@@ -4,7 +4,7 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
 
 本文档是这张地图的总图。配套文档分别深入介绍各个部分：
 
-- [`backend-crates.md`](backend-crates.zh.md) —— 32 个 `nomifun-*` crate。
+- [`backend-crates.md`](backend-crates.zh.md) —— 34 个 `nomifun-*` crate。
 - [`agent-engine.md`](agent-engine.zh.md) —— 15 个 `nomi-*` crate（AI 引擎）。
 - [`agent-execution.zh.md`](agent-execution.zh.md) —— 统一的持久化 AgentExecution 模型。
 - [`frontend.md`](frontend.zh.md) —— React SPA、适配层、路由。
@@ -32,7 +32,7 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
    │  injects window.__backendPort      │  │  authenticated by default│
    │  injects window.__nomiLocalTrust   │  │  --insecure-no-auth opts │
    │  AuthPolicy::TrustLocalToken       │  │  into no-auth mode       │
-   │  Tauri command: check_for_updates  │  │  serves SPA as fallback  │
+   │  Tauri command: install_update     │  │  serves SPA as fallback  │
    └────────────────────────────────────┘  └──────────────────────────┘
                                    │                 │
                                    ▼                 ▼
@@ -40,12 +40,12 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
                         │  nomifun-app  (binary nomicore)     │
                         │  composition root · axum router     │
                         │  bootstrap → data layer → services  │
-                        │  /api · /ws · Routes from 32 crates │
+                        │  /api · /ws · Routes from 34 crates │
                         └─────────────────────────────────────┘
                           │                       │
                           ▼                       ▼
               ┌─────────────────────┐   ┌─────────────────────┐
-              │  nomifun-* (32)     │   │  nomi-* (15)         │
+              │  nomifun-* (34)     │   │  nomi-* (15)         │
               │  backend crates     │◀─▶│  agent engine crates │
               │  data, auth, MCP,   │   │  via the SEAM:       │
               │  conversation, etc. │   │  nomifun-ai-agent     │
@@ -97,7 +97,7 @@ Cargo 工作区（根 [`Cargo.toml`](../../Cargo.toml)，`resolver = "3"`，`edi
 | 目录 | 用途 | Crate 前缀 | 数量 |
 | --- | --- | --- | --- |
 | `crates/agent/` | AI 引擎 —— providers、tools、sessions、MCP、skills、browser/computer-use | `nomi-*` | 15 |
-| `crates/backend/` | HTTP/WS 服务器、数据、认证、各项功能 | `nomifun-*` | 32 |
+| `crates/backend/` | HTTP/WS 服务器、数据、认证、各项功能 | `nomifun-*` | 34 |
 | `crates/shared/` | 真正跨层共享工具 | mixed | 3 |
 
 agent 分组是**基本自包含的** —— `nomi-*` crate 不引用 `nomifun-*` crate、工作区根目录或 Tauri / sqlx / axum 等后端框架。反向依赖默认通过 `nomifun-ai-agent` 这条接缝汇集，它再导出 `nomi_config`、`nomi_types` 和 `RequirementSink`。当前 `nomifun-app` 与 `nomifun-gateway` 为 browser/computer-use bridge 存在 feature-gated 直接依赖例外；新增例外必须有明确 feature gate 和文档说明。
@@ -111,7 +111,7 @@ nomifun-tauri/
 │   └─ web/       nomifun-web      (standalone server: /api + SPA on one port)
 ├─ crates/
 │   ├─ agent/     15 nomi-*  crates  → see agent-engine.md
-│   ├─ backend/   32 nomifun-* crates → see backend-crates.md
+│   ├─ backend/   34 nomifun-* crates → see backend-crates.md
 │   └─ shared/    3 shared crates
 ├─ ui/            React 19 + Vite 6 + Arco + UnoCSS  → see frontend.md
 └─ docs/

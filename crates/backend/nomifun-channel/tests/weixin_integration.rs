@@ -53,7 +53,6 @@ mod weixin_tests {
         let repo: Arc<dyn IChannelRepository> = Arc::new(SqliteChannelRepository::new(db.pool().clone()));
         let broadcaster = Arc::new(MockBroadcaster::new());
         let (message_tx, _message_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
 
         let manager = ChannelManager::new(
             repo.clone(),
@@ -61,7 +60,6 @@ mod weixin_tests {
             "018f1234-5678-7abc-8def-012345678973",
             make_encryption_key(),
             message_tx,
-            confirm_tx,
         );
 
         // Keep db alive — test process exits anyway

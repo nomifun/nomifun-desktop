@@ -23,17 +23,6 @@ pub fn dir_suffix() -> String {
     suffix_for(channel())
 }
 
-/// True only for the production (stable) channel.
-pub fn is_stable() -> bool {
-    channel() == "stable"
-}
-
-/// Whether `channel` is a recognized channel name (vs a typo). Used by the
-/// startup self-check to warn on `NOMI_CHANNEL=Dev` and friends.
-pub fn is_known(channel: &str) -> bool {
-    matches!(channel, "stable" | "dev" | "beta" | "canary")
-}
-
 /// Pure mapping: only the exact `stable` yields the empty (production) suffix;
 /// every other value is isolated under `-<channel>`.
 fn suffix_for(channel: &str) -> String {
@@ -46,7 +35,7 @@ fn suffix_for(channel: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_known, suffix_for};
+    use super::suffix_for;
 
     #[test]
     fn stable_has_no_suffix() {
@@ -70,12 +59,5 @@ mod tests {
         assert_eq!(suffix_for("Dev"), "-Dev");
         assert_ne!(suffix_for("Dev"), "");
         assert_ne!(suffix_for("stable "), "");
-    }
-
-    #[test]
-    fn known_channels_recognized_typos_rejected() {
-        assert!(is_known("stable") && is_known("dev") && is_known("beta") && is_known("canary"));
-        assert!(!is_known("Dev"));
-        assert!(!is_known("prod"));
     }
 }

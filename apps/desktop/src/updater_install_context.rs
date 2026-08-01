@@ -62,6 +62,7 @@ fn classify_install(
     classify_macos_install(app_bundle, app_device_id, temp_device_id)
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn app_bundle_from_executable(executable: &Path) -> Option<PathBuf> {
     executable
         .ancestors()

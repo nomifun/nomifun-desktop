@@ -23,8 +23,8 @@ pub enum ContentUpdateOperation {
 
 /// A node in the directory tree (file or directory with optional children).
 ///
-/// Used internally by `IFileService::get_files_by_dir`. Converted to
-/// `DirOrFileResponse` at the API boundary.
+/// Used internally by `IFileService::get_files_by_dir` (consumed by the
+/// gateway file tools).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DirOrFile {
     pub name: String,

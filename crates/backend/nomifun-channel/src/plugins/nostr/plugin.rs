@@ -6,16 +6,16 @@
 //! individual per-relay connections (each in its own subtask).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use dashmap::DashMap;
 use nostr::Keys;
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{NOSTR_MAX_RECONNECT_ATTEMPTS, NOSTR_MAX_RECONNECT_DELAY};
+use crate::constants::{RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::backoff_delay;
 use crate::types::{
     BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType, UnifiedIncomingMessage,
     UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
@@ -318,11 +318,11 @@ async fn run_relay_loop(
             Err(e) => {
                 consecutive_errors += 1;
                 warn!(relay = %relay_url, error = %e, attempt = consecutive_errors, "relay connection error");
-                if consecutive_errors >= NOSTR_MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!(relay = %relay_url, "max reconnect attempts reached");
                     break;
                 }
-                let backoff = backoff_delay(consecutive_errors);
+                let backoff = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown_rx.changed() => break,
@@ -330,11 +330,6 @@ async fn run_relay_loop(
             }
         }
     }
-}
-
-fn backoff_delay(attempt: u32) -> Duration {
-    let secs = 2u64.saturating_pow(attempt).min(NOSTR_MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(secs)
 }
 
 /// A single relay connection: connect, subscribe, read/write loop.

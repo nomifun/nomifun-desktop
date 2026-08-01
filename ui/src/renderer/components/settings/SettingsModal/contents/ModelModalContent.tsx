@@ -47,7 +47,6 @@ import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useModelProfiles } from '@/renderer/hooks/agent/useModelProfiles';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
-import { useSettingsViewMode } from '../settingsViewContext';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
 import { ContextLimitSelect, formatContextLimit } from '@/renderer/pages/settings/components/ContextLimitSelect';
 import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
@@ -495,8 +494,6 @@ const PriorityDragHandle: React.FC<SortableRenderProps & { label: string }> = ({
 const ModelModalContent: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const viewMode = useSettingsViewMode();
-  const isPageMode = viewMode === 'page';
   // 以「内容面板实际宽度」而非视口宽度做分档：模型管理面板被一次 rail + 二级
   // ContentSider 占去宽度，视口断点(md:/lg:)会误判为宽屏。窄面板下用紧凑布局，
   // 避免 provider 头 hover 展开区(320px)挤占供应商名称。
@@ -911,13 +908,11 @@ const ModelModalContent: React.FC = () => {
         <div className='flex items-center justify-between gap-8px flex-wrap'>
           <div className='min-w-0'>
             <div className='text-20px font-600 text-t-primary leading-28px'>
-              {isPageMode ? t('settings.modelHub.provider.title') : t('settings.model')}
+              {t('settings.modelHub.provider.title')}
             </div>
-            {isPageMode && (
-              <div className='mt-2px text-13px leading-18px text-t-secondary'>
-                {t('settings.modelHub.provider.subtitle')}
-              </div>
-            )}
+            <div className='mt-2px text-13px leading-18px text-t-secondary'>
+              {t('settings.modelHub.provider.subtitle')}
+            </div>
           </div>
           <div className='flex items-center gap-8px flex-wrap'>
             <Button
@@ -938,28 +933,20 @@ const ModelModalContent: React.FC = () => {
             backgroundColor: 'rgba(var(--primary-6),0.06)',
           }}
         >
-          {isPageMode && <Info theme='outline' size='16' className='mt-1px shrink-0 text-[rgb(var(--primary-6))]' />}
+          <Info theme='outline' size='16' className='mt-1px shrink-0 text-[rgb(var(--primary-6))]' />
           <div className='min-w-0'>
-            {isPageMode && (
-              <div className='text-13px font-600 leading-18px text-t-primary'>
-                {t('settings.modelHub.provider.noticeTitle')}
-              </div>
-            )}
-            <div
-              className={
-                isPageMode
-                  ? 'mt-2px text-12px leading-18px text-t-secondary'
-                  : 'text-12px leading-5 text-[rgb(var(--primary-6))]'
-              }
-            >
-              {isPageMode ? t('settings.modelHub.provider.note') : t('settings.customModelSupportNote')}
+            <div className='text-13px font-600 leading-18px text-t-primary'>
+              {t('settings.modelHub.provider.noticeTitle')}
+            </div>
+            <div className='mt-2px text-12px leading-18px text-t-secondary'>
+              {t('settings.modelHub.provider.note')}
             </div>
           </div>
         </div>
       </div>
 
       {/* Content Area */}
-      <NomiScrollArea className='flex-1 min-h-0' disableOverflow={isPageMode}>
+      <NomiScrollArea className='flex-1 min-h-0' disableOverflow>
         {!data || editableProviders.length === 0 ? (
           <div className='flex flex-col items-center justify-center py-40px'>
             <Info theme='outline' size='48' className='text-t-secondary mb-16px' />

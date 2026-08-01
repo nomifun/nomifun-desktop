@@ -14,7 +14,6 @@ const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
 const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const DIGITS: &[u8] = b"0123456789";
 const SPECIAL: &[u8] = b"!@#$%^&*";
-const ALPHANUMERIC_LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 const ALL_PASSWORD_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
 
 /// Pre-computed dummy hash for timing attack prevention.
@@ -73,21 +72,6 @@ pub fn dummy_password_hash() -> &'static str {
     })
 }
 
-/// Generate random user credentials for auto-bootstrap scenarios.
-///
-/// Returns `(username, password)` where:
-/// - username: 6-8 lowercase alphanumeric characters
-/// - password: 12-17 mixed characters (upper, lower, digits, special)
-pub fn generate_user_credentials() -> (String, String) {
-    let username_len = random_range(6, 9);
-    let password_len = random_range(12, 18);
-
-    let username = random_string(username_len, ALPHANUMERIC_LOWER);
-    let password = generate_strong_password(password_len);
-
-    (username, password)
-}
-
 /// Generate a strong random password suitable for WebUI admin reset.
 ///
 /// Guarantees ≥1 character from each category (upper, lower, digit, special)
@@ -107,28 +91,11 @@ fn fill_random(buf: &mut [u8]) {
     getrandom::getrandom(buf).expect("OS entropy source unavailable");
 }
 
-/// Generate a random integer in `[min, max_exclusive)`.
-fn random_range(min: usize, max_exclusive: usize) -> usize {
-    let range = max_exclusive - min;
-    let mut buf = [0u8; 4];
-    fill_random(&mut buf);
-    min + (u32::from_le_bytes(buf) as usize) % range
-}
-
 /// Pick a random byte from the given charset.
 fn random_from(charset: &[u8]) -> u8 {
     let mut buf = [0u8; 1];
     fill_random(&mut buf);
     charset[buf[0] as usize % charset.len()]
-}
-
-/// Generate a random string of the given length from the charset.
-fn random_string(len: usize, charset: &[u8]) -> String {
-    let mut buf = vec![0u8; len];
-    fill_random(&mut buf);
-    buf.iter()
-        .map(|b| charset[*b as usize % charset.len()] as char)
-        .collect()
 }
 
 /// Generate a strong password with guaranteed character variety.
@@ -160,7 +127,6 @@ fn generate_strong_password(len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validation::{validate_password, validate_username};
 
     #[test]
     fn hash_and_verify_correct_password() {
@@ -191,53 +157,6 @@ mod tests {
     fn dummy_hash_matches_dummy_input() {
         let hash = dummy_password_hash();
         assert!(verify_password("__nomifun_dummy_password__", hash).unwrap());
-    }
-
-    #[test]
-    fn generate_credentials_produces_valid_username() {
-        for _ in 0..10 {
-            let (username, _) = generate_user_credentials();
-            assert!(
-                username.len() >= 6 && username.len() <= 8,
-                "username length out of range: {}",
-                username.len()
-            );
-            assert!(
-                validate_username(&username).is_ok(),
-                "generated username failed validation: {username}"
-            );
-        }
-    }
-
-    #[test]
-    fn generate_credentials_produces_valid_password() {
-        for _ in 0..10 {
-            let (_, password) = generate_user_credentials();
-            assert!(
-                password.len() >= 12 && password.len() <= 17,
-                "password length out of range: {}",
-                password.len()
-            );
-            assert!(
-                validate_password(&password).is_ok(),
-                "generated password failed validation: {password}"
-            );
-        }
-    }
-
-    #[test]
-    fn generate_credentials_has_character_variety() {
-        for _ in 0..10 {
-            let (_, password) = generate_user_credentials();
-            let has_upper = password.bytes().any(|b| b.is_ascii_uppercase());
-            let has_lower = password.bytes().any(|b| b.is_ascii_lowercase());
-            let has_digit = password.bytes().any(|b| b.is_ascii_digit());
-            let has_special = password.bytes().any(|b| SPECIAL.contains(&b));
-            assert!(has_upper, "password missing uppercase: {password}");
-            assert!(has_lower, "password missing lowercase: {password}");
-            assert!(has_digit, "password missing digit: {password}");
-            assert!(has_special, "password missing special char: {password}");
-        }
     }
 
     #[tokio::test]

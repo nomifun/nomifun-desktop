@@ -34,7 +34,7 @@ source 并复用同一个 body。
 - `WorkspaceTreeSource`：`useWorkspaceTree` 使用的 lazy root/child loader。
 - `SelectedFile`：与来源无关的文件 / 文件夹选择结构。
 - `WorkspaceUploadConfig`：存在即启用 upload、drag、paste UI。
-- `eventPrefix`：只能是 `'acp' | 'codex' | 'nomi' | 'openclaw-gateway' | 'nanobot' | 'remote'`。
+- `eventPrefix`：只能是 `'acp' | 'nomi' | 'openclaw-gateway' | 'nanobot' | 'remote'`。
 
 ## 持久化与设置
 

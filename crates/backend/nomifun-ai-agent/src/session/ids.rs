@@ -46,7 +46,6 @@ macro_rules! newtype_id {
     };
 }
 
-newtype_id!(ConversationId);
 newtype_id!(SessionId);
 newtype_id!(ModeId);
 newtype_id!(ModelId);
@@ -59,10 +58,10 @@ mod tests {
 
     #[test]
     fn newtype_roundtrip() {
-        let id = ConversationId::new("conv-123");
-        assert_eq!(id.as_str(), "conv-123");
-        assert_eq!(id.to_string(), "conv-123");
-        assert_eq!(id.into_inner(), "conv-123");
+        let id = SessionId::new("sess-123");
+        assert_eq!(id.as_str(), "sess-123");
+        assert_eq!(id.to_string(), "sess-123");
+        assert_eq!(id.into_inner(), "sess-123");
     }
 
     #[test]

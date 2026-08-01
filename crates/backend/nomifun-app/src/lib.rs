@@ -15,6 +15,7 @@ mod browser_lane_provider;
 // Tauri resource dir and publishes it through that env seam (F48).
 #[cfg(feature = "browser-use")]
 pub mod browser_resource;
+mod browser_inventory_events;
 mod provider_deletion;
 mod router;
 mod services;

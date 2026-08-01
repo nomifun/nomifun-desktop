@@ -1,6 +1,6 @@
 # 后端 Crates
 
-[`crates/backend/`](../../crates/backend/) 下的 32 个 `nomifun-*` crate 共同构成 HTTP/WS 服务器。它们一起编译进 `nomifun-app` 库 crate，并通过 `nomifun-app/src/main.rs` 生成 **`nomicore`** 二进制。两个宿主应用（`nomifun-desktop` 与 `nomifun-web`）直接链接 `nomifun-app`，并自行调用 `run_embedded_server` 或组合 `create_router`。
+[`crates/backend/`](../../crates/backend/) 下的 34 个 `nomifun-*` crate 共同构成 HTTP/WS 服务器。它们一起编译进 `nomifun-app` 库 crate，并通过 `nomifun-app/src/main.rs` 生成 **`nomicore`** 二进制。两个宿主应用（`nomifun-desktop` 与 `nomifun-web`）直接链接 `nomifun-app`，并自行调用 `run_embedded_server` 或组合 `create_router`。
 
 下方分组反映了 crate 在工作区清单（[`Cargo.toml`](../../Cargo.toml)）中相互依赖的方式。这并非严格的分层 DAG —— 部分功能 crate 之间存在依赖 —— 但它提供了一张与请求穿越服务器的路径相吻合的认知地图。
 
@@ -75,6 +75,9 @@
 | [`nomifun-preset`](../../crates/backend/nomifun-preset/) | 面向 Conversation、Execution 参与者、伙伴和定时任务的可复用启动配置：合并 builtin/user/extension 目录、关系化 CRUD、按目标解析、不可变快照与导入。 |
 | [`nomifun-companion`](../../crates/backend/nomifun-companion/) | 桌面伙伴状态、形象 / 图片资源、记忆 / 人格数据、伙伴公开图片服务，以及伙伴绑定令牌集成。 |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | 知识库、来源摄取、绑定库挂载状态，以及作用域只读的知识 MCP 服务器。 |
+| [`nomifun-workshop`](../../crates/backend/nomifun-workshop/) | 创意工坊域：无限画布的 AI 视觉创作工作区。持有画布 + 资产（索引行在 `nomifun-db`，画布正文与资产二进制落盘），提供 `/api/workshop/*` 路由面。 |
+| [`nomifun-creation`](../../crates/backend/nomifun-creation/) | 生成引擎：工坊画布生成节点背后的异步任务队列。供应商无关的状态机（`queued → running → succeeded/failed/canceled`），按供应商并发上限 + 全局上限、取消与启动对账；模型执行委托 `nomifun-model-invoke`，产物字节交给 `AssetSink`。 |
+| [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | 客服独立域：面向 IM 渠道陌生人的独立服务域，与伙伴 / 会话体系不共享概念——对话是本域自己的聚合，回复由一次性引擎会话产出，工具注册表固定为只读三件套。 |
 | [`nomifun-public`](../../crates/backend/nomifun-public/) | 由伙伴令牌鉴权的公开对外入口：`/mcp`、`/mcp-agent` 与 `/v1`。 |
 | [`nomifun-secret`](../../crates/backend/nomifun-secret/) | 按伙伴的 browser-use 密钥存储与凭据查询。 |
 
@@ -83,6 +86,8 @@
 | Crate | 职责 |
 | --- | --- |
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal/) | 基于 `portable-pty` 的终端会话，支持 resize，通过 WS 进行输入 / 输出流式传输。 |
+| [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | 主进程浏览器所有权、调度与生命周期权威：`BrowserSessionHub` 提供 Native、Gateway、ACP、remote 与集群调用方共享的所有权、隔离、调度、租约、清单与清理契约；Chromium 启动本身留给宿主侧的 `BrowserHostFactory` 实现。 |
+| [`nomifun-model-invoke`](../../crates/backend/nomifun-model-invoke/) | 统一多模态模型调用层：类型化任务请求 / 结果、声明式鉴权方案、共享 HTTP 传输、协议适配器接缝 + 注册表与模型目录解析管线；被 `nomifun-shell` STT/TTS、`nomifun-creation` 等模型调用方消费。 |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | 操作系统外壳辅助：用系统应用打开文件，针对 Deepgram 或 OpenAI 的语音转文字，剪贴板 / 粘贴集成。 |
 | [`nomifun-file`](../../crates/backend/nomifun-file/) | 在会话工作目录下的沙箱化文件系统（`browse`、`path_safety`、`watch_service`、`snapshot_service`），zip 辅助。 |
 | [`nomifun-office`](../../crates/backend/nomifun-office/) | LibreOffice 转换 / 预览管线（Office 文档 → 预览）。 |

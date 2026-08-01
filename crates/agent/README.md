@@ -29,7 +29,3 @@ Current crates:
   `crates/backend/nomifun-ai-agent`.
 - Shared utilities that genuinely belong on both sides live under
   `crates/shared`.
-
-The old extraction checklist in `docs/specs/agent-extraction-checklist.md` is a
-historical aid. Re-check it against the current crate list before using it as an
-execution plan.

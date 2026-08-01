@@ -30,7 +30,6 @@ import { Alert, Button, Collapse, InputNumber, Message, Modal, Radio, Switch } f
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { useSettingsViewMode } from '../settingsViewContext';
 import PreferenceRow from './SystemModalContent/PreferenceRow';
 
 const RadioGroup = Radio.Group;
@@ -510,8 +509,6 @@ const BrowserUseSettingsContent: React.FC = () => {
   const translationRef = useRef(t);
   translationRef.current = t;
   const navigate = useNavigate();
-  const viewMode = useSettingsViewMode();
-  const isPageMode = viewMode === 'page';
   const [browserUse, setBrowserUse] = useState(false);
   const [source, setSource] = useState<BrowserSource>('system');
   const [displayMode, setDisplayMode] = useState<BrowserDisplayMode>('headless');
@@ -1064,7 +1061,7 @@ const BrowserUseSettingsContent: React.FC = () => {
 
   return (
     <div className='flex flex-col h-full w-full'>
-      <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow={isPageMode}>
+      <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
         <div className='space-y-16px'>
           <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
             <div className='text-13px font-600 text-t-secondary'>{t('settings.browserUseSection')}</div>

@@ -37,7 +37,9 @@ static MANAGED_LANE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Identity selection is trusted host policy, never model input. Keep this
 /// separate from owner metadata so callers receive the stable
 /// `invalid_browser_request` contract rather than an owner-spoofing error.
-const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
+/// ONE shared list for every managed surface (the native [`crate::BrowserTool`]
+/// managed path and this facade).
+pub(crate) const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
     "identity",
     "identity_mode",
     "authenticated",
@@ -241,7 +243,7 @@ impl ManagedBrowserFacade {
     }
 
     async fn status(&self, input: &Value) -> ToolResult {
-        let lane_id = match self.resolve_lane_id(input, false).await {
+        let lane_id = match self.resolve_lane_id(input).await {
             Ok(Some(lane_id)) => lane_id,
             Ok(None) => {
                 return invalid_browser_request(
@@ -262,7 +264,7 @@ impl ManagedBrowserFacade {
     }
 
     async fn close(&self, input: &Value) -> ToolResult {
-        let lane_id = match self.resolve_lane_id(input, false).await {
+        let lane_id = match self.resolve_lane_id(input).await {
             Ok(lane_id) => lane_id,
             Err(error) => return platform_error_result("Resolving the browser Lane failed", error),
         };
@@ -356,28 +358,19 @@ impl ManagedBrowserFacade {
     async fn resolve_lane_id(
         &self,
         input: &Value,
-        open_default: bool,
     ) -> Result<Option<BrowserLaneId>, BrowserPlatformError> {
         if let Some(lane_id) = managed_lane_id(input)? {
             // Authorization happens here before the handle is used.
             self.client.status(&lane_id).await?;
             return Ok(Some(lane_id));
         }
-        if let Some(lane) = self
+        Ok(self
             .client
             .list()
             .await?
             .into_iter()
             .find(|lane| lane.lane_key.lane_name == "default")
-        {
-            return Ok(Some(lane.lane_id));
-        }
-        if !open_default {
-            return Ok(None);
-        }
-        self.resolve_running_lane(input)
-            .await
-            .map(|lane| Some(lane.lane_id))
+            .map(|lane| lane.lane_id))
     }
 
     async fn crawl_many(&self, input: &Value) -> ToolResult {
@@ -1296,7 +1289,10 @@ async fn cleanup_dropped_crawl_batch(
     let _ = close_lane_ids_until(client, unresolved_ids, deadline).await;
 }
 
-fn managed_lane_id(input: &Value) -> Result<Option<BrowserLaneId>, BrowserPlatformError> {
+pub(crate) fn managed_lane_id(input: &Value) -> Result<Option<BrowserLaneId>, BrowserPlatformError> {
+    // F55: a typed-wrong lane_id (number/bool/object) is an explicit error,
+    // never a silent fallback to the caller's default Lane (which could
+    // execute the action against the wrong logged-in page).
     match input.get("lane_id") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => BrowserLaneId::parse(value.to_owned()).map(Some),
@@ -1399,7 +1395,7 @@ fn crawl_concurrency_is_auto(input: &Value) -> bool {
         || input.get("concurrency").is_none()
 }
 
-fn first_model_identity_field(input: &Value) -> Option<&'static str> {
+pub(crate) fn first_model_identity_field(input: &Value) -> Option<&'static str> {
     let object = input.as_object()?;
     MODEL_IDENTITY_INPUT_FIELDS
         .iter()
@@ -1407,7 +1403,7 @@ fn first_model_identity_field(input: &Value) -> Option<&'static str> {
         .find(|field| object.contains_key(*field))
 }
 
-fn first_trusted_owner_field(input: &Value) -> Option<&'static str> {
+pub(crate) fn first_trusted_owner_field(input: &Value) -> Option<&'static str> {
     let object = input.as_object()?;
     TRUSTED_OWNER_INPUT_FIELDS
         .iter()
@@ -1415,7 +1411,7 @@ fn first_trusted_owner_field(input: &Value) -> Option<&'static str> {
         .find(|field| object.contains_key(*field))
 }
 
-fn sanitize_operation_input(input: &Value) -> Value {
+pub(crate) fn sanitize_operation_input(input: &Value) -> Value {
     let mut sanitized = input.as_object().cloned().unwrap_or_default();
     sanitized.remove("lane_id");
     sanitized.remove("lane_name");
@@ -1427,7 +1423,7 @@ fn sanitize_operation_input(input: &Value) -> Value {
     Value::Object(sanitized)
 }
 
-fn is_existing_browser_action(action: &str) -> bool {
+pub(crate) fn is_existing_browser_action(action: &str) -> bool {
     matches!(
         action,
         "navigate"
@@ -1468,7 +1464,7 @@ fn is_existing_browser_action(action: &str) -> bool {
     )
 }
 
-fn operation_kind(action: &str) -> BrowserOperationKind {
+pub(crate) fn operation_kind(action: &str) -> BrowserOperationKind {
     match action {
         "navigate" | "back" | "forward" | "reload" => BrowserOperationKind::Navigate,
         "observe"
@@ -1490,7 +1486,7 @@ fn operation_kind(action: &str) -> BrowserOperationKind {
     }
 }
 
-fn action_may_modify_identity(action: &str, input: &Value) -> bool {
+pub(crate) fn action_may_modify_identity(action: &str, input: &Value) -> bool {
     match action {
         // Pure navigation is a supported authenticated-replica read path.
         // An explicitly state-changing request shape is still refused.
@@ -1741,7 +1737,7 @@ fn operation_result(
     .with_images(images)
 }
 
-fn public_platform_error_json(error: &BrowserPlatformError) -> Value {
+pub(crate) fn public_platform_error_json(error: &BrowserPlatformError) -> Value {
     json!({
         "code": error.code,
         "message": error.message,
@@ -1752,7 +1748,7 @@ fn public_platform_error_json(error: &BrowserPlatformError) -> Value {
     })
 }
 
-fn platform_error_result(context: &str, error: BrowserPlatformError) -> ToolResult {
+pub(crate) fn platform_error_result(context: &str, error: BrowserPlatformError) -> ToolResult {
     ToolResult::error(pretty_json(&json!({
         "ok": false,
         "context": context,
@@ -1772,7 +1768,7 @@ pub(crate) fn invalid_browser_request(message: impl Into<String>) -> ToolResult 
     })))
 }
 
-fn pretty_json(value: &Value) -> String {
+pub(crate) fn pretty_json(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 

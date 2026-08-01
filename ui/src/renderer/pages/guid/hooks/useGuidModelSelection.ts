@@ -7,7 +7,6 @@
 import type { IProvider, TProviderWithModel } from '@/common/config/storage';
 import type { ConfigKeyMap } from '@/common/config/configKeys';
 import { configService } from '@/common/config/configService';
-import { useGoogleAuthModels } from '@/renderer/hooks/agent/useGoogleAuthModels';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -41,7 +40,6 @@ function isPersistedDefaultModel(value: unknown): value is PersistedDefaultModel
 
 export type GuidModelSelectionResult = {
   modelList: IProvider[];
-  isGoogleAuth: boolean;
   formatGeminiModelLabel: (provider: { platform?: string } | undefined, modelName?: string) => string;
   current_model: TProviderWithModel | undefined;
   setCurrentModel: (model_info: TProviderWithModel) => Promise<void>;
@@ -52,7 +50,6 @@ export type GuidModelSelectionResult = {
  * @param agentKey - current provider-based agent (currently only 'nomi')
  */
 export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): GuidModelSelectionResult => {
-  const { isGoogleAuth } = useGoogleAuthModels();
   // Chat-capable catalog from the unified backend resolve — replaces the old
   // duplicate guid/utils/modelUtils name-heuristic implementation.
   const { groups } = useModelsForTask('chat');
@@ -181,7 +178,6 @@ export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): Guid
 
   return {
     modelList,
-    isGoogleAuth,
     formatGeminiModelLabel,
     current_model,
     setCurrentModel,

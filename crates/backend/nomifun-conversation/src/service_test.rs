@@ -5154,13 +5154,6 @@ impl AgentRuntimeRegistry for FailingAgentRuntimeRegistry {
         Ok(())
     }
 
-    fn terminate_and_wait(
-        &self,
-        _conversation_id: &str,
-        _reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        Box::pin(std::future::ready(()))
-    }
 
     fn terminate_and_wait_result(
         &self,
@@ -5230,15 +5223,6 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
         Ok(())
     }
 
-    fn terminate_and_wait(
-        &self,
-        conversation_id: &str,
-        reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        self.termination_wait_count.fetch_add(1, Ordering::SeqCst);
-        let _ = self.terminate(conversation_id, reason);
-        Box::pin(std::future::ready(()))
-    }
 
     fn terminate_and_wait_result(
         &self,
@@ -5345,13 +5329,6 @@ impl AgentRuntimeRegistry for SlowAgentRuntimeRegistry {
         Ok(())
     }
 
-    fn terminate_and_wait(
-        &self,
-        _conversation_id: &str,
-        _reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        Box::pin(std::future::ready(()))
-    }
 
     fn terminate_and_wait_result(
         &self,
@@ -5415,14 +5392,6 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistryWithWorkspace {
         Ok(())
     }
 
-    fn terminate_and_wait(
-        &self,
-        conversation_id: &str,
-        reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = self.terminate(conversation_id, reason);
-        Box::pin(std::future::ready(()))
-    }
 
     fn terminate_and_wait_result(
         &self,
@@ -10212,63 +10181,6 @@ async fn completed_turn_receipt_read_boundaries_adopt_its_still_active_running_g
     assert_eq!(
         internal_replay.result_error.as_deref(),
         Some("authoritative internal result")
-    );
-    assert_eq!(
-        repo.get(&conversation_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status
-            .as_deref(),
-        Some("finished")
-    );
-
-    let proof_key = "completed-proof-read-boundary";
-    let proof_operation = ConversationService::public_turn_operation_id(
-        SQLITE_TEST_OWNER,
-        &conversation_id,
-        proof_key,
-    );
-    let proof_epoch = repo
-        .get_turn_admission_state(SQLITE_TEST_OWNER, &conversation_id)
-        .await
-        .unwrap()
-        .epoch;
-    repo.claim_turn_delivery_receipt_and_admit_with_candidate(
-        SQLITE_TEST_OWNER,
-        &conversation_id,
-        &proof_operation,
-        &MessageId::new().into_string(),
-        r#"{"source":"proof"}"#,
-        proof_epoch,
-        now_ms(),
-    )
-    .await
-    .unwrap();
-    assert!(
-        repo.complete_delivery_receipt(
-            SQLITE_TEST_OWNER,
-            &conversation_id,
-            &proof_operation,
-            true,
-            Some("authoritative proof result"),
-            None,
-            None,
-            None,
-            now_ms(),
-        )
-        .await
-        .unwrap()
-    );
-    assert!(
-        !service
-            .prove_no_turn_admission_with_idempotency_key(
-                SQLITE_TEST_OWNER,
-                &conversation_id,
-                proof_key,
-            )
-            .await
-            .unwrap()
     );
     assert_eq!(
         repo.get(&conversation_id)
@@ -15424,7 +15336,7 @@ async fn check_approval_not_found() {
 
 #[tokio::test]
 async fn replace_skill_snapshot_updates_and_recycles_only_on_change() {
-    let (svc, _broadcaster, repo, runtime_registry) = make_service();
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
     let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
 
     assert!(
@@ -16039,14 +15951,6 @@ impl AgentRuntimeRegistry for PersistentScriptedRuntimeRegistry {
     }
     fn terminate(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
         Ok(())
-    }
-    fn terminate_and_wait(
-        &self,
-        _conversation_id: &str,
-        _reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        self.termination_count.fetch_add(1, Ordering::SeqCst);
-        Box::pin(std::future::ready(()))
     }
     fn terminate_and_wait_result(
         &self,

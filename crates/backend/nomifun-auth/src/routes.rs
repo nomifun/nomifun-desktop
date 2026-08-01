@@ -2,13 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Json, Path, State};
+use axum::extract::{Json, State};
 use axum::http::{HeaderMap, header};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use serde::Deserialize;
 
 use nomifun_api_types::{
     ApiResponse, AuthStatusResponse, ChangePasswordRequest, ChangeUsernameRequest, ChangeUsernameResponse,
@@ -16,7 +15,7 @@ use nomifun_api_types::{
     RefreshResponse, RefreshTokenRequest, UserInfoResponse, WebuiChangePasswordRequest, WebuiChangeUsernameRequest,
     WebuiChangeUsernameResponse, WebuiGenerateQrTokenResponse, WebuiResetPasswordResponse, WsTokenResponse,
 };
-use nomifun_common::{AppError, UserId};
+use nomifun_common::AppError;
 use nomifun_common::constants::SESSION_MAX_AGE_SECONDS;
 use nomifun_db::{IUserRepository, models::User};
 
@@ -38,33 +37,6 @@ pub struct AuthRouterState {
     pub user_repo: Arc<dyn IUserRepository>,
     pub cookie_config: Arc<CookieConfig>,
     pub qr_token_store: Arc<QrTokenStore>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateInternalUserRequest {
-    username: String,
-    password_hash: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SetSystemUserCredentialsRequest {
-    username: String,
-    password_hash: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdatePasswordHashRequest {
-    password_hash: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateUsernameRequest {
-    username: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateJwtSecretRequest {
-    jwt_secret: String,
 }
 
 fn into_public_user(user: User) -> Result<PublicUser, AppError> {
@@ -122,41 +94,11 @@ pub fn auth_routes(state: AuthRouterState) -> Router {
         .route_layer(from_fn_with_state(api_limiter.clone(), api_rate_limit_middleware))
         .with_state(state.clone());
 
-    // Local-only credential/internal routes. These have NO auth middleware, so
+    // Local-only credential routes. These have NO auth middleware, so
     // they are gated by `require_local_trust_middleware`: only the local desktop
     // client (which presents the per-boot trust secret, resolved upstream by
     // `trust_resolve_middleware` into a `LocalTrusted` marker) may reach them.
     let api_local_only = Router::new()
-        .route(
-            "/api/auth/internal/users",
-            get(list_internal_users_handler).post(create_internal_user_handler),
-        )
-        .route("/api/auth/internal/users/system", get(get_system_user_handler))
-        .route(
-            "/api/auth/internal/users/system/credentials",
-            post(set_system_user_credentials_handler),
-        )
-        .route(
-            "/api/auth/internal/users/by-username/{username}",
-            get(find_user_by_username_handler),
-        )
-        .route("/api/auth/internal/users/{id}", get(find_user_by_id_handler))
-        .route(
-            "/api/auth/internal/users/{id}/password",
-            post(update_user_password_hash_handler),
-        )
-        .route(
-            "/api/auth/internal/users/{id}/username",
-            post(update_user_username_handler),
-        )
-        .route(
-            "/api/auth/internal/users/{id}/jwt-secret",
-            post(update_user_jwt_secret_handler),
-        )
-        .route(
-            "/api/auth/internal/users/{id}/last-login",
-            post(update_user_last_login_handler),
-        )
         // WebUI admin credential endpoints — local desktop client only.
         .route("/api/webui/change-password", post(webui_change_password_handler))
         .route("/api/webui/change-username", post(webui_change_username_handler))
@@ -411,109 +353,6 @@ async fn setup_handler(
 
     tracing::info!("first-run setup: initial admin account created");
     Ok(([(header::SET_COOKIE, cookie)], Json(resp)).into_response())
-}
-
-// ---------------------------------------------------------------------------
-// Local-only internal user routes
-// ---------------------------------------------------------------------------
-
-async fn list_internal_users_handler(
-    State(state): State<AuthRouterState>,
-) -> Result<Json<ApiResponse<Vec<User>>>, AppError> {
-
-    let users = state.user_repo.list_users().await?;
-    Ok(Json(ApiResponse::ok(users)))
-}
-
-async fn get_system_user_handler(
-    State(state): State<AuthRouterState>,
-) -> Result<Json<ApiResponse<Option<User>>>, AppError> {
-
-    let user = state.user_repo.get_system_user().await?;
-    Ok(Json(ApiResponse::ok(user)))
-}
-
-async fn find_user_by_username_handler(
-    State(state): State<AuthRouterState>,
-    Path(username): Path<String>,
-) -> Result<Json<ApiResponse<Option<User>>>, AppError> {
-
-    let user = state.user_repo.find_by_username(&username).await?;
-    Ok(Json(ApiResponse::ok(user)))
-}
-
-async fn find_user_by_id_handler(
-    State(state): State<AuthRouterState>,
-    Path(id): Path<UserId>,
-) -> Result<Json<ApiResponse<Option<User>>>, AppError> {
-
-    let user = state.user_repo.find_by_id(id.as_str()).await?;
-    Ok(Json(ApiResponse::ok(user)))
-}
-
-async fn create_internal_user_handler(
-    State(state): State<AuthRouterState>,
-    body: Result<Json<CreateInternalUserRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<User>>, AppError> {
-
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let user = state.user_repo.create_user(&req.username, &req.password_hash).await?;
-    Ok(Json(ApiResponse::ok(user)))
-}
-
-async fn set_system_user_credentials_handler(
-    State(state): State<AuthRouterState>,
-    body: Result<Json<SetSystemUserCredentialsRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state
-        .user_repo
-        .set_system_user_credentials(&req.username, &req.password_hash)
-        .await?;
-    Ok(Json(ApiResponse::ok(())))
-}
-
-async fn update_user_password_hash_handler(
-    State(state): State<AuthRouterState>,
-    Path(id): Path<UserId>,
-    body: Result<Json<UpdatePasswordHashRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.user_repo.update_password(id.as_str(), &req.password_hash).await?;
-    Ok(Json(ApiResponse::ok(())))
-}
-
-async fn update_user_username_handler(
-    State(state): State<AuthRouterState>,
-    Path(id): Path<UserId>,
-    body: Result<Json<UpdateUsernameRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.user_repo.update_username(id.as_str(), &req.username).await?;
-    Ok(Json(ApiResponse::ok(())))
-}
-
-async fn update_user_jwt_secret_handler(
-    State(state): State<AuthRouterState>,
-    Path(id): Path<UserId>,
-    body: Result<Json<UpdateJwtSecretRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.user_repo.update_jwt_secret(id.as_str(), &req.jwt_secret).await?;
-    Ok(Json(ApiResponse::ok(())))
-}
-
-async fn update_user_last_login_handler(
-    State(state): State<AuthRouterState>,
-    Path(id): Path<UserId>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-
-    state.user_repo.update_last_login(id.as_str()).await?;
-    Ok(Json(ApiResponse::ok(())))
 }
 
 // ---------------------------------------------------------------------------

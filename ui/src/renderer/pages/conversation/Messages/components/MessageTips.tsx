@@ -137,30 +137,6 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
       code ? `${t('conversation.agentError.errorCode')}: ${code}` : '',
       structuredError.detail || structuredError.message,
     ].filter(Boolean);
-    const feedbackTags: Record<string, string> = {};
-    if (code) {
-      feedbackTags.agent_error_code = code;
-    }
-    if (ownership) {
-      feedbackTags.agent_error_ownership = ownership;
-    }
-    if (structuredError.retryable !== undefined) {
-      feedbackTags.agent_error_retryable = String(structuredError.retryable);
-    }
-    if (structuredError.resolution?.kind) {
-      feedbackTags.agent_error_resolution = structuredError.resolution.kind;
-    }
-    const feedbackExtra = {
-      agent_error: {
-        ...(code ? { code } : {}),
-        ...(ownership ? { ownership } : {}),
-        ...(structuredError.retryable !== undefined ? { retryable: structuredError.retryable } : {}),
-        ...(structuredError.feedback_recommended !== undefined
-          ? { feedback_recommended: structuredError.feedback_recommended }
-          : {}),
-        ...(structuredError.resolution ? { resolution: structuredError.resolution } : {}),
-      },
-    };
 
     return (
       <div className='w-full'>
@@ -213,12 +189,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
                   {shouldShowFeedback && (
                     <div className='message-error-note__actions'>
                       {retryButton}
-                      <FeedbackButton
-                        module='conversation-session'
-                        feedbackTags={feedbackTags}
-                        feedbackExtra={feedbackExtra}
-                        className='message-error-note__feedback'
-                      />
+                      <FeedbackButton className='message-error-note__feedback' />
                     </div>
                   )}
                 </div>
@@ -245,7 +216,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
           {type === 'error' && (
             <div className='flex justify-end items-center gap-8px'>
               {retryButton}
-              <FeedbackButton module='conversation-session' />
+              <FeedbackButton />
             </div>
           )}
         </div>
@@ -265,7 +236,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
         {shouldShowFeedback && (
           <div className='flex justify-end items-center gap-8px'>
             {retryButton}
-            <FeedbackButton module='conversation-session' />
+            <FeedbackButton />
           </div>
         )}
       </div>

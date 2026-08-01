@@ -6,15 +6,14 @@ const readSource = (relativePath: string): string =>
 
 const queueSource = readSource('./useConversationCommandQueue.ts');
 const acpSource = readSource('./acp/AcpSendBox.tsx');
-const remoteSource = readSource('./remote/RemoteSendBox.tsx');
-const nanobotSource = readSource('./nanobot/NanobotSendBox.tsx');
+// The nanobot / remote / openclaw send boxes share one implementation; the
+// OpenClaw file still hosts the platform-only Star Office install flow.
+const basicRuntimeSource = readSource('./BasicRuntimeSendBox.tsx');
 const openClawSource = readSource('./openclaw/OpenClawSendBox.tsx');
 const nomiSource = readSource('./nomi/NomiSendBox.tsx');
 const platformSources = [
   acpSource,
-  remoteSource,
-  nanobotSource,
-  openClawSource,
+  basicRuntimeSource,
   nomiSource,
 ];
 
@@ -71,17 +70,7 @@ describe('conversation send idempotency wiring', () => {
         deferredFreshOpen: 'if (deferLocalTurnUntilFresh) {',
       },
       {
-        source: remoteSource,
-        guardedDirectOpen: 'if (!deferLocalTurnUntilFresh) {',
-        deferredFreshOpen: 'if (deferLocalTurnUntilFresh) {',
-      },
-      {
-        source: nanobotSource,
-        guardedDirectOpen: 'if (!deferLocalTurnUntilFresh) {',
-        deferredFreshOpen: 'if (deferLocalTurnUntilFresh) {',
-      },
-      {
-        source: openClawSource,
+        source: basicRuntimeSource,
         guardedDirectOpen: 'if (!deferLocalTurnUntilFresh) {',
         deferredFreshOpen: 'if (deferLocalTurnUntilFresh) {',
       },
@@ -120,9 +109,7 @@ describe('conversation send idempotency wiring', () => {
   test('authorizes exact initial payloads and marks only those POSTs initial-only', () => {
     const initialConsumers = [
       readSource('./acp/useAcpInitialMessage.ts'),
-      readSource('./remote/RemoteSendBox.tsx'),
-      readSource('./nanobot/NanobotSendBox.tsx'),
-      readSource('./openclaw/OpenClawSendBox.tsx'),
+      basicRuntimeSource,
       readSource('./nomi/NomiSendBox.tsx'),
     ];
 
@@ -250,20 +237,8 @@ describe('conversation send idempotency wiring', () => {
         open: 'setAiProcessing(true);',
       },
       {
-        source: remoteSource,
+        source: basicRuntimeSource,
         start: 'const processInitialMessage = async () => {',
-        post: 'sendMessage.invoke({',
-        open: 'beginLocalTurn();',
-      },
-      {
-        source: nanobotSource,
-        start: 'const processInitialMessage = async () => {',
-        post: 'sendMessage.invoke({',
-        open: 'beginLocalTurn();',
-      },
-      {
-        source: openClawSource,
-        start: '// Handle initial message from guid page.',
         post: 'sendMessage.invoke({',
         open: 'beginLocalTurn();',
       },

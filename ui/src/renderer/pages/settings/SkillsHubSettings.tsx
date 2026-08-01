@@ -8,8 +8,6 @@
  * Visual language mirrors the preset page: a soft fill-2 panel, an
  * PresetTagFilterBar, and PresetCard-style grid items (see SkillCard).
  * Theme variables only; `<div onClick>`/Arco controls (no <button>).
- *
- * `withWrapper` is preserved for the legacy CapabilitiesSettings embed.
  */
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
@@ -35,7 +33,6 @@ import { CloseSmall, FileZip, FolderOpen, Info, Refresh, Search } from '@icon-pa
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
-import SettingsPageWrapper from './components/SettingsPageWrapper';
 
 /**
  * 卡片网格按「内容容器实际宽度」自动定列(auto-fill),而非视口断点 —— 设置内容
@@ -48,12 +45,7 @@ const CARD_GRID_COLS = 'repeat(auto-fill, minmax(min(232px, 100%), 1fr))';
 const IMPORT_ACTION_BUTTON_CLASS =
   '!rounded-[100px] !h-34px !px-14px !text-t-primary flex items-center gap-6px';
 
-interface SkillsHubSettingsProps {
-  /** When false, renders without SettingsPageWrapper — useful for embedding in a tab */
-  withWrapper?: boolean;
-}
-
-const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ withWrapper = true }) => {
+const SkillsHubSettings: React.FC = () => {
   const { t, i18n } = useTranslation();
   const localeKey = resolveLocaleKey(i18n.language);
   const layout = useLayoutContext();
@@ -463,7 +455,7 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ withWrapper = tru
     </div>
   );
 
-  return withWrapper ? <SettingsPageWrapper>{mainContent}</SettingsPageWrapper> : mainContent;
+  return mainContent;
 };
 
 export default SkillsHubSettings;

@@ -111,13 +111,6 @@ pub struct ExportSkillRequest {
     pub target_dir: String,
 }
 
-/// Request body for `DELETE /api/skills/:name` (path param, but also usable as body).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeleteSkillRequest {
-    pub skill_name: String,
-}
-
 // ---------------------------------------------------------------------------
 // C. Skill scanning & discovery
 // ---------------------------------------------------------------------------

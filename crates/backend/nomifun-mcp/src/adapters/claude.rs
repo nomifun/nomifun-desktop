@@ -6,23 +6,15 @@ use crate::adapter::{DetectedServer, McpAgentAdapter};
 use crate::error::McpError;
 use crate::types::McpServerTransport;
 
-use super::cli_helpers::{
-    DETECT_TIMEOUT, MUTATE_TIMEOUT, is_cli_installed, normalize_detection_status, run_cli, strip_ansi,
-};
+use super::cli_helpers::{DETECT_TIMEOUT, is_cli_installed, normalize_detection_status, run_cli, strip_ansi};
 
 const CLI_NAME: &str = "claude";
-
-/// Scopes to try when removing a server (user → local → project).
-const REMOVE_SCOPES: &[&str] = &["user", "local", "project"];
 
 /// MCP Agent adapter for Claude CLI.
 ///
 /// # CLI Commands
 ///
 /// - **detect**: `claude mcp list`
-/// - **install (stdio)**: `claude mcp add-json -s user <name> <json>`
-/// - **install (http/sse)**: `claude mcp add -s user --transport <type> <name> <url> [--header ...]`
-/// - **remove**: `claude mcp remove -s <scope> <name>` (tries user → local → project)
 ///
 /// Claude's list output uses a custom format:
 /// `name: command args - ✓ Connected` or `name: command args - ✗ Failed`
@@ -46,93 +38,6 @@ impl McpAgentAdapter for ClaudeAdapter {
         let (stdout, _stderr) = run_cli(CLI_NAME, &["mcp", "list"], DETECT_TIMEOUT).await?;
         Ok(parse_claude_list_output(&stdout))
     }
-
-    async fn install_server(&self, name: &str, transport: &McpServerTransport) -> Result<(), McpError> {
-        if !self.is_installed().await? {
-            return Err(McpError::AgentNotInstalled(CLI_NAME.into()));
-        }
-
-        match transport {
-            McpServerTransport::Stdio { command, args, env } => {
-                let config = build_stdio_json(command, args, env);
-                let config_str =
-                    serde_json::to_string(&config).map_err(|e| McpError::AgentOperationFailed(e.to_string()))?;
-                run_cli(
-                    CLI_NAME,
-                    &["mcp", "add-json", "-s", "user", name, &config_str],
-                    MUTATE_TIMEOUT,
-                )
-                .await?;
-            }
-            McpServerTransport::Sse { url, headers } => {
-                install_http_like(name, "sse", url, headers).await?;
-            }
-            McpServerTransport::Http { url, headers } => {
-                install_http_like(name, "http", url, headers).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn remove_server(&self, name: &str) -> Result<(), McpError> {
-        if !self.is_installed().await? {
-            return Err(McpError::AgentNotInstalled(CLI_NAME.into()));
-        }
-
-        // Try each scope; stop on first success or "not found".
-        for scope in REMOVE_SCOPES {
-            let (stdout, _stderr) = run_cli(CLI_NAME, &["mcp", "remove", "-s", scope, name], MUTATE_TIMEOUT).await?;
-            let lower = stdout.to_lowercase();
-            if lower.contains("removed") || lower.contains("not found") {
-                return Ok(());
-            }
-        }
-
-        // If none of the scopes reported "removed" or "not found", treat as
-        // idempotent success (server may simply not exist).
-        Ok(())
-    }
-}
-
-/// Install an HTTP-like (sse/http) server via `claude mcp add`.
-async fn install_http_like(
-    name: &str,
-    transport_type: &str,
-    url: &str,
-    headers: &HashMap<String, String>,
-) -> Result<(), McpError> {
-    let mut args = vec![
-        "mcp".to_owned(),
-        "add".to_owned(),
-        "-s".to_owned(),
-        "user".to_owned(),
-        "--transport".to_owned(),
-        transport_type.to_owned(),
-        name.to_owned(),
-        url.to_owned(),
-    ];
-
-    for (key, value) in headers {
-        args.push("--header".to_owned());
-        args.push(format!("{key}: {value}"));
-    }
-
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    run_cli(CLI_NAME, &arg_refs, MUTATE_TIMEOUT).await?;
-    Ok(())
-}
-
-/// Build the JSON config for `claude mcp add-json`.
-fn build_stdio_json(command: &str, args: &[String], env: &HashMap<String, String>) -> serde_json::Value {
-    let mut config = serde_json::json!({
-        "command": command,
-        "args": args,
-    });
-    if !env.is_empty() {
-        config["env"] = serde_json::json!(env);
-    }
-    config
 }
 
 // ---------------------------------------------------------------------------
@@ -327,22 +232,5 @@ web: https://example.com/api - ✓ Connected";
     fn parse_claude_empty_output() {
         let servers = parse_claude_list_output("");
         assert!(servers.is_empty());
-    }
-
-    #[test]
-    fn build_stdio_json_without_env() {
-        let json = build_stdio_json("npx", &["-y".into(), "srv".into()], &HashMap::new());
-        assert_eq!(json["command"], "npx");
-        assert_eq!(json["args"], serde_json::json!(["-y", "srv"]));
-        assert!(json.get("env").is_none());
-    }
-
-    #[test]
-    fn build_stdio_json_with_env() {
-        let mut env = HashMap::new();
-        env.insert("KEY".into(), "VALUE".into());
-        let json = build_stdio_json("node", &[], &env);
-        assert_eq!(json["command"], "node");
-        assert_eq!(json["env"]["KEY"], "VALUE");
     }
 }

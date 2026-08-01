@@ -86,7 +86,6 @@ serde_json = "1"
 serde_yaml = "0.9"
 jsonschema = { version = "0.47", default-features = false }
 ts-rs = "12.0.1"
-encoding_rs = "0.8"
 
 # --- Async / error / log ---
 async-trait = "0.1"
@@ -165,8 +164,6 @@ open = { version = "5", features = ["shellexecute-on-windows"] }
 which = "7"
 
 # --- Office ---
-calamine = "0.26"
-rust_xlsxwriter = "0.82"
 sha1 = "0.10"
 sha2 = "0.10"
 hmac = "0.12"

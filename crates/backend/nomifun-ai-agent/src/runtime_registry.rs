@@ -130,33 +130,13 @@ pub trait AgentRuntimeRegistry: Send + Sync {
     /// Terminate and remove a runtime.
     fn terminate(&self, conversation_id: &str, reason: Option<AgentKillReason>) -> Result<(), AppError>;
 
-    /// Terminate a runtime and resolve after its process has exited.
-    fn terminate_and_wait(
-        &self,
-        conversation_id: &str,
-        reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let teardown = self.terminate_and_wait_result(conversation_id, reason);
-        let conversation_id = conversation_id.to_owned();
-        Box::pin(async move {
-            if let Err(error) = teardown.await {
-                warn!(
-                    conversation_id,
-                    error = %ErrorChain(&error),
-                    "Awaitable Agent runtime teardown failed"
-                );
-            }
-        })
-    }
-
     /// Result-bearing awaitable teardown. Production registries override this
     /// so callers can distinguish a proven process exit from a failed kill.
     ///
-    /// Registries that cannot prove process-tree exit must fail closed. The
-    /// legacy unit-returning wrapper delegates *to this method*, never the
-    /// reverse: treating an unverified unit future as success would allow a
-    /// caller to finalize and reopen a durable Running Conversation while its
-    /// old process could still execute.
+    /// Registries that cannot prove process-tree exit must fail closed:
+    /// treating an unverified teardown as success would allow a caller to
+    /// finalize and reopen a durable Running Conversation while its old
+    /// process could still execute.
     fn terminate_and_wait_result(
         &self,
         conversation_id: &str,
@@ -1324,24 +1304,6 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
             }
         }
         Ok(())
-    }
-
-    fn terminate_and_wait(
-        &self,
-        conversation_id: &str,
-        reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let teardown = self.terminate_and_wait_result(conversation_id, reason);
-        let conversation_id = conversation_id.to_owned();
-        Box::pin(async move {
-            if let Err(error) = teardown.await {
-                warn!(
-                    conversation_id,
-                    error = %ErrorChain(&error),
-                    "Awaitable Agent runtime teardown failed; runtime remains quarantined"
-                );
-            }
-        })
     }
 
     fn terminate_and_wait_result(
@@ -2627,7 +2589,7 @@ mod tests {
         let teardown = {
             let registry = Arc::clone(&registry);
             tokio::spawn(async move {
-                registry.terminate_and_wait("conv-teardown", None).await;
+                let _ = registry.terminate_and_wait_result("conv-teardown", None).await;
             })
         };
         kill_started.acquire().await.unwrap().forget();

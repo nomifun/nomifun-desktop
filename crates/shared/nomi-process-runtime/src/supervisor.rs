@@ -409,42 +409,8 @@ impl ProcessSupervisor {
         cursor: OutputCursor,
         yield_until: Instant,
     ) -> Result<PollResult, ProcessError> {
-        let action = self.session(owner, session_id)?;
-        let session = action.session_arc();
-        let mut exits = session.exit.subscribe();
-        let mut lifecycle = session.lifecycle.subscribe();
-        let yield_timer = tokio::time::sleep_until(tokio::time::Instant::from_std(yield_until));
-        tokio::pin!(yield_timer);
-        loop {
-            if let Some(terminal) = session.terminal() {
-                return Ok(PollResult::Finished(session.outcome(&terminal, cursor)));
-            }
-            if let Some(observation) = session.exit_observation() {
-                return Ok(PollResult::Finished(
-                    finish_observed_exit(&session, observation, cursor).await,
-                ));
-            }
-            tokio::select! {
-                changed = exits.changed() => {
-                    changed.expect("process exit watch closed while session is alive");
-                }
-                changed = lifecycle.changed() => {
-                    changed.expect("process lifecycle watch closed while session is alive");
-                }
-                () = &mut yield_timer => break,
-            }
-        }
-        let snapshot = session.snapshot();
-        let output = session.output.snapshot_from(cursor);
-        if let Some(terminal) = session.terminal() {
-            return Ok(PollResult::Finished(session.outcome(&terminal, cursor)));
-        }
-        if let Some(observation) = session.exit_observation() {
-            return Ok(PollResult::Finished(
-                finish_observed_exit(&session, observation, cursor).await,
-            ));
-        }
-        Ok(PollResult::Running { snapshot, output })
+        self.poll_inner(owner, session_id, cursor, yield_until, false)
+            .await
     }
 
     /// Poll until terminal state, newly available output, or the yield
@@ -456,6 +422,18 @@ impl ProcessSupervisor {
         session_id: &SessionId,
         cursor: OutputCursor,
         yield_until: Instant,
+    ) -> Result<PollResult, ProcessError> {
+        self.poll_inner(owner, session_id, cursor, yield_until, true)
+            .await
+    }
+
+    async fn poll_inner(
+        &self,
+        owner: &ProcessOwner,
+        session_id: &SessionId,
+        cursor: OutputCursor,
+        yield_until: Instant,
+        break_on_output: bool,
     ) -> Result<PollResult, ProcessError> {
         let action = self.session(owner, session_id)?;
         let session = action.session_arc();
@@ -473,7 +451,7 @@ impl ProcessSupervisor {
                     finish_observed_exit(&session, observation, cursor).await,
                 ));
             }
-            if session.output.snapshot_from(cursor).next_cursor > cursor {
+            if break_on_output && session.output.snapshot_from(cursor).next_cursor > cursor {
                 break;
             }
             tokio::select! {
@@ -483,7 +461,7 @@ impl ProcessSupervisor {
                 changed = lifecycle.changed() => {
                     changed.expect("process lifecycle watch closed while session is alive");
                 }
-                changed = output_changes.changed() => {
+                changed = output_changes.changed(), if break_on_output => {
                     changed.expect("process output watch closed while session is alive");
                 }
                 () = &mut yield_timer => break,
@@ -644,11 +622,6 @@ impl ProcessSupervisor {
             StopCause::TimedOut,
         )
         .await)
-    }
-
-    pub fn heartbeat(&self, invocation_id: uuid::Uuid) -> usize {
-        self.registry
-            .heartbeat_invocation(invocation_id, Instant::now())
     }
 
     /// Stop new starts, wait for every admitted ownership transaction, then

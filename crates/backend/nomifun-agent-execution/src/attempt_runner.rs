@@ -1364,7 +1364,7 @@ mod tests {
             CURRENT_WIRE_TURN_ID,
             receipt,
         )];
-        for index in 1..ARTIFACT_RECEIPT_PAGE_SIZE {
+        for _ in 1..ARTIFACT_RECEIPT_PAGE_SIZE {
             first_page.push(message(
                 &generate_id(),
                 CURRENT_WIRE_TURN_ID,

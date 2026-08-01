@@ -1,5 +1,5 @@
 mod claude;
-mod cli_helpers;
+pub(crate) mod cli_helpers;
 mod codebuddy;
 mod codex;
 mod gemini;

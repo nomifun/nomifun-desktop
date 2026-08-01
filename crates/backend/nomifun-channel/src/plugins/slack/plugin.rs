@@ -14,9 +14,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{SLACK_MAX_RECONNECT_ATTEMPTS, SLACK_MAX_RECONNECT_DELAY, SLACK_MESSAGE_LIMIT};
+use crate::constants::{RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY, SLACK_MESSAGE_LIMIT};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::plugins::callback::{format_callback_data, parse_callback_data};
 use crate::types::{
     ActionContext, BotInfo, MessageContentType, PluginConfig, PluginStatus,
@@ -158,7 +159,6 @@ impl ChannelPlugin for SlackPlugin {
         self.ws_handle = Some(tokio::spawn(socket_mode_loop(
             api,
             callbacks.message_tx,
-            callbacks.confirm_tx,
             self.status.clone(),
             shutdown_rx,
             bot_user_id,
@@ -278,7 +278,6 @@ impl ChannelPlugin for SlackPlugin {
 async fn socket_mode_loop(
     api: Arc<SlackApi>,
     message_tx: mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: mpsc::Sender<(String, String)>,
     status: SharedPluginStatus,
     mut shutdown_rx: watch::Receiver<bool>,
     bot_user_id: String,
@@ -304,11 +303,11 @@ async fn socket_mode_loop(
                     consecutive_errors,
                     "Slack apps.connections.open failed"
                 );
-                if consecutive_errors >= SLACK_MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("Slack max reconnect attempts reached, stopping socket mode loop");
                     break;
                 }
-                let backoff = backoff_delay(consecutive_errors);
+                let backoff = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown_rx.changed() => {
@@ -324,7 +323,6 @@ async fn socket_mode_loop(
         match connect_and_listen(
             &ws_url,
             &message_tx,
-            &confirm_tx,
             &mut shutdown_rx,
             &bot_user_id,
         )
@@ -345,11 +343,11 @@ async fn socket_mode_loop(
                     consecutive_errors,
                     "Slack WS error"
                 );
-                if consecutive_errors >= SLACK_MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("Slack max reconnect attempts reached, stopping socket mode loop");
                     break;
                 }
-                let backoff = backoff_delay(consecutive_errors);
+                let backoff = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown_rx.changed() => {
@@ -369,7 +367,6 @@ async fn socket_mode_loop(
 async fn connect_and_listen(
     ws_url: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
     shutdown_rx: &mut watch::Receiver<bool>,
     bot_user_id: &str,
 ) -> Result<(), ChannelError> {
@@ -438,7 +435,6 @@ async fn connect_and_listen(
                                                 &payload,
                                                 stable_envelope_id,
                                                 message_tx,
-                                                confirm_tx,
                                             )
                                             .await;
                                         } else {
@@ -578,7 +574,6 @@ async fn handle_interactive(
     payload: &InteractivePayload,
     envelope_id: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
 ) {
     let envelope_id = envelope_id.trim();
     if envelope_id.is_empty() {
@@ -621,19 +616,6 @@ async fn handle_interactive(
             .unwrap_or("");
 
         let parsed = parse_callback_data(callback_data);
-
-        // Check for tool confirmation callback
-        if let Some(ref parsed_action) = parsed {
-            if parsed_action.action == "system.confirm" {
-                if let Some(ref params) = parsed_action.params {
-                    let call_id = params.get("callId").cloned().unwrap_or_default();
-                    let value = params.get("value").cloned().unwrap_or_default();
-                    if !call_id.is_empty() {
-                        let _ = confirm_tx.send((call_id, value)).await;
-                    }
-                }
-            }
-        }
 
         let unified_action = parsed.map(|a| UnifiedAction {
             action: a.action,
@@ -719,15 +701,6 @@ fn parse_slack_ts(ts: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// Truncate a message to the platform limit, appending "..." if truncated.
-fn truncate_message(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(limit - 3).collect();
-    format!("{truncated}...")
-}
-
 /// Build Block Kit blocks for buttons, if present.
 fn build_blocks(msg: &UnifiedOutgoingMessage) -> Option<serde_json::Value> {
     let buttons = msg.buttons.as_ref()?;
@@ -758,12 +731,6 @@ fn build_blocks(msg: &UnifiedOutgoingMessage) -> Option<serde_json::Value> {
     };
 
     serde_json::to_value(vec![block]).ok()
-}
-
-/// Calculate exponential backoff delay, capped at the configured maximum.
-fn backoff_delay(attempt: u32) -> Duration {
-    let delay_secs = 2u64.saturating_pow(attempt).min(SLACK_MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(delay_secs)
 }
 
 /// Current unix timestamp in seconds.
@@ -882,32 +849,6 @@ mod tests {
         assert_eq!(parse_slack_ts("abc.def"), 0);
     }
 
-    // -- truncate_message -----------------------------------------------------
-
-    #[test]
-    fn truncate_within_limit() {
-        assert_eq!(truncate_message("Hello", 100), "Hello");
-    }
-
-    #[test]
-    fn truncate_at_limit() {
-        assert_eq!(truncate_message("abc", 3), "abc");
-    }
-
-    #[test]
-    fn truncate_exceeds_limit() {
-        let result = truncate_message("Hello, world!", 10);
-        assert_eq!(result, "Hello, ...");
-        assert!(result.len() <= 10);
-    }
-
-    #[test]
-    fn truncate_unicode() {
-        let text = "你好世界测试文本";
-        let result = truncate_message(text, 5);
-        assert_eq!(result, "你好...");
-    }
-
     // -- build_blocks ---------------------------------------------------------
 
     #[test]
@@ -969,22 +910,6 @@ mod tests {
         let action_id = blocks[0]["elements"][0]["action_id"].as_str().unwrap();
         let parsed = parse_callback_data(action_id).unwrap();
         assert_eq!(parsed.action, "help.show");
-    }
-
-    // -- backoff_delay --------------------------------------------------------
-
-    #[test]
-    fn backoff_exponential() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(2), Duration::from_secs(4));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-        assert_eq!(backoff_delay(4), Duration::from_secs(16));
-    }
-
-    #[test]
-    fn backoff_capped() {
-        assert_eq!(backoff_delay(5), Duration::from_secs(30));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30));
     }
 
     // -- handle_event normalization -------------------------------------------
@@ -1115,7 +1040,6 @@ mod tests {
     #[tokio::test]
     async fn handle_interactive_block_actions() {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
 
         let payload = InteractivePayload {
             interaction_type: Some("block_actions".into()),
@@ -1134,7 +1058,7 @@ mod tests {
             }),
         };
 
-        handle_interactive(&payload, "env-interactive-1", &msg_tx, &confirm_tx).await;
+        handle_interactive(&payload, "env-interactive-1", &msg_tx).await;
         let msg = msg_rx.try_recv().unwrap();
         assert_eq!(msg.id, "env-interactive-1:0");
         assert_eq!(msg.platform, PluginType::Slack);
@@ -1147,37 +1071,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_interactive_confirm_sends_to_confirm_tx() {
-        let (msg_tx, _msg_rx) = mpsc::channel(16);
-        let (confirm_tx, mut confirm_rx) = mpsc::channel(16);
-
-        let payload = InteractivePayload {
-            interaction_type: Some("block_actions".into()),
-            actions: Some(vec![super::super::types::BlockAction {
-                action_id: Some("chat:system.confirm:callId=abc,value=yes".into()),
-                value: Some("chat:system.confirm:callId=abc,value=yes".into()),
-            }]),
-            channel: Some(super::super::types::InteractiveChannel {
-                id: Some("C12345".into()),
-            }),
-            user: Some(super::super::types::InteractiveUser {
-                id: Some("U99999".into()),
-            }),
-            message: Some(super::super::types::InteractiveMessage {
-                ts: Some("1700000000.000100".into()),
-            }),
-        };
-
-        handle_interactive(&payload, "env-confirm-1", &msg_tx, &confirm_tx).await;
-        let (call_id, value) = confirm_rx.try_recv().unwrap();
-        assert_eq!(call_id, "abc");
-        assert_eq!(value, "yes");
-    }
-
-    #[tokio::test]
     async fn handle_interactive_non_block_actions_skipped() {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
 
         let payload = InteractivePayload {
             interaction_type: Some("view_submission".into()),
@@ -1187,14 +1082,13 @@ mod tests {
             message: None,
         };
 
-        handle_interactive(&payload, "env-view-1", &msg_tx, &confirm_tx).await;
+        handle_interactive(&payload, "env-view-1", &msg_tx).await;
         assert!(msg_rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn handle_interactive_uses_action_index_for_unique_stable_ids() {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
         let payload = InteractivePayload {
             interaction_type: Some("block_actions".into()),
             actions: Some(vec![
@@ -1216,16 +1110,15 @@ mod tests {
             message: None,
         };
 
-        handle_interactive(&payload, "env-multi-1", &msg_tx, &confirm_tx).await;
+        handle_interactive(&payload, "env-multi-1", &msg_tx).await;
 
         assert_eq!(msg_rx.try_recv().unwrap().id, "env-multi-1:0");
         assert_eq!(msg_rx.try_recv().unwrap().id, "env-multi-1:1");
     }
 
     #[tokio::test]
-    async fn handle_interactive_without_envelope_id_is_dropped_before_confirm() {
+    async fn handle_interactive_without_envelope_id_is_dropped() {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
-        let (confirm_tx, mut confirm_rx) = mpsc::channel(16);
         let payload = InteractivePayload {
             interaction_type: Some("block_actions".into()),
             actions: Some(vec![super::super::types::BlockAction {
@@ -1237,10 +1130,9 @@ mod tests {
             message: None,
         };
 
-        handle_interactive(&payload, "  ", &msg_tx, &confirm_tx).await;
+        handle_interactive(&payload, "  ", &msg_tx).await;
 
         assert!(msg_rx.try_recv().is_err());
-        assert!(confirm_rx.try_recv().is_err());
     }
 
     // -- test helpers ----------------------------------------------------------

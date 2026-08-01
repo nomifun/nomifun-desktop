@@ -6,7 +6,6 @@
 //!
 //! For Nomi, we use a mock repository since it reads from the DB.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use nomifun_common::McpSource;
@@ -143,36 +142,6 @@ mod nomifun {
         let adapter = NomifunAdapter::new(repo);
         let servers = adapter.detect_existing().await.unwrap();
         assert!(servers.is_empty());
-    }
-
-    #[tokio::test]
-    async fn install_is_noop() {
-        let repo = Arc::new(MockRepo::new(vec![]));
-        let adapter = NomifunAdapter::new(repo.clone());
-
-        let transport = McpServerTransport::Stdio {
-            command: "npx".into(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        adapter.install_server("test", &transport).await.unwrap();
-
-        // DB should still be empty since install is a no-op
-        let servers = adapter.detect_existing().await.unwrap();
-        assert!(servers.is_empty());
-    }
-
-    #[tokio::test]
-    async fn remove_is_noop() {
-        let rows = vec![make_row("srv", "stdio", r#"{"command":"npx","args":[]}"#)];
-        let repo = Arc::new(MockRepo::new(rows));
-        let adapter = NomifunAdapter::new(repo);
-
-        adapter.remove_server("srv").await.unwrap();
-
-        // Server should still be in DB since remove is a no-op
-        let servers = adapter.detect_existing().await.unwrap();
-        assert_eq!(servers.len(), 1);
     }
 
     #[tokio::test]

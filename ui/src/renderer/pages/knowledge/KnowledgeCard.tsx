@@ -15,9 +15,10 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { Delete, Earth, EditTwo, FolderOpen, LinkOne } from '@icon-park/react';
+import { Delete, EditTwo, LinkOne } from '@icon-park/react';
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import { formatSize } from './useKnowledge';
+import { getKindConfig, KindIcon } from './knowledgeKind';
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -30,84 +31,7 @@ export interface KnowledgeCardProps {
   onDelete?: (base: IKnowledgeBase, e: React.MouseEvent) => void;
 }
 
-// ─── Kind → theme color mapping ───────────────────────────────────────────────
-
-type KindConfig = {
-  label: string;
-  /** UnoCSS bg class (translucent) */
-  bgClass: string;
-  /** UnoCSS text class */
-  textClass: string;
-  /** UnoCSS border class */
-  borderClass: string;
-  /** Icon bg/border CSS vars for the round icon container */
-  iconBg: string;
-  iconBorder: string;
-  iconColor: string;
-};
-
-/**
- * Per-kind badge + icon styling. Uses theme semantic colors:
- * - blank = neutral/gray (fill-2 / text-2)
- * - local = primary (blue)
- * - web = success (green)
- */
-function getKindConfig(kind: IKnowledgeBase['kind'], t: TFunction): KindConfig {
-  switch (kind) {
-    case 'local':
-      return {
-        label: t('knowledge.card.kindLocal', { defaultValue: '本地文件夹' }),
-        bgClass: 'bg-[rgba(var(--primary-6),0.1)]',
-        textClass: 'text-[rgb(var(--primary-5))]',
-        borderClass: 'border-[rgba(var(--primary-6),0.3)]',
-        iconBg: 'rgba(var(--primary-6),0.1)',
-        iconBorder: 'rgba(var(--primary-6),0.3)',
-        iconColor: 'rgb(var(--primary-5))',
-      };
-    case 'web':
-      return {
-        label: t('knowledge.card.kindWeb', { defaultValue: '网页' }),
-        bgClass: 'bg-[rgba(var(--success-6),0.1)]',
-        textClass: 'text-[rgb(var(--success-5))]',
-        borderClass: 'border-[rgba(var(--success-6),0.3)]',
-        iconBg: 'rgba(var(--success-6),0.1)',
-        iconBorder: 'rgba(var(--success-6),0.3)',
-        iconColor: 'rgb(var(--success-5))',
-      };
-    case 'blank':
-    default:
-      return {
-        label: t('knowledge.card.kindBlank', { defaultValue: '空白' }),
-        bgClass: 'bg-fill-2',
-        textClass: 'text-[var(--color-text-2)]',
-        borderClass: 'border-[var(--color-border-2)]',
-        iconBg: 'var(--color-fill-2)',
-        iconBorder: 'var(--color-border-2)',
-        iconColor: 'var(--color-text-2)',
-      };
-  }
-}
-
 // ─── Sub-components ───────────────────────────────────────────────────────────
-
-/** Kind icon in a rounded square container. */
-function KindIcon({ kind, config }: { kind: IKnowledgeBase['kind']; config: KindConfig }) {
-  const iconProps = { theme: 'outline' as const, size: 20, strokeWidth: 3 };
-  return (
-    <div
-      className='w-42px h-42px rounded-12px flex-none grid place-items-center border border-solid'
-      style={{
-        background: config.iconBg,
-        borderColor: config.iconBorder,
-        color: config.iconColor,
-      }}
-    >
-      {kind === 'local' && <FolderOpen {...iconProps} />}
-      {kind === 'web' && <Earth {...iconProps} />}
-      {kind === 'blank' && <EditTwo {...iconProps} />}
-    </div>
-  );
-}
 
 /** Source-mode status badges (live/snapshot). */
 function StatusBadges({

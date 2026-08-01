@@ -21,9 +21,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{MATTERMOST_MAX_RECONNECT_ATTEMPTS, MATTERMOST_MAX_RECONNECT_DELAY, MATTERMOST_MESSAGE_LIMIT};
+use crate::constants::{MATTERMOST_MESSAGE_LIMIT, RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
     BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType,
     UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
@@ -311,7 +312,7 @@ impl ChannelPlugin for MattermostPlugin {
 
 /// Background task: connect to Mattermost WS, authenticate, listen for events.
 ///
-/// Reconnects with exponential backoff up to `MATTERMOST_MAX_RECONNECT_ATTEMPTS`
+/// Reconnects with exponential backoff up to `RECONNECT_MAX_ATTEMPTS`
 /// consecutive failures. On exhaustion, calls `mark_error_on_unexpected_exit`.
 async fn ws_loop(
     server_url: String,
@@ -359,12 +360,12 @@ async fn ws_loop(
             }
         }
 
-        if consecutive_errors >= MATTERMOST_MAX_RECONNECT_ATTEMPTS {
+        if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
             error!("Mattermost max reconnect attempts reached, stopping WS loop");
             break;
         }
 
-        let backoff = backoff_delay(consecutive_errors);
+        let backoff = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
             _ = shutdown_rx.changed() => {
@@ -583,21 +584,6 @@ pub(crate) fn is_bot_mentioned(mentions_json: &Option<String>, message: &str, bo
     false
 }
 
-/// Truncate a message to the platform limit, appending "..." if truncated.
-pub(crate) fn truncate_message(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(limit - 3).collect();
-    format!("{truncated}...")
-}
-
-/// Exponential backoff delay, capped.
-fn backoff_delay(attempt: u32) -> Duration {
-    let delay_secs = 2u64.saturating_pow(attempt).min(MATTERMOST_MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(delay_secs)
-}
-
 /// Build a TLS connector for WebSocket connections (mirrors Lark).
 ///
 /// Explicitly sets ALPN to `http/1.1` — WebSocket requires an HTTP/1.1
@@ -720,44 +706,7 @@ mod tests {
 
     // -- truncate_message ----------------------------------------------------
 
-    #[test]
-    fn truncate_within_limit() {
-        assert_eq!(truncate_message("Hello", 100), "Hello");
-    }
-
-    #[test]
-    fn truncate_at_limit() {
-        assert_eq!(truncate_message("abc", 3), "abc");
-    }
-
-    #[test]
-    fn truncate_exceeds_limit() {
-        let result = truncate_message("Hello, world!", 10);
-        assert_eq!(result, "Hello, ...");
-        assert!(result.len() <= 10);
-    }
-
-    #[test]
-    fn truncate_unicode() {
-        let text = "abcdefghij"; // 10 chars
-        let result = truncate_message(text, 8);
-        assert_eq!(result, "abcde...");
-    }
-
     // -- backoff_delay -------------------------------------------------------
-
-    #[test]
-    fn backoff_exponential() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(2), Duration::from_secs(4));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-    }
-
-    #[test]
-    fn backoff_capped() {
-        assert_eq!(backoff_delay(5), Duration::from_secs(30));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30));
-    }
 
     // -- MattermostPlugin constructor ----------------------------------------
 

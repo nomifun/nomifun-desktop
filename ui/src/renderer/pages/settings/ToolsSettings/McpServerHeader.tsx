@@ -177,7 +177,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
             <span className='flex items-center cursor-default'>{statusIcon}</span>
           </Tooltip>
         )}
-        {isError && <FeedbackButton module='mcp-tools' />}
+        {isError && <FeedbackButton />}
         {!isReadOnly && needsLogin && onOAuthLogin && (
           <Button
             size='mini'

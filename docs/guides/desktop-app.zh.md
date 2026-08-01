@@ -118,7 +118,7 @@ $ bun run build
 
 ## 更新器状态
 
-Tauri 更新器插件 (`tauri-plugin-updater`) 已接入，渲染进程暴露了 `invoke('check_for_updates')` (返回新版本字符串，若已是最新则返回 `null`)。然而：
+Tauri 更新器插件 (`tauri-plugin-updater`) 已接入：渲染进程通过插件的 `check()` API 检查更新，并通过 Rust 持有的 `install_update` 命令安装所选版本。然而：
 
 - 在 `apps/desktop/tauri.conf.json` 中配置的端点 (`plugins.updater.endpoints`) 是一个**占位符** (`https://REPLACE-WITH-YOUR-HOST/...`)。在你将其替换为一个提供已签名的 `latest.json` 的真实 HTTPS URL 之前，更新器检查会失败。
 - 包含的 `pubkey` 是一个为本地测试生成的**开发密钥**。**在任何公开发布前请替换它**，并将私钥存储在 CI 密钥中。

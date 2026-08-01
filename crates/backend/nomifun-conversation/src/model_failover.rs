@@ -56,9 +56,9 @@ fn validate_failover_config(config: &ModelFailoverConfig) -> Result<(), AppError
 /// 判定一个 `AgentErrorCode` 是否为「provider 故障」——即换个备用模型可能绕过的
 /// 单厂商失败(限流 / 5xx / 网络 / 配置)。
 ///
-/// 这张 matches 表是 `nomifun-idmm/config.rs::is_provider_fault` 的**就地副本**:
-/// 故障转移 seam 在 `nomifun-conversation`,而 `nomifun-idmm` 在其之上,直接依赖
-/// 会形成倒置的 crate 边界。两份必须保持一致;改动其一时同步另一处。
+/// 这是全仓库唯一的权威副本:故障转移 seam 在 `nomifun-conversation`,而
+/// `nomifun-idmm` 在其之上,通过 `nomifun_idmm::config::is_provider_fault`
+/// re-export 复用本函数。
 pub fn is_provider_fault(code: AgentErrorCode) -> bool {
     use AgentErrorCode::*;
     matches!(
@@ -439,7 +439,7 @@ mod tests {
         assert!(read_conversation_failover_override("{not json").is_none());
     }
 
-    // ── 故障分类(本地副本与 idmm 表对齐)──
+    // ── 故障分类(全仓库唯一权威表;idmm 经 re-export 复用)──
 
     #[test]
     fn is_provider_fault_matches_known_codes() {

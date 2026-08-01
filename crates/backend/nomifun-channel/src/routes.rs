@@ -373,7 +373,6 @@ async fn already_bound_message(state: &ChannelRouterState, owner: &ChannelOwner)
             .unwrap_or_else(|| format!("伙伴「{id}」"));
             format!("此机器人已绑定{who}，请先在该伙伴处解绑或删除后再在此使用。")
         }
-        ChannelOwner::Channel(id) => format!("此机器人已被渠道「{id}」占用。"),
     }
 }
 

@@ -16,7 +16,7 @@ import { type NodeProps, useNodesData, useStore } from '@xyflow/react';
 import { DeleteFour, Info, Left, PreviewOpen } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useCanvasNode } from '../CanvasNodeContext';
-import { useWorkshopMedia } from '../media';
+import { useWorkshopObjectUrl } from '../../assets/useWorkshopMedia';
 import type { OutputFlowNode } from '../model';
 import { KIND_META } from '../model';
 import { upstreamPrimary } from './upstream';
@@ -37,7 +37,7 @@ function OutputNodeImpl({ id, selected }: NodeProps<OutputFlowNode>) {
   const resolved = useMemo(() => upstreamPrimary(upstream), [upstream]);
 
   const isMedia = resolved?.kind === 'image' || resolved?.kind === 'video';
-  const media = useWorkshopMedia(isMedia ? resolved?.assetId ?? null : null);
+  const media = useWorkshopObjectUrl(isMedia ? resolved?.assetId ?? null : null);
   const assetId = resolved?.assetId ?? null;
 
   const openPreview = (): void => {

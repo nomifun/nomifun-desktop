@@ -67,17 +67,15 @@ pub fn mark_error_on_unexpected_exit(
 /// Callback channels for a channel plugin.
 ///
 /// Instead of closures (which are hard to make object-safe), plugins
-/// receive an `mpsc::Sender` for incoming messages and tool-confirmation
-/// events. The `ChannelManager` holds the receiving ends.
+/// receive an `mpsc::Sender` for incoming messages. The `ChannelManager`
+/// holds the receiving end.
 ///
-/// This addresses M-63 — the API Spec `BasePlugin.onMessage/onConfirm`
-/// callbacks are mapped to channel-based injection.
+/// This addresses M-63 — the API Spec `BasePlugin.onMessage` callback is
+/// mapped to channel-based injection.
 #[derive(Clone)]
 pub struct PluginCallbacks {
     /// Sender for incoming messages from the platform.
     pub message_tx: tokio::sync::mpsc::Sender<UnifiedIncomingMessage>,
-    /// Sender for tool confirmation callbacks (callId, value).
-    pub confirm_tx: tokio::sync::mpsc::Sender<(String, String)>,
 }
 
 /// Abstraction over a platform-specific channel plugin.
@@ -260,8 +258,7 @@ mod tests {
 
     fn make_test_callbacks() -> PluginCallbacks {
         let (message_tx, _message_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
-        PluginCallbacks { message_tx, confirm_tx }
+        PluginCallbacks { message_tx }
     }
 
     fn make_test_outgoing() -> UnifiedOutgoingMessage {

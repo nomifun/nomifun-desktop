@@ -350,23 +350,6 @@ pub fn read_image(
     Ok(Some((bytes, mtime)))
 }
 
-/// Rename a figure. Unknown `figure_id` → 404.
-pub fn rename(
-    figures_dir: &Path,
-    figure_id: &str,
-    name: &str,
-) -> Result<FigureMeta, AppError> {
-    update(
-        figures_dir,
-        figure_id,
-        FigureUpdate {
-            name: Some(name.to_owned()),
-            head_box: None,
-            size_tier: None,
-        },
-    )
-}
-
 /// Update editable figure metadata. Unknown `figure_id` → 404.
 pub fn update(
     figures_dir: &Path,
@@ -516,8 +499,13 @@ mod tests {
         let (bytes, _) = read_image(dir, &a.figure_id).unwrap().unwrap();
         assert_eq!(bytes, webp_bytes());
 
-        // rename
-        let renamed = rename(dir, &a.figure_id, "新名字").unwrap();
+        // name-only update
+        let renamed = update(
+            dir,
+            &a.figure_id,
+            FigureUpdate { name: Some("新名字".to_owned()), head_box: None, size_tier: None },
+        )
+        .unwrap();
         assert_eq!(renamed.name, "新名字");
         assert_eq!(list(dir).unwrap().iter().find(|f| f.figure_id == a.figure_id).unwrap().name, "新名字");
 
@@ -553,7 +541,6 @@ mod tests {
             read_image(figs.path(), "id_550e8400-e29b-41d4-a716-446655440000").unwrap().is_none(),
             "parseable non-v7 UUIDs are not canonical figure IDs"
         );
-        assert!(rename(figs.path(), "../x", "n").is_err());
         assert!(update(figs.path(), "../x", FigureUpdate { name: Some("n".into()), head_box: None, size_tier: None }).is_err());
         assert!(remove(figs.path(), "id_a/b").is_err());
     }

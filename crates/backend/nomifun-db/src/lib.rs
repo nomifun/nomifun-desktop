@@ -60,7 +60,7 @@ pub use repository::conversation::{
 };
 pub use repository::cron::{
     AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, FinalizeCronRunOutcome,
-    FinalizeCronRunParams, ReserveCronRunParams, SettleCronRunParams,
+    FinalizeCronRunParams, ReserveCronRunParams,
     UpdateCronJobParams,
 };
 pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};

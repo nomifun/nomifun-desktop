@@ -1,6 +1,6 @@
 use crate::error::DbError;
 use crate::models::{
-    CreatePresetTagParams, PresetRecord, PresetRow, PresetTagRow, PresetUserStateRow,
+    CreatePresetTagParams, PresetRecord, PresetTagRow, PresetUserStateRow,
     PresetWriteParams, UpdatePresetTagParams, UpsertPresetStateParams,
 };
 
@@ -18,7 +18,6 @@ pub trait IPresetRepository: Send + Sync {
     /// Replaces all authored fields and bindings and increments revision.
     async fn update(&self, preset_id: &str, params: &PresetWriteParams) -> Result<Option<PresetRecord>, DbError>;
     async fn delete(&self, preset_id: &str) -> Result<bool, DbError>;
-    async fn list_rows(&self) -> Result<Vec<PresetRow>, DbError>;
 }
 
 #[async_trait::async_trait]

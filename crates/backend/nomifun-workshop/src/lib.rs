@@ -13,7 +13,6 @@
 //! durable identity envelope (bare UUIDv7 nodes, edges, and node references),
 //! caps its size, and derives `node_count` from it.
 
-mod archive;
 mod docscan;
 mod dto;
 mod fsio;

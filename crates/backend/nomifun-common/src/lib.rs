@@ -1,4 +1,5 @@
 //! Shared primitives: error types, enums, ID generation, crypto, timestamps, and pagination.
+pub mod ansi;
 pub mod constants;
 pub mod agent_execution;
 
@@ -13,6 +14,7 @@ pub mod factory_reset;
 mod fsname;
 mod hooks;
 mod id;
+mod idempotency;
 mod scoped_auth;
 mod pagination;
 pub mod paths;
@@ -21,9 +23,11 @@ pub mod provider_usage;
 mod timestamp;
 mod types;
 pub mod vision_registry;
+pub mod zip_safe;
 
 pub use case_convert::{camel_to_snake, normalize_keys_to_snake_case};
 pub use constants::NOMI_AGENT_ID;
+pub use idempotency::{MAX_IDEMPOTENCY_KEY_LEN, is_visible_ascii_key, required_idempotency_key};
 pub use agent_execution::{
     AdaptationPolicy, AgentExecutionActor, AgentExecutionActorType, AgentExecutionEventKind,
     AgentExecutionReceipt, AgentExecutionStatus, AgentStepMode, AgentToolPolicy, ConversationExecutionRelation, DecisionPolicy,
@@ -55,7 +59,7 @@ pub use id::{
     CompanionMemoryId, CompanionSessionWindowId, CompanionSkillId, CompanionSkillPatternId,
     CompanionSuggestionId,
     ConversationArtifactId, ConversationId, CreationTaskId, CronJobId, CronJobRunId,
-    CsAgentId, CsDialogueId, CsMessageId, CsNoteId,
+    CsAgentId, CsNoteId,
     EntityId, FigureId,
     IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId, McpServerId, MessageId,
     PersistedArtifactId, PresetId, PresetTagId, PreviewSnapshotId, ProviderId,

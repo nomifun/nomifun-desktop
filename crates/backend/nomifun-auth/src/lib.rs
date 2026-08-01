@@ -28,7 +28,7 @@ pub use companion_token::{CompanionTokenValidator, token_sha256_hex};
 
 // Password service
 pub use password::{
-    dummy_password_hash, generate_password, generate_user_credentials, hash_password, verify_password,
+    dummy_password_hash, generate_password, hash_password, verify_password,
     verify_password_timed,
 };
 

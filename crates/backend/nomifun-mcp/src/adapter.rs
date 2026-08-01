@@ -29,10 +29,10 @@ pub struct DetectedServer {
 // McpAgentAdapter — trait for Agent CLI adapters
 // ---------------------------------------------------------------------------
 
-/// Abstraction for AI Agent CLI MCP configuration management.
+/// Abstraction for read-only AI Agent CLI MCP configuration discovery.
 ///
 /// Each Agent CLI (Claude, Gemini, Qwen, etc.) implements this trait to
-/// provide detection, installation, and removal of MCP server configurations.
+/// provide detection of existing MCP server configurations.
 ///
 /// # Concurrency
 ///
@@ -60,18 +60,6 @@ pub trait McpAgentAdapter: Send + Sync {
     /// Returns an empty vec if the CLI is installed but has no MCP servers.
     /// Returns `McpError::AgentNotInstalled` if the CLI is not available.
     async fn detect_existing(&self) -> Result<Vec<DetectedServer>, McpError>;
-
-    /// Installs (or updates) an MCP server configuration in this Agent CLI.
-    ///
-    /// The `name` and `transport` fields from `server` are used to configure
-    /// the Agent CLI. If a server with the same name already exists in the
-    /// CLI, it should be replaced.
-    async fn install_server(&self, name: &str, transport: &McpServerTransport) -> Result<(), McpError>;
-
-    /// Removes an MCP server configuration from this Agent CLI by name.
-    ///
-    /// Should be idempotent: removing a non-existent server is not an error.
-    async fn remove_server(&self, name: &str) -> Result<(), McpError>;
 }
 
 #[cfg(test)]
@@ -95,6 +83,11 @@ mod tests {
                 servers: Arc::new(Mutex::new(Vec::new())),
             }
         }
+
+        fn with_servers(self, servers: Vec<DetectedServer>) -> Self {
+            *self.servers.lock().unwrap() = servers;
+            self
+        }
     }
 
     #[async_trait::async_trait]
@@ -114,29 +107,14 @@ mod tests {
             let servers = self.servers.lock().unwrap();
             Ok(servers.clone())
         }
+    }
 
-        async fn install_server(&self, name: &str, transport: &McpServerTransport) -> Result<(), McpError> {
-            if !self.installed {
-                return Err(McpError::AgentNotInstalled(format!("{:?}", self.source)));
-            }
-            let mut servers = self.servers.lock().unwrap();
-            servers.retain(|s| s.name != name);
-            servers.push(DetectedServer {
-                name: name.to_owned(),
-                transport: transport.clone(),
-                importable: true,
-                import_skip_reason: None,
-            });
-            Ok(())
-        }
-
-        async fn remove_server(&self, name: &str) -> Result<(), McpError> {
-            if !self.installed {
-                return Err(McpError::AgentNotInstalled(format!("{:?}", self.source)));
-            }
-            let mut servers = self.servers.lock().unwrap();
-            servers.retain(|s| s.name != name);
-            Ok(())
+    fn detected(name: &str, transport: McpServerTransport) -> DetectedServer {
+        DetectedServer {
+            name: name.to_owned(),
+            transport,
+            importable: true,
+            import_skip_reason: None,
         }
     }
 
@@ -156,15 +134,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_adapter_install_and_detect() {
-        let adapter = MockAdapter::new(McpSource::Claude, true);
+    async fn mock_adapter_detect_returns_servers() {
         let transport = McpServerTransport::Stdio {
             command: "npx".into(),
             args: vec!["-y".into(), "@test/server".into()],
             env: HashMap::new(),
         };
-
-        adapter.install_server("test-mcp", &transport).await.unwrap();
+        let adapter =
+            MockAdapter::new(McpSource::Claude, true).with_servers(vec![detected("test-mcp", transport.clone())]);
 
         let detected = adapter.detect_existing().await.unwrap();
         assert_eq!(detected.len(), 1);
@@ -173,67 +150,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_adapter_install_replaces_existing() {
+    async fn mock_adapter_detect_empty() {
         let adapter = MockAdapter::new(McpSource::Claude, true);
-        let t1 = McpServerTransport::Stdio {
-            command: "old".into(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        let t2 = McpServerTransport::Stdio {
-            command: "new".into(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-
-        adapter.install_server("test-mcp", &t1).await.unwrap();
-        adapter.install_server("test-mcp", &t2).await.unwrap();
-
-        let detected = adapter.detect_existing().await.unwrap();
-        assert_eq!(detected.len(), 1);
-        match &detected[0].transport {
-            McpServerTransport::Stdio { command, .. } => assert_eq!(command, "new"),
-            _ => panic!("expected Stdio"),
-        }
-    }
-
-    #[tokio::test]
-    async fn mock_adapter_remove() {
-        let adapter = MockAdapter::new(McpSource::Claude, true);
-        let transport = McpServerTransport::Http {
-            url: "http://x".into(),
-            headers: HashMap::new(),
-        };
-        adapter.install_server("srv", &transport).await.unwrap();
-        adapter.remove_server("srv").await.unwrap();
-
         let detected = adapter.detect_existing().await.unwrap();
         assert!(detected.is_empty());
-    }
-
-    #[tokio::test]
-    async fn mock_adapter_remove_nonexistent_is_idempotent() {
-        let adapter = MockAdapter::new(McpSource::Claude, true);
-        // Should not error
-        adapter.remove_server("nonexistent").await.unwrap();
     }
 
     #[tokio::test]
     async fn not_installed_detect_fails() {
         let adapter = MockAdapter::new(McpSource::Qwen, false);
         let result = adapter.detect_existing().await;
-        assert!(matches!(result, Err(McpError::AgentNotInstalled(_))));
-    }
-
-    #[tokio::test]
-    async fn not_installed_install_fails() {
-        let adapter = MockAdapter::new(McpSource::Qwen, false);
-        let transport = McpServerTransport::Stdio {
-            command: "x".into(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        let result = adapter.install_server("srv", &transport).await;
         assert!(matches!(result, Err(McpError::AgentNotInstalled(_))));
     }
 

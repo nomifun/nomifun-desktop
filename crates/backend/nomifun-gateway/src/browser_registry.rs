@@ -10,7 +10,6 @@
 //! companion is attribution context only; it is never an ownership or lane key.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomi_browser::{
@@ -323,11 +322,10 @@ impl BrowserRegistry {
         Self::new(hub, Arc::new(CallerCtxBrowserIdentityResolver))
     }
 
-    /// Compatibility constructor for callers that have not yet injected the
-    /// application hub. It is intentionally fail-closed and launches nothing.
-    ///
-    /// New application wiring must use [`Self::from_hub`] or [`Self::new`].
-    pub fn default_for_browser_use() -> Self {
+    /// Test-only fail-closed constructor: no hub injected, launches nothing.
+    /// Application wiring must use [`Self::from_hub`] or [`Self::new`].
+    #[cfg(test)]
+    pub(crate) fn default_for_browser_use() -> Self {
         Self {
             hub: None,
             identity_resolver: Arc::new(CallerCtxBrowserIdentityResolver),
@@ -341,16 +339,6 @@ impl BrowserRegistry {
             )),
             observations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
-    }
-
-    /// Compatibility no-op. Secret/profile ownership moved to the shared host.
-    pub fn with_secret_key(self, _key: [u8; 32]) -> Self {
-        self
-    }
-
-    /// Compatibility no-op. Chromium discovery moved to the shared host.
-    pub fn with_bundled_dir(self, _dir: Option<PathBuf>) -> Self {
-        self
     }
 
     /// Attach a browser identity after the Gateway server validates signed
@@ -1904,29 +1892,6 @@ pub fn platform_error_to_value(error: BrowserPlatformError) -> Value {
         "lane_id": error.lane_id,
         "metadata": error.metadata,
     })
-}
-
-/// Compatibility converter retained for non-browser Gateway callers/tests.
-pub fn tool_result_to_value(result: ToolResult) -> Value {
-    if result.is_error {
-        return json!({ "error": result.content });
-    }
-    let mut payload = json!({ "text": result.content });
-    if !result.images.is_empty() {
-        payload["images"] = Value::Array(
-            result
-                .images
-                .iter()
-                .map(|image| {
-                    json!({
-                        "media_type": image.media_type,
-                        "data": image.data,
-                    })
-                })
-                .collect(),
-        );
-    }
-    json!({ "result": payload })
 }
 
 #[cfg(test)]
@@ -4156,14 +4121,5 @@ mod tests {
         assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
         assert!(!error.retryable);
         assert_eq!(operation_kind("bring_to_front"), BrowserOperationKind::Act);
-    }
-
-    #[test]
-    fn tool_result_compatibility_envelope_is_unchanged() {
-        let value = tool_result_to_value(ToolResult::text("ok"));
-        assert_eq!(
-            value.pointer("/result/text").and_then(Value::as_str),
-            Some("ok")
-        );
     }
 }

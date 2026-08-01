@@ -122,7 +122,7 @@ If you want to access the same install from another device, do **not** expose th
 
 ## Updater status
 
-The Tauri updater plugin (`tauri-plugin-updater`) is wired in and the renderer exposes `invoke('check_for_updates')` (returns the new version string or `null` if up to date). However:
+The Tauri updater plugin (`tauri-plugin-updater`) is wired in: the renderer checks for updates through the plugin's `check()` API and installs the selected version through the Rust-owned `install_update` command. However:
 
 - The endpoint configured in `apps/desktop/tauri.conf.json` (`plugins.updater.endpoints`) is a **placeholder** (`https://REPLACE-WITH-YOUR-HOST/...`). Until you replace it with a real HTTPS URL serving a signed `latest.json`, the updater check will fail.
 - The included `pubkey` is a **development key** generated for local testing. **Replace it before any public release** and store your private key in a CI secret.

@@ -12,21 +12,6 @@
 import { getBaseUrl } from '@/common/adapter/httpBridge';
 
 /**
- * Legacy capability gate, retained as a permanent `false`.
- *
- * Electron support has been fully removed — the app ships only as the Tauri
- * desktop shell + the WebUI browser. This used to be `Boolean(window.electronAPI)`;
- * it now always returns false. It is kept as a named flag for the few UI
- * affordances that only made sense in the old Electron shell and that Tauri
- * intentionally does NOT replicate — e.g. custom in-app window chrome (Tauri
- * uses OS-native decorations) and a couple of shell-managed OS settings.
- * For "am I in a bundled desktop shell (Tauri)?" use `isDesktopShell()`.
- *
- * TODO(cleanup): inline the remaining call sites to `false` and delete this.
- */
-export const isElectronDesktop = (): boolean => false;
-
-/**
  * Check if running inside the bundled desktop shell (Tauri) as opposed to the
  * remote WebUI browser. The Tauri shell injects `window.__backendPort` via the
  * window initialization script in apps/desktop/src/main.rs; the WebUI browser
@@ -88,10 +73,10 @@ function isAbsoluteAssetUrl(url: string): boolean {
  * must be expanded against the backend HTTP origin via `getBaseUrl()`. In the
  * WebUI browser they stay relative (same-origin reverse proxy handles them).
  *
- * Keyed on `isDesktopShell()` (the `__backendPort` signal), not
- * `isElectronDesktop()` — under Tauri the latter is false, which left every
- * backend-relative asset (agent/model logos, extension icons) pointing at the
- * dev/static server instead of the backend, so they failed to load.
+ * Keyed on `isDesktopShell()` (the `__backendPort` signal) — the Tauri renderer
+ * is not same-origin with the backend, so without this expansion every
+ * backend-relative asset (agent/model logos, extension icons) would point at
+ * the dev/static server instead of the backend and fail to load.
  */
 export const resolveBackendAssetUrl = (url: string | undefined): string | undefined => {
   if (!url) return url;

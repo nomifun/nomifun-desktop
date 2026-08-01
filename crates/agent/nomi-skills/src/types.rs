@@ -23,17 +23,12 @@ pub struct FrontmatterData {
     pub context: Option<String>,
     pub agent: Option<String>,
     pub paths: Option<StringOrVec>,
-    /// "bash" only — PowerShell not supported
-    pub shell: Option<String>,
     #[serde(rename = "user-invocable")]
     pub user_invocable: Option<BoolOrString>,
     #[serde(rename = "hide-from-slash-command-tool")]
     pub hide_from_model_invocation: Option<BoolOrString>,
     /// Raw hooks YAML — converted to serde_json::Value in SkillMetadata (Phase 11 will parse fully)
     pub hooks: Option<serde_yaml::Value>,
-    #[serde(rename = "type")]
-    pub skill_type: Option<String>,
-    pub skills: Option<String>,
     // No serde(flatten) + HashMap — known serde_yaml bug with that combination
 }
 
@@ -121,8 +116,6 @@ pub struct SkillMetadata {
     pub execution_context: ExecutionContext,
     pub agent: Option<String>,
     pub effort: Option<EffortLevel>,
-    /// "bash" only
-    pub shell: Option<String>,
     /// Glob patterns after brace expansion
     pub paths: Vec<String>,
     /// Hooks converted from serde_yaml::Value — full parse deferred to Phase 11

@@ -17,6 +17,7 @@ use tracing::info;
 use crate::constants::QQBOT_MESSAGE_LIMIT;
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus};
+use crate::plugins::util::truncate_message;
 use crate::types::{BotInfo, PluginConfig, PluginStatus, PluginType, UnifiedOutgoingMessage};
 
 use super::api::{QqbotApi, SharedToken};
@@ -157,7 +158,6 @@ impl ChannelPlugin for QqbotPlugin {
         self.gateway_handle = Some(tokio::spawn(run_gateway(
             gw_api,
             callbacks.message_tx,
-            callbacks.confirm_tx,
             self.status.clone(),
             reply_map,
             gw_shutdown,
@@ -349,15 +349,6 @@ impl ChannelPlugin for QqbotPlugin {
 // Outbound helpers (pure, unit-tested)
 // ---------------------------------------------------------------------------
 
-/// Truncate text at a char boundary to `limit`, appending "..." if cut.
-fn truncate_message(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(limit.saturating_sub(3)).collect();
-    format!("{truncated}...")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,26 +361,6 @@ mod tests {
         assert!(p.bot_info().is_none());
         assert_eq!(p.plugin_type(), PluginType::Qqbot);
         assert_eq!(p.active_user_count(), 0);
-    }
-
-    #[test]
-    fn truncate_respects_limit() {
-        assert_eq!(truncate_message("short", 4000), "short");
-        let long = "a".repeat(4100);
-        let out = truncate_message(&long, 4000);
-        assert_eq!(out.chars().count(), 4000);
-        assert!(out.ends_with("..."));
-    }
-
-    #[test]
-    fn truncate_unicode_boundary() {
-        let text = "你好世界测试";
-        assert_eq!(truncate_message(text, 4), "你...");
-    }
-
-    #[test]
-    fn truncate_empty() {
-        assert_eq!(truncate_message("", 4000), "");
     }
 
     fn _make_msg(text: &str) -> UnifiedOutgoingMessage {

@@ -136,7 +136,6 @@ impl AgentExecutionEngine {
             config.provider_model_repository.clone(),
             config.encryption_key,
             config.workspace_root.clone(),
-            None,
         ));
         let execution_port = config
             .conversation

@@ -51,7 +51,6 @@ import NomiSessionMetricsPanel from '../platforms/nomi/NomiSessionMetricsPanel';
 import ConversationTerminalPanel from './ConversationTerminalPanel';
 import { useExecutionModelPool } from '../execution/useExecutionModelPool';
 import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
-// import SkillRuleGenerator from './components/SkillRuleGenerator'; // Temporarily hidden
 
 /** Check whether a specific skill is mounted on the conversation. */
 const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: string): boolean => {

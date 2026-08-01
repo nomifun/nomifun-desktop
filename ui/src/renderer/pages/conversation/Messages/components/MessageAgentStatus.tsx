@@ -107,7 +107,7 @@ const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
 
       <div className='flex-1 flex items-center gap-6px'>
         {getStatusBadge()}
-        {isError && <FeedbackButton module='conversation-session' />}
+        {isError && <FeedbackButton />}
       </div>
     </div>
   );

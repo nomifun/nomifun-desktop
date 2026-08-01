@@ -129,7 +129,6 @@ fn tc_7_3_section_ordering() {
         execution_context: ExecutionContext::Inline,
         agent: None,
         effort: None,
-        shell: None,
         paths: vec![],
         hooks_raw: None,
         source: SkillSource::User,

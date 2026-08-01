@@ -213,20 +213,6 @@ pub trait IRequirementRepository: Send + Sync {
         now: TimestampMs,
     ) -> Result<Option<RequirementRow>, DbError>;
 
-    /// Detach one exact typed owner during aggregate deletion. Active work is
-    /// atomically parked for review; non-active rows retain status.
-    async fn detach_owner_exact(
-        &self,
-        requirement_id: &str,
-        expected_status: &str,
-        expected_generation: i64,
-        expected_claim_token: Option<&str>,
-        owner_conversation_id: Option<&str>,
-        owner_terminal_id: Option<&str>,
-        review_note: Option<&str>,
-        now: TimestampMs,
-    ) -> Result<Option<RequirementRow>, DbError>;
-
     /// Atomically process every row owned by one typed session during aggregate
     /// deletion. Active/parked execution evidence retains its typed owner;
     /// inactive rows are detached.

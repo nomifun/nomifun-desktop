@@ -74,27 +74,6 @@ async fn git_repo_init_is_idempotent() {
 }
 
 #[tokio::test]
-async fn git_repo_get_info_after_init() {
-    let tmp = tempfile::tempdir().unwrap();
-    init_empty_repo(tmp.path());
-
-    let svc = SnapshotService::new();
-    let ws = tmp.path().to_str().unwrap();
-    svc.init(ws).await.unwrap();
-    let info = svc.get_info(ws).await.unwrap();
-
-    assert_eq!(info.mode, SnapshotMode::GitRepo);
-    assert!(info.branch.is_some());
-}
-
-#[tokio::test]
-async fn git_repo_get_info_without_init_errors() {
-    let svc = SnapshotService::new();
-    let result = svc.get_info("/some/random/path").await;
-    assert!(result.is_err());
-}
-
-#[tokio::test]
 async fn git_repo_compare_clean_workspace() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_with_file(tmp.path(), "a.txt", "hello");
@@ -286,20 +265,6 @@ async fn snapshot_init_is_idempotent() {
     let info2 = svc.init(ws).await.unwrap();
 
     assert_eq!(info1.mode, info2.mode);
-}
-
-#[tokio::test]
-async fn snapshot_get_info_after_init() {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("f.txt"), "data").unwrap();
-
-    let svc = SnapshotService::new();
-    let ws = tmp.path().to_str().unwrap();
-    svc.init(ws).await.unwrap();
-    let info = svc.get_info(ws).await.unwrap();
-
-    assert_eq!(info.mode, SnapshotMode::Snapshot);
-    assert!(info.branch.is_none());
 }
 
 #[tokio::test]
@@ -754,48 +719,6 @@ async fn git_repo_reset_staged_deleted_file() {
 }
 
 // =======================================================================
-// Branches tests
-// =======================================================================
-
-#[tokio::test]
-async fn git_repo_get_branches() {
-    let tmp = tempfile::tempdir().unwrap();
-    init_repo_with_file(tmp.path(), "a.txt", "content");
-
-    // Create extra branches
-    {
-        let repo = Repository::open(tmp.path()).unwrap();
-        let head = repo.head().unwrap();
-        let commit = head.peel_to_commit().unwrap();
-        repo.branch("feature-x", &commit, false).unwrap();
-        repo.branch("hotfix-1", &commit, false).unwrap();
-    }
-
-    let svc = SnapshotService::new();
-    let ws = tmp.path().to_str().unwrap();
-    svc.init(ws).await.unwrap();
-
-    let branches = svc.get_branches(ws).await.unwrap();
-    assert!(branches.len() >= 3); // default + feature-x + hotfix-1
-    assert!(branches.contains(&"feature-x".to_string()));
-    assert!(branches.contains(&"hotfix-1".to_string()));
-}
-
-#[tokio::test]
-async fn snapshot_get_branches_returns_single() {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("f.txt"), "data").unwrap();
-
-    let svc = SnapshotService::new();
-    let ws = tmp.path().to_str().unwrap();
-    svc.init(ws).await.unwrap();
-
-    let branches = svc.get_branches(ws).await.unwrap();
-    // Snapshot mode has only the default branch from the temp repo
-    assert_eq!(branches.len(), 1);
-}
-
-// =======================================================================
 // Dispose tests
 // =======================================================================
 
@@ -808,13 +731,13 @@ async fn snapshot_dispose_cleans_up_temp_repo() {
     let ws = tmp.path().to_str().unwrap();
     svc.init(ws).await.unwrap();
 
-    // Verify we can get info before dispose
-    assert!(svc.get_info(ws).await.is_ok());
+    // Verify the workspace is still usable before dispose
+    assert!(svc.compare(ws).await.is_ok());
 
     svc.dispose(ws).await.unwrap();
 
-    // After dispose, get_info should error (workspace not initialized)
-    assert!(svc.get_info(ws).await.is_err());
+    // After dispose, the workspace is no longer tracked
+    assert!(svc.compare(ws).await.is_err());
 }
 
 #[tokio::test]
@@ -832,7 +755,7 @@ async fn git_repo_dispose_does_not_delete_dot_git() {
     assert!(tmp.path().join(".git").exists());
 
     // But workspace is no longer tracked
-    assert!(svc.get_info(ws).await.is_err());
+    assert!(svc.compare(ws).await.is_err());
 }
 
 #[tokio::test]
@@ -990,13 +913,13 @@ async fn snapshot_refcount_disposes_only_on_last() {
     svc.dispose(ws).await.unwrap();
     assert!(svc.is_tracked(ws), "entry must remain after first dispose (refcount 2->1)");
     assert!(repo_path.exists(), "temp repo must remain after first dispose");
-    assert!(svc.get_info(ws).await.is_ok(), "still usable after first dispose");
+    assert!(svc.compare(ws).await.is_ok(), "still usable after first dispose");
 
     // Second dispose drops refcount to 0: entry + temp repo removed.
     svc.dispose(ws).await.unwrap();
     assert!(!svc.is_tracked(ws), "entry must be gone after last dispose");
     assert!(!repo_path.exists(), "temp repo must be removed after last dispose");
-    assert!(svc.get_info(ws).await.is_err(), "no longer usable after last dispose");
+    assert!(svc.compare(ws).await.is_err(), "no longer usable after last dispose");
 }
 
 // =======================================================================

@@ -7,8 +7,9 @@
 //!
 //! Layering: `service` owns registry CRUD + file access + mount planning;
 //! `mount` is the platform-aware link engine (junction on Windows, symlink on
-//! Unix, recursive copy fallback); `routes`/`state` are the `/api/knowledge/*`
-//! surface; `events` pushes WS notifications.
+//! Unix; a recursive copy is deliberately NOT used as a fallback — link
+//! failure skips the mount instead); `routes`/`state` are the
+//! `/api/knowledge/*` surface; `events` pushes WS notifications.
 //!
 //! The directory is the source of truth for content — the database only
 //! stores registration metadata, so users may drop `.md` files in at any
@@ -49,7 +50,7 @@ pub use service::{
     WriteRequest, WriteResolution, WriteSurface, WriteTargetSpec, decode_doc_handle, encode_doc_handle,
     resolve_write_policy,
 };
-pub use source_url::{HttpFetcher, PageFetcher, UrlFetcher};
+pub use source_url::{HttpFetcher, PageFetcher};
 pub use state::KnowledgeRouterState;
 pub use turn_writeback::{TurnWritebackCandidate, TurnWritebackOutput};
 pub use workpath::{DEFAULT_WORKPATH_KEY, WORKPATH_BINDING_KIND, session_workpath_key, workpath_key};

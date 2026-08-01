@@ -68,11 +68,6 @@ pub struct HttpFetcher {
     allow_private: bool,
 }
 
-/// Backward-compatible alias for the pre-trait name. External callers (e.g.
-/// `nomifun-gateway::tools_knowledge`) still refer to `UrlFetcher`; it is now
-/// the concrete HTTP implementation of [`PageFetcher`].
-pub type UrlFetcher = HttpFetcher;
-
 impl Default for HttpFetcher {
     fn default() -> Self {
         Self {
@@ -478,8 +473,8 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn test_fetcher() -> UrlFetcher {
-        UrlFetcher::new().allow_private_for_tests()
+    fn test_fetcher() -> HttpFetcher {
+        HttpFetcher::new().allow_private_for_tests()
     }
 
     // ── PageFetcher seam ─────────────────────────────────────────────
@@ -812,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_blocks_private_targets_by_default() {
         let server = MockServer::start().await;
-        let err = UrlFetcher::new().fetch_page(&format!("{}/doc", server.uri())).await.unwrap_err();
+        let err = HttpFetcher::new().fetch_page(&format!("{}/doc", server.uri())).await.unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
         assert!(err.to_string().contains("private or local"), "{err}");
     }

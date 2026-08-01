@@ -31,7 +31,7 @@ pub mod types;
 // ── Agent-layer re-exports (the seam) ──────────────────────────────────────
 // Backend crates reach the agent (nomi-*) layer ONLY through nomifun-ai-agent.
 // When the agent layer is later extracted into its own repo, these re-exports
-// become the single integration surface (see docs/specs/agent-extraction-checklist.md).
+// become the single integration surface.
 pub use nomi_agent::companion_tools::CompanionMemorySink;
 pub use nomi_agent::companion_tools::{CompanionSkillSink, SkillListing};
 pub use nomi_agent::summon_tools::{SummonContextSink, SummonProposalSink};
@@ -50,12 +50,10 @@ pub use runtime_handle::{
     AgentRuntimeControl, AgentRuntimeHandle, SystemResourceNoticeDelivery,
 };
 pub use capability::skill_manager::{
-    AcpSkillManager, SkillDefinition, SkillIndex, build_skills_index_text, build_system_instructions,
-    build_system_instructions_with_skills_index, detect_skill_load_request, prepare_first_message,
-    prepare_first_message_with_skills_index,
+    AcpSkillManager, SkillDefinition, SkillIndex, build_skills_index_text, prepare_first_message_with_skills_index,
 };
 pub use factory::provider_config::{
-    one_shot_completion, resolve_provider_config, streaming_completion, streaming_completion_kinded,
+    one_shot_completion, resolve_provider_config, streaming_completion,
     streaming_completion_text_or_reasoning, user_message, DeltaKind,
 };
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};

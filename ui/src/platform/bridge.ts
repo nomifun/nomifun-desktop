@@ -18,7 +18,6 @@
  *  - subscribe(name, handler):
  *      listens on `"subscribe-" + name`, runs the handler, then emits
  *      `"subscribe.callback-" + name + body.id` with the result.
- *  - buildEmitter uses the bare event name (fire-and-forget, no callback).
  *
  * The id is concatenated to the name WITHOUT a delimiter — this matches the
  * original library and the consumers that hand-build the callback name
@@ -33,41 +32,20 @@ interface Adapter {
   on(emitter: { emit(name: string, ...args: any[]): void }): void;
 }
 
-interface InterceptParams {
-  name: string;
-  data: any;
-}
-
 // Internal event hub. The adapter plugs the real transport into `outbound`
 // (how events leave this process) and feeds inbound events back via the
 // emitter handed to `adapter.on`.
 const hub = new EventEmitter();
-
-let logOutput: ((...args: any[]) => void) | null = null;
-const log = (...args: any[]) => {
-  if (logOutput) logOutput(...args);
-};
-
-const interceptors: Array<(params: InterceptParams) => Promise<void>> = [];
 
 // Default outbound: loopback (same-process). The adapter overrides this.
 let outbound: (name: string, data: any, ...args: any[]) => void = (name, data, ...args) => {
   hub.emit(name, data, ...args);
 };
 
-/**
- * Register a listener. Callback-channel events (`subscribe(.callback)?-`)
- * bypass interceptors so RPC plumbing is never delayed by app-level guards.
- */
+/** Register a listener; returns a disposer. */
 const on = (name: string, callback: AnyFn): (() => void) => {
-  const wrapped = (...args: any[]) => {
-    if (/^subscribe(\.callback)?-/.test(name) || interceptors.length === 0) {
-      return callback(...args);
-    }
-    return Promise.all(interceptors.map((i) => i({ name, data: args[0] }))).then(() => callback(...args));
-  };
-  hub.on(name, wrapped);
-  return () => hub.off(name, wrapped);
+  hub.on(name, callback);
+  return () => hub.off(name, callback);
 };
 
 const off = (name: string, callback: AnyFn): void => {
@@ -77,7 +55,6 @@ const off = (name: string, callback: AnyFn): void => {
 };
 
 const emit = (name: string, data: any, ...args: any[]): void => {
-  log('bridge.emit', name, data);
   outbound(name, data, ...args);
 };
 
@@ -116,36 +93,6 @@ const invoke = <Data = any>(name: string, data?: any): Promise<Data> => {
   });
 };
 
-const create = <Data = any, Result = any>(key: string) => ({
-  invoke: (data: Data) => invoke<Result>(key, data),
-  subscribe: (handler: (data: Data) => Promise<Result>) => subscribe<Data, Result>(key, handler),
-});
-
-const buildProvider = <Data = any, Params = undefined>(key: string) => {
-  const channel = create<Params, Data>(key);
-  return {
-    provider: (provider: Params extends undefined ? () => Promise<Data> : (params: Params) => Promise<Data>) => {
-      channel.subscribe((params: Params) => (provider as (p: Params) => Promise<Data>)(params));
-    },
-    invoke: ((params?: Params) => channel.invoke(params as Params)) as Params extends undefined
-      ? () => Promise<Data>
-      : (params: Params) => Promise<Data>,
-  };
-};
-
-const buildEmitter = <Params = undefined>(key: string) => ({
-  on: (callback: Params extends undefined ? () => void : (params: Params) => void) => on(key, callback as AnyFn),
-  emit: ((params?: Params) => emit(key, params)) as Params extends undefined ? () => void : (params: Params) => void,
-});
-
-const intercept = (callback: (params: InterceptParams) => Promise<void>): (() => void) => {
-  interceptors.push(callback);
-  return () => {
-    const i = interceptors.indexOf(callback);
-    if (i >= 0) interceptors.splice(i, 1);
-  };
-};
-
 /**
  * Install the real transport. `emit` ships an outbound event; `on` is handed
  * an emitter whose `.emit(name, data)` feeds inbound events into the hub.
@@ -159,31 +106,4 @@ const adapter = (config: Adapter): void => {
   });
 };
 
-const logger = (output: (...args: any[]) => void): void => {
-  logOutput = output;
-};
-
-// Inert lifecycle hooks kept for API compatibility (no consumer relies on
-// their behavior; they existed on the original surface).
-const start = (): void => {};
-const stop = (): void => {};
-const status = (): boolean => true;
-const debug = (_flag?: boolean): void => {};
-
-export {
-  adapter,
-  buildProvider,
-  buildEmitter,
-  on,
-  off,
-  emit,
-  subscribe,
-  invoke,
-  create,
-  intercept,
-  logger,
-  start,
-  stop,
-  status,
-  debug,
-};
+export { adapter, on, off, emit, subscribe, invoke };

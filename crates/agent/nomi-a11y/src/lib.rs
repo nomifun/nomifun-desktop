@@ -1,7 +1,7 @@
 //! Cross-platform accessibility-tree + Set-of-Marks engine for Nomi computer-use.
 //!
-//! The platform-neutral layer (engine trait/types, selector grammar, tree
-//! model + filtering, Set-of-Marks overlay) compiles on every target. Per-OS
+//! The platform-neutral layer (engine trait/types, tree formatting,
+//! Set-of-Marks overlay) compiles on every target. Per-OS
 //! backends live behind `#[cfg(target_os = …)]`:
 //!   - macOS: AXUIElement via a dedicated CFRunLoop actor thread (implemented).
 //!   - Windows: UI Automation via a dedicated MTA actor thread (implemented).
@@ -13,7 +13,6 @@
 
 pub mod engine;
 pub mod overlay;
-pub mod selector;
 pub mod tree;
 
 #[cfg(target_os = "macos")]

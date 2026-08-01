@@ -41,9 +41,10 @@ fn to_source_response(source: SkillSource) -> SkillSourceResponse {
 pub struct SkillRouterState {
     pub skill_paths: SkillPaths,
     pub external_paths_manager: Arc<ExternalPathsManager>,
-    /// Optional dispatcher that routes preset-rule / preset-skill
-    /// read/write/delete by source (builtin / extension / user). When
-    /// `None`, the legacy user-directory-only behavior is preserved.
+    /// Dispatcher that routes preset-rule / preset-skill read/write/delete
+    /// by source (builtin / extension / user). The production composition
+    /// root always wires it; handlers reject with an internal error when it
+    /// is absent (test-only construction).
     #[allow(clippy::type_complexity)]
     pub preset_dispatcher: Option<Arc<dyn PresetRuleDispatcher>>,
     /// Per-skill tag assignment repo (user assignments/overrides).
@@ -398,21 +399,28 @@ async fn materialize_for_agent(
 // Preset rules CRUD
 // ---------------------------------------------------------------------------
 
+/// Preset rule/skill content lives in the DB (`preset.instructions`); the
+/// dispatcher is always wired by the production composition root. There is
+/// no file-system fallback.
+fn require_preset_dispatcher(
+    state: &SkillRouterState,
+) -> Result<&Arc<dyn PresetRuleDispatcher>, AppError> {
+    state
+        .preset_dispatcher
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Preset dispatcher is not configured".into()))
+}
+
 /// `POST /api/skills/preset-rule/read` — read an preset rule.
 ///
-/// Dispatches by source via [`PresetRuleDispatcher`] when wired; falls
-/// back to user-directory-only legacy behavior otherwise.
+/// Dispatches by source via [`PresetRuleDispatcher`].
 async fn read_preset_rule(
     State(state): State<SkillRouterState>,
     body: Result<Json<ReadPresetRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<String>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if let Some(dispatcher) = &state.preset_dispatcher {
-        let content = dispatcher.read_rule(&req.preset_id, req.locale.as_deref()).await?;
-        return Ok(Json(ApiResponse::ok(content)));
-    }
-    let content =
-        skill_service::read_preset_rule(&state.skill_paths, &req.preset_id, req.locale.as_deref()).await?;
+    let dispatcher = require_preset_dispatcher(&state)?;
+    let content = dispatcher.read_rule(&req.preset_id, req.locale.as_deref()).await?;
     Ok(Json(ApiResponse::ok(content)))
 }
 
@@ -424,20 +432,11 @@ async fn write_preset_rule(
     body: Result<Json<WritePresetRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if let Some(dispatcher) = &state.preset_dispatcher {
-        dispatcher
-            .write_rule(&req.preset_id, req.locale.as_deref(), &req.content)
-            .await?;
-        return Ok(Json(ApiResponse::ok(true)));
-    }
-    let ok = skill_service::write_preset_rule(
-        &state.skill_paths,
-        &req.preset_id,
-        &req.content,
-        req.locale.as_deref(),
-    )
-    .await?;
-    Ok(Json(ApiResponse::ok(ok)))
+    let dispatcher = require_preset_dispatcher(&state)?;
+    dispatcher
+        .write_rule(&req.preset_id, req.locale.as_deref(), &req.content)
+        .await?;
+    Ok(Json(ApiResponse::ok(true)))
 }
 
 /// `DELETE /api/skills/preset-rule/:id` — delete all locale versions.
@@ -445,11 +444,8 @@ async fn delete_preset_rule(
     State(state): State<SkillRouterState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
-    if let Some(dispatcher) = &state.preset_dispatcher {
-        let ok = dispatcher.delete_rule(&id).await?;
-        return Ok(Json(ApiResponse::ok(ok)));
-    }
-    let ok = skill_service::delete_preset_rule(&state.skill_paths, &id).await?;
+    let dispatcher = require_preset_dispatcher(&state)?;
+    let ok = dispatcher.delete_rule(&id).await?;
     Ok(Json(ApiResponse::ok(ok)))
 }
 
@@ -459,18 +455,14 @@ async fn delete_preset_rule(
 
 /// `POST /api/skills/preset-skill/read` — read an preset skill.
 ///
-/// Dispatches by source via [`PresetRuleDispatcher`] when wired.
+/// Dispatches by source via [`PresetRuleDispatcher`].
 async fn read_preset_skill(
     State(state): State<SkillRouterState>,
     body: Result<Json<ReadPresetRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<String>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if let Some(dispatcher) = &state.preset_dispatcher {
-        let content = dispatcher.read_skill(&req.preset_id, req.locale.as_deref()).await?;
-        return Ok(Json(ApiResponse::ok(content)));
-    }
-    let content =
-        skill_service::read_preset_skill(&state.skill_paths, &req.preset_id, req.locale.as_deref()).await?;
+    let dispatcher = require_preset_dispatcher(&state)?;
+    let content = dispatcher.read_skill(&req.preset_id, req.locale.as_deref()).await?;
     Ok(Json(ApiResponse::ok(content)))
 }
 
@@ -482,20 +474,11 @@ async fn write_preset_skill(
     body: Result<Json<WritePresetRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if let Some(dispatcher) = &state.preset_dispatcher {
-        dispatcher
-            .write_skill(&req.preset_id, req.locale.as_deref(), &req.content)
-            .await?;
-        return Ok(Json(ApiResponse::ok(true)));
-    }
-    let ok = skill_service::write_preset_skill(
-        &state.skill_paths,
-        &req.preset_id,
-        &req.content,
-        req.locale.as_deref(),
-    )
-    .await?;
-    Ok(Json(ApiResponse::ok(ok)))
+    let dispatcher = require_preset_dispatcher(&state)?;
+    dispatcher
+        .write_skill(&req.preset_id, req.locale.as_deref(), &req.content)
+        .await?;
+    Ok(Json(ApiResponse::ok(true)))
 }
 
 /// `DELETE /api/skills/preset-skill/:id` — delete all locale versions.
@@ -503,11 +486,8 @@ async fn delete_preset_skill(
     State(state): State<SkillRouterState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
-    if let Some(dispatcher) = &state.preset_dispatcher {
-        let ok = dispatcher.delete_skill(&id).await?;
-        return Ok(Json(ApiResponse::ok(ok)));
-    }
-    let ok = skill_service::delete_preset_skill(&state.skill_paths, &id).await?;
+    let dispatcher = require_preset_dispatcher(&state)?;
+    let ok = dispatcher.delete_skill(&id).await?;
     Ok(Json(ApiResponse::ok(ok)))
 }
 

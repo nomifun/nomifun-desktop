@@ -2,11 +2,10 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const sharedLifecycle = readFileSync(new URL('./useAuthoritativeTurnLifecycle.ts', import.meta.url), 'utf8');
-const simpleSendBoxes = [
-  './nanobot/NanobotSendBox.tsx',
-  './remote/RemoteSendBox.tsx',
-  './openclaw/OpenClawSendBox.tsx',
-].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'));
+// The nanobot / remote / openclaw send boxes share one implementation.
+const simpleSendBoxes = ['./BasicRuntimeSendBox.tsx'].map((path) =>
+  readFileSync(new URL(path, import.meta.url), 'utf8')
+);
 const statefulLifecycles = ['./nomi/useNomiMessage.ts', './acp/useAcpMessage.ts'].map((path) =>
   readFileSync(new URL(path, import.meta.url), 'utf8')
 );

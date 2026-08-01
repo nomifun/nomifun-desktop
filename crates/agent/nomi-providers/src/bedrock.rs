@@ -319,50 +319,14 @@ impl LlmProvider for BedrockProvider {
 
         // AWS event stream uses binary framing.
         tokio::spawn(async move {
-            match process_aws_event_stream(response, &tx).await {
-                anthropic_shared::StreamOutcome::Ok => {}
-                anthropic_shared::StreamOutcome::FailedPartial(e) => {
-                    // Content already emitted — replaying would duplicate it.
-                    let _ = tx.send(LlmEvent::Error(e.to_string())).await;
-                }
-                anthropic_shared::StreamOutcome::FailedEmpty(e) => {
-                    if e.is_retryable() {
-                        let mut backoff = std::time::Duration::from_secs(1);
-                        let mut final_err = Some(e);
-                        for attempt in 1..=crate::retry::MAX_STREAM_RETRIES {
-                            backoff = crate::retry::backoff_sleep(attempt, backoff).await;
-                            match send_signed(&region, &client, &url_owned, &body_bytes, &credentials)
-                                .await
-                            {
-                                Ok(resp) => {
-                                    let outcome = process_aws_event_stream(resp, &tx).await;
-                                    match crate::retry::evaluate_outcome(outcome, attempt) {
-                                        Ok(None) => {
-                                            final_err = None;
-                                            break;
-                                        }
-                                        Ok(Some(err)) => {
-                                            final_err = Some(err);
-                                            break;
-                                        }
-                                        Err(_) => continue,
-                                    }
-                                }
-                                Err(err) if attempt == crate::retry::MAX_STREAM_RETRIES => {
-                                    final_err = Some(err);
-                                    break;
-                                }
-                                Err(_) => continue,
-                            }
-                        }
-                        if let Some(err) = final_err {
-                            let _ = tx.send(LlmEvent::Error(err.to_string())).await;
-                        }
-                    } else {
-                        let _ = tx.send(LlmEvent::Error(e.to_string())).await;
-                    }
-                }
-            }
+            let outcome = process_aws_event_stream(response, &tx).await;
+            crate::retry::finish_stream_with_retry(
+                outcome,
+                &tx,
+                || send_signed(&region, &client, &url_owned, &body_bytes, &credentials),
+                |resp| process_aws_event_stream(resp, &tx),
+            )
+            .await;
         });
 
         Ok(rx)

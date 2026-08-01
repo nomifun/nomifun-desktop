@@ -143,18 +143,6 @@ interface PreviewToolbarProps {
   onClose: () => void;
 
   /**
-   * HTML 审核元素模式（仅HTML类型使用）
-   * HTML inspect mode (only for HTML type)
-   */
-  inspectMode?: boolean;
-
-  /**
-   * 切换HTML审核元素模式（仅HTML类型使用）
-   * Toggle HTML inspect mode (only for HTML type)
-   */
-  onInspectModeToggle?: () => void;
-
-  /**
    * 左侧额外渲染内容
    * Extra content rendered on the left section
    */
@@ -197,8 +185,6 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
   onOpenInSystem,
   onDownload,
   onClose,
-  inspectMode,
-  onInspectModeToggle,
   leftExtra,
   rightExtra,
 }) => {
@@ -468,30 +454,6 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
                 <line x1='12' y1='15' x2='12' y2='3' />
               </svg>
               <span>{t('common.download')}</span>
-            </div>
-          )}
-
-          {isHTML && onInspectModeToggle && (
-            <div
-              className={`${toolbarBtn} ${inspectMode ? toolbarBtnActive : ''}`}
-              onClick={onInspectModeToggle}
-              title={inspectMode ? t('preview.html.inspectElementDisable') : t('preview.html.inspectElementEnable')}
-            >
-              <svg
-                width={toolbarIconSize}
-                height={toolbarIconSize}
-                viewBox='0 0 24 24'
-                fill='none'
-                stroke='currentColor'
-                strokeWidth='2'
-                strokeLinecap='round'
-                strokeLinejoin='round'
-                className={inspectMode ? 'text-white' : 'text-t-secondary'}
-              >
-                <path d='M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z' />
-                <path d='M13 13l6 6' />
-              </svg>
-              <span>{inspectMode ? t('preview.html.inspecting') : t('preview.html.inspectElement')}</span>
             </div>
           )}
         </div>

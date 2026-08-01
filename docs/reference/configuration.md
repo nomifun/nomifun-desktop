@@ -83,13 +83,13 @@ Source: [`crates/backend/nomifun-common/src/constants.rs`](../../crates/backend/
 | `DEFAULT_PORT` | `25808` | Default `--port` for `nomicore`. (The web host overrides this to `8787`.) |
 | `BODY_LIMIT` | `10 MiB` | Default request body limit applied to every route. Routes that need more (e.g. `/api/fs/upload`) install their own larger limit. |
 | `UPLOAD_MAX_SIZE` | `30 MiB` | Cap for the file upload route (`/api/fs/upload`). |
-| `REMOTE_IMAGE_MAX_SIZE` | `5 MiB` | Cap for downloading a remote image referenced in chat. |
+| `MAX_REMOTE_IMAGE_SIZE` | `5 MiB` | Cap for downloading a remote image referenced in chat. |
 | `COOKIE_NAME` | `nomifun-session` | Session cookie. |
 | `CSRF_COOKIE_NAME` | `nomifun-csrf-token` | CSRF cookie (NOT HttpOnly — JavaScript reads it). |
 | `CSRF_HEADER_NAME` | `x-csrf-token` | Header that mirrors the CSRF cookie value (Double Submit Cookie). |
 | `COOKIE_MAX_AGE_DAYS` | `30` | Cookie `Max-Age`. |
-| `SESSION_EXPIRY` | `30d` | JWT validity window, kept identical to the browser session cookie lifetime. |
-| `HEARTBEAT_INTERVAL_MS` / `HEARTBEAT_TIMEOUT_MS` | `30000` / `60000` | WebSocket heartbeat ping/pong. |
+| `SESSION_MAX_AGE_SECONDS` | `30d` | JWT validity window, kept identical to the browser session cookie lifetime. |
+| `HEARTBEAT_INTERVAL` / `HEARTBEAT_TIMEOUT` | `30s` / `60s` | WebSocket heartbeat ping/pong. |
 
 ## Data directory and work directory semantics
 

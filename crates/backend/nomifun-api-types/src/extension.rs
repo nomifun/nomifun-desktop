@@ -17,13 +17,8 @@ pub struct ExtensionSummaryResponse {
     pub source: String,
 }
 
-/// Response for `GET /api/hub/extensions`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HubExtensionListResponse {
-    pub extensions: Vec<HubExtensionListItem>,
-}
-
-/// Single item in the Hub extension list.
+/// Single item in the Hub extension list (`GET /api/hub/extensions` returns a
+/// bare array of these).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HubExtensionListItem {
     pub name: String,

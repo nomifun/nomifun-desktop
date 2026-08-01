@@ -8,7 +8,7 @@ use nomifun_api_types::{BedrockAuthMethod, BedrockConfig};
 use nomifun_system::ConnectionTestService;
 
 fn make_service() -> ConnectionTestService {
-    ConnectionTestService::new(reqwest::Client::new())
+    ConnectionTestService::new()
 }
 
 // ── Bedrock validation ──────────────────────────────────────────────

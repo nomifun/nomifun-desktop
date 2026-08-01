@@ -14,7 +14,6 @@ use common::{body_json, build_app, build_app_with_file_roots, json_with_token, s
 async fn fs_endpoints_require_auth() {
     let (app, _services) = build_app().await;
     let endpoints = [
-        "/api/fs/dir",
         "/api/fs/list",
         "/api/fs/metadata",
         "/api/fs/read",
@@ -22,7 +21,6 @@ async fn fs_endpoints_require_auth() {
         "/api/fs/copy",
         "/api/fs/remove",
         "/api/fs/rename",
-        "/api/fs/temp",
         "/api/fs/upload",
         "/api/fs/image-base64",
         "/api/fs/fetch-remote-image",
@@ -34,7 +32,6 @@ async fn fs_endpoints_require_auth() {
         "/api/fs/office-watch/start",
         "/api/fs/office-watch/stop",
         "/api/fs/snapshot/init",
-        "/api/fs/snapshot/info",
         "/api/fs/snapshot/compare",
         "/api/fs/snapshot/baseline",
         "/api/fs/snapshot/stage",
@@ -43,7 +40,6 @@ async fn fs_endpoints_require_auth() {
         "/api/fs/snapshot/unstage-all",
         "/api/fs/snapshot/discard",
         "/api/fs/snapshot/reset",
-        "/api/fs/snapshot/branches",
         "/api/fs/snapshot/dispose",
     ];
 
@@ -66,50 +62,6 @@ async fn fs_endpoints_require_auth() {
 // ===========================================================================
 // Directory browsing
 // ===========================================================================
-
-#[tokio::test]
-async fn get_files_by_dir_returns_directory_contents() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    std::fs::write(root.join("hello.txt"), "world").unwrap();
-    std::fs::create_dir(root.join("subdir")).unwrap();
-
-    let req = json_with_token(
-        "POST",
-        "/api/fs/dir",
-        json!({
-            "dir": root.to_str().unwrap(),
-            "root": root.to_str().unwrap()
-        }),
-        &token,
-        &csrf,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-
-    let data = json["data"].as_array().unwrap();
-    assert!(data.len() >= 2, "should contain file + subdir");
-
-    let names: Vec<&str> = data.iter().filter_map(|e| e["name"].as_str()).collect();
-    assert!(names.contains(&"hello.txt"));
-    assert!(names.contains(&"subdir"));
-
-    // Check directory has isDir=true
-    let subdir_entry = data.iter().find(|e| e["name"] == "subdir").unwrap();
-    assert_eq!(subdir_entry["is_dir"], true);
-    assert_eq!(subdir_entry["is_file"], false);
-
-    // Check file has isFile=true
-    let file_entry = data.iter().find(|e| e["name"] == "hello.txt").unwrap();
-    assert_eq!(file_entry["is_dir"], false);
-    assert_eq!(file_entry["is_file"], true);
-}
 
 #[tokio::test]
 async fn list_workspace_files_flat_list() {
@@ -345,33 +297,6 @@ async fn write_file_creates_and_returns_true() {
     assert_eq!(content, "written via api");
 }
 
-#[tokio::test]
-async fn read_file_buffer_returns_base64() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("binary.bin");
-    std::fs::write(&file_path, [0x00, 0xFF, 0xAB]).unwrap();
-
-    let req = json_with_token(
-        "POST",
-        "/api/fs/read-buffer",
-        json!({ "path": file_path.to_str().unwrap() }),
-        &token,
-        &csrf,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    let encoded = json["data"].as_str().unwrap();
-    // Verify base64 roundtrip
-    use base64::Engine;
-    let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
-    assert_eq!(decoded, vec![0x00, 0xFF, 0xAB]);
-}
-
 // ===========================================================================
 // File management
 // ===========================================================================
@@ -454,30 +379,6 @@ async fn rename_entry_returns_new_path() {
     let new_path = json["data"]["new_path"].as_str().unwrap();
     assert!(new_path.contains("new.txt"));
     assert!(!old_path.exists());
-}
-
-#[tokio::test]
-async fn create_temp_file_returns_path() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    let req = json_with_token(
-        "POST",
-        "/api/fs/temp",
-        json!({ "file_name": "temp_test.txt" }),
-        &token,
-        &csrf,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    let path = json["data"].as_str().unwrap();
-    assert!(path.contains("temp_test.txt"));
-    assert!(std::path::Path::new(path).exists());
-
-    // Cleanup
-    let _ = std::fs::remove_file(path);
 }
 
 // ===========================================================================
@@ -634,19 +535,6 @@ async fn snapshot_init_and_compare_on_plain_dir() {
     assert_eq!(json["success"], true);
     assert_eq!(json["data"]["mode"], "snapshot");
 
-    // Get info
-    let req = json_with_token(
-        "POST",
-        "/api/fs/snapshot/info",
-        json!({ "workspace": workspace.to_str().unwrap() }),
-        &token,
-        &csrf,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["mode"], "snapshot");
-
     // Modify file and compare
     std::fs::write(workspace.join("file.txt"), "modified").unwrap();
 
@@ -727,20 +615,6 @@ async fn snapshot_init_git_repo() {
     let json = body_json(resp).await;
     assert_eq!(json["data"]["mode"], "git-repo");
     assert!(json["data"]["branch"].is_string());
-
-    // Branches
-    let req = json_with_token(
-        "POST",
-        "/api/fs/snapshot/branches",
-        json!({ "workspace": workspace.to_str().unwrap() }),
-        &token,
-        &csrf,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    let branches = json["data"].as_array().unwrap();
-    assert!(!branches.is_empty());
 
     // Dispose
     let req = json_with_token(

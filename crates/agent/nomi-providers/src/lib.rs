@@ -5,12 +5,12 @@ pub mod openai;
 pub mod retry;
 pub mod vertex;
 
-use std::sync::{Arc, OnceLock};
-#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -125,6 +125,95 @@ pub(crate) fn is_api_key_rotation_error(error: &ProviderError) -> bool {
             ..
         } | ProviderError::RateLimited { .. }
     )
+}
+
+/// Send the initial streaming request with bounded transient-failure retry.
+///
+/// Shared by the API-key-based providers (Anthropic, OpenAI): posts `body`
+/// with `headers`, surfaces 429 as `RateLimited` (honouring `Retry-After`)
+/// and any other non-2xx as `Api`.
+pub(crate) async fn send_initial(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &HeaderMap,
+    body: &Value,
+) -> Result<reqwest::Response, ProviderError> {
+    retry::with_initial_request_retry(|| async {
+        let response = client
+            .post(url)
+            .headers(headers.clone())
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let retry_after_ms = parse_retry_after_ms(response.headers()).unwrap_or(5000);
+        let body_text = response.text().await.unwrap_or_default();
+        if status.as_u16() == 429 {
+            return Err(ProviderError::RateLimited {
+                retry_after_ms,
+                message: non_empty_rate_limit_message(body_text),
+            });
+        }
+        Err(ProviderError::Api {
+            status: status.as_u16(),
+            message: body_text,
+        })
+    })
+    .await
+}
+
+/// Send the initial streaming request, rotating through the configured API
+/// keys on auth/rate-limit rejections.
+///
+/// Starts at the last known-good key (`current_api_key`), advances on
+/// `is_api_key_rotation_error` failures, and records the winning index back
+/// into `current_api_key`. Returns the response together with the headers
+/// that produced it so callers can reuse them for mid-stream retries.
+pub(crate) async fn send_initial_with_key_rotation(
+    client: &reqwest::Client,
+    url: &str,
+    body: &Value,
+    api_keys: &[String],
+    current_api_key: &AtomicUsize,
+    provider_label: &'static str,
+    build_headers: impl Fn(&str) -> Result<HeaderMap, ProviderError>,
+) -> Result<(reqwest::Response, HeaderMap), ProviderError> {
+    let mut last_error = None;
+    let key_count = api_keys.len();
+    let start_index = current_api_key.load(Ordering::Acquire) % key_count.max(1);
+
+    for offset in 0..key_count {
+        let index = (start_index + offset) % key_count;
+        let api_key = &api_keys[index];
+        let headers = build_headers(api_key)?;
+        match send_initial(client, url, &headers, body).await {
+            Ok(response) => {
+                current_api_key.store(index, Ordering::Release);
+                return Ok((response, headers));
+            }
+            Err(error) if is_api_key_rotation_error(&error) && offset + 1 < key_count => {
+                let next_index = (index + 1) % key_count;
+                tracing::warn!(
+                    target: "nomi_providers",
+                    provider = provider_label,
+                    key_index = index + 1,
+                    key_count,
+                    error = %error,
+                    "provider rejected API key; trying the next configured key"
+                );
+                current_api_key.store(next_index, Ordering::Release);
+                last_error = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        ProviderError::Connection("No usable API key configured".to_owned())
+    }))
 }
 
 /// Parse the completed argument payload of a provider-emitted tool call.

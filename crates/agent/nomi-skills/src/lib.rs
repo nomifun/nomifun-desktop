@@ -1,7 +1,4 @@
-pub mod bundled;
-pub mod conditional;
 pub mod context_modifier;
-pub mod discovery;
 pub mod executor;
 pub mod frontmatter;
 pub mod hooks;
@@ -13,7 +10,6 @@ pub mod prompt;
 pub mod shell;
 pub mod substitution;
 pub mod types;
-pub mod watcher;
 
 #[cfg(test)]
 mod permissions_supplemental_tests;
@@ -21,9 +17,3 @@ mod permissions_supplemental_tests;
 #[cfg(test)]
 #[path = "integration_tests.rs"]
 mod integration_tests;
-
-#[cfg(test)]
-mod bundled_supplemental_tests;
-
-#[cfg(test)]
-mod watcher_tests;

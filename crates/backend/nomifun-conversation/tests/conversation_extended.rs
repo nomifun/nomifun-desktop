@@ -50,13 +50,6 @@ impl AgentRuntimeRegistry for NoopAgentRuntimeRegistry {
     fn terminate(&self, _: &str, _: Option<AgentKillReason>) -> Result<(), AppError> {
         Ok(())
     }
-    fn terminate_and_wait(
-        &self,
-        _: &str,
-        _: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        Box::pin(std::future::ready(()))
-    }
     fn terminate_and_wait_result(
         &self,
         _: &str,

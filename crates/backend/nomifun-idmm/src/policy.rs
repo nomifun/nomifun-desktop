@@ -73,10 +73,18 @@ struct WatchRuntime {
 
 /// Confidence floor below which a bypass-model decision falls back to the
 /// conservative rule action. Phase-1's per-session `confidence_floor` is gone;
-/// the dual-watch config carries no per-watch floor, so a single conservative
-/// default applies (equivalent to Phase-1's `SidecarConfig::default` 0.0 would
-/// have *never* fallen back — but the spec's safety posture wants low-confidence
-/// guesses to fall back, so a modest floor is used).
+/// the dual-watch config carries no per-watch floor.
+///
+/// Currently 0.0, which means the low-confidence fallback is DISABLED: the
+/// sidecar contract emits confidence in 0..1, so `confidence < 0.0` never
+/// holds and `SidecarStep::Fallback` is never produced. The spec's safety
+/// posture wants low-confidence guesses to fall back to the conservative rule
+/// action (Phase-1's legacy default floor was 0.4), and the supervisor's
+/// `low_confidence_rulefallback` arm becomes live the moment this is raised.
+///
+/// TODO(product): decide the intended floor value. Raising it silently changes
+/// live intervention behavior (real answers/nudges start being withheld), so
+/// it must not be changed in a mechanical cleanup pass.
 const CONFIDENCE_FLOOR: f32 = 0.0;
 
 /// Per-target mutable policy state. Holds BOTH watch configs (D4) and routes each

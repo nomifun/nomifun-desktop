@@ -5,11 +5,11 @@ use nomifun_db::IMcpServerRepository;
 
 use crate::adapter::{DetectedServer, McpAgentAdapter};
 use crate::error::McpError;
-use crate::types::{McpServer, McpServerTransport};
+use crate::types::McpServer;
 
 /// MCP Agent adapter for Nomi itself.
 ///
-/// Unlike CLI-based adapters, this adapter reads/writes directly to the
+/// Unlike CLI-based adapters, this adapter reads directly from the
 /// local database. It is always "installed" since Nomi is the host
 /// application.
 ///
@@ -17,8 +17,6 @@ use crate::types::{McpServer, McpServerTransport};
 ///
 /// - `is_installed()` → always `true`
 /// - `detect_existing()` → reads all MCP servers from the DB
-/// - `install_server()` → no-op (DB writes are handled by `McpConfigService`)
-/// - `remove_server()` → no-op (configuration is managed via the frontend)
 pub struct NomifunAdapter {
     repo: Arc<dyn IMcpServerRepository>,
 }
@@ -55,19 +53,6 @@ impl McpAgentAdapter for NomifunAdapter {
 
         Ok(servers)
     }
-
-    async fn install_server(&self, _name: &str, _transport: &McpServerTransport) -> Result<(), McpError> {
-        // No-op: DB writes are handled by McpConfigService.
-        // The sync service calls install_server on all adapters, but for
-        // Nomi the server is already in the DB.
-        Ok(())
-    }
-
-    async fn remove_server(&self, _name: &str) -> Result<(), McpError> {
-        // No-op: configuration is managed via the frontend/REST API.
-        // Removing from the DB is done through McpConfigService.delete_server().
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -76,8 +61,6 @@ impl McpAgentAdapter for NomifunAdapter {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
     use crate::types::McpServerTransport;
     use nomifun_db::models::McpServerRow;
@@ -209,29 +192,6 @@ mod tests {
 
         let servers = adapter.detect_existing().await.unwrap();
         assert!(servers.is_empty());
-    }
-
-    #[tokio::test]
-    async fn install_server_is_noop() {
-        let repo = Arc::new(MockRepo::new(vec![]));
-        let adapter = NomifunAdapter::new(repo);
-
-        let transport = McpServerTransport::Stdio {
-            command: "npx".into(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        // Should succeed without side effects
-        adapter.install_server("test", &transport).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn remove_server_is_noop() {
-        let repo = Arc::new(MockRepo::new(vec![]));
-        let adapter = NomifunAdapter::new(repo);
-
-        // Should succeed without side effects
-        adapter.remove_server("test").await.unwrap();
     }
 
     #[tokio::test]

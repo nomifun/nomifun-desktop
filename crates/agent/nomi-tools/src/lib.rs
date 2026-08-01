@@ -55,7 +55,7 @@ mod windows_shell_tests {
 #[cfg(test)]
 pub(crate) mod test_support;
 
-pub use output_truncation::{TruncationBudget, approx_token_count, truncate_middle};
+pub use output_truncation::{TruncationBudget, truncate_middle};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -117,10 +117,6 @@ pub struct ToolExecutionContext {
 
 impl ToolExecutionContext {
     const DOMAIN: &'static [u8] = b"nomifun-tool-execution:v1\0";
-
-    pub fn from_tool_call_id(tool_call_id: &str) -> Self {
-        Self::from_scoped_tool_call("", tool_call_id)
-    }
 
     /// Derive an invocation identity from both the durable turn/message scope
     /// and the provider's call id. Some providers reuse short ids such as

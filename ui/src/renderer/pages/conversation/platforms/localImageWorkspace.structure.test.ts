@@ -13,9 +13,8 @@ const readSource = (relativePath: string): string =>
 describe('conversation artifact image workspace wiring', () => {
   const surfaces = [
     ['ACP', './acp/AcpChat.tsx', "updateLocalImage({ root: workspace ?? '' });"],
-    ['Remote', './remote/RemoteChat.tsx', 'updateLocalImage({ root: workspace });'],
-    ['Nanobot', './nanobot/NanobotChat.tsx', 'updateLocalImage({ root: workspace });'],
-    ['OpenClaw', './openclaw/OpenClawChat.tsx', 'updateLocalImage({ root: workspace });'],
+    // Remote / Nanobot / OpenClaw share the BasicRuntimeChat implementation.
+    ['BasicRuntime', './BasicRuntimeChat.tsx', 'updateLocalImage({ root: workspace });'],
   ] as const;
 
   for (const [name, relativePath, workspaceUpdate] of surfaces) {

@@ -11,15 +11,17 @@
 //!
 //! Import extracts into a temp dir under the managed knowledge dir (same
 //! volume as the final destination, so file moves are cheap renames), with
-//! zip-slip hardening mirroring `nomifun-extension`'s skill import: entry
-//! paths are component-sanitized, symlink entries are rejected, and only
-//! `manifest.json` / `meta.json` / `files/**.md` entries are accepted.
+//! the shared `nomifun_common::zip_safe` hardening (also used by the skill
+//! and companion importers): entry paths are component-sanitized (zip-slip),
+//! symlink entries are rejected, decompression-bomb caps bound the
+//! extraction, and only `manifest.json` / `meta.json` / `files/**.md`
+//! entries are accepted.
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use nomifun_common::{AppError, KnowledgeBaseId, TimestampMs, now_ms};
+use nomifun_common::{AppError, KnowledgeBaseId, TimestampMs, now_ms, zip_safe};
 use serde::{Deserialize, Serialize};
 
 use crate::KB_MANAGED_REL_DIR;
@@ -270,14 +272,20 @@ async fn import_extracted(
 
 /// Blocking extraction with validation. Only `manifest.json`, `meta.json`
 /// and `files/**.md` entries are accepted; every entry path is sanitized
-/// (zip-slip) and symlink entries are rejected. Returns the parsed meta
-/// after the manifest passed format/kind/version checks.
+/// (zip-slip), symlink entries are rejected, and decompression-bomb caps
+/// (entry count + cumulative actually-written bytes) bound the extraction.
+/// Returns the parsed meta after the manifest passed format/kind/version
+/// checks.
 fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<ExportMeta, AppError> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| AppError::BadRequest(format!("failed to open import file: {e}")))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|_| AppError::BadRequest("不是知识库导出包".into()))?;
 
+    let mut budget = zip_safe::ZipExtractionBudget::default();
+    budget
+        .check_entry_count(archive.len())
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
@@ -316,8 +324,11 @@ fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<Expo
         }
         let mut output = std::fs::File::create(&output_path)
             .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
-        std::io::copy(&mut entry, &mut output)
+        let written = std::io::copy(&mut entry, &mut output)
             .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
+        budget
+            .record_written(written)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
     }
 
     let manifest_bytes = std::fs::read(destination.join("manifest.json"))
@@ -348,47 +359,17 @@ fn validate_manifest(manifest: &serde_json::Value) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Sanitize a zip entry name into a safe relative path (same policy as
-/// `nomifun-extension`'s skill import): no backslashes, no absolute paths,
-/// no `..`/prefix components.
+/// Sanitize a zip entry name into a safe relative path via the shared
+/// [`nomifun_common::zip_safe`] hardening. Knowledge packages embed real
+/// on-disk file names (which may legally contain `':'` on Unix), so only
+/// drive prefixes are rejected, not every `':'` byte.
 fn safe_zip_entry_path(name: &str) -> Result<PathBuf, AppError> {
-    let invalid = || AppError::BadRequest(format!("非法压缩包条目: {name}"));
-    if name.is_empty() || name.contains('\\') {
-        return Err(invalid());
-    }
-    let path = Path::new(name);
-    if path.is_absolute() {
-        return Err(invalid());
-    }
-    let mut safe_path = PathBuf::new();
-    let mut saw_normal = false;
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => {
-                if !saw_normal {
-                    let first = part.to_string_lossy();
-                    let bytes = first.as_bytes();
-                    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-                        return Err(invalid());
-                    }
-                    saw_normal = true;
-                }
-                safe_path.push(part);
-            }
-            Component::CurDir => {}
-            _ => return Err(invalid()),
-        }
-    }
-    if safe_path.as_os_str().is_empty() {
-        return Err(invalid());
-    }
-    Ok(safe_path)
+    zip_safe::safe_zip_entry_path(name, zip_safe::ZipColonPolicy::RejectDrivePrefix)
+        .ok_or_else(|| AppError::BadRequest(format!("非法压缩包条目: {name}")))
 }
 
 fn reject_zip_symlink(entry: &zip::read::ZipFile<'_>, name: &str) -> Result<(), AppError> {
-    if let Some(mode) = entry.unix_mode()
-        && mode & 0o170000 == 0o120000
-    {
+    if zip_safe::zip_entry_is_symlink(entry.unix_mode()) {
         return Err(AppError::BadRequest(format!("非法压缩包条目: {name}")));
     }
     Ok(())

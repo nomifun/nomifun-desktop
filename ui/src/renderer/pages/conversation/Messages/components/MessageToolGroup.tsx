@@ -437,7 +437,7 @@ const MessageToolGroup: React.FC<IMessageToolGroupProps> = ({ message }) => {
                 )}
                 {statusText === 'Error' && (
                   <div className='mt-4px flex justify-end'>
-                    <FeedbackButton module='conversation-session' />
+                    <FeedbackButton />
                   </div>
                 )}
               </div>

@@ -10,12 +10,6 @@ pub const EXTENSION_API_VERSION: &str = "1.0.0";
 /// Hub index schema version we support.
 pub const HUB_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
-/// Cache TTL for agent activity snapshots (milliseconds).
-pub const ACTIVITY_SNAPSHOT_TTL_MS: u64 = 3000;
-
-/// Debounce delay for hot-reload file watching (milliseconds).
-pub const DEBOUNCE_MS: u64 = 1000;
-
 /// Debounce delay for state persistence writes (milliseconds).
 pub const STATE_PERSIST_DEBOUNCE_MS: u64 = 500;
 
@@ -151,9 +145,7 @@ mod tests {
     #[test]
     fn test_debounce_values_positive() {
         const {
-            assert!(DEBOUNCE_MS > 0);
             assert!(STATE_PERSIST_DEBOUNCE_MS > 0);
-            assert!(ACTIVITY_SNAPSHOT_TTL_MS > 0);
         }
     }
 

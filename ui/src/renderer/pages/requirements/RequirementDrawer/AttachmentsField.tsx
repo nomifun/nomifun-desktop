@@ -83,7 +83,6 @@ const AttachmentsField: React.FC<AttachmentsFieldProps> = ({
   );
 
   const { dragHandlers, isFileDragging } = useDragUpload({
-    supportedExts: imageExts,
     onFilesAdded: handleFilesAdded,
     source: 'requirement',
   });

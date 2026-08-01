@@ -23,7 +23,6 @@ pub mod startup_materialize;
 pub mod state;
 pub mod template;
 pub mod types;
-pub mod watcher;
 mod zip_safe;
 
 pub use classifier::{PresetClassifier, PresetRuleDispatcher};
@@ -43,7 +42,6 @@ pub use startup_materialize::materialize_if_needed;
 pub use state::{ExtensionStateStore, load_states_from_file, resolve_state_file_path, save_states_to_file};
 pub use template::{resolve_env_map, resolve_env_templates, resolve_file_reference};
 pub use types::*;
-pub use watcher::ExtensionWatcher;
 
 pub use external_paths::ExternalPathsManager;
 pub use hub::{HubIndexManager, HubInstaller};
@@ -58,7 +56,3 @@ pub use skill_service::{
     read_builtin_rule, read_builtin_skill, read_skill_info, resolve_skill_paths, scan_for_skills,
 };
 pub use skill_service::{builtin_skills_corpus_fingerprint, builtin_skills_materialize_version};
-pub use skill_service::{
-    delete_preset_rule, delete_preset_skill, read_preset_rule, read_preset_skill, write_preset_rule,
-    write_preset_skill,
-};

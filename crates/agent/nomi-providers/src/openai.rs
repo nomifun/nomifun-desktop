@@ -410,78 +410,22 @@ impl OpenAIProvider {
         body
     }
 
-    async fn send_initial(
-        client: &reqwest::Client,
-        url: &str,
-        headers: &HeaderMap,
-        body: &Value,
-    ) -> Result<reqwest::Response, ProviderError> {
-        crate::retry::with_initial_request_retry(|| async {
-            let response = client
-                .post(url)
-                .headers(headers.clone())
-                .json(body)
-                .send()
-                .await?;
-            let status = response.status();
-            if status.is_success() {
-                return Ok(response);
-            }
-            let retry_after_ms = crate::parse_retry_after_ms(response.headers()).unwrap_or(5000);
-            let body_text = response.text().await.unwrap_or_default();
-            if status.as_u16() == 429 {
-                return Err(ProviderError::RateLimited {
-                    retry_after_ms,
-                    message: crate::non_empty_rate_limit_message(body_text),
-                });
-            }
-            Err(ProviderError::Api {
-                status: status.as_u16(),
-                message: body_text,
-            })
-        })
-        .await
-    }
-
     async fn send_initial_with_key_rotation(
         &self,
         client: &reqwest::Client,
         url: &str,
         body: &Value,
     ) -> Result<(reqwest::Response, HeaderMap), ProviderError> {
-        let mut last_error = None;
-        let key_count = self.api_keys.len();
-        let start_index = self.current_api_key.load(Ordering::Acquire) % key_count.max(1);
-
-        for offset in 0..key_count {
-            let index = (start_index + offset) % key_count;
-            let api_key = &self.api_keys[index];
-            let headers = Self::build_headers(api_key)?;
-            match Self::send_initial(client, url, &headers, body).await {
-                Ok(response) => {
-                    self.current_api_key.store(index, Ordering::Release);
-                    return Ok((response, headers));
-                }
-                Err(error) if crate::is_api_key_rotation_error(&error) && offset + 1 < key_count => {
-                    let next_index = (index + 1) % key_count;
-                    tracing::warn!(
-                        target: "nomi_providers",
-                        provider = "openai",
-                        key_index = index + 1,
-                        key_count = self.api_keys.len(),
-                        error = %error,
-                        "provider rejected API key; trying the next configured key"
-                    );
-                    self.current_api_key.store(next_index, Ordering::Release);
-                    last_error = Some(error);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            ProviderError::Connection("No usable API key configured".to_owned())
-        }))
+        crate::send_initial_with_key_rotation(
+            client,
+            url,
+            body,
+            &self.api_keys,
+            &self.current_api_key,
+            "openai",
+            Self::build_headers,
+        )
+        .await
     }
 }
 
@@ -883,49 +827,14 @@ impl LlmProvider for OpenAIProvider {
         let url_clone = url.clone();
 
         tokio::spawn(async move {
-            match process_sse_stream(response, &tx, auto_tool_id).await {
-                StreamOutcome::Ok => {}
-                StreamOutcome::FailedPartial(e) => {
-                    let _ = tx.send(LlmEvent::Error(e.to_string())).await;
-                }
-                StreamOutcome::FailedEmpty(e) => {
-                    if e.is_retryable() {
-                        let mut backoff = std::time::Duration::from_secs(1);
-                        let mut final_err = Some(e);
-                        for attempt in 1..=crate::retry::MAX_STREAM_RETRIES {
-                            backoff = crate::retry::backoff_sleep(attempt, backoff).await;
-                            match crate::retry::send_and_check(&client, &url_clone, &headers, &body)
-                                .await
-                            {
-                                Ok(resp) => {
-                                    let outcome = process_sse_stream(resp, &tx, auto_tool_id).await;
-                                    match crate::retry::evaluate_outcome(outcome, attempt) {
-                                        Ok(None) => {
-                                            final_err = None;
-                                            break;
-                                        }
-                                        Ok(Some(e)) => {
-                                            final_err = Some(e);
-                                            break;
-                                        }
-                                        Err(_) => continue,
-                                    }
-                                }
-                                Err(e) if attempt == crate::retry::MAX_STREAM_RETRIES => {
-                                    final_err = Some(e);
-                                    break;
-                                }
-                                Err(_) => continue,
-                            }
-                        }
-                        if let Some(err) = final_err {
-                            let _ = tx.send(LlmEvent::Error(err.to_string())).await;
-                        }
-                    } else {
-                        let _ = tx.send(LlmEvent::Error(e.to_string())).await;
-                    }
-                }
-            }
+            let outcome = process_sse_stream(response, &tx, auto_tool_id).await;
+            crate::retry::finish_stream_with_retry(
+                outcome,
+                &tx,
+                || crate::retry::send_and_check(&client, &url_clone, &headers, &body),
+                |resp| process_sse_stream(resp, &tx, auto_tool_id),
+            )
+            .await;
         });
 
         Ok(rx)

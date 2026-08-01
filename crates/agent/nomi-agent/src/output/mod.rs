@@ -1288,7 +1288,9 @@ impl OutputFormatter {
     }
 }
 
-fn truncate_display(s: &str, max: usize) -> String {
+/// Char-boundary-safe display truncation shared across output formatting and
+/// tool-call previews (see `tool_execution.rs`).
+pub(crate) fn truncate_display(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {

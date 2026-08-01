@@ -9,7 +9,6 @@ use nomifun_common::CronJobId;
 use crate::error::CronError;
 
 pub const CRON_SKILLS_REL_DIR: &str = "cron/skills";
-pub const CRON_SKILL_DIR_PREFIX: &str = "";
 pub const SKILL_FILE_NAME: &str = "SKILL.md";
 
 const PLACEHOLDER_PATTERNS: &[&str] = &[
@@ -40,10 +39,6 @@ pub fn cron_skill_name(job_id: &str) -> Result<String, CronError> {
 
 pub fn cron_skill_dir(data_dir: &Path, job_id: &str) -> Result<PathBuf, CronError> {
     Ok(data_dir.join(CRON_SKILLS_REL_DIR).join(cron_skill_name(job_id)?))
-}
-
-pub fn cron_skill_file_path(data_dir: &Path, job_id: &str) -> Result<PathBuf, CronError> {
-    Ok(cron_skill_dir(data_dir, job_id)?.join(SKILL_FILE_NAME))
 }
 
 pub fn build_skill_content(name: &str, description: &str, prompt: &str, schedule_description: Option<&str>) -> String {
@@ -82,16 +77,6 @@ pub fn build_skill_content(name: &str, description: &str, prompt: &str, schedule
     lines.join("\n")
 }
 
-pub fn parse_skill_content(content: &str) -> Result<ParsedSkillContent, CronError> {
-    let (name, description, body) = parse_frontmatter(content)?;
-    let prompt = extract_prompt_from_body(&body);
-    Ok(ParsedSkillContent {
-        name,
-        description,
-        body: prompt,
-    })
-}
-
 pub fn validate_skill_content(content: &str) -> Result<ParsedSkillContent, CronError> {
     let (name, description, body) = parse_frontmatter(content)?;
     let trimmed_body = body.trim();
@@ -128,18 +113,6 @@ pub fn content_hash(content: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-pub async fn write_skill_file(
-    data_dir: &Path,
-    job_id: &str,
-    name: &str,
-    description: &str,
-    prompt: &str,
-    schedule_description: Option<&str>,
-) -> Result<PathBuf, CronError> {
-    let content = build_skill_content(name, description, prompt, schedule_description);
-    write_raw_skill_file(data_dir, job_id, &content).await
-}
-
 pub async fn write_raw_skill_file(
     data_dir: &Path,
     job_id: &str,
@@ -167,24 +140,6 @@ pub async fn write_raw_skill_file(
         .map_err(|err| CronError::InvalidSkillContent(err.to_string()))?;
 
     Ok(file_path)
-}
-
-pub async fn read_skill_content(data_dir: &Path, job_id: &str) -> Result<Option<String>, CronError> {
-    let file_path = cron_skill_file_path(data_dir, job_id)?;
-    match fs::read_to_string(file_path).await {
-        Ok(content) => Ok(Some(content)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(CronError::InvalidSkillContent(err.to_string())),
-    }
-}
-
-pub async fn has_skill_file(data_dir: &Path, job_id: &str) -> Result<bool, CronError> {
-    let file_path = cron_skill_file_path(data_dir, job_id)?;
-    match fs::metadata(file_path).await {
-        Ok(metadata) => Ok(metadata.is_file()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(CronError::InvalidSkillContent(err.to_string())),
-    }
 }
 
 pub async fn delete_skill_file(data_dir: &Path, job_id: &str) -> Result<(), CronError> {
@@ -247,31 +202,6 @@ fn parse_frontmatter(content: &str) -> Result<(String, String, String), CronErro
     }
     let body = body_lines.join("\n");
     Ok((name, description, body))
-}
-
-fn extract_prompt_from_body(body: &str) -> String {
-    let instructions_idx = match body.find("## Instructions") {
-        Some(idx) => idx,
-        None => return body.trim_end().to_owned(),
-    };
-
-    let after_heading = &body[instructions_idx..];
-    let lines: Vec<&str> = after_heading.split('\n').collect();
-    let mut start_idx = lines.len();
-    for (idx, line) in lines.iter().enumerate().skip(1) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("You are executing") || trimmed.starts_with("Do NOT ask") {
-            continue;
-        }
-        start_idx = idx;
-        break;
-    }
-
-    if start_idx >= lines.len() {
-        return String::new();
-    }
-
-    lines[start_idx..].join("\n").trim_end().to_owned()
 }
 
 fn is_placeholder(value: &str, patterns: &[&str]) -> bool {

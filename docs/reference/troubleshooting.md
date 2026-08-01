@@ -44,7 +44,7 @@ The endpoint runs a constant-time bcrypt compare against the stored hash. If
 you suspect data corruption: stop the server, back up the data dir, resolve the
 installation owner through `installation_identity.owner_user_id`, and inspect
 that user's `password_hash`. A surgical fix is possible
-(`/api/auth/internal/users/{id}/password` in local mode) but the easiest path is
+(`POST /api/webui/reset-password` in local mode) but the easiest path is
 to restore from backup or re-bootstrap.
 
 ### "Username/password rejected" with a vaguely worded validation error
@@ -106,7 +106,7 @@ The embedded-bun build extracts bun into the data directory on first run. If ext
 
 ### Word/Excel/PPT preview returns "LibreOffice not detected"
 
-The `/api/star-office/detect` route probes the system for a LibreOffice install. The Office preview features (`/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`, `/api/document/convert`) need LibreOffice to render documents.
+The `/api/star-office/detect` route probes the system for a LibreOffice install. The Office preview features (`/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`) need LibreOffice to render documents.
 
 - Linux: `apt install libreoffice` (or distribution equivalent).
 - macOS: `brew install --cask libreoffice`.

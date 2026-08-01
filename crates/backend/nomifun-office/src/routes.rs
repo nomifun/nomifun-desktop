@@ -7,7 +7,7 @@ use axum::routing::{get, post};
 use std::path::{Path as FsPath, PathBuf};
 
 use nomifun_api_types::{
-    ApiResponse, DetectStarOfficeRequest, DocumentConversionRequest, GetSnapshotContentRequest, ListSnapshotsRequest,
+    ApiResponse, DetectStarOfficeRequest, GetSnapshotContentRequest, ListSnapshotsRequest,
     PreviewSnapshotInfoDto, PreviewUrlResponse, SaveSnapshotRequest, SnapshotContentResponse, StarOfficeDetectResponse,
     StartPreviewRequest, StopPreviewRequest,
 };
@@ -31,7 +31,6 @@ pub fn office_routes(state: OfficeRouterState) -> Router {
         .route("/api/preview-history/save", post(save_snapshot))
         .route("/api/preview-history/get-content", post(get_snapshot_content))
         .route("/api/star-office/detect", post(detect_star_office))
-        .route("/api/document/convert", post(convert_document))
         .with_state(state)
 }
 
@@ -204,20 +203,6 @@ async fn detect_star_office(
 
 // -- Document conversion --------------------------------------------------
 
-async fn convert_document(
-    State(state): State<OfficeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<DocumentConversionRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<nomifun_api_types::DocumentConversionResponse>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let validated_path = validate_office_path(&state, &req.file_path, req.workspace.as_deref())?;
-    let resp = state
-        .conversion_service
-        .convert(validated_path.to_string_lossy().as_ref(), req.to)
-        .await?;
-    Ok(Json(ApiResponse::ok(resp)))
-}
-
 fn validate_office_path(
     state: &OfficeRouterState,
     file_path: &str,
@@ -243,6 +228,29 @@ fn preview_error_code(error: &OfficeError) -> &'static str {
 
 // -- Reverse proxy handlers -----------------------------------------------
 
+/// Collect request headers into the `(name, value)` pairs `ProxyService`
+/// expects, dropping any values that are not valid UTF-8.
+fn headers_to_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.as_str().to_owned(), val.to_owned())))
+        .collect()
+}
+
+/// Convert a `ProxyService` response into an axum HTTP response.
+fn proxy_response_into_axum(proxy_resp: crate::proxy::ProxyResponse) -> Response {
+    let status = StatusCode::from_u16(proxy_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = axum::response::Response::builder().status(status);
+
+    for (key, value) in &proxy_resp.headers {
+        response = response.header(key.as_str(), value.as_str());
+    }
+
+    response
+        .body(axum::body::Body::from(proxy_resp.body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
 async fn ppt_proxy(
     State(state): State<OfficeRouterState>,
     Path(params): Path<ProxyCapabilityPath>,
@@ -258,26 +266,14 @@ async fn office_watch_proxy(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let path = params.path.as_deref().unwrap_or("/");
-    let request_headers: Vec<(String, String)> = headers
-        .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.as_str().to_owned(), val.to_owned())))
-        .collect();
+    let request_headers = headers_to_pairs(&headers);
 
     let proxy_resp = state
         .proxy_service
         .forward_watch(&params.capability, path, &request_headers)
         .await?;
 
-    let status = StatusCode::from_u16(proxy_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut response = axum::response::Response::builder().status(status);
-
-    for (key, value) in &proxy_resp.headers {
-        response = response.header(key.as_str(), value.as_str());
-    }
-
-    Ok(response
-        .body(axum::body::Body::from(proxy_resp.body))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+    Ok(proxy_response_into_axum(proxy_resp))
 }
 
 async fn proxy_forward(
@@ -287,33 +283,20 @@ async fn proxy_forward(
     doc_type: DocType,
     headers: &HeaderMap,
 ) -> Result<Response, AppError> {
-    let request_headers: Vec<(String, String)> = headers
-        .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.as_str().to_owned(), val.to_owned())))
-        .collect();
+    let request_headers = headers_to_pairs(headers);
 
     let proxy_resp = state
         .proxy_service
         .forward(capability, path, doc_type, &request_headers)
         .await?;
 
-    let status = StatusCode::from_u16(proxy_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut response = axum::response::Response::builder().status(status);
-
-    for (key, value) in &proxy_resp.headers {
-        response = response.header(key.as_str(), value.as_str());
-    }
-
-    Ok(response
-        .body(axum::body::Body::from(proxy_resp.body))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+    Ok(proxy_response_into_axum(proxy_resp))
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use crate::conversion::ConversionService;
     use crate::error::OfficeError;
     use crate::proxy::ProxyService;
     use crate::snapshot::SnapshotService;
@@ -352,9 +335,6 @@ mod tests {
             async fn install_officecli(&self) -> Result<(), OfficeError> {
                 Err(OfficeError::InstallFailed("noop".into()))
             }
-            async fn is_officecli_installed(&self) -> bool {
-                false
-            }
             async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {
                 Ok(())
             }
@@ -376,14 +356,12 @@ mod tests {
 
         let snapshot = Arc::new(SnapshotService::new(std::path::Path::new("/tmp/test")));
         let detector = Arc::new(StarOfficeDetector::local());
-        let conversion = Arc::new(ConversionService::new(None));
         let proxy = Arc::new(ProxyService::new(wm.clone()));
 
         OfficeRouterState {
             watch_manager: wm,
             snapshot_service: snapshot,
             star_office_detector: detector,
-            conversion_service: conversion,
             proxy_service: proxy,
             allowed_roots: vec![std::env::temp_dir()],
         }

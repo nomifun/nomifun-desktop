@@ -89,7 +89,7 @@ impl ProviderService {
         let model_enabled_json = serialize_opt(&req.model_enabled, "model_enabled")?;
         let bedrock_json = serialize_opt(&req.bedrock_config, "bedrock_config")?;
         // `req.capabilities` and `req.model_health` are accepted-and-ignored
-        // since P3: the capabilities column was dropped in migration 017 and
+        // since P3: the capabilities column was dropped in migration 021 and
         // the server-side probe is the only health writer.
         let params = CreateProviderParams {
             provider_id: req.provider_id.as_deref(),
@@ -134,7 +134,7 @@ impl ProviderService {
         let bedrock_json = serialize_opt(&req.bedrock_config, "bedrock_config")?;
 
         // `req.capabilities` and `req.model_health` are accepted-and-ignored
-        // since P3: the capabilities column was dropped in migration 017 and
+        // since P3: the capabilities column was dropped in migration 021 and
         // the server-side probe is the only health writer — a PUT can no
         // longer overwrite probe-written row health.
         let params = UpdateProviderParams {
@@ -485,7 +485,7 @@ impl ProviderService {
             api_key,
             models,
             enabled: row.enabled,
-            // Retired: providers.capabilities was dropped in migration 017;
+            // Retired: providers.capabilities was dropped in migration 021;
             // the wire field stays for shape compat and is always empty.
             capabilities: Vec::new(),
             model_context_limits: (!model_context_limits.is_empty()).then_some(model_context_limits),
@@ -1252,7 +1252,7 @@ mod tests {
             .unwrap();
         assert!(
             created.capabilities.is_empty(),
-            "capabilities is retired (column dropped in migration 017) and must project []"
+            "capabilities is retired (column dropped in migration 021) and must project []"
         );
 
         let updated = svc

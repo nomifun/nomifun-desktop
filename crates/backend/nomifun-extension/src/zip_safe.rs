@@ -2,47 +2,43 @@
 //! ([`crate::skill_service`]). Guards against zip-slip (path traversal),
 //! symlink entries, and decompression bombs (entry-count and cumulative
 //! uncompressed-size caps) so an untrusted archive can never write outside
-//! `destination` or exhaust the disk.
+//! `destination` or exhaust the disk. The security primitives (entry-name
+//! sanitization, symlink detection, bomb budget) are the shared
+//! [`nomifun_common::zip_safe`] hardening also used by the knowledge and
+//! companion importers.
 
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+
+use nomifun_common::zip_safe::{self, ZipColonPolicy, ZipExtractionBudget};
 
 use crate::error::ExtensionError;
 
-/// Cumulative uncompressed-bytes cap across all entries of one archive.
-/// A tiny zip expanding past this is a decompression bomb, not a skill pack.
-const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
-/// Entry-count cap for one archive.
-const MAX_ENTRIES: usize = 20_000;
-
 /// Extract every entry of `archive_path` into `destination`, rejecting any entry
-/// whose name escapes `destination` (absolute, `..`, backslash), that is a
-/// symlink, or that would blow the bomb caps ([`MAX_ENTRIES`] entries /
-/// [`MAX_TOTAL_UNCOMPRESSED_BYTES`] cumulative uncompressed bytes).
+/// whose name escapes `destination` (absolute, `..`, backslash, drive prefix),
+/// that is a symlink, or that would blow the default bomb caps
+/// ([`ZipExtractionBudget::DEFAULT_MAX_ENTRIES`] entries /
+/// [`ZipExtractionBudget::DEFAULT_MAX_TOTAL_UNCOMPRESSED_BYTES`] cumulative
+/// uncompressed bytes).
 /// Synchronous — run under `tokio::task::spawn_blocking` off the reactor.
 pub(crate) fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), ExtensionError> {
-    extract_zip_archive_with_limits(archive_path, destination, MAX_TOTAL_UNCOMPRESSED_BYTES, MAX_ENTRIES)
+    extract_zip_archive_with_budget(archive_path, destination, ZipExtractionBudget::default())
 }
 
-/// [`extract_zip_archive`] with injectable caps, split out so tests can
+/// [`extract_zip_archive`] with an injectable budget, split out so tests can
 /// exercise the bomb guards without multi-hundred-MiB fixtures.
-fn extract_zip_archive_with_limits(
+fn extract_zip_archive_with_budget(
     archive_path: &Path,
     destination: &Path,
-    max_total_uncompressed_bytes: u64,
-    max_entries: usize,
+    mut budget: ZipExtractionBudget,
 ) -> Result<(), ExtensionError> {
     let file = std::fs::File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(zip_error)?;
 
-    if archive.len() > max_entries {
-        return Err(ExtensionError::InvalidSkillPath(format!(
-            "Zip archive has too many entries ({} > {max_entries})",
-            archive.len()
-        )));
-    }
+    budget
+        .check_entry_count(archive.len())
+        .map_err(|e| ExtensionError::InvalidSkillPath(e.to_string()))?;
 
-    let mut total_uncompressed: u64 = 0;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(zip_error)?;
         let entry_name = entry.name().to_string();
@@ -59,55 +55,29 @@ fn extract_zip_archive_with_limits(
             std::fs::create_dir_all(parent)?;
         }
         let mut output = std::fs::File::create(&output_path)?;
-        // Track ACTUAL bytes written (io::copy's return), not the entry's
-        // self-declared size — bomb archives lie about their sizes.
+        // The budget tracks ACTUAL bytes written (io::copy's return), not the
+        // entry's self-declared size — bomb archives lie about their sizes.
         let written = io::copy(&mut entry, &mut output)?;
-        total_uncompressed = total_uncompressed.saturating_add(written);
-        if total_uncompressed > max_total_uncompressed_bytes {
-            return Err(ExtensionError::InvalidSkillPath(format!(
-                "Zip archive expands beyond {max_total_uncompressed_bytes} bytes; \
-                 refusing to extract a potential decompression bomb"
-            )));
-        }
+        budget
+            .record_written(written)
+            .map_err(|e| ExtensionError::InvalidSkillPath(e.to_string()))?;
     }
 
     Ok(())
 }
 
 /// Resolve a zip entry name to a safe relative path, or reject it. Rejects
-/// empty names, backslashes, absolute paths, and any `..`/root component.
+/// empty names, backslashes, absolute paths, drive prefixes, and any
+/// `..`/root component (shared [`zip_safe`] policy).
 pub(crate) fn safe_zip_entry_path(name: &str) -> Result<PathBuf, ExtensionError> {
-    if name.is_empty() || name.contains('\\') {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
-    }
-
-    let path = Path::new(name);
-    if path.is_absolute() {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
-    }
-
-    let mut safe_path = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => safe_path.push(part),
-            Component::CurDir => {}
-            _ => return Err(ExtensionError::PathTraversal(name.to_string())),
-        }
-    }
-
-    if safe_path.as_os_str().is_empty() {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
-    }
-
-    Ok(safe_path)
+    zip_safe::safe_zip_entry_path(name, ZipColonPolicy::RejectDrivePrefix)
+        .ok_or_else(|| ExtensionError::PathTraversal(name.to_string()))
 }
 
 /// Reject symlink entries (unix mode `S_IFLNK`), which could otherwise redirect
 /// a subsequent write outside `destination`.
 fn reject_zip_symlink(entry: &zip::read::ZipFile<'_>) -> Result<(), ExtensionError> {
-    if let Some(mode) = entry.unix_mode()
-        && mode & 0o170000 == 0o120000
-    {
+    if zip_safe::zip_entry_is_symlink(entry.unix_mode()) {
         return Err(ExtensionError::PathTraversal(entry.name().to_string()));
     }
     Ok(())
@@ -132,7 +102,7 @@ mod tests {
 
     #[test]
     fn safe_path_rejects_traversal_and_absolute() {
-        for bad in ["", "..", "../evil", "a/../b", "/abs/path", "a\\b", "\\\\server\\share"] {
+        for bad in ["", "..", "../evil", "a/../b", "/abs/path", "a\\b", "\\\\server\\share", "C:/evil.md"] {
             assert!(
                 safe_zip_entry_path(bad).is_err(),
                 "must reject unsafe zip entry name: {bad:?}"
@@ -182,7 +152,12 @@ mod tests {
 
         // 4 KiB test cap: the 64 KiB expansion must be refused...
         let dest = tmp.path().join("out");
-        let err = extract_zip_archive_with_limits(&zip_path, &dest, 4 * 1024, MAX_ENTRIES).unwrap_err();
+        let err = extract_zip_archive_with_budget(
+            &zip_path,
+            &dest,
+            ZipExtractionBudget::new(4 * 1024, ZipExtractionBudget::DEFAULT_MAX_ENTRIES),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("decompression bomb"),
             "unexpected error: {err}"
@@ -190,7 +165,12 @@ mod tests {
 
         // ...while a sufficient cap extracts the same archive fine.
         let dest_ok = tmp.path().join("out-ok");
-        extract_zip_archive_with_limits(&zip_path, &dest_ok, 128 * 1024, MAX_ENTRIES).unwrap();
+        extract_zip_archive_with_budget(
+            &zip_path,
+            &dest_ok,
+            ZipExtractionBudget::new(128 * 1024, ZipExtractionBudget::DEFAULT_MAX_ENTRIES),
+        )
+        .unwrap();
         assert!(dest_ok.join("big.bin").is_file());
     }
 
@@ -211,8 +191,12 @@ mod tests {
         }
 
         let dest = tmp.path().join("out");
-        let err =
-            extract_zip_archive_with_limits(&zip_path, &dest, MAX_TOTAL_UNCOMPRESSED_BYTES, 4).unwrap_err();
+        let err = extract_zip_archive_with_budget(
+            &zip_path,
+            &dest,
+            ZipExtractionBudget::new(ZipExtractionBudget::DEFAULT_MAX_TOTAL_UNCOMPRESSED_BYTES, 4),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("too many entries"), "unexpected error: {err}");
         // Nothing was written: the count check runs before any extraction.
         assert!(!dest.exists());

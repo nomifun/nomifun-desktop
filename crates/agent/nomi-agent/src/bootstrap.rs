@@ -515,12 +515,6 @@ impl AgentBootstrap {
                 nomi_process_runtime::SandboxPolicy::UnrestrictedLocalOwner
             },
         };
-        if self.config.tools.persistent_shell {
-            tracing::warn!(
-                target: "nomi_agent",
-                "tools.persistent_shell is ignored; Bash now always uses supervised one-shot execution"
-            );
-        }
         registry.register(Box::new(nomi_tools::bash::BashTool::new(
             Arc::clone(&process_supervisor),
             cwd_path.to_path_buf(),

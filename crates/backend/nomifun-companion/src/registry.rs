@@ -38,7 +38,7 @@ pub(crate) const SEQ_STATE_FILE: &str = "companion_seq.json";
 /// ever allocated on this machine, persisted as `{shared_dir}/companion_seq.json`
 /// (`{"last_companion_seq": N}`). It deliberately does NOT live on
 /// [`crate::profile::SharedCompanionConfig`]: that object is user-writable
-/// wholesale (full-object `PUT /api/companion/config`, future import paths, …), so
+/// (`PATCH /api/companion/config` merge patches, future import paths, …), so
 /// keeping the watermark there would make "never reuse a deleted companion's
 /// number" depend on every present and future config write path remembering
 /// to clamp it. A missing file starts at 0; an existing but malformed state
@@ -471,17 +471,6 @@ impl CompanionRegistry {
                 })?;
         }
         Ok(())
-    }
-
-    /// Standalone audit helper for callers that are not already under the
-    /// lifecycle barrier.
-    pub async fn validate_provider_references(&self) -> Result<(), AppError> {
-        let _provider_guard = if let Some(barrier) = self.provider_lifecycle.as_ref() {
-            Some(barrier.read().await)
-        } else {
-            None
-        };
-        self.validate_provider_references_under_guard().await
     }
 
     /// Audit every profile-to-library figure reference. The profile field is a

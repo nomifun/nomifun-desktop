@@ -6,7 +6,7 @@ use clap::Parser;
 // bootstrap/cli/commands now live in the library so embedded hosts can reuse
 // them; the bin consumes them from there.
 use nomifun_app::cli::{Cli, Command};
-use nomifun_app::{AppServices, bootstrap, commands};
+use nomifun_app::{bootstrap, commands};
 
 fn main() -> Result<ExitCode> {
     let mut cli = Cli::parse();
@@ -75,20 +75,6 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode> {
             bundle,
             destination_data_dir,
         }) => commands::run_restore(bundle.clone(), destination_data_dir.clone()).await,
-        None => {
-            let env = bootstrap::init_environment(&cli, &merged_path)?;
-            let database = bootstrap::init_data_layer(&env.config).await?;
-            let services = AppServices::from_config(database, &env.config)
-                .await?
-                .with_boot_reconciliation_authority(
-                    env.boot_reconciliation_authority(),
-                    &env.config,
-                )
-                .await?;
-            if let Err(error) = bootstrap::finalize_data_layer(&env.config) {
-                return Err(services.cleanup_after_startup_failure(error).await);
-            }
-            commands::run_server(env, services).await
-        }
+        None => nomifun_app::run_embedded_server(&cli, &merged_path).await,
     }
 }

@@ -7,9 +7,10 @@ use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{LARK_EVENT_DEDUP_TTL, LARK_MESSAGE_LIMIT};
+use crate::constants::{LARK_EVENT_DEDUP_TTL, LARK_MESSAGE_LIMIT, RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
     ActionCategory, ActionContext, BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType, UnifiedAction,
     UnifiedAttachment, UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
@@ -21,12 +22,6 @@ use super::frame::{
 };
 use super::types::{BotMenuEvent, CardActionEvent, MessageEvent, build_interactive_card, parse_lark_callback};
 use super::ws_session::{FragmentCache, parse_pong_config};
-
-/// Maximum reconnect attempts before giving up.
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
-/// Maximum backoff delay between reconnection attempts.
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 /// Interval between event dedup cache cleanup sweeps.
 const DEDUP_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -153,7 +148,6 @@ impl ChannelPlugin for LarkPlugin {
         self.ws_handle = Some(tokio::spawn(ws_loop(
             api_clone,
             callbacks.message_tx,
-            callbacks.confirm_tx,
             dedup_cache.clone(),
             self.status.clone(),
             shutdown_rx,
@@ -279,11 +273,10 @@ impl ChannelPlugin for LarkPlugin {
 /// Background task that maintains a WebSocket connection to Lark.
 ///
 /// On disconnect, implements exponential backoff reconnection up to
-/// `MAX_RECONNECT_ATTEMPTS`.
+/// `RECONNECT_MAX_ATTEMPTS`.
 async fn ws_loop(
     api: Arc<LarkApi>,
     message_tx: mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: mpsc::Sender<(String, String)>,
     dedup_cache: Arc<Mutex<HashMap<String, Instant>>>,
     status: SharedPluginStatus,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -301,11 +294,11 @@ async fn ws_loop(
             Err(e) => {
                 consecutive_errors += 1;
                 warn!(error = %e, consecutive_errors, "Lark WS endpoint fetch failed");
-                if consecutive_errors >= MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("Lark max reconnect attempts reached");
                     break;
                 }
-                let delay = backoff_delay(consecutive_errors);
+                let delay = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => continue,
                     _ = shutdown_rx.changed() => break,
@@ -328,7 +321,6 @@ async fn ws_loop(
             service_id,
             initial_ping_secs,
             &message_tx,
-            &confirm_tx,
             &dedup_cache,
             &mut shutdown_rx,
         )
@@ -341,11 +333,11 @@ async fn ws_loop(
             Err(e) => {
                 consecutive_errors += 1;
                 warn!(error = %e, consecutive_errors, "Lark WS connection error");
-                if consecutive_errors >= MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("Lark max reconnect attempts reached");
                     break;
                 }
-                let delay = backoff_delay(consecutive_errors);
+                let delay = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}
                     _ = shutdown_rx.changed() => break,
@@ -370,7 +362,6 @@ async fn connect_and_listen(
     service_id: i32,
     initial_ping_secs: u64,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
     dedup_cache: &Arc<Mutex<HashMap<String, Instant>>>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), ChannelError> {
@@ -436,7 +427,7 @@ async fn connect_and_listen(
                                             } else {
                                                 Some(message_id.as_str())
                                             };
-                                            handle_ws_text(&text, msg_type, dedup_id, message_tx, confirm_tx, dedup_cache)
+                                            handle_ws_text(&text, msg_type, dedup_id, message_tx, dedup_cache)
                                                 .await;
                                         } else {
                                             warn!("Lark frame payload is not valid UTF-8");
@@ -522,7 +513,6 @@ async fn handle_ws_text(
     frame_type: &str,
     dedup_id: Option<&str>,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
     dedup_cache: &Arc<Mutex<HashMap<String, Instant>>>,
 ) {
     match frame_type {
@@ -589,7 +579,7 @@ async fn handle_ws_text(
                     return;
                 }
             };
-            handle_card_action(data, stable_event_id, message_tx, confirm_tx).await;
+            handle_card_action(data, stable_event_id, message_tx).await;
         }
         _ => {
             debug!(frame_type, "Lark unhandled payload type");
@@ -662,7 +652,6 @@ async fn handle_card_action(
     data: serde_json::Value,
     stable_event_id: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
 ) {
     if stable_event_id.trim().is_empty() {
         warn!("Lark card action missing stable frame message_id; dropping callback");
@@ -687,18 +676,6 @@ async fn handle_card_action(
         .unwrap_or("");
 
     let parsed = parse_lark_callback(action_str);
-
-    // Check if this is a tool confirmation
-    if let Some((_, ref action, ref params)) = parsed
-        && action == "system.confirm"
-        && let Some(p) = params
-    {
-        let call_id = p.get("callId").cloned().unwrap_or_default();
-        let value = p.get("value").cloned().unwrap_or_default();
-        if !call_id.is_empty() {
-            let _ = confirm_tx.send((call_id, value)).await;
-        }
-    }
 
     let chat_id = evt.open_chat_id.as_deref().unwrap_or("").to_string();
 
@@ -905,21 +882,6 @@ async fn cleanup_expired_events(cache: &Arc<Mutex<HashMap<String, Instant>>>) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Truncate a message to the platform limit, appending "..." if truncated.
-fn truncate_message(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(limit - 3).collect();
-    format!("{truncated}...")
-}
-
-/// Calculate exponential backoff delay, capped at the maximum.
-fn backoff_delay(attempt: u32) -> Duration {
-    let delay_secs = 2u64.saturating_pow(attempt).min(MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(delay_secs)
-}
-
 /// Current unix timestamp in seconds.
 fn chrono_now() -> i64 {
     std::time::SystemTime::now()
@@ -978,42 +940,7 @@ mod tests {
 
     // -- truncate_message ---------------------------------------------------
 
-    #[test]
-    fn truncate_within_limit() {
-        assert_eq!(truncate_message("Hello", 100), "Hello");
-    }
-
-    #[test]
-    fn truncate_at_limit() {
-        assert_eq!(truncate_message("abc", 3), "abc");
-    }
-
-    #[test]
-    fn truncate_exceeds_limit() {
-        let result = truncate_message("Hello, world!", 10);
-        assert_eq!(result, "Hello, ...");
-    }
-
-    #[test]
-    fn truncate_unicode() {
-        let result = truncate_message("你好世界测试文本", 5);
-        assert_eq!(result, "你好...");
-    }
-
     // -- backoff_delay ------------------------------------------------------
-
-    #[test]
-    fn backoff_exponential() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(2), Duration::from_secs(4));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-    }
-
-    #[test]
-    fn backoff_capped() {
-        assert_eq!(backoff_delay(5), Duration::from_secs(30));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30));
-    }
 
     // -- extract_message_content --------------------------------------------
 
@@ -1207,7 +1134,6 @@ mod tests {
     #[tokio::test]
     async fn ws_text_event_dispatches_message() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
@@ -1231,7 +1157,7 @@ mod tests {
             }
         }"#;
 
-        handle_ws_text(payload, "event", None, &message_tx, &confirm_tx, &dedup_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
 
         let msg = message_rx.try_recv().unwrap();
         assert_eq!(msg.id, "msg_test_1");
@@ -1244,7 +1170,6 @@ mod tests {
     #[tokio::test]
     async fn ws_text_event_deduplicates() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
@@ -1268,8 +1193,8 @@ mod tests {
             }
         }"#;
 
-        handle_ws_text(payload, "event", None, &message_tx, &confirm_tx, &dedup_cache).await;
-        handle_ws_text(payload, "event", None, &message_tx, &confirm_tx, &dedup_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
 
         assert!(message_rx.try_recv().is_ok());
         assert!(message_rx.try_recv().is_err());
@@ -1278,7 +1203,6 @@ mod tests {
     #[tokio::test]
     async fn ws_text_card_dispatches_action() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
@@ -1288,7 +1212,7 @@ mod tests {
             "open_chat_id": "oc_chat2"
         }"#;
 
-        handle_ws_text(payload, "card", Some("card_frame_1"), &message_tx, &confirm_tx, &dedup_cache).await;
+        handle_ws_text(payload, "card", Some("card_frame_1"), &message_tx, &dedup_cache).await;
 
         let msg = message_rx.try_recv().unwrap();
         assert_eq!(msg.id, "card_frame_1");
@@ -1305,7 +1229,6 @@ mod tests {
         // `message_id`) must dispatch the action exactly once, so a duplicate
         // chat.regenerate/chat.continue cannot re-fire.
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
@@ -1315,8 +1238,8 @@ mod tests {
             "open_chat_id": "oc_chat_dup"
         }"#;
 
-        handle_ws_text(payload, "card", Some("card_frame_dup"), &message_tx, &confirm_tx, &dedup_cache).await;
-        handle_ws_text(payload, "card", Some("card_frame_dup"), &message_tx, &confirm_tx, &dedup_cache).await;
+        handle_ws_text(payload, "card", Some("card_frame_dup"), &message_tx, &dedup_cache).await;
+        handle_ws_text(payload, "card", Some("card_frame_dup"), &message_tx, &dedup_cache).await;
 
         assert!(message_rx.try_recv().is_ok(), "first card frame dispatches");
         assert!(message_rx.try_recv().is_err(), "duplicate card frame is dropped");
@@ -1325,7 +1248,6 @@ mod tests {
     #[tokio::test]
     async fn ws_text_card_without_frame_id_is_dropped() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (confirm_tx, mut confirm_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
@@ -1335,41 +1257,14 @@ mod tests {
             "open_chat_id": "oc_1"
         }"#;
 
-        handle_ws_text(payload, "card", None, &message_tx, &confirm_tx, &dedup_cache).await;
+        handle_ws_text(payload, "card", None, &message_tx, &dedup_cache).await;
 
         assert!(message_rx.try_recv().is_err());
-        assert!(confirm_rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn ws_text_card_confirm_sends_to_confirm_channel() {
-        let (message_tx, _message_rx) = mpsc::channel(16);
-        let (confirm_tx, mut confirm_rx) = mpsc::channel(16);
-        let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
-
-        // NOTE: handle_card_action checks `action == "system.confirm"` but
-        // parse_lark_callback splits "system:confirm:..." into category="system",
-        // action="confirm". This means the confirm path requires the action field
-        // to literally contain "system.confirm" as a dotted string within the
-        // "system" category. The format "system:system.confirm:k=v" satisfies this.
-        let payload = r#"{
-            "operator": { "open_id": "ou_actor" },
-            "action": { "tag": "button", "value": {"action": "system:system.confirm:callId=call_123,value=approve"} },
-            "open_message_id": "om_1",
-            "open_chat_id": "oc_1"
-        }"#;
-
-        handle_ws_text(payload, "card", Some("card_frame_1"), &message_tx, &confirm_tx, &dedup_cache).await;
-
-        let (call_id, value) = confirm_rx.try_recv().unwrap();
-        assert_eq!(call_id, "call_123");
-        assert_eq!(value, "approve");
     }
 
     #[tokio::test]
     async fn ws_text_bot_menu_uses_header_event_id() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
         let payload = r#"{
             "header": {
@@ -1384,7 +1279,7 @@ mod tests {
             }
         }"#;
 
-        handle_ws_text(payload, "event", None, &message_tx, &confirm_tx, &dedup_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
 
         let msg = message_rx.try_recv().unwrap();
         assert_eq!(msg.id, "ev_menu_1");
@@ -1394,7 +1289,6 @@ mod tests {
     #[tokio::test]
     async fn ws_text_bot_menu_without_header_event_id_is_dropped() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
         let payload = r#"{
             "header": {
@@ -1408,7 +1302,7 @@ mod tests {
             }
         }"#;
 
-        handle_ws_text(payload, "event", None, &message_tx, &confirm_tx, &dedup_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
 
         assert!(message_rx.try_recv().is_err());
     }
@@ -1416,10 +1310,9 @@ mod tests {
     #[tokio::test]
     async fn ws_text_unknown_type_does_not_dispatch() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
 
-        handle_ws_text("{}", "unknown_type", None, &message_tx, &confirm_tx, &dedup_cache).await;
+        handle_ws_text("{}", "unknown_type", None, &message_tx, &dedup_cache).await;
 
         assert!(message_rx.try_recv().is_err());
     }

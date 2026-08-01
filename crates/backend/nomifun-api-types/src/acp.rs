@@ -2,24 +2,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Request body for detecting an ACP CLI executable.
-///
-/// `backend` is a vendor label (e.g. "claude"). The service resolves it
-/// against the `agent_metadata` catalog.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DetectCliRequest {
-    pub backend: String,
-}
-
-/// Response for CLI detection.
-#[derive(Debug, Serialize)]
-pub struct DetectCliResponse {
-    /// Path to the detected CLI, `None` if not found.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
-
 /// Request body for ACP health check.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,13 +62,6 @@ pub struct ModelInfoPayload {
     pub current_model_id: Option<String>,
     pub current_model_label: Option<String>,
     pub available_models: Vec<ModelInfoEntry>,
-}
-
-/// Request body for probing model information.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProbeModelRequest {
-    pub backend: String,
 }
 
 /// Request body for probing a custom ACP agent.
@@ -155,29 +130,6 @@ pub struct SideQuestionResponse {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn detect_cli_request_serde() {
-        let json = json!({ "backend": "claude" });
-        let req: DetectCliRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.backend, "claude");
-    }
-
-    #[test]
-    fn detect_cli_response_with_path() {
-        let resp = DetectCliResponse {
-            path: Some("/usr/local/bin/claude".into()),
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["path"], "/usr/local/bin/claude");
-    }
-
-    #[test]
-    fn detect_cli_response_without_path() {
-        let resp = DetectCliResponse { path: None };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert!(json.get("path").is_none());
-    }
 
     #[test]
     fn health_check_response_available() {
@@ -255,12 +207,5 @@ mod tests {
             serde_json::to_value(&fail).unwrap(),
             serde_json::json!({"step":"fail_cli","error":"not found"})
         );
-    }
-
-    #[test]
-    fn probe_model_request_serde() {
-        let json = json!({ "backend": "claude" });
-        let req: ProbeModelRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.backend, "claude");
     }
 }

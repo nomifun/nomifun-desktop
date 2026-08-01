@@ -8,7 +8,7 @@ use crate::repository::bind::{BindValue, bind_value};
 use crate::repository::cron::{
     AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, FinalizeCronRunOutcome,
     FinalizeCronRunParams, ICronRepository, ReserveCronRunParams,
-    SettleCronRunParams, UpdateCronJobParams,
+    UpdateCronJobParams,
 };
 
 #[derive(Clone, Debug)]
@@ -1040,112 +1040,6 @@ impl ICronRepository for SqliteCronRepository {
         .await?;
         tx.commit().await?;
         Ok(row)
-    }
-
-    async fn settle_run(
-        &self,
-        user_id: &str,
-        params: &SettleCronRunParams,
-    ) -> Result<bool, DbError> {
-        UserId::parse(user_id)
-            .map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
-        CronJobRunId::parse(&params.cron_job_run_id)
-            .map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
-        if !matches!(params.status.as_str(), "ok" | "error" | "skipped" | "missed") {
-            return Err(DbError::Conflict(format!(
-                "invalid cron run terminal status '{}'",
-                params.status
-            )));
-        }
-        if let Some(conversation_id) = params.conversation_id.as_deref() {
-            ConversationId::parse(conversation_id)
-                .map_err(|error| DbError::Conflict(format!("invalid conversation id: {error}")))?;
-        }
-
-        let mut tx = self.pool.begin().await?;
-        let current = sqlx::query_as::<_, CronRunReservationRow>(
-            "SELECT reservation.* FROM cron_run_reservations reservation \
-             JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
-             WHERE reservation.cron_job_run_id = ? AND job.user_id = ?",
-        )
-        .bind(&params.cron_job_run_id)
-        .bind(user_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| DbError::NotFound(format!("cron run '{}'", params.cron_job_run_id)))?;
-        if current.status != "reserved" {
-            tx.commit().await?;
-            return Ok(false);
-        }
-        if current.job_projection_state != "pending" {
-            return Err(DbError::Conflict(
-                "legacy cron run projection is unknowable and cannot be settled by the current protocol"
-                    .to_owned(),
-            ));
-        }
-        if let (Some(existing), Some(requested)) = (
-            current.conversation_id.as_deref(),
-            params.conversation_id.as_deref(),
-        ) && existing != requested
-        {
-            return Err(DbError::Conflict(
-                "cron run settlement targets a different conversation".to_owned(),
-            ));
-        }
-
-        let settled = sqlx::query(
-            "UPDATE cron_run_reservations \
-             SET status = ?, conversation_id = COALESCE(conversation_id, ?), \
-                 result_error = ?, updated_at_ms = ?, settled_at_ms = ?, \
-                 job_projection_state = 'applied', job_projected_at_ms = ? \
-             WHERE cron_job_run_id = ? AND status = 'reserved' \
-               AND job_projection_state = 'pending'",
-        )
-        .bind(&params.status)
-        .bind(&params.conversation_id)
-        .bind(&params.result_error)
-        .bind(params.now)
-        .bind(params.now)
-        .bind(params.now)
-        .bind(&params.cron_job_run_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-            == 1;
-        if !settled {
-            tx.commit().await?;
-            return Ok(false);
-        }
-
-        sqlx::query(
-            "INSERT INTO cron_job_runs \
-                (cron_job_run_id, cron_job_id, executed_at_ms, status, created_at_ms) \
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(&params.cron_job_run_id)
-        .bind(&current.cron_job_id)
-        .bind(params.now)
-        .bind(&params.status)
-        .bind(params.now)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "DELETE FROM cron_job_runs \
-             WHERE cron_job_id = ? \
-               AND id NOT IN (\
-                   SELECT id FROM cron_job_runs \
-                   WHERE cron_job_id = ? \
-                   ORDER BY executed_at_ms DESC, created_at_ms DESC, id DESC \
-                   LIMIT ?\
-               )",
-        )
-        .bind(&current.cron_job_id)
-        .bind(&current.cron_job_id)
-        .bind(CRON_RUN_HISTORY_LIMIT)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(true)
     }
 
     async fn finalize_run_with_job_projection(

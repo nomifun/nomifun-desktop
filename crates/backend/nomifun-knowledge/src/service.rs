@@ -3765,25 +3765,13 @@ impl KnowledgeService {
         })
     }
 
-    /// Resolve conversation/terminal mounts exclusively through the canonical
-    /// workpath binding. The session-kind/id parameters remain in the method
-    /// shape for callers outside this crate, but v3 never reads per-session
-    /// binding rows as a fallback.
-    pub async fn ensure_mounts_for_session(
-        &self,
-        workpath: &str,
-        _session_kind: &str,
-        _session_id: &str,
-        workspace: &Path,
-    ) -> MountOutcome {
-        let key = workpath_key(workpath);
-        self.ensure_mounts_for_target(WORKPATH_BINDING_KIND, &key, workspace).await
-    }
-
     /// Synchronize workspace mounts for a target according to its binding.
     /// Deleted/missing bases are skipped (no FK by design); a disabled or
     /// empty binding clears previously created mounts. Never fails the
     /// session start — errors degrade to an empty outcome with warnings.
+    /// Conversation/terminal mounts resolve exclusively through the canonical
+    /// workpath binding (`WORKPATH_BINDING_KIND` + `workpath_key`); v3 never
+    /// reads per-session binding rows as a fallback.
     pub async fn ensure_mounts_for_target(&self, kind: &str, target_id: &str, workspace: &Path) -> MountOutcome {
         // Safety guard: when the workspace is the backend data root (or one
         // of its ancestors), the mount sync / legacy cleanup would run their
@@ -3979,22 +3967,6 @@ impl KnowledgeService {
         Ok(hits)
     }
 
-    /// Drop search-cache entries whose files no longer exist (e.g. after a base
-    /// delete). Off the hot path — the size cap already bounds waste.
-    pub fn prune_search_cache(&self) {
-        let mut guard = self.search_cache.write().unwrap_or_else(|e| e.into_inner());
-        let mut freed = 0usize;
-        guard.entries.retain(|path, doc| {
-            if path.exists() {
-                true
-            } else {
-                freed += doc.bytes;
-                false
-            }
-        });
-        guard.total_bytes = guard.total_bytes.saturating_sub(freed);
-    }
-
     /// Empty the search content cache (forced refresh / test isolation).
     pub fn clear_search_cache(&self) {
         let mut guard = self.search_cache.write().unwrap_or_else(|e| e.into_inner());
@@ -4014,7 +3986,7 @@ impl KnowledgeService {
     ///   registered base IDs (broadest fallback — the model still cannot widen
     ///   scope beyond what is registered).
     /// - Otherwise → returns the `kb_ids` from the workpath binding (same set
-    ///   `ensure_mounts_for_session` would mount).
+    ///   `ensure_mounts_for_target` would mount).
     ///
     /// Used by [`crate::mcp_server`] to resolve the search scope at runtime
     /// from the caller's cwd rather than relying on baked `kb_ids`.
@@ -4032,7 +4004,7 @@ impl KnowledgeService {
             return self.all_base_ids().await;
         }
 
-        // Look up the workpath binding — same row `ensure_mounts_for_session` uses.
+        // Look up the workpath binding — same row `ensure_mounts_for_target` uses.
         match self.get_binding(WORKPATH_BINDING_KIND, &key).await {
             Ok(binding) if binding.enabled && !binding.kb_ids.is_empty() => {
                 binding.kb_ids
@@ -10415,7 +10387,7 @@ mod tests {
         .await;
 
         let outcome = service
-            .ensure_mounts_for_session(&key, "conversation", TEST_CONVERSATION_ID, &ws)
+            .ensure_mounts_for_target(WORKPATH_BINDING_KIND, &key, &ws)
             .await;
         assert_eq!(outcome.mounts.len(), 1, "{:?}", outcome.mounts);
         assert_eq!(outcome.mounts[0].knowledge_base_id.to_string(), kb_workpath);
@@ -10439,14 +10411,14 @@ mod tests {
         .await;
 
         let outcome = service
-            .ensure_mounts_for_session(&key, "conversation", TEST_CONVERSATION_ID, &ws)
+            .ensure_mounts_for_target(WORKPATH_BINDING_KIND, &key, &ws)
             .await;
         assert!(outcome.mounts.is_empty(), "{:?}", outcome.mounts);
 
         // Terminal sessions follow the same workpath-only rule.
         let _kb_term = bind_new_base(&service, "终端库", "terminal", TEST_TERMINAL_ID_2).await;
         let outcome = service
-            .ensure_mounts_for_session(&key, "terminal", TEST_TERMINAL_ID_2, &ws)
+            .ensure_mounts_for_target(WORKPATH_BINDING_KIND, &key, &ws)
             .await;
         assert!(outcome.mounts.is_empty(), "{:?}", outcome.mounts);
     }
@@ -10474,7 +10446,7 @@ mod tests {
             .unwrap();
 
         let outcome = service
-            .ensure_mounts_for_session(&key, "conversation", TEST_CONVERSATION_ID, &ws)
+            .ensure_mounts_for_target(WORKPATH_BINDING_KIND, &key, &ws)
             .await;
         assert!(outcome.mounts.is_empty(), "{:?}", outcome.mounts);
     }
@@ -10496,12 +10468,7 @@ mod tests {
 
         let kb = bind_new_base(&service, "默认库", WORKPATH_BINDING_KIND, DEFAULT_WORKPATH_KEY).await;
         let outcome = service
-            .ensure_mounts_for_session(
-                &key,
-                "conversation",
-                TEST_CONVERSATION_ID,
-                &temp_ws,
-            )
+            .ensure_mounts_for_target(WORKPATH_BINDING_KIND, &key, &temp_ws)
             .await;
         assert_eq!(outcome.mounts.len(), 1, "{:?}", outcome.mounts);
         assert_eq!(outcome.mounts[0].knowledge_base_id.to_string(), kb);
@@ -10526,14 +10493,9 @@ mod tests {
         assert!(binding.enabled);
         assert_eq!(binding.kb_ids, vec![KnowledgeBaseId::parse(kb.clone()).unwrap()]);
 
-        // The session lookup normalizes its own input too.
+        // The mount lookup normalizes its own input too.
         let outcome = service
-            .ensure_mounts_for_session(
-                &format!("{}/", ws.display()),
-                "conversation",
-                TEST_CONVERSATION_ID,
-                &ws,
-            )
+            .ensure_mounts_for_target(WORKPATH_BINDING_KIND, &format!("{}/", ws.display()), &ws)
             .await;
         assert_eq!(outcome.mounts.len(), 1, "{:?}", outcome.mounts);
         assert_eq!(outcome.mounts[0].knowledge_base_id.to_string(), kb);

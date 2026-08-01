@@ -6,7 +6,7 @@
 //! exact v3 contract, rotates the storage generation, and installs a matching
 //! dataset receipt before publishing the destination directory.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -21,7 +21,6 @@ use nomifun_common::{
     now_ms, validate_uuidv7,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Arguments, Row, SqlitePool, TypeInfo, ValueRef};
@@ -507,13 +506,6 @@ pub enum BackupError {
     UnsafeSource(String),
     #[error("backup dataset lifecycle failed: {0}")]
     DatasetLifecycle(String),
-    #[error("backup import conflict for {entity_type} {entity_id}")]
-    Conflict {
-        entity_type: String,
-        entity_id: String,
-    },
-    #[error("backup object graph is invalid: {0}")]
-    InvalidGraph(String),
 }
 
 /// Create a database-only offline directory bundle.
@@ -727,42 +719,6 @@ pub struct RestoreOutcome {
 /// complete directory is installed with one rename. Entity IDs are preserved,
 /// while storage-generation is deliberately rotated so browser-side caches
 /// cannot bind stale state to the restored graph.
-pub async fn restore_backup_bundle(
-    bundle_dir: &Path,
-    destination_database: &Path,
-    destination_generation_file: &Path,
-) -> Result<RestoreOutcome, BackupError> {
-    if path_exists_no_follow(destination_database)?
-        || path_exists_no_follow(destination_generation_file)?
-    {
-        return Err(BackupError::Io(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "restore database/generation destination already exists",
-        )));
-    }
-    let parent = destination_database
-        .parent()
-        .ok_or_else(|| BackupError::InvalidManifest("database has no parent directory".into()))?;
-    if destination_generation_file.parent() != Some(parent) {
-        return Err(BackupError::InvalidManifest(
-            "database and generation file must share one destination directory".into(),
-        ));
-    }
-    if destination_database.file_name().and_then(|name| name.to_str())
-        != Some("nomifun-backend.db")
-        || destination_generation_file
-            .file_name()
-            .and_then(|name| name.to_str())
-            != Some("storage-generation")
-    {
-        return Err(BackupError::InvalidManifest(
-            "complete restore requires canonical nomifun-backend.db and storage-generation paths"
-                .into(),
-        ));
-    }
-    restore_backup_data_dir(bundle_dir, parent).await
-}
-
 pub async fn restore_backup_data_dir(
     bundle_dir: &Path,
     destination_data_dir: &Path,
@@ -1101,231 +1057,6 @@ fn sqlite_row_value(row: &sqlx::sqlite::SqliteRow, index: usize) -> Result<Resto
 
 fn quote_sqlite_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-/// One portable logical entity record. `entity_id` is the stable business
-/// graph ID; it is not a SQLite row ID. `payload` contains the entity's own
-/// fields and `references` declares every durable entity-ID edge by JSON
-/// Pointer.
-///
-/// A reference value may be either:
-/// - a single canonical entity-ID string; or
-/// - an array/object containing canonical entity-ID strings at any depth.
-///
-/// Clone preserves the same business IDs and declared reference values.
-/// SQLite technical IDs are outside this portable wire format and are
-/// regenerated only when records are materialized into a fresh database.
-/// Unknown fields and non-v3 IDs are rejected.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortableEntity {
-    pub entity_type: String,
-    pub entity_id: String,
-    pub payload: Value,
-    #[serde(default)]
-    pub references: BTreeMap<String, Value>,
-}
-
-impl PortableEntity {
-    fn validate(&self) -> Result<(), BackupError> {
-        validate_runtime_entity_id(&self.entity_id)?;
-        if !self.payload.is_object() {
-            return Err(BackupError::InvalidGraph(format!(
-                "{} {} payload must be a JSON object",
-                self.entity_type, self.entity_id
-            )));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct PortableGraph {
-    pub entities: Vec<PortableEntity>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImportMode {
-    Restore,
-    Merge,
-    Clone,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ImportReport {
-    pub inserted: usize,
-    pub skipped_identical: usize,
-    pub remap: BTreeMap<String, String>,
-}
-
-/// In-memory catalog used by the offline import planner and its tests.
-///
-/// A future command can persist the planned records in one database
-/// transaction; the collision and graph-rewrite rules do not depend on a
-/// particular repository implementation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct PortableCatalog {
-    entities: BTreeMap<String, PortableEntity>,
-}
-
-impl PortableCatalog {
-    pub fn get(&self, entity_id: &str) -> Option<&PortableEntity> {
-        self.entities.get(entity_id)
-    }
-
-    pub fn len(&self) -> usize {
-        self.entities.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entities.is_empty()
-    }
-
-    pub fn import(
-        &mut self,
-        graph: &PortableGraph,
-        mode: ImportMode,
-    ) -> Result<ImportReport, BackupError> {
-        validate_graph(graph)?;
-        match mode {
-            ImportMode::Restore | ImportMode::Merge => self.preserve_ids(graph),
-            ImportMode::Clone => self.clone_graph(graph),
-        }
-    }
-
-    fn preserve_ids(&mut self, graph: &PortableGraph) -> Result<ImportReport, BackupError> {
-        // Plan first so a late conflict cannot partially mutate the catalog.
-        for entity in &graph.entities {
-            if let Some(existing) = self.entities.get(&entity.entity_id)
-                && existing != entity
-            {
-                return Err(BackupError::Conflict {
-                    entity_type: entity.entity_type.clone(),
-                    entity_id: entity.entity_id.clone(),
-                });
-            }
-        }
-        let mut report = ImportReport::default();
-        for entity in &graph.entities {
-            if self.entities.contains_key(&entity.entity_id) {
-                report.skipped_identical += 1;
-            } else {
-                self.entities
-                    .insert(entity.entity_id.clone(), entity.clone());
-                report.inserted += 1;
-            }
-        }
-        Ok(report)
-    }
-
-    fn clone_graph(&mut self, graph: &PortableGraph) -> Result<ImportReport, BackupError> {
-        // Clone must not mint a new business identity. UUIDv7 is the logical
-        // identity; only SQLite's technical `id` is regenerated by database
-        // restore. A collision in this catalog is therefore ambiguous and
-        // fails closed instead of silently creating a second business object.
-        for entity in &graph.entities {
-            if self.entities.contains_key(&entity.entity_id) {
-                return Err(BackupError::Conflict {
-                    entity_type: entity.entity_type.clone(),
-                    entity_id: entity.entity_id.clone(),
-                });
-            }
-        }
-        for entity in &graph.entities {
-            self.entities
-                .insert(entity.entity_id.clone(), entity.clone());
-        }
-        Ok(ImportReport {
-            inserted: graph.entities.len(),
-            skipped_identical: 0,
-            remap: BTreeMap::new(),
-        })
-    }
-}
-
-fn validate_graph(graph: &PortableGraph) -> Result<(), BackupError> {
-    let mut ids = BTreeSet::new();
-    for entity in &graph.entities {
-        entity.validate()?;
-        if !ids.insert(entity.entity_id.as_str()) {
-            return Err(BackupError::InvalidGraph(format!(
-                "duplicate entity_id {}",
-                entity.entity_id
-            )));
-        }
-    }
-    for entity in &graph.entities {
-        for (pointer, reference) in &entity.references {
-            if !pointer.starts_with('/') {
-                return Err(BackupError::InvalidGraph(format!(
-                    "{} {} reference key {pointer:?} must be an RFC 6901 JSON Pointer",
-                    entity.entity_type, entity.entity_id,
-                )));
-            }
-            validate_reference_value(entity, pointer, reference)?;
-            let payload_reference = entity.payload.pointer(pointer).ok_or_else(|| {
-                BackupError::InvalidGraph(format!(
-                    "{} {} declares reference pointer {pointer}, but payload has no such value",
-                    entity.entity_type, entity.entity_id
-                ))
-            })?;
-            if payload_reference != reference {
-                return Err(BackupError::InvalidGraph(format!(
-                    "{} {} reference {pointer} disagrees with its payload value",
-                    entity.entity_type, entity.entity_id
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_reference_value(
-    entity: &PortableEntity,
-    pointer: &str,
-    value: &Value,
-) -> Result<(), BackupError> {
-    let mut leaf_count = 0usize;
-    visit_reference_strings(value, &mut |target| {
-        leaf_count += 1;
-        validate_runtime_entity_id(target).map_err(|_| {
-            BackupError::InvalidGraph(format!(
-                "{} {} has invalid entity reference {target:?} at {pointer}",
-                entity.entity_type, entity.entity_id
-            ))
-        })
-    })?;
-    if leaf_count == 0 {
-        return Err(BackupError::InvalidGraph(format!(
-            "{} {} reference {pointer} contains no entity IDs",
-            entity.entity_type, entity.entity_id
-        )));
-    }
-    Ok(())
-}
-
-fn visit_reference_strings(
-    value: &Value,
-    visitor: &mut impl FnMut(&str) -> Result<(), BackupError>,
-) -> Result<(), BackupError> {
-    match value {
-        Value::String(target) => visitor(target),
-        Value::Array(values) => {
-            for value in values {
-                visit_reference_strings(value, visitor)?;
-            }
-            Ok(())
-        }
-        Value::Object(values) => {
-            for value in values.values() {
-                visit_reference_strings(value, visitor)?;
-            }
-            Ok(())
-        }
-        _ => Err(BackupError::InvalidGraph(
-            "declared references may contain only strings, arrays, and objects".into(),
-        )),
-    }
 }
 
 fn sibling_staging_path(destination: &Path) -> PathBuf {
@@ -2147,15 +1878,6 @@ fn remove_staging_dir(path: &Path) -> Result<(), BackupError> {
         )));
     }
     fs::remove_dir_all(path)?;
-    Ok(())
-}
-
-fn validate_runtime_entity_id(value: &str) -> Result<(), BackupError> {
-    validate_uuidv7(value).map_err(|error| {
-        BackupError::InvalidGraph(format!(
-            "entity ID must be a canonical lowercase UUIDv7 (prefixed IDs are rejected): {value} ({error})"
-        ))
-    })?;
     Ok(())
 }
 

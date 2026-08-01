@@ -19,17 +19,18 @@ use nomifun_common::{
     AdaptationPolicy, AgentDelegationTask, AgentExecutionActor, AgentExecutionActorType,
     AgentExecutionEventKind, AgentExecutionId, AgentExecutionReceipt, AgentExecutionStatus,
     AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionStepKind, PlanGate,
-    ProviderId, StepFailurePolicy,
+    StepFailurePolicy,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
+use crate::id_schema::ModelRefParam;
 use crate::registry::{
     Capability, CapabilityMeta, DangerTier, Decision, Surface, default_decision,
 };
-use crate::server::{ok, require_user};
+use crate::server::ok;
 use crate::provider_support;
 
 const MAX_EXPLICIT_STEPS: usize = 16;
@@ -42,28 +43,6 @@ where
     nomifun_common::validate_uuidv7(&value)
         .map(|_| value)
         .map_err(serde::de::Error::custom)
-}
-
-fn deserialize_model_name<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if value.is_empty() || value.trim() != value {
-        return Err(serde::de::Error::custom(
-            "model must be a non-empty trimmed natural key",
-        ));
-    }
-    Ok(value)
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ModelRefParam {
-    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
-    provider_id: ProviderId,
-    #[serde(deserialize_with = "deserialize_model_name")]
-    model: String,
 }
 
 impl From<ModelRefParam> for ExecutionModelRef {
@@ -770,10 +749,7 @@ fn delegate_receipt(
 }
 
 async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams) -> Value {
-    let owner_id = match require_user(&ctx) {
-        Ok(value) => value.to_owned(),
-        Err(error) => return error,
-    };
+    let owner_id = ctx.user_id.as_str().to_owned();
     let (goal, work_dir, model_pool, plan_gate, adaptation_policy, max_parallel, steps) =
         match params {
             DelegateParams::Planned {
@@ -1011,10 +987,7 @@ async fn execution_get(
     ctx: CallerCtx,
     params: ExecutionGetParams,
 ) -> Value {
-    let owner_id = match require_user(&ctx) {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
+    let owner_id = ctx.user_id.as_str();
     if let Err(error) = authorize_execution_caller(&deps, &ctx, &params.execution_id).await {
         return json!({"error":error.to_string()});
     }
@@ -1033,10 +1006,7 @@ async fn execution_update(
     ctx: CallerCtx,
     params: ExecutionUpdateParams,
 ) -> Value {
-    let owner_id = match require_user(&ctx) {
-        Ok(value) => value.to_owned(),
-        Err(error) => return error,
-    };
+    let owner_id = ctx.user_id.as_str().to_owned();
     if let Some(gated) = update_operation_gate(&params, ctx.surface()) {
         return gated;
     }

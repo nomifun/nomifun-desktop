@@ -290,15 +290,6 @@ impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
         Ok(())
     }
 
-    fn terminate_and_wait(
-        &self,
-        conversation_id: &str,
-        reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = self.terminate(conversation_id, reason);
-        Box::pin(std::future::ready(()))
-    }
-
     fn terminate_all(&self) {
         self.agents.lock().unwrap().clear();
     }
@@ -316,8 +307,6 @@ impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
 /// DB, a scripted agent, and a recording channel sender.
 struct Harness {
     message_tx: mpsc::Sender<ChannelIncoming>,
-    /// Held so the message loop's confirm branch stays open.
-    _confirm_tx: mpsc::Sender<(String, String)>,
     recorder: Arc<MessageRecorder>,
     channel_repo: Arc<dyn IChannelRepository>,
     conversation_svc: Arc<ConversationService>,
@@ -443,12 +432,10 @@ async fn build_harness() -> Harness {
     );
 
     let (message_tx, message_rx) = mpsc::channel(16);
-    let (confirm_tx, confirm_rx) = mpsc::channel(16);
-    tokio::spawn(message_loop.run(message_rx, confirm_rx));
+    tokio::spawn(message_loop.run(message_rx));
 
     Harness {
         message_tx,
-        _confirm_tx: confirm_tx,
         recorder,
         channel_repo,
         conversation_svc,

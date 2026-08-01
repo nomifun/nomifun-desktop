@@ -1,6 +1,6 @@
 # Current Technical Status
 
-Updated: 2026-06-24.
+Updated: 2026-08-01.
 
 This file is a compact current-state snapshot. Historical P0-P5 migration notes
 were removed from the active status because they described the 2026-06-08
@@ -10,8 +10,9 @@ transition plan, not the product shape in this repository now.
 
 - One Cargo workspace:
   - `crates/agent/*`: 15 `nomi-*` crates.
-  - `crates/backend/*`: 29 `nomifun-*` crates.
-  - `crates/shared/*`: 2 cross-layer crates.
+  - `crates/backend/*`: 34 `nomifun-*` crates.
+  - `crates/shared/*`: 3 cross-layer crates (`nomi-process-runtime`,
+    `nomi-redact`, `nomifun-net`).
   - `apps/web` and `apps/desktop`.
 - One frontend: `ui/`, a React 19 + Vite SPA.
 - Two host modes:
@@ -30,14 +31,20 @@ The current frontend route map lives in
 - `/guid` and `/conversation/:id`
 - `/terminal-new` and `/terminal/:id`
 - `/models`
-- `/assistants`
 - `/mcp`
 - `/open-capabilities`
+- `/browser`
+- `/presets`
+- `/skills`
 - `/requirements`, `/requirements/extensions`, `/requirements/sources`
-- `/scheduled` and `/scheduled/:job_id`
-- `/nomi`
+- `/scheduled` and `/scheduled/:cron_job_id`
+- `/nomi` and `/companion`
+- `/customer-service` and `/customer-service/:cs_agent_id`
 - `/knowledge` and `/knowledge/:id`
-- `/settings/system` plus system sub-sections routed through that page
+- `/assets`
+- `/workshop` and `/workshop/:id`
+- `/settings/system` and `/settings/execution-engines`, plus system
+  sub-sections routed through the system settings page
 
 Several legacy paths still exist only as redirects. Do not document them as
 primary navigation.

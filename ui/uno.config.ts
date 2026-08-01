@@ -81,17 +81,7 @@ const aouColors = {
 
 // ==================== UI 组件专用颜色 / UI Component Specific Colors ====================
 const componentColors = {
-  'message-user': 'var(--message-user-bg)',
   'message-tips': 'var(--message-tips-bg)',
-  'workspace-btn': 'var(--workspace-btn-bg)',
-  'terminal-surface': 'var(--terminal-surface-bg)',
-  'terminal-border': 'var(--terminal-border)',
-};
-
-// ==================== 特殊颜色 / Special Colors ====================
-const specialColors = {
-  fill: 'var(--fill)',
-  inverse: 'var(--inverse)',
 };
 
 export default defineConfig({
@@ -138,28 +128,13 @@ export default defineConfig({
       },
     ],
 
-    // Arco Design 官方白色和黑色
-    // Arco Design white and black: bg-color-white, text-color-white, bg-color-black, text-color-black
-    ['bg-color-white', { 'background-color': 'var(--color-white)' }],
-    ['text-color-white', { color: 'var(--color-white)' }],
-    ['bg-color-black', { 'background-color': 'var(--color-black)' }],
-    ['text-color-black', { color: 'var(--color-black)' }],
-
-    // Arco Design 对话框/弹出层专用背景色
-    // Arco Design popup/dialog background color: bg-popup
-    ['bg-popup', { 'background-color': 'var(--color-bg-popup)' }],
+    // Arco Design 对话框/弹出层专用背景色由主题变量直接消费（var(--color-bg-popup)），无工具类
 
     // 项目自定义颜色 / Project custom colors
     ['bg-dialog-fill-0', { 'background-color': 'var(--dialog-fill-0)' }],
     ['text-0', { color: 'var(--text-0)' }],
     ['text-white', { color: 'var(--text-white)' }],
     ['bg-fill-0', { 'background-color': 'var(--fill-0)' }],
-    ['bg-fill-white-to-black', { 'background-color': 'var(--fill-white-to-black)' }],
-    ['border-special', { 'border-color': 'var(--border-special)' }],
-
-    // Wiggle animation for attention indicators (e.g. pending permission badge)
-    // Shakes briefly then pauses — 3s cycle, active in first ~20%
-    ['animate-wiggle', { animation: 'wiggle 3s ease-in-out infinite' }],
   ],
   // Preflights - Global base styles 全局基础样式
   preflights: [
@@ -168,13 +143,6 @@ export default defineConfig({
         * {
           /* Set default text color to follow theme 所有元素默认使用主题文字颜色 */
           color: inherit;
-        }
-        @keyframes wiggle {
-          0%, 20%, 100% { transform: rotate(0deg); }
-          4% { transform: rotate(8deg); }
-          8% { transform: rotate(-8deg); }
-          12% { transform: rotate(6deg); }
-          16% { transform: rotate(-4deg); }
         }
       `,
     },
@@ -193,7 +161,6 @@ export default defineConfig({
       ...brandColors,
       ...aouColors,
       ...componentColors,
-      ...specialColors,
     },
   },
 });

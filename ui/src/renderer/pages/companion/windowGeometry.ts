@@ -16,22 +16,21 @@ export interface GeomSize {
   height: number;
 }
 
-const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+export const clamp = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
-const pickMostOverlapping = (rect: GeomRect, monitors: GeomRect[]): GeomRect | null => {
-  let best: GeomRect | null = null;
-  let bestArea = 0;
-  for (const m of monitors) {
-    const w = Math.min(rect.x + rect.width, m.x + m.width) - Math.max(rect.x, m.x);
-    const h = Math.min(rect.y + rect.height, m.y + m.height) - Math.max(rect.y, m.y);
-    const area = Math.max(0, w) * Math.max(0, h);
-    if (area > bestArea) {
-      bestArea = area;
-      best = m;
-    }
-  }
-  return best ?? monitors[0] ?? null;
-};
+/** Intersection area of two rects (0 when disjoint). */
+export const overlapArea = (a: GeomRect, b: GeomRect): number =>
+  Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) *
+  Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+
+/**
+ * Pick the item whose bounds overlap `anchor` the most. Ties go to the earlier
+ * item; when nothing overlaps the first item is returned; empty input → null.
+ */
+export function pickHost<T>(anchor: GeomRect, items: T[], boundsOf: (item: T) => GeomRect): T | null {
+  if (items.length === 0) return null;
+  return items.reduce((best, item) => (overlapArea(anchor, boundsOf(item)) > overlapArea(anchor, boundsOf(best)) ? item : best));
+}
 
 /**
  * Placement for an in-place companion-window resize: the bottom edge stays put and
@@ -45,7 +44,7 @@ const pickMostOverlapping = (rect: GeomRect, monitors: GeomRect[]): GeomRect | n
 export function placeResizedWindow(oldRect: GeomRect, newSize: GeomSize, monitors: GeomRect[]): { x: number; y: number } {
   let x = oldRect.x + Math.round((oldRect.width - newSize.width) / 2);
   let y = oldRect.y + (oldRect.height - newSize.height);
-  const monitor = pickMostOverlapping(oldRect, monitors);
+  const monitor = pickHost(oldRect, monitors, (m) => m);
   if (monitor) {
     x = clamp(x, monitor.x, monitor.x + monitor.width - newSize.width);
     y = clamp(y, monitor.y, monitor.y + monitor.height - newSize.height);

@@ -198,13 +198,6 @@ export interface CreateTaskBody {
   inputs: CreationInput[];
 }
 
-/** `GET /api/creation/tasks` query params. */
-export interface ListTasksQuery {
-  canvas_id?: CanvasId;
-  status?: CreationTaskStatus;
-  limit?: number;
-}
-
 // ─── Response envelopes ──────────────────────────────────────────────────────
 
 /** `GET /api/workshop/canvases/{canvas_id}` response. */
@@ -421,15 +414,4 @@ export interface WorkshopCanvasDoc {
   background: WorkshopCanvasBackground;
   nodes: WorkshopNode[];
   edges: WorkshopEdge[];
-}
-
-/** Factory for a fresh, empty canvas document. */
-export function createEmptyCanvasDoc(): WorkshopCanvasDoc {
-  return {
-    schema: WORKSHOP_DOC_SCHEMA,
-    viewport: { x: 0, y: 0, zoom: 1 },
-    background: 'dots',
-    nodes: [],
-    edges: [],
-  };
 }

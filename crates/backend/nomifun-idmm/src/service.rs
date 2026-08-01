@@ -69,12 +69,17 @@ pub struct ProbeDeps {
 }
 
 impl ProbeDeps {
-    /// Read the persisted per-session config (default when none / store absent).
-    pub async fn read_config(&self, kind: IdmmTargetKind, target_id: &str) -> Result<IdmmConfig, AppError> {
+    /// Read the persisted per-session config, `None` when the target exists
+    /// without a saved config (or the stored JSON does not parse).
+    pub async fn read_config_opt(
+        &self,
+        kind: IdmmTargetKind,
+        target_id: &str,
+    ) -> Result<Option<IdmmConfig>, AppError> {
         let raw: Option<serde_json::Value> = match kind {
             IdmmTargetKind::Conversation => {
                 let Some(row) = self.conversation_repo.get(validate_target_id(kind, target_id)?).await? else {
-                    return Ok(IdmmConfig::default());
+                    return Ok(None);
                 };
                 let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap_or_default();
                 extra.get("idmm").cloned()
@@ -89,7 +94,12 @@ impl ProbeDeps {
                 None => None,
             },
         };
-        Ok(raw.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default())
+        Ok(raw.and_then(|v| serde_json::from_value(v).ok()))
+    }
+
+    /// Read the persisted per-session config (default when none / store absent).
+    pub async fn read_config(&self, kind: IdmmTargetKind, target_id: &str) -> Result<IdmmConfig, AppError> {
+        Ok(self.read_config_opt(kind, target_id).await?.unwrap_or_default())
     }
 
     /// Resolve the target's authoritative persisted owner. This is shared by
@@ -288,31 +298,7 @@ impl IdmmService {
         kind: IdmmTargetKind,
         target_id: &str,
     ) -> Result<Option<IdmmConfig>, AppError> {
-        let raw: Option<serde_json::Value> = match kind {
-            IdmmTargetKind::Conversation => {
-                let Some(row) = self
-                    .probe_deps
-                    .conversation_repo
-                    .get(validate_target_id(kind, target_id)?)
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap_or_default();
-                extra.get("idmm").cloned()
-            }
-            IdmmTargetKind::Terminal => match self
-                .probe_deps
-                .terminal_driver
-                .read_idmm(validate_target_id(kind, target_id)?)
-                .await
-                .map_err(|e| AppError::Internal(format!("read_idmm failed: {e}")))?
-            {
-                Some(s) => serde_json::from_str(&s).ok(),
-                None => None,
-            },
-        };
-        Ok(raw.and_then(|v| serde_json::from_value(v).ok()))
+        self.probe_deps.read_config_opt(kind, target_id).await
     }
 
     /// Assemble the live state (config + manager runtime + backup resolvability).

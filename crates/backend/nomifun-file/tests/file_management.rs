@@ -1,8 +1,8 @@
 //! Integration tests for file management operations (task 7.5).
 //!
-//! Covers `copy_files_to_workspace`, `remove_entry`, `rename_entry`, and
-//! `create_temp_file` through the `IFileService` trait, including path
-//! validation, event broadcast, and cache invalidation.
+//! Covers `copy_files_to_workspace`, `remove_entry`, and `rename_entry`
+//! through the `IFileService` trait, including path validation, event
+//! broadcast, and cache invalidation.
 
 use std::fs;
 use std::sync::{Arc, Mutex};
@@ -388,76 +388,4 @@ async fn rename_entry_rejects_path_separator_in_name() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("path separator"), "got: {err}");
-}
-
-// -----------------------------------------------------------------------
-// createTempFile
-// -----------------------------------------------------------------------
-
-#[tokio::test]
-async fn create_temp_file_normal() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let svc = make_service(dir.path());
-    let path = svc.create_temp_file("test.txt").await.unwrap();
-
-    assert!(path.contains("test.txt"));
-    assert!(std::path::Path::new(&path).exists());
-}
-
-#[tokio::test]
-async fn create_temp_file_is_empty() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let svc = make_service(dir.path());
-    let path = svc.create_temp_file("empty.txt").await.unwrap();
-
-    let content = fs::read_to_string(&path).unwrap();
-    assert!(content.is_empty());
-}
-
-#[tokio::test]
-async fn create_temp_file_path_in_nomifun_dir() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let svc = make_service(dir.path());
-    let path = svc.create_temp_file("check.txt").await.unwrap();
-
-    assert!(path.contains("nomifun"), "temp path should be under nomifun dir");
-}
-
-#[tokio::test]
-async fn create_temp_file_rejects_traversal() {
-    let dir = tempfile::tempdir().unwrap();
-    let svc = make_service(dir.path());
-
-    let result = svc.create_temp_file("../../malicious.txt").await;
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("traversal"), "expected traversal error, got: {err}");
-}
-
-#[tokio::test]
-async fn create_temp_file_rejects_path_separator() {
-    let dir = tempfile::tempdir().unwrap();
-    let svc = make_service(dir.path());
-
-    let result = svc.create_temp_file("sub/file.txt").await;
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("path separator"),
-        "expected path separator error, got: {err}"
-    );
-}
-
-#[tokio::test]
-async fn create_temp_file_rejects_null_byte() {
-    let dir = tempfile::tempdir().unwrap();
-    let svc = make_service(dir.path());
-
-    let result = svc.create_temp_file("evil\0name.txt").await;
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("traversal"), "expected traversal error, got: {err}");
 }

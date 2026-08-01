@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use reqwest::header::HeaderMap;
 use serde_json::Value;
+use tokio::sync::mpsc;
+
+use nomi_types::llm::LlmEvent;
 
 use super::ProviderError;
 use super::anthropic_shared::StreamOutcome;
@@ -121,6 +124,70 @@ pub fn evaluate_outcome(
                 Err(e)
             }
         }
+    }
+}
+
+/// Drive a completed stream outcome to resolution, retrying empty-content
+/// failures with exponential backoff. Shared by all providers' spawned
+/// stream tasks.
+///
+/// - `Ok` — nothing to do.
+/// - `FailedPartial` — content already reached the consumer; replaying
+///   would duplicate it, so the error is surfaced immediately.
+/// - `FailedEmpty` — nothing was emitted yet; if the error is retryable,
+///   re-send the request via `send` and re-process the response via
+///   `process`, up to `MAX_STREAM_RETRIES` times.
+pub async fn finish_stream_with_retry<S, SFut, P, PFut>(
+    outcome: StreamOutcome,
+    tx: &mpsc::Sender<LlmEvent>,
+    send: S,
+    mut process: P,
+) where
+    S: Fn() -> SFut,
+    SFut: Future<Output = Result<reqwest::Response, ProviderError>>,
+    P: FnMut(reqwest::Response) -> PFut,
+    PFut: Future<Output = StreamOutcome>,
+{
+    let initial_err = match outcome {
+        StreamOutcome::Ok => return,
+        StreamOutcome::FailedPartial(e) => {
+            // Content already emitted — replaying would duplicate it.
+            let _ = tx.send(LlmEvent::Error(e.to_string())).await;
+            return;
+        }
+        StreamOutcome::FailedEmpty(e) => e,
+    };
+
+    if !initial_err.is_retryable() {
+        let _ = tx.send(LlmEvent::Error(initial_err.to_string())).await;
+        return;
+    }
+
+    let mut backoff = Duration::from_secs(1);
+    let mut final_err = Some(initial_err);
+    for attempt in 1..=MAX_STREAM_RETRIES {
+        backoff = backoff_sleep(attempt, backoff).await;
+        match send().await {
+            Ok(resp) => match evaluate_outcome(process(resp).await, attempt) {
+                Ok(None) => {
+                    final_err = None;
+                    break;
+                }
+                Ok(Some(e)) => {
+                    final_err = Some(e);
+                    break;
+                }
+                Err(_) => continue,
+            },
+            Err(e) if attempt == MAX_STREAM_RETRIES => {
+                final_err = Some(e);
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    if let Some(err) = final_err {
+        let _ = tx.send(LlmEvent::Error(err.to_string())).await;
     }
 }
 

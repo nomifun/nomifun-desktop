@@ -4,34 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { conversationTarget, type ConversationId, type MessageId } from '@/common/types/ids';
+import { conversationTarget, type ConversationId } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import type { TMessage } from '@/common/chat/chatLib';
-import { uuid, uuidv7 } from '@/common/utils';
-import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
-import SendBox from '@/renderer/components/chat/SendBox';
-import FileAttachButton from '@/renderer/components/media/FileAttachButton';
-import FilePreview from '@/renderer/components/media/FilePreview';
-import HorizontalFileList from '@/renderer/components/media/HorizontalFileList';
-import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
-import { getSendBoxDraftHook, type FileOrFolderItem } from '@/renderer/hooks/chat/useSendBoxDraft';
-import { createSetUploadFile } from '@/renderer/hooks/chat/useSendBoxFiles';
+import { uuid } from '@/common/utils';
+import { getSendBoxDraftHook } from '@/renderer/hooks/chat/useSendBoxDraft';
 import { useSlashCommands } from '@/renderer/hooks/chat/useSlashCommands';
-import { useOpenFileSelector } from '@/renderer/hooks/file/useOpenFileSelector';
-import { useLatestRef } from '@/renderer/hooks/ui/useLatestRef';
-import { useAddOrUpdateMessage, useRemoveMessageByMsgId } from '@/renderer/pages/conversation/Messages/hooks';
-import {
-  shouldEnqueueConversationCommand,
-  useConversationCommandQueue,
-  type ConversationCommandQueueExecution,
-  type ConversationCommandQueueItem,
-} from '@/renderer/pages/conversation/platforms/useConversationCommandQueue';
 import {
   claimInitialMessageDelivery,
   completeInitialMessageDelivery,
-  handleInitialMessageDeliveryFailure,
   persistInitialMessageDelivery,
   quarantineInitialMessageDelivery,
   readAuthorizedInitialMessageDelivery,
@@ -40,33 +22,15 @@ import {
   type PersistedInitialMessage,
 } from '@/renderer/pages/conversation/platforms/initialMessageDelivery';
 import { classifyPublicMessageDelivery } from '@/renderer/pages/conversation/platforms/publicMessageDelivery';
-import { stopConversationAndConfirmRelease } from '@/renderer/pages/conversation/platforms/requestConversationStop';
-import { useAuthoritativeTurnLifecycle } from '@/renderer/pages/conversation/platforms/useAuthoritativeTurnLifecycle';
-import {
-  shouldReleaseStopInteraction,
-  useConversationStopAttemptGuard,
-} from '@/renderer/pages/conversation/platforms/useConversationStopAttemptGuard';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
-import { getConversationRuntimeWorkspaceErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
-import {
-  getConversationRuntimeAuthority,
-  isConversationProcessing,
-} from '@/renderer/pages/conversation/utils/conversationRuntime';
-import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
-import { allSupportedExts, type FileMetadata } from '@/renderer/services/FileService';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
-import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
-import { buildDisplayMessage } from '@/renderer/utils/file/messageFiles';
-import { Message, Tag } from '@arco-design/web-react';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useTranslation } from 'react-i18next';
-
-interface OpenClawDraftData {
-  _type: 'openclaw-gateway';
-  atPath: Array<string | FileOrFolderItem>;
-  content: string;
-  uploadFile: string[];
-}
+import BasicRuntimeSendBox, {
+  type BasicRuntimeDraftHook,
+  type BasicRuntimeSendBoxConfig,
+  type BasicRuntimeSendBoxController,
+  type BasicRuntimeStreamHooks,
+} from '@/renderer/pages/conversation/platforms/BasicRuntimeSendBox';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 
 const useOpenClawSendBoxDraft = getSendBoxDraftHook('openclaw-gateway', {
   _type: 'openclaw-gateway',
@@ -75,205 +39,26 @@ const useOpenClawSendBoxDraft = getSendBoxDraftHook('openclaw-gateway', {
   uploadFile: [],
 });
 
-const EMPTY_AT_PATH: Array<string | FileOrFolderItem> = [];
-const EMPTY_UPLOAD_FILES: string[] = [];
-const OpenClawSendBox: React.FC<{ conversation_id: ConversationId }> = ({ conversation_id }) => {
-  const [workspacePath, setWorkspacePath] = useState('');
-  const { t } = useTranslation();
-  const { checkAndUpdateTitle } = useAutoTitle();
-  const slash_commands = useSlashCommands(conversation_id);
-  const addOrUpdateMessage = useAddOrUpdateMessage();
-  const removeMessageByMsgId = useRemoveMessageByMsgId();
-  const { setSendBoxHandler } = usePreviewContext();
-
-  const [aiProcessing, setAiProcessing] = useState(false);
-  const [isStopping, setIsStopping] = useState(false);
-  const [hasHydratedRunningState, setHasHydratedRunningState] = useState(false);
-  const isBusy = aiProcessing || isStopping;
-
-  // Use ref to sync state for immediate access in event handlers
-  // 使用 ref 同步状态，以便在事件处理程序中立即访问
-  const aiProcessingRef = useRef(aiProcessing);
-
-  // Track whether current turn has content output
-  // Only reset aiProcessing when finish arrives after content (not after tool calls)
-  const hasContentInTurnRef = useRef(false);
-
+/**
+ * OpenClaw-only Star Office install flow, mounted as a platform extension of
+ * the shared BasicRuntimeSendBox. Delivers explicit install requests as new
+ * turns, recovers persisted requests across remounts with replay-or-initial-
+ * only semantics, and reports turn completion via the stream 'finish' hook.
+ */
+function useStarOfficeInstallFlow(controller: BasicRuntimeSendBoxController): BasicRuntimeStreamHooks {
   const {
+    conversation_id,
+    setAiProcessing,
     beginLocalTurn,
     markLocalTurnAccepted,
     reconcilePublicDeliveryReplay,
     cancelLocalTurn,
-    stopOptimistically,
-    confirmStopped,
-    restoreAfterStopFailure,
-    hydrateAuthoritativeRuntime,
-    acceptsStreamActivity,
-    reconcileAfterStreamTerminal,
-    getTurnStartGeneration,
-    getTurnCompletionGeneration,
-    getTurnLifecycleGeneration,
-  } = useAuthoritativeTurnLifecycle(conversation_id, {
-    onTurnStarted: () => {
-      setAiProcessing(true);
-      aiProcessingRef.current = true;
-    },
-    onTurnCompleted: () => {
-      setAiProcessing(false);
-      aiProcessingRef.current = false;
-      hasContentInTurnRef.current = false;
-    },
-  });
-  const { beginStopAttempt, getStopAttemptStatus } = useConversationStopAttemptGuard(
-    conversation_id,
-    getTurnStartGeneration,
-    getTurnCompletionGeneration
-  );
+    checkAndUpdateTitle,
+    addOrUpdateMessage,
+  } = controller;
 
   // Track whether the current turn was triggered by a Star Office install request
   const starOfficeInstallInFlightRef = useRef(false);
-
-  const { data: draftData, mutate: mutateDraft } = useOpenClawSendBoxDraft(conversation_id);
-  const atPath = draftData?.atPath ?? EMPTY_AT_PATH;
-  const uploadFile = draftData?.uploadFile ?? EMPTY_UPLOAD_FILES;
-  const content = draftData?.content ?? '';
-
-  const setAtPath = useCallback(
-    (val: Array<string | FileOrFolderItem>) => {
-      mutateDraft((prev) => ({ ...(prev as OpenClawDraftData), atPath: val }));
-    },
-    [mutateDraft]
-  );
-
-  const setUploadFile = createSetUploadFile(mutateDraft, draftData);
-
-  const setContent = useCallback(
-    (val: string) => {
-      mutateDraft((prev) => ({ ...(prev as OpenClawDraftData), content: val }));
-    },
-    [mutateDraft]
-  );
-
-  const handleContentChange = useCallback(
-    (val: string) => {
-      setContent(val);
-    },
-    [setContent]
-  );
-
-  const setContentRef = useLatestRef(setContent);
-  const contentRef = useLatestRef(content);
-  const atPathRef = useLatestRef(atPath);
-  const immediateSendRef = useRef<((text: string) => Promise<void>) | null>(null);
-  // Reset state when conversation changes and restore actual running status
-  useEffect(() => {
-    let cancelled = false;
-    const hydrationGeneration = getTurnLifecycleGeneration();
-
-    setAiProcessing(false);
-    setIsStopping(false);
-    aiProcessingRef.current = false;
-    setHasHydratedRunningState(false);
-    hasContentInTurnRef.current = false;
-
-    // Check actual conversation status from backend before resetting aiProcessing
-    // to avoid flicker when switching to a running conversation
-    // 先获取后端状态再重置 aiProcessing，避免切换到运行中的会话时闪烁
-    void getConversationOrNull(conversation_id).then((res) => {
-      if (cancelled) {
-        return;
-      }
-      if (getTurnLifecycleGeneration() !== hydrationGeneration) {
-        setHasHydratedRunningState(true);
-        return;
-      }
-
-      if (!res) {
-        hydrateAuthoritativeRuntime(false);
-        setAiProcessing(false);
-        aiProcessingRef.current = false;
-        setHasHydratedRunningState(true);
-        return;
-      }
-      const runtimeAuthority = getConversationRuntimeAuthority(res);
-      const isRunning = runtimeAuthority === 'processing';
-      hydrateAuthoritativeRuntime(isRunning);
-      setAiProcessing(isRunning);
-      aiProcessingRef.current = isRunning;
-      setHasHydratedRunningState(runtimeAuthority !== 'unknown');
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [conversation_id, getTurnLifecycleGeneration, hydrateAuthoritativeRuntime]);
-
-  useEffect(() => {
-    const handler = (text: string) => {
-      const new_content = content ? `${content}\n${text}` : text;
-      setContentRef.current(new_content);
-    };
-    setSendBoxHandler(handler);
-  }, [setSendBoxHandler, content]);
-
-  useAddEventListener(
-    'sendbox.fill',
-    (text: string) => {
-      const prev = contentRef.current;
-      setContentRef.current(prev ? `${prev}${text}` : text);
-    },
-    []
-  );
-
-  useEffect(() => {
-    return ipcBridge.openclawConversation.responseStream.on((message) => {
-      if (conversation_id !== message.conversation_id) {
-        return;
-      }
-
-      switch (message.type) {
-        case 'thought':
-          if (acceptsStreamActivity(message.turn_id) && !aiProcessingRef.current) {
-            setAiProcessing(true);
-            aiProcessingRef.current = true;
-          }
-          break;
-        case 'finish':
-          // Stream completion can precede release of the backend turn handle.
-          if (starOfficeInstallInFlightRef.current) {
-            starOfficeInstallInFlightRef.current = false;
-            emitter.emit('staroffice.install.finished', { conversation_id });
-          }
-          hasContentInTurnRef.current = false;
-          reconcileAfterStreamTerminal();
-          break;
-        case 'error':
-          reconcileAfterStreamTerminal();
-          break;
-        case 'content':
-        case 'acp_permission': {
-          if (!acceptsStreamActivity(message.turn_id)) break;
-          // Mark that current turn has content output
-          hasContentInTurnRef.current = true;
-          // Auto-recover aiProcessing state if content arrives after finish
-          if (!aiProcessingRef.current) {
-            setAiProcessing(true);
-            aiProcessingRef.current = true;
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    });
-  }, [acceptsStreamActivity, conversation_id, reconcileAfterStreamTerminal]);
-
-  useEffect(() => {
-    void getConversationOrNull(conversation_id).then((res) => {
-      if (!res?.extra?.workspace) return;
-      setWorkspacePath(res.extra.workspace);
-    });
-  }, [conversation_id]);
 
   const deliverStarOfficeRequest = useCallback(
     async (
@@ -301,7 +86,6 @@ const OpenClawSendBox: React.FC<{ conversation_id: ConversationId }> = ({ conver
         if (disposition === 'fresh') {
           beginLocalTurn();
           setAiProcessing(true);
-          aiProcessingRef.current = true;
           void checkAndUpdateTitle(conversation_id, text);
           markLocalTurnAccepted();
           addOrUpdateMessage({
@@ -335,7 +119,6 @@ const OpenClawSendBox: React.FC<{ conversation_id: ConversationId }> = ({ conver
         }
         cancelLocalTurn();
         setAiProcessing(false);
-        aiProcessingRef.current = false;
         starOfficeInstallInFlightRef.current = false;
       }
     },
@@ -347,6 +130,7 @@ const OpenClawSendBox: React.FC<{ conversation_id: ConversationId }> = ({ conver
       conversation_id,
       markLocalTurnAccepted,
       reconcilePublicDeliveryReplay,
+      setAiProcessing,
     ]
   );
 
@@ -428,432 +212,51 @@ const OpenClawSendBox: React.FC<{ conversation_id: ConversationId }> = ({ conver
     return () => releaseInitialMessageDelivery(storageKey);
   }, [conversation_id, deliverStarOfficeRequest]);
 
-  const handleFilesAdded = useCallback(
-    (pastedFiles: FileMetadata[]) => {
-      const file_paths = pastedFiles.map((file) => file.path);
-      setUploadFile((prev) => [...prev, ...file_paths]);
-    },
-    [setUploadFile]
-  );
-
-  useAddEventListener('openclaw-gateway.selected.file', (items: Array<string | FileOrFolderItem>) => {
-    setTimeout(() => {
-      setAtPath(items);
-    }, 10);
-  });
-
-  useAddEventListener('openclaw-gateway.selected.file.append', (items: Array<string | FileOrFolderItem>) => {
-    setTimeout(() => {
-      const merged = mergeFileSelectionItems(atPathRef.current, items);
-      if (merged !== atPathRef.current) {
-        setAtPath(merged as Array<string | FileOrFolderItem>);
-      }
-    }, 10);
-  });
-
-  const executeCommand = useCallback(
-    async (
-      {
-        id = uuidv7(),
-        input,
-        files,
-      }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-        Partial<Pick<ConversationCommandQueueItem, 'id'>>,
-      execution?: ConversationCommandQueueExecution,
-      deferLocalTurnUntilFresh = execution !== undefined
-    ) => {
-      const displayMessage = buildDisplayMessage(input, files, workspacePath);
-
-      if (!deferLocalTurnUntilFresh) {
-        beginLocalTurn();
-        setAiProcessing(true);
-        aiProcessingRef.current = true;
-      }
-      let msg_id: MessageId | null = null;
-      try {
-        if (!deferLocalTurnUntilFresh) {
-          void checkAndUpdateTitle(conversation_id, input);
-        }
-        // Wait for the server-assigned msg_id before rendering the optimistic
-        // user bubble so the local row uses the same id as the DB row and
-        // subsequent WebSocket stream events — avoids duplicate bubbles when
-        // useMessageLstCache reloads.
-        const res = await ipcBridge.openclawConversation.sendMessage.invoke({
-          input: displayMessage,
-          conversation_id,
-          files,
-          idempotency_key: id,
-        });
-        if (execution && !execution.isCurrent()) return;
-        msg_id = res.msg_id;
-        const disposition = classifyPublicMessageDelivery(res);
-        if (disposition === 'fresh') {
-          if (deferLocalTurnUntilFresh) {
-            beginLocalTurn();
-            setAiProcessing(true);
-            aiProcessingRef.current = true;
-            void checkAndUpdateTitle(conversation_id, input);
-          }
-          markLocalTurnAccepted();
-        const userMessage: TMessage = {
-          id: uuid(),
-          msg_id,
-          conversation_id,
-          type: 'text',
-          position: 'right',
-          content: { content: displayMessage },
-          created_at: Date.now(),
-        };
-        // Use add=false (compose mode) so composeMessageWithIndex can de-dup
-        // by msg_id against the DB row that useMessageLstCache may insert.
-        addOrUpdateMessage(userMessage);
-        } else {
-          reconcilePublicDeliveryReplay(res.completed);
-        }
-        emitter.emit('chat.history.refresh');
-        return disposition;
-      } catch (error) {
-        if (execution && !execution.isCurrent()) return;
-        if (msg_id) removeMessageByMsgId(msg_id);
-        cancelLocalTurn();
-        setAiProcessing(false);
-        aiProcessingRef.current = false;
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
-        throw error;
-      }
-    },
-    [
-      addOrUpdateMessage,
-      beginLocalTurn,
-      cancelLocalTurn,
-      checkAndUpdateTitle,
-      conversation_id,
-      markLocalTurnAccepted,
-      reconcilePublicDeliveryReplay,
-      removeMessageByMsgId,
-      t,
-      workspacePath,
-    ]
-  );
-
-  const {
-    items,
-    isPaused: isQueuePaused,
-    isInteractionLocked: isQueueInteractionLocked,
-    hasPendingCommands,
-    enqueue,
-    remove,
-    clear,
-    reorder,
-    pause,
-    resume,
-    lockInteraction,
-    unlockInteraction,
-    resetActiveExecution,
-  } = useConversationCommandQueue({
-    conversation_id: conversation_id,
-    enabled: true,
-    isBusy,
-    isHydrated: hasHydratedRunningState,
-    onExecute: executeCommand,
-  });
-
-  const onSendHandler = async (message: string) => {
-    emitter.emit('openclaw-gateway.selected.file.clear');
-    const file_paths = [...uploadFile, ...atPath.map((item) => (typeof item === 'string' ? item : item.path))];
-    setAtPath([]);
-    setUploadFile([]);
-
-    if (
-      shouldEnqueueConversationCommand({
-        enabled: true,
-        isBusy,
-        hasPendingCommands,
-      })
-    ) {
-      enqueue({ input: message, files: file_paths });
-      return;
+  const onStreamFinish = useCallback(() => {
+    if (starOfficeInstallInFlightRef.current) {
+      starOfficeInstallInFlightRef.current = false;
+      emitter.emit('staroffice.install.finished', { conversation_id });
     }
+  }, [conversation_id]);
 
-    await executeCommand({ input: message, files: file_paths });
-  };
+  return useMemo(() => ({ onStreamFinish }), [onStreamFinish]);
+}
 
-  const handleEditQueuedCommand = useCallback(
-    (item: ConversationCommandQueueItem) => {
-      remove(item.id);
-      setContent(item.input);
-      setUploadFile(Array.from(new Set(item.files)));
-      setAtPath([]);
-      emitter.emit('openclaw-gateway.selected.file.clear');
-    },
-    [remove, setAtPath, setContent, setUploadFile]
-  );
-
-  useEffect(() => {
-    immediateSendRef.current = async (text) => {
-      await executeCommand({ input: text, files: [] });
-    };
-    return () => {
-      immediateSendRef.current = null;
-    };
-  }, [executeCommand]);
-
-  const appendSelectedFiles = useCallback(
-    (files: string[]) => {
-      setUploadFile((prev) => [...prev, ...files]);
-    },
-    [setUploadFile]
-  );
-  const { openFileSelector, onSlashBuiltinCommand } = useOpenFileSelector({
-    onFilesSelected: appendSelectedFiles,
-  });
-
-  // Handle initial message from guid page.
+const OPENCLAW_SENDBOX_CONFIG: BasicRuntimeSendBoxConfig = {
+  logTag: '[OpenClawSendBox]',
+  selectedFileEvents: {
+    set: 'openclaw-gateway.selected.file',
+    append: 'openclaw-gateway.selected.file.append',
+    clear: 'openclaw-gateway.selected.file.clear',
+  },
+  // Historical suffix: 'openclaw', not the 'openclaw-gateway' conversation type.
+  initialMessageFeature: 'initial-message-openclaw',
+  initialMessageProcessedFeature: 'initial-message-processed-openclaw',
+  sendMessage: ipcBridge.openclawConversation.sendMessage,
+  responseStream: ipcBridge.openclawConversation.responseStream,
+  // The concrete draft store carries the 'openclaw-gateway' `_type`
+  // discriminant, which the shared send box neither reads nor rewrites
+  // (mutations spread the previous draft), so widening to the structural hook
+  // type is safe.
+  useDraft: useOpenClawSendBoxDraft as unknown as BasicRuntimeDraftHook,
+  useSlashCommandList: useSlashCommands,
+  usePlatformExtension: useStarOfficeInstallFlow,
   // In backend-proxy mode, warmup happens on the backend when send_message is
-  // called, so we no longer need to wait for a frontend 'session_active' status.
-  useEffect(() => {
-    if (!conversation_id || !hasHydratedRunningState) return;
-
-    const target = conversationTarget(conversation_id);
-    const storageKey = sessionStorageKey('initial-message-openclaw', target);
-    const processedKey = sessionStorageKey('initial-message-processed-openclaw', target);
-
-    const processInitialMessage = async () => {
-      if (!sessionStorage.getItem(storageKey) || !claimInitialMessageDelivery(storageKey)) return;
-
-      let attemptedIdempotencyKey: string | null = null;
-      try {
-        sessionStorage.removeItem(processedKey);
-        const initialMessage = await readAuthorizedInitialMessageDelivery(
-          sessionStorage,
-          storageKey,
-          conversation_id
-        );
-        if (!initialMessage) {
-          releaseInitialMessageDelivery(storageKey);
-          return;
-        }
-        const { input, files, idempotency_key } = initialMessage;
-        attemptedIdempotencyKey = idempotency_key;
-        const initialDisplayMessage = buildDisplayMessage(input, files, workspacePath);
-
-        // Fetch the server-assigned msg_id before rendering the optimistic
-        // bubble so the local row uses the same id as the persisted DB row.
-        const sendResult = await ipcBridge.openclawConversation.sendMessage.invoke({
-          input: initialDisplayMessage,
-          conversation_id,
-          files,
-          idempotency_key,
-          initial_only: true,
-        });
-        completeInitialMessageDelivery(sessionStorage, storageKey, idempotency_key);
-        const { msg_id } = sendResult;
-        const disposition = classifyPublicMessageDelivery(sendResult);
-        if (disposition === 'fresh') {
-          beginLocalTurn();
-          setAiProcessing(true);
-          aiProcessingRef.current = true;
-          void checkAndUpdateTitle(conversation_id, input);
-          markLocalTurnAccepted();
-
-        const userMessage: TMessage = {
-          id: uuid(),
-          msg_id,
-          conversation_id,
-          type: 'text',
-          position: 'right',
-          content: { content: initialDisplayMessage },
-          created_at: Date.now(),
-        };
-        // Use add=false (compose mode) so composeMessageWithIndex can de-dup
-        // by msg_id against the DB row that useMessageLstCache may insert.
-        addOrUpdateMessage(userMessage);
-        } else {
-          reconcilePublicDeliveryReplay(sendResult.completed);
-        }
-
-        emitter.emit('chat.history.refresh');
-      } catch (error) {
-        handleInitialMessageDeliveryFailure(
-          sessionStorage,
-          storageKey,
-          attemptedIdempotencyKey,
-          error
-        );
-        sessionStorage.removeItem(processedKey);
-        cancelLocalTurn();
-        setAiProcessing(false);
-        aiProcessingRef.current = false;
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
-      }
-    };
-
-    const timer = setTimeout(() => {
-      processInitialMessage().catch((error) => {
-        console.error('Failed to process initial message:', error);
-      });
-    }, 200);
-
-    return () => {
-      clearTimeout(timer);
-    };
-  }, [
-    addOrUpdateMessage,
-    beginLocalTurn,
-    cancelLocalTurn,
-    checkAndUpdateTitle,
-    conversation_id,
-    hasHydratedRunningState,
-    markLocalTurnAccepted,
-    reconcilePublicDeliveryReplay,
-    t,
-    workspacePath,
-  ]);
-
-  const handleStop = async (): Promise<void> => {
-    if (isStopping) return;
-    const stopAttempt = beginStopAttempt();
-    setIsStopping(true);
-    stopOptimistically();
-    setAiProcessing(false);
-    aiProcessingRef.current = false;
-    hasContentInTurnRef.current = false;
-    pause();
-    resetActiveExecution('stop');
-
-    const result = await stopConversationAndConfirmRelease(conversation_id);
-    const stopAttemptStatus = getStopAttemptStatus(stopAttempt);
-    if (stopAttemptStatus !== 'current') {
-      if (shouldReleaseStopInteraction(stopAttemptStatus)) setIsStopping(false);
-      return;
-    }
-    if (result.status === 'released' || result.status === 'deleted') {
-      confirmStopped();
-      setIsStopping(false);
-      resetActiveExecution('external-reset');
-      return;
-    }
-
-    console.warn('[OpenClawSendBox] stop request could not be confirmed', result);
-    restoreAfterStopFailure();
-    setAiProcessing(true);
-    aiProcessingRef.current = true;
-    setIsStopping(false);
-    Message.error({
-      content: t('conversation.stop.failed', { defaultValue: 'Failed to stop the current task. Please try again.' }),
-      closable: true,
-    });
-  };
-
-  // Clear conversation context (release model context); keeps message records.
-  const handleClearContext = async (): Promise<void> => {
-    try {
-      await ipcBridge.conversation.clearContext.invoke({ conversation_id });
-      Message.success({
-        content: t('conversation.clearContext.success', { defaultValue: 'Context cleared' }),
-        duration: 2000,
-        closable: true,
-      });
-    } catch (error) {
-      console.warn('[OpenClawSendBox] clear context failed', error);
-      Message.error({
-        content: t('conversation.clearContext.failed', { defaultValue: 'Failed to clear context' }),
-        closable: true,
-      });
-    }
-  };
-
-  return (
-    <div className='max-w-800px w-full mx-auto flex flex-col mt-auto mb-16px'>
-      <CommandQueuePanel
-        items={items}
-        paused={isQueuePaused}
-        interactionLocked={isQueueInteractionLocked}
-        onPause={pause}
-        onResume={resume}
-        onInteractionLock={lockInteraction}
-        onInteractionUnlock={unlockInteraction}
-        onEdit={handleEditQueuedCommand}
-        onReorder={reorder}
-        onRemove={remove}
-        onClear={clear}
-      />
-      <SendBox
-        key={conversation_id}
-        showPinnedPlan
-        value={content}
-        onChange={handleContentChange}
-        selectedWorkspaceItems={atPath}
-        onSelectedWorkspaceItemsChange={(nextSelectedItems) => {
-          emitter.emit('openclaw-gateway.selected.file', nextSelectedItems);
-          setAtPath(nextSelectedItems);
-        }}
-        loading={isBusy}
-        disabled={false}
-        className='z-10'
-        placeholder={
-          isBusy
-            ? t('conversation.chat.processing')
-            : t('acp.sendbox.placeholder', {
-                backend: 'OpenClaw',
-                defaultValue: `Send message to OpenClaw...`,
-              })
-        }
-        onStop={handleStop}
-        onClearContext={handleClearContext}
-        onFilesAdded={handleFilesAdded}
-        hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
-        supportedExts={allSupportedExts}
-        defaultMultiLine={true}
-        lockMultiLine={true}
-        tools={<FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={handleFilesAdded} />}
-        prefix={
-          <>
-            {uploadFile.length > 0 && (
-              <HorizontalFileList>
-                {uploadFile.map((path) => (
-                  <FilePreview
-                    key={path}
-                    path={path}
-                    onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
-                  />
-                ))}
-              </HorizontalFileList>
-            )}
-            {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
-              <div className='flex flex-wrap items-center gap-8px mb-8px'>
-                {atPath.map((item) => {
-                  if (typeof item === 'string') return null;
-                  if (!item.isFile) {
-                    return (
-                      <Tag
-                        key={item.path}
-                        bordered={false}
-                        className='!bg-primary-1 !text-primary-6'
-                        closable
-                        onClose={() => {
-                          const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
-                          emitter.emit('openclaw-gateway.selected.file', newAtPath);
-                          setAtPath(newAtPath);
-                        }}
-                      >
-                        {item.name}
-                      </Tag>
-                    );
-                  }
-                  return null;
-                })}
-              </div>
-            )}
-          </>
-        }
-        onSend={onSendHandler}
-        slash_commands={slash_commands}
-        onSlashBuiltinCommand={onSlashBuiltinCommand}
-        allowSendWhileLoading
-      ></SendBox>
-    </div>
-  );
+  // called, so the initial message only waits for mount + runtime hydration.
+  initialMessageDelayMs: 200,
+  initialMessageAfterHydration: true,
+  workspaceResolution: 'on-mount',
+  enableClearContext: true,
+  backendName: 'OpenClaw',
+  emitSelectedFileOnChange: true,
+  showFolderTags: true,
+  reportPendingAttachments: true,
+  defaultMultiLine: true,
+  lockMultiLine: true,
 };
+
+const OpenClawSendBox: React.FC<{ conversation_id: ConversationId }> = ({ conversation_id }) => (
+  <BasicRuntimeSendBox conversation_id={conversation_id} config={OPENCLAW_SENDBOX_CONFIG} />
+);
 
 export default OpenClawSendBox;

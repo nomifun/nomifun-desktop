@@ -19,9 +19,9 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tower-http.workspace = true
-futures-util.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
 nomifun-db.workspace = true
 http-body-util.workspace = true
 bytes = "1"

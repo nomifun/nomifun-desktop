@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import ModalWrapper from '@renderer/components/base/ModalWrapper';
 import { openExternalUrl } from '@renderer/utils/platform';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
+import NomiModal from '@/renderer/components/base/NomiModal';
 import { Link } from '@icon-park/react';
 import { Tooltip } from '@arco-design/web-react';
 import React, { useCallback } from 'react';
@@ -58,23 +58,9 @@ const CONTACT_ITEMS = [
   },
 ] as const;
 
-// 以下导出类型与 props 形状保持不变，以兼容现有调用方（FeedbackButton / 一键反馈入口等）。
-export type PrefilledScreenshot = {
-  filename: string;
-  data: Uint8Array;
-  type: string;
-};
-
-export type FeedbackEventTags = Record<string, string>;
-export type FeedbackEventExtra = Record<string, unknown>;
-
 type FeedbackReportModalProps = {
   visible: boolean;
   onCancel: () => void;
-  defaultModule?: string;
-  prefilledScreenshots?: PrefilledScreenshot[];
-  feedbackTags?: FeedbackEventTags;
-  feedbackExtra?: FeedbackEventExtra;
 };
 
 /**
@@ -92,7 +78,7 @@ const FeedbackReportModal: React.FC<FeedbackReportModalProps> = ({ visible, onCa
   }, []);
 
   return (
-    <ModalWrapper
+    <NomiModal
       title={t('settings.contactTitle')}
       visible={visible}
       onCancel={onCancel}
@@ -147,7 +133,7 @@ const FeedbackReportModal: React.FC<FeedbackReportModalProps> = ({ visible, onCa
         </div>
         <div className='mt-12px text-center text-12px text-t-tertiary'>{COPYRIGHT}</div>
       </div>
-    </ModalWrapper>
+    </NomiModal>
   );
 };
 

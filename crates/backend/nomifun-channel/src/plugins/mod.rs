@@ -34,9 +34,25 @@ pub mod nostr;
 #[cfg(feature = "qqbot")]
 pub mod qqbot;
 
-/// Shared callback-data encoding for interactive buttons (Discord/Slack/...).
-#[cfg(any(feature = "discord", feature = "slack", feature = "mattermost", feature = "qqbot"))]
+/// Shared callback-data encoding for interactive buttons (Telegram/Discord/Slack/...).
+#[cfg(any(feature = "telegram", feature = "discord", feature = "slack", feature = "qqbot"))]
 pub mod callback;
+
+/// Small helpers shared by the plugins.
+#[cfg(any(
+    feature = "telegram",
+    feature = "lark",
+    feature = "dingtalk",
+    feature = "wecom",
+    feature = "discord",
+    feature = "matrix",
+    feature = "mattermost",
+    feature = "slack",
+    feature = "twitch",
+    feature = "nostr",
+    feature = "qqbot"
+))]
+pub(crate) mod util;
 
 use crate::plugin::ChannelPlugin;
 use crate::types::PluginType;

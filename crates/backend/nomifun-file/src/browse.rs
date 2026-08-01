@@ -1,6 +1,6 @@
 //! Shallow, WebUI-only directory browser backing `GET /api/fs/browse`.
 //!
-//! Unlike the workspace-scoped `/api/fs/dir` endpoint, this handler lists a
+//! This handler lists a
 //! single directory level and surfaces navigation hints (`can_go_up`,
 //! `parent_path`) plus a `__ROOT__` sentinel for the Windows drive picker.
 //! It is only reachable in WebUI deployments; the Electron desktop path uses

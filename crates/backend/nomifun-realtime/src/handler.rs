@@ -13,7 +13,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::manager::{TokenAuthenticator, WebSocketManager};
-use crate::router::MessageRouter;
 use crate::types::{ConnectionId, PER_CONNECTION_BUFFER, WebSocketCloseCode, WsOutbound};
 
 /// Extracts a JWT token from WebSocket upgrade request headers.
@@ -26,7 +25,6 @@ pub type TokenExtractor = Arc<dyn Fn(&HeaderMap) -> Option<String> + Send + Sync
 #[derive(Clone)]
 pub struct WsHandlerState {
     pub manager: Arc<WebSocketManager>,
-    pub router: Arc<dyn MessageRouter>,
     pub token_authenticator: TokenAuthenticator,
     pub token_extractor: TokenExtractor,
 }
@@ -358,7 +356,10 @@ async fn recv_loop(
     }
 }
 
-/// Process a text message: parse JSON, dispatch to built-in or router.
+/// Process a text message: parse JSON and dispatch the built-in kinds.
+///
+/// Business requests flow over HTTP, not the WebSocket: any upstream message
+/// other than `pong` / `subscribe-show-open` is discarded with a debug log.
 fn handle_text_message(conn_id: ConnectionId, text: &str, state: &WsHandlerState) {
     let parsed: Result<WebSocketMessage<Value>, _> = serde_json::from_str(text);
 
@@ -378,7 +379,7 @@ fn handle_text_message(conn_id: ConnectionId, text: &str, state: &WsHandlerState
             handle_subscribe_show_open(state, conn_id, msg.data);
         }
         name => {
-            state.router.route(conn_id, name, msg.data);
+            debug!(%conn_id, message_name = name, "unhandled upstream WS message discarded");
         }
     }
 }
@@ -439,7 +440,6 @@ mod tests {
     fn test_state(manager: Arc<WebSocketManager>) -> WsHandlerState {
         WsHandlerState {
             manager,
-            router: Arc::new(crate::router::NoopMessageRouter),
             token_authenticator: Arc::new(|_| Some("user".to_owned())),
             token_extractor: Arc::new(|_| None),
         }
@@ -700,31 +700,12 @@ mod tests {
     }
 
     #[test]
-    fn text_message_routes_unknown_to_router() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        struct TestRouter {
-            called: AtomicBool,
-        }
-        impl MessageRouter for TestRouter {
-            fn route(&self, _conn_id: ConnectionId, _name: &str, _data: Value) {
-                self.called.store(true, Ordering::Relaxed);
-            }
-        }
-
+    fn text_message_unknown_is_discarded_without_response() {
         let manager = Arc::new(WebSocketManager::new());
-        let (tx, _rx) = mpsc::channel(PER_CONNECTION_BUFFER);
+        let (tx, mut rx) = mpsc::channel(PER_CONNECTION_BUFFER);
         let conn_id = manager.add_client("user".into(), "tok".into(), tx);
 
-        let router = Arc::new(TestRouter {
-            called: AtomicBool::new(false),
-        });
-        let state = WsHandlerState {
-            manager,
-            router: router.clone(),
-            token_authenticator: Arc::new(|_| Some("user".to_owned())),
-            token_extractor: Arc::new(|_| None),
-        };
+        let state = test_state(manager);
 
         handle_text_message(
             conn_id,
@@ -732,7 +713,8 @@ mod tests {
             &state,
         );
 
-        assert!(router.called.load(Ordering::Relaxed));
+        // Unknown upstream messages are silently discarded: no error frame.
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

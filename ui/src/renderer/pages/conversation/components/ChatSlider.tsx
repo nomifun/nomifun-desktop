@@ -16,82 +16,25 @@ const ChatSlider: React.FC<{
 }> = ({ conversation, extraTabs }) => {
   const [messageApi, messageContext] = useArcoMessage({ maxCount: 1 });
 
-  let workspaceNode: React.ReactNode = null;
-  if (conversation?.type === 'acp' && conversation.extra?.workspace) {
-    workspaceNode = (
-      <ChatWorkspace
-        conversation_id={conversation.id}
-        workspace={conversation.extra.workspace}
-        isTemporaryWorkspace={
-          (conversation.extra as { is_temporary_workspace?: boolean } | undefined)?.is_temporary_workspace
-        }
-        eventPrefix='acp'
-        messageApi={messageApi}
-        extraTabs={extraTabs}
-      ></ChatWorkspace>
-    );
-  } else if (conversation?.type === 'nomi' && conversation.extra?.workspace) {
-    workspaceNode = (
-      <ChatWorkspace
-        conversation_id={conversation.id}
-        workspace={conversation.extra.workspace}
-        isTemporaryWorkspace={
-          (conversation.extra as { is_temporary_workspace?: boolean } | undefined)?.is_temporary_workspace
-        }
-        eventPrefix='nomi'
-        messageApi={messageApi}
-        extraTabs={extraTabs}
-      ></ChatWorkspace>
-    );
-  } else if (conversation?.type === 'openclaw-gateway' && conversation.extra?.workspace) {
-    workspaceNode = (
-      <ChatWorkspace
-        conversation_id={conversation.id}
-        workspace={conversation.extra.workspace}
-        isTemporaryWorkspace={
-          (conversation.extra as { is_temporary_workspace?: boolean } | undefined)?.is_temporary_workspace
-        }
-        eventPrefix='openclaw-gateway'
-        messageApi={messageApi}
-        extraTabs={extraTabs}
-      ></ChatWorkspace>
-    );
-  } else if (conversation?.type === 'nanobot' && conversation.extra?.workspace) {
-    workspaceNode = (
-      <ChatWorkspace
-        conversation_id={conversation.id}
-        workspace={conversation.extra.workspace}
-        isTemporaryWorkspace={
-          (conversation.extra as { is_temporary_workspace?: boolean } | undefined)?.is_temporary_workspace
-        }
-        eventPrefix='nanobot'
-        messageApi={messageApi}
-        extraTabs={extraTabs}
-      ></ChatWorkspace>
-    );
-  } else if (conversation?.type === 'remote' && conversation.extra?.workspace) {
-    workspaceNode = (
-      <ChatWorkspace
-        conversation_id={conversation.id}
-        workspace={conversation.extra.workspace}
-        isTemporaryWorkspace={
-          (conversation.extra as { is_temporary_workspace?: boolean } | undefined)?.is_temporary_workspace
-        }
-        eventPrefix='remote'
-        messageApi={messageApi}
-        extraTabs={extraTabs}
-      ></ChatWorkspace>
-    );
-  }
-
-  if (!workspaceNode) {
+  // All conversation types ('acp' | 'nomi' | 'openclaw-gateway' | 'nanobot' | 'remote')
+  // render the same workspace rail; eventPrefix is always the conversation type.
+  if (!conversation?.extra?.workspace) {
     return <div></div>;
   }
 
   return (
     <>
       {messageContext}
-      {workspaceNode}
+      <ChatWorkspace
+        conversation_id={conversation.id}
+        workspace={conversation.extra.workspace}
+        isTemporaryWorkspace={
+          (conversation.extra as { is_temporary_workspace?: boolean } | undefined)?.is_temporary_workspace
+        }
+        eventPrefix={conversation.type}
+        messageApi={messageApi}
+        extraTabs={extraTabs}
+      ></ChatWorkspace>
     </>
   );
 };

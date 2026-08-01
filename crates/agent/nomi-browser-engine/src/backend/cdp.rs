@@ -62,7 +62,7 @@ use crate::engine::{
 };
 use crate::injected::{InjectError, InjectionManager};
 use crate::launch::{
-    BrowserHostLaunchMode, LaunchConfig, Launched, launch_chrome,
+    BrowserHostLaunchMode, LaunchConfig, Launched,
     launch_chrome_with_cleanup_profile,
     terminate_launched_process_tree_and_cleanup_profile,
 };
@@ -2907,8 +2907,8 @@ pub struct CdpBackend {
     /// 循环意外死亡（panic 逃出）→ watchdog fail 整条连接（fail-closed）。连接关闭时循环自然退出、
     /// watchdog 随之收尾。
     _firewall_watchdog: Option<tokio::task::JoinHandle<()>>,
-    /// **P3-G1：注入的出口防火墙配置快照**（裁决①）。= `EngineConfig.firewall`（经 build_backend →
-    /// from_launched 透传），**与防火墙循环持有的同一份配置**。仅供测试 accessor
+    /// **P3-G1：注入的出口防火墙配置快照**（裁决①）。= `EngineConfig.firewall`（经
+    /// from_launched / from_host 透传），**与防火墙循环持有的同一份配置**。仅供测试 accessor
     /// [`Self::firewall_config_for_test`] 读回断言「注入值真的到达引擎」（loop 在另一线程内消费，
     /// 无法直接观测）。**P3-D1 后 `FirewallConfig` 不再 `Copy`（改 `Clone`，因加了 `Vec` 域名策略字段）**，
     /// 存一份快照（`.clone()`，零热路径成本）。产品路径不读它（loop 才是真消费者）。
@@ -2968,14 +2968,14 @@ impl Drop for CdpBackend {
 }
 
 impl CdpBackend {
-    /// 用一次成功的 [`launch_chrome`] 产物建后端：connect → 起 attach loop →
+    /// 用一次成功的 [`crate::launch::launch_chrome`] 产物建后端：connect → 起 attach loop →
     /// enable_auto_attach → 取一个 page session。
     ///
     /// **编排铁律（Task B 约定）**：先 `run_attach_loop()`（装监听）再
     /// `enable_auto_attach()`（放行），否则首批子 session 的 attach 事件会丢。
     ///
     /// `#[allow(clippy::too_many_arguments)]`：本构造器逐参注入引擎配置（download/evaluate/firewall/
-    /// egress 等都是 P3 各阶段一路打通的注入链真值，调用点仅 build_backend + 测试 helper），
+    /// egress 等都是 P3 各阶段一路打通的注入链真值，调用点仅集成测试 helper），
     /// 折成 config 结构会牵动 G1/D1/D2 多个已交付调用点的同步改动——超出本次重构范围。
     #[allow(clippy::too_many_arguments)]
     pub async fn from_launched(
@@ -3106,7 +3106,7 @@ impl CdpBackend {
         // `Fetch.enable` 全流量拦截 + 订阅 `Fetch.requestPaused` 判定放行/阻断。**SW 必须也拦**
         // （裁决⑪/不变量⑬）——P0 保持 SW attach（transport.rs handle_attached 不 detach），本循环
         // 对其 session 也 Fetch.enable。**P3-G1（裁决①）**：firewall 配置从硬编码 `FirewallConfig::default()`
-        // 改为**接收注入值**（`EngineConfig.firewall` 经 build_backend → from_launched 透传）——默认仍是
+        // 改为**接收注入值**（`EngineConfig.firewall` 经 from_launched 透传）——默认仍是
         // default（IP 封禁开 + 跨域 POST 门控检测开），但上层（D1）可注入 per-pet 域名 allowlist 真值。
         // 先 spawn 循环（订阅 attachedToTarget + requestPaused），再对**已附着**的根 + 初始 page session
         // 补挂 Fetch.enable（新 session 由循环里的 attachedToTarget 处理）。
@@ -3208,7 +3208,7 @@ impl CdpBackend {
         };
 
         // ── W4d 持久登录：启动注入 storage_state（灌登录态）──────────────────────────
-        // `EngineConfig.storage_state`（G1 预留的 `Option<Value>`，经 build_backend 透传）= 上层从
+        // `EngineConfig.storage_state`（G1 预留的 `Option<Value>`，经构造器透传）= 上层从
         // per-pet vault（[`crate::vault::load_storage_state`]）解密读出的跨会话登录态。`Some` → 解析成
         // [`crate::storage_state::StorageState`] → **此刻 page/tab/context 已建好**，把 cookie 灌进本引擎
         // 的默认 browser context（`restore_cookies`，**context-bound：无需先 navigate 即生效**——这是持久登录
@@ -8308,55 +8308,6 @@ async fn fetch_fail(
             error = %e, "Fetch.failRequest failed (benign; request may have already resolved)"
         );
     }
-}
-
-
-///
-/// `force_headless = !display_available() || (display 可用但配置要 headless)`。本函数把
-/// `display_available()` 与 `config.headful` 合成 `force_headless` 传给 launch。
-///
-/// `download_dir`（E4）：per-pet 隔离下载目录的绝对路径（[`crate::download::ensure_download_dir`]
-/// 的产物）。`Some` → 启动时挂 `Browser.setDownloadBehavior(allowAndName, download_dir)` 沙箱 +
-/// 起下载事件循环（落盘后打 Win MOTW）。`None` → 不主动配置下载行为（chrome 默认 deny / 用户
-/// 自定，仅用于不关心下载的纯冒烟）。
-// build_backend / from_launched 的构造参数随安全配置增长（download/workspace/evaluate_full_power/
-// evaluate_persistent_login/firewall/egress_approver/storage_state）；待后续 cleanup 收拢成
-// 一个 EngineRuntimeParams 结构体（已第二次触 too_many_arguments），此处先 allow。
-#[allow(clippy::too_many_arguments)]
-pub async fn build_backend(
-    config: &LaunchConfig,
-    download_dir: Option<String>,
-    workspace_dir: Option<PathBuf>,
-    evaluate_full_power: bool,
-    evaluate_persistent_login: bool,
-    firewall: crate::firewall::FirewallConfig,
-    egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
-    storage_state: Option<serde_json::Value>,
-    known_secret_values: crate::KnownSecretValues,
-) -> Result<CdpBackend, BrowserError> {
-    let display = crate::display::display_available();
-    // 无显示器 → 强制 headless；有显示器 → 听 config.headful（false 即仍 headless）。
-    let force_headless = !display || !config.headful;
-
-    let launched = launch_chrome(config, force_headless).await?;
-    // headful 仅当「有显示且配置要」。
-    let headful = display && config.headful;
-    CdpBackend::from_launched(
-        launched,
-        headful,
-        display,
-        download_dir,
-        workspace_dir,
-        evaluate_full_power,
-        evaluate_persistent_login,
-        firewall,
-        egress_approver,
-        storage_state,
-        known_secret_values,
-        // 生产走默认 TokioResolver（真实 DNS）。可注入 resolver 仅为测试隔离而存在。
-        None,
-    )
-    .await
 }
 
 #[cfg(test)]

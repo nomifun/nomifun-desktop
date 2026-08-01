@@ -15,7 +15,6 @@ dirs.workspace = true
 fs2.workspace = true
 include_dir.workspace = true
 semver.workspace = true
-notify.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

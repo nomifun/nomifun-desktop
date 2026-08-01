@@ -311,7 +311,7 @@ async fn t3_1_valid_json_message_accepted() {
 
     // No error response expected — verify with a short timeout
     let timeout_result = tokio::time::timeout(Duration::from_millis(200), _rx.into_future()).await;
-    // Timeout (no response) is expected for valid messages routed to NoopMessageRouter
+    // Timeout (no response) is expected: unknown upstream WS messages are silently discarded
     assert!(timeout_result.is_err(), "valid message should not generate a response");
 }
 

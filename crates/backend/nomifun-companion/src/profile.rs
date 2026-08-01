@@ -353,9 +353,10 @@ impl Default for SharedArchiveConfig {
 }
 
 /// Cross-companion shared configuration persisted as `companion/shared/config.json`.
-/// Deliberately user-writable wholesale (full-object `PUT /api/companion/config`),
-/// so nothing registry-owned (e.g. the companion-seq watermark, which lives in
-/// `companion/shared/companion_seq.json`) may be carried here.
+/// Deliberately user-writable (`PATCH /api/companion/config` merges arbitrary
+/// user JSON over it), so nothing registry-owned (e.g. the companion-seq
+/// watermark, which lives in `companion/shared/companion_seq.json`) may be
+/// carried here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SharedCompanionConfig {

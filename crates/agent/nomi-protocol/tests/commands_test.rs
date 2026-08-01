@@ -7,15 +7,15 @@ use rstest::rstest;
     ProtocolCommand::Message {
         msg_id: "m1".to_string(),
         content: "Hello".to_string(),
-        files: vec![],
     }
 )]
 #[case(
+    // Wire-compatibility regression: unknown keys (like the removed `files`)
+    // must be tolerated, not rejected.
     r#"{"type":"message","msg_id":"m2","content":"Read this","files":["/tmp/a.rs"]}"#,
     ProtocolCommand::Message {
         msg_id: "m2".to_string(),
         content: "Read this".to_string(),
-        files: vec!["/tmp/a.rs".to_string()],
     }
 )]
 #[case(r#"{"type":"stop"}"#, ProtocolCommand::Stop)]

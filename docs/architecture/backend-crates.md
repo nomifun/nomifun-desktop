@@ -1,6 +1,6 @@
 # Backend Crates
 
-The 32 `nomifun-*` crates under [`crates/backend/`](../../crates/backend/) form
+The 34 `nomifun-*` crates under [`crates/backend/`](../../crates/backend/) form
 the HTTP/WS server. Together they compile into the `nomifun-app` library crate
 and, via `nomifun-app/src/main.rs`, the **`nomicore`** binary. The two app hosts
 (`nomifun-desktop` and `nomifun-web`) link `nomifun-app` directly and call
@@ -93,6 +93,9 @@ identifiers remain opaque.
 | [`nomifun-preset`](../../crates/backend/nomifun-preset/) | Reusable launch configurations for Conversations, Execution participants, companions, and cron: merged builtin/user/extension catalog, relational CRUD, target-aware resolution, immutable snapshots, and import. |
 | [`nomifun-companion`](../../crates/backend/nomifun-companion/) | Desktop companion state, figure/image assets, memory/persona data, companion public image serving, and companion-bound token integration. |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | Knowledge bases, source ingestion, bound-base mount state, and scoped read-only knowledge MCP server. |
+| [`nomifun-workshop`](../../crates/backend/nomifun-workshop/) | Creative Workshop domain: the infinite-canvas visual-creation workspace. Owns canvases + assets (index rows in `nomifun-db`, canvas bodies and asset binaries on disk) and serves the `/api/workshop/*` surface. |
+| [`nomifun-creation`](../../crates/backend/nomifun-creation/) | Media generation engine behind the Workshop canvas's generation nodes: provider-agnostic async task queue (`queued → running → succeeded/failed/canceled`) with per-provider concurrency plus a global cap, cancellation, and boot reconciliation. Delegates model execution to `nomifun-model-invoke` and hands produced bytes to an `AssetSink`. |
+| [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | Standalone customer-service domain for serving strangers over IM channels. Shares no concepts with the companion/conversation system: dialogues are the domain's own aggregate and replies come from a disposable one-shot engine session with a fixed read-only tool registry. |
 | [`nomifun-public`](../../crates/backend/nomifun-public/) | Companion-token authenticated public front doors: `/mcp`, `/mcp-agent`, and `/v1`. |
 | [`nomifun-secret`](../../crates/backend/nomifun-secret/) | Per-companion browser-use secret storage and credential lookup. |
 
@@ -101,6 +104,8 @@ identifiers remain opaque.
 | Crate | Responsibility |
 | --- | --- |
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal/) | Terminal sessions backed by `portable-pty`, resize, input/output streaming over WS. |
+| [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | Main-process browser ownership, scheduling, and lifecycle authority: `BrowserSessionHub` supplies the ownership, isolation, scheduling, lease, inventory, and cleanup contract shared by Native, Gateway, ACP, remote, and cluster callers. Chromium launch stays behind a host-specific `BrowserHostFactory`. |
+| [`nomifun-model-invoke`](../../crates/backend/nomifun-model-invoke/) | Unified multimodal model invocation layer: typed task requests/results, declarative auth schemes, shared HTTP transport, the protocol-adapter seam + registry, and catalog resolution. Consumed by `nomifun-shell` STT/TTS, `nomifun-creation`, and other model-calling features. |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | OS shell helpers: open files in the system, speech-to-text against Deepgram or OpenAI, clipboard / paste integration. |
 | [`nomifun-file`](../../crates/backend/nomifun-file/) | Sandboxed filesystem under the conversation work dir (`browse`, `path_safety`, `watch_service`, `snapshot_service`), zip helpers. |
 | [`nomifun-office`](../../crates/backend/nomifun-office/) | LibreOffice convert/preview pipeline (Office documents → preview). |

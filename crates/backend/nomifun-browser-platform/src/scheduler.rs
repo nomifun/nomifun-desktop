@@ -226,32 +226,12 @@ impl BrowserLaneScheduler {
         }
     }
 
-    pub fn config(&self) -> SchedulerConfig {
-        self.state().config.clone()
-    }
-
     pub fn active_count(&self) -> usize {
         self.state().active.len()
     }
 
     pub fn queued_count(&self) -> usize {
         self.state().queued.len()
-    }
-
-    pub fn owner_active_count(&self, owner_id: &str) -> usize {
-        self.state()
-            .active
-            .values()
-            .filter(|request| request.owner_id == owner_id)
-            .count()
-    }
-
-    pub fn owner_queued_count(&self, owner_id: &str) -> usize {
-        self.state()
-            .queued
-            .iter()
-            .filter(|request| request.owner_id == owner_id)
-            .count()
     }
 
     pub fn admit(
@@ -268,13 +248,6 @@ impl BrowserLaneScheduler {
             matches!(priority, LanePriority::First),
         );
         self.admit_request_with_policy(request, allow_immediate, reason_code)
-    }
-
-    pub fn admit_request(
-        &self,
-        request: QueueRequest,
-    ) -> Result<Admission, BrowserPlatformError> {
-        self.admit_request_with_policy(request, true, DEFAULT_REASON_CODE)
     }
 
     /// Admits a lane or places it in the visible queue.
@@ -338,29 +311,6 @@ impl BrowserLaneScheduler {
         Ok(Admission::Queued(request))
     }
 
-    /// Explicit pressure-path alias for a forced, observable enqueue.
-    pub fn enqueue(
-        &self,
-        request: QueueRequest,
-        reason_code: impl Into<String>,
-    ) -> Result<Admission, BrowserPlatformError> {
-        self.admit_request_with_policy(request, false, reason_code)
-    }
-
-    /// Releases an active permit and returns the next promoted request.
-    ///
-    /// Releasing an unknown or already released lane is idempotent and cannot
-    /// consume another queue entry. Promotion respects the currently installed
-    /// [`PromotionPolicy`]; resource-pressure denials therefore survive this
-    /// public entry point instead of being clobbered by allow-all.
-    pub fn release(&self, lane_id: &BrowserLaneId) -> Option<QueueRequest> {
-        let now_ms = self.inner.clock.now_ms();
-        let mut state = self.state();
-        state.active.remove(lane_id)?;
-        let policy = state.promotion_policy.clone();
-        promote_one_locked(&mut state, now_ms, &policy)
-    }
-
     /// Releases an active permit without promoting queued work.
     ///
     /// The Hub uses this split form so it can take a fresh resource snapshot
@@ -381,45 +331,6 @@ impl BrowserLaneScheduler {
         promote_one_locked(&mut state, now_ms, policy)
     }
 
-    /// Cancels a queued request while explicitly rejecting active requests.
-    ///
-    /// `Ok(None)` means the request identifier is unknown or no longer
-    /// retained. An already promoted request returns `OperationNotAllowed`
-    /// with stable request-state metadata instead of looking missing.
-    pub fn cancel(
-        &self,
-        request_id: &QueueRequestId,
-    ) -> Result<Option<QueueRequest>, BrowserPlatformError> {
-        let mut state = self.state();
-        if let Some(request) = state
-            .active
-            .values()
-            .find(|request| &request.request_id == request_id)
-        {
-            return Err(BrowserPlatformError::new(
-                BrowserErrorCode::OperationNotAllowed,
-                "The browser queue request has already been promoted and is active.",
-                false,
-                "Close the active browser lane instead of cancelling its queue request.",
-            )
-            .for_lane(request.lane_id.clone())
-            .with_metadata(json!({
-                "request_id": request.request_id.as_str(),
-                "request_state": "active",
-            })));
-        }
-        let Some(index) = state
-            .queued
-            .iter()
-            .position(|request| &request.request_id == request_id)
-        else {
-            return Ok(None);
-        };
-        let removed = state.queued.remove(index);
-        prune_owner_ring(&mut state);
-        Ok(Some(removed))
-    }
-
     pub fn cancel_lane(&self, lane_id: &BrowserLaneId) -> Option<QueueRequest> {
         let mut state = self.state();
         let index = state
@@ -429,93 +340,6 @@ impl BrowserLaneScheduler {
         let removed = state.queued.remove(index);
         prune_owner_ring(&mut state);
         Some(removed)
-    }
-
-    pub fn cancel_owner(&self, owner_id: &str) -> Vec<QueueRequest> {
-        let mut state = self.state();
-        let mut removed = Vec::new();
-        let mut retained = Vec::with_capacity(state.queued.len());
-        for request in state.queued.drain(..) {
-            if request.owner_id == owner_id {
-                removed.push(request);
-            } else {
-                retained.push(request);
-            }
-        }
-        state.queued = retained;
-        prune_owner_ring(&mut state);
-        removed
-    }
-
-    /// Removes all of an owner's active and queued requests, then fills every
-    /// newly available permit under the currently installed promotion policy.
-    /// The return value contains only promoted work.
-    pub fn release_owner(&self, owner_id: &str) -> Vec<QueueRequest> {
-        let now_ms = self.inner.clock.now_ms();
-        let mut state = self.state();
-        state
-            .active
-            .retain(|_, request| request.owner_id != owner_id);
-        state
-            .queued
-            .retain(|request| request.owner_id != owner_id);
-        prune_owner_ring(&mut state);
-        let policy = state.promotion_policy.clone();
-        promote_available_locked(&mut state, now_ms, &policy)
-    }
-
-    /// Promotes every available request the currently installed promotion
-    /// policy admits.
-    pub fn promote_available(&self) -> Vec<QueueRequest> {
-        let now_ms = self.inner.clock.now_ms();
-        let mut state = self.state();
-        let policy = state.promotion_policy.clone();
-        promote_available_locked(&mut state, now_ms, &policy)
-    }
-
-    /// Promotes every currently available and resource-eligible request.
-    pub fn promote_available_with_policy(&self, policy: &PromotionPolicy) -> Vec<QueueRequest> {
-        let now_ms = self.inner.clock.now_ms();
-        let mut state = self.state();
-        state.promotion_policy = policy.clone();
-        promote_available_locked(&mut state, now_ms, policy)
-    }
-
-    /// Updates the dynamic resource-policy limit. Existing active lanes are
-    /// never evicted here; increasing the limit returns work newly promoted
-    /// under the currently installed promotion policy.
-    pub fn update_capacity(
-        &self,
-        max_open_lanes: usize,
-        recommended_concurrency: usize,
-    ) -> Vec<QueueRequest> {
-        let now_ms = self.inner.clock.now_ms();
-        let mut state = self.state();
-        state.config.max_open_lanes = max_open_lanes;
-        state.config.recommended_concurrency = recommended_concurrency;
-        let policy = state.promotion_policy.clone();
-        promote_available_locked(&mut state, now_ms, &policy)
-    }
-
-    /// Applies all mutable resource-policy limits. Existing queued requests are
-    /// retained when a cap is lowered; the tighter caps apply to subsequent
-    /// admissions, while active lanes are never preempted. Promotion respects
-    /// the currently installed promotion policy.
-    pub fn update_policy_limits(
-        &self,
-        max_open_lanes: usize,
-        max_global_queue: usize,
-        max_owner_queue: usize,
-        recommended_concurrency: usize,
-    ) -> Vec<QueueRequest> {
-        let now_ms = self.inner.clock.now_ms();
-        let mut state = self.state();
-        state.config.max_open_lanes = max_open_lanes;
-        state.config.max_global_queue = max_global_queue;
-        state.config.max_owner_queue = max_owner_queue;
-        state.config.recommended_concurrency = recommended_concurrency;
-        let policy = state.promotion_policy.clone();
-        promote_available_locked(&mut state, now_ms, &policy)
     }
 
     /// Applies mutable limits without promoting queued work.
@@ -568,38 +392,8 @@ impl BrowserLaneScheduler {
         })
     }
 
-    pub fn queue_metadata_for_lane(
-        &self,
-        lane_id: &BrowserLaneId,
-    ) -> Option<QueueMetadata> {
-        let now_ms = self.inner.clock.now_ms();
-        let state = self.state();
-        let request_id = state
-            .queued
-            .iter()
-            .find(|request| &request.lane_id == lane_id)?
-            .request_id
-            .clone();
-        queue_metadata_locked(
-            &state,
-            &request_id,
-            now_ms,
-            &state.promotion_policy,
-        )
-    }
-
     pub fn active_requests(&self) -> Vec<QueueRequest> {
         self.state().active.values().cloned().collect()
-    }
-
-    /// Returns queued requests in their current effective promotion order.
-    ///
-    /// Requests deferred by the current promotion policy remain visible after
-    /// every presently promotable request.
-    pub fn queued_requests(&self) -> Vec<QueueRequest> {
-        let now_ms = self.inner.clock.now_ms();
-        let state = self.state();
-        queue_order(&state, now_ms, &state.promotion_policy)
     }
 
     /// Returns queued requests without simulating promotion order.
@@ -766,6 +560,7 @@ fn repair_owner_cursor(
     *cursor = None;
 }
 
+#[cfg(test)]
 fn promote_available_locked(
     state: &mut SchedulerState,
     now_ms: u64,
@@ -891,6 +686,7 @@ fn select_owner_fair_index(
     None
 }
 
+#[cfg(test)]
 fn queue_order(
     state: &SchedulerState,
     now_ms: u64,
@@ -987,6 +783,134 @@ fn queue_metadata_locked(
 mod tests {
     use super::*;
     use crate::ManualClock;
+
+    /// Test seams over the trimmed production API.
+    ///
+    /// The Hub's actual call set is the only production surface; these
+    /// wrappers keep the scheduler-invariant tests expressed in admission /
+    /// release / cancellation semantics without re-exposing dead entry points
+    /// to production code.
+    impl BrowserLaneScheduler {
+        fn admit_request(
+            &self,
+            request: QueueRequest,
+        ) -> Result<Admission, BrowserPlatformError> {
+            self.admit_request_with_policy(request, true, DEFAULT_REASON_CODE)
+        }
+
+        /// Releases an active permit and returns the next promoted request.
+        ///
+        /// Promotion respects the currently installed [`PromotionPolicy`];
+        /// resource-pressure denials survive this entry point instead of
+        /// being clobbered by allow-all.
+        fn release(&self, lane_id: &BrowserLaneId) -> Option<QueueRequest> {
+            let now_ms = self.inner.clock.now_ms();
+            let mut state = self.state();
+            state.active.remove(lane_id)?;
+            let policy = state.promotion_policy.clone();
+            promote_one_locked(&mut state, now_ms, &policy)
+        }
+
+        /// Cancels a queued request while explicitly rejecting active requests.
+        fn cancel(
+            &self,
+            request_id: &QueueRequestId,
+        ) -> Result<Option<QueueRequest>, BrowserPlatformError> {
+            let mut state = self.state();
+            if let Some(request) = state
+                .active
+                .values()
+                .find(|request| &request.request_id == request_id)
+            {
+                return Err(BrowserPlatformError::new(
+                    BrowserErrorCode::OperationNotAllowed,
+                    "The browser queue request has already been promoted and is active.",
+                    false,
+                    "Close the active browser lane instead of cancelling its queue request.",
+                )
+                .for_lane(request.lane_id.clone())
+                .with_metadata(json!({
+                    "request_id": request.request_id.as_str(),
+                    "request_state": "active",
+                })));
+            }
+            let Some(index) = state
+                .queued
+                .iter()
+                .position(|request| &request.request_id == request_id)
+            else {
+                return Ok(None);
+            };
+            let removed = state.queued.remove(index);
+            prune_owner_ring(&mut state);
+            Ok(Some(removed))
+        }
+
+        /// Removes all of an owner's active and queued requests, then fills
+        /// every newly available permit under the installed promotion policy.
+        fn release_owner(&self, owner_id: &str) -> Vec<QueueRequest> {
+            let now_ms = self.inner.clock.now_ms();
+            let mut state = self.state();
+            state
+                .active
+                .retain(|_, request| request.owner_id != owner_id);
+            state
+                .queued
+                .retain(|request| request.owner_id != owner_id);
+            prune_owner_ring(&mut state);
+            let policy = state.promotion_policy.clone();
+            promote_available_locked(&mut state, now_ms, &policy)
+        }
+
+        /// Promotes every available request the installed promotion policy admits.
+        fn promote_available(&self) -> Vec<QueueRequest> {
+            let now_ms = self.inner.clock.now_ms();
+            let mut state = self.state();
+            let policy = state.promotion_policy.clone();
+            promote_available_locked(&mut state, now_ms, &policy)
+        }
+
+        /// Updates the dynamic resource-policy limit and promotes under the
+        /// installed promotion policy.
+        fn update_capacity(
+            &self,
+            max_open_lanes: usize,
+            recommended_concurrency: usize,
+        ) -> Vec<QueueRequest> {
+            let now_ms = self.inner.clock.now_ms();
+            let mut state = self.state();
+            state.config.max_open_lanes = max_open_lanes;
+            state.config.recommended_concurrency = recommended_concurrency;
+            let policy = state.promotion_policy.clone();
+            promote_available_locked(&mut state, now_ms, &policy)
+        }
+
+        /// Applies all mutable resource-policy limits and promotes under the
+        /// installed promotion policy.
+        fn update_policy_limits(
+            &self,
+            max_open_lanes: usize,
+            max_global_queue: usize,
+            max_owner_queue: usize,
+            recommended_concurrency: usize,
+        ) -> Vec<QueueRequest> {
+            let now_ms = self.inner.clock.now_ms();
+            let mut state = self.state();
+            state.config.max_open_lanes = max_open_lanes;
+            state.config.max_global_queue = max_global_queue;
+            state.config.max_owner_queue = max_owner_queue;
+            state.config.recommended_concurrency = recommended_concurrency;
+            let policy = state.promotion_policy.clone();
+            promote_available_locked(&mut state, now_ms, &policy)
+        }
+
+        /// Returns queued requests in their current effective promotion order.
+        fn queued_requests(&self) -> Vec<QueueRequest> {
+            let now_ms = self.inner.clock.now_ms();
+            let state = self.state();
+            queue_order(&state, now_ms, &state.promotion_policy)
+        }
+    }
 
     fn scheduler(config: SchedulerConfig) -> (BrowserLaneScheduler, ManualClock) {
         let clock = ManualClock::new(1_000);

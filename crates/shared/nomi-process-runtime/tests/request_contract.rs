@@ -6,7 +6,7 @@ use std::{
 };
 
 use nomi_process_runtime::{
-    CapabilityPolicy, CleanupReport, CommandSpec, EncodingMetadata, ProcessEvent,
+    CapabilityPolicy, CleanupReport, CommandSpec, EncodingMetadata,
     ProcessOutcome, ProcessOwner, ProcessPolicy, ProcessRequest, OutputChunk, OutputCursor,
     OutputSnapshot, OutputStream, ProcessSnapshot, ProcessState, SessionId, ShellKind, SpawnFailure,
     Transport, normalize_request,
@@ -232,34 +232,3 @@ fn outcome_variants_preserve_process_facts() {
     assert_eq!(outcomes.len(), 5);
 }
 
-#[test]
-fn process_events_preserve_sequence_and_loss() {
-    let output = ProcessEvent::Output {
-        seq: 3,
-        stream: OutputStream::Stderr,
-        bytes: b"failure".to_vec(),
-        text: "failure".to_owned(),
-        encoding: EncodingMetadata {
-            source_encoding: "utf-8".to_owned(),
-            decode_errors: 0,
-        },
-    };
-    let state = ProcessEvent::StateChanged {
-        seq: 4,
-        state: ProcessState::Running,
-    };
-    let dropped = ProcessEvent::OutputDropped { seq: 5, bytes: 8 };
-
-    assert!(matches!(output, ProcessEvent::Output { seq: 3, .. }));
-    assert!(matches!(
-        state,
-        ProcessEvent::StateChanged {
-            seq: 4,
-            state: ProcessState::Running
-        }
-    ));
-    assert!(matches!(
-        dropped,
-        ProcessEvent::OutputDropped { seq: 5, bytes: 8 }
-    ));
-}

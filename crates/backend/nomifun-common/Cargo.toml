@@ -18,7 +18,6 @@ getrandom.workspace = true
 hmac.workspace = true
 libc.workspace = true
 sha2.workspace = true
-semver.workspace = true
 tracing.workspace = true
 ts-rs.workspace = true
 tokio.workspace = true

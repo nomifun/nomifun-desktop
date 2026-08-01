@@ -350,14 +350,6 @@ define_entity_id!(
     CsAgentId
 );
 define_entity_id!(
-    /// Globally unique customer-service dialogue (访客对话) identifier.
-    CsDialogueId
-);
-define_entity_id!(
-    /// Globally unique customer-service message identifier.
-    CsMessageId
-);
-define_entity_id!(
     /// Globally unique customer-service note (客服笔记) identifier.
     CsNoteId
 );

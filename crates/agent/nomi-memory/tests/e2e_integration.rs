@@ -7,7 +7,7 @@ use std::fs;
 
 use nomi_memory::index;
 use nomi_memory::paths;
-use nomi_memory::prompt::build_memory_prompt;
+use nomi_memory::prompt::build_memory_prompt_minimal;
 use nomi_memory::store;
 use nomi_memory::types::{MemoryEntry, MemoryType};
 
@@ -47,22 +47,8 @@ fn tc_8_1_complete_memory_lifecycle() {
     )
     .unwrap();
 
-    // 4. Scan directory — the memory should appear
-    let headers = store::scan_memory_files(&mem_dir).unwrap();
-    assert_eq!(
-        headers.len(),
-        1,
-        "should find exactly 1 memory file (MEMORY.md excluded)"
-    );
-    assert_eq!(headers[0].filename, filename);
-    assert_eq!(headers[0].memory_type, Some(MemoryType::Feedback));
-    assert_eq!(
-        headers[0].description.as_deref(),
-        Some("integration tests must hit real DB")
-    );
-
-    // 5. Build prompt — should include MEMORY.md content
-    let prompt = build_memory_prompt(&mem_dir);
+    // 4. Build prompt — should include MEMORY.md content
+    let prompt = build_memory_prompt_minimal(&mem_dir);
     assert!(
         prompt.contains(filename),
         "prompt should reference the memory file"
@@ -72,7 +58,7 @@ fn tc_8_1_complete_memory_lifecycle() {
         "prompt should contain the index summary"
     );
 
-    // 6. Read back the memory file — verify content integrity
+    // 5. Read back the memory file — verify content integrity
     let read_back = store::read_memory(&written_path).unwrap();
     assert_eq!(read_back.frontmatter.name.as_deref(), Some("test policy"));
     assert_eq!(
@@ -81,15 +67,19 @@ fn tc_8_1_complete_memory_lifecycle() {
     );
     assert!(read_back.content.contains("testcontainers"));
 
-    // 7. Delete the memory file
-    store::delete_memory(&written_path).unwrap();
+    // 6. Delete the memory file (the model does this via generic file tools)
+    fs::remove_file(&written_path).unwrap();
     assert!(!written_path.exists());
 
-    // 8. Re-scan — should be empty
-    let headers_after = store::scan_memory_files(&mem_dir).unwrap();
+    // 7. The directory should contain only MEMORY.md afterwards
+    let remaining: Vec<_> = fs::read_dir(&mem_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name != "MEMORY.md")
+        .collect();
     assert!(
-        headers_after.is_empty(),
-        "should find no memory files after deletion"
+        remaining.is_empty(),
+        "should find no memory files after deletion: {remaining:?}"
     );
 }
 
@@ -126,11 +116,6 @@ fn tc_8_2_chinese_content_roundtrip() {
     assert!(read_back.content.contains("十年经验"));
     assert!(read_back.content.contains("函数式编程"));
 
-    // Scan — header should preserve Chinese description
-    let headers = store::scan_memory_files(&mem_dir).unwrap();
-    assert_eq!(headers.len(), 1);
-    assert_eq!(headers[0].description.as_deref(), Some("资深后端工程师"));
-
     // Index — append Chinese title and verify
     let index_path = paths::memory_entrypoint(&mem_dir);
     let filename = path.file_name().unwrap().to_str().unwrap();
@@ -141,7 +126,7 @@ fn tc_8_2_chinese_content_roundtrip() {
     assert!(index_content.contains("资深后端工程师"));
 
     // Prompt — should include Chinese index content
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt_minimal(&mem_dir);
     assert!(prompt.contains("用户角色"));
     assert!(prompt.contains("资深后端工程师"));
 }

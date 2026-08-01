@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -18,7 +17,6 @@ pub struct SseTransport {
     headers: HeaderMap,
     /// Pending request-response channels, keyed by JSON-RPC id
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
-    next_id: AtomicU64,
     /// Handle to the background SSE listener task
     _listener: tokio::task::JoinHandle<()>,
 }
@@ -132,14 +130,10 @@ impl SseTransport {
             post_url,
             headers: header_map,
             pending,
-            next_id: AtomicU64::new(1),
             _listener: listener,
         })
     }
 
-    pub fn next_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
 }
 
 #[async_trait]

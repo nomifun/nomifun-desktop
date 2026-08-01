@@ -6,7 +6,7 @@ use crate::adapter::{DetectedServer, McpAgentAdapter};
 use crate::error::McpError;
 use crate::types::McpServerTransport;
 
-use super::cli_helpers::{DETECT_TIMEOUT, MUTATE_TIMEOUT, is_cli_installed, run_cli_strict};
+use super::cli_helpers::{DETECT_TIMEOUT, is_cli_installed, run_cli_strict};
 
 const CLI_NAME: &str = "codex";
 
@@ -15,9 +15,6 @@ const CLI_NAME: &str = "codex";
 /// # CLI Commands
 ///
 /// - **detect**: `codex mcp list --json` (JSON output)
-/// - **install (stdio)**: `codex mcp add <name> [--env K=V]... -- <cmd> [args...]`
-/// - **install (http)**: `codex mcp add <name> --url <url>`
-/// - **remove**: `codex mcp remove <name>` (no scope parameter)
 ///
 /// Codex outputs structured JSON for list, unlike the text-based agents.
 pub struct CodexAdapter;
@@ -40,55 +37,6 @@ impl McpAgentAdapter for CodexAdapter {
         let stdout = run_cli_strict(CLI_NAME, &["mcp", "list", "--json"], DETECT_TIMEOUT).await?;
 
         parse_codex_list_json(&stdout)
-    }
-
-    async fn install_server(&self, name: &str, transport: &McpServerTransport) -> Result<(), McpError> {
-        if !self.is_installed().await? {
-            return Err(McpError::AgentNotInstalled(CLI_NAME.into()));
-        }
-
-        match transport {
-            McpServerTransport::Stdio { command, args, env } => {
-                let mut cli_args = vec!["mcp".to_owned(), "add".to_owned(), name.to_owned()];
-
-                // Env vars come before --
-                for (k, v) in env {
-                    cli_args.push("--env".to_owned());
-                    cli_args.push(format!("{k}={v}"));
-                }
-
-                // Command and args come after --
-                cli_args.push("--".to_owned());
-                cli_args.push(command.clone());
-                cli_args.extend(args.iter().cloned());
-
-                let arg_refs: Vec<&str> = cli_args.iter().map(|s| s.as_str()).collect();
-                run_cli_strict(CLI_NAME, &arg_refs, MUTATE_TIMEOUT).await?;
-            }
-            McpServerTransport::Http { url, .. } | McpServerTransport::Sse { url, .. } => {
-                // Codex only supports --url for HTTP, no headers via CLI
-                run_cli_strict(CLI_NAME, &["mcp", "add", name, "--url", url], MUTATE_TIMEOUT).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn remove_server(&self, name: &str) -> Result<(), McpError> {
-        if !self.is_installed().await? {
-            return Err(McpError::AgentNotInstalled(CLI_NAME.into()));
-        }
-
-        // Codex has no scope parameter; remove is simple.
-        let (stdout, _stderr) = super::cli_helpers::run_cli(CLI_NAME, &["mcp", "remove", name], MUTATE_TIMEOUT).await?;
-
-        // Idempotent: treat "not found" as success.
-        let lower = stdout.to_lowercase();
-        if lower.contains("not found") || lower.contains("removed") || lower.is_empty() {
-            return Ok(());
-        }
-
-        Ok(())
     }
 }
 

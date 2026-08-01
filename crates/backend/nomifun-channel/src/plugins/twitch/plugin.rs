@@ -14,9 +14,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{TWITCH_MAX_RECONNECT_ATTEMPTS, TWITCH_MAX_RECONNECT_DELAY, TWITCH_MESSAGE_LIMIT};
+use crate::constants::{RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY, TWITCH_MESSAGE_LIMIT};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
     BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType, UnifiedIncomingMessage,
     UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
@@ -301,11 +302,11 @@ async fn run_irc_loop(
             Err(e) => {
                 consecutive_errors += 1;
                 warn!(error = %e, consecutive_errors, "Twitch IRC error");
-                if consecutive_errors >= TWITCH_MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("Twitch max reconnect attempts reached, stopping IRC loop");
                     break;
                 }
-                let backoff = backoff_delay(consecutive_errors);
+                let backoff = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown_rx.changed() => break,
@@ -316,12 +317,6 @@ async fn run_irc_loop(
 
     mark_error_on_unexpected_exit(&status, &shutdown_rx, "twitch");
     debug!("Twitch IRC loop exited");
-}
-
-/// Exponential backoff capped at `TWITCH_MAX_RECONNECT_DELAY`.
-fn backoff_delay(attempt: u32) -> Duration {
-    let secs = 2u64.saturating_pow(attempt).min(TWITCH_MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(secs)
 }
 
 /// A single IRC connection: CAP → PASS → NICK → JOIN → read loop.
@@ -585,26 +580,17 @@ pub(crate) fn format_privmsgs(channel: &str, text: &str) -> Vec<String> {
         if line.is_empty() {
             continue;
         }
-        let truncated = truncate_text(line, TWITCH_MESSAGE_LIMIT);
+        let truncated = truncate_message(line, TWITCH_MESSAGE_LIMIT);
         result.push(format!("PRIVMSG {channel} :{truncated}"));
     }
     if result.is_empty() {
         // If the text had no non-empty lines, send the full text as one line.
-        let truncated = truncate_text(text.trim(), TWITCH_MESSAGE_LIMIT);
+        let truncated = truncate_message(text.trim(), TWITCH_MESSAGE_LIMIT);
         if !truncated.is_empty() {
             result.push(format!("PRIVMSG {channel} :{truncated}"));
         }
     }
     result
-}
-
-/// Truncate text at a char boundary to `limit`, appending "..." if cut.
-pub(crate) fn truncate_text(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(limit.saturating_sub(3)).collect();
-    format!("{truncated}...")
 }
 
 #[cfg(test)]
@@ -785,36 +771,6 @@ mod tests {
         assert!(content.ends_with("..."));
     }
 
-    // ── Text truncation ───────────────────────────────────────────────────
-
-    #[test]
-    fn truncate_short_text() {
-        assert_eq!(truncate_text("short", 480), "short");
-    }
-
-    #[test]
-    fn truncate_exact_limit() {
-        let text = "a".repeat(480);
-        assert_eq!(truncate_text(&text, 480), text);
-    }
-
-    #[test]
-    fn truncate_over_limit() {
-        let text = "b".repeat(500);
-        let result = truncate_text(&text, 480);
-        assert_eq!(result.chars().count(), 480);
-        assert!(result.ends_with("..."));
-    }
-
-    #[test]
-    fn truncate_unicode() {
-        let text = "你好世界测试这是一个很长的中文字符串";
-        // 16 chars, truncate to 10
-        let result = truncate_text(text, 10);
-        assert_eq!(result.chars().count(), 10);
-        assert!(result.ends_with("..."));
-    }
-
     // ── PRIVMSG → UnifiedIncomingMessage ──────────────────────────────────
 
     #[test]
@@ -875,10 +831,4 @@ mod tests {
 
     // ── Backoff ───────────────────────────────────────────────────────────
 
-    #[test]
-    fn backoff_is_exponential_and_capped() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30)); // capped
-    }
 }

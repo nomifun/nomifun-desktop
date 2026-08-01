@@ -8,24 +8,12 @@ import { ipcBridge } from '@/common';
 import { useTypingAnimation } from '@/renderer/hooks/chat/useTypingAnimation';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-/** 选中元素的数据结构 / Selected element data structure */
-export interface InspectedElement {
-  /** 完整 HTML / Full HTML */
-  html: string;
-  /** 简化标签名 / Simplified tag name */
-  tag: string;
-}
-
 interface HTMLRendererProps {
   content: string;
   file_path?: string;
   workspace?: string;
   containerRef?: React.RefObject<HTMLDivElement | null>;
   onScroll?: (scrollTop: number, scrollHeight: number, clientHeight: number) => void;
-  inspectMode?: boolean; // 是否开启检查模式 / Whether inspect mode is enabled
-  copySuccessMessage?: string;
-  /** 元素选中回调 / Element selected callback */
-  onElementSelected?: (element: InspectedElement) => void;
 }
 
 /**
@@ -173,16 +161,7 @@ async function inlineRelativeResources(html: string, basePath: string, workspace
  * 在 iframe 中渲染 HTML 内容，相对资源通过 ipcBridge.fs.* 内联化
  * Renders HTML content in an iframe; relative resources are inlined via ipcBridge.fs.*
  */
-const HTMLRenderer: React.FC<HTMLRendererProps> = ({
-  content,
-  file_path,
-  workspace,
-  containerRef,
-  copySuccessMessage: _copySuccessMessage,
-  inspectMode: _inspectMode,
-  onElementSelected: _onElementSelected,
-  onScroll: _onScroll,
-}) => {
+const HTMLRenderer: React.FC<HTMLRendererProps> = ({ content, file_path, workspace, containerRef, onScroll }) => {
   const divRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [inlinedHtmlContent, setInlinedHtmlContent] = useState<string>(''); // 内联化后的 HTML / Inlined HTML
@@ -261,6 +240,39 @@ const HTMLRenderer: React.FC<HTMLRendererProps> = ({
     }
     return displayedContent;
   }, [hasRelativeResources, file_path, inlinedHtmlContent, content, displayedContent]);
+
+  // preview→editor 滚动同步：iframe 内部文档才是实际滚动容器，监听其滚动并上报
+  // preview→editor scroll sync: the iframe inner document is the real scroll container
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe || !onScroll) return;
+
+    let detach: (() => void) | undefined;
+    const attach = () => {
+      detach?.();
+      detach = undefined;
+      try {
+        const win = iframe.contentWindow;
+        const doc = win?.document;
+        if (!win || !doc) return;
+        const handler = () => {
+          const el = doc.scrollingElement || doc.documentElement;
+          if (el) onScroll(el.scrollTop, el.scrollHeight, el.clientHeight);
+        };
+        win.addEventListener('scroll', handler, { passive: true });
+        detach = () => win.removeEventListener('scroll', handler);
+      } catch {
+        // 内容不可访问时静默跳过（如被导航到跨域页面）/ Silently skip when inner document is inaccessible
+      }
+    };
+
+    attach(); // srcDoc 可能已加载完成 / srcDoc may already be loaded
+    iframe.addEventListener('load', attach);
+    return () => {
+      iframe.removeEventListener('load', attach);
+      detach?.();
+    };
+  }, [onScroll, browserHtmlContent]);
 
   return (
     <div

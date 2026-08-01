@@ -188,6 +188,15 @@ enum DeferredSpawnFailure {
     Spawn(TerminalError),
 }
 
+/// What an in-place relaunch spawns for the existing session id.
+#[derive(Clone, Copy, Debug)]
+enum RelaunchTarget {
+    /// Reuse the stored command/args/env/backend.
+    Stored,
+    /// Replace the launch identity with the platform login shell.
+    Shell,
+}
+
 /// Hook the IDMM layer registers so a user-driven terminal session (re)arms
 /// intelligent-decision supervision on activity. Defined here (the lower crate)
 /// so `nomifun-terminal` need not depend on `nomifun-idmm`; `IdmmManager`
@@ -605,6 +614,22 @@ impl TerminalService {
         base.join(id.to_string())
     }
 
+    /// Run a lifecycle operation on a detached coordinator task.
+    ///
+    /// The spawned task keeps running even if the HTTP/WebSocket caller is
+    /// cancelled, so a dropped request can never abandon a durable-commit +
+    /// process-swap transaction halfway (see the coordinated fns' PROCESS
+    /// ORDER comments).
+    async fn coordinate<T: Send + 'static>(
+        &self,
+        what: &'static str,
+        fut: impl std::future::Future<Output = Result<T, TerminalError>> + Send + 'static,
+    ) -> Result<T, TerminalError> {
+        tokio::spawn(fut).await.map_err(|error| {
+            TerminalError::Spawn(format!("terminal {what} coordinator failed: {error}"))
+        })?
+    }
+
     /// Create a session: persist the row, spawn the PTY, wire output/exit.
     pub async fn create(
         &self,
@@ -613,11 +638,10 @@ impl TerminalService {
     ) -> Result<TerminalSessionResponse, TerminalError> {
         let service = self.clone();
         let user_id = user_id.to_owned();
-        tokio::spawn(async move { service.create_coordinated(user_id, None, req).await })
-            .await
-            .map_err(|error| {
-                TerminalError::Spawn(format!("terminal create coordinator failed: {error}"))
-            })?
+        self.coordinate("create", async move {
+            service.create_coordinated(user_id, None, req).await
+        })
+        .await
     }
 
     /// Create a terminal owned by one interactive conversation.
@@ -636,15 +660,12 @@ impl TerminalService {
         })?;
         let service = self.clone();
         let user_id = user_id.to_owned();
-        tokio::spawn(async move {
+        self.coordinate("create", async move {
             service
                 .create_coordinated(user_id, Some(conversation_id), req)
                 .await
         })
         .await
-        .map_err(|error| {
-            TerminalError::Spawn(format!("terminal create coordinator failed: {error}"))
-        })?
     }
 
     async fn create_coordinated(
@@ -1890,11 +1911,10 @@ impl TerminalService {
     pub async fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), TerminalError> {
         let service = self.clone();
         let id = id.to_owned();
-        tokio::spawn(async move { service.resize_coordinated(id, cols, rows).await })
-            .await
-            .map_err(|error| {
-                TerminalError::Spawn(format!("terminal resize coordinator failed: {error}"))
-            })?
+        self.coordinate("resize", async move {
+            service.resize_coordinated(id, cols, rows).await
+        })
+        .await
     }
 
     /// Detached activation coordinator. If the HTTP/WebSocket caller is
@@ -2009,11 +2029,8 @@ impl TerminalService {
     pub async fn kill(&self, id: &str) -> Result<(), TerminalError> {
         let service = self.clone();
         let id = id.to_owned();
-        tokio::spawn(async move { service.kill_coordinated(id).await })
+        self.coordinate("kill", async move { service.kill_coordinated(id).await })
             .await
-            .map_err(|error| {
-                TerminalError::Spawn(format!("terminal kill coordinator failed: {error}"))
-            })?
     }
 
     async fn kill_coordinated(&self, id: String) -> Result<(), TerminalError> {
@@ -2051,11 +2068,8 @@ impl TerminalService {
     pub async fn delete(&self, id: &str) -> Result<(), TerminalError> {
         let service = self.clone();
         let id = id.to_owned();
-        tokio::spawn(async move { service.delete_coordinated(id).await })
+        self.coordinate("delete", async move { service.delete_coordinated(id).await })
             .await
-            .map_err(|error| {
-                TerminalError::Spawn(format!("terminal delete coordinator failed: {error}"))
-            })?
     }
 
     /// Runs independently of the HTTP caller so a dropped request cannot leave
@@ -2142,16 +2156,43 @@ impl TerminalService {
     pub async fn relaunch(&self, id: &str) -> Result<TerminalSessionResponse, TerminalError> {
         let service = self.clone();
         let id = id.to_owned();
-        tokio::spawn(async move { service.relaunch_coordinated(id).await })
-            .await
-            .map_err(|error| {
-                TerminalError::Spawn(format!("terminal relaunch coordinator failed: {error}"))
-            })?
+        self.coordinate("relaunch", async move {
+            service.relaunch_in_place(id, RelaunchTarget::Stored).await
+        })
+        .await
     }
 
-    async fn relaunch_coordinated(
+    /// Fall back to a clean login shell **in place**: kill the (possibly wedged)
+    /// current child and spawn the platform shell for the SAME session id, then
+    /// rewrite the stored launch identity to the shell sentinel so the session is
+    /// permanently a shell (a later restart / boot-reconcile relaunches a shell,
+    /// not the dead agent CLI, and the mechanical name becomes `Shell`).
+    ///
+    /// This is the escape hatch for a claude/codex TUI that left the terminal
+    /// garbled and unresponsive: the user can always get back to a usable shell
+    /// without the dead-page/disabled-composer state. Structurally identical to
+    /// [`relaunch`] (same id, fresh epoch, status→running, emit `terminal.updated`
+    /// which re-enables the frontend composer) —only the launch target differs.
+    pub async fn relaunch_as_shell(
+        &self,
+        id: &str,
+    ) -> Result<TerminalSessionResponse, TerminalError> {
+        let service = self.clone();
+        let id = id.to_owned();
+        self.coordinate("shell-relaunch", async move {
+            service.relaunch_in_place(id, RelaunchTarget::Shell).await
+        })
+        .await
+    }
+
+    /// Detached coordinator body shared by [`relaunch`] and
+    /// [`relaunch_as_shell`]. Every divergence between the two paths is an
+    /// explicit match on `target` so the safety-critical ordering (durable
+    /// preflight → owned kill → spawn) is written exactly once.
+    async fn relaunch_in_place(
         &self,
         id: String,
+        target: RelaunchTarget,
     ) -> Result<TerminalSessionResponse, TerminalError> {
         let _shutdown_guard = self.enter_operation().await?;
         let lifecycle_slot = self.lifecycle_slot_for_existing_row(&id).await?;
@@ -2169,25 +2210,32 @@ impl TerminalService {
         };
         let (cols, rows) = validate_stored_pty_size(row.cols, row.rows)?;
         let args = crate::types::parse_args(&row.args);
-        let env = process_env_from_persisted(row.env.as_deref());
+
         // Re-sync knowledge mounts + README on every relaunch. Binding
         // changes already reach a LIVE terminal through the binding-change
         // hook (`resync_workpath_knowledge`) and live MCP dispatch; the
         // relaunch re-sync additionally refreshes the signed capability
         // snapshot and (re)injects the MCP bridge for sessions that launched
-        // without it.
-        let kb_ids = self
-            .sync_knowledge_workspace(&id, &row.cwd, &row.command, &args, row.backend.as_deref())
-            .await;
+        // without it. A shell never gets MCP/tool injection
+        // (apply_enhancement no-ops for it).
+        let kb_ids = match target {
+            RelaunchTarget::Stored => {
+                self.sync_knowledge_workspace(&id, &row.cwd, &row.command, &args, row.backend.as_deref())
+                    .await
+            }
+            RelaunchTarget::Shell => {
+                self.sync_knowledge_workspace(&id, &row.cwd, crate::types::SHELL_SENTINEL, &[], None)
+                    .await
+            }
+        };
 
         if let Some(pty_epoch) = self.live.get(&id).map(|handle| handle.epoch()) {
+            let park_reason = match target {
+                RelaunchTarget::Stored => TURN_PARK_RELAUNCH,
+                RelaunchTarget::Shell => TURN_PARK_SHELL_RELAUNCH,
+            };
             self.repo
-                .park_open_turn_admissions(
-                    &id,
-                    Some(pty_epoch),
-                    TURN_PARK_RELAUNCH,
-                    nomifun_common::now_ms(),
-                )
+                .park_open_turn_admissions(&id, Some(pty_epoch), park_reason, nomifun_common::now_ms())
                 .await?;
         }
         if let Some(handle) = self
@@ -2203,8 +2251,26 @@ impl TerminalService {
         }
         // All fallible durable preflight happens while the previous PTY and
         // state remain untouched. This is deliberately the last DB mutation
-        // before the owned cleanup + replacement transaction below.
-        self.repo.update_status(&id, "running", None).await?;
+        // before the owned cleanup + replacement transaction below. For the
+        // shell fallback it is one atomic commit: an observer can never see
+        // shell identity and agent status as two separate writes. The
+        // detached coordinator completes the swap even if the HTTP caller is
+        // cancelled after SQLite commits.
+        match target {
+            RelaunchTarget::Stored => self.repo.update_status(&id, "running", None).await?,
+            RelaunchTarget::Shell => {
+                self.repo
+                    .update_launch_state(
+                        &id,
+                        crate::types::SHELL_SENTINEL,
+                        "[]",
+                        None,
+                        "running",
+                        None,
+                    )
+                    .await?
+            }
+        }
 
         let previous_state = lifecycle.clone();
         *lifecycle = TerminalLifecycleState::Pending;
@@ -2213,32 +2279,67 @@ impl TerminalService {
             .get(&id)
             .map(|entry| Arc::clone(entry.value()));
         if let Some(handle) = old_handle {
-            if let Err(error) = handle.ensure_not_quarantined() {
+            let cleanup = match handle.ensure_not_quarantined() {
+                Ok(()) => handle.kill().await,
+                Err(error) => Err(error),
+            };
+            if let Err(kill_error) = cleanup {
                 *lifecycle = previous_state;
-                return Err(error);
-            }
-            if let Err(error) = handle.kill().await {
-                *lifecycle = previous_state;
-                return Err(error);
+                if matches!(target, RelaunchTarget::Shell) {
+                    // The old PTY is still live. Restore its durable launch
+                    // identity before returning so a failed fallback remains
+                    // internally honest.
+                    self.repo
+                        .update_launch_state(
+                            &id,
+                            &row.command,
+                            &row.args,
+                            row.backend.as_deref(),
+                            &row.last_status,
+                            row.exit_code,
+                        )
+                        .await?;
+                }
+                return Err(kill_error);
             }
         }
         self.live_capability_leases.remove(&id);
         self.live.remove(&id);
 
-        if let Err(e) = self.spawn_pty(
-            &row.user_id,
-            &id,
-            &row.command,
-            &args,
-            &row.cwd,
-            env,
-            cols,
-            rows,
-            kb_ids,
-            row.backend.as_deref(),
-        )
-        .await
-        {
+        let spawn_result = match target {
+            RelaunchTarget::Stored => {
+                let env = process_env_from_persisted(row.env.as_deref());
+                self.spawn_pty(
+                    &row.user_id,
+                    &id,
+                    &row.command,
+                    &args,
+                    &row.cwd,
+                    env,
+                    cols,
+                    rows,
+                    kb_ids,
+                    row.backend.as_deref(),
+                )
+                .await
+            }
+            RelaunchTarget::Shell => {
+                self.spawn_pty(
+                    &row.user_id,
+                    &id,
+                    crate::types::SHELL_SENTINEL,
+                    &[],
+                    &row.cwd,
+                    None,
+                    cols,
+                    rows,
+                    kb_ids,
+                    None,
+                )
+                .await
+            }
+        };
+        if let Err(e) = spawn_result {
             // The old PTY is already removed + killed; if the fresh spawn fails
             // the session has no process. Record a stable error because the
             // predecessor's epoch-guarded exit callback will not do it for us.
@@ -2265,165 +2366,19 @@ impl TerminalService {
             .ok_or_else(|| TerminalError::NotFound(id.clone()))?;
         let resp = row_to_response(&updated, None, &self.work_dir);
         self.emitter.emit_updated(&updated.user_id, &resp);
-        info!(terminal_id = %id, "terminal session relaunched in place");
+        match target {
+            RelaunchTarget::Stored => {
+                info!(terminal_id = %id, "terminal session relaunched in place");
+            }
+            RelaunchTarget::Shell => {
+                info!(
+                    terminal_id = %id,
+                    "terminal session fell back to a clean shell in place"
+                );
+            }
+        }
         // Re-arm IDMM supervision for the fresh PTY (the old supervisor stood
         // down when the previous PTY exited).
-        self.arm_supervision(&id);
-        Ok(resp)
-    }
-
-    /// Fall back to a clean login shell **in place**: kill the (possibly wedged)
-    /// current child and spawn the platform shell for the SAME session id, then
-    /// rewrite the stored launch identity to the shell sentinel so the session is
-    /// permanently a shell (a later restart / boot-reconcile relaunches a shell,
-    /// not the dead agent CLI, and the mechanical name becomes `Shell`).
-    ///
-    /// This is the escape hatch for a claude/codex TUI that left the terminal
-    /// garbled and unresponsive: the user can always get back to a usable shell
-    /// without the dead-page/disabled-composer state. Structurally identical to
-    /// [`relaunch`] (same id, fresh epoch, status→running, emit `terminal.updated`
-    /// which re-enables the frontend composer) —only the launch target differs.
-    pub async fn relaunch_as_shell(
-        &self,
-        id: &str,
-    ) -> Result<TerminalSessionResponse, TerminalError> {
-        let service = self.clone();
-        let id = id.to_owned();
-        tokio::spawn(async move { service.relaunch_as_shell_coordinated(id).await })
-            .await
-            .map_err(|error| {
-                TerminalError::Spawn(format!(
-                    "terminal shell-relaunch coordinator failed: {error}"
-                ))
-            })?
-    }
-
-    async fn relaunch_as_shell_coordinated(
-        &self,
-        id: String,
-    ) -> Result<TerminalSessionResponse, TerminalError> {
-        let _shutdown_guard = self.enter_operation().await?;
-        let lifecycle_slot = self.lifecycle_slot_for_existing_row(&id).await?;
-        let mut lifecycle = lifecycle_slot.clone().lock_owned().await;
-        if matches!(*lifecycle, TerminalLifecycleState::Cancelled) {
-            return Err(TerminalError::NotFound(id));
-        }
-        let row = match self.repo.get_by_id(&id).await? {
-            Some(row) => row,
-            None => {
-                *lifecycle = TerminalLifecycleState::Cancelled;
-                self.remove_lifecycle_slot_if_same(&id, &lifecycle_slot);
-                return Err(TerminalError::NotFound(id));
-            }
-        };
-        let (cols, rows) = validate_stored_pty_size(row.cols, row.rows)?;
-
-        // Re-sync knowledge mounts for the cwd (same contract as `relaunch`); a
-        // shell never gets MCP/tool injection (apply_enhancement no-ops for it).
-        let kb_ids = self
-            .sync_knowledge_workspace(&id, &row.cwd, crate::types::SHELL_SENTINEL, &[], None)
-            .await;
-
-        if let Some(pty_epoch) = self.live.get(&id).map(|handle| handle.epoch()) {
-            self.repo
-                .park_open_turn_admissions(
-                    &id,
-                    Some(pty_epoch),
-                    TURN_PARK_SHELL_RELAUNCH,
-                    nomifun_common::now_ms(),
-                )
-                .await?;
-        }
-        if let Some(handle) = self
-            .live
-            .get(&id)
-            .map(|entry| Arc::clone(entry.value()))
-        {
-            handle.ensure_not_quarantined()?;
-        }
-        // One atomic durable preflight precedes the process swap: an observer
-        // can never see shell identity and agent status as two separate commits.
-        // The detached coordinator completes the swap even if the HTTP caller
-        // is cancelled after SQLite commits.
-        self.repo
-            .update_launch_state(
-                &id,
-                crate::types::SHELL_SENTINEL,
-                "[]",
-                None,
-                "running",
-                None,
-            )
-            .await?;
-
-        let previous_state = lifecycle.clone();
-        *lifecycle = TerminalLifecycleState::Pending;
-        let old_handle = self
-            .live
-            .get(&id)
-            .map(|entry| Arc::clone(entry.value()));
-        if let Some(handle) = old_handle {
-            let cleanup = match handle.ensure_not_quarantined() {
-                Ok(()) => handle.kill().await,
-                Err(error) => Err(error),
-            };
-            if let Err(kill_error) = cleanup {
-                *lifecycle = previous_state;
-                // The old PTY is still live. Restore its durable launch identity
-                // before returning so a failed fallback remains internally honest.
-                self.repo
-                    .update_launch_state(
-                        &id,
-                        &row.command,
-                        &row.args,
-                        row.backend.as_deref(),
-                        &row.last_status,
-                        row.exit_code,
-                    )
-                    .await?;
-                return Err(kill_error);
-            }
-        }
-        self.live_capability_leases.remove(&id);
-        self.live.remove(&id);
-
-        if let Err(e) = self.spawn_pty(
-            &row.user_id,
-            &id,
-            crate::types::SHELL_SENTINEL,
-            &[],
-            &row.cwd,
-            None,
-            cols,
-            rows,
-            kb_ids,
-            None,
-        )
-        .await
-        {
-            *lifecycle = TerminalLifecycleState::Failed(terminal_failure_message(&e));
-            self.persist_terminal_failure(&id, true).await;
-            return Err(e);
-        }
-        *lifecycle = TerminalLifecycleState::Ready;
-
-        // Fresh process → drop the previous (agent) scrollback so a later restart
-        // doesn't replay it as this shell's history.
-        if let Err(e) = self.repo.clear_scrollback(&id).await {
-            warn!(terminal_id = %id, error = %e, "failed to clear persisted scrollback on shell fallback");
-        }
-
-        let updated = self
-            .repo
-            .get_by_id(&id)
-            .await?
-            .ok_or_else(|| TerminalError::NotFound(id.clone()))?;
-        let resp = row_to_response(&updated, None, &self.work_dir);
-        self.emitter.emit_updated(&updated.user_id, &resp);
-        info!(
-            terminal_id = %id,
-            "terminal session fell back to a clean shell in place"
-        );
         self.arm_supervision(&id);
         Ok(resp)
     }

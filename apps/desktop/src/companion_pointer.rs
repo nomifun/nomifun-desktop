@@ -22,8 +22,6 @@ pub enum CompanionLocalPointer {
 #[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PointerBackend {
-    AppKit,
-    Win32,
     X11,
     Wayland,
     Other,
@@ -37,10 +35,7 @@ fn is_companion_label(label: &str) -> bool {
 
 #[cfg(any(test, target_os = "linux"))]
 fn backend_supports_reentry(backend: PointerBackend) -> bool {
-    matches!(
-        backend,
-        PointerBackend::AppKit | PointerBackend::Win32 | PointerBackend::X11
-    )
+    matches!(backend, PointerBackend::X11)
 }
 
 fn normalize_local_point(
@@ -67,6 +62,7 @@ fn normalize_local_point(
     })
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn top_left_view_y(view_y: f64, bounds_y: f64, height: f64, flipped: bool) -> f64 {
     if flipped {
         view_y - bounds_y
@@ -173,7 +169,6 @@ fn sample_native(window: &tauri::WebviewWindow) -> Result<CompanionLocalPointer,
             return Ok(CompanionLocalPointer::Unsupported { backend: "other" });
         }
         PointerBackend::X11 => {}
-        PointerBackend::AppKit | PointerBackend::Win32 => unreachable!(),
     }
 
     let top = window.gtk_window().map_err(|error| error.to_string())?;
@@ -262,8 +257,6 @@ mod tests {
 
     #[test]
     fn only_recoverable_backends_start_in_passthrough() {
-        assert!(backend_supports_reentry(PointerBackend::AppKit));
-        assert!(backend_supports_reentry(PointerBackend::Win32));
         assert!(backend_supports_reentry(PointerBackend::X11));
         assert!(!backend_supports_reentry(PointerBackend::Wayland));
         assert!(!backend_supports_reentry(PointerBackend::Other));

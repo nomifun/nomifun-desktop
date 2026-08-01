@@ -50,7 +50,7 @@ pub trait SlashCommand: Send + Sync {
 
 /// Registry of all available slash commands.
 pub struct CommandRegistry {
-    commands: Vec<Box<dyn SlashCommand>>,
+    commands: Vec<Arc<dyn SlashCommand>>,
 }
 
 impl CommandRegistry {
@@ -60,21 +60,21 @@ impl CommandRegistry {
         }
     }
 
-    pub fn register(&mut self, cmd: Box<dyn SlashCommand>) {
+    pub fn register(&mut self, cmd: Arc<dyn SlashCommand>) {
         self.commands.push(cmd);
     }
 
-    pub fn find(&self, name: &str) -> Option<&dyn SlashCommand> {
+    pub fn find(&self, name: &str) -> Option<Arc<dyn SlashCommand>> {
         self.commands.iter().find_map(|cmd| {
             if cmd.name() == name || cmd.aliases().contains(&name) {
-                Some(cmd.as_ref())
+                Some(Arc::clone(cmd))
             } else {
                 None
             }
         })
     }
 
-    pub fn all(&self) -> &[Box<dyn SlashCommand>] {
+    pub fn all(&self) -> &[Arc<dyn SlashCommand>] {
         &self.commands
     }
 }
@@ -88,10 +88,10 @@ impl Default for CommandRegistry {
 /// Build the default registry with all built-in commands.
 pub fn default_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
-    registry.register(Box::new(compact::CompactCommand));
-    registry.register(Box::new(clear::ClearCommand));
-    registry.register(Box::new(help::HelpCommand));
-    registry.register(Box::new(quit::QuitCommand));
+    registry.register(Arc::new(compact::CompactCommand));
+    registry.register(Arc::new(clear::ClearCommand));
+    registry.register(Arc::new(help::HelpCommand));
+    registry.register(Arc::new(quit::QuitCommand));
     registry
 }
 

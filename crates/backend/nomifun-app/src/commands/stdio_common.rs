@@ -25,12 +25,9 @@ use tokio::sync::Mutex;
 type ScopedAccess<S> = LoopbackCapabilityAccess<LoopbackCapabilityClaims<S>>;
 
 const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
-const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
 
 fn valid_idempotency_key(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_IDEMPOTENCY_KEY_LEN
-        && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    nomifun_common::is_visible_ascii_key(value, nomifun_common::MAX_IDEMPOTENCY_KEY_LEN)
 }
 
 /// How a forwarded tool POST may be retried at the transport level.

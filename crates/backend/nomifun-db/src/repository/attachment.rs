@@ -9,11 +9,6 @@ pub trait IAttachmentRepository: Send + Sync {
 
     async fn get_by_id(&self, id: i64) -> Result<Option<AttachmentRow>, DbError>;
 
-    async fn get_by_attachment_id(
-        &self,
-        attachment_id: &str,
-    ) -> Result<Option<AttachmentRow>, DbError>;
-
     /// All attachments for a requirement, oldest first.
     async fn list_for_requirement(
         &self,

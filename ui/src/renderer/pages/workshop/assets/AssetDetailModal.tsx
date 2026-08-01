@@ -20,6 +20,7 @@ import { Copy, Delete, Download, EditTwo, FileText, ImageFiles, Left, LinkOne, R
 
 import type { WorkshopAsset } from '../types';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
+import { copyText as copyToClipboard } from '@renderer/utils/ui/clipboard';
 import { useWorkshopObjectUrl } from './useWorkshopMedia';
 import { formatBytes, formatDimensions } from './format';
 
@@ -155,7 +156,7 @@ const AssetDetailModal: React.FC<AssetDetailModalProps> = ({
   const copyPrompt = async () => {
     if (!origin?.prompt) return;
     try {
-      await navigator.clipboard.writeText(origin.prompt);
+      await copyToClipboard(origin.prompt);
       message.success(t('workshopAssets.detail.origin.copied', { defaultValue: '已复制提示词' }));
     } catch {
       /* clipboard unavailable — silently ignore */
@@ -165,7 +166,7 @@ const AssetDetailModal: React.FC<AssetDetailModalProps> = ({
   const copyText = async () => {
     if (asset.kind !== 'text' || !asset.text_content) return;
     try {
-      await navigator.clipboard.writeText(asset.text_content);
+      await copyToClipboard(asset.text_content);
       message.success(t('workshopAssets.detail.copiedText', { defaultValue: '已复制正文' }));
     } catch {
       /* clipboard unavailable — silently ignore */

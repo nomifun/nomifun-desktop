@@ -12,11 +12,12 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::constants::{
-    QQBOT_MAX_RECONNECT_ATTEMPTS, QQBOT_MAX_RECONNECT_DELAY, QQBOT_PASSIVE_REPLY_MAX,
+    QQBOT_PASSIVE_REPLY_MAX, RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY,
     QQBOT_PASSIVE_REPLY_WINDOW,
 };
 use crate::error::ChannelError;
 use crate::plugin::{SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::backoff_delay;
 use crate::plugins::callback::parse_callback_data;
 use crate::types::{
     ActionContext, MessageContentType, PluginType, UnifiedAction, UnifiedIncomingMessage,
@@ -397,11 +398,9 @@ fn parse_timestamp(ts: &str) -> i64 {
 // ---------------------------------------------------------------------------
 
 /// Background task: maintain the QQ Bot gateway connection with reconnects.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_gateway(
     api: Arc<QqbotApi>,
     message_tx: mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: mpsc::Sender<(String, String)>,
     status: SharedPluginStatus,
     reply_map: PassiveReplyMap,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -419,7 +418,6 @@ pub(super) async fn run_gateway(
         match connect_once(
             &api,
             &message_tx,
-            &confirm_tx,
             &reply_map,
             &mut shutdown_rx,
             &mut session_id,
@@ -458,13 +456,13 @@ pub(super) async fn run_gateway(
             }
         }
 
-        if consecutive_errors >= QQBOT_MAX_RECONNECT_ATTEMPTS {
+        if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
             error!("QQBot max reconnect attempts reached, stopping gateway loop");
             break;
         }
 
         if consecutive_errors > 0 {
-            let backoff = backoff_delay(consecutive_errors);
+            let backoff = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
             tokio::select! {
                 _ = tokio::time::sleep(backoff) => {}
                 _ = shutdown_rx.changed() => break,
@@ -502,12 +500,6 @@ pub(super) async fn run_token_refresh(
     }
 }
 
-/// Exponential backoff capped at `QQBOT_MAX_RECONNECT_DELAY`.
-fn backoff_delay(attempt: u32) -> Duration {
-    let secs = 2u64.saturating_pow(attempt).min(QQBOT_MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(secs)
-}
-
 /// Reasons a single gateway connection can exit.
 enum GatewayExitReason {
     Fatal(ChannelError),
@@ -517,11 +509,9 @@ enum GatewayExitReason {
 }
 
 /// A single gateway connection: get URL → connect → HELLO → IDENTIFY/RESUME → loop.
-#[allow(clippy::too_many_arguments)]
 async fn connect_once(
     api: &Arc<QqbotApi>,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
     reply_map: &PassiveReplyMap,
     shutdown_rx: &mut watch::Receiver<bool>,
     session_id: &mut Option<String>,
@@ -739,7 +729,7 @@ async fn connect_once(
                                     "INTERACTION_CREATE" => {
                                         match serde_json::from_value::<InteractionCreate>(payload.d) {
                                             Ok(interaction) => {
-                                                handle_interaction(api, &interaction, message_tx, confirm_tx).await;
+                                                handle_interaction(api, &interaction, message_tx).await;
                                             }
                                             Err(e) => warn!(error = %e, "QQBot INTERACTION_CREATE parse failed"),
                                         }
@@ -840,7 +830,6 @@ async fn handle_interaction(
     api: &Arc<QqbotApi>,
     interaction: &InteractionCreate,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
 ) {
     if interaction.interaction_type != INTERACTION_TYPE_BUTTON {
         return;
@@ -854,18 +843,6 @@ async fn handle_interaction(
     let Some(unified) = normalize_interaction(interaction) else {
         return;
     };
-
-    // Tool-confirmation buttons feed confirm_tx.
-    if let Some(action) = &unified.action
-        && action.action == "system.confirm"
-        && let Some(params) = &action.params
-    {
-        let call_id = params.get("callId").cloned().unwrap_or_default();
-        let value = params.get("value").cloned().unwrap_or_default();
-        if !call_id.is_empty() {
-            let _ = confirm_tx.send((call_id, value)).await;
-        }
-    }
 
     let _ = message_tx.send(unified).await;
 }
@@ -1285,10 +1262,4 @@ mod tests {
 
     // -- backoff --
 
-    #[test]
-    fn backoff_is_exponential_and_capped() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30)); // capped
-    }
 }

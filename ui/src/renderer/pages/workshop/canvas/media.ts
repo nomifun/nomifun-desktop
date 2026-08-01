@@ -5,54 +5,10 @@
  */
 
 /**
- * Media helpers for the canvas: a React hook that resolves a workshop asset to
- * a displayable object URL (through the frozen `loadWorkshopMedia` contract),
- * plus small utilities for reading image dimensions and picking local files.
+ * Media utilities for the canvas: reading image dimensions and picking local
+ * files. (Asset → object-URL resolution lives in the shared
+ * `assets/useWorkshopMedia.ts` hook.)
  */
-
-import { useEffect, useRef, useState } from 'react';
-import type { AssetId } from '@/common/types/ids';
-import { loadWorkshopMedia } from '../lib/media';
-
-export type MediaState =
-  | { status: 'idle' }
-  | { status: 'loading' }
-  | { status: 'ready'; url: string }
-  | { status: 'error'; message: string };
-
-/**
- * Resolve an asset id to an object URL. Re-runs when `assetId` or `nonce`
- * changes (bump `nonce` after replacing an asset's binary to bust the cache).
- */
-export function useWorkshopMedia(assetId: AssetId | null | undefined, nonce = 0): MediaState {
-  const [state, setState] = useState<MediaState>({ status: assetId ? 'loading' : 'idle' });
-  const reqRef = useRef(0);
-
-  useEffect(() => {
-    if (!assetId) {
-      setState({ status: 'idle' });
-      return;
-    }
-    const req = reqRef.current + 1;
-    reqRef.current = req;
-    setState({ status: 'loading' });
-    let cancelled = false;
-    loadWorkshopMedia(assetId)
-      .then((url) => {
-        if (cancelled || reqRef.current !== req) return;
-        setState({ status: 'ready', url });
-      })
-      .catch((e: unknown) => {
-        if (cancelled || reqRef.current !== req) return;
-        setState({ status: 'error', message: e instanceof Error ? e.message : String(e) });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [assetId, nonce]);
-
-  return state;
-}
 
 /** Read an image file's natural dimensions (best-effort; resolves null on failure). */
 export function readImageSize(file: File | Blob): Promise<{ width: number; height: number } | null> {

@@ -47,7 +47,6 @@ mod tests {
             execution_context: ExecutionContext::Inline,
             agent: None,
             effort,
-            shell: None,
             paths: Vec::new(),
             hooks_raw: None,
             source: SkillSource::User,

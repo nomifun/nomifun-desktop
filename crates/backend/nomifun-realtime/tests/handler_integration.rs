@@ -8,9 +8,7 @@ use axum::http::{HeaderValue, header};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use nomifun_api_types::WebSocketMessage;
-use nomifun_realtime::{
-    ConnectionId, MessageRouter, NoopMessageRouter, WebSocketManager, WsHandlerState, ws_upgrade_handler,
-};
+use nomifun_realtime::{ConnectionId, WebSocketManager, WsHandlerState, ws_upgrade_handler};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
@@ -37,7 +35,6 @@ fn default_state() -> (WsHandlerState, Arc<WebSocketManager>) {
     let manager = Arc::new(WebSocketManager::new());
     let state = WsHandlerState {
         manager: manager.clone(),
-        router: Arc::new(NoopMessageRouter),
         token_authenticator: Arc::new(|t| (t == "valid-token").then(|| "user".to_owned())),
         token_extractor: Arc::new(|headers| {
             headers
@@ -54,7 +51,6 @@ fn all_auth_sources_state() -> (WsHandlerState, Arc<WebSocketManager>) {
     let manager = Arc::new(WebSocketManager::new());
     let state = WsHandlerState {
         manager: manager.clone(),
-        router: Arc::new(NoopMessageRouter),
         token_authenticator: Arc::new(|token| {
             matches!(token, "valid-token" | "local-trust-token").then(|| "user".to_owned())
         }),
@@ -93,7 +89,6 @@ fn no_auth_state() -> (WsHandlerState, Arc<WebSocketManager>) {
     let manager = Arc::new(WebSocketManager::new());
     let state = WsHandlerState {
         manager: manager.clone(),
-        router: Arc::new(NoopMessageRouter),
         token_authenticator: Arc::new(|_| Some("user".to_owned())),
         token_extractor: Arc::new(|_| Some("local".to_owned())),
     };
@@ -262,7 +257,6 @@ async fn untrusted_browser_origin_is_rejected_before_cookie_or_bearer_authentica
     let authenticator_calls = Arc::new(AtomicUsize::new(0));
     let state = WsHandlerState {
         manager: manager.clone(),
-        router: Arc::new(NoopMessageRouter),
         token_authenticator: {
             let calls = authenticator_calls.clone();
             Arc::new(move |_| {
@@ -498,7 +492,6 @@ async fn authenticated_user_scope_is_enforced_end_to_end() {
     let manager = Arc::new(WebSocketManager::new());
     let state = WsHandlerState {
         manager: manager.clone(),
-        router: Arc::new(NoopMessageRouter),
         token_authenticator: Arc::new(|token| match token {
             "alice-token" => Some("alice".to_owned()),
             "bob-token" => Some("bob".to_owned()),
@@ -591,44 +584,20 @@ async fn pong_message_does_not_generate_response() {
 }
 
 #[tokio::test]
-async fn unknown_message_routed_to_message_router() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    struct TrackingRouter {
-        called: AtomicBool,
-    }
-    impl MessageRouter for TrackingRouter {
-        fn route(&self, _conn_id: ConnectionId, _name: &str, _data: Value) {
-            self.called.store(true, Ordering::Relaxed);
-        }
-    }
-
-    let manager = Arc::new(WebSocketManager::new());
-    let router = Arc::new(TrackingRouter {
-        called: AtomicBool::new(false),
-    });
-    let state = WsHandlerState {
-        manager: manager.clone(),
-        router: router.clone(),
-        token_authenticator: Arc::new(|t| (t == "valid-token").then(|| "user".to_owned())),
-        token_extractor: Arc::new(|headers| {
-            headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.strip_prefix("Bearer "))
-                .map(|s| s.to_owned())
-        }),
-    };
+async fn unknown_message_is_discarded_without_response() {
+    let (state, _manager) = default_state();
 
     let addr = start_server(state).await;
-    let (mut tx, _rx) = connect_with_token(addr, "valid-token").await;
+    let (mut tx, mut rx) = connect_with_token(addr, "valid-token").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let msg = json!({"name": "custom.business-event", "data": {"key": "val"}});
     tx.send(send_json(&msg.to_string())).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
-    assert!(router.called.load(Ordering::Relaxed));
+    // Business requests flow over HTTP; unknown upstream WS messages are
+    // silently discarded and must not produce a reply frame.
+    let timeout_result = tokio::time::timeout(Duration::from_millis(200), rx.next()).await;
+    assert!(timeout_result.is_err(), "unknown message should not generate a response");
 }
 
 #[tokio::test]

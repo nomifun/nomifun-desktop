@@ -8,7 +8,7 @@ use nomifun_api_types::{
 use nomifun_common::{
     AppError, AttachmentId, ConversationId, PaginatedResult, RequirementId, TerminalId, UserId, now_ms,
 };
-use nomifun_db::models::{RequirementRowUpdate, RequirementTagRow};
+use nomifun_db::models::RequirementRowUpdate;
 use nomifun_db::{
     ConversationFilters, IConversationRepository, IRequirementRepository, ITerminalRepository, ListRequirementsParams,
     RequirementClaimResolution,
@@ -196,20 +196,6 @@ impl RequirementService {
                 warn!(error = %e, requirement_id, "failed to load requirement attachments");
                 Vec::new()
             }
-        }
-    }
-
-    /// Staging entry point for the AutoWork runner: copy the requirement's
-    /// attachments into the session workspace (when given) and return prompt
-    /// entries. Empty when no store is attached.
-    pub async fn stage_attachments_for_prompt(
-        &self,
-        req_id: &str,
-        workspace: Option<&std::path::Path>,
-    ) -> Vec<crate::attachments::PromptAttachment> {
-        match &self.attachments {
-            Some(store) => store.stage_for_prompt(req_id, workspace).await,
-            None => Vec::new(),
         }
     }
 
@@ -1492,11 +1478,6 @@ impl RequirementService {
     /// Whether `tag` is currently paused (AutoWork halted for it).
     pub async fn is_tag_paused(&self, tag: &str) -> Result<bool, AppError> {
         Ok(self.repo.is_tag_paused(tag).await?)
-    }
-
-    /// Full pause state for a tag (`None` = never paused).
-    pub async fn tag_state(&self, tag: &str) -> Result<Option<RequirementTagRow>, AppError> {
-        Ok(self.repo.get_tag_state(tag).await?)
     }
 
     /// Resume a paused tag. Optionally re-queue specific failed requirements back
@@ -2995,7 +2976,7 @@ mod tests {
         assert_eq!(failed.status, RequirementStatus::Failed);
         assert_eq!(failed.attempt_count, MAX_ATTEMPTS);
         assert!(service.is_tag_paused("retry-pause").await.unwrap());
-        let state = service.tag_state("retry-pause").await.unwrap().unwrap();
+        let state = service.repo().get_tag_state("retry-pause").await.unwrap().unwrap();
         assert_eq!(state.paused_reason.as_deref(), Some("requirement_failed"));
         assert_eq!(
             state.paused_requirement_id,

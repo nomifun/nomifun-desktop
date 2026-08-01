@@ -195,7 +195,6 @@ mod tests {
             execution_context: ExecutionContext::Inline,
             agent: None,
             effort: None,
-            shell: None,
             paths: vec![],
             hooks_raw: None,
             source: if bundled {

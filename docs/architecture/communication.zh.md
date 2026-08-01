@@ -76,7 +76,7 @@ Tauri 外壳采用**反向 IPC**：是 SPA 调用操作系统外壳，绝不反�
 
 ```rust
 .invoke_handler(tauri::generate_handler![
-    check_for_updates,
+    install_update,
     sync_companion_windows,
     webui_get_status,
     webui_start,

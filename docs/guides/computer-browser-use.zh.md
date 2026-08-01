@@ -73,7 +73,7 @@ enabled = true
 allowed_origins = []         # 可选 origin 白名单；空=全放行，仅纵深防御
 # 可信全局默认值为 headless；安装 owner 可实时改为 external。
 # 对 Lane 的前台/后台切换不会改写该默认值。
-# browser_path / idle_timeout_secs / 私有 headless ownership 均为旧兼容字段，
+# 未知的旧配置键（如早期的 browser_path / idle_timeout_secs）会被忽略，
 # 不能绕过 BrowserSessionHub 的身份、容量或生命周期策略。
 ```
 

@@ -96,8 +96,8 @@ enabled = true
 allowed_origins = []
 # The trusted global default is headless; an installation owner may change it
 # live to external. Foreground/background Lane actions do not rewrite it.
-# browser_path, idle_timeout_secs, and private headless ownership are legacy
-# compatibility fields and cannot bypass BrowserSessionHub policy.
+# Unknown legacy keys (e.g. old browser_path / idle_timeout_secs entries) are
+# ignored and cannot bypass BrowserSessionHub policy.
 ```
 
 On first use, the Hub resolves a system Chrome/Edge executable or the managed

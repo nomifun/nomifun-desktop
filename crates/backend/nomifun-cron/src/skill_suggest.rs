@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,7 +28,6 @@ impl SkillSuggestDetector {
     pub fn new(
         user_events: Arc<dyn UserEventSink>,
         conversation_repo: Arc<dyn IConversationRepository>,
-        _data_dir: PathBuf,
     ) -> Self {
         Self {
             user_events,
@@ -114,7 +113,7 @@ impl SkillSuggestDetector {
         }
 
         self.set_last_hash(job_id, hash);
-        self.emit(
+        self.persist_and_emit(
             owner_id,
             conversation_id,
             job_id,
@@ -124,26 +123,6 @@ impl SkillSuggestDetector {
         )
         .await;
         Ok(true)
-    }
-
-    async fn emit(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        job_id: &str,
-        name: &str,
-        description: &str,
-        skill_content: &str,
-    ) {
-        self.persist_and_emit(
-            owner_id,
-            conversation_id,
-            job_id,
-            name,
-            description,
-            skill_content,
-        )
-            .await;
     }
 
     async fn persist_and_emit(
@@ -205,12 +184,6 @@ impl SkillSuggestDetector {
     fn set_last_hash(&self, job_id: &str, hash: String) {
         if let Ok(mut hashes) = self.last_hash_by_job.lock() {
             hashes.insert(job_id.to_owned(), hash);
-        }
-    }
-
-    fn clear_last_hash(&self, job_id: &str) {
-        if let Ok(mut hashes) = self.last_hash_by_job.lock() {
-            hashes.remove(job_id);
         }
     }
 }
@@ -345,7 +318,7 @@ mod tests {
         repo.create(&make_conversation(conversation_id, &installation_owner)).await.unwrap();
 
         let bus = Arc::new(TestUserEventBus::new(16));
-        let detector = SkillSuggestDetector::new(bus.clone(), repo.clone(), temp.path().to_path_buf());
+        let detector = SkillSuggestDetector::new(bus.clone(), repo.clone());
         let mut rx = bus.subscribe();
 
         let emitted = detector
@@ -398,7 +371,7 @@ mod tests {
         repo.create(&make_conversation(CONVERSATION_ID_2, &installation_owner)).await.unwrap();
 
         let bus = Arc::new(TestUserEventBus::new(16));
-        let detector = SkillSuggestDetector::new(bus.clone(), repo, temp.path().to_path_buf());
+        let detector = SkillSuggestDetector::new(bus.clone(), repo);
         let mut rx = bus.subscribe();
 
         assert!(
@@ -429,21 +402,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn suppresses_skill_suggest_when_saved_skill_exists() {
+    async fn does_not_emit_when_cron_job_does_not_exist() {
+        // The artifact layer is the authority: a suggestion for a cron job that
+        // is not in the database fails closed at `upsert_artifact`, so no event
+        // reaches the user even though the workspace file itself is valid.
         let temp = tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         tokio::fs::write(
             workspace.join(SKILL_SUGGEST_FILENAME),
             "---\nname: daily-report\ndescription: Daily report\n---\n\nCheck sources.\n",
-        )
-        .await
-        .unwrap();
-        let skill_dir = temp.path().join(format!("cron/skills/{JOB_ID}"));
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: saved-skill\ndescription: Saved skill\n---\n\nDo the task.\n",
         )
         .await
         .unwrap();
@@ -454,9 +422,11 @@ mod tests {
         repo.create(&make_conversation(CONVERSATION_ID, &installation_owner)).await.unwrap();
 
         let bus = Arc::new(TestUserEventBus::new(16));
-        let detector = SkillSuggestDetector::new(bus.clone(), repo, temp.path().to_path_buf());
+        let detector = SkillSuggestDetector::new(bus.clone(), repo.clone());
         let mut rx = bus.subscribe();
 
+        // JOB_ID was never seeded: the check itself succeeds (the file is a
+        // valid suggestion) but persistence refuses the orphan artifact.
         let emitted = detector
             .check_and_emit(
                 &installation_owner,
@@ -469,5 +439,6 @@ mod tests {
 
         assert!(emitted);
         assert!(rx.try_recv().is_err());
+        assert!(repo.list_artifacts(CONVERSATION_ID).await.unwrap().is_empty());
     }
 }

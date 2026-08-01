@@ -196,7 +196,6 @@ pub(crate) struct LlmPlanProducer {
     provider_model_repo: Arc<dyn IProviderModelRepository>,
     encryption_key: [u8; 32],
     workspace: PathBuf,
-    lead: Option<ProviderWithModel>,
 }
 
 impl LlmPlanProducer {
@@ -205,14 +204,12 @@ impl LlmPlanProducer {
         provider_model_repo: Arc<dyn IProviderModelRepository>,
         encryption_key: [u8; 32],
         workspace: impl Into<PathBuf>,
-        lead: Option<ProviderWithModel>,
     ) -> Self {
         Self {
             provider_repo,
             provider_model_repo,
             encryption_key,
             workspace: workspace.into(),
-            lead,
         }
     }
 
@@ -224,7 +221,7 @@ impl LlmPlanProducer {
         max_tokens: u32,
         sink: Option<&LeadThinkingSink>,
     ) -> Result<String, AppError> {
-        let lead = pick_lead(participants, self.lead.as_ref()).ok_or_else(|| {
+        let lead = pick_lead(participants).ok_or_else(|| {
             AppError::ProviderUnavailable(
                 "execution planner has no canonical provider/model participant".to_owned(),
             )
@@ -308,34 +305,19 @@ impl PlanProducer for LlmPlanProducer {
 
 }
 
-fn pick_lead(
-    participants: &[ExecutionParticipant],
-    fallback: Option<&ProviderWithModel>,
-) -> Option<ProviderWithModel> {
-    participants
-        .iter()
-        .find_map(|participant| {
-            let provider_id = participant.provider_id.as_ref()?;
-            let model = participant.model.as_ref()?;
-            (ProviderId::try_from(provider_id.as_str()).is_ok()
-                && !model.is_empty()
-                && model.trim() == model)
-                .then(|| ProviderWithModel {
-                    provider_id: provider_id.clone(),
-                    model: model.clone(),
-                    use_model: Some(model.clone()),
-                })
-        })
-        .or_else(|| {
-            let fallback = fallback?;
-            let selected = fallback.use_model.as_deref().unwrap_or(&fallback.model);
-            (ProviderId::try_from(fallback.provider_id.as_str()).is_ok()
-                && !fallback.model.is_empty()
-                && fallback.model.trim() == fallback.model
-                && !selected.is_empty()
-                && selected.trim() == selected)
-                .then(|| fallback.clone())
-        })
+fn pick_lead(participants: &[ExecutionParticipant]) -> Option<ProviderWithModel> {
+    participants.iter().find_map(|participant| {
+        let provider_id = participant.provider_id.as_ref()?;
+        let model = participant.model.as_ref()?;
+        (ProviderId::try_from(provider_id.as_str()).is_ok()
+            && !model.is_empty()
+            && model.trim() == model)
+            .then(|| ProviderWithModel {
+                provider_id: provider_id.clone(),
+                model: model.clone(),
+                use_model: Some(model.clone()),
+            })
+    })
 }
 
 const PLAN_SYSTEM: &str = r#"You are the lead Agent planning one AgentExecution.

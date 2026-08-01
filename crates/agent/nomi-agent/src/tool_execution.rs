@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use futures::FutureExt;
 
 use crate::confirm::{ConfirmResult, ToolConfirmer};
+use crate::output::truncate_display;
 use nomi_config::hooks::HookEngine;
 use nomi_protocol::events::{OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus};
 use nomi_protocol::writer::ProtocolEmitter;
@@ -69,35 +70,14 @@ impl std::ops::DerefMut for ToolCallOutcome {
     }
 }
 
-/// Partition tool calls and execute them with optional confirmation and hooks.
-/// `authority` must be the snapshot captured from the request that produced
-/// `tool_calls`; there is deliberately no live-registry convenience overload.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_tool_calls(
-    registry: &ToolRegistry,
-    tool_calls: &[ContentBlock],
-    authority: &ProviderToolAuthority,
-    confirmer: &Arc<Mutex<ToolConfirmer>>,
-    hooks: Option<&mut HookEngine>,
-    compaction_level: nomi_compact::CompactionLevel,
-    toon_enabled: bool,
-) -> Result<ToolCallOutcome, ExecutionControl> {
-    execute_tool_calls_scoped(
-        registry,
-        tool_calls,
-        authority,
-        "",
-        confirmer,
-        hooks,
-        compaction_level,
-        toon_enabled,
-    )
-    .await
-}
-
-/// Production variant that namespaces provider tool-call ids by the durable
-/// turn/message id. This prevents providers that reuse `call_0` in later turns
-/// from aliasing a prior operation receipt.
+/// Production entry point that partitions tool calls and executes them with
+/// optional confirmation and hooks, namespacing provider tool-call ids by the
+/// durable turn/message id. This prevents providers that reuse `call_0` in
+/// later turns from aliasing a prior operation receipt. `authority` must be
+/// the snapshot captured from the request that produced `tool_calls`; there is
+/// deliberately no live-registry convenience overload. Pass an empty
+/// `execution_scope` only when call-id aliasing across turns is acceptable
+/// (e.g. single-shot test harnesses).
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_tool_calls_scoped(
     registry: &ToolRegistry,
@@ -228,7 +208,7 @@ pub async fn execute_tool_calls_scoped(
                                 hooks_shared,
                                 compaction_level,
                                 toon_enabled,
-                            )
+)
                             .await;
                         }
                         // Merge skill hooks after a successful sequential execution.
@@ -923,16 +903,6 @@ fn truncate_result(content: &str, max_chars: usize) -> String {
     )
 }
 
-fn truncate_display(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        // Find a char boundary to avoid panicking on multi-byte characters
-        let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
-        format!("{}...", &s[..end])
-    }
-}
-
 struct Batch<'a> {
     is_concurrent: bool,
     calls: Vec<&'a ContentBlock>,
@@ -1020,35 +990,6 @@ mod tests {
         assert_eq!(group_batches(&[]), Vec::<std::ops::Range<usize>>::new());
     }
     use serde_json::json;
-
-    // -- truncate_display -----------------------------------------------------
-
-    #[test]
-    fn truncate_display_ascii_short_unchanged() {
-        assert_eq!(truncate_display("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_display_ascii_truncated() {
-        let result = truncate_display("hello world", 5);
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 20);
-    }
-
-    #[test]
-    fn truncate_display_cjk_does_not_panic() {
-        // 200 CJK chars: each is 3 bytes, so byte index 200 falls mid-character
-        let cjk: String = "你好世界测试".chars().cycle().take(200).collect();
-        let result = truncate_display(&cjk, 50);
-        assert!(result.ends_with("..."));
-    }
-
-    #[test]
-    fn truncate_display_mixed_cjk_ascii_does_not_panic() {
-        let mixed = "abc你好def世界ghi测试".repeat(20);
-        let result = truncate_display(&mixed, 30);
-        assert!(result.ends_with("..."));
-    }
 
     // -- truncate_result ------------------------------------------------------
 
@@ -1609,10 +1550,11 @@ mod tests {
             extra: None,
         }];
 
-        let invalid_outcome = execute_tool_calls(
+        let invalid_outcome = execute_tool_calls_scoped(
             &registry,
             &invalid,
             &authority,
+            "",
             &confirmer,
             None,
             nomi_compact::CompactionLevel::Off,
@@ -1640,10 +1582,11 @@ mod tests {
             }),
             extra: None,
         }];
-        let valid_outcome = execute_tool_calls(
+        let valid_outcome = execute_tool_calls_scoped(
             &registry,
             &valid,
             &authority,
+            "",
             &confirmer,
             None,
             nomi_compact::CompactionLevel::Off,
@@ -1957,10 +1900,11 @@ mod tests {
         let (registry, calls) = make_registry_with_deferred_safety(false);
         let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
 
-        let outcome = execute_tool_calls(
+        let outcome = execute_tool_calls_scoped(
             &registry,
             &[deferred_call("serial-deferred")],
             &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+            "",
             &confirmer,
             None,
             nomi_compact::CompactionLevel::Off,
@@ -1988,10 +1932,11 @@ mod tests {
             deferred_call("concurrent-deferred-2"),
         ];
 
-        let outcome = execute_tool_calls(
+        let outcome = execute_tool_calls_scoped(
             &registry,
             &tool_calls,
             &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+            "",
             &confirmer,
             None,
             nomi_compact::CompactionLevel::Off,
@@ -2073,10 +2018,11 @@ mod tests {
         ];
         let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
 
-        let outcome = execute_tool_calls(
+        let outcome = execute_tool_calls_scoped(
             &registry,
             &tool_calls,
             &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+            "",
             &confirmer,
             None,
             nomi_compact::CompactionLevel::Off,

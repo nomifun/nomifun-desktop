@@ -182,8 +182,6 @@ fn test_enum_serde_roundtrip() {
 #[test]
 fn test_constants_values() {
     assert_eq!(constants::DEFAULT_PORT, 25808);
-    assert_eq!(constants::HEARTBEAT_INTERVAL_MS, 30_000);
     assert_eq!(constants::BODY_LIMIT, 10 * 1024 * 1024);
     assert_eq!(constants::COOKIE_NAME, "nomifun-session");
-    assert!(constants::SUPPORTED_IMAGE_EXTENSIONS.contains(&".png"));
 }

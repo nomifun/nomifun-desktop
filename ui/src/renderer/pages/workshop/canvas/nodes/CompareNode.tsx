@@ -16,7 +16,7 @@ import { type NodeProps, useNodesData, useStore } from '@xyflow/react';
 import { Contrast, DeleteFour } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useCanvasNode } from '../CanvasNodeContext';
-import { useWorkshopMedia } from '../media';
+import { useWorkshopObjectUrl } from '../../assets/useWorkshopMedia';
 import type { CompareFlowNode } from '../model';
 import { KIND_META } from '../model';
 import { upstreamPrimary } from './upstream';
@@ -26,7 +26,7 @@ import type { AssetId } from '@/common/types/ids';
 const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
 
 const MediaLayer: React.FC<{ assetId: AssetId | null; kind: 'image' | 'video' | undefined }> = ({ assetId, kind }) => {
-  const media = useWorkshopMedia(kind === 'image' || kind === 'video' ? assetId : null);
+  const media = useWorkshopObjectUrl(kind === 'image' || kind === 'video' ? assetId : null);
   if (media.status !== 'ready') {
     return (
       <div className='flex h-full w-full items-center justify-center'>

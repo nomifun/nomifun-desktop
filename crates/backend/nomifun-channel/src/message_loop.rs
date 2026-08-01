@@ -136,12 +136,10 @@ fn build_inbound_operation(
 
 /// Runs the full channel message lifecycle.
 ///
-/// Consumes incoming IM messages from `message_rx` and tool confirmation
-/// callbacks from `confirm_rx`, driving the pipeline:
+/// Consumes incoming IM messages from `message_rx`, driving the pipeline:
 /// 1. ActionExecutor routing (auth → action/AI dispatch)
 /// 2. For Dispatched: send_to_agent + spawn ChannelStreamRelay
 /// 3. For Action: reply via plugin
-/// 4. Forward tool confirmations to the agent
 pub struct ChannelMessageLoop {
     action_executor: Arc<ActionExecutor>,
     message_service: Arc<ChannelMessageService>,
@@ -164,27 +162,15 @@ impl ChannelMessageLoop {
         }
     }
 
-    /// Start the message loop. Runs until both channels close.
-    pub async fn run(
-        self,
-        mut message_rx: mpsc::Receiver<ChannelIncoming>,
-        mut confirm_rx: mpsc::Receiver<(String, String)>,
-    ) {
+    /// Start the message loop. Runs until the message channel closes.
+    pub async fn run(self, mut message_rx: mpsc::Receiver<ChannelIncoming>) {
         info!("ChannelMessageLoop started");
 
-        loop {
-            tokio::select! {
-                Some(incoming) = message_rx.recv() => {
-                    self.handle_message(incoming).await;
-                }
-                Some((call_id, value)) = confirm_rx.recv() => {
-                    handle_confirm(&call_id, &value);
-                }
-                else => break,
-            }
+        while let Some(incoming) = message_rx.recv().await {
+            self.handle_message(incoming).await;
         }
 
-        info!("ChannelMessageLoop stopped (channels closed)");
+        info!("ChannelMessageLoop stopped (channel closed)");
     }
 
     async fn handle_message(&self, incoming: ChannelIncoming) {
@@ -878,14 +864,6 @@ fn plain_text_message(text: String) -> UnifiedOutgoingMessage {
         reply_to_message_id: None,
         silent: None,
     }
-}
-
-/// Forward a tool confirmation callback to the active agent.
-fn handle_confirm(call_id: &str, value: &str) {
-    // Channel conversations use yoloMode which auto-approves everything,
-    // so this path is rarely hit. When needed, we can add a
-    // call_id→conversation_id lookup via AgentRuntimeRegistry.
-    info!(call_id = %call_id, value = %value, "forwarding tool confirmation");
 }
 
 /// Parses a channel user's numbered-decision reply into a 0-based option

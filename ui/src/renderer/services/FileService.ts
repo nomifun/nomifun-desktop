@@ -191,19 +191,6 @@ export interface FileMetadata {
   lastModified: number;
 }
 
-/**
- * 检查文件是否被支持
- * 注意：当前实现为预先设计的架构，支持所有文件类型
- * supportedExts 参数预留给将来的文件类型过滤功能
- *
- * @param _file_name 文件名（预留参数）
- * @param _supportedExts 支持的文件扩展名数组（预留参数）
- * @returns 总是返回 true，表示支持所有文件类型
- */
-export function isSupportedFile(_file_name: string, _supportedExts: string[]): boolean {
-  return true; // 预先设计：当前支持所有文件类型
-}
-
 // 获取文件扩展名
 export function getFileExtension(file_name: string): string {
   const lastDotIndex = file_name.lastIndexOf('.');
@@ -226,16 +213,6 @@ export function getCleanFileName(file_path: string): string {
 // 从文件路径数组获取清理后的文件名数组（用于消息格式化）
 export function getCleanFileNames(file_paths: string[]): string[] {
   return file_paths.map(getCleanFileName);
-}
-
-/**
- * 检查是否为文本文件
- * 注意：由于 isSupportedFile 当前总是返回 true，此函数实际总是返回 true
- * 预先设计的架构，为将来的文件类型判断功能预留
- * 当前未被使用，保留供将来扩展
- */
-export function isTextFile(file_name: string): boolean {
-  return isSupportedFile(file_name, textExts);
 }
 
 class FileServiceClass {

@@ -202,6 +202,22 @@ pub struct ClientInfo {
     pub version: String,
 }
 
+/// The canonical `initialize` handshake params this client sends: protocol
+/// version + nomi client identity + tool capability. Single point of
+/// maintenance for the protocol/client versions.
+pub fn default_init_params() -> InitializeParams {
+    InitializeParams {
+        protocol_version: "2025-03-26".to_string(),
+        capabilities: ClientCapabilities {
+            tools: Some(serde_json::json!({})),
+        },
+        client_info: ClientInfo {
+            name: "nomi".to_string(),
+            version: "0.3.0".to_string(),
+        },
+    }
+}
+
 /// Initialize response result
 #[derive(Debug, Deserialize)]
 pub struct InitializeResult {

@@ -1,5 +1,5 @@
-//! Human takeover / watch-mode: pause the agent at a sensitive step, surface a
-//! headful live window for the user, await their resolution, then resume.
+//! Human takeover / watch-mode: pause the agent at a sensitive step, surface
+//! the request to the user, and resume only on an explicit confirmation.
 //!
 //! This is ALSO the **security-critical out-of-band approval channel** for
 //! irreversible actions under yolo/companion sessions. [`TakeoverResolution::Confirmed`]
@@ -7,18 +7,20 @@
 //! All other outcomes (Cancelled, TimedOut, Unavailable) are **fail-closed** — the
 //! irreversible action stays Blocked.
 //!
-//! # Architecture
+//! # Architecture (Phase D)
 //!
-//! A [`TakeoverController`] (facade level) exposes [`TakeoverController::request`] that:
-//! 1. Ensures Chrome is headful & the window is visible/foregrounded (engine seam).
-//! 2. Emits a UI event ("human takeover requested: <reason>") to the desktop.
-//! 3. Awaits a resolution (user clicks "done" / "cancel" / timeout).
+//! Out-of-band confirmation is owned by the injected
+//! [`crate::approval::BrowserApprovalGate`] (desktop event + `ToolApprovalManager`,
+//! or the gateway confirm channel): it notifies the user, awaits their decision,
+//! and times out fail-closed. The [`TakeoverController`] kept here is the armed/
+//! disarmed switch for that path (`enabled`, flipped by
+//! `BrowserTool::with_approval_gate`) plus a test seam (`force_resolution`).
+//! Without a gate there is no UI able to resolve a takeover, so
+//! [`TakeoverController::resolve_without_ui`] fail-closes immediately.
 //!
-//! On resume, the facade **re-observes** to rebuild the aria-ref generation (the user
-//! may have navigated), so subsequent refs are valid.
-
-use std::time::Duration;
-use tokio::sync::oneshot;
+//! On resume after a confirmed takeover, the facade **re-observes** to rebuild
+//! the aria-ref generation (the user may have navigated), so subsequent refs
+//! are valid.
 
 /// Why a takeover was requested.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,128 +61,48 @@ impl TakeoverResolution {
     }
 }
 
-/// A handle to an in-flight takeover request. The holder can resolve it from the UI side.
-pub struct TakeoverHandle {
-    tx: oneshot::Sender<TakeoverResolution>,
-}
-
-impl TakeoverHandle {
-    /// Resolve the takeover from the UI side (user clicked "done" or "cancel").
-    /// Returns `Err` if the receiver was already dropped (timeout fired first).
-    pub fn resolve(self, resolution: TakeoverResolution) -> Result<(), TakeoverResolution> {
-        self.tx.send(resolution)
-    }
-}
-
-/// Controls human takeover requests for a browser session.
+/// Arms the human-takeover path of the redline gate for a browser session.
 ///
-/// The controller is created per-session. When a takeover is needed, [`Self::request`]
-/// returns a future that resolves to [`TakeoverResolution`] (either from the UI via
-/// [`TakeoverHandle::resolve`] or from a timeout).
+/// The controller is created per-session, disabled by default (fail-closed).
+/// [`crate::BrowserTool::with_approval_gate`] flips `enabled` when the trusted
+/// host injects an approval gate; the gate itself owns notify/await/timeout.
 pub struct TakeoverController {
-    /// Default timeout for a takeover request. If the user does not act within this
-    /// duration, the takeover resolves to [`TakeoverResolution::TimedOut`] (fail-closed).
-    pub timeout: Duration,
-    /// Whether takeover is enabled for this session. When `false`, all requests
-    /// immediately resolve to [`TakeoverResolution::Unavailable`] (fail-closed default OFF).
+    /// Whether takeover is enabled for this session. When `false`, requests
+    /// resolve to [`TakeoverResolution::Unavailable`] (fail-closed default OFF).
     pub enabled: bool,
-    /// **Test seam**: when `Some`, all requests immediately resolve to this value
-    /// (bypassing the oneshot/timeout mechanism). Production code leaves this `None`.
-    /// Tests set it to inject a predetermined resolution.
+    /// **Test seam**: when `Some`, [`Self::resolve_without_ui`] returns this
+    /// value. Production code leaves this `None` (fail-closed without a gate).
     pub force_resolution: Option<TakeoverResolution>,
 }
 
 impl TakeoverController {
     /// Create a new controller. `enabled` defaults to `false` (fail-closed: the feature
     /// must be explicitly opted in via client preferences).
-    pub fn new(timeout: Duration) -> Self {
+    pub fn new() -> Self {
         Self {
-            timeout,
             enabled: false,
             force_resolution: None,
         }
     }
 
-    /// Request a human takeover. Returns `(TakeoverHandle, impl Future<Output=TakeoverResolution>)`.
+    /// Resolve a takeover request when no approval gate is wired.
     ///
-    /// The caller awaits the future; the UI side resolves via the handle.
-    /// If `self.enabled == false`, returns `Unavailable` immediately (no handle needed).
-    /// If `force_resolution` is set (test seam), returns that immediately.
-    /// If the timeout fires before the handle resolves, returns `TimedOut`.
-    pub fn request(
-        &self,
-        _reason: TakeoverReason,
-    ) -> TakeoverRequest {
+    /// Without a gate there is no UI able to answer the request, so this
+    /// fail-closes **immediately** ([`TakeoverResolution::Unavailable`])
+    /// instead of holding the action open until a timeout. Tests inject a
+    /// predetermined outcome via [`Self::force_resolution`].
+    pub fn resolve_without_ui(&self) -> TakeoverResolution {
         if !self.enabled {
-            return TakeoverRequest::Immediate(TakeoverResolution::Unavailable);
+            return TakeoverResolution::Unavailable;
         }
-        if let Some(forced) = self.force_resolution {
-            return TakeoverRequest::Immediate(forced);
-        }
-        let (tx, rx) = oneshot::channel();
-        let handle = TakeoverHandle { tx };
-        let timeout = self.timeout;
-        TakeoverRequest::Pending { handle, rx, timeout }
+        self.force_resolution
+            .unwrap_or(TakeoverResolution::Unavailable)
     }
 }
 
-/// The result of [`TakeoverController::request`]. Either immediately resolved
-/// (feature disabled / headless) or pending user action.
-pub enum TakeoverRequest {
-    /// Resolved immediately without needing user action.
-    Immediate(TakeoverResolution),
-    /// Awaiting user action via the handle, with a timeout.
-    Pending {
-        handle: TakeoverHandle,
-        rx: oneshot::Receiver<TakeoverResolution>,
-        timeout: Duration,
-    },
-}
-
-impl TakeoverRequest {
-    /// Consume this request: if `Immediate`, return the resolution; if `Pending`,
-    /// split into the handle (for the UI) and a future that resolves to the outcome.
-    /// The caller must give the handle to the UI layer and await the future.
-    pub fn split(self) -> (Option<TakeoverHandle>, TakeoverRequestFuture) {
-        match self {
-            TakeoverRequest::Immediate(res) => {
-                (None, TakeoverRequestFuture::Ready(res))
-            }
-            TakeoverRequest::Pending { handle, rx, timeout } => {
-                (Some(handle), TakeoverRequestFuture::Awaiting { rx, timeout })
-            }
-        }
-    }
-}
-
-/// A future that resolves to [`TakeoverResolution`].
-pub enum TakeoverRequestFuture {
-    Ready(TakeoverResolution),
-    Awaiting {
-        rx: oneshot::Receiver<TakeoverResolution>,
-        timeout: Duration,
-    },
-}
-
-impl TakeoverRequestFuture {
-    /// Await the resolution (with timeout).
-    pub async fn resolve(self) -> TakeoverResolution {
-        match self {
-            TakeoverRequestFuture::Ready(res) => res,
-            TakeoverRequestFuture::Awaiting { rx, timeout } => {
-                match tokio::time::timeout(timeout, rx).await {
-                    Ok(Ok(resolution)) => resolution,
-                    Ok(Err(_)) => {
-                        // Sender dropped without sending — treat as cancelled.
-                        TakeoverResolution::Cancelled
-                    }
-                    Err(_) => {
-                        // Timeout elapsed — fail-closed.
-                        TakeoverResolution::TimedOut
-                    }
-                }
-            }
-        }
+impl Default for TakeoverController {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -211,97 +133,36 @@ mod tests {
         );
     }
 
-    // ── Task 2: TakeoverController request/await with timeout ────────────────
+    // ── Task 2: gate-less resolution is immediate and fail-closed ────────────
 
-    #[tokio::test]
-    async fn request_times_out_to_failclosed() {
-        tokio::time::pause();
-        let controller = TakeoverController {
-            timeout: Duration::from_millis(50),
-            enabled: true,
-            force_resolution: None,
-        };
-        let req = controller.request(TakeoverReason::IrreversibleAction {
-            action: "click".into(),
-            description: "Pay $100".into(),
-        });
-        let (handle, future) = req.split();
-        assert!(handle.is_some(), "enabled controller should yield a handle");
-        // Do NOT resolve — keep the handle alive but idle so the timeout fires.
-        let _keep_alive = handle;
-        // Advance time past the timeout.
-        let resolution = future.resolve().await;
-        assert_eq!(resolution, TakeoverResolution::TimedOut);
-        assert!(!resolution.to_confirmed(), "TimedOut must be fail-closed");
-    }
-
-    #[tokio::test]
-    async fn request_confirmed_resolves_true() {
-        let controller = TakeoverController {
-            timeout: Duration::from_secs(60),
-            enabled: true,
-            force_resolution: None,
-        };
-        let req = controller.request(TakeoverReason::Manual {
-            hint: "test".into(),
-        });
-        let (handle, future) = req.split();
-        let handle = handle.unwrap();
-        handle.resolve(TakeoverResolution::Confirmed).unwrap();
-        let resolution = future.resolve().await;
-        assert_eq!(resolution, TakeoverResolution::Confirmed);
-        assert!(resolution.to_confirmed());
-    }
-
-    #[tokio::test]
-    async fn request_cancelled_resolves_false() {
-        let controller = TakeoverController {
-            timeout: Duration::from_secs(60),
-            enabled: true,
-            force_resolution: None,
-        };
-        let req = controller.request(TakeoverReason::Manual {
-            hint: "test".into(),
-        });
-        let (handle, future) = req.split();
-        let handle = handle.unwrap();
-        handle.resolve(TakeoverResolution::Cancelled).unwrap();
-        let resolution = future.resolve().await;
-        assert_eq!(resolution, TakeoverResolution::Cancelled);
-        assert!(!resolution.to_confirmed());
-    }
-
-    #[tokio::test]
-    async fn disabled_controller_returns_unavailable_immediately() {
-        let controller = TakeoverController::new(Duration::from_secs(60));
+    #[test]
+    fn disabled_controller_resolves_unavailable() {
+        let controller = TakeoverController::new();
         // enabled defaults to false.
         assert!(!controller.enabled);
-        let req = controller.request(TakeoverReason::IrreversibleAction {
-            action: "click".into(),
-            description: "Delete account".into(),
-        });
-        let (handle, future) = req.split();
-        assert!(handle.is_none(), "disabled controller yields no handle");
-        let resolution = future.resolve().await;
+        let resolution = controller.resolve_without_ui();
         assert_eq!(resolution, TakeoverResolution::Unavailable);
         assert!(!resolution.to_confirmed(), "Unavailable must be fail-closed");
     }
 
-    #[tokio::test]
-    async fn handle_dropped_without_resolving_yields_cancelled() {
-        let controller = TakeoverController {
-            timeout: Duration::from_secs(60),
-            enabled: true,
-            force_resolution: None,
-        };
-        let req = controller.request(TakeoverReason::Manual {
-            hint: "test".into(),
-        });
-        let (handle, future) = req.split();
-        // Drop the handle without resolving — sender gone.
-        drop(handle);
-        let resolution = future.resolve().await;
-        assert_eq!(resolution, TakeoverResolution::Cancelled);
-        assert!(!resolution.to_confirmed());
+    #[test]
+    fn enabled_controller_without_ui_fails_closed_unless_forced() {
+        let mut controller = TakeoverController::new();
+        controller.enabled = true;
+        // No UI can resolve the request → immediate fail-closed.
+        assert_eq!(
+            controller.resolve_without_ui(),
+            TakeoverResolution::Unavailable
+        );
+        assert!(!controller.resolve_without_ui().to_confirmed());
+
+        // The test seam injects a predetermined outcome.
+        controller.force_resolution = Some(TakeoverResolution::Confirmed);
+        assert_eq!(
+            controller.resolve_without_ui(),
+            TakeoverResolution::Confirmed
+        );
+        controller.force_resolution = Some(TakeoverResolution::Cancelled);
+        assert!(!controller.resolve_without_ui().to_confirmed());
     }
 }

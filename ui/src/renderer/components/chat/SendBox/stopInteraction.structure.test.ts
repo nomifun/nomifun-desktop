@@ -3,9 +3,8 @@ import { describe, expect, test } from 'bun:test';
 
 const source = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 const platformSendBoxes = [
-  '../../../pages/conversation/platforms/remote/RemoteSendBox.tsx',
-  '../../../pages/conversation/platforms/openclaw/OpenClawSendBox.tsx',
-  '../../../pages/conversation/platforms/nanobot/NanobotSendBox.tsx',
+  // remote/openclaw/nanobot share the BasicRuntime implementation.
+  '../../../pages/conversation/platforms/BasicRuntimeSendBox.tsx',
   '../../../pages/conversation/platforms/acp/AcpSendBox.tsx',
   '../../../pages/conversation/platforms/nomi/NomiSendBox.tsx',
 ].map((path) => ({ path, source: readFileSync(new URL(path, import.meta.url), 'utf8') }));

@@ -27,9 +27,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use agent_client_protocol::schema::{
-    AGENT_METHOD_NAMES, AuthenticateResponse, ClientNotification, ClientRequest, CloseSessionResponse, ExtResponse,
-    ForkSessionResponse, InitializeRequest, LoadSessionResponse, PromptResponse, ProtocolVersion,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResumeSessionResponse,
+    AGENT_METHOD_NAMES, InitializeRequest, LoadSessionResponse, PromptResponse, ProtocolVersion,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, SetSessionConfigOptionResponse, SetSessionModeResponse,
     SetSessionModelResponse,
 };
@@ -49,10 +48,8 @@ use crate::protocol::events::{
 };
 
 use agent_client_protocol::schema::{
-    AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, CloseSessionRequest, ExtNotification,
-    ExtRequest, ForkSessionRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    NewSessionRequest, NewSessionResponse, PromptRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, SetSessionModelRequest,
+    AgentCapabilities, AuthMethod, CancelNotification, InitializeResponse, LoadSessionRequest, NewSessionRequest,
+    NewSessionResponse, PromptRequest, SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest,
 };
 
 /// Default timeout for the ACP initialize handshake (seconds).
@@ -138,7 +135,6 @@ pub struct AcpProtocol {
     artifact_store: Option<Arc<ArtifactStore>>,
 }
 
-#[allow(dead_code)] // Full ACP method set; some methods await wiring (fork, close, list, auth, ext).
 impl AcpProtocol {
     /// Connect to a running CLI process and execute the ACP initialize handshake.
     ///
@@ -271,21 +267,6 @@ impl AcpProtocol {
         self.send_request(req, AGENT_METHOD_NAMES.session_load).await
     }
 
-    /// Fork an existing ACP session into a new session.
-    pub async fn fork_session(&self, req: ForkSessionRequest) -> Result<ForkSessionResponse, AcpError> {
-        self.send_request(req, AGENT_METHOD_NAMES.session_fork).await
-    }
-
-    /// Resume an existing ACP session.
-    pub async fn resume_session(&self, req: ResumeSessionRequest) -> Result<ResumeSessionResponse, AcpError> {
-        self.send_request(req, AGENT_METHOD_NAMES.session_resume).await
-    }
-
-    /// Close an ACP session.
-    pub async fn close_session(&self, req: CloseSessionRequest) -> Result<CloseSessionResponse, AcpError> {
-        self.send_request(req, AGENT_METHOD_NAMES.session_close).await
-    }
-
     /// Send a prompt to the agent in an active session.
     ///
     /// Blocks until the agent returns a `PromptResponse` (turn completed).
@@ -320,43 +301,6 @@ impl AcpProtocol {
     ) -> Result<SetSessionConfigOptionResponse, AcpError> {
         self.send_request(req, AGENT_METHOD_NAMES.session_set_config_option)
             .await
-    }
-
-    /// List sessions, optionally filtered by working directory.
-    pub async fn list_sessions(&self, req: ListSessionsRequest) -> Result<ListSessionsResponse, AcpError> {
-        self.send_request(req, AGENT_METHOD_NAMES.session_list).await
-    }
-
-    /// Authenticate with the agent using a previously advertised auth method.
-    pub async fn authenticate(&self, req: AuthenticateRequest) -> Result<AuthenticateResponse, AcpError> {
-        self.send_request(req, AGENT_METHOD_NAMES.authenticate).await
-    }
-
-    /// Send an extension request (method name must start with `_`).
-    ///
-    /// Returns the raw JSON response value from the agent.
-    pub async fn ext_request(&self, req: ExtRequest) -> Result<ExtResponse, AcpError> {
-        self.ensure_connected()?;
-        let method = format!("_{}", req.method);
-        let wrapped = ClientRequest::ExtMethodRequest(req);
-        let value = self.send_request(wrapped, &method).await?;
-        let raw = serde_json::value::to_raw_value(&value).map_err(|e| AcpError::AgentInternal {
-            message: format!("Failed to convert ext response: {e}"),
-            code: -32603,
-            data: None,
-        })?;
-        Ok(ExtResponse::new(raw.into()))
-    }
-
-    /// Send an extension notification (fire-and-forget, method name must start with `_`).
-    pub fn ext_notify(&self, notification: ExtNotification) {
-        if !self.is_connected() {
-            return;
-        }
-        let method = format!("_{}", notification.method);
-        log_client_notify(&method, &json_str(&notification));
-        let wrapped = ClientNotification::ExtNotification(notification);
-        let _ = self.connection.send_notification(wrapped);
     }
 
     /// Check whether the SDK connection is still alive.

@@ -10,7 +10,6 @@ import { useCallback } from 'react';
 
 type UseAgentAvailabilityOptions = {
   modelList: IProvider[];
-  isGoogleAuth: boolean;
   availableAgents: AvailableAgent[] | undefined;
   resolvePresetAgentType: (
     agentInfo: { agent_type: string; backend?: string } | undefined
@@ -30,18 +29,17 @@ type UseAgentAvailabilityResult = {
  */
 export const useAgentAvailability = ({
   modelList,
-  isGoogleAuth,
   availableAgents,
   resolvePresetAgentType,
 }: UseAgentAvailabilityOptions): UseAgentAvailabilityResult => {
   const isMainAgentAvailable = useCallback(
     (agent_type: string): boolean => {
       if (agent_type === 'gemini') {
-        return isGoogleAuth || (modelList != null && modelList.length > 0);
+        return modelList != null && modelList.length > 0;
       }
       return availableAgents?.some((agent) => agent.agent_type === agent_type || agent.backend === agent_type) ?? false;
     },
-    [modelList, availableAgents, isGoogleAuth]
+    [modelList, availableAgents]
   );
 
   const getEffectiveAgentType = useCallback(

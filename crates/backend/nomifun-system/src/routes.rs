@@ -151,11 +151,6 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         .with_state(state)
 }
 
-/// Backwards-compatible alias — delegates to `system_routes`.
-pub fn settings_routes(state: SystemRouterState) -> Router {
-    system_routes(state)
-}
-
 // ===========================================================================
 // Settings handlers
 // ===========================================================================

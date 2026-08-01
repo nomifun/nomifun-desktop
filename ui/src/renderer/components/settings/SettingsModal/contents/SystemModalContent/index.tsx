@@ -5,21 +5,20 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { IGpuStatus, IStartOnBootStatus } from '@/common/adapter/ipcBridge';
+import type { IStartOnBootStatus } from '@/common/adapter/ipcBridge';
 import { configService } from '@/common/config/configService';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
 import LanguageSwitcher from '@/renderer/components/settings/LanguageSwitcher';
 import { iconColors } from '@/renderer/styles/colors';
-import { isElectronDesktop } from '@/renderer/utils/platform';
+import { isDesktopShell } from '@/renderer/utils/platform';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
 import { Alert, Button, Collapse, Form, Message, Modal, Switch, Tooltip } from '@arco-design/web-react';
 import { FolderSearch } from '@icon-park/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
-import { useSettingsViewMode } from '../../settingsViewContext';
 import DirInputItem from './DirInputItem';
 import FactoryResetModal from './FactoryResetModal';
 import PreferenceRow from './PreferenceRow';
@@ -32,7 +31,6 @@ import PreferenceRow from './PreferenceRow';
  */
 const SystemModalContent: React.FC = () => {
   const { t } = useTranslation();
-  const isDesktop = isElectronDesktop();
   const [form] = Form.useForm();
   // arco types Modal.useModal() methods (confirm/info/...) as optional even
   // though the hook always supplies them; assert the non-optional shape so
@@ -40,8 +38,6 @@ const SystemModalContent: React.FC = () => {
   const [modalRaw, modalContextHolder] = Modal.useModal();
   const modal = modalRaw as Required<typeof modalRaw>;
   const [error, setError] = useState<string | null>(null);
-  const viewMode = useSettingsViewMode();
-  const isPageMode = viewMode === 'page';
   const initializingRef = useRef(true);
 
   const [startOnBoot, setStartOnBoot] = useState<IStartOnBootStatus>({
@@ -50,7 +46,6 @@ const SystemModalContent: React.FC = () => {
     isPackaged: false,
     platform: 'web',
   });
-  const [gpuStatus, setGpuStatus] = useState<IGpuStatus | null>(null);
   const [notificationEnabled, setNotificationEnabled] = useState(true);
   const [cronNotificationEnabled, setCronNotificationEnabled] = useState(false);
   const [saveUploadToWorkspace, setSaveUploadToWorkspace] = useState(false);
@@ -59,7 +54,9 @@ const SystemModalContent: React.FC = () => {
   const [factoryResetVisible, setFactoryResetVisible] = useState(false);
 
   useEffect(() => {
-    if (!isDesktop) {
+    // Start-on-boot is only meaningful in the Tauri desktop shell (backed by
+    // tauri-plugin-autostart); the WebUI browser has no autostart concept.
+    if (!isDesktopShell()) {
       return;
     }
 
@@ -71,16 +68,7 @@ const SystemModalContent: React.FC = () => {
         }
       })
       .catch(() => {});
-
-    ipcBridge.application.getGpuStatus
-      .invoke()
-      .then((result) => {
-        if (result.success && result.data) {
-          setGpuStatus(result.data);
-        }
-      })
-      .catch(() => {});
-  }, [isDesktop]);
+  }, []);
 
   useEffect(() => {
     setNotificationEnabled(configService.get('system.notificationEnabled') ?? true);
@@ -88,46 +76,7 @@ const SystemModalContent: React.FC = () => {
     setSaveUploadToWorkspace(configService.get('upload.saveToWorkspace') ?? false);
     setAutoPreviewOfficeFiles(configService.get('system.autoPreviewOfficeFiles') ?? true);
     setSendKey(configService.get('chat.sendKey') ?? 'enter');
-  }, [isDesktop]);
-
-  const handleHardwareAccelerationChange = useCallback(
-    (checked: boolean) => {
-      const previous = gpuStatus;
-      const optimistic: IGpuStatus = {
-        userOverride: checked ? 'force-on' : 'force-off',
-        autoDisabled: false,
-        crashCount: 0,
-        lastCrashAt: gpuStatus?.lastCrashAt ?? null,
-      };
-      setGpuStatus(optimistic);
-
-      const apply = () => {
-        ipcBridge.application.setGpuOverride
-          .invoke({ override: checked ? 'force-on' : 'force-off' })
-          .then((result) => {
-            if (result.success && result.data) {
-              setGpuStatus(result.data);
-              ipcBridge.application.restart.invoke().catch(() => {});
-            } else {
-              setGpuStatus(previous);
-              Message.error(t('settings.hardwareAccelerationUpdateFailed'));
-            }
-          })
-          .catch(() => {
-            setGpuStatus(previous);
-            Message.error(t('settings.hardwareAccelerationUpdateFailed'));
-          });
-      };
-
-      modal.confirm({
-        title: t('settings.updateConfirm'),
-        content: t('settings.hardwareAccelerationRestartConfirm'),
-        onOk: apply,
-        onCancel: () => setGpuStatus(previous),
-      });
-    },
-    [gpuStatus, modal, t]
-  );
+  }, []);
 
   const handleStartOnBootChange = useCallback(
     (checked: boolean) => {
@@ -254,23 +203,6 @@ const SystemModalContent: React.FC = () => {
       description: t('settings.keepAwakeDesc'),
       component: <Switch checked={keepAwake} onChange={handleKeepAwakeChange} />,
     },
-    ...(isDesktop && gpuStatus
-      ? [
-          {
-            key: 'hardwareAcceleration',
-            label: t('settings.hardwareAcceleration'),
-            description: gpuStatus.autoDisabled
-              ? t('settings.hardwareAccelerationAutoDisabled')
-              : t('settings.hardwareAccelerationDesc'),
-            component: (
-              <Switch
-                checked={gpuStatus.userOverride !== 'force-off' && !gpuStatus.autoDisabled}
-                onChange={handleHardwareAccelerationChange}
-              />
-            ),
-          },
-        ]
-      : []),
     {
       key: 'saveUploadToWorkspace',
       label: t('settings.saveUploadToWorkspace'),
@@ -345,7 +277,7 @@ const SystemModalContent: React.FC = () => {
     <div className='flex flex-col h-full w-full'>
       {modalContextHolder}
 
-      <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow={isPageMode}>
+      <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
         <div className='space-y-16px'>
           <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
             <div className='w-full flex flex-col divide-y divide-border-2'>
@@ -422,7 +354,7 @@ const SystemModalContent: React.FC = () => {
                   content={
                     <span>
                       {typeof error === 'string' ? error : JSON.stringify(error)}
-                      <FeedbackButton module='system-settings' className='ml-6px' />
+                      <FeedbackButton className='ml-6px' />
                     </span>
                   }
                 />

@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn test_router_state_clone() {
         let state = ConnectionTestRouterState {
-            service: ConnectionTestService::new(reqwest::Client::new()),
+            service: ConnectionTestService::new(),
         };
         let _cloned = state.clone();
     }
@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn test_router_construction() {
         let state = ConnectionTestRouterState {
-            service: ConnectionTestService::new(reqwest::Client::new()),
+            service: ConnectionTestService::new(),
         };
         let _router = connection_test_routes(state);
     }

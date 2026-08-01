@@ -81,9 +81,6 @@ pub async fn execute_shell_commands_with_shell(
 pub enum ShellExecutionError {
     #[error("Shell command failed for pattern \"{pattern}\": {output}")]
     CommandFailed { pattern: String, output: String },
-
-    #[error("Shell execution blocked for MCP skill")]
-    McpBlocked,
 }
 
 // ---------------------------------------------------------------------------

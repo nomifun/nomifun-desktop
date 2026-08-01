@@ -115,7 +115,6 @@ impl JobExecutor {
         let skill_suggest_detector = SkillSuggestDetector::new(
             Arc::clone(&user_events),
             conversation_repo.clone(),
-            data_dir.clone(),
         );
         Self {
             authoritative_user_id,
@@ -177,74 +176,6 @@ impl JobExecutor {
         } else {
             Ok(None)
         }
-    }
-
-    pub async fn execute(&self, job: &CronJob, run_id: &str) -> ExecutionResult {
-        if nomifun_common::CronJobRunId::parse(run_id).is_err() {
-            return ExecutionResult::Error {
-                message: format!("invalid durable cron run id: {run_id}"),
-            };
-        }
-        if let Err(error) = cron_job_to_row(job) {
-            return ExecutionResult::Error {
-                message: error.to_string(),
-            };
-        }
-        if job
-            .conversation_id
-            .as_deref()
-            .is_some_and(|conversation_id| self.busy_guard.is_busy(conversation_id))
-        {
-            return self.handle_busy(job);
-        }
-
-        let saved_skill = match self.prepare_authorized_saved_skill(job).await {
-            Ok(skill) => skill,
-            Err(e) => {
-                error!(job_id = %job.cron_job_id, error = %e, "Failed to prepare saved cron skill");
-                return ExecutionResult::Error {
-                    message: e.to_string(),
-                };
-            }
-        };
-
-        if let Err(e) = self.validate_runtime_job_workspace(job).await {
-            error!(job_id = %job.cron_job_id, error = %e, "Failed cron workspace validation");
-            return ExecutionResult::Error {
-                message: e.to_string(),
-            };
-        }
-
-        let target_conversation_id =
-            match self
-                .resolve_conversation(job, saved_skill.as_ref(), run_id)
-                .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    error!(job_id = %job.cron_job_id, error = %e, "Failed to resolve conversation");
-                    return ExecutionResult::Error {
-                        message: e.to_string(),
-                    };
-                }
-            };
-
-        self.busy_guard
-            .set_processing(&target_conversation_id, true);
-
-        let result = self
-            .execute_inner_with_run_id(
-                job,
-                run_id,
-                &target_conversation_id,
-                saved_skill.as_ref(),
-            )
-            .await;
-
-        self.busy_guard
-            .set_processing(&target_conversation_id, false);
-
-        result
     }
 
     pub(crate) async fn prepare_run_now(
@@ -636,7 +567,7 @@ impl JobExecutor {
         // cached `agent_config.provider_id` is invalid or missing
         // cannot reach the factory and raise `Provider 'nomi' not found`
         // (Sentry ELECTRON-1HM). `resolve_conversation` (called by
-        // `execute`/`execute_prepared` before this method runs) guarantees the
+        // `prepare_run_now` before this method runs) guarantees the
         // row exists. Re-check both existence and owner here to close the
         // delete/rebind race before any runtime is obtained.
         let conversation_row = match self.get_conversation_row(conversation_id).await {
@@ -3668,13 +3599,6 @@ mod tests {
             ) -> Result<(), nomifun_common::AppError> {
                 Ok(())
             }
-            fn terminate_and_wait(
-                &self,
-                _: &str,
-                _: Option<nomifun_common::AgentKillReason>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-                Box::pin(std::future::ready(()))
-            }
             fn terminate_all(&self) {}
             fn active_runtime_count(&self) -> usize {
                 0
@@ -4030,13 +3954,6 @@ mod tests {
             Ok(())
         }
 
-        fn terminate_and_wait(
-            &self,
-            _: &str,
-            _: Option<AgentKillReason>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-            Box::pin(std::future::ready(()))
-        }
 
         fn terminate_and_wait_result(
             &self,
@@ -4113,13 +4030,6 @@ mod tests {
             Ok(())
         }
 
-        fn terminate_and_wait(
-            &self,
-            _: &str,
-            _: Option<AgentKillReason>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-            Box::pin(std::future::ready(()))
-        }
 
         fn terminate_and_wait_result(
             &self,

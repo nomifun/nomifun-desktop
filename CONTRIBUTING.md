@@ -149,7 +149,6 @@ legacy redirected routes as current navigation.
 
 ### Rust And Backend
 
-- Run `cargo fmt` before submitting Rust changes.
 - Use workspace dependencies from the root [Cargo.toml](Cargo.toml) when adding
   shared Rust dependencies.
 - Route backend feature code through its owning `nomifun-*` crate. Do not put

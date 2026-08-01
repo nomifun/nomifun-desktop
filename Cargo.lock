@@ -1342,21 +1342,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "calamine"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "138646b9af2c5d7f1804ea4bf93afc597737d2bd4f7341d67c48b03316976eb1"
-dependencies = [
- "byteorder",
- "codepage",
- "encoding_rs",
- "log",
- "quick-xml 0.31.0",
- "serde",
- "zip 2.4.2",
-]
-
-[[package]]
 name = "camino"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1677,15 +1662,6 @@ name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
-
-[[package]]
-name = "codepage"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48f68d061bc2828ae826206326e61251aca94c1e4a5305cf52d9138639c918b4"
-dependencies = [
- "encoding_rs",
-]
 
 [[package]]
 name = "color_quant"
@@ -5058,7 +5034,6 @@ name = "nomi-a11y"
 version = "0.3.5"
 dependencies = [
  "atspi",
- "base64 0.22.1",
  "core-foundation 0.10.1",
  "core-graphics",
  "image",
@@ -5068,7 +5043,6 @@ dependencies = [
  "objc2-foundation",
  "objc2-vision",
  "serde",
- "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5086,7 +5060,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "crossterm",
- "dirs 6.0.0",
  "futures",
  "glob",
  "is-terminal",
@@ -5115,7 +5088,6 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
- "uuid",
  "wiremock",
 ]
 
@@ -5187,12 +5159,9 @@ dependencies = [
  "nomi-compact",
  "nomi-config",
  "nomi-mcp",
- "nomi-memory",
  "nomi-process-runtime",
  "nomi-protocol",
- "nomi-providers",
  "nomi-skills",
- "nomi-tools",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -5235,13 +5204,11 @@ name = "nomi-config"
 version = "0.3.5"
 dependencies = [
  "anyhow",
- "chrono",
  "dirs 6.0.0",
  "glob",
  "nomi-compact",
  "nomi-process-runtime",
  "nomi-types",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
@@ -5254,7 +5221,6 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
- "wiremock",
 ]
 
 [[package]]
@@ -5300,7 +5266,6 @@ name = "nomi-process-runtime"
 version = "0.3.5"
 dependencies = [
  "async-trait",
- "encoding_rs",
  "libc",
  "portable-pty",
  "serde",
@@ -5369,12 +5334,9 @@ dependencies = [
  "async-trait",
  "dirs 6.0.0",
  "futures",
- "glob",
- "libc",
  "nomi-config",
  "nomi-mcp",
  "nomi-types",
- "notify",
  "regex",
  "rstest",
  "serde",
@@ -5448,9 +5410,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "tower",
  "tracing",
 ]
 
@@ -5594,7 +5554,6 @@ dependencies = [
  "percent-encoding",
  "reqwest 0.12.28",
  "rmcp",
- "rust_xlsxwriter",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5719,7 +5678,6 @@ dependencies = [
  "hmac 0.12.1",
  "libc",
  "nomi-types",
- "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5824,7 +5782,6 @@ version = "0.3.5"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "cron",
@@ -5853,7 +5810,6 @@ dependencies = [
  "async-trait",
  "axum",
  "dashmap",
- "futures",
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",
@@ -5937,7 +5893,6 @@ dependencies = [
  "nomifun-common",
  "nomifun-db",
  "nomifun-realtime",
- "notify",
  "regex",
  "reqwest 0.12.28",
  "semver",
@@ -5989,7 +5944,6 @@ version = "0.3.5"
 dependencies = [
  "async-trait",
  "axum",
- "dirs 6.0.0",
  "futures",
  "jsonschema",
  "nomi-browser",
@@ -6013,7 +5967,6 @@ dependencies = [
  "nomifun-idmm",
  "nomifun-knowledge",
  "nomifun-mcp",
- "nomifun-preset",
  "nomifun-requirement",
  "nomifun-shell",
  "nomifun-system",
@@ -6100,7 +6053,6 @@ version = "0.3.5"
 dependencies = [
  "async-trait",
  "axum",
- "dashmap",
  "dirs 6.0.0",
  "nomi-process-runtime",
  "nomifun-api-types",
@@ -6153,7 +6105,6 @@ version = "0.3.5"
 dependencies = [
  "async-trait",
  "axum",
- "calamine",
  "dashmap",
  "getrandom 0.2.17",
  "hex",
@@ -6164,7 +6115,6 @@ dependencies = [
  "nomifun-file",
  "nomifun-realtime",
  "reqwest 0.12.28",
- "rust_xlsxwriter",
  "serde",
  "serde_json",
  "sha1",
@@ -6172,7 +6122,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "which 7.0.3",
 ]
 
 [[package]]
@@ -6206,7 +6155,6 @@ dependencies = [
  "nomifun-browser-platform",
  "nomifun-common",
  "nomifun-gateway",
- "reqwest 0.12.28",
  "rmcp",
  "serde",
  "serde_json",
@@ -6419,7 +6367,6 @@ dependencies = [
  "reqwest 0.12.28",
  "serde_json",
  "sha2 0.10.9",
- "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6443,7 +6390,6 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
- "zip 2.4.2",
 ]
 
 [[package]]
@@ -7768,16 +7714,6 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
-dependencies = [
- "encoding_rs",
- "memchr",
-]
-
-[[package]]
-name = "quick-xml"
 version = "0.37.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
@@ -8340,15 +8276,6 @@ checksum = "796e8d2b6696392a43bea58116b667fb4c29727dc5abd27d6acf338bb4f688c7"
 dependencies = [
  "cfg-if",
  "ordered-multimap",
-]
-
-[[package]]
-name = "rust_xlsxwriter"
-version = "0.82.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d61a82de4e7b30fc427909f2c5aafaada88cc7ae8316edabae435f74341f9278"
-dependencies = [
- "zip 2.4.2",
 ]
 
 [[package]]

@@ -1,24 +1,18 @@
-// Memory file read, write, delete, scan, and manifest formatting.
+// Memory file read and write.
 //
 // This module handles the file-level operations for memory persistence:
-// parsing YAML frontmatter, writing memory entries, scanning directories
-// for memory headers, and formatting manifests.
+// parsing YAML frontmatter and writing memory entries.
 
 use std::fs;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 
 use crate::error::Result;
-use crate::paths::ENTRYPOINT_NAME;
-use crate::types::{MemoryEntry, MemoryFrontmatter, MemoryHeader};
+use crate::types::{MemoryEntry, MemoryFrontmatter};
 
 /// Maximum number of lines to read when extracting frontmatter.
 const FRONTMATTER_MAX_LINES: usize = 30;
-
-/// Maximum number of files returned by a directory scan.
-const MAX_MEMORY_FILES: usize = 200;
 
 /// YAML frontmatter delimiter.
 const FRONTMATTER_DELIM: &str = "---";
@@ -60,18 +54,6 @@ pub fn write_memory(dir: &Path, entry: &MemoryEntry) -> Result<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Delete
-// ---------------------------------------------------------------------------
-
-/// Delete a memory file at the given path.
-///
-/// Returns an error if the file does not exist or cannot be removed.
-pub fn delete_memory(path: &Path) -> Result<()> {
-    fs::remove_file(path)?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Citation reflow: bump usage stats
 // ---------------------------------------------------------------------------
 
@@ -92,70 +74,6 @@ pub fn bump_memory_usage(dir: &Path, filename: &str, now: DateTime<Utc>) -> Resu
     let content = serialize_entry(&entry);
     fs::write(&path, content)?;
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Scan
-// ---------------------------------------------------------------------------
-
-/// Scan a directory for memory files, returning lightweight headers.
-///
-/// - Recursively reads `.md` files, excluding `MEMORY.md`.
-/// - Reads only the first 30 lines of each file for frontmatter extraction.
-/// - Sorts by modification time (newest first).
-/// - Caps results at 200 files.
-///
-/// Returns an empty list for non-existent or empty directories.
-pub fn scan_memory_files(dir: &Path) -> Result<Vec<MemoryHeader>> {
-    if !dir.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut headers = Vec::new();
-
-    for entry in collect_md_files(dir)? {
-        let path = entry;
-        if let Some(header) = read_header(&path) {
-            headers.push(header);
-        }
-    }
-
-    // Sort by mtime descending (newest first).
-    headers.sort_by_key(|h| std::cmp::Reverse(h.mtime));
-
-    // Cap at limit.
-    headers.truncate(MAX_MEMORY_FILES);
-
-    Ok(headers)
-}
-
-// ---------------------------------------------------------------------------
-// Manifest formatting
-// ---------------------------------------------------------------------------
-
-/// Format a list of memory headers as a human-readable manifest.
-///
-/// Each line: `- [type] filename (ISO8601): description`
-/// Type tag omitted if absent; description omitted if absent.
-pub fn format_memory_manifest(headers: &[MemoryHeader]) -> String {
-    let mut lines = Vec::with_capacity(headers.len());
-
-    for h in headers {
-        let type_tag = h
-            .memory_type
-            .map(|t| format!("[{}] ", t))
-            .unwrap_or_default();
-        let ts = h.mtime.format("%Y-%m-%dT%H:%M:%S").to_string();
-        let desc = h
-            .description
-            .as_deref()
-            .map(|d| format!(": {d}"))
-            .unwrap_or_default();
-
-        lines.push(format!("- {type_tag}{} ({ts}){desc}", h.filename));
-    }
-
-    lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -325,91 +243,6 @@ fn sanitize_filename(name: &str) -> String {
     result.trim_matches('_').to_owned()
 }
 
-// ---------------------------------------------------------------------------
-// Directory traversal (internal)
-// ---------------------------------------------------------------------------
-
-/// Collect all `.md` files in a directory (recursive), excluding MEMORY.md.
-fn collect_md_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    collect_md_files_recursive(dir, &mut files)?;
-    Ok(files)
-}
-
-fn collect_md_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            collect_md_files_recursive(&path, files)?;
-        } else if is_scannable_md(&path) {
-            files.push(path);
-        }
-    }
-
-    Ok(())
-}
-
-/// Check if a path is a scannable `.md` file (not MEMORY.md).
-fn is_scannable_md(path: &Path) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str());
-    if ext != Some("md") {
-        return false;
-    }
-    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-    filename != ENTRYPOINT_NAME
-}
-
-// ---------------------------------------------------------------------------
-// Header extraction (internal)
-// ---------------------------------------------------------------------------
-
-/// Read a file's first N lines and metadata to produce a header.
-///
-/// Returns `None` if the file cannot be read (silently drops failures).
-fn read_header(path: &Path) -> Option<MemoryHeader> {
-    let file = fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
-
-    let mut first_lines = String::new();
-    for (i, line) in reader.lines().enumerate() {
-        if i >= FRONTMATTER_MAX_LINES {
-            break;
-        }
-        let line = line.ok()?;
-        first_lines.push_str(&line);
-        first_lines.push('\n');
-    }
-
-    let (fm, _) = parse_frontmatter(&first_lines, None);
-    let mtime = file_mtime(path)?;
-    let filename = path.file_name()?.to_string_lossy().into_owned();
-
-    Some(MemoryHeader {
-        filename,
-        file_path: path.to_owned(),
-        mtime,
-        description: fm.description,
-        memory_type: fm.memory_type,
-    })
-}
-
-/// Get a file's modification time as UTC datetime.
-fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
-    let metadata = fs::metadata(path).ok()?;
-    let modified = metadata.modified().ok()?;
-    let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
-    Utc.timestamp_opt(duration.as_secs() as i64, duration.subsec_nanos())
-        .single()
-}
-
 // ===========================================================================
 // Unit tests
 // ===========================================================================
@@ -417,8 +250,8 @@ fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::MemoryError;
     use crate::types::MemoryType;
+    use chrono::TimeZone;
 
     // -- parse_frontmatter ---------------------------------------------------
 
@@ -611,60 +444,6 @@ mod tests {
         assert_ne!(name1, name2, "pure non-ASCII names should not collide");
     }
 
-    // -- is_scannable_md -----------------------------------------------------
-
-    #[test]
-    fn scannable_normal_md() {
-        assert!(is_scannable_md(Path::new("/dir/user_role.md")));
-    }
-
-    #[test]
-    fn scannable_rejects_memory_md() {
-        assert!(!is_scannable_md(Path::new("/dir/MEMORY.md")));
-    }
-
-    #[test]
-    fn scannable_rejects_non_md() {
-        assert!(!is_scannable_md(Path::new("/dir/notes.txt")));
-        assert!(!is_scannable_md(Path::new("/dir/data.json")));
-    }
-
-    // -- format_memory_manifest ----------------------------------------------
-
-    #[test]
-    fn manifest_with_full_headers() {
-        let headers = vec![MemoryHeader {
-            filename: "user_role.md".into(),
-            file_path: PathBuf::from("/mem/user_role.md"),
-            mtime: Utc.with_ymd_and_hms(2026, 4, 10, 12, 0, 0).unwrap(),
-            description: Some("User role info".into()),
-            memory_type: Some(MemoryType::User),
-        }];
-        let manifest = format_memory_manifest(&headers);
-        assert_eq!(
-            manifest,
-            "- [user] user_role.md (2026-04-10T12:00:00): User role info"
-        );
-    }
-
-    #[test]
-    fn manifest_without_type_and_description() {
-        let headers = vec![MemoryHeader {
-            filename: "notes.md".into(),
-            file_path: PathBuf::from("/mem/notes.md"),
-            mtime: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
-            description: None,
-            memory_type: None,
-        }];
-        let manifest = format_memory_manifest(&headers);
-        assert_eq!(manifest, "- notes.md (2026-01-01T00:00:00)");
-    }
-
-    #[test]
-    fn manifest_empty() {
-        assert_eq!(format_memory_manifest(&[]), "");
-    }
-
     // -- file operations (using tempdir) -------------------------------------
 
     #[test]
@@ -687,51 +466,6 @@ mod tests {
             entry.frontmatter.memory_type
         );
         assert_eq!(read_back.content, entry.content);
-    }
-
-    #[test]
-    fn delete_existing_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("test.md");
-        fs::write(&path, "content").unwrap();
-        assert!(path.exists());
-
-        delete_memory(&path).unwrap();
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn delete_nonexistent_file_errors() {
-        let err = delete_memory(Path::new("/nonexistent/file.md")).unwrap_err();
-        assert!(matches!(err, MemoryError::Io(_)));
-    }
-
-    #[test]
-    fn scan_excludes_memory_md_and_non_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-
-        // Create files
-        fs::write(dir.join("user_role.md"), "---\ntype: user\n---\nBody").unwrap();
-        fs::write(dir.join("MEMORY.md"), "# Index").unwrap();
-        fs::write(dir.join("notes.txt"), "not markdown").unwrap();
-
-        let headers = scan_memory_files(dir).unwrap();
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers[0].filename, "user_role.md");
-    }
-
-    #[test]
-    fn scan_nonexistent_dir_returns_empty() {
-        let headers = scan_memory_files(Path::new("/nonexistent/dir")).unwrap();
-        assert!(headers.is_empty());
-    }
-
-    #[test]
-    fn scan_empty_dir_returns_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let headers = scan_memory_files(tmp.path()).unwrap();
-        assert!(headers.is_empty());
     }
 
     // -- bump_memory_usage (citation reflow) ---------------------------------

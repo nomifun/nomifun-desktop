@@ -120,10 +120,7 @@
     "downloadHtml": "下载 HTML 文件",
     "copyElementHtml": "复制元素 HTML",
     "viewElementInfo": "查看元素信息",
-    "printedToConsole": "已在控制台打印元素信息",
-    "inspectElement": "审核元素",
-    "inspectElementEnable": "开启审核元素",
-    "inspectElementDisable": "关闭审核元素"
+    "printedToConsole": "已在控制台打印元素信息"
   },
   "ppt": {
     "loading": "正在启动 PPT 预览...",

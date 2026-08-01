@@ -91,14 +91,6 @@ impl FileService {
         self.allowed_roots.iter().map(|p| p.as_path()).collect()
     }
 
-    fn allowed_roots_with_extra<'a>(&'a self, extra_root: Option<&'a Path>) -> Vec<&'a Path> {
-        let mut roots = self.allowed_roots_refs();
-        if let Some(extra_root) = extra_root {
-            roots.push(extra_root);
-        }
-        roots
-    }
-
     /// The default [`PathAuthority`] for the non-scoped trait methods: confine
     /// to the service's construction-time `allowed_roots`, optionally widened
     /// by a request-scoped `extra` root. This reproduces the historical
@@ -115,7 +107,8 @@ impl FileService {
     /// Whether a (possibly non-existent) `path` textually falls under the given
     /// authority — used by the read fallback to distinguish "allowed but not
     /// found" (→ `Ok(None)`) from "forbidden" (→ error). `Unrestricted` always
-    /// qualifies; `Confined` mirrors [`Self::path_uses_allowed_root`].
+    /// qualifies; `Confined` checks whether the path textually starts with one
+    /// of the (canonicalized) confining roots.
     fn path_uses_authority(&self, path: &Path, authority: &PathAuthority) -> bool {
         match authority {
             PathAuthority::Unrestricted => true,
@@ -134,24 +127,6 @@ impl FileService {
                     .any(|root| candidate.starts_with(root))
             }
         }
-    }
-
-    fn path_uses_allowed_root(&self, path: &Path, extra_root: Option<&Path>) -> bool {
-        let candidate = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            match std::env::current_dir() {
-                Ok(current_dir) => current_dir.join(path),
-                Err(_) => path.to_path_buf(),
-            }
-        };
-
-        self.allowed_roots
-            .iter()
-            .map(PathBuf::as_path)
-            .chain(extra_root)
-            .filter_map(|root| std::fs::canonicalize(root).ok())
-            .any(|root| candidate.starts_with(root))
     }
 
     // -- Authority-aware cores (shared by the non-scoped + `*_scoped` trait
@@ -572,19 +547,6 @@ fn read_file_sync(path: &Path) -> Result<Option<String>, AppError> {
     Ok(Some(content))
 }
 
-/// Read a file as raw bytes. Returns `None` if the file does not exist.
-/// Rejects files larger than 256 MB.
-fn read_file_buffer_sync(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
-    if validate_file_for_read(path)?.is_none() {
-        return Ok(None);
-    }
-
-    let bytes =
-        std::fs::read(path).map_err(|e| AppError::Internal(format!("cannot read file '{}': {e}", path.display())))?;
-
-    Ok(Some(bytes))
-}
-
 /// Write data to a file synchronously. Creates the file if it does not exist.
 /// Returns `true` on success.
 fn write_file_sync(path: &Path, data: &[u8]) -> Result<bool, AppError> {
@@ -888,35 +850,6 @@ impl crate::traits::IFileService for FileService {
         self.read_file_impl(path, authority).await
     }
 
-    async fn read_file_buffer(&self, path: &str, extra_root: Option<&Path>) -> Result<Option<Vec<u8>>, AppError> {
-        if has_traversal(path) {
-            return Err(AppError::BadRequest(format!(
-                "path '{}' contains invalid traversal patterns",
-                path
-            )));
-        }
-
-        let roots = self.allowed_roots_refs();
-        let canonical = match validate_path_with_extra_root(path, &roots, extra_root) {
-            Ok(c) => c,
-            Err(err) => {
-                if matches!(err, AppError::BadRequest(_))
-                    && validate_path_for_write(path, &self.allowed_roots_with_extra(extra_root)).is_ok()
-                {
-                    return Ok(None);
-                }
-                if matches!(err, AppError::BadRequest(_)) && self.path_uses_allowed_root(Path::new(path), extra_root) {
-                    return Ok(None);
-                }
-                return Err(err);
-            }
-        };
-
-        tokio::task::spawn_blocking(move || read_file_buffer_sync(&canonical))
-            .await
-            .map_err(|e| AppError::Internal(format!("read file buffer task failed: {e}")))?
-    }
-
     async fn write_file(
         &self,
         owner_id: &str,
@@ -1020,38 +953,6 @@ impl crate::traits::IFileService for FileService {
         authority: &PathAuthority,
     ) -> Result<String, AppError> {
         self.rename_entry_impl(path, new_name, authority).await
-    }
-
-    async fn create_temp_file(&self, file_name: &str) -> Result<String, AppError> {
-        if has_traversal(file_name) {
-            return Err(AppError::BadRequest(format!(
-                "file name '{}' contains invalid traversal patterns",
-                file_name
-            )));
-        }
-
-        if file_name.contains('/') || file_name.contains('\\') {
-            return Err(AppError::BadRequest(format!(
-                "file name '{}' must not contain path separators",
-                file_name
-            )));
-        }
-
-        let name = file_name.to_owned();
-
-        tokio::task::spawn_blocking(move || {
-            let tmp_dir = std::env::temp_dir().join("nomifun");
-            std::fs::create_dir_all(&tmp_dir)
-                .map_err(|e| AppError::Internal(format!("cannot create temp directory: {e}")))?;
-
-            let file_path = tmp_dir.join(&name);
-            std::fs::File::create(&file_path)
-                .map_err(|e| AppError::Internal(format!("cannot create temp file '{}': {e}", file_path.display())))?;
-
-            Ok(file_path.to_string_lossy().into_owned())
-        })
-        .await
-        .map_err(|e| AppError::Internal(format!("create temp file task failed: {e}")))?
     }
 
     async fn create_upload_file(
@@ -1535,28 +1436,6 @@ mod tests {
         let fake = dir.path().join("nope.txt");
 
         let result = validate_file_for_read(&fake).unwrap();
-        assert!(result.is_none());
-    }
-
-    // -- read_file_buffer_sync tests --
-
-    #[test]
-    fn read_file_buffer_sync_normal() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("data.bin");
-        let bytes: Vec<u8> = vec![0x00, 0xFF, 0x42, 0x89];
-        fs::write(&file, &bytes).unwrap();
-
-        let result = read_file_buffer_sync(&file).unwrap();
-        assert_eq!(result.as_deref(), Some(bytes.as_slice()));
-    }
-
-    #[test]
-    fn read_file_buffer_sync_nonexistent() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake = dir.path().join("missing.bin");
-
-        let result = read_file_buffer_sync(&fake).unwrap();
         assert!(result.is_none());
     }
 

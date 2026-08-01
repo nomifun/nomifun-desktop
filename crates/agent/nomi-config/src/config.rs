@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthConfig, OAuthManager};
 use crate::compact::CompactConfig;
 use crate::compat::ProviderCompat;
 use crate::file_cache::FileCacheConfig;
@@ -166,7 +165,6 @@ pub struct ConfigFile {
 
     pub bedrock: Option<BedrockConfig>,
     pub vertex: Option<VertexConfig>,
-    pub auth: Option<AuthConfig>,
 
     #[serde(default)]
     pub mcp: McpConfig,
@@ -260,10 +258,6 @@ pub struct ToolsConfig {
     pub computer: ComputerConfig,
     #[serde(default)]
     pub browser: BrowserConfig,
-    /// Deprecated compatibility input. Supervised one-shot execution ignores
-    /// this setting on every platform and emits a warning when it is enabled.
-    #[serde(default)]
-    pub persistent_shell: bool,
     /// Opt-in (default empty = off): restrict Write/Edit/ApplyPatch to writes
     /// within this directory. Accidental/buggy out-of-root writes are rejected.
     /// NOT a security sandbox (the agent has Bash) — that needs OS-level
@@ -314,7 +308,6 @@ impl Default for ToolsConfig {
             max_recent_images: default_max_recent_images(),
             computer: ComputerConfig::default(),
             browser: BrowserConfig::default(),
-            persistent_shell: false,
             write_root: String::new(),
             lsp_servers: Vec::new(),
             delegation_token_budget: None,
@@ -354,21 +347,8 @@ pub struct BrowserConfig {
     /// Off by default: driving a browser is opt-in.
     #[serde(default)]
     pub enabled: bool,
-    /// DEPRECATED (no longer consumed). Browser executable selection belongs to
-    /// the main-process `BrowserSessionHub` Host factory, not an Agent runtime.
-    /// Kept (serde-defaulted) one release so existing config.toml files still
-    /// deserialize; remove after the migration window.
-    #[serde(default)]
-    pub browser_path: String,
     #[serde(default)]
     pub headless: bool,
-    /// DEPRECATED (no longer consumed). Lane expiry and Browser Host lifecycle
-    /// are owned by the main-process `BrowserSessionHub`, not an Agent-local idle
-    /// timeout. Kept (serde-defaulted) one release for config compatibility;
-    /// remove after the migration window. (Not to be confused with the unrelated
-    /// agent-session idle timeout in `idle_scanner`.)
-    #[serde(default = "default_browser_idle_timeout")]
-    pub idle_timeout_secs: u64,
     /// Optional origin allowlist for Browser operations, derived alongside the
     /// shared secret vault's `allowed_origins`. It is enforced by the managed
     /// tool/policy path before Hub execution. Empty = allow all.
@@ -427,9 +407,7 @@ impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            browser_path: String::new(),
             headless: false,
-            idle_timeout_secs: default_browser_idle_timeout(),
             allowed_origins: Vec::new(),
             full_power: false,
             persistent_login: false,
@@ -477,9 +455,6 @@ fn default_max_recent_images() -> usize {
 }
 fn default_max_screenshot_edge() -> u32 {
     1568
-}
-fn default_browser_idle_timeout() -> u64 {
-    300
 }
 /// 浏览器来源默认值：`"managed"`（内置/下载 CfT）。`"system"` = 用户系统 Chrome/Edge。
 fn default_browser_source() -> String {
@@ -784,15 +759,9 @@ fn resolve_api_key(
         }
     }
 
-    // Try OAuth credentials as last resort
-    let oauth = OAuthManager::new(AuthConfig::default());
-    if oauth.has_credentials() {
-        return Ok(String::new()); // Will be resolved at runtime via OAuth
-    }
-
     anyhow::bail!(
-        "No API key found. Provide via --api-key, config file, environment variable \
-         (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY), or run 'nomi --login'."
+        "No API key found. Provide via --api-key, config file, or environment variable \
+         (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY)."
     )
 }
 
@@ -1087,17 +1056,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
     };
     let browser = BrowserConfig {
         enabled: global.tools.browser.enabled || project.tools.browser.enabled,
-        browser_path: if !project.tools.browser.browser_path.is_empty() {
-            project.tools.browser.browser_path
-        } else {
-            global.tools.browser.browser_path
-        },
         headless: global.tools.browser.headless || project.tools.browser.headless,
-        idle_timeout_secs: if project.tools.browser.idle_timeout_secs != default_browser_idle_timeout() {
-            project.tools.browser.idle_timeout_secs
-        } else {
-            global.tools.browser.idle_timeout_secs
-        },
         allowed_origins: if !project.tools.browser.allowed_origins.is_empty() {
             project.tools.browser.allowed_origins
         } else {
@@ -1118,7 +1077,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         unrestricted_approval: global.tools.browser.unrestricted_approval
             || project.tools.browser.unrestricted_approval,
         // 浏览器来源——project 非默认（显式设了 "system"/其它）则覆盖 global，否则用 global（与
-        // browser_path 同「project 非默认优先」语义）。运行时由 backend factory 经 client_preferences
+        // write_root 同「project 非默认优先」语义）。运行时由 backend factory 经 client_preferences
         // LIVE 覆写（config.tools.browser.source），这里只是 toml 合并。
         source: if project.tools.browser.source != default_browser_source() {
             project.tools.browser.source
@@ -1142,7 +1101,6 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             max_recent_images,
             computer,
             browser,
-            persistent_shell: global.tools.persistent_shell || project.tools.persistent_shell,
             write_root: if !project.tools.write_root.is_empty() {
                 project.tools.write_root
             } else {
@@ -1169,7 +1127,6 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             max_recent_images,
             computer,
             browser,
-            persistent_shell: global.tools.persistent_shell || project.tools.persistent_shell,
             write_root: if !project.tools.write_root.is_empty() {
                 project.tools.write_root
             } else {
@@ -1239,10 +1196,9 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         global.file_cache
     };
 
-    // Bedrock/Vertex/Auth: project overrides global
+    // Bedrock/Vertex: project overrides global
     let bedrock = project.bedrock.or(global.bedrock);
     let vertex = project.vertex.or(global.vertex);
-    let auth = project.auth.or(global.auth);
 
     // Compact: project overrides global for any non-default field.
     // Since CompactConfig uses serde defaults, a fully-default project config
@@ -1271,7 +1227,6 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         hooks,
         bedrock,
         vertex,
-        auth,
         mcp,
         logging,
     }
@@ -1427,12 +1382,6 @@ max_tokens = 8192
 # project_id = "my-gcp-project"
 # region = "us-central1"
 # credentials_file = "/path/to/service-account.json"  # or use ADC
-
-# OAuth settings (for --login with Claude.ai account)
-# [auth]
-# auth_url = "https://claude.ai/oauth"
-# token_url = "https://claude.ai/oauth/token"
-# client_id = "nomi"
 
 # Named profiles for quick switching (--profile <name>)
 # [profiles.deepseek]

@@ -16,9 +16,6 @@ path = "src/main.rs"
 nomi-agent = { workspace = true, features = ["computer-use"] }
 nomi-compact.workspace  = true
 nomi-config.workspace   = true
-nomi-memory.workspace   = true
-nomi-providers.workspace = true
-nomi-tools.workspace    = true
 nomi-mcp.workspace      = true
 nomi-protocol.workspace = true
 nomi-skills.workspace   = true

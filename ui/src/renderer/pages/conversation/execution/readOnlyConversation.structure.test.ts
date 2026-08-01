@@ -12,12 +12,13 @@ const readSource = (url: URL) => readFileSync(url, 'utf8');
 describe('execution transcript capability boundary', () => {
   test('marks every projected platform chat as read-only', () => {
     const source = readSource(new URL('./ReadOnlyConversationView.tsx', import.meta.url));
+    // The openclaw / nanobot / remote chat surfaces and send boxes share the
+    // BasicRuntimeChat / BasicRuntimeSendBox implementations.
     const basicPlatformChats = [
-      readSource(new URL('../platforms/openclaw/OpenClawChat.tsx', import.meta.url)),
-      readSource(new URL('../platforms/nanobot/NanobotChat.tsx', import.meta.url)),
-      readSource(new URL('../platforms/remote/RemoteChat.tsx', import.meta.url)),
+      readSource(new URL('../platforms/BasicRuntimeChat.tsx', import.meta.url)),
     ];
     const basicPlatformSendBoxes = [
+      readSource(new URL('../platforms/BasicRuntimeSendBox.tsx', import.meta.url)),
       readSource(new URL('../platforms/openclaw/OpenClawSendBox.tsx', import.meta.url)),
       readSource(new URL('../platforms/nanobot/NanobotSendBox.tsx', import.meta.url)),
       readSource(new URL('../platforms/remote/RemoteSendBox.tsx', import.meta.url)),

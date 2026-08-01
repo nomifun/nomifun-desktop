@@ -11,7 +11,6 @@ nomifun-api-types.workspace = true
 nomifun-auth.workspace = true
 nomifun-requirement.workspace = true
 axum.workspace = true
-tokio.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -23,5 +22,4 @@ base64.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
-sqlx = { workspace = true }
+tokio.workspace = true

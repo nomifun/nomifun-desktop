@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use nomifun_common::McpSource;
-use nomifun_db::SqliteMcpServerRepository;
 use nomifun_mcp::{DetectedServer, McpAgentAdapter, McpError, McpServerTransport, McpSyncService};
 
 struct MockAdapter {
@@ -47,20 +46,6 @@ impl McpAgentAdapter for MockAdapter {
         }
         Ok(self.servers.lock().unwrap().clone())
     }
-
-    async fn install_server(&self, _name: &str, _transport: &McpServerTransport) -> Result<(), McpError> {
-        unreachable!("write-to-CLI is no longer supported")
-    }
-
-    async fn remove_server(&self, _name: &str) -> Result<(), McpError> {
-        unreachable!("write-to-CLI is no longer supported")
-    }
-}
-
-async fn make_service(adapters: Vec<Arc<dyn McpAgentAdapter>>) -> McpSyncService {
-    let db = nomifun_db::init_database_memory().await.unwrap();
-    let repo: Arc<dyn nomifun_db::IMcpServerRepository> = Arc::new(SqliteMcpServerRepository::new(db.pool().clone()));
-    McpSyncService::new(repo, adapters)
 }
 
 fn stdio_transport() -> McpServerTransport {
@@ -85,12 +70,11 @@ async fn get_agent_configs_returns_installed_agents() {
     let adapter_gemini = Arc::new(MockAdapter::new(McpSource::Gemini, false));
     let adapter_qwen = Arc::new(MockAdapter::new(McpSource::Qwen, true));
 
-    let sync_svc = make_service(vec![
+    let sync_svc = McpSyncService::new(vec![
         adapter_claude as Arc<dyn McpAgentAdapter>,
         adapter_gemini,
         adapter_qwen,
-    ])
-    .await;
+    ]);
     let configs = sync_svc.get_agent_configs().await.unwrap();
 
     assert_eq!(configs.len(), 2);
@@ -104,7 +88,7 @@ async fn get_agent_configs_returns_installed_agents() {
 #[tokio::test]
 async fn get_agent_configs_empty_when_none_installed() {
     let adapter = Arc::new(MockAdapter::new(McpSource::Claude, false));
-    let sync_svc = make_service(vec![adapter as Arc<dyn McpAgentAdapter>]).await;
+    let sync_svc = McpSyncService::new(vec![adapter as Arc<dyn McpAgentAdapter>]);
 
     let configs = sync_svc.get_agent_configs().await.unwrap();
     assert!(configs.is_empty());

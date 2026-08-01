@@ -126,8 +126,30 @@ fn build_requirement_prompt_with_native_tools(
     claim_token: &str,
     attachments: &[PromptAttachment],
 ) -> String {
+    build_native_tools_prompt(
+        &format!("[AutoWork] You are working through requirements in tag \"{tag}\"."),
+        req,
+        claim_generation,
+        claim_token,
+        attachments,
+        "",
+    )
+}
+
+/// Single source of truth for the native-tools prompt shape. The chat and
+/// terminal variants differ only in their opening line and optional extra
+/// sections, so sharing the template keeps the requirement block and the
+/// completion contract from drifting between the two surfaces.
+fn build_native_tools_prompt(
+    header: &str,
+    req: &Requirement,
+    claim_generation: i64,
+    claim_token: &str,
+    attachments: &[PromptAttachment],
+    extra_sections: &str,
+) -> String {
     format!(
-        "[AutoWork] You are working through requirements in tag \"{tag}\".\n\n\
+        "{header}\n\n\
          ## Current requirement\n\
          id: {id}\n\
          claim_generation: {claim_generation}\n\
@@ -135,7 +157,8 @@ fn build_requirement_prompt_with_native_tools(
          title: {title}\n\
          order: {order}\n\n\
          {content}\n\
-         {attachments_section}\n\
+         {attachments_section}\
+         {extra_sections}\n\
          ## When finished\n\
          - Call `requirement_complete({{\"id\":\"{id}\",\"claim_generation\":{claim_generation},\
          \"claim_token\":\"{claim_token}\",\"completion_note\":\"what you did\"}})` when done.\n\
@@ -143,7 +166,7 @@ fn build_requirement_prompt_with_native_tools(
          \"claim_generation\":{claim_generation},\"claim_token\":\"{claim_token}\",\
          \"status\":\"failed\",\"note\":\"reason\"}})`.\n\
          Do not pick the next requirement yourself — the platform will hand you the next one.",
-        tag = tag,
+        header = header,
         id = req.requirement_id,
         claim_generation = claim_generation,
         claim_token = claim_token,
@@ -151,6 +174,7 @@ fn build_requirement_prompt_with_native_tools(
         order = req.order_key,
         content = req.content,
         attachments_section = render_attachments_section(attachments),
+        extra_sections = extra_sections,
     )
 }
 
@@ -233,34 +257,16 @@ pub fn build_terminal_requirement_prompt(
     } else {
         ""
     };
-    format!(
-        "[AutoWork] You are working through requirements in tag \"{tag}\". Complete ONLY the \
-         requirement below.\n\n\
-         ## Current requirement\n\
-         id: {id}\n\
-         claim_generation: {claim_generation}\n\
-         claim_token: {claim_token}\n\
-         title: {title}\n\
-         order: {order}\n\n\
-         {content}\n\
-         {attachments_section}\
-         {knowledge_section}\n\
-         ## When finished\n\
-         - Call `requirement_complete({{\"id\":\"{id}\",\"claim_generation\":{claim_generation},\
-         \"claim_token\":\"{claim_token}\",\"completion_note\":\"what you did\"}})` when done.\n\
-         - If you cannot complete it, call `requirement_update_status({{\"id\":\"{id}\",\
-         \"claim_generation\":{claim_generation},\"claim_token\":\"{claim_token}\",\
-         \"status\":\"failed\",\"note\":\"reason\"}})`.\n\
-         Do not pick the next requirement yourself — the platform will hand you the next one.",
-        tag = tag,
-        id = req.requirement_id,
-        claim_generation = claim_generation,
-        claim_token = claim_token,
-        title = req.title,
-        order = req.order_key,
-        content = req.content,
-        attachments_section = render_attachments_section(attachments),
-        knowledge_section = knowledge_section,
+    build_native_tools_prompt(
+        &format!(
+            "[AutoWork] You are working through requirements in tag \"{tag}\". Complete ONLY the \
+             requirement below."
+        ),
+        req,
+        claim_generation,
+        claim_token,
+        attachments,
+        knowledge_section,
     )
 }
 

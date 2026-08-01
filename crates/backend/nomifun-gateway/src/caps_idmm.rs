@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use crate::deps::{CallerCtx, GatewayDeps};
 use crate::id_schema::{CanonicalEntityId, SessionTargetKind};
 use crate::registry::{Capability, CapabilityMeta, DangerTier};
-use crate::server::{ok, require_user};
+use crate::server::ok;
 
 // ─── Params ──────────────────────────────────────────────────────────────────
 
@@ -89,10 +89,7 @@ pub(crate) async fn verify_target(
     kind: IdmmTargetKind,
     target_id: &str,
 ) -> Option<Value> {
-    let user_id = match require_user(ctx) {
-        Ok(u) => u.to_owned(),
-        Err(e) => return Some(e),
-    };
+    let user_id = ctx.user_id.as_str().to_owned();
     match deps
         .idmm_service
         .verify_target_owner(kind, target_id, &user_id)

@@ -23,10 +23,6 @@ impl DocType {
             Self::Ppt => "ppt-proxy",
         }
     }
-
-    pub fn officecli_subcommand(&self) -> &'static str {
-        "watch"
-    }
 }
 
 impl std::fmt::Display for DocType {
@@ -37,14 +33,6 @@ impl std::fmt::Display for DocType {
             Self::Ppt => write!(f, "ppt"),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OfficecliStatus {
-    Starting,
-    Installing,
-    Ready,
-    Error,
 }
 
 #[cfg(test)]
@@ -63,13 +51,6 @@ mod tests {
         assert_eq!(DocType::Word.proxy_prefix(), "office-watch-proxy");
         assert_eq!(DocType::Excel.proxy_prefix(), "office-watch-proxy");
         assert_eq!(DocType::Ppt.proxy_prefix(), "ppt-proxy");
-    }
-
-    #[test]
-    fn doc_type_officecli_subcommand() {
-        assert_eq!(DocType::Word.officecli_subcommand(), "watch");
-        assert_eq!(DocType::Excel.officecli_subcommand(), "watch");
-        assert_eq!(DocType::Ppt.officecli_subcommand(), "watch");
     }
 
     #[test]
@@ -118,17 +99,5 @@ mod tests {
         set.insert(DocType::Ppt);
         assert_eq!(set.len(), 3);
         assert!(set.contains(&DocType::Word));
-    }
-
-    #[test]
-    fn officecli_status_variants() {
-        let statuses = [
-            OfficecliStatus::Starting,
-            OfficecliStatus::Installing,
-            OfficecliStatus::Ready,
-            OfficecliStatus::Error,
-        ];
-        assert_eq!(statuses.len(), 4);
-        assert_ne!(OfficecliStatus::Starting, OfficecliStatus::Ready);
     }
 }

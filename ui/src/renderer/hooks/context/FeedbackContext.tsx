@@ -5,55 +5,23 @@
  */
 
 import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
-import FeedbackReportModal, {
-  type FeedbackEventExtra,
-  type FeedbackEventTags,
-  type PrefilledScreenshot,
-} from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
-
-type OpenFeedbackOptions = {
-  module?: string;
-  autoScreenshot?: boolean;
-  tags?: FeedbackEventTags;
-  extra?: FeedbackEventExtra;
-};
+import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 
 type FeedbackContextValue = {
-  openFeedback: (options?: OpenFeedbackOptions) => Promise<void>;
+  openFeedback: () => Promise<void>;
 };
 
 const FeedbackContext = createContext<FeedbackContextValue | null>(null);
 
-const captureScreenshot = async (): Promise<PrefilledScreenshot | null> => {
-  // TODO(tauri): port screenshot capture to a Tauri command if pre-filled feedback screenshots are wanted.
-  return null;
-};
-
 export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [visible, setVisible] = useState(false);
-  const [defaultModule, setDefaultModule] = useState<string | undefined>(undefined);
-  const [prefilledScreenshots, setPrefilledScreenshots] = useState<PrefilledScreenshot[] | undefined>(undefined);
-  const [feedbackTags, setFeedbackTags] = useState<FeedbackEventTags | undefined>(undefined);
-  const [feedbackExtra, setFeedbackExtra] = useState<FeedbackEventExtra | undefined>(undefined);
 
-  const openFeedback = useCallback(async (options?: OpenFeedbackOptions) => {
-    setDefaultModule(options?.module);
-    setFeedbackTags(options?.tags);
-    setFeedbackExtra(options?.extra);
-    if (options?.autoScreenshot) {
-      const shot = await captureScreenshot();
-      setPrefilledScreenshots(shot ? [shot] : undefined);
-    } else {
-      setPrefilledScreenshots(undefined);
-    }
+  const openFeedback = useCallback(async () => {
     setVisible(true);
   }, []);
 
   const handleCancel = useCallback(() => {
     setVisible(false);
-    setPrefilledScreenshots(undefined);
-    setFeedbackTags(undefined);
-    setFeedbackExtra(undefined);
   }, []);
 
   const value = useMemo(() => ({ openFeedback }), [openFeedback]);
@@ -61,14 +29,7 @@ export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   return (
     <FeedbackContext.Provider value={value}>
       {children}
-      <FeedbackReportModal
-        visible={visible}
-        onCancel={handleCancel}
-        defaultModule={defaultModule}
-        prefilledScreenshots={prefilledScreenshots}
-        feedbackTags={feedbackTags}
-        feedbackExtra={feedbackExtra}
-      />
+      <FeedbackReportModal visible={visible} onCancel={handleCancel} />
     </FeedbackContext.Provider>
   );
 };

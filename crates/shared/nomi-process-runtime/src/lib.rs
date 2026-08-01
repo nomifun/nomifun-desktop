@@ -21,7 +21,7 @@ pub use command_builder::{
 };
 pub use io::{OutputBuffer, OutputObserver};
 pub use outcome::{
-    CleanupReport, EncodingMetadata, ProcessEvent, ProcessOutcome, OutputChunk, OutputCursor,
+    CleanupReport, EncodingMetadata, ProcessOutcome, OutputChunk, OutputCursor,
     OutputSnapshot, OutputStream, ProcessSnapshot, ProcessState, SessionId, SpawnFailure,
 };
 pub use recovery::{

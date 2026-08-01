@@ -15,252 +15,11 @@
   margin-bottom: 16px;
 }
 
-.heroHeaderControls {
-  width: 100%;
-  max-width: 760px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 36px;
-  flex-wrap: nowrap;
-}
-
-.heroHeaderLeft {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  min-height: 36px;
-  flex: 1 1 auto;
-  white-space: nowrap;
-}
-
-.heroHeaderRight {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  min-height: 36px;
-  flex: 0 0 auto;
-  padding-right: 2px;
-}
-
-.heroBackButton {
-  width: 30px !important;
-  height: 30px !important;
-  min-width: 30px !important;
-  color: var(--color-text-2) !important;
-  border-radius: 999px !important;
-  background: var(--color-fill-2) !important;
-  display: inline-flex !important;
-  align-items: center;
-  justify-content: center;
-  padding: 0 !important;
-}
-
-.heroBackButton:hover {
-  background: var(--color-fill-3) !important;
-}
-
-.heroBackButton :global(svg),
-.heroTitleEdit :global(svg),
-.heroAgentSwitchButton :global(svg) {
-  display: block;
-}
-
-.heroBackButton :global(.arco-btn-icon) {
-  margin: 0 !important;
-  line-height: 0 !important;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.heroTitleEdit {
-  width: 20px !important;
-  height: 20px !important;
-  min-width: 20px !important;
-  padding: 0 !important;
-  border: none !important;
-  border-radius: 0 !important;
-  color: var(--color-text-3) !important;
-  background: transparent !important;
-  display: inline-flex !important;
-  align-items: center;
-  justify-content: center;
-  transform: translateY(1px);
-}
-
-.heroTitleEdit:hover {
-  background: transparent !important;
-  color: var(--color-text-2) !important;
-}
-
-.heroAgentSwitchButton {
-  color: var(--color-text-2) !important;
-  padding: 0 6px !important;
-  height: 34px !important;
-  min-height: 34px !important;
-  display: inline-flex !important;
-  align-items: center;
-  transform: translateY(1px);
-}
-
-.heroAgentSwitchIcon {
-  object-fit: contain;
-  flex-shrink: 0;
-}
-
 .heroTitle {
   margin: 0;
   display: inline-flex;
   align-items: center;
   gap: 3px;
-}
-
-.heroTitleInlineIcon {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--color-text-0);
-  flex-shrink: 0;
-}
-
-.heroTitleInlineIcon img {
-  display: block;
-}
-
-.heroTitleEmoji {
-  font-size: 26px;
-  line-height: 1;
-}
-
-.heroSubtitle {
-  margin: 0 auto 14px;
-  max-width: 760px;
-  min-height: 40px;
-  padding: 0 14px;
-  border-radius: 20px;
-  color: var(--color-text-2);
-  background: var(--preset-surface-bg);
-  border: none;
-  line-height: 20px;
-  font-size: 14px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  box-sizing: border-box;
-  cursor: pointer;
-  transition: background-color 0.15s;
-}
-
-.heroSubtitle:hover {
-  background: var(--preset-surface-bg-hover);
-}
-
-.heroSubtitleExpanded {
-  align-items: flex-start;
-  padding: 10px 14px;
-  border-radius: 16px;
-  cursor: default;
-}
-
-.heroSubtitleExpanded:hover {
-  background: var(--preset-surface-bg);
-}
-
-.heroSubtitleExpanded .heroSubtitleBack {
-  margin-top: 2px;
-}
-
-.heroSubtitleBack {
-  flex-shrink: 0;
-  width: 24px !important;
-  height: 24px !important;
-  min-width: 24px !important;
-  padding: 0 !important;
-  border-radius: 999px !important;
-  color: var(--color-text-2) !important;
-  border-color: var(--color-border-2) !important;
-  background: var(--bg-active) !important;
-}
-
-.heroSubtitleBack:hover {
-  background: var(--bg-3) !important;
-}
-
-.heroSubtitleToggle {
-  flex-shrink: 0;
-  width: 28px !important;
-  height: 28px !important;
-  min-width: 28px !important;
-  padding: 0 !important;
-  border: none !important;
-  box-shadow: none !important;
-  background: transparent !important;
-  color: var(--color-text-3) !important;
-  transition: transform 0.2s ease;
-}
-
-.heroSubtitleToggle:hover {
-  background: transparent !important;
-  color: var(--color-text-2) !important;
-}
-
-.heroSubtitleToggleExpanded {
-  transform: rotate(180deg);
-}
-
-.heroSubtitleText {
-  flex: 1;
-  min-width: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  line-height: 20px;
-}
-
-.heroSubtitleTextExpanded {
-  display: block;
-  overflow: visible;
-  -webkit-line-clamp: unset;
-  white-space: normal;
-  line-height: 1.6;
-}
-
-.heroSubtitleDetail {
-  flex-shrink: 0;
-  height: 22px !important;
-  min-height: 22px !important;
-  padding: 0 6px !important;
-  border-radius: 10px !important;
-  border: 0 !important;
-  outline: 0 !important;
-  box-shadow: none !important;
-  background: transparent !important;
-  color: var(--color-text-3) !important;
-  font-size: 12px !important;
-  font-weight: 500 !important;
-  opacity: 0.9;
-}
-
-.heroSubtitleDetail:hover {
-  background: var(--color-fill-2) !important;
-  color: var(--color-text-2) !important;
-  border: 0 !important;
-  box-shadow: none !important;
-  opacity: 1;
-}
-
-.heroSubtitleDetail:focus,
-.heroSubtitleDetail:focus-visible,
-.heroSubtitleDetail:active {
-  border: 0 !important;
-  outline: 0 !important;
-  box-shadow: none !important;
 }
 
 .presetPromptChip {
@@ -273,63 +32,8 @@
   line-height: 20px;
 }
 
-.presetPromptAgentSwitcher {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: 12px;
-  background: var(--color-fill-1);
-  border: 1px solid var(--color-border-2);
-  color: var(--color-text-2);
-  cursor: pointer;
-  user-select: none;
-  transform: translateY(-1px);
-  transition:
-    background-color 0.2s,
-    border-color 0.2s,
-    color 0.2s;
-}
-
-.presetPromptAgentSwitcher:hover {
-  background: var(--color-fill-2);
-  border-color: var(--color-border-3);
-  color: var(--color-text-1);
-}
-
-.presetPromptAgentSwitcherName {
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 20px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 170px;
-}
-
-.presetPromptAgentSwitcherDot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: rgb(var(--success-6));
-  flex-shrink: 0;
-}
-
-.presetPromptAgentSwitcherLogo {
-  width: 13px;
-  height: 13px;
-  object-fit: contain;
-  flex-shrink: 0;
-}
-
 .presetPromptChip:hover {
   background: var(--preset-surface-bg-hover);
-}
-
-.guidInputCard {
-  width: 100%;
-  box-sizing: border-box;
 }
 
 .guidInputCardWrap {
@@ -988,14 +692,6 @@ button.guidResourceCard:focus-visible {
   margin-top: 9px;
   padding-top: 9px;
   border-top: 1px solid var(--color-border-1);
-}
-
-.entryDivider {
-  width: 1px;
-  height: 18px;
-  flex: 0 0 auto;
-  margin: 0 2px;
-  background: var(--color-border-2);
 }
 
 .entryDismiss {
@@ -2011,13 +1707,6 @@ button.guidResourceCard:focus-visible {
   border-radius: 50%;
 }
 
-.skeletonPill {
-  background: linear-gradient(90deg, var(--color-fill-2) 25%, var(--color-fill-3) 50%, var(--color-fill-2) 75%);
-  background-size: 200% 100%;
-  animation: guid-shimmer 1.5s ease-in-out infinite;
-  border-radius: 100px;
-}
-
 /* 移动端优化 */
 @media (max-width: 768px) {
   .guidLayout {
@@ -2025,10 +1714,6 @@ button.guidResourceCard:focus-visible {
     padding: 0 12px;
     padding-bottom: 100px; /* 为底部快捷按钮留出空间 */
     box-sizing: border-box;
-  }
-
-  .guidInputCard {
-    width: 100%;
   }
 
   .actionRow {
@@ -2061,11 +1746,6 @@ button.guidResourceCard:focus-visible {
 
   .actionConfigGroup {
     gap: 0;
-  }
-
-  .actionConfigGroupWithDivider > :first-child::after {
-    right: -6px;
-    height: 16px;
   }
 
   .actionSubmit {
@@ -2182,140 +1862,6 @@ button.guidResourceCard:focus-visible {
   opacity: 1 !important;
 }
 
-/* 设定卡片网格（首页 list view） */
-.presetCardScrollWrap {
-  position: relative;
-  max-height: 200px;
-  overflow-y: auto;
-  padding: 4px 6px 4px 4px;
-  scrollbar-width: thin;
-}
-
-.presetCardScrollWrapScrollable {
-  -webkit-mask-image: linear-gradient(to bottom, black 0, black calc(100% - 56px), transparent 100%);
-  mask-image: linear-gradient(to bottom, black 0, black calc(100% - 56px), transparent 100%);
-}
-
-.presetCardScrollWrap::-webkit-scrollbar {
-  width: 6px;
-}
-
-.presetCardScrollWrap::-webkit-scrollbar-thumb {
-  background: var(--color-fill-3);
-  border-radius: 3px;
-}
-
-.presetCardScrollWrap::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.presetCardGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.presetCard {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  padding: 12px 14px;
-  background: var(--bg-base, #fff);
-  border: 1px solid color-mix(in srgb, var(--color-border-2) 70%, transparent);
-  border-radius: 14px;
-  cursor: pointer;
-  transition:
-    border-color 0.15s,
-    box-shadow 0.15s;
-}
-
-.presetCard:hover {
-  border-color: var(--color-border-3);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
-}
-
-:global([data-theme='dark']) .presetCard {
-  background: #262626;
-}
-
-:global([data-theme='dark']) .presetCard:hover {
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
-}
-
-.presetCardAvatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-fill-2);
-  overflow: hidden;
-}
-
-.presetCardAvatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.presetCardEmoji {
-  font-size: 18px;
-  line-height: 1;
-}
-
-.presetCardMeta {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.presetCardName {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text-1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.presetCardDesc {
-  font-size: 12px;
-  color: var(--color-text-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.presetCardAdd {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 60px;
-  padding: 12px 14px;
-  background: var(--color-fill-1);
-  border: 1px dashed color-mix(in srgb, var(--color-border-2) 70%, transparent);
-  border-radius: 14px;
-  cursor: pointer;
-  transition: background-color 0.15s;
-  color: var(--color-text-3);
-}
-
-.presetCardAdd:hover {
-  background: var(--color-fill-2);
-  color: var(--color-text-2);
-}
-
-@media (max-width: 640px) {
-  .presetCardGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
 /* 设定标签 */
 .presetAgentTag {
   display: inline-flex;
@@ -2335,15 +1881,6 @@ button.guidResourceCard:focus-visible {
 
 .presetAgentTag:hover {
   background: color-mix(in srgb, var(--color-fill-3) 92%, transparent);
-}
-
-.presetAgentTagActiveDot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: rgb(var(--success-6));
-  box-shadow: 0 0 8px color-mix(in srgb, rgb(var(--success-6)) 45%, transparent);
-  flex-shrink: 0;
 }
 
 /* Left clickable area: agent logo + avatar + name */

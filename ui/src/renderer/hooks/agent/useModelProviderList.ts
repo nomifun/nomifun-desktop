@@ -1,9 +1,7 @@
 import { ipcBridge } from '@/common';
-import { GOOGLE_AUTH_PROVIDER_ID } from '@/common/config/constants';
 import type { IProvider } from '@/common/config/storage';
 import { useCallback, useMemo } from 'react';
 import useSWR, { type SWRConfiguration } from 'swr';
-import { useGoogleAuthModels } from './useGoogleAuthModels';
 import { orderModelSelectorProviders } from './modelSelectorProviderOrdering';
 
 export interface ModelProviderListResult {
@@ -35,32 +33,18 @@ export const useProvidersQuery = () => {
 };
 
 /**
- * Shared hook that builds the provider list (including Google Auth) and
- * exposes provider metadata/label helpers. Task-capable MODEL lists are
+ * Shared hook that builds the provider list and exposes provider
+ * metadata/label helpers. Task-capable MODEL lists are
  * resolved by `useModelsForTask` against the backend catalog — this hook
  * deliberately no longer filters models by capability name heuristics.
  */
 export const useModelProviderList = (): ModelProviderListResult => {
-  const { isGoogleAuth, isLoading: isGoogleAuthLoading } = useGoogleAuthModels();
-
   const { data: modelConfig, isLoading: isProvidersLoading } = useProvidersQuery();
 
   const configuredProviders = useMemo(() => {
     const list: IProvider[] = Array.isArray(modelConfig) ? modelConfig : [];
-    if (isGoogleAuth) {
-      const googleProvider: IProvider = {
-        id: GOOGLE_AUTH_PROVIDER_ID,
-        name: 'Gemini Google Auth',
-        platform: 'gemini-with-google-auth',
-        base_url: '',
-        api_key: '',
-        model: [],
-        enabled: true, // Google Auth provider 始终启用
-      } as unknown as IProvider;
-      return [googleProvider, ...list];
-    }
     return list;
-  }, [isGoogleAuth, modelConfig]);
+  }, [modelConfig]);
 
   const providers = useMemo(() => {
     // 过滤掉被禁用的 provider（默认为启用）。
@@ -81,7 +65,7 @@ export const useModelProviderList = (): ModelProviderListResult => {
     // the catalog unresolved in that state so consumers never reinterpret a
     // failed provider request as an authoritative empty catalog and purge every
     // persisted model reference.
-    isLoading: isProvidersLoading || isGoogleAuthLoading || !Array.isArray(modelConfig),
+    isLoading: isProvidersLoading || !Array.isArray(modelConfig),
     formatModelLabel,
   };
 };

@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use nomifun_ai_agent::AgentRuntimeRegistry;
-use nomifun_preset::PresetService;
 use nomifun_companion::CompanionService;
 use nomifun_conversation::ConversationService;
 use nomifun_cron::service::CronService;
@@ -104,8 +103,6 @@ pub struct GatewayDeps {
     /// One shared persistent collaboration facade. REST, gateway tools, boot
     /// recovery and scheduling all use this exact instance.
     pub agent_execution_engine: Arc<nomifun_agent_execution::AgentExecutionEngine>,
-    /// Preset service — the same singleton used by `/api/presets`.
-    pub preset_service: Arc<PresetService>,
     /// Gateway bridge to the application-owned [`BrowserSessionHub`]. `Some`
     /// only when the `browser-use` feature is on and the app injected the shared
     /// hub; the Gateway never owns a browser engine or Chromium process.

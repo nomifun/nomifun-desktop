@@ -154,14 +154,6 @@ impl AgentRuntimeRegistry for ScriptedRegistry {
         self.agents.lock().unwrap().remove(conversation_id);
         Ok(())
     }
-    fn terminate_and_wait(
-        &self,
-        conversation_id: &str,
-        reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = self.terminate(conversation_id, reason);
-        Box::pin(std::future::ready(()))
-    }
     fn terminate_all(&self) {
         self.agents.lock().unwrap().clear();
     }
@@ -248,12 +240,10 @@ async fn build_stack(pool: nomifun_db::SqlitePool) -> Stack {
             api_key_encrypted: "test-only",
             models: r#"["m"]"#,
             enabled: true,
-            capabilities: "[]",
             model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
             model_enabled: None,
-            model_health: None,
             bedrock_config: None,
             is_full_url: false,
             sort_order: None,

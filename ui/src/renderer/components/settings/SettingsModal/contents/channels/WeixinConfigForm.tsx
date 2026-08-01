@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { QRCodeSVG } from 'qrcode.react';
 import { buildEnablePluginRequest } from '@/renderer/components/channels/channelStatusSelection';
+import { copyText } from '@/renderer/utils/ui/clipboard';
 import type { ChannelTarget } from './channelTarget';
 import {
   applyWeixinAuthorizedUserMutations,
@@ -275,8 +276,9 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
   };
 
   const copyToClipboard = (text: string) => {
-    void navigator.clipboard.writeText(text);
-    Message.success(t('common.copySuccess', 'Copied'));
+    copyText(text)
+      .then(() => Message.success(t('common.copySuccess', 'Copied')))
+      .catch((error) => console.error('[WeixinConfig] Copy failed:', error));
   };
 
   const enableWeixinPlugin = async (

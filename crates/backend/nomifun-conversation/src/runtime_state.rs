@@ -218,13 +218,6 @@ pub struct ConversationResetGuard {
 }
 
 #[derive(Debug)]
-pub struct CancelledTurnReleaseGuard {
-    cancellation: AgentTurnCancellation,
-    state: Weak<ConversationRuntimeStateService>,
-    armed: bool,
-}
-
-#[derive(Debug)]
 pub struct RuntimeBuildLease {
     conversation_id: String,
     id: u64,
@@ -1167,17 +1160,6 @@ impl ConversationRuntimeStateService {
         true
     }
 
-    pub fn arm_cancelled_turn_release(
-        self: &Arc<Self>,
-        cancellation: AgentTurnCancellation,
-    ) -> CancelledTurnReleaseGuard {
-        CancelledTurnReleaseGuard {
-            cancellation,
-            state: Arc::downgrade(self),
-            armed: true,
-        }
-    }
-
     fn owner_abort_handle(&self, conversation_id: &str, turn_id: u64) -> Option<AbortHandle> {
         self.active_turns.lock().ok().and_then(|turns| {
             turns
@@ -2047,25 +2029,6 @@ impl Drop for ConversationCompletionGuard {
             }
             drop(tombstones);
             state.cleanup_fence_notify.notify_waiters();
-        }
-    }
-}
-
-impl CancelledTurnReleaseGuard {
-    pub fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for CancelledTurnReleaseGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        self.cancellation.cancel();
-        self.cancellation.abort_owner_task();
-        if let Some(state) = self.state.upgrade() {
-            state.force_release_cancelled_turn(&self.cancellation);
         }
     }
 }

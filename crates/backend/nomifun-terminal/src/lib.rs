@@ -3,7 +3,13 @@
 //! output is streamed over the realtime WebSocket broadcaster, and session
 //! metadata is persisted in SQLite.
 
-pub mod ansi;
+/// ANSI/OSC escape stripping + incremental line scanning. The implementation
+/// lives in `nomifun_common::ansi`; this alias keeps `nomifun_terminal::ansi`
+/// paths and the crate-root re-exports working for existing consumers
+/// (e.g. `nomifun-idmm`).
+pub mod ansi {
+    pub use nomifun_common::ansi::*;
+}
 pub mod driver;
 pub mod enhance;
 pub mod error;

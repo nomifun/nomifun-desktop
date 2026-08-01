@@ -6,12 +6,9 @@ use crate::adapter::{DetectedServer, McpAgentAdapter};
 use crate::error::McpError;
 use crate::types::McpServerTransport;
 
-use super::cli_helpers::{MUTATE_TIMEOUT, is_cli_installed, run_cli};
+use super::cli_helpers::is_cli_installed;
 
 const CLI_NAME: &str = "codebuddy";
-
-/// Scopes to try when removing a server.
-const REMOVE_SCOPES: &[&str] = &["user", "local", "project"];
 
 /// MCP Agent adapter for CodeBuddy CLI.
 ///
@@ -23,12 +20,6 @@ const REMOVE_SCOPES: &[&str] = &["user", "local", "project"];
 /// ```json
 /// { "mcpServers": { "name": { "command": "...", "args": [...], ... } } }
 /// ```
-///
-/// # CLI Commands
-///
-/// - **install (stdio)**: `codebuddy mcp add -s user <name> <cmd> [-- args...] [-e K=V...]`
-/// - **install (http)**: `codebuddy mcp add-json -s user <name> <json>`
-/// - **remove**: `codebuddy mcp remove -s <scope> <name>` (tries user → local → project)
 pub struct CodeBuddyAdapter;
 
 #[async_trait::async_trait]
@@ -57,90 +48,6 @@ impl McpAgentAdapter for CodeBuddyAdapter {
 
         parse_codebuddy_config(&content)
     }
-
-    async fn install_server(&self, name: &str, transport: &McpServerTransport) -> Result<(), McpError> {
-        if !self.is_installed().await? {
-            return Err(McpError::AgentNotInstalled(CLI_NAME.into()));
-        }
-
-        match transport {
-            McpServerTransport::Stdio { command, args, env } => {
-                let mut cli_args = vec![
-                    "mcp".to_owned(),
-                    "add".to_owned(),
-                    "-s".to_owned(),
-                    "user".to_owned(),
-                    name.to_owned(),
-                    command.clone(),
-                ];
-
-                // Separate args from env with --
-                if !args.is_empty() {
-                    cli_args.push("--".to_owned());
-                    cli_args.extend(args.iter().cloned());
-                }
-
-                // Env vars as -e KEY=VALUE
-                for (k, v) in env {
-                    cli_args.push("-e".to_owned());
-                    cli_args.push(format!("{k}={v}"));
-                }
-
-                let arg_refs: Vec<&str> = cli_args.iter().map(|s| s.as_str()).collect();
-                run_cli(CLI_NAME, &arg_refs, MUTATE_TIMEOUT).await?;
-            }
-            McpServerTransport::Sse { url, headers } => {
-                let config = build_http_json("sse", url, headers);
-                install_via_add_json(name, &config).await?;
-            }
-            McpServerTransport::Http { url, headers } => {
-                let config = build_http_json("streamable-http", url, headers);
-                install_via_add_json(name, &config).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn remove_server(&self, name: &str) -> Result<(), McpError> {
-        if !self.is_installed().await? {
-            return Err(McpError::AgentNotInstalled(CLI_NAME.into()));
-        }
-
-        for scope in REMOVE_SCOPES {
-            let (stdout, _stderr) = run_cli(CLI_NAME, &["mcp", "remove", "-s", scope, name], MUTATE_TIMEOUT).await?;
-            let lower = stdout.to_lowercase();
-            if lower.contains("removed") || lower.contains("not found") {
-                return Ok(());
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Install via `codebuddy mcp add-json -s user <name> <json>`.
-async fn install_via_add_json(name: &str, config: &serde_json::Value) -> Result<(), McpError> {
-    let config_str = serde_json::to_string(config).map_err(|e| McpError::AgentOperationFailed(e.to_string()))?;
-    run_cli(
-        CLI_NAME,
-        &["mcp", "add-json", "-s", "user", name, &config_str],
-        MUTATE_TIMEOUT,
-    )
-    .await?;
-    Ok(())
-}
-
-/// Build JSON config for HTTP-like servers.
-fn build_http_json(transport_type: &str, url: &str, headers: &HashMap<String, String>) -> serde_json::Value {
-    let mut config = serde_json::json!({
-        "url": url,
-        "transportType": transport_type,
-    });
-    if !headers.is_empty() {
-        config["headers"] = serde_json::json!(headers);
-    }
-    config
 }
 
 /// Get the CodeBuddy config file path: `~/.codebuddy/mcp.json`.
@@ -371,23 +278,6 @@ mod tests {
         let servers = parse_codebuddy_config(config).unwrap();
         assert_eq!(servers.len(), 1);
         assert!(matches!(servers[0].transport, McpServerTransport::Http { .. }));
-    }
-
-    #[test]
-    fn build_http_json_without_headers() {
-        let json = build_http_json("streamable-http", "https://example.com", &HashMap::new());
-        assert_eq!(json["url"], "https://example.com");
-        assert_eq!(json["transportType"], "streamable-http");
-        assert!(json.get("headers").is_none());
-    }
-
-    #[test]
-    fn build_http_json_with_headers() {
-        let mut headers = HashMap::new();
-        headers.insert("Authorization".into(), "Bearer tok".into());
-        let json = build_http_json("sse", "https://example.com/sse", &headers);
-        assert_eq!(json["transportType"], "sse");
-        assert_eq!(json["headers"]["Authorization"], "Bearer tok");
     }
 
     #[test]

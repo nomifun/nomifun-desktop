@@ -157,9 +157,6 @@ async fn read_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadFileParams) ->
 }
 
 async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({ "error": "missing caller user identity" });
-    }
     let result = match file_authority(&ctx) {
         Some(auth) => {
             deps.file_service
@@ -248,9 +245,6 @@ async fn get_metadata(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetMetadataPara
 }
 
 async fn remove(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RemoveParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({ "error": "missing caller user identity" });
-    }
     let result = match file_authority(&ctx) {
         Some(auth) => {
             deps.file_service
@@ -411,9 +405,9 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 //   `source_root` and multiple file paths; more of a bulk UI operation than an
 //   agent tool. Can be added later if needed.
 //
-// - `nomi_fs_create_temp_file` / `nomi_fs_create_upload_file` — temp/upload
-//   helpers used by the UI upload flow and conversation attachments. The agent
-//   can use `nomi_fs_write_file` for workspace files directly.
+// - `nomi_fs_create_upload_file` — upload helper used by the UI upload flow
+//   and conversation attachments. The agent can use `nomi_fs_write_file` for
+//   workspace files directly.
 //
 // - `nomi_fs_get_image_base64` / `nomi_fs_fetch_remote_image` — image
 //   processing helpers. Could be added as a separate "media" domain if agents

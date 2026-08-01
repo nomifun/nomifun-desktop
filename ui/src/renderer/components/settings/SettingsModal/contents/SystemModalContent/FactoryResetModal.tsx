@@ -6,7 +6,6 @@
 
 import { ipcBridge } from '@/common';
 import { configService } from '@/common/config/configService';
-import { isElectronDesktop } from '@/renderer/utils/platform';
 import { Alert, Button, Input, Message, Modal } from '@arco-design/web-react';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -61,14 +60,13 @@ const FactoryResetModal: React.FC<FactoryResetModalProps> = ({ visible, onClose 
       }
       configService.reset();
       Message.success(t('settings.factoryReset.armed'));
-      // 3. Relaunch. Desktop: boot will perform the wipe. WebUI: no-op -> guide
-      //    the user to restart the service manually.
+      // 3. Relaunch. Desktop (Tauri): boot performs the wipe and the relaunch
+      //    never returns here. WebUI: relaunch is a no-op -> guide the user to
+      //    restart the service manually.
       await ipcBridge.application.restart.invoke();
-      if (!isElectronDesktop()) {
-        Message.info(t('settings.factoryReset.restartManually'));
-        setLoading(false);
-        onClose();
-      }
+      Message.info(t('settings.factoryReset.restartManually'));
+      setLoading(false);
+      onClose();
     } catch {
       Message.error(t('settings.factoryReset.failed'));
       setLoading(false);

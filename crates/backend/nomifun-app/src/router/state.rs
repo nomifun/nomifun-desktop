@@ -44,14 +44,14 @@ use nomifun_mcp::{
     QwenAdapter,
 };
 use nomifun_office::{
-    ConversionService, OfficeRouterState, OfficecliWatchManager, ProxyService,
+    OfficeRouterState, OfficecliWatchManager, ProxyService,
     SnapshotService as OfficeSnapshotService, StarOfficeDetector,
 };
 use nomifun_agent_execution::{AgentExecutionEngine, AgentExecutionEngineConfig};
 use nomifun_companion::CompanionRouterState;
 use nomifun_workshop::WorkshopRouterState;
 use nomifun_creation::CreationRouterState;
-use nomifun_realtime::{NoopMessageRouter, WsHandlerState};
+use nomifun_realtime::WsHandlerState;
 use nomifun_requirement::RequirementRouterState;
 use nomifun_shell::ShellRouterState;
 use nomifun_system::{
@@ -126,10 +126,6 @@ fn default_allowed_roots(work_dir: Option<&std::path::Path>) -> Vec<std::path::P
     roots
 }
 
-fn outbound_http_client() -> reqwest::Client {
-    nomifun_net::http_client()
-}
-
 /// Components needed to start the channel message loop.
 ///
 /// Returned alongside `ChannelRouterState` by `build_channel_state`.
@@ -137,7 +133,6 @@ fn outbound_http_client() -> reqwest::Client {
 pub struct ChannelMessageLoopComponents {
     pub message_loop: nomifun_channel::message_loop::ChannelMessageLoop,
     pub message_rx: tokio::sync::mpsc::Receiver<nomifun_channel::types::ChannelIncoming>,
-    pub confirm_rx: tokio::sync::mpsc::Receiver<(String, String)>,
     pub manager: Arc<nomifun_channel::manager::ChannelManager>,
     pub plugin_factory: Arc<nomifun_channel::manager::PluginFactory>,
     /// Busy-time prompt queue drain (spec D1). The caller spawns
@@ -793,7 +788,7 @@ pub fn build_remote_agent_state(services: &AppServices) -> RemoteAgentRouterStat
 /// Build the default `ConnectionTestRouterState`.
 pub fn build_connection_test_state() -> ConnectionTestRouterState {
     ConnectionTestRouterState {
-        service: ConnectionTestService::new(outbound_http_client()),
+        service: ConnectionTestService::new(),
     }
 }
 
@@ -842,7 +837,7 @@ pub fn build_mcp_state(services: &AppServices) -> McpRouterState {
 
     McpRouterState {
         config_service: McpConfigService::new(repo.clone()),
-        sync_service: McpSyncService::new(repo, adapters),
+        sync_service: McpSyncService::new(adapters),
         connection_test_service: McpConnectionTestService::new_dynamic(),
         oauth_service: nomifun_mcp::McpOAuthService::new_dynamic(oauth_token_repo),
     }
@@ -967,7 +962,6 @@ pub async fn build_channel_state(
     let encryption_key = services.encryption_key;
 
     let (message_tx, message_rx) = tokio::sync::mpsc::channel(256);
-    let (confirm_tx, confirm_rx) = tokio::sync::mpsc::channel(256);
 
     // Channel configuration and pairing are personal control-plane state. Bind
     // their realtime audience to the authoritative primary WebUI user before
@@ -980,7 +974,6 @@ pub async fn build_channel_state(
         owner_user_id.clone(),
         encryption_key,
         message_tx,
-        confirm_tx,
     ));
 
     let pairing_service = Arc::new(nomifun_channel::pairing::PairingService::new(
@@ -1152,7 +1145,6 @@ pub async fn build_channel_state(
     let components = ChannelMessageLoopComponents {
         message_loop,
         message_rx,
-        confirm_rx,
         manager,
         plugin_factory,
         queue_drain,
@@ -2016,14 +2008,12 @@ pub fn build_office_state(services: &AppServices) -> OfficeRouterState {
 
     let snapshot_service = Arc::new(OfficeSnapshotService::new(data_dir));
     let star_office_detector = Arc::new(StarOfficeDetector::local());
-    let conversion_service = Arc::new(ConversionService::new(None));
     let proxy_service = Arc::new(ProxyService::new(watch_manager.clone()));
 
     OfficeRouterState {
         watch_manager,
         snapshot_service,
         star_office_detector,
-        conversion_service,
         proxy_service,
         allowed_roots,
     }
@@ -2115,7 +2105,6 @@ pub fn build_ws_state(services: &AppServices) -> WsHandlerState {
         let authoritative_user_id = services.authoritative_user_id.to_string();
         return WsHandlerState {
             manager: services.ws_manager.clone(),
-            router: Arc::new(NoopMessageRouter),
             token_authenticator: Arc::new(move |_| Some(authoritative_user_id.clone())),
             token_extractor: Arc::new(|_| Some("local".into())),
         };
@@ -2141,7 +2130,6 @@ pub fn build_ws_state(services: &AppServices) -> WsHandlerState {
 
     WsHandlerState {
         manager: services.ws_manager.clone(),
-        router: Arc::new(NoopMessageRouter),
         token_authenticator,
         token_extractor,
     }
@@ -2413,7 +2401,6 @@ mod tests {
     fn every_production_host_attaches_exact_server_lock_authority() {
         for (host, source) in [
             ("embedded", include_str!("../lib.rs")),
-            ("nomicore", include_str!("../main.rs")),
             ("desktop", include_str!("../desktop.rs")),
             ("web", include_str!("../../../../../apps/web/src/main.rs")),
         ] {
@@ -2437,6 +2424,13 @@ mod tests {
                 "{host} must attach boot authority before router/background startup"
             );
         }
+
+        // nomicore delegates to run_embedded_server, whose construction is
+        // covered by the "embedded" (lib.rs) row above.
+        assert!(
+            include_str!("../main.rs").contains("run_embedded_server"),
+            "nomicore must delegate to run_embedded_server so the embedded path's boot authority applies"
+        );
 
         let service_source = include_str!("../services.rs");
         assert!(

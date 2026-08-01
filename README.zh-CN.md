@@ -396,6 +396,8 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 <details>
 <summary><b>完整脚本目录</b></summary>
 
+<!-- BEGIN GENERATED SCRIPTS (bun run help --readme) -->
+
 | 脚本 | 说明 |
 | --- | --- |
 | **开发（热重载）** | |
@@ -404,6 +406,7 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run dev:ui` | 仅启动前端开发服务器（纯 vite，无后端） |
 | **构建（出制品）** | |
 | `bun run build` | 为当前操作系统打桌面安装包 |
+| `bun run build:fast` | 快速构建可直接运行的 debug 桌面二进制（不打安装包） |
 | `bun run build:win` | 打 Windows 安装包（NSIS），汇总到 dist/desktop/ |
 | `bun run build:mac` | 打 macOS 安装包（.dmg），汇总到 dist/desktop/ |
 | `bun run build:linux` | 打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/ |
@@ -414,20 +417,26 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:linux` | 一键 Linux 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run build:ui` | 前端生产构建 → ui/dist |
+| `bun run docker:prebuilt` | 用已有 ui/dist + nomifun-web release 二进制快速构建 Docker 运行时镜像 |
 | **运行（组装好的应用）** | |
 | `bun run serve:web` | 启动 Web 服务器，托管已构建的前端 |
 | **测试** | |
 | `bun run test` | 运行全部 Rust 测试（含 doctest） |
 | `bun run test:fast` | 用 nextest 快速跑 Rust 测试（日常） |
+| `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
+| `bun run test:core` | 运行不含 desktop-only feature 的 Rust workspace |
+| `bun run test:desktop` | 运行桌面壳测试，不监听或打包 ui/dist 资源 |
+| `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/nomi-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
+| `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
 | **静态检查 / 门禁** | |
-| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 脚本登记 |
+| `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
+| `bun run check:browser-platform-boundary` | Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths. |
+| `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
+| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
-| **格式化** | |
-| `bun run fmt` | 格式化 Rust 代码（cargo fmt） |
-| `bun run fmt:check` | 校验 Rust 代码格式（cargo fmt --check） |
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
 | **维护 / 工具** | |
@@ -436,7 +445,9 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run bump` | 统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag |
 | `bun run help` | 打印脚本目录（--check 校验登记 / --readme 生成 README 表） |
 
-<sub>此表的英文权威版由 <code>bun run help --readme</code> 在 <a href="README.md">README.md</a> 中自动维护。</sub>
+<!-- END GENERATED SCRIPTS -->
+
+<sub>此表由 <code>bun run help --readme</code> 依据 <code>scripts/scripts.json</code> 在 <a href="README.md">README.md</a> 与本文件中自动维护，请勿手改。</sub>
 
 </details>
 

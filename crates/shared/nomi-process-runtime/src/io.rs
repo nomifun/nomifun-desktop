@@ -9,7 +9,7 @@ use windows_sys::Win32::Globalization::{
 };
 
 use crate::outcome::{
-    EncodingMetadata, ProcessEvent, OutputChunk, OutputCursor, OutputSnapshot, OutputStream,
+    EncodingMetadata, OutputChunk, OutputCursor, OutputSnapshot, OutputStream,
 };
 
 /// Lossless observer invoked directly on each raw transport read before the
@@ -105,14 +105,17 @@ impl OutputBuffer {
         output
     }
 
-    pub fn push(&self, stream: OutputStream, bytes: &[u8]) -> Vec<ProcessEvent> {
+    /// Append raw transport bytes to the bounded replay ring, advancing the
+    /// per-stream decoder state that feeds [`OutputSnapshot::encoding`].
+    /// Returns the number of bytes dropped from the ring by this push.
+    pub fn push(&self, stream: OutputStream, bytes: &[u8]) -> u64 {
         let mut storage = self
             .inner
             .lock()
             .expect("process output state mutex is poisoned");
         let state = match &mut *storage {
             OutputBufferState::Live(state) => state,
-            OutputBufferState::Frozen(_) => return Vec::new(),
+            OutputBufferState::Frozen(_) => return 0,
             OutputBufferState::Transition => {
                 unreachable!("output state transition is only visible while its lock is held")
             }
@@ -122,30 +125,13 @@ impl OutputBuffer {
             .next_offset
             .checked_add(byte_count(bytes.len()))
             .expect("process output offset overflowed u64");
-        let retained_start = bytes.len().saturating_sub(self.limit);
-        let retained_bytes = &bytes[retained_start..];
 
-        let decoded = {
-            let decoder = state.decoders.for_stream_mut(stream);
-            decoder.decode_event(bytes, retained_start)
-        };
+        state
+            .decoders
+            .for_stream_mut(stream)
+            .discard_bounded(bytes);
         let output_seq = state.take_seq();
-        let mut events = vec![ProcessEvent::Output {
-            seq: output_seq,
-            stream,
-            bytes: retained_bytes.to_vec(),
-            text: decoded.text,
-            encoding: decoded.encoding,
-        }];
-
         let dropped = state.retain(self.limit, output_seq, start, stream, bytes);
-        if dropped > 0 {
-            let dropped_seq = state.take_seq();
-            events.push(ProcessEvent::OutputDropped {
-                seq: dropped_seq,
-                bytes: dropped,
-            });
-        }
 
         drop(storage);
         if !bytes.is_empty()
@@ -167,7 +153,7 @@ impl OutputBuffer {
                 *generation = generation.wrapping_add(1);
             });
         }
-        events
+        dropped
     }
 
     pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -251,7 +237,7 @@ fn snapshot_from_state(state: &OutputState, cursor: OutputCursor) -> OutputSnaps
             .start
             .checked_add(byte_count(slice_start))
             .expect("snapshot output offset overflowed u64");
-        let text = decoder.decode(&bytes).text;
+        let text = decoder.decode(&bytes);
         chunks.push(OutputChunk {
             seq: stored.seq,
             start: chunk_start,
@@ -473,43 +459,10 @@ impl StreamDecoders {
 
     fn finish(&mut self) -> [(OutputStream, String); 3] {
         [
-            (OutputStream::Stdout, self.stdout.finish().text),
-            (OutputStream::Stderr, self.stderr.finish().text),
-            (OutputStream::Pty, self.pty.finish().text),
+            (OutputStream::Stdout, self.stdout.finish()),
+            (OutputStream::Stderr, self.stderr.finish()),
+            (OutputStream::Pty, self.pty.finish()),
         ]
-    }
-}
-
-struct DecodedDelta {
-    text: String,
-    encoding: EncodingMetadata,
-    sources: DeltaSources,
-}
-
-#[derive(Default)]
-struct DeltaSources {
-    utf8_non_ascii: bool,
-    platform_encoding: Option<String>,
-}
-
-impl DeltaSources {
-    fn merge(&mut self, other: Self) {
-        self.utf8_non_ascii |= other.utf8_non_ascii;
-        if let Some(other_encoding) = other.platform_encoding {
-            match &self.platform_encoding {
-                None => self.platform_encoding = Some(other_encoding),
-                Some(encoding) if *encoding == other_encoding => {}
-                Some(_) => self.platform_encoding = Some("mixed".to_owned()),
-            }
-        }
-    }
-
-    fn label(&self) -> String {
-        match &self.platform_encoding {
-            Some(_) if self.utf8_non_ascii => "mixed".to_owned(),
-            Some(encoding) => encoding.clone(),
-            None => UTF8_LABEL.to_owned(),
-        }
     }
 }
 
@@ -541,33 +494,9 @@ impl IncrementalDecoder {
         }
     }
 
-    fn decode(&mut self, bytes: &[u8]) -> DecodedDelta {
-        let errors_before = self.decode_errors;
+    fn decode(&mut self, bytes: &[u8]) -> String {
         self.observed_bytes |= !bytes.is_empty();
-        let mut sources = DeltaSources::default();
-        let text = self.decode_text(bytes, &mut sources);
-        DecodedDelta {
-            text,
-            encoding: EncodingMetadata {
-                source_encoding: sources.label(),
-                decode_errors: self.decode_errors.saturating_sub(errors_before),
-            },
-            sources,
-        }
-    }
-
-    fn decode_event(&mut self, bytes: &[u8], retained_start: usize) -> DecodedDelta {
-        let errors_before = self.decode_errors;
-        let mut sources = DeltaSources::default();
-        for chunk in bytes[..retained_start].chunks(DECODE_SCRATCH_BYTES) {
-            sources.merge(self.decode(chunk).sources);
-        }
-        let mut decoded = self.decode(&bytes[retained_start..]);
-        sources.merge(decoded.sources);
-        decoded.encoding.decode_errors = self.decode_errors.saturating_sub(errors_before);
-        decoded.encoding.source_encoding = sources.label();
-        decoded.sources = sources;
-        decoded
+        self.decode_text(bytes)
     }
 
     fn discard_bounded(&mut self, bytes: &[u8]) {
@@ -576,17 +505,10 @@ impl IncrementalDecoder {
         }
     }
 
-    fn finish(&mut self) -> DecodedDelta {
-        let errors_before = self.decode_errors;
-        #[cfg(windows)]
-        let mut sources = DeltaSources::default();
-        #[cfg(not(windows))]
-        let sources = DeltaSources::default();
-
+    fn finish(&mut self) -> String {
         #[cfg(windows)]
         let text = if let Some(decoder) = &mut self.windows {
             let platform_encoding = decoder.label();
-            sources.platform_encoding = Some(platform_encoding.clone());
             self.source_encoding = if self.saw_non_ascii_utf8 {
                 "mixed".to_owned()
             } else {
@@ -605,7 +527,6 @@ impl IncrementalDecoder {
             } else {
                 let mut decoder = WindowsDecoder::new(self.active_code_page);
                 let platform_encoding = decoder.label();
-                sources.platform_encoding = Some(platform_encoding.clone());
                 self.source_encoding = if self.saw_non_ascii_utf8 {
                     "mixed".to_owned()
                 } else {
@@ -632,20 +553,12 @@ impl IncrementalDecoder {
             "\u{fffd}".to_owned()
         };
 
-        DecodedDelta {
-            text,
-            encoding: EncodingMetadata {
-                source_encoding: sources.label(),
-                decode_errors: self.decode_errors.saturating_sub(errors_before),
-            },
-            sources,
-        }
+        text
     }
 
-    fn decode_text(&mut self, bytes: &[u8], sources: &mut DeltaSources) -> String {
+    fn decode_text(&mut self, bytes: &[u8]) -> String {
         #[cfg(windows)]
         if let Some(decoder) = &mut self.windows {
-            sources.platform_encoding = Some(decoder.label());
             let (text, errors) = decoder.decode(bytes);
             self.decode_errors = self.decode_errors.saturating_add(errors);
             return text;
@@ -660,7 +573,6 @@ impl IncrementalDecoder {
             match std::str::from_utf8(&input[index..]) {
                 Ok(valid) => {
                     text.push_str(valid);
-                    sources.utf8_non_ascii |= !valid.is_ascii();
                     self.saw_non_ascii_utf8 |= !valid.is_ascii();
                     break;
                 }
@@ -669,7 +581,6 @@ impl IncrementalDecoder {
                     let valid = std::str::from_utf8(&input[index..valid_end])
                         .expect("Utf8Error valid prefix must be UTF-8");
                     text.push_str(valid);
-                    sources.utf8_non_ascii |= !valid.is_ascii();
                     self.saw_non_ascii_utf8 |= !valid.is_ascii();
                     index = valid_end;
 
@@ -685,7 +596,6 @@ impl IncrementalDecoder {
                         if code_page != 65001 {
                             let mut decoder = WindowsDecoder::new(code_page);
                             let platform_encoding = decoder.label();
-                            sources.platform_encoding = Some(platform_encoding.clone());
                             self.source_encoding = if self.saw_non_ascii_utf8 {
                                 "mixed".to_owned()
                             } else {
@@ -832,7 +742,7 @@ mod tests {
     };
 
     use super::{FrozenOutput, OutputBuffer, OutputBufferState, OutputObserver};
-    use crate::{ProcessEvent, OutputCursor, OutputStream};
+    use crate::{OutputCursor, OutputStream};
 
     const MAX_DECODED_TEXT_BYTES_PER_SOURCE_BYTE: usize = 4;
 
@@ -912,12 +822,12 @@ mod tests {
         #[cfg(windows)]
         set_code_page(&output, OutputStream::Stdout, 65001);
 
-        let events = output.push(OutputStream::Stdout, &[0xff]);
-        let ProcessEvent::Output { bytes, text, .. } = &events[0] else {
-            panic!("first push event was not output");
-        };
+        let dropped = output.push(OutputStream::Stdout, &[0xff]);
         let snapshot = output.snapshot_from(OutputCursor::START);
+        let bytes = &snapshot.chunks[0].bytes;
+        let text = &snapshot.chunks[0].text;
 
+        assert_eq!(dropped, 0);
         assert_eq!(bytes, &[0xff]);
         assert_eq!(text, "\u{fffd}");
         assert_eq!(snapshot.text(), "\u{fffd}");
@@ -963,10 +873,10 @@ mod tests {
         );
 
         let terminal_before = frozen.snapshot_from(OutputCursor::START);
-        let events = output.push(OutputStream::Stdout, b"late");
+        let dropped = output.push(OutputStream::Stdout, b"late");
         let terminal_after = frozen.snapshot_from(OutputCursor::START);
         let live_after = output.snapshot_from(OutputCursor::START);
-        assert!(events.is_empty(), "push after freeze must be rejected");
+        assert_eq!(dropped, 0, "push after freeze must be rejected");
         assert_eq!(terminal_after, terminal_before);
         assert_eq!(live_after, terminal_before);
     }

@@ -504,9 +504,6 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
-| **格式化** | |
-| `bun run fmt` | 格式化 Rust 代码（cargo fmt） |
-| `bun run fmt:check` | 校验 Rust 代码格式（cargo fmt --check） |
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
 | **维护 / 工具** | |

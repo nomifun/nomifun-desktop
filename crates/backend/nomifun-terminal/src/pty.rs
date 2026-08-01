@@ -130,7 +130,12 @@ impl PtyHandle {
         });
 
         let mut policy = ProcessPolicy::default();
-        policy.output_limit_bytes = SCROLLBACK_CAP;
+        // The runtime's bounded replay ring is never read for terminals:
+        // PtyHandle keeps its own lossless scrollback (fed by the observer
+        // above), and exit/kill outcomes only consume code + cleanup
+        // evidence. A zero cap avoids retaining a second ~256 KiB copy of
+        // every live terminal's output.
+        policy.output_limit_bytes = 0;
         // Desktop terminals live until the user closes/relaunches them or the
         // backend shuts down. A lease would race the reaper after long sleep.
         policy.expire_on_idle = false;

@@ -4405,26 +4405,6 @@ pub fn ensure_current_v3_work_root_owner(
     Ok(())
 }
 
-/// Return whether the resolved external work root contains the product-owned
-/// conversation workspace.  If a receipt is absent after a crash, this lets
-/// the application distinguish a recoverable same-root bootstrap from an
-/// ambiguous database/workspace pairing and fail closed without destroying a
-/// database that may already be a valid v3 database.
-pub fn external_work_root_has_managed_workspace(
-    data_dir: &Path,
-    work_dir: &Path,
-) -> Result<bool, AppError> {
-    let canonical_data = canonical_data_dir(data_dir)?;
-    let canonical_work = canonical_work_dir(work_dir)?;
-    if canonical_data == canonical_work {
-        return Ok(false);
-    }
-    inspect_planned_root(
-        &canonical_work.join(MANAGED_WORKSPACES_DIR),
-        ManagedRootKind::Directory,
-    )
-}
-
 /// Prove that a root is either completely fresh or stopped during the
 /// first-bootstrap control-file sequence.
 ///
@@ -5639,7 +5619,7 @@ pub fn rebind_data_root_after_relocation(
     };
     let mut warnings = Vec::new();
     let mut external_work_roots: Vec<PathBuf> = Vec::new();
-    let mut note_external = |stored: &str, external: &mut Vec<PathBuf>| {
+    let note_external = |stored: &str, external: &mut Vec<PathBuf>| {
         let path = PathBuf::from(stored);
         if !stored.is_empty()
             && !crate::paths::paths_equivalent(&path, old_data_root)

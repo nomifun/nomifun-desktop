@@ -36,7 +36,7 @@ source and reuse the same body.
 - `WorkspaceTreeSource`: lazy root/child loader used by `useWorkspaceTree`.
 - `SelectedFile`: source-agnostic file/folder selection shape.
 - `WorkspaceUploadConfig`: presence enables upload, drag, and paste UI.
-- `eventPrefix`: one of `'acp' | 'codex' | 'nomi' | 'openclaw-gateway' | 'nanobot' | 'remote'`.
+- `eventPrefix`: one of `'acp' | 'nomi' | 'openclaw-gateway' | 'nanobot' | 'remote'`.
 
 ## Persistence And Settings
 

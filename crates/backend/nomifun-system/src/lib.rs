@@ -2,7 +2,6 @@
 pub mod bedrock_probe;
 pub mod client_pref;
 pub mod managed_model;
-pub mod model_classify;
 pub mod model_fetcher;
 pub mod model_profile;
 pub mod protocol;
@@ -23,7 +22,6 @@ pub use managed_model::{
     ManagedModelService, is_managed_provider_platform, start_and_provision_free_model,
     start_and_provision_free_model_with_preferences,
 };
-pub use model_classify::{ModelGenerationSuggestion, suggest_generation_capabilities};
 pub use model_fetcher::ModelFetchService;
 pub use model_profile::{ModelProfileService, seed_inferred_provider_models, seed_missing_inferred_profiles};
 pub use protocol::ProtocolDetectionService;
@@ -31,6 +29,6 @@ pub use provider::ProviderService;
 pub use provider_connection::ProviderConnectionService;
 pub use provider_deletion::{ProviderDeletionCoordinator, SharedProviderDeletionCoordinator};
 pub use provider_model::ProviderModelService;
-pub use routes::{SystemRouterState, settings_routes, system_routes};
+pub use routes::{SystemRouterState, system_routes};
 pub use settings::SettingsService;
 pub use version::VersionCheckService;

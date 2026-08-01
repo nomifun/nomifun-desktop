@@ -74,9 +74,6 @@ struct ListTerminalsParams {
 // ─── Handlers ──────────────────────────────────────────────────────────────
 
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({"error": "missing caller user identity in signed Gateway capability"});
-    }
     let conversation_id = match ctx.conversation_id.as_deref() {
         Some(id) if nomifun_common::ConversationId::parse(id).is_ok() => id.to_owned(),
         _ => {
@@ -191,9 +188,6 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
 }
 
 async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListTerminalsParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({"error": "missing caller user identity in signed Gateway capability"});
-    }
     let user_id = ctx.user_id.as_str();
     let conversation_id = match ctx.conversation_id.as_deref() {
         Some(id) if nomifun_common::ConversationId::parse(id).is_ok() => id,

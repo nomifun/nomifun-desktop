@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -15,7 +14,6 @@ pub struct StreamableHttpTransport {
     url: String,
     headers: HeaderMap,
     session_id: Mutex<Option<String>>,
-    next_id: AtomicU64,
 }
 
 impl StreamableHttpTransport {
@@ -35,12 +33,7 @@ impl StreamableHttpTransport {
             url: url.to_string(),
             headers: header_map,
             session_id: Mutex::new(None),
-            next_id: AtomicU64::new(1),
         })
-    }
-
-    pub fn next_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Build request with session ID header if available

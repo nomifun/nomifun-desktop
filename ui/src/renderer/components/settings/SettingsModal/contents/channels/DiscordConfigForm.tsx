@@ -4,14 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IChannelPairingRequest, IChannelPluginStatus, IChannelUser } from '@/common/types/channel/channel';
+import type { IChannelPluginStatus } from '@/common/types/channel/channel';
 import { channel } from '@/common/adapter/ipcBridge';
-import { Button, Empty, Input, Message, Spin, Tooltip } from '@arco-design/web-react';
-import { CheckOne, CloseOne, Copy, Delete, Refresh } from '@icon-park/react';
-import React, { useCallback, useEffect, useState } from 'react';
+import { Button, Input, Message, Tooltip } from '@arco-design/web-react';
+import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { buildEnablePluginRequest, findEnabledChannelStatus } from '@/renderer/components/channels/channelStatusSelection';
+import { AuthorizedUserList, PendingPairingList } from './ChannelPairingLists';
 import type { ChannelTarget } from './channelTarget';
+import { useChannelPairing } from './useChannelPairing';
 
 /** Preference row */
 const PreferenceRow: React.FC<{
@@ -28,13 +29,6 @@ const PreferenceRow: React.FC<{
   </div>
 );
 
-const SectionHeader: React.FC<{ title: string; action?: React.ReactNode }> = ({ title, action }) => (
-  <div className='flex items-center justify-between mb-12px'>
-    <h3 className='text-14px font-500 text-t-primary m-0'>{title}</h3>
-    {action}
-  </div>
-);
-
 interface DiscordConfigFormProps {
   pluginStatus: IChannelPluginStatus | null;
   /** 多机器人模式下寻址的渠道行；缺省 = 全局设置页 legacy 单行行为。 */
@@ -48,62 +42,18 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
 
   const [discordToken, setDiscordToken] = useState('');
   const [testLoading, setTestLoading] = useState(false);
-  const [pairingLoading, setPairingLoading] = useState(false);
-  const [usersLoading, setUsersLoading] = useState(false);
-  const [pendingPairings, setPendingPairings] = useState<IChannelPairingRequest[]>([]);
-  const [authorizedUsers, setAuthorizedUsers] = useState<IChannelUser[]>([]);
 
-  const loadPendingPairings = useCallback(async () => {
-    setPairingLoading(true);
-    try {
-      const pairings = await channel.getPendingPairings.invoke();
-      if (pairings) {
-        setPendingPairings(pairings.filter((p) => p.platformType === 'discord' && (!channelTarget?.channelPluginId || p.channel_plugin_id === channelTarget.channelPluginId)));
-      }
-    } catch (error) {
-      console.error('[ChannelSettings] Failed to load pending pairings:', error);
-    } finally {
-      setPairingLoading(false);
-    }
-  }, [channelTarget?.channelPluginId]);
-
-  const loadAuthorizedUsers = useCallback(async () => {
-    setUsersLoading(true);
-    try {
-      const users = await channel.getAuthorizedUsers.invoke();
-      if (users) {
-        setAuthorizedUsers(users.filter((u) => u.platformType === 'discord' && (!channelTarget?.channelPluginId || u.channel_plugin_id === channelTarget.channelPluginId)));
-      }
-    } catch (error) {
-      console.error('[ChannelSettings] Failed to load authorized users:', error);
-    } finally {
-      setUsersLoading(false);
-    }
-  }, [channelTarget?.channelPluginId]);
-
-  useEffect(() => {
-    void loadPendingPairings();
-    void loadAuthorizedUsers();
-  }, [loadPendingPairings, loadAuthorizedUsers]);
-
-  useEffect(() => {
-    const unsubscribe = channel.pairingRequested.on((request) => {
-      if (request.platformType !== 'discord') return;
-      if (channelTarget?.channelPluginId && request.channel_plugin_id !== channelTarget.channelPluginId) return;
-      setPendingPairings((prev) => (prev.some((p) => p.code === request.code) ? prev : [request, ...prev]));
-    });
-    return () => unsubscribe();
-  }, [channelTarget?.channelPluginId]);
-
-  useEffect(() => {
-    const unsubscribe = channel.userAuthorized.on((user) => {
-      if (user.platformType !== 'discord') return;
-      if (channelTarget?.channelPluginId && user.channel_plugin_id !== channelTarget.channelPluginId) return;
-      setAuthorizedUsers((prev) => (prev.some((u) => u.channel_user_id === user.channel_user_id) ? prev : [user, ...prev]));
-      setPendingPairings((prev) => prev.filter((p) => p.platformUserId !== user.platformUserId));
-    });
-    return () => unsubscribe();
-  }, [channelTarget?.channelPluginId]);
+  const {
+    pendingPairings,
+    authorizedUsers,
+    pairingLoading,
+    usersLoading,
+    loadPendingPairings,
+    loadAuthorizedUsers,
+    approvePairing,
+    rejectPairing,
+    revokeUser,
+  } = useChannelPairing('discord', channelTarget);
 
   const handleAutoEnable = async () => {
     try {
@@ -155,45 +105,6 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
     onTokenChange?.(value);
   };
 
-  const handleApprovePairing = async (code: string) => {
-    try {
-      await channel.approvePairing.invoke({ code });
-      Message.success(t('settings.channels.pairingApproved', 'Pairing approved'));
-      await loadPendingPairings();
-      await loadAuthorizedUsers();
-    } catch (error: unknown) {
-      Message.error(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const handleRejectPairing = async (code: string) => {
-    try {
-      await channel.rejectPairing.invoke({ code });
-      Message.info(t('settings.channels.pairingRejected', 'Pairing rejected'));
-      await loadPendingPairings();
-    } catch (error: unknown) {
-      Message.error(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const handleRevokeUser = async (channel_user_id: import('@/common/types/ids').ChannelUserId) => {
-    try {
-      await channel.revokeUser.invoke({ channel_user_id });
-      Message.success(t('settings.channels.userRevoked', 'User access revoked'));
-      await loadAuthorizedUsers();
-    } catch (error: unknown) {
-      Message.error(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const copyToClipboard = (text: string) => {
-    void navigator.clipboard.writeText(text);
-    Message.success(t('common.copySuccess', 'Copied'));
-  };
-
-  const formatTime = (timestamp: number) => new Date(timestamp).toLocaleString();
-  const getRemainingTime = (expiresAt: number) => `${Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000 / 60))} ${t('common.unit.minute_short')}`;
-
   // Row-scoped credential lock — lock only when THIS bot row is live.
   const credentialsLocked = !!pluginStatus?.connected;
 
@@ -225,68 +136,25 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
 
       {/* Pending Pairings */}
       {pluginStatus?.enabled && authorizedUsers.length === 0 && (
-        <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
-          <SectionHeader title={t('settings.channels.pendingPairings', 'Pending Pairing Requests')} action={<Button size='mini' type='text' icon={<Refresh size={14} />} loading={pairingLoading} onClick={loadPendingPairings}>{t('common.refresh', 'Refresh')}</Button>} />
-          {pairingLoading ? (
-            <div className='flex justify-center py-24px'><Spin /></div>
-          ) : pendingPairings.length === 0 ? (
-            <Empty description={t('settings.channels.noPendingPairings', 'No pending pairing requests')} />
-          ) : (
-            <div className='flex flex-col gap-12px'>
-              {pendingPairings.map((pairing) => (
-                <div key={pairing.code} className='flex items-center justify-between bg-fill-2 rd-8px p-12px'>
-                  <div className='flex-1'>
-                    <div className='flex items-center gap-8px'>
-                      <span className='text-14px font-500 text-t-primary'>{pairing.display_name || t('common.unknownUser')}</span>
-                      <Tooltip content={t('settings.channels.copyCode', 'Copy pairing code')}>
-                        <button className='p-4px bg-transparent border-none text-t-tertiary hover:text-t-primary cursor-pointer' onClick={() => copyToClipboard(pairing.code)}>
-                          <Copy size={14} />
-                        </button>
-                      </Tooltip>
-                    </div>
-                    <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.channels.pairingCode', 'Code')}: <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code>
-                      <span className='mx-8px'>|</span>
-                      {t('settings.channels.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}
-                    </div>
-                  </div>
-                  <div className='flex items-center gap-8px'>
-                    <Button type='primary' size='small' icon={<CheckOne size={14} />} onClick={() => handleApprovePairing(pairing.code)}>{t('settings.channels.approve', 'Approve')}</Button>
-                    <Button type='secondary' size='small' status='danger' icon={<CloseOne size={14} />} onClick={() => handleRejectPairing(pairing.code)}>{t('settings.channels.reject', 'Reject')}</Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <PendingPairingList
+          pairings={pendingPairings}
+          loading={pairingLoading}
+          onRefresh={loadPendingPairings}
+          onApprove={approvePairing}
+          onReject={rejectPairing}
+          showCopyButton
+        />
       )}
 
       {/* Authorized Users */}
       {pluginStatus?.enabled && authorizedUsers.length > 0 && (
-        <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
-          <SectionHeader title={t('settings.channels.authorizedUsers', 'Authorized Users')} action={<Button size='mini' type='text' icon={<Refresh size={14} />} loading={usersLoading} onClick={loadAuthorizedUsers}>{t('common.refresh', 'Refresh')}</Button>} />
-          {usersLoading ? (
-            <div className='flex justify-center py-24px'><Spin /></div>
-          ) : (
-            <div className='flex flex-col gap-12px'>
-              {authorizedUsers.map((user) => (
-                <div key={user.channel_user_id} className='flex items-center justify-between bg-fill-2 rd-8px p-12px'>
-                  <div className='flex-1'>
-                    <div className='text-14px font-500 text-t-primary'>{user.display_name || t('common.unknownUser')}</div>
-                    <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.channels.platform', 'Platform')}: {user.platformType}
-                      <span className='mx-8px'>|</span>
-                      {t('settings.channels.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
-                    </div>
-                  </div>
-                  <Tooltip content={t('settings.channels.revokeAccess', 'Revoke access')}>
-                    <Button type='text' status='danger' size='small' icon={<Delete size={16} />} onClick={() => handleRevokeUser(user.channel_user_id)} />
-                  </Tooltip>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <AuthorizedUserList
+          users={authorizedUsers}
+          loading={usersLoading}
+          onRefresh={loadAuthorizedUsers}
+          onRevoke={revokeUser}
+          showMeta
+        />
       )}
     </div>
   );

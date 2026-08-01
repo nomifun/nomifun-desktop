@@ -1,4 +1,4 @@
-import type { GeomRect, GeomSize } from './windowGeometry';
+import { clamp, pickHost, type GeomRect, type GeomSize } from './windowGeometry';
 
 export type DetachedMemoryPanelPlacement = 'above' | 'left' | 'right';
 
@@ -21,18 +21,12 @@ export type DetachedMemoryPanelResult =
   | { kind: 'placed'; placement: DetachedMemoryPanelPlacement; panelRect: GeomRect; anchorRect: GeomRect; monitorId: string; scaleFactor: number; gap: number }
   | { kind: 'fallback'; reason: 'no-monitor' | 'insufficient-space' };
 
-const overlapArea = (a: GeomRect, b: GeomRect) =>
-  Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) *
-  Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
-const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max));
 const intersects = (a: GeomRect, b: GeomRect) =>
   a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 
 export function chooseDetachedMemoryPanelLayout(input: DetachedMemoryPanelInput): DetachedMemoryPanelResult {
-  if (input.monitors.length === 0) return { kind: 'fallback', reason: 'no-monitor' };
-  const host = input.monitors.reduce((best, monitor) =>
-    overlapArea(input.anchor, monitor.bounds) > overlapArea(input.anchor, best.bounds) ? monitor : best
-  );
+  const host = pickHost(input.anchor, input.monitors, (monitor) => monitor.bounds);
+  if (!host) return { kind: 'fallback', reason: 'no-monitor' };
   const scale = Number.isFinite(host.scaleFactor) && host.scaleFactor > 0 ? host.scaleFactor : 1;
   const desired = { width: Math.round(input.logicalPanel.width * scale), height: Math.round(input.logicalPanel.height * scale) };
   const minimumLogical = input.logicalMinimum ?? { width: 280, height: 120 };

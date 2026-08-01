@@ -258,10 +258,6 @@ impl ExecutionScheduler {
         }
     }
 
-    pub fn is_active(&self, execution_id: &str) -> bool {
-        self.inner.active.contains_key(execution_id)
-    }
-
     pub fn start(&self, owner_id: String, execution_id: String) {
         use dashmap::mapref::entry::Entry;
         let generation = generate_id();
@@ -2226,28 +2222,6 @@ fn status_is_active_for_scheduler_failure(status: AgentExecutionStatus) -> bool 
     )
 }
 
-fn recovery_transition(
-    status: ExecutionAttemptStatus,
-    adaptation: AdaptationPolicy,
-) -> (ExecutionAttemptStatus, ExecutionStepStatus, &'static str) {
-    if status == ExecutionAttemptStatus::Queued {
-        return (
-            ExecutionAttemptStatus::Cancelled,
-            ExecutionStepStatus::Pending,
-            "queued attempt was released during recovery",
-        );
-    }
-    (
-        ExecutionAttemptStatus::Interrupted,
-        if adaptation == AdaptationPolicy::Adaptive {
-            ExecutionStepStatus::Pending
-        } else {
-            ExecutionStepStatus::Failed
-        },
-        "application restarted during the attempt",
-    )
-}
-
 fn attempt_error_transition(
     status: ExecutionAttemptStatus,
     adaptation: AdaptationPolicy,
@@ -2853,30 +2827,6 @@ mod tests {
         ]
         .concat();
         assert_eq!(source.matches(&required_call).count(), 1);
-    }
-
-    #[test]
-    fn queued_recovery_never_consumes_the_fixed_policy_attempt() {
-        for adaptation in [AdaptationPolicy::Fixed, AdaptationPolicy::Adaptive] {
-            let (attempt, step, reason) =
-                recovery_transition(ExecutionAttemptStatus::Queued, adaptation);
-            assert_eq!(attempt, ExecutionAttemptStatus::Cancelled);
-            assert_eq!(step, ExecutionStepStatus::Pending);
-            assert!(reason.contains("queued"));
-        }
-    }
-
-    #[test]
-    fn running_recovery_respects_adaptation_policy() {
-        let (fixed_attempt, fixed_step, _) =
-            recovery_transition(ExecutionAttemptStatus::Running, AdaptationPolicy::Fixed);
-        assert_eq!(fixed_attempt, ExecutionAttemptStatus::Interrupted);
-        assert_eq!(fixed_step, ExecutionStepStatus::Failed);
-
-        let (adaptive_attempt, adaptive_step, _) =
-            recovery_transition(ExecutionAttemptStatus::Running, AdaptationPolicy::Adaptive);
-        assert_eq!(adaptive_attempt, ExecutionAttemptStatus::Interrupted);
-        assert_eq!(adaptive_step, ExecutionStepStatus::Pending);
     }
 
     #[test]

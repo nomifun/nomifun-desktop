@@ -64,7 +64,6 @@ const PreviewPanel: React.FC = () => {
     closePreview,
     updateContent,
     saveContent,
-    addDomSnippet,
   } = usePreviewContext();
   const layout = useLayoutContext();
 
@@ -72,7 +71,6 @@ const PreviewPanel: React.FC = () => {
   const [viewMode, setViewMode] = useState<'source' | 'preview'>('preview');
   const [isSplitScreenEnabled, setIsSplitScreenEnabled] = useState(false);
   const [isEditMode, setIsEditMode] = useState(false);
-  const [inspectMode, setInspectMode] = useState(false);
   const [toolbarExtras, setToolbarExtras] = useState<PreviewToolbarExtras | null>(null);
 
   // 确认对话框状态 / Confirmation dialog states
@@ -120,14 +118,6 @@ const PreviewPanel: React.FC = () => {
   const setToolbarExtrasCallback = useCallback((extras: PreviewToolbarExtras | null) => {
     setToolbarExtras(extras);
   }, []);
-
-  // 处理 HTML 审核模式元素选中 / Handle HTML inspect mode element selection
-  const handleElementSelected = useCallback(
-    (element: { html: string; tag: string }) => {
-      addDomSnippet(element.tag, element.html);
-    },
-    [addDomSnippet]
-  );
 
   const toolbarExtrasContextValue = useMemo(
     () => ({
@@ -495,14 +485,7 @@ const PreviewPanel: React.FC = () => {
         if (layout?.isMobile) {
           return (
             <div className='flex-1 overflow-hidden'>
-              <HTMLRenderer
-                content={content}
-                file_path={metadata?.file_path}
-                workspace={metadata?.workspace}
-                copySuccessMessage={t('preview.html.copySuccess')}
-                inspectMode={inspectMode}
-                onElementSelected={handleElementSelected}
-              />
+              <HTMLRenderer content={content} file_path={metadata?.file_path} workspace={metadata?.workspace} />
             </div>
           );
         }
@@ -535,17 +518,12 @@ const PreviewPanel: React.FC = () => {
                 <span className='text-12px text-t-secondary'>{t('preview.preview')}</span>
               </div>
               <div className='flex flex-col flex-1 overflow-hidden'>
-                {/* prettier-ignore */}
-                {/* eslint-disable-next-line max-len */}
                 <HTMLRenderer
                   content={content}
                   file_path={metadata?.file_path}
                   workspace={metadata?.workspace}
                   containerRef={previewContainerRef}
                   onScroll={handlePreviewScroll}
-                  inspectMode={inspectMode}
-                  copySuccessMessage={t('preview.html.copySuccess')}
-                  onElementSelected={handleElementSelected}
                 />
               </div>
             </div>
@@ -569,14 +547,7 @@ const PreviewPanel: React.FC = () => {
         // 预览模式 / Preview mode
         return (
           <div className='flex-1 overflow-hidden'>
-            <HTMLRenderer
-              content={content}
-              file_path={metadata?.file_path}
-              workspace={metadata?.workspace}
-              inspectMode={inspectMode}
-              copySuccessMessage={t('preview.html.copySuccess')}
-              onElementSelected={handleElementSelected}
-            />
+            <HTMLRenderer content={content} file_path={metadata?.file_path} workspace={metadata?.workspace} />
           </div>
         );
       }
@@ -736,8 +707,6 @@ const PreviewPanel: React.FC = () => {
             onOpenInSystem={handleOpenInSystem}
             onDownload={handleDownload}
             onClose={closePreview}
-            inspectMode={inspectMode}
-            onInspectModeToggle={() => setInspectMode(!inspectMode)}
             leftExtra={toolbarExtras?.left}
             rightExtra={toolbarExtras?.right}
           />

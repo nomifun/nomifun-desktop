@@ -1,7 +1,8 @@
 //! `SessionProbe` — the target abstraction unifying conversation agents and
 //! terminal/agent-CLI sessions. A probe normalizes a session's activity into a
-//! `SessionSignal` stream (`observe`), injects wake/answer actions (`inject`),
-//! and snapshots recent context for the sidecar (`snapshot_context`).
+//! `SessionSignal` stream (`observe`), delivers reserved wake/answer actions
+//! (`inject_reserved`), and snapshots recent context for the sidecar
+//! (`snapshot_context`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,8 +44,6 @@ pub trait SessionProbe: Send + Sync {
     /// Normalized signal stream. The implementation spawns the translation task;
     /// the receiver closes when the session ends.
     fn observe(&self, idle_threshold: Duration) -> mpsc::Receiver<SessionSignal>;
-    /// Inject a wake/answer action into the session.
-    async fn inject(&self, action: &WakeAction) -> Result<(), AppError>;
     /// Snapshot the exact live Conversation turn that a durable action
     /// reservation will bind. Terminals currently have no durable Conversation
     /// turn identity and therefore return `None`.
@@ -82,12 +81,6 @@ pub trait SessionProbe: Send + Sync {
     /// fresh execution authority.
     async fn pending_signal(&self) -> Option<SessionSignal> {
         None
-    }
-    /// Whether text can independently authorize another action. The safe
-    /// default is false: a cleanly-finished free-text response is terminal and
-    /// may not be reinterpreted as a pending decision after completion.
-    async fn decision_in_text(&self, _turn_text: &str) -> bool {
-        false
     }
 }
 
@@ -486,15 +479,6 @@ impl SessionProbe for ConversationProbe {
         rx
     }
 
-    async fn inject(&self, action: &WakeAction) -> Result<(), AppError> {
-        if matches!(action, WakeAction::Wait(_) | WakeAction::Stop(_)) {
-            return Ok(());
-        }
-        Err(AppError::Conflict(
-            "Conversation IDMM actions require a durable exact-turn reservation".into(),
-        ))
-    }
-
     async fn action_scope(&self) -> Result<Option<IdmmTurnScope>, AppError> {
         let owner_id = self.owner_id().await?;
         self.ensure_live_turn_authority().await?;
@@ -680,12 +664,6 @@ impl SessionProbe for ConversationProbe {
         // The sole recovery source is a confirmation that is still live in the
         // runtime. Completed assistant rows are not scanned or replayed.
         pending_confirmation_signal(&self.runtime_registry, self.conversation_id.as_str())
-    }
-
-    async fn decision_in_text(&self, _turn_text: &str) -> bool {
-        // A caller only supplies this hook with a just-finished assistant turn.
-        // Finished text is absorbing and cannot authorize IDMM injection.
-        false
     }
 }
 
@@ -1008,21 +986,6 @@ impl SessionProbe for TerminalProbe {
             }
         });
         rx
-    }
-
-    async fn inject(&self, action: &WakeAction) -> Result<(), AppError> {
-        match action {
-            // Supervisor control flow only; these variants never write to the
-            // PTY.
-            WakeAction::Wait(_) | WakeAction::Stop(_) => Ok(()),
-            // Terminal IDMM currently has no exact durable turn scope/admission
-            // receipt. Retry, free text, choices, confirmations, and especially
-            // Failover must not degrade into a fresh "continue" write.
-            _ => Err(AppError::Conflict(
-                "Terminal IDMM action rejected: no exact durable terminal turn scope"
-                    .into(),
-            )),
-        }
     }
 
     async fn snapshot_context(&self, max_chars: usize) -> Result<String, AppError> {
@@ -1809,42 +1772,24 @@ mod tests {
                 value: "allow".into(),
                 always_allow: false,
             },
+            WakeAction::Wait(Duration::from_millis(1)),
+            WakeAction::Stop("human review".into()),
         ] {
             let error = probe
-                .inject(&action)
+                .inject_reserved(&action, None)
                 .await
                 .expect_err("unscoped terminal action must be rejected");
             assert!(
                 error
                     .to_string()
-                    .contains("no exact durable terminal turn scope"),
+                    .contains("no exact durable action scope"),
                 "unexpected rejection: {error}"
             );
         }
         assert!(
             written.lock().unwrap().is_empty(),
-            "Failover/Retry/SendText/AnswerChoice/Confirm must perform zero PTY writes"
+            "terminal actions must perform zero PTY writes without an exact durable scope"
         );
-    }
-
-    #[tokio::test]
-    async fn terminal_wait_and_stop_are_control_flow_only() {
-        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let driver = Arc::new(CapturingDriver {
-            written: written.clone(),
-            backend: Some("claude".into()),
-        });
-        let probe = TerminalProbe::new(driver.clone(), alternate_test_terminal_id());
-
-        probe
-            .inject(&WakeAction::Wait(Duration::from_millis(1)))
-            .await
-            .expect("wait is a no-op");
-        probe
-            .inject(&WakeAction::Stop("human review".into()))
-            .await
-            .expect("stop is a no-op");
-        assert!(written.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
