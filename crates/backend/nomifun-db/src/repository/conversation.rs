@@ -273,6 +273,10 @@ pub trait IConversationRepository: Send + Sync {
     /// operation closes keyed generations. If a later generation has already
     /// won, only the captured operation's accepted receipt may be absorbed and
     /// the current Conversation row is left untouched.
+    ///
+    /// The optional spec-D4 code columns (`result_error_code`,
+    /// `result_error_retryable`) are written only when the receipt is settled
+    /// from `accepted`; `None` keeps the legacy NULL behavior.
     async fn finalize_exact_cancelled_turn_generation(
         &self,
         user_id: &str,
@@ -280,6 +284,8 @@ pub trait IConversationRepository: Send + Sync {
         expected_admission_epoch: i64,
         expected_active_operation_id: Option<&str>,
         reason: &str,
+        result_error_code: Option<&str>,
+        result_error_retryable: Option<bool>,
         completed_at: TimestampMs,
     ) -> Result<TurnLifecycleTransition, DbError> {
         let _ = (
@@ -288,6 +294,8 @@ pub trait IConversationRepository: Send + Sync {
             expected_admission_epoch,
             expected_active_operation_id,
             reason,
+            result_error_code,
+            result_error_retryable,
             completed_at,
         );
         Err(DbError::Init(

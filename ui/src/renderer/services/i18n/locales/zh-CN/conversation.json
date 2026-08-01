@@ -138,6 +138,10 @@
       "unknown_upstream": "上游"
     },
     "codes": {
+      "INTERRUPTED_BY_RESTART": {
+        "title": "任务因应用退出而中断",
+        "body": "应用在任务执行中途退出，本次任务未能完成。会话已恢复可用，可重新发送该请求。"
+      },
       "PROVIDER_UNAVAILABLE": {
         "title": "当前没有可用的模型",
         "body": "当前没有可用的模型供应商，请到「模型&Agent」添加并启用一个模型后重试。"

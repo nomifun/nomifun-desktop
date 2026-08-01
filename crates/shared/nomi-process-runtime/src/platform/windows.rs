@@ -127,6 +127,37 @@ pub fn windows_process_identity(pid: u32) -> io::Result<WindowsProcessIdentity> 
     Ok(identity)
 }
 
+/// Probe one PID for a *running* exact process.
+///
+/// `Ok(None)` is positive proof that no live process instance currently runs
+/// under the PID: either no process object exists (`OpenProcess` rejects the
+/// PID) or the object is already terminated (its handle is signaled; a
+/// terminated object can no longer execute, and identity queries such as
+/// `QueryFullProcessImageNameW` legitimately fail on it).
+pub(crate) fn probe_running_process_identity(
+    pid: u32,
+) -> io::Result<Option<WindowsProcessIdentity>> {
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    let process = match open_exact_process(pid, false) {
+        Ok(process) => process,
+        Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if handle_is_signaled(process.as_raw())? {
+        return Ok(None);
+    }
+    let identity = process_identity_from_handle(process.as_raw())?;
+    if identity.pid != pid {
+        return Err(io::Error::other(format!(
+            "opened process handle reports PID {}, expected {pid}",
+            identity.pid
+        )));
+    }
+    Ok(Some(identity))
+}
+
 /// Inspect a Tokio child through the exact handle already owned by the child.
 pub fn windows_child_process_identity(
     child: &tokio::process::Child,

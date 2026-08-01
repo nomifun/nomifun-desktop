@@ -5,13 +5,40 @@
 //! process or machine has stopped.  Keep this classification centralized so a
 //! newly-added backend fails closed until its crash/parent-death contract has
 //! been audited explicitly.
+//!
+//! Every variant still requires proof before a durable Running generation may
+//! be finalized; a variant only names which persisted evidence source can
+//! supply that proof.  Request-facing guards (send/stop/delete/warmup) treat
+//! all variants identically — quarantined until the boot/background recovery
+//! seam presents the proof — so adding a variant never opens a bypass.
 
 use nomifun_common::{AgentType, AppError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunningOrphanDisposition {
-    /// Work may still be executing outside this application process.  A
-    /// protocol-specific terminal proof is required before durable finalization.
+    /// The turn owner is an in-process engine task that cannot outlive the
+    /// application, and every effect-bearing child spawn path is contained by
+    /// an audited parent-death authority (Windows kill-on-close Job armed
+    /// before resume; per-child Unix watchdog sealing the process group).
+    /// Terminal proof = exclusive boot-lock authority over the data dir plus
+    /// a fully-reaped durable process registry with no surviving entry for
+    /// this Conversation.
+    LocalContainedAuthority,
+    /// The backend's effect-bearing child process is durably registered at
+    /// spawn and unregistered only on proven tree exit.  Terminal proof =
+    /// verified boot reaping of every registry entry for this Conversation;
+    /// absence of entries is itself proof (the child never spawned, exited
+    /// with proof, or died under the same containment authorities as above).
+    RegisteredLocalProcessTree,
+    /// The backend registers a gateway process only when it self-spawned one;
+    /// external or port-attached gateways host work this process never owned,
+    /// so registry absence is ambiguous.  Terminal proof requires that entries
+    /// existed for this Conversation and every one was reaped with
+    /// exact-identity verification.
+    RegisteredGatewayAuthorityRequired,
+    /// Work may still be executing outside this application process or
+    /// machine.  A protocol-specific external terminal proof is required
+    /// before durable finalization; no local evidence source can supply it.
     ExternalTerminalProofRequired,
 }
 
@@ -19,19 +46,26 @@ pub(crate) fn running_orphan_disposition(
     persisted_agent_type: &str,
 ) -> Result<RunningOrphanDisposition, AppError> {
     let disposition = match persisted_agent_type {
-        // Parent-death/Job/process-group containment can initiate teardown but
-        // a replacement process cannot query the prior authority and prove
-        // that its complete descendant tree is already empty. Nomi also has
-        // direct MCP/tool child paths not yet uniformly contained. Remote and
-        // OpenClaw may execute outside this process entirely. Therefore every
-        // current backend fails closed after restart.
+        // Crash contract audited 2026-07-31: the Nomi turn is an in-process
+        // tokio task; Bash/exec children ride the ProcessSupervisor, MCP
+        // stdio servers and browser roots ride ChildProcessBuilder — all
+        // armed with kill-on-close Jobs (Windows) or forked parent-death
+        // watchdogs (Unix) before their first instruction.  Long-lived
+        // survivors are limited to read-only LSP servers; the browser
+        // additionally has its own identity-verified boot recovery.
+        value if value == AgentType::Nomi.serde_name() => {
+            RunningOrphanDisposition::LocalContainedAuthority
+        }
         value
-            if value == AgentType::Nomi.serde_name()
-                || value == AgentType::Acp.serde_name()
-                || value == AgentType::Nanobot.serde_name()
-                || value == AgentType::Remote.serde_name()
-                || value == AgentType::OpenclawGateway.serde_name() =>
+            if value == AgentType::Acp.serde_name()
+                || value == AgentType::Nanobot.serde_name() =>
         {
+            RunningOrphanDisposition::RegisteredLocalProcessTree
+        }
+        value if value == AgentType::OpenclawGateway.serde_name() => {
+            RunningOrphanDisposition::RegisteredGatewayAuthorityRequired
+        }
+        value if value == AgentType::Remote.serde_name() => {
             RunningOrphanDisposition::ExternalTerminalProofRequired
         }
         unknown => {
@@ -48,18 +82,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_current_backend_requires_queryable_terminal_proof_after_restart() {
-        for backend in [
-            AgentType::Nomi.serde_name(),
-            AgentType::Acp.serde_name(),
-            AgentType::Nanobot.serde_name(),
-            AgentType::Remote.serde_name(),
-            AgentType::OpenclawGateway.serde_name(),
+    fn every_current_backend_requires_proof_after_restart() {
+        for (backend, disposition) in [
+            (
+                AgentType::Nomi.serde_name(),
+                RunningOrphanDisposition::LocalContainedAuthority,
+            ),
+            (
+                AgentType::Acp.serde_name(),
+                RunningOrphanDisposition::RegisteredLocalProcessTree,
+            ),
+            (
+                AgentType::Nanobot.serde_name(),
+                RunningOrphanDisposition::RegisteredLocalProcessTree,
+            ),
+            (
+                AgentType::Remote.serde_name(),
+                RunningOrphanDisposition::ExternalTerminalProofRequired,
+            ),
+            (
+                AgentType::OpenclawGateway.serde_name(),
+                RunningOrphanDisposition::RegisteredGatewayAuthorityRequired,
+            ),
         ] {
-            assert_eq!(
-                running_orphan_disposition(backend).unwrap(),
-                RunningOrphanDisposition::ExternalTerminalProofRequired
-            );
+            assert_eq!(running_orphan_disposition(backend).unwrap(), disposition);
         }
     }
 
