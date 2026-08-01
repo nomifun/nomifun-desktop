@@ -17,12 +17,9 @@
 //! intentionally deferred (no code here depends on conversation or companion).
 
 pub mod autogen;
-pub mod connector;
-pub mod connector_feishu;
 pub mod context;
 pub mod events;
 pub mod export;
-pub mod feishu_md;
 pub mod mcp_server;
 mod broker;
 pub mod mount;

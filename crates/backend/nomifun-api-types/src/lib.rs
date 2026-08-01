@@ -146,7 +146,7 @@ pub use idmm::{
     PermissionRule, ScanScope, SetIdmmRequest, Tendency, WakeStrategy, WatchBase, WatchTier,
 };
 pub use knowledge::{
-    ConnectorCredentialSummary, ConnectorSyncState, CreateKnowledgeTagRequest, KnowledgeMountInfo,
+    CreateKnowledgeTagRequest, KnowledgeMountInfo,
     KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag,
     UpdateKnowledgeTagRequest,
 };

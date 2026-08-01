@@ -183,7 +183,6 @@ import {
   parseCompanionSessionWindowId,
   parseCompanionSkillId,
   parseCompanionSuggestionId,
-  parseConnectorCredentialId,
   parseConversationId,
   parseCronJobId,
   parseCronJobRunId,
@@ -222,7 +221,6 @@ import {
   type CompanionSessionWindowId,
   type CompanionSkillId,
   type CompanionSuggestionId,
-  type ConnectorCredentialId,
   type FigureId,
   type IdmmInterventionId,
   type ExecutionAttemptId,
@@ -5365,23 +5363,12 @@ export type KnowledgeSourceMode = 'live' | 'snapshot';
 
 /** URL source config of a base (wire shape: camelCase, `lastFetchedAt` epoch-ms). */
 export interface IKnowledgeSource {
-  /** Source kind discriminator; "url" for URL sources, "feishu"/… for connectors. */
+  /** Source kind discriminator; "url" is the only kind today. */
   kind: string;
   mode: KnowledgeSourceMode;
   entries: IKnowledgeSourceEntry[];
   /** Last successful snapshot fetch (epoch ms); absent until the first fetch. */
   lastFetchedAt?: number;
-  /** Connector-backed sources: reference to a stored connector credential. */
-  credentialRef?: ConnectorCredentialId;
-  /** Connector-specific scope (e.g. Feishu `{ spaceId | space_id }`). Opaque to the core. */
-  scope?: Record<string, unknown>;
-  /** Connector sync state (cursor + interval + last outcome). */
-  sync?: {
-    intervalMinutes?: number;
-    lastSyncAt?: number;
-    cursor?: unknown;
-    lastError?: string;
-  };
 }
 
 /** Per-batch outcome of a URL-source fetch (create with snapshot source / refresh-source). */
@@ -5425,7 +5412,7 @@ export interface IKnowledgeBase {
   /** Tag keys attached to this base. */
   tags: string[];
   /** Source kind discriminator. */
-  kind: 'blank' | 'local' | 'web' | 'feishu';
+  kind: 'blank' | 'local' | 'web';
   /** Number of unreviewed staged inbox proposals. */
   pending_inbox: number;
 }
@@ -5535,21 +5522,6 @@ export interface IKnowledgeConsumer {
   target_kind: KnowledgeBindingKind | string;
   target_id?: string | null;
   enabled: boolean;
-}
-
-/** Wire-safe connector credential summary (never carries the secret payload). */
-export interface IConnectorCredentialSummary {
-  credentialId: ConnectorCredentialId;
-  /** Connector discriminator: "feishu", … */
-  kind: string;
-  name: string;
-  createdAt: number;
-}
-
-/** Identity returned by a successful connector credential validation. */
-export interface IConnectorIdentity {
-  tenant_name?: string;
-  scopes_available: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -5791,34 +5763,12 @@ const KB_READ_TIMEOUT_MS = 30_000;
 const fromApiKnowledgeBase = (base: IKnowledgeBase): IKnowledgeBase => ({
   ...base,
   knowledge_base_id: parseKnowledgeBaseId(base.knowledge_base_id),
-  source: base.source == null
-    ? base.source
-    : {
-        ...base.source,
-        credentialRef: base.source.credentialRef == null
-          ? undefined
-          : parseConnectorCredentialId(base.source.credentialRef),
-      },
 });
 
 const fromApiKnowledgeBinding = (binding: IKnowledgeBinding): IKnowledgeBinding => ({
   ...binding,
   kb_ids: binding.kb_ids.map(parseKnowledgeBaseId),
 });
-
-const fromApiConnectorCredential = (
-  credential: IConnectorCredentialSummary
-): IConnectorCredentialSummary => {
-  if (Object.prototype.hasOwnProperty.call(credential, 'id')) {
-    throw new TypeError(
-      'connector credential wire payload must use credentialId, not generic id'
-    );
-  }
-  return {
-    ...credential,
-    credentialId: parseConnectorCredentialId(credential.credentialId),
-  };
-};
 
 const parseKnowledgeBindingTargetId = (
   kind: KnowledgeBindingKind,
@@ -5862,7 +5812,7 @@ export const knowledge = {
       description?: string;
       root_path?: string;
       /** Optional URL source; mode 'snapshot' fetches every entry before the response returns (slow — see source_fetch). */
-      source?: { kind: string; mode: KnowledgeSourceMode; entries?: IKnowledgeSourceEntry[]; credentialRef?: ConnectorCredentialId; scope?: Record<string, unknown>; sync?: { intervalMinutes?: number } };
+      source?: { kind: string; mode: KnowledgeSourceMode; entries?: IKnowledgeSourceEntry[] };
       /** Tag keys to assign at creation time. */
       tags?: string[];
     }
@@ -5899,7 +5849,7 @@ export const knowledge = {
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/refresh-source`,
     () => undefined
   ),
-  /** Attach / replace / clear a base's source config (e.g. wire a Feishu connector onto an existing base). */
+  /** Attach / replace / clear a base's source config. */
   setSource: withResponseMap(httpPut<IKnowledgeBase, { knowledge_base_id: KnowledgeBaseId; source: IKnowledgeSource | null }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/source`,
     (p) => ({ source: p.source })
@@ -5987,26 +5937,6 @@ export const knowledge = {
   listConsumers: httpGet<IKnowledgeConsumer[], { knowledge_base_id: KnowledgeBaseId }>((p) => `/api/knowledge/bases/${p.knowledge_base_id}/consumers`, { timeoutMs: KB_READ_TIMEOUT_MS }),
   /** Total unreviewed staged proposals across all bases (sidebar red-dot signal). */
   pendingInboxCount: httpGet<number, void>('/api/knowledge/inbox/pending-count', { timeoutMs: KB_READ_TIMEOUT_MS }),
-  // ── P3 source connectors (Feishu, …) ──
-  /** Pull a connector-backed base's remote docs into snapshots/ (distinct from refresh-source). */
-  syncSource: httpPost<IKnowledgeSourceFetchSummary, { knowledge_base_id: KnowledgeBaseId }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/sync`,
-    () => undefined
-  ),
-  listCredentials: withResponseMap(httpGet<IConnectorCredentialSummary[], void>('/api/knowledge/connectors/credentials'), (items) => items.map(fromApiConnectorCredential)),
-  /** Validate then store a connector credential (probed before encryption; returns a secret-free summary). */
-  createCredential: withResponseMap(httpPost<IConnectorCredentialSummary, { kind: string; name: string; payload: Record<string, unknown> }>(
-    '/api/knowledge/connectors/credentials',
-    (p) => ({ kind: p.kind, name: p.name, payload: p.payload })
-  ), fromApiConnectorCredential),
-  deleteCredential: httpDelete<void, { credential_id: ConnectorCredentialId }>(
-    (p) => `/api/knowledge/connectors/credentials/${p.credential_id}`
-  ),
-  /** Re-probe a stored credential against its remote (the "test connection" action). */
-  testCredential: httpPost<IConnectorIdentity, { credential_id: ConnectorCredentialId }>(
-    (p) => `/api/knowledge/connectors/credentials/${p.credential_id}/test`,
-    () => undefined
-  ),
   onBaseCreated: wsMappedEmitter<IKnowledgeBase>('knowledge.base-created', fromApiKnowledgeBase),
   onBaseUpdated: wsMappedEmitter<IKnowledgeBase>('knowledge.base-updated', fromApiKnowledgeBase),
   onBaseDeleted: wsMappedEmitter<{ knowledge_base_id: KnowledgeBaseId }>(

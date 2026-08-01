@@ -12,14 +12,14 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use futures_util::{StreamExt, stream};
-use nomifun_api_types::{ConnectorCredentialSummary, ConnectorSyncState, KnowledgeMountInfo, KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag, UpdateKnowledgeTagRequest};
+use nomifun_api_types::{KnowledgeMountInfo, KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag, UpdateKnowledgeTagRequest};
 use nomifun_common::{
-    AppError, CompanionId, ConnectorCredentialId, ConversationId, KnowledgeBaseId,
+    AppError, CompanionId, ConversationId, KnowledgeBaseId,
     ProviderWithModel, TerminalId, TimestampMs, UuidV7Error, generate_id,
     now_ms,
 };
 use nomifun_db::models::{CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow};
-use nomifun_db::{IConnectorCredentialRepository, IKnowledgeRepository};
+use nomifun_db::IKnowledgeRepository;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{
@@ -31,7 +31,6 @@ use unicode_normalization::UnicodeNormalization;
 use url::Url;
 
 use crate::autogen::{self, KnowledgeCompleter};
-use crate::connector::{ConnectorCredential, ConnectorIdentity, ConnectorScope, KnowledgeConnector, RemoteDocRef, SyncCursor, SyncPage};
 use crate::events::KnowledgeEventEmitter;
 use crate::mount::{self, MountSpec};
 use crate::source_url::{self, HttpFetcher, PageFetcher};
@@ -138,7 +137,7 @@ pub struct KnowledgeBaseInfo {
     #[serde(default)]
     pub tags: Vec<String>,
     /// UI type discriminator, derived from `managed` + `extra.source`:
-    /// `"blank"` | `"local"` | `"web"` | `"feishu"`.
+    /// `"blank"` | `"local"` | `"web"`.
     pub kind: String,
     /// Number of pending inbox proposals for this base (drives list badge /
     /// detail tab count).
@@ -634,24 +633,6 @@ pub struct KnowledgeService {
     /// avoids repeating slow NAS/OneDrive canonicalization at tree, target and
     /// lifecycle lock boundaries in the same write.
     root_lock_identity_cache: Arc<StdMutex<HashMap<String, String>>>,
-    /// **P3 connectors**: registered source connectors keyed by `kind()`
-    /// (e.g. `"feishu"`). Late-wired at boot (`register_connector`) — same
-    /// discipline as [`Self::completer`], since a connector may depend on the
-    /// agent/http stack built after this service.
-    connectors: RwLock<HashMap<&'static str, Arc<dyn KnowledgeConnector>>>,
-    /// **P3 connectors**: encrypted credential store. `None` until late-wired
-    /// (`set_connector_credentials`); credential endpoints fail with a clear
-    /// 409 until then. Paired with [`Self::cred_key`].
-    cred_repo: RwLock<Option<Arc<dyn IConnectorCredentialRepository>>>,
-    /// **P3 connectors**: AES-256-GCM key (machine-bound, derived from the JWT
-    /// secret — same key the provider api-key column uses) for encrypting
-    /// credential payloads at rest. Late-wired alongside [`Self::cred_repo`].
-    cred_key: RwLock<Option<[u8; 32]>>,
-    /// Serializes credential deletion with source creation/attachment. The
-    /// SQLite credential repository transactionally rejects already-persisted
-    /// references; this application-layer lock closes the check-then-persist
-    /// race for new `extra.source.credentialRef` values.
-    credential_reference_lock: AsyncMutex<()>,
     /// Additional backend-managed workspace roots (beyond `data_dir`) whose
     /// paths map to the `__default__` workpath key — late-wired with the
     /// terminal work dir so this service and the terminal service derive the
@@ -682,9 +663,6 @@ struct PreparedSourceFile {
     rel_path: String,
     source_label: String,
     content: String,
-    /// Exact connector source identity used to migrate snapshots written by
-    /// the legacy lossy filename scheme. URL-source files leave this unset.
-    connector_source_url: Option<String>,
 }
 
 struct SourcePublicationOutcome {
@@ -718,10 +696,6 @@ impl KnowledgeService {
             base_lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             document_tree_locks: Arc::new(StdMutex::new(HashMap::new())),
             root_lock_identity_cache: Arc::new(StdMutex::new(HashMap::new())),
-            connectors: RwLock::new(HashMap::new()),
-            cred_repo: RwLock::new(None),
-            cred_key: RwLock::new(None),
-            credential_reference_lock: AsyncMutex::new(()),
             extra_managed_roots: RwLock::new(Vec::new()),
             binding_changed_hook: RwLock::new(None),
         }
@@ -812,415 +786,6 @@ impl KnowledgeService {
     /// sources). `None` ⇒ no browser backend → fall back to the HTTP [`Self::fetcher`].
     fn render_fetcher(&self) -> Option<Arc<dyn PageFetcher>> {
         self.render_fetcher.read().ok().and_then(|guard| guard.clone())
-    }
-
-    // ── P3 connectors: registry + credential store (late-wired) ───────
-
-    /// Register a source connector (keyed by its `kind()`). Boot-time
-    /// late-wire, mirroring [`Self::set_completer`] — connectors may depend on
-    /// the http/agent stack constructed after this service.
-    pub fn register_connector(&self, connector: Arc<dyn KnowledgeConnector>) {
-        let kind = connector.kind();
-        self.connectors
-            .write()
-            .expect("knowledge connectors lock poisoned")
-            .insert(kind, connector);
-    }
-
-    /// The connector registered for `kind`, if any.
-    fn connector_for(&self, kind: &str) -> Option<Arc<dyn KnowledgeConnector>> {
-        self.connectors.read().ok()?.get(kind).cloned()
-    }
-
-    /// Late-wire the encrypted credential store: the repository plus the
-    /// machine-bound AES key (derive it once from the JWT secret, same key the
-    /// provider api-key column uses). Until this is called, every credential
-    /// endpoint returns a clear 409.
-    pub fn set_connector_credentials(&self, repo: Arc<dyn IConnectorCredentialRepository>, key: [u8; 32]) {
-        *self.cred_repo.write().expect("knowledge cred_repo lock poisoned") = Some(repo);
-        *self.cred_key.write().expect("knowledge cred_key lock poisoned") = Some(key);
-    }
-
-    fn cred_repo(&self) -> Result<Arc<dyn IConnectorCredentialRepository>, AppError> {
-        self.cred_repo
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
-            .ok_or_else(|| AppError::Conflict("connector credential store is not configured".into()))
-    }
-
-    fn cred_key(&self) -> Result<[u8; 32], AppError> {
-        self.cred_key
-            .read()
-            .ok()
-            .and_then(|g| *g)
-            .ok_or_else(|| AppError::Conflict("connector credential store is not configured".into()))
-    }
-
-    /// Decrypt a stored credential into the in-memory [`ConnectorCredential`]
-    /// the connector authenticates with.
-    async fn load_credential(
-        &self,
-        credential_id: &ConnectorCredentialId,
-    ) -> Result<ConnectorCredential, AppError> {
-        let repo = self.cred_repo()?;
-        let key = self.cred_key()?;
-        let row = repo
-            .get(credential_id)
-            .await?
-            .ok_or_else(|| {
-                AppError::NotFound(format!(
-                    "connector credential not found: {credential_id}"
-                ))
-            })?;
-        let plaintext = nomifun_common::decrypt_string(&row.payload_encrypted, &key)?;
-        let payload: serde_json::Value = serde_json::from_str(&plaintext)
-            .map_err(|e| AppError::Internal(format!("credential payload decode failed: {e}")))?;
-        Ok(ConnectorCredential {
-            credential_id: Some(row.credential_id),
-            kind: row.kind,
-            name: row.name,
-            payload,
-        })
-    }
-
-    /// All stored credentials (secret-free summaries).
-    pub async fn list_credentials(&self) -> Result<Vec<ConnectorCredentialSummary>, AppError> {
-        let repo = self.cred_repo()?;
-        let rows = repo.list().await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| ConnectorCredentialSummary {
-                credential_id: r.credential_id,
-                kind: r.kind,
-                name: r.name,
-                created_at: r.created_at,
-            })
-            .collect())
-    }
-
-    /// Validate then store a new credential. The payload (e.g. Feishu
-    /// `{ app_id, app_secret }`) is probed against the remote before being
-    /// AES-encrypted at rest — bad secrets fail fast and are never persisted.
-    pub async fn create_credential(
-        &self,
-        kind: &str,
-        name: &str,
-        payload: serde_json::Value,
-    ) -> Result<ConnectorCredentialSummary, AppError> {
-        let connector = self
-            .connector_for(kind)
-            .ok_or_else(|| AppError::BadRequest(format!("no connector registered for kind \"{kind}\"")))?;
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(AppError::BadRequest("credential name must not be empty".into()));
-        }
-        // Fail fast: never persist a credential that can't authenticate.
-        let probe = ConnectorCredential {
-            credential_id: None,
-            kind: kind.to_owned(),
-            name: name.to_owned(),
-            payload: payload.clone(),
-        };
-        connector.validate_credentials(&probe).await?;
-
-        let key = self.cred_key()?;
-        let repo = self.cred_repo()?;
-        let plaintext =
-            serde_json::to_string(&payload).map_err(|e| AppError::Internal(format!("payload encode failed: {e}")))?;
-        let encrypted = nomifun_common::encrypt_string(&plaintext, &key)?;
-        let row = repo.create(kind, name, &encrypted).await?;
-        Ok(ConnectorCredentialSummary {
-            credential_id: row.credential_id,
-            kind: row.kind,
-            name: row.name,
-            created_at: row.created_at,
-        })
-    }
-
-    pub async fn delete_credential(
-        &self,
-        credential_id: &ConnectorCredentialId,
-    ) -> Result<(), AppError> {
-        let _reference_guard = self.credential_reference_lock.lock().await;
-        let repo = self.cred_repo()?;
-        repo.delete(credential_id).await?;
-        Ok(())
-    }
-
-    /// Re-probe a stored credential against its remote (the UI "test
-    /// connection" action). Returns the connector identity on success.
-    pub async fn test_credential(
-        &self,
-        credential_id: &ConnectorCredentialId,
-    ) -> Result<ConnectorIdentity, AppError> {
-        let cred = self.load_credential(credential_id).await?;
-        let connector = self
-            .connector_for(&cred.kind)
-            .ok_or_else(|| AppError::BadRequest(format!("no connector registered for kind \"{}\"", cred.kind)))?;
-        connector.validate_credentials(&cred).await
-    }
-
-    /// **P3 sync coordinator** — pull a connector-backed base's remote
-    /// documents into `{root}/snapshots/*.md` (the snapshot-as-seam invariant:
-    /// produces the same markdown shape the URL source does, so retrieval /
-    /// mount / search stay untouched). Paginates `list_documents`, serially
-    /// fetches each (the connector guards its own rate limit), compresses
-    /// oversized bodies via the completer, moves vanished docs to
-    /// `snapshots/_trash/`, then persists the cursor + last-sync stamp.
-    pub async fn sync_connector_source(&self, kb_id: &str) -> Result<RefreshSourceSummary, AppError> {
-        let mut row = self.require_base(kb_id).await?;
-        let mut source = source_from_extra(&row.extra)
-            .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
-            .ok_or_else(|| AppError::BadRequest("knowledge base has no source to sync".into()))?;
-        if source.kind == "url" {
-            return Err(AppError::BadRequest(
-                "URL sources use the refresh endpoint, not connector sync".into(),
-            ));
-        }
-        let connector = self.connector_for(&source.kind).ok_or_else(|| {
-            AppError::BadRequest(format!("no connector registered for kind \"{}\"", source.kind))
-        })?;
-        let cred_ref = source
-            .credential_ref
-            .as_ref()
-            .ok_or_else(|| AppError::BadRequest("connector source is missing credential_ref".into()))?;
-        let cred = self.load_credential(cred_ref).await?;
-        let scope = ConnectorScope(source.scope.clone().unwrap_or(serde_json::Value::Null));
-
-        // Resume the incremental cursor from persisted sync state. The
-        // watermark (remote max edit_time) is the real filter input; legacy
-        // rows without one fall back to `last_sync_at`.
-        let prev_sync = source.sync.clone().unwrap_or_default();
-        let prev_watermark = prev_sync.watermark.or(prev_sync.last_sync_at);
-        let cursor = SyncCursor { last_sync_at: prev_watermark, opaque: prev_sync.cursor.clone() };
-
-        let root = PathBuf::from(&row.root_path);
-
-        // Phase 1 — paginate list_documents, collecting refs + tombstones.
-        // A mid-pagination failure is NON-fatal: keep whatever pages we got and
-        // record the error (the watermark is held below so the run is retried),
-        // rather than discarding a large partial sync.
-        let mut all_docs: Vec<RemoteDocRef> = Vec::new();
-        let mut deleted_ids: Vec<String> = Vec::new();
-        let mut page_token: Option<String> = None;
-        let mut last_opaque = prev_sync.cursor.clone();
-        let mut list_errored = false;
-        loop {
-            match connector.list_documents(&cred, &scope, &cursor, page_token.as_deref()).await {
-                Ok(page) => {
-                    let SyncPage { docs, deleted_ids: dels, next_page_token, updated_cursor } = page;
-                    all_docs.extend(docs);
-                    deleted_ids.extend(dels);
-                    last_opaque = updated_cursor.opaque;
-                    match next_page_token {
-                        Some(tok) if !tok.is_empty() => page_token = Some(tok),
-                        _ => break,
-                    }
-                }
-                Err(e) => {
-                    // The very first page failing with nothing collected is a
-                    // genuine sync failure — surface it. A later page failing
-                    // leaves a usable partial set.
-                    if all_docs.is_empty() && deleted_ids.is_empty() {
-                        return Err(e);
-                    }
-                    tracing::warn!(error = %e, "feishu pagination failed mid-run; syncing partial set");
-                    list_errored = true;
-                    break;
-                }
-            }
-        }
-        // Remote high-water-mark across ALL pages (the per-page cursor only sees
-        // the last page since the same input cursor is passed each page).
-        let batch_max_edit = all_docs.iter().map(|d| d.edit_time).max();
-
-        // Phase 2 — serial fetch → compress → prepare snapshots in memory
-        // (deterministic slug per remote_id, so deletions below can target
-        // files without frontmatter matching). No filesystem side effect is
-        // allowed until the source config is revalidated in phase 3.
-        let completer = self.completer();
-        let mut errors: Vec<String> = Vec::new();
-        let mut prepared_files = Vec::new();
-        for doc in &all_docs {
-            let fetched_doc = match connector.fetch_document(&cred, doc).await {
-                Ok(d) => d,
-                Err(e) => {
-                    errors.push(format!("{}: {e}", doc.title));
-                    continue;
-                }
-            };
-
-            let body = condense_snapshot_body(fetched_doc.markdown, completer.as_deref()).await;
-
-            // The filename is a pure, order-independent function of the
-            // exact remote id. In particular, ids which differ only by case
-            // or punctuation must never be assigned `slug` / `slug-2`
-            // according to whichever pagination order happened to arrive.
-            let slug = connector_doc_slug(&fetched_doc.remote_id);
-
-            let fetched_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            // Prefer the canonical web URL for citation; fall back to a stable
-            // synthetic id so every snapshot still carries a source_url line.
-            let src_url = fetched_doc
-                .source_url
-                .clone()
-                .unwrap_or_else(|| format!("{}://{}", source.kind, fetched_doc.remote_id));
-            let content = connector_snapshot_markdown(
-                &src_url,
-                &fetched_at,
-                Some(&fetched_doc.title),
-                &fetched_doc.remote_id,
-                &body,
-            );
-            let rel_path =
-                format!("{}/{slug}.md", source_url::SNAPSHOT_REL_DIR);
-            prepared_files.push(PreparedSourceFile {
-                rel_path,
-                source_label: fetched_doc.title,
-                content,
-                connector_source_url: Some(src_url),
-            });
-        }
-
-        // Phase 3 — one source commit boundary. A user source switch/detach
-        // that wins during the long remote work causes a conflict here before
-        // any old snapshot is written or moved.
-        let _tree_guard =
-            self.acquire_document_tree_write_lock(&row).await?;
-        let _base_guard =
-            self.acquire_base_lifecycle_write_lock(&row).await?;
-        let mut current = self.current_source_publication_row(&row).await?;
-        validate_knowledge_root_bounded(root.clone()).await?;
-
-        let mut published_connector_urls = HashSet::new();
-        let mut fetched = 0usize;
-        for file in prepared_files {
-            let path = match safe_md_path_bounded(
-                root.clone(),
-                file.rel_path.clone(),
-            )
-            .await
-            {
-                Ok(path) => path,
-                Err(error) => {
-                    errors.push(format!("{}: {error}", file.source_label));
-                    continue;
-                }
-            };
-            match write_text_atomic(&path, &file.content).await {
-                Ok(()) => {
-                    fetched += 1;
-                    self.invalidate_search_cache_path(&path);
-                    if let Some(source_url) = &file.connector_source_url {
-                        published_connector_urls.insert(source_url.clone());
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        source = %file.source_label,
-                        %error,
-                        "failed to publish connector snapshot"
-                    );
-                    errors.push(format!("{}: {error}", file.source_label));
-                }
-            }
-        }
-
-        // Upgrade compatibility: older releases named connector snapshots
-        // with a lossy lower-cased slug. Incremental connectors may never list
-        // an unchanged document again, so migration is lazy and file-based:
-        // when a document is updated, identify old aliases by their exact
-        // source_url frontmatter and quarantine them only after the new hashed
-        // snapshot has been published.
-        if !published_connector_urls.is_empty()
-            && let Err(error) = quarantine_connector_snapshot_aliases(
-                &root,
-                &published_connector_urls,
-            )
-            .await
-        {
-            tracing::warn!(%error, "failed to migrate legacy connector snapshots");
-            errors.push(format!("legacy connector snapshot migration: {error}"));
-        }
-
-        // Move vanished docs to a unique, recoverable trash name. Fixed trash
-        // names overwrite on Unix but fail on Windows after a re-add/delete
-        // cycle, so every quarantine entry is no-clobber on every platform.
-        let mut deleted_source_urls = HashSet::new();
-        for id in &deleted_ids {
-            if let Err(error) =
-                quarantine_connector_snapshot(&root, id).await
-            {
-                tracing::warn!(
-                    remote_id = id,
-                    %error,
-                    "failed to quarantine deleted connector snapshot"
-                );
-                errors.push(format!("deleted {id}: {error}"));
-            }
-            deleted_source_urls.insert(format!("{}://{id}", source.kind));
-            if let Some(source_url) = connector.source_url_for_remote_id(id) {
-                deleted_source_urls.insert(source_url);
-            }
-        }
-        // A tombstone can refer to a snapshot written before hashed
-        // filenames existed. Match its exact connector URL instead of the
-        // old lossy slug, which could target another document.
-        if !deleted_source_urls.is_empty()
-            && let Err(error) = quarantine_connector_snapshot_aliases(
-                &root,
-                &deleted_source_urls,
-            )
-            .await
-        {
-            tracing::warn!(%error, "failed to quarantine legacy deleted connector snapshots");
-            errors.push(format!("legacy deleted connector snapshots: {error}"));
-        }
-
-        // Persist the cursor + watermark + last-sync stamp + any error summary
-        // while the same lifecycle writer still excludes source changes.
-        let had_errors = list_errored || !errors.is_empty();
-        let last_error = if errors.is_empty() {
-            list_errored.then(|| "pagination failed mid-run; partial sync".to_owned())
-        } else {
-            Some(errors.join("; "))
-        };
-        let last_sync_at = Some(now_ms());
-        // Advance the remote watermark ONLY on a fully clean run. If any doc
-        // fetch/write failed (or pagination was partial), hold the previous
-        // watermark so every changed doc — including the failed ones — is
-        // re-evaluated next run instead of being skipped forever.
-        let watermark = if had_errors {
-            prev_watermark
-        } else {
-            match (prev_watermark, batch_max_edit) {
-                (Some(p), Some(b)) => Some(p.max(b)),
-                (p, b) => b.or(p),
-            }
-        };
-        source.sync = Some(ConnectorSyncState {
-            interval_minutes: prev_sync.interval_minutes,
-            last_sync_at,
-            watermark,
-            cursor: last_opaque,
-            last_error,
-        });
-        // Keep the URL-source stamp coherent too (mount/info reads it).
-        if fetched > 0 {
-            source.last_fetched_at = last_sync_at;
-        }
-        self.persist_source_in_current_row(&mut current, &source)
-            .await?;
-        row = current;
-        let info = self.row_to_info(row).await?;
-        self.emitter.emit_base_updated(&info);
-        Ok(RefreshSourceSummary {
-            fetched,
-            failed: errors.len(),
-            errors,
-            last_fetched_at: source.last_fetched_at,
-        })
     }
 
     /// **P3-K3 backend selection**: pick the page-fetcher for one source entry.
@@ -1365,17 +930,8 @@ impl KnowledgeService {
             return Err(AppError::BadRequest("knowledge base name must not be empty".into()));
         }
         let mut source = source;
-        let _credential_reference_guard = if source
-            .as_ref()
-            .is_some_and(|source| source.kind != "url")
-        {
-            Some(self.credential_reference_lock.lock().await)
-        } else {
-            None
-        };
         if let Some(src) = &mut source {
             validate_source(src)?;
-            self.ensure_source_credential_exists(src).await?;
             // Server-assigned; a client-sent value would lie until the first fetch.
             src.last_fetched_at = None;
         }
@@ -1502,9 +1058,7 @@ impl KnowledgeService {
         self.repo.insert_base(&row).await?;
         let info = self.row_to_info(row.clone()).await?;
         self.emitter.emit_base_created(&info);
-        // Only URL sources owe a create-time snapshot fetch. Connector-backed
-        // snapshot sources (empty URL `entries`) are populated by the explicit
-        // `sync_connector_source` pipeline instead, so they skip this path.
+        // Only URL sources owe a create-time snapshot fetch.
         let snapshot_source =
             source.filter(|s| s.mode == KnowledgeSourceMode::Snapshot && s.kind == "url");
         Ok((row, info, snapshot_source))
@@ -3642,7 +3196,6 @@ impl KnowledgeService {
                 rel_path,
                 source_label: entry.url.clone(),
                 content,
-                connector_source_url: None,
             });
         }
         (files, errors)
@@ -3875,28 +3428,17 @@ impl KnowledgeService {
 
     /// Attach, replace, or clear a base's source config (`extra.source`).
     /// `Some(src)` validates + persists it (server clears any client-sent
-    /// `last_fetched_at`); `None` removes the source. Used to wire a connector
-    /// (Feishu, …) onto an existing base, or to detach one. Emits
-    /// `base-updated`. Does NOT fetch/sync — callers trigger
-    /// `sync_connector_source` / `refresh_source` afterward.
+    /// `last_fetched_at`); `None` removes the source. Emits `base-updated`.
+    /// Does NOT fetch — callers trigger `refresh_source` afterward.
     pub async fn set_source(
         &self,
         kb_id: &str,
         source: Option<KnowledgeSource>,
     ) -> Result<KnowledgeBaseInfo, AppError> {
         let mut row = self.require_base(kb_id).await?;
-        let _credential_reference_guard = if source
-            .as_ref()
-            .is_some_and(|source| source.kind != "url")
-        {
-            Some(self.credential_reference_lock.lock().await)
-        } else {
-            None
-        };
         match source {
             Some(mut src) => {
                 validate_source(&src)?;
-                self.ensure_source_credential_exists(&src).await?;
                 src.last_fetched_at = None;
                 self.persist_source(&mut row, &src).await?;
             }
@@ -3928,34 +3470,6 @@ impl KnowledgeService {
         let info = self.row_to_info(row).await?;
         self.emitter.emit_base_updated(&info);
         Ok(info)
-    }
-
-    async fn ensure_source_credential_exists(
-        &self,
-        source: &KnowledgeSource,
-    ) -> Result<(), AppError> {
-        if source.kind == "url" {
-            return Ok(());
-        }
-        let credential_id = source.credential_ref.as_ref().ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "connector source \"{}\" requires a credential_ref",
-                source.kind
-            ))
-        })?;
-        let repo = self.cred_repo()?;
-        let credential = repo.get(credential_id).await?.ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "connector credential not found: {credential_id}"
-            ))
-        })?;
-        if credential.kind != source.kind {
-            return Err(AppError::BadRequest(format!(
-                "connector credential {credential_id} has kind \"{}\", expected \"{}\"",
-                credential.kind, source.kind
-            )));
-        }
-        Ok(())
     }
 
     // ── Bindings & mounting ─────────────────────────────────────────
@@ -4974,13 +4488,11 @@ fn tags_from_row(row: &KnowledgeBaseRow) -> Result<Vec<String>, AppError> {
 }
 
 /// Derive the UI type discriminator for a knowledge base:
-/// - `"feishu"` when a connector-backed source has `kind == "feishu"`
 /// - `"web"` when a URL source is attached (`kind == "url"`)
 /// - `"blank"` for managed bases with no source (user creates from scratch)
 /// - `"local"` for non-managed (user-referenced directory) bases
 fn derive_kind(managed: bool, source: Option<&KnowledgeSource>) -> &'static str {
     match source.map(|s| s.kind.as_str()) {
-        Some("feishu") => "feishu",
         Some("url") => "web",
         _ => if managed { "blank" } else { "local" },
     }
@@ -4998,114 +4510,14 @@ fn derive_kind(managed: bool, source: Option<&KnowledgeSource>) -> &'static str 
 /// validation in the loop. `rendered` is best-effort routing (browser backend
 /// when wired, HTTP otherwise), so an unsupported value can never make a config
 /// invalid; there is intentionally nothing to reject.
-/// Validate a source config before it is persisted. Dispatches on `kind`:
-/// `"url"` runs the existing URL-entry checks; any other kind is treated as a
-/// connector-backed source and gets structural validation only (credential
-/// reachability is probed at credential-creation and at sync time). Connectors
-/// are snapshot-only in v1.
 fn validate_source(source: &KnowledgeSource) -> Result<(), AppError> {
-    if source.kind == "url" {
-        return validate_url_source(source);
-    }
-    if source.mode != KnowledgeSourceMode::Snapshot {
+    if source.kind != "url" {
         return Err(AppError::BadRequest(format!(
-            "connector source \"{}\" must use snapshot mode",
+            "unsupported source kind \"{}\" (only \"url\" is supported)",
             source.kind
         )));
     }
-    if source.credential_ref.is_none() {
-        return Err(AppError::BadRequest(format!(
-            "connector source \"{}\" requires a credential_ref",
-            source.kind
-        )));
-    }
-    match &source.scope {
-        Some(v) if !v.is_null() => {}
-        _ => {
-            return Err(AppError::BadRequest(format!(
-                "connector source \"{}\" requires a scope",
-                source.kind
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// A filesystem-safe, deterministic slug for a connector document, derived
-/// from its exact stable `remote_id`. The readable prefix alone is not an
-/// identity: lower-casing and punctuation folding make values such as `A:B`
-/// and `a/b` collide. Appending the full SHA-256 digest makes publication and
-/// deletion order-independent while keeping the component comfortably below
-/// the 255-byte cross-platform limit.
-fn connector_doc_slug(remote_id: &str) -> String {
-    const READABLE_PREFIX_MAX: usize = 80;
-
-    let mut slug = String::with_capacity(READABLE_PREFIX_MAX);
-    let mut last_dash = false;
-    for ch in remote_id.chars() {
-        if ch.is_ascii_alphanumeric() {
-            if slug.len() == READABLE_PREFIX_MAX {
-                break;
-            }
-            slug.push(ch.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            if slug.len() == READABLE_PREFIX_MAX {
-                break;
-            }
-            slug.push('-');
-            last_dash = true;
-        }
-    }
-    let trimmed = slug.trim_matches('-');
-    let readable = if trimmed.is_empty() { "doc" } else { trimmed };
-    format!("{readable}-{}", content_sha256(remote_id))
-}
-
-const CONNECTOR_REMOTE_ID_HASH_FIELD: &str = "connector_remote_id_sha256";
-
-/// Extend generic URL snapshot frontmatter with a stable connector identity.
-/// The remote id itself is not exposed; its full hash distinguishes current
-/// files from legacy aliases even when a provider reuses one source URL.
-fn connector_snapshot_markdown(
-    source_url: &str,
-    fetched_at: &str,
-    title: Option<&str>,
-    remote_id: &str,
-    body: &str,
-) -> String {
-    let markdown =
-        source_url::snapshot_markdown(source_url, fetched_at, title, body);
-    let Some(rest) = markdown.strip_prefix("---\n") else {
-        return markdown;
-    };
-    format!(
-        "---\n{CONNECTOR_REMOTE_ID_HASH_FIELD}: {}\n{rest}",
-        content_sha256(remote_id)
-    )
-}
-
-fn has_connector_snapshot_identity(content: &str) -> bool {
-    let mut lines = content.lines();
-    if lines.next() != Some("---") {
-        return false;
-    }
-    for line in lines {
-        if line.trim() == "---" {
-            return false;
-        }
-        let Some(value) = line
-            .trim()
-            .strip_prefix(CONNECTOR_REMOTE_ID_HASH_FIELD)
-            .and_then(|line| line.strip_prefix(':'))
-            .map(str::trim)
-        else {
-            continue;
-        };
-        return value.len() == 64
-            && value.bytes().all(|byte| byte.is_ascii_hexdigit());
-    }
-    false
+    validate_url_source(source)
 }
 
 fn validate_url_source(source: &KnowledgeSource) -> Result<(), AppError> {
@@ -5261,151 +4673,6 @@ async fn quarantine_snapshot_file(
             ))
         })?;
     Ok(true)
-}
-
-async fn quarantine_connector_snapshot(
-    root: &Path,
-    remote_id: &str,
-) -> Result<bool, AppError> {
-    let slug = connector_doc_slug(remote_id);
-    let source = safe_md_path_bounded(
-        root.to_path_buf(),
-        format!(
-            "{}/{slug}.md",
-            source_url::SNAPSHOT_REL_DIR
-        ),
-    )
-    .await?;
-    quarantine_snapshot_file(root, &source, None).await
-}
-
-/// Quarantine connector snapshots written under an older filename scheme by
-/// matching their exact `source_url` frontmatter. This is intentionally a
-/// directory scan rather than a legacy-slug lookup: the old slug was lossy
-/// and could point at a different remote document. Current-format snapshots
-/// carry an identity marker and are never treated as aliases, even if an
-/// incremental batch omits them and a provider reuses a source URL.
-async fn quarantine_connector_snapshot_aliases(
-    root: &Path,
-    source_urls: &HashSet<String>,
-) -> Result<usize, AppError> {
-    validate_knowledge_root_bounded(root.to_path_buf()).await?;
-    let snap_dir = root.join(source_url::SNAPSHOT_REL_DIR);
-    let snapshot_metadata = match tokio::fs::symlink_metadata(&snap_dir).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(0);
-        }
-        Err(error) => {
-            return Err(AppError::Internal(format!(
-                "failed to inspect connector snapshots directory: {error}"
-            )));
-        }
-    };
-    if metadata_is_link_or_reparse(&snap_dir, &snapshot_metadata)
-        || !snapshot_metadata.is_dir()
-    {
-        return Err(AppError::Conflict(
-            "connector snapshots directory must be a real directory, not a link or reparse point"
-                .into(),
-        ));
-    }
-
-    let mut legacy_matches: HashMap<String, Vec<(PathBuf, String)>> =
-        HashMap::new();
-    let mut dir = tokio::fs::read_dir(&snap_dir).await.map_err(|error| {
-        AppError::Internal(format!(
-            "failed to read connector snapshots directory: {error}"
-        ))
-    })?;
-    while let Some(entry) = dir.next_entry().await.map_err(|error| {
-        AppError::Internal(format!(
-            "failed to scan connector snapshots directory: {error}"
-        ))
-    })? {
-        let path = entry.path();
-        let metadata = match tokio::fs::symlink_metadata(&path).await {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                continue;
-            }
-            Err(error) => {
-                return Err(AppError::Internal(format!(
-                    "failed to inspect connector snapshot {}: {error}",
-                    path.display()
-                )));
-            }
-        };
-        if metadata_is_link_or_reparse(&path, &metadata) {
-            return Err(AppError::Conflict(format!(
-                "connector snapshot is a link or reparse point: {}",
-                path.display()
-            )));
-        }
-        if !metadata.is_file() || !is_md(&path) {
-            continue;
-        }
-        let content = tokio::time::timeout(
-            KNOWLEDGE_FILE_IO_TIMEOUT,
-            tokio::fs::read_to_string(&path),
-        )
-        .await
-        .map_err(|_| {
-            AppError::Timeout(format!(
-                "connector snapshot read timed out: {}",
-                path.display()
-            ))
-        })?
-        .map_err(|error| {
-            AppError::Internal(format!(
-                "failed to read connector snapshot {}: {error}",
-                path.display()
-            ))
-        })?;
-        if has_connector_snapshot_identity(&content) {
-            continue;
-        }
-        let Some(source_url) = source_url::snapshot_source_url(&content) else {
-            continue;
-        };
-        if !source_urls.contains(source_url.trim()) {
-            continue;
-        }
-        legacy_matches
-            .entry(source_url.trim().to_owned())
-            .or_default()
-            .push((path, content));
-    }
-
-    // A legacy file has no remote-id marker. When more than one such file
-    // shares a URL, there is no safe way to know which remote id it belongs
-    // to. Detect every ambiguity before moving anything, keep all candidates
-    // live, and surface a retryable sync error instead of deleting a sibling.
-    if let Some((source_url, candidates)) =
-        legacy_matches.iter().find(|(_, candidates)| candidates.len() > 1)
-    {
-        return Err(AppError::Conflict(format!(
-            "cannot safely migrate or delete {} legacy connector snapshots sharing source URL {source_url}",
-            candidates.len()
-        )));
-    }
-
-    let mut quarantined = 0usize;
-    for candidates in legacy_matches.into_values() {
-        let (path, content) = candidates
-            .into_iter()
-            .next()
-            .expect("non-empty legacy snapshot group");
-        if quarantine_snapshot_file(root, &path, Some(&content)).await? {
-            quarantined += 1;
-        } else {
-            return Err(AppError::Conflict(format!(
-                "connector snapshot changed while it was being migrated or deleted: {}",
-                path.display()
-            )));
-        }
-    }
-    Ok(quarantined)
 }
 
 /// Quarantine `{root}/snapshots/*.md` files whose frontmatter `source_url` no
@@ -8237,7 +7504,6 @@ fn deduplicate_slug(base: &str, existing: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_db::models::ConnectorCredentialRow;
 
     const TEST_OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const TEST_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000011";
@@ -8250,64 +7516,6 @@ mod tests {
     const TEST_KB_PENDING: &str = "0190f5fe-7c00-7a00-8000-000000000091";
     const TEST_KB_LIVE: &str = "0190f5fe-7c00-7a00-8000-000000000092";
     const TEST_KB_STAMPED: &str = "0190f5fe-7c00-7a00-8000-000000000093";
-
-    #[derive(Default)]
-    struct TestCredentialRepo {
-        rows: StdMutex<Vec<ConnectorCredentialRow>>,
-    }
-
-    #[async_trait::async_trait]
-    impl IConnectorCredentialRepository for TestCredentialRepo {
-        async fn list(&self) -> Result<Vec<ConnectorCredentialRow>, nomifun_db::DbError> {
-            Ok(self.rows.lock().unwrap().clone())
-        }
-
-        async fn get(
-            &self,
-            credential_id: &ConnectorCredentialId,
-        ) -> Result<Option<ConnectorCredentialRow>, nomifun_db::DbError> {
-            Ok(self
-                .rows
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|row| &row.credential_id == credential_id)
-                .cloned())
-        }
-
-        async fn create(
-            &self,
-            kind: &str,
-            name: &str,
-            payload_encrypted: &str,
-        ) -> Result<ConnectorCredentialRow, nomifun_db::DbError> {
-            let row = ConnectorCredentialRow {
-                credential_id: ConnectorCredentialId::new(),
-                kind: kind.to_owned(),
-                name: name.to_owned(),
-                payload_encrypted: payload_encrypted.to_owned(),
-                created_at: 1,
-                updated_at: 1,
-            };
-            self.rows.lock().unwrap().push(row.clone());
-            Ok(row)
-        }
-
-        async fn delete(
-            &self,
-            credential_id: &ConnectorCredentialId,
-        ) -> Result<(), nomifun_db::DbError> {
-            let mut rows = self.rows.lock().unwrap();
-            let before = rows.len();
-            rows.retain(|row| &row.credential_id != credential_id);
-            if rows.len() == before {
-                return Err(nomifun_db::DbError::NotFound(format!(
-                    "connector credential {credential_id}"
-                )));
-            }
-            Ok(())
-        }
-    }
 
     #[test]
     fn canonical_entity_target_id_accepts_bare_uuidv7_and_rejects_legacy_prefix() {
@@ -9920,9 +9128,6 @@ mod tests {
                 .collect(),
             // A client-sent value must be discarded by create.
             last_fetched_at: Some(42),
-            credential_ref: None,
-            scope: None,
-            sync: None,
         }
     }
 
@@ -10241,9 +9446,6 @@ mod tests {
                 KnowledgeSourceEntry { url: rendered_url.clone(), title: None, rendered: true },
             ],
             last_fetched_at: None,
-            credential_ref: None,
-            scope: None,
-            sync: None,
         };
         let kb = service.create_base("混合库", "", None, Some(source)).await.unwrap();
 
@@ -10289,9 +9491,6 @@ mod tests {
             mode: KnowledgeSourceMode::Snapshot,
             entries: vec![KnowledgeSourceEntry { url: url.clone(), title: None, rendered: true }],
             last_fetched_at: None,
-            credential_ref: None,
-            scope: None,
-            sync: None,
         };
         let kb = service.create_base("回退库", "", None, Some(source)).await.unwrap();
 
@@ -10760,9 +9959,6 @@ mod tests {
                     rendered: false,
                 }],
                 last_fetched_at: stamp,
-                credential_ref: None,
-                scope: None,
-                sync: None,
             };
             repo.bases.lock().unwrap().push(KnowledgeBaseRow {
                 id: 0,
@@ -13239,495 +12435,6 @@ mod tests {
         );
     }
 
-    /// **P3 connector sync e2e**: register a mock connector + credential store,
-    /// create a connector-backed base, and prove `sync_connector_source` writes
-    /// one snapshot per remote doc using a stable collision-resistant filename,
-    /// persists the cursor, and on a second sync moves a vanished doc into
-    /// `snapshots/_trash/` (never hard-deletes).
-    #[tokio::test]
-    async fn portable_writeback_connector_sync_is_collision_safe_and_migrates_legacy_files() {
-        use crate::connector::FetchedConnectorDoc;
-        struct MockConn {
-            docs: StdMutex<Vec<RemoteDocRef>>,
-            deleted: StdMutex<Vec<String>>,
-        }
-        #[async_trait::async_trait]
-        impl KnowledgeConnector for MockConn {
-            fn kind(&self) -> &'static str {
-                "mock"
-            }
-            fn source_url_for_remote_id(&self, remote_id: &str) -> Option<String> {
-                Some(if matches!(
-                    remote_id,
-                    "SHARED:A"
-                        | "SHARED:B"
-                        | "LEGACY:SHARED:A"
-                        | "LEGACY:SHARED:B"
-                ) {
-                    "https://mock/shared".into()
-                } else {
-                    format!("https://mock/{remote_id}")
-                })
-            }
-            async fn validate_credentials(&self, cred: &ConnectorCredential) -> Result<ConnectorIdentity, AppError> {
-                // Reject an obviously-bad payload so create_credential's fail-fast is exercised elsewhere.
-                if cred.payload.get("token").is_none() {
-                    return Err(AppError::Unauthorized("missing token".into()));
-                }
-                Ok(ConnectorIdentity { tenant_name: Some("T".into()), scopes_available: vec!["wiki".into()] })
-            }
-            async fn list_documents(
-                &self,
-                _cred: &ConnectorCredential,
-                _scope: &ConnectorScope,
-                _cursor: &SyncCursor,
-                _page_token: Option<&str>,
-            ) -> Result<SyncPage, AppError> {
-                Ok(SyncPage {
-                    docs: self.docs.lock().unwrap().clone(),
-                    deleted_ids: self.deleted.lock().unwrap().clone(),
-                    next_page_token: None,
-                    updated_cursor: SyncCursor { last_sync_at: Some(123), opaque: serde_json::json!({ "p": 1 }) },
-                })
-            }
-            async fn fetch_document(
-                &self,
-                _cred: &ConnectorCredential,
-                doc: &RemoteDocRef,
-            ) -> Result<FetchedConnectorDoc, AppError> {
-                Ok(FetchedConnectorDoc {
-                    remote_id: doc.remote_id.clone(),
-                    title: doc.title.clone(),
-                    markdown: format!("# {}\n\nbody of {}", doc.title, doc.remote_id),
-                    edit_time: doc.edit_time,
-                    source_url: self.source_url_for_remote_id(&doc.remote_id),
-                })
-            }
-        }
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let (service, repo) = service_with_repo(&dir.path().join("data"));
-        let conn = Arc::new(MockConn {
-            docs: StdMutex::new(vec![
-                RemoteDocRef { remote_id: "DOCAAA".into(), title: "Alpha".into(), edit_time: 10, doc_type: "docx".into() },
-                // This deliberately collides with `DOCAAA` under the legacy
-                // lower-cased slug algorithm.
-                RemoteDocRef { remote_id: "docaaa".into(), title: "Beta".into(), edit_time: 20, doc_type: "docx".into() },
-            ]),
-            deleted: StdMutex::new(vec![]),
-        });
-        service.register_connector(conn.clone());
-        service.set_connector_credentials(Arc::new(TestCredentialRepo::default()), [7u8; 32]);
-
-        // A bad payload is rejected and never stored.
-        assert!(service.create_credential("mock", "bad", serde_json::json!({})).await.is_err());
-        assert!(service.list_credentials().await.unwrap().is_empty(), "rejected credential must not persist");
-
-        // A good payload validates and is stored as a secret-free summary.
-        let cred = service
-            .create_credential("mock", "My Mock", serde_json::json!({ "token": "x" }))
-            .await
-            .unwrap();
-        assert_eq!(cred.kind, "mock");
-        assert_eq!(service.list_credentials().await.unwrap().len(), 1);
-
-        let source = KnowledgeSource {
-            kind: "mock".into(),
-            mode: KnowledgeSourceMode::Snapshot,
-            entries: vec![],
-            last_fetched_at: None,
-            credential_ref: Some(cred.credential_id),
-            scope: Some(serde_json::json!({ "space_id": "s1" })),
-            sync: None,
-        };
-        let kb = service.create_base("镜像库", "", None, Some(source)).await.unwrap();
-        let snap_dir = PathBuf::from(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR);
-
-        // First sync: 2 docs → 2 snapshots.
-        let summary = service.sync_connector_source(&kb.knowledge_base_id).await.unwrap();
-        assert_eq!(summary.fetched, 2);
-        assert_eq!(summary.failed, 0);
-        let a = snap_dir.join(format!("{}.md", connector_doc_slug("DOCAAA")));
-        let b = snap_dir.join(format!("{}.md", connector_doc_slug("docaaa")));
-        assert_ne!(a, b, "case-distinct remote ids must not share a snapshot");
-        assert!(a.exists() && b.exists(), "both snapshots written");
-        let a_body = std::fs::read_to_string(&a).unwrap();
-        assert!(a_body.contains("# Alpha"), "body rendered: {a_body}");
-        assert!(a_body.contains("body of DOCAAA"));
-        assert!(a_body.contains("https://mock/DOCAAA"), "frontmatter carries web source_url");
-        assert!(
-            has_connector_snapshot_identity(&a_body),
-            "new connector snapshots carry a non-lossy identity marker"
-        );
-
-        // Cursor + stamp persisted; no error.
-        let stored = extra_source(&repo, kb.knowledge_base_id.as_str()).unwrap();
-        let sync = stored.sync.expect("sync state persisted");
-        assert_eq!(sync.last_error, None);
-        assert!(sync.last_sync_at.is_some());
-        assert_eq!(sync.cursor, serde_json::json!({ "p": 1 }), "terminal page cursor persisted");
-        // Watermark is the REMOTE max edit_time (20), not local now_ms — this is
-        // what the incremental filter resumes from, avoiding clock-skew misses.
-        assert_eq!(sync.watermark, Some(20), "watermark = max remote edit_time");
-
-        // Second sync: the colliding lower-case id is deleted, while the
-        // upper-case id must remain untouched.
-        *conn.docs.lock().unwrap() =
-            vec![RemoteDocRef { remote_id: "DOCAAA".into(), title: "Alpha".into(), edit_time: 10, doc_type: "docx".into() }];
-        *conn.deleted.lock().unwrap() = vec!["docaaa".into()];
-        let summary2 = service.sync_connector_source(&kb.knowledge_base_id).await.unwrap();
-        assert_eq!(summary2.fetched, 1);
-        assert!(!b.exists(), "deleted doc removed from live snapshots");
-        let trash = snap_dir.join("_trash");
-        assert_eq!(
-            std::fs::read_dir(&trash).unwrap().flatten().count(),
-            1,
-            "deleted doc moved to unique _trash entry"
-        );
-        assert!(a.exists(), "surviving doc remains");
-
-        // Re-add and delete the same remote document again. A fixed trash
-        // destination overwrites on Unix but fails on Windows; unique
-        // quarantine names must preserve both audit copies and remove the live
-        // snapshot consistently on every platform.
-        *conn.docs.lock().unwrap() = vec![
-            RemoteDocRef {
-                remote_id: "DOCAAA".into(),
-                title: "Alpha".into(),
-                edit_time: 10,
-                doc_type: "docx".into(),
-            },
-            RemoteDocRef {
-                remote_id: "docaaa".into(),
-                title: "Beta".into(),
-                edit_time: 30,
-                doc_type: "docx".into(),
-            },
-        ];
-        conn.deleted.lock().unwrap().clear();
-        service
-            .sync_connector_source(&kb.knowledge_base_id)
-            .await
-            .unwrap();
-        assert!(b.exists(), "re-added document returns to the live set");
-
-        *conn.docs.lock().unwrap() = vec![RemoteDocRef {
-            remote_id: "DOCAAA".into(),
-            title: "Alpha".into(),
-            edit_time: 10,
-            doc_type: "docx".into(),
-        }];
-        *conn.deleted.lock().unwrap() = vec!["docaaa".into()];
-        service
-            .sync_connector_source(&kb.knowledge_base_id)
-            .await
-            .unwrap();
-        assert!(!b.exists());
-        assert_eq!(
-            std::fs::read_dir(&trash).unwrap().flatten().count(),
-            2,
-            "both deletion audit copies must survive without platform overwrite differences"
-        );
-
-        // Upgrade path: a changed document can still exist under the legacy
-        // lossy filename. Publishing the stable hashed path must quarantine
-        // the legacy alias instead of leaving duplicate searchable content.
-        let legacy_changed_id = "LEGACY:CHANGE";
-        let legacy_changed = snap_dir.join("legacy-change.md");
-        std::fs::write(
-            &legacy_changed,
-            source_url::snapshot_markdown(
-                &format!("https://mock/{legacy_changed_id}"),
-                "2026-01-01T00:00:00Z",
-                Some("Legacy changed"),
-                "old body",
-            ),
-        )
-        .unwrap();
-        *conn.docs.lock().unwrap() = vec![RemoteDocRef {
-            remote_id: legacy_changed_id.into(),
-            title: "Legacy changed".into(),
-            edit_time: 40,
-            doc_type: "docx".into(),
-        }];
-        conn.deleted.lock().unwrap().clear();
-        service
-            .sync_connector_source(&kb.knowledge_base_id)
-            .await
-            .unwrap();
-        assert!(
-            !legacy_changed.exists(),
-            "legacy update alias must leave the live snapshot directory"
-        );
-        assert!(
-            snap_dir
-                .join(format!(
-                    "{}.md",
-                    connector_doc_slug(legacy_changed_id)
-                ))
-                .exists(),
-            "updated document must land at its stable hashed path"
-        );
-
-        // A deletion tombstone can be the first event after upgrading, so no
-        // changed document body is available. The connector's exact source
-        // URL mapping must still find and quarantine the legacy snapshot.
-        let legacy_deleted_id = "LEGACY/DELETE";
-        let legacy_deleted = snap_dir.join("legacy-delete.md");
-        std::fs::write(
-            &legacy_deleted,
-            source_url::snapshot_markdown(
-                &format!("https://mock/{legacy_deleted_id}"),
-                "2026-01-01T00:00:00Z",
-                Some("Legacy deleted"),
-                "stale deleted body",
-            ),
-        )
-        .unwrap();
-        conn.docs.lock().unwrap().clear();
-        *conn.deleted.lock().unwrap() = vec![legacy_deleted_id.into()];
-        service
-            .sync_connector_source(&kb.knowledge_base_id)
-            .await
-            .unwrap();
-        assert!(
-            !legacy_deleted.exists(),
-            "legacy tombstone must not leave deleted content searchable"
-        );
-        assert_eq!(
-            std::fs::read_dir(&trash).unwrap().flatten().count(),
-            4,
-            "update migration and deletion must each create a recoverable trash entry"
-        );
-
-        // Two provider documents may share one canonical URL. After a full
-        // batch, an incremental update containing only A must not classify
-        // the omitted current-format B snapshot as a legacy alias.
-        *conn.docs.lock().unwrap() = vec![
-            RemoteDocRef {
-                remote_id: "SHARED:A".into(),
-                title: "Shared A".into(),
-                edit_time: 50,
-                doc_type: "docx".into(),
-            },
-            RemoteDocRef {
-                remote_id: "SHARED:B".into(),
-                title: "Shared B".into(),
-                edit_time: 60,
-                doc_type: "docx".into(),
-            },
-        ];
-        conn.deleted.lock().unwrap().clear();
-        service
-            .sync_connector_source(&kb.knowledge_base_id)
-            .await
-            .unwrap();
-        let shared_b = snap_dir.join(format!(
-            "{}.md",
-            connector_doc_slug("SHARED:B")
-        ));
-        assert!(shared_b.exists());
-
-        *conn.docs.lock().unwrap() = vec![RemoteDocRef {
-            remote_id: "SHARED:A".into(),
-            title: "Shared A updated".into(),
-            edit_time: 70,
-            doc_type: "docx".into(),
-        }];
-        service
-            .sync_connector_source(&kb.knowledge_base_id)
-            .await
-            .unwrap();
-        assert!(
-            shared_b.exists(),
-            "incremental alias cleanup must preserve omitted current-format documents sharing the same URL"
-        );
-        assert_eq!(
-            std::fs::read_dir(&trash).unwrap().flatten().count(),
-            4,
-            "shared-URL incremental update must not quarantine a current snapshot"
-        );
-
-        // Legacy snapshots lack a remote-id marker. If two of them share one
-        // URL, an incremental update cannot prove which alias belongs to A.
-        // Keep both live and report a conflict so the watermark does not
-        // advance; never sacrifice B merely to clean up A.
-        let legacy_shared_a = snap_dir.join("legacy-shared-a.md");
-        let legacy_shared_b = snap_dir.join("legacy-shared-b.md");
-        for (path, title) in [
-            (&legacy_shared_a, "Legacy shared A"),
-            (&legacy_shared_b, "Legacy shared B"),
-        ] {
-            std::fs::write(
-                path,
-                source_url::snapshot_markdown(
-                    "https://mock/shared",
-                    "2026-01-01T00:00:00Z",
-                    Some(title),
-                    title,
-                ),
-            )
-            .unwrap();
-        }
-        *conn.docs.lock().unwrap() = vec![RemoteDocRef {
-            remote_id: "LEGACY:SHARED:A".into(),
-            title: "Legacy shared A updated".into(),
-            edit_time: 80,
-            doc_type: "docx".into(),
-        }];
-        let summary = service
-            .sync_connector_source(&kb.knowledge_base_id)
-            .await
-            .unwrap();
-        assert_eq!(summary.failed, 1, "{:?}", summary.errors);
-        assert!(
-            summary.errors[0].contains("cannot safely migrate or delete"),
-            "{:?}",
-            summary.errors
-        );
-        assert!(
-            legacy_shared_a.exists() && legacy_shared_b.exists(),
-            "ambiguous legacy aliases must remain untouched"
-        );
-        assert_eq!(
-            std::fs::read_dir(&trash).unwrap().flatten().count(),
-            4,
-            "ambiguous migration must not move either legacy file"
-        );
-    }
-
-    #[tokio::test]
-    async fn portable_writeback_connector_source_switch_prevents_stale_publication() {
-        use crate::connector::FetchedConnectorDoc;
-        use tokio::sync::Barrier;
-
-        struct PausingConnector {
-            started: Arc<Barrier>,
-            resume: Arc<Barrier>,
-        }
-
-        #[async_trait::async_trait]
-        impl KnowledgeConnector for PausingConnector {
-            fn kind(&self) -> &'static str {
-                "pausing"
-            }
-
-            async fn validate_credentials(
-                &self,
-                _cred: &ConnectorCredential,
-            ) -> Result<ConnectorIdentity, AppError> {
-                Ok(ConnectorIdentity {
-                    tenant_name: None,
-                    scopes_available: Vec::new(),
-                })
-            }
-
-            async fn list_documents(
-                &self,
-                _cred: &ConnectorCredential,
-                _scope: &ConnectorScope,
-                _cursor: &SyncCursor,
-                _page_token: Option<&str>,
-            ) -> Result<SyncPage, AppError> {
-                Ok(SyncPage {
-                    docs: vec![RemoteDocRef {
-                        remote_id: "STALE".into(),
-                        title: "Stale".into(),
-                        edit_time: 1,
-                        doc_type: "doc".into(),
-                    }],
-                    deleted_ids: Vec::new(),
-                    next_page_token: None,
-                    updated_cursor: SyncCursor::default(),
-                })
-            }
-
-            async fn fetch_document(
-                &self,
-                _cred: &ConnectorCredential,
-                doc: &RemoteDocRef,
-            ) -> Result<FetchedConnectorDoc, AppError> {
-                self.started.wait().await;
-                self.resume.wait().await;
-                Ok(FetchedConnectorDoc {
-                    remote_id: doc.remote_id.clone(),
-                    title: doc.title.clone(),
-                    markdown: "stale connector body".into(),
-                    edit_time: doc.edit_time,
-                    source_url: None,
-                })
-            }
-        }
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let (service, repo) = service_with_repo(&dir.path().join("data"));
-        let service = Arc::new(service);
-        let started = Arc::new(Barrier::new(2));
-        let resume = Arc::new(Barrier::new(2));
-        service.register_connector(Arc::new(PausingConnector {
-            started: Arc::clone(&started),
-            resume: Arc::clone(&resume),
-        }));
-        service.set_connector_credentials(
-            Arc::new(TestCredentialRepo::default()),
-            [9u8; 32],
-        );
-        let credential = service
-            .create_credential(
-                "pausing",
-                "pause",
-                serde_json::json!({ "token": "x" }),
-            )
-            .await
-            .unwrap();
-        let kb = service
-            .create_base(
-                "connector race",
-                "",
-                None,
-                Some(KnowledgeSource {
-                    kind: "pausing".into(),
-                    mode: KnowledgeSourceMode::Snapshot,
-                    entries: Vec::new(),
-                    last_fetched_at: None,
-                    credential_ref: Some(credential.credential_id),
-                    scope: Some(serde_json::json!({ "space": "test" })),
-                    sync: None,
-                }),
-            )
-            .await
-            .unwrap();
-        let kb_id = kb.knowledge_base_id.clone();
-        let syncing = {
-            let service = Arc::clone(&service);
-            tokio::spawn(async move {
-                service.sync_connector_source(kb_id.as_str()).await
-            })
-        };
-
-        started.wait().await;
-        service
-            .set_source(kb.knowledge_base_id.as_str(), None)
-            .await
-            .unwrap();
-        resume.wait().await;
-
-        let error = syncing.await.unwrap().unwrap_err();
-        assert!(matches!(error, AppError::Conflict(_)), "{error:?}");
-        assert!(
-            extra_source(&repo, kb.knowledge_base_id.as_str()).is_none()
-        );
-        let snapshots =
-            Path::new(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR);
-        assert!(
-            !snapshots.exists()
-                || std::fs::read_dir(&snapshots)
-                    .unwrap()
-                    .next()
-                    .is_none()
-        );
-    }
-
     /// **P4 inbox e2e**: stage proposals via the P1 staged-write path, then
     /// list / diff / merge / discard them, and prove the main document list
     /// hides `_inbox/`.
@@ -14118,24 +12825,9 @@ mod tests {
             mode: KnowledgeSourceMode::Live,
             entries: vec![],
             last_fetched_at: None,
-            credential_ref: None,
-            scope: None,
-            sync: None,
         };
         assert_eq!(derive_kind(true, Some(&url)), "web");
         assert_eq!(derive_kind(false, Some(&url)), "web");
-        // Feishu connector = feishu
-        let fs = KnowledgeSource {
-            kind: "feishu".into(),
-            mode: KnowledgeSourceMode::Snapshot,
-            entries: vec![],
-            last_fetched_at: None,
-            credential_ref: None,
-            scope: None,
-            sync: None,
-        };
-        assert_eq!(derive_kind(true, Some(&fs)), "feishu");
-        assert_eq!(derive_kind(false, Some(&fs)), "feishu");
     }
 
     // ── Tag CRUD tests ───────────────────────────────────────────────────
@@ -14200,77 +12892,19 @@ mod tests {
         assert_eq!(updated.color, Some("red".into())); // unchanged
     }
 
-    /// A5: creating a base with a feishu (connector-backed) source persists
-    /// `extra.source` with credential_ref and scope, and `kind` derives to
-    /// "feishu".
+    /// Non-URL source kinds are unsupported and must be rejected at create time.
     #[tokio::test]
-    async fn create_base_with_feishu_source_persists_kind_and_credential() {
+    async fn create_base_rejects_non_url_source_kinds() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (service, repo) = service_with_repo(&dir.path().join("data"));
-        let credential_repo = Arc::new(TestCredentialRepo::default());
-        let credential_id = credential_repo
-            .create("feishu", "test", "ENC(payload)")
-            .await
-            .unwrap()
-            .credential_id;
-        service.set_connector_credentials(credential_repo, [7u8; 32]);
+        let (service, _repo) = service_with_repo(&dir.path().join("data"));
         let source = KnowledgeSource {
             kind: "feishu".into(),
             mode: KnowledgeSourceMode::Snapshot,
             entries: vec![],
             last_fetched_at: None,
-            credential_ref: Some(credential_id.clone()),
-            scope: Some(serde_json::json!({ "space_id": "sp1" })),
-            sync: Some(Default::default()),
         };
-        let info = service.create_base("飞书库", "", None, Some(source)).await.unwrap();
-        assert_eq!(info.kind, "feishu", "kind must derive to feishu");
-        // Verify credential_ref persisted in extra.source
-        let stored = extra_source(&repo, info.knowledge_base_id.as_str()).expect("source stored in extra");
-        assert_eq!(stored.credential_ref, Some(credential_id));
-        assert_eq!(stored.scope.unwrap()["space_id"], "sp1");
-        assert_eq!(stored.kind, "feishu");
-    }
-
-    /// A5: feishu source must be rejected when credential_ref or scope is missing.
-    #[tokio::test]
-    async fn create_base_feishu_source_rejects_missing_credential_or_scope() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (service, _repo) = service_with_repo(&dir.path().join("data"));
-        // Missing credential_ref
-        let no_cred = KnowledgeSource {
-            kind: "feishu".into(),
-            mode: KnowledgeSourceMode::Snapshot,
-            entries: vec![],
-            last_fetched_at: None,
-            credential_ref: None,
-            scope: Some(serde_json::json!({ "space_id": "sp1" })),
-            sync: None,
-        };
-        assert!(service.create_base("x", "", None, Some(no_cred)).await.is_err());
-        // Missing scope
-        let no_scope = KnowledgeSource {
-            kind: "feishu".into(),
-            mode: KnowledgeSourceMode::Snapshot,
-            entries: vec![],
-            last_fetched_at: None,
-            credential_ref: Some(ConnectorCredentialId::new()),
-            scope: None,
-            sync: None,
-        };
-        assert!(service.create_base("x", "", None, Some(no_scope)).await.is_err());
-        // Wrong mode (must be snapshot)
-        let live_mode = KnowledgeSource {
-            kind: "feishu".into(),
-            mode: KnowledgeSourceMode::Live,
-            entries: vec![],
-            last_fetched_at: None,
-            credential_ref: Some(ConnectorCredentialId::new()),
-            scope: Some(serde_json::json!({ "space_id": "sp1" })),
-            sync: None,
-        };
-        assert!(service.create_base("x", "", None, Some(live_mode)).await.is_err());
-        assert!(service.list_bases().await.unwrap().is_empty(), "all rejected");
+        assert!(service.create_base("x", "", None, Some(source)).await.is_err());
+        assert!(service.list_bases().await.unwrap().is_empty(), "rejected base must not persist");
     }
 
     /// A5: creating a base with tags persists them in the returned info.

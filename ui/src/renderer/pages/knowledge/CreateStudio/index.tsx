@@ -10,8 +10,7 @@
  * Layout: left TypeRail (kind selector) + right panel (SourceConfig + BasicInfo).
  * Footer with low-barrier hint + cancel / submit.
  *
- * C3 wires: basic info (name/desc/AI row/tags), submission per sourceType,
- * feishu inline credential creation in SourceConfig.
+ * C3 wires: basic info (name/desc/AI row/tags), submission per sourceType.
  */
 import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -23,17 +22,16 @@ import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import { isAutogenNoProviderError, knowledgeErrorText, notifySourceFetchResult } from '../useKnowledge';
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
-import type { KnowledgeKind } from '../KnowledgeTagFilterBar';
 import SourceConfig from './SourceConfig';
-import type { SourceConfigValue, SyncInterval } from './SourceConfig';
+import type { SourceConfigValue } from './SourceConfig';
 import TeachingCard from './TeachingCard';
 import TypeRail from './TypeRail';
 import TagPicker from './TagPicker';
-import type { ConnectorCredentialId } from '@/common/types/ids';
 import {
   canSubmitStudioSourceConfig,
   canSubmitStudioSourceType,
   normalizeStudioInitialKind,
+  type StudioInitialKind,
   type StudioSourceType,
 } from './sourceTypes';
 
@@ -42,20 +40,10 @@ import {
 export interface CreateStudioProps {
   visible: boolean;
   /** Pre-select a kind when opening (e.g. from empty-state shortcut). */
-  initialKind?: KnowledgeKind;
+  initialKind?: StudioInitialKind;
   onClose: () => void;
   /** Called after successful creation with the new base object. */
   onCreated: (base: IKnowledgeBase) => void;
-}
-
-// ─── Sync interval → minutes mapping ────────────────────────────────────────
-
-function syncIntervalToMinutes(interval: SyncInterval | undefined): number | undefined {
-  switch (interval) {
-    case 'hourly': return 60;
-    case 'daily': return 1440;
-    default: return undefined;
-  }
 }
 
 const studioFieldClass =
@@ -240,9 +228,6 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
         kind: string;
         mode: 'live' | 'snapshot';
         entries?: { url: string; title?: string; rendered?: boolean }[];
-        credentialRef?: ConnectorCredentialId;
-        scope?: Record<string, unknown>;
-        sync?: { intervalMinutes?: number };
       } | undefined;
 
       if (sourceType === 'web') {
@@ -281,20 +266,6 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
           return;
         }
         source = { kind: 'url', mode: urlMode, entries };
-      } else if (sourceType === 'feishu') {
-        if (!sourceConfigValue.credentialId) {
-          Message.warning(t('knowledge.studio.feishuCredRequired', { defaultValue: '请选择或创建飞书凭证' }));
-          setSubmitting(false);
-          return;
-        }
-        const intervalMinutes = syncIntervalToMinutes(sourceConfigValue.syncInterval);
-        source = {
-          kind: 'feishu',
-          mode: 'snapshot',
-          credentialRef: sourceConfigValue.credentialId,
-          scope: sourceConfigValue.spaceId ? { space_id: sourceConfigValue.spaceId } : undefined,
-          sync: intervalMinutes ? { intervalMinutes } : undefined,
-        };
       }
 
       const rootPath = sourceType === 'local' ? sourceConfigValue.rootPath?.trim() || undefined : undefined;

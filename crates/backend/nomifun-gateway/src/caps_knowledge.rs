@@ -244,9 +244,6 @@ fn parse_url_source(urls: Option<Vec<String>>, mode: Option<&str>) -> Result<Opt
             .map(|url| KnowledgeSourceEntry { url, title: None, ..Default::default() })
             .collect(),
         last_fetched_at: None,
-        credential_ref: None,
-        scope: None,
-        sync: None,
     }))
 }
 

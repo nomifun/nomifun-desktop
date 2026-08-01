@@ -53,7 +53,7 @@ pub use id::{
     AgentId, AttachmentId, ChannelPendingPromptId, ChannelPluginId, ChannelSessionId, ChannelUserId,
     CompanionEventId, CompanionEvolutionFeedbackId, CompanionId, CompanionLearnRunId,
     CompanionMemoryId, CompanionSessionWindowId, CompanionSkillId, CompanionSkillPatternId,
-    CompanionSuggestionId, ConnectorCredentialId,
+    CompanionSuggestionId,
     ConversationArtifactId, ConversationId, CreationTaskId, CronJobId, CronJobRunId,
     CsAgentId, CsDialogueId, CsMessageId, CsNoteId,
     EntityId, FigureId,

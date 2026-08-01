@@ -96,27 +96,6 @@ const getTeachRows = (sourceType: StudioSourceType): TeachRow[] => {
           textDefault: '挂载后模型可检索这些页面；快照可在详情页一键刷新。',
         },
       ];
-    case 'feishu':
-      return [
-        {
-          labelKey: 'knowledge.studio.teachWhat',
-          labelDefault: '是什么',
-          textKey: 'knowledge.studio.feishuTeachWhat',
-          textDefault: '连接飞书 Wiki 空间，把文档同步成本地快照供检索。',
-        },
-        {
-          labelKey: 'knowledge.studio.teachHow',
-          labelDefault: '怎么填',
-          textKey: 'knowledge.studio.feishuTeachHow',
-          textDefault: '选/建凭证 → 填空间 ID → 选同步频率，保存后首次同步。',
-        },
-        {
-          labelKey: 'knowledge.studio.teachUse',
-          labelDefault: '怎么用',
-          textKey: 'knowledge.studio.feishuTeachUse',
-          textDefault: '同步完成即为普通库，挂载即用；可定时增量同步。',
-        },
-      ];
     case 'import':
       return [
         {
@@ -138,6 +117,10 @@ const getTeachRows = (sourceType: StudioSourceType): TeachRow[] => {
           textDefault: '导入后即普通托管库，可编辑、挂载、再导出。',
         },
       ];
+    // 'feishu' stays in StudioSourceType only as a disabled placeholder in the
+    // type rail — it can never be selected, so it teaches nothing.
+    default:
+      return [];
   }
 };
 

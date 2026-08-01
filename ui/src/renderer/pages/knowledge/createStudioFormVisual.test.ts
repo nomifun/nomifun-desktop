@@ -38,7 +38,7 @@ describe('CreateStudio form visual design', () => {
   });
 
   test('uses the standard sliding Switch for the web browser-render option', () => {
-    expect(sourceConfigSource.includes("import { Button, Input, Message, Select, Switch } from '@arco-design/web-react';")).toBe(true);
+    expect(sourceConfigSource.includes("import { Button, Input, Message, Switch } from '@arco-design/web-react';")).toBe(true);
     expect(sourceConfigSource.includes('<Switch')).toBe(true);
     expect(sourceConfigSource.includes("onChange={(checked) => update({ browserRender: checked })}")).toBe(true);
     expect(sourceConfigSource.includes('peer-checked:after:translate-x-16px')).toBe(false);

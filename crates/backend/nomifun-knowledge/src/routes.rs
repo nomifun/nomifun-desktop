@@ -5,12 +5,11 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
 use axum::routing::{get, post};
 
-use nomifun_api_types::{ApiResponse, ConnectorCredentialSummary, CreateKnowledgeTagRequest, KnowledgeSource, KnowledgeTag, UpdateKnowledgeTagRequest};
+use nomifun_api_types::{ApiResponse, CreateKnowledgeTagRequest, KnowledgeSource, KnowledgeTag, UpdateKnowledgeTagRequest};
 use nomifun_auth::CurrentUser;
-use nomifun_common::{AppError, ConnectorCredentialId, KnowledgeBaseId};
+use nomifun_common::{AppError, KnowledgeBaseId};
 use serde::{Deserialize, Serialize};
 
-use crate::connector::ConnectorIdentity;
 use crate::export::{self, ExportSummary, ImportSummary};
 use crate::service::{
     AutogenOutcome, ConsumerInfo, InboxDiff, InboxEntry, InboxMergeResult, KbFileContent, KbFileEntry,
@@ -43,22 +42,6 @@ pub fn knowledge_routes(state: KnowledgeRouterState) -> Router {
         .route(
             "/api/knowledge/bases/{knowledge_base_id}/source",
             axum::routing::put(set_source),
-        )
-        .route(
-            "/api/knowledge/bases/{knowledge_base_id}/sync",
-            post(sync_source),
-        )
-        .route(
-            "/api/knowledge/connectors/credentials",
-            get(list_credentials).post(create_credential),
-        )
-        .route(
-            "/api/knowledge/connectors/credentials/{credential_id}",
-            axum::routing::delete(delete_credential),
-        )
-        .route(
-            "/api/knowledge/connectors/credentials/{credential_id}/test",
-            post(test_credential),
         )
         .route(
             "/api/knowledge/tags",
@@ -160,12 +143,6 @@ async fn create_base(
     body: Result<Json<CreateBaseRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<KnowledgeBaseInfo>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    // Detect whether the source is connector-backed (e.g. feishu) so we can
-    // fire-and-forget a first sync after creation without blocking the response.
-    let is_connector_source = req
-        .source
-        .as_ref()
-        .is_some_and(|s| s.kind != "url" && !s.kind.is_empty());
     let mut info = state
         .service
         .create_base(&req.name, &req.description, req.root_path.as_deref(), req.source)
@@ -184,17 +161,6 @@ async fn create_base(
                 )
                 .await?;
         }
-    }
-    // Connector-backed sources (feishu, etc.): trigger background sync so the
-    // user does not have to manually invoke /sync after creation.
-    if is_connector_source {
-        let service = state.service.clone();
-        let kb_id = info.knowledge_base_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = service.sync_connector_source(kb_id.as_str()).await {
-                tracing::warn!(kb_id = %kb_id, error = %e, "background connector sync after create failed");
-            }
-        });
     }
     Ok(Json(ApiResponse::ok(info)))
 }
@@ -545,21 +511,6 @@ async fn refresh_source(
     )))
 }
 
-/// Pull a connector-backed base's remote documents into `snapshots/` (Feishu
-/// wiki, …). Distinct from `refresh-source`, which is for URL sources.
-async fn sync_source(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(knowledge_base_id): Path<KnowledgeBaseId>,
-) -> Result<Json<ApiResponse<RefreshSourceSummary>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .sync_connector_source(knowledge_base_id.as_str())
-            .await?,
-    )))
-}
-
 #[derive(Deserialize)]
 struct SetSourceRequest {
     /// New source config, or `null` to detach the base's source.
@@ -567,9 +518,8 @@ struct SetSourceRequest {
     source: Option<KnowledgeSource>,
 }
 
-/// Attach / replace / clear a base's source config (`extra.source`). Used to
-/// wire a connector (Feishu, …) onto an existing base. Does not fetch — the
-/// caller triggers sync afterward.
+/// Attach / replace / clear a base's source config (`extra.source`).
+/// Does not fetch — the caller triggers refresh-source afterward.
 async fn set_source(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
@@ -582,54 +532,6 @@ async fn set_source(
             .service
             .set_source(knowledge_base_id.as_str(), req.source)
             .await?,
-    )))
-}
-
-async fn list_credentials(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<Vec<ConnectorCredentialSummary>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.list_credentials().await?)))
-}
-
-#[derive(Deserialize)]
-struct CreateCredentialRequest {
-    /// Connector discriminator: "feishu", …
-    kind: String,
-    name: String,
-    /// Connector-specific secret payload (e.g. Feishu `{ app_id, app_secret }`).
-    /// Probed against the remote before being encrypted at rest.
-    payload: serde_json::Value,
-}
-
-async fn create_credential(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<CreateCredentialRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<ConnectorCredentialSummary>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let summary = state.service.create_credential(&req.kind, &req.name, req.payload).await?;
-    Ok(Json(ApiResponse::ok(summary)))
-}
-
-async fn delete_credential(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(credential_id): Path<ConnectorCredentialId>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.delete_credential(&credential_id).await?;
-    Ok(Json(ApiResponse::ok(())))
-}
-
-/// Re-probe a stored credential against its remote (the UI "test connection"
-/// action). Returns the connector identity on success.
-async fn test_credential(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(credential_id): Path<ConnectorCredentialId>,
-) -> Result<Json<ApiResponse<ConnectorIdentity>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state.service.test_credential(&credential_id).await?,
     )))
 }
 

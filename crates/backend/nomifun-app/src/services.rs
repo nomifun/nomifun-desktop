@@ -2151,18 +2151,6 @@ impl AppServices {
             .await;
         #[cfg(not(feature = "browser-use"))]
         let browser_mcp_config = None;
-        // P3 connectors: register the built-in source connectors and late-wire
-        // the encrypted credential store (same machine-bound AES key the
-        // provider api-key column uses). Until this runs, the credential and
-        // connector-sync endpoints return a clear 409. Feishu is the first
-        // connector (self-built app + tenant_access_token, no OAuth redirect).
-        knowledge_service.register_connector(Arc::new(
-            nomifun_knowledge::connector_feishu::FeishuConnector::new(),
-        ));
-        let connector_cred_repo: Arc<dyn nomifun_db::IConnectorCredentialRepository> = Arc::new(
-            nomifun_db::SqliteConnectorCredentialRepository::new(database.pool().clone()),
-        );
-        knowledge_service.set_connector_credentials(connector_cred_repo, encryption_key);
         // Boot-resume: re-fetch snapshot-mode URL sources whose create-time
         // fetch never completed (the app exited mid-run — the source is
         // persisted unstamped before fetching). Spawned after the completer
