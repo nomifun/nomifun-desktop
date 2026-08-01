@@ -397,7 +397,6 @@ async fn create_provider_with_optional_fields() {
         "api_key": "test-key-abcd",
         "models": ["anthropic.claude-3-sonnet"],
         "enabled": false,
-        "capabilities": [{"type": "text"}, {"type": "vision", "is_user_selected": true}],
         "model_context_limits": {"anthropic.claude-3-sonnet": 200000},
         "bedrock_config": {
             "auth_method": "accessKey",
@@ -414,9 +413,6 @@ async fn create_provider_with_optional_fields() {
     let data = &json["data"];
     assert!(!data["enabled"].as_bool().unwrap());
     assert_eq!(data["models"].as_array().unwrap().len(), 1);
-    // `capabilities` in the request is accepted-and-ignored since P3 (the
-    // column was dropped in migration 017); the response is always [].
-    assert_eq!(data["capabilities"], json!([]));
     assert_eq!(
         data["model_context_limits"]["anthropic.claude-3-sonnet"],
         200000
@@ -424,6 +420,23 @@ async fn create_provider_with_optional_fields() {
     assert!(data.get("context_limit").is_none());
     assert_eq!(data["bedrock_config"]["auth_method"], "accessKey");
     assert_eq!(data["bedrock_config"]["region"], "us-east-1");
+}
+
+#[tokio::test]
+async fn create_provider_rejects_retired_capabilities_field() {
+    // The provider-level `capabilities` wire field was removed at
+    // ui-api-contract v4 (the column was already dropped in migration 017);
+    // requests still carrying it are rejected by `deny_unknown_fields`.
+    let (app, _db) = setup().await;
+    let body = json!({
+        "platform": "openai",
+        "name": "Test",
+        "base_url": "https://api.example.com",
+        "api_key": "sk-test",
+        "capabilities": []
+    });
+    let resp = app.oneshot(json_request("POST", "/api/providers", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

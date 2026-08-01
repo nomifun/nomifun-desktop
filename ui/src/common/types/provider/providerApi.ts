@@ -22,9 +22,9 @@ import { parseProviderId, type ProviderId } from '@/common/types/ids';
  * The wire uses `provider_id`; renderer code deliberately keeps using
  * `IProvider.id`. Do not collapse the two shapes or read a wire-level `id`.
  *
- * The wire still carries a vestigial `capabilities: []` field; it is
- * deliberately not mirrored here and never passed through to `IProvider`
- * (row-level `models_detail` tasks/traits are the capability authority).
+ * The vestigial provider-level `capabilities` field was removed from the
+ * wire at ui-api-contract v4 (row-level `models_detail` tasks/traits are
+ * the capability authority).
  */
 export interface ProviderResponse {
   provider_id: string;

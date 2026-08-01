@@ -75,17 +75,11 @@ struct WatchRuntime {
 /// conservative rule action. Phase-1's per-session `confidence_floor` is gone;
 /// the dual-watch config carries no per-watch floor.
 ///
-/// Currently 0.0, which means the low-confidence fallback is DISABLED: the
-/// sidecar contract emits confidence in 0..1, so `confidence < 0.0` never
-/// holds and `SidecarStep::Fallback` is never produced. The spec's safety
-/// posture wants low-confidence guesses to fall back to the conservative rule
-/// action (Phase-1's legacy default floor was 0.4), and the supervisor's
-/// `low_confidence_rulefallback` arm becomes live the moment this is raised.
-///
-/// TODO(product): decide the intended floor value. Raising it silently changes
-/// live intervention behavior (real answers/nudges start being withheld), so
-/// it must not be changed in a mechanical cleanup pass.
-const CONFIDENCE_FLOOR: f32 = 0.0;
+/// 0.4 restores Phase-1's legacy default and the spec's safety posture: the
+/// sidecar contract emits confidence in 0..1, and a guess below the floor is
+/// answered by `PolicyState::conservative_fallback` (the supervisor's
+/// `low_confidence_rulefallback` arm) instead of being applied verbatim.
+const CONFIDENCE_FLOOR: f32 = 0.4;
 
 /// Per-target mutable policy state. Holds BOTH watch configs (D4) and routes each
 /// signal to the relevant one; `on_stall` reads that watch's base
@@ -1423,6 +1417,29 @@ mod tests {
             reason: String::new(),
         };
         assert_eq!(p.on_sidecar(&dec), SidecarStep::Apply(WakeAction::AnswerChoice("2".into())));
+    }
+
+    #[test]
+    fn sidecar_low_confidence_falls_back_to_rule() {
+        let p = PolicyState::new(sidecar_cfg());
+        let dec = SidecarDecision {
+            action: "answer_choice".into(),
+            text: "2".into(),
+            wait_secs: 0,
+            confidence: CONFIDENCE_FLOOR - 0.01,
+            reason: String::new(),
+        };
+        assert_eq!(p.on_sidecar(&dec), SidecarStep::Fallback);
+
+        // At exactly the floor the decision is applied (floor is exclusive).
+        let at_floor = SidecarDecision {
+            confidence: CONFIDENCE_FLOOR,
+            ..dec
+        };
+        assert_eq!(
+            p.on_sidecar(&at_floor),
+            SidecarStep::Apply(WakeAction::AnswerChoice("2".into()))
+        );
     }
 
     #[test]

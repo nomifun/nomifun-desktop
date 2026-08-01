@@ -5,6 +5,15 @@
  */
 import { useEffect, useRef, useState, type RefObject } from 'react';
 
+interface UseContainerWidthOptions {
+  /**
+   * Start from (and fall back to) `window.innerWidth` while the element is
+   * not mounted, instead of 0. Opt-in for layouts whose breakpoint math must
+   * not see a transient 0-width "compact" frame before the first measure.
+   */
+  fallbackToWindowWidth?: boolean;
+}
+
 /**
  * 观测某个容器元素的实际宽度（基于 ResizeObserver）。
  *
@@ -15,16 +24,26 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
  * const { ref, width } = useContainerWidth<HTMLDivElement>();
  * return <div ref={ref}>{width < 600 ? <Compact/> : <Full/>}</div>;
  */
-export function useContainerWidth<T extends HTMLElement = HTMLDivElement>(): {
+export function useContainerWidth<T extends HTMLElement = HTMLDivElement>(
+  options?: UseContainerWidthOptions
+): {
   ref: RefObject<T | null>;
   width: number;
 } {
+  const fallbackToWindowWidth = options?.fallbackToWindowWidth ?? false;
   const ref = useRef<T>(null);
-  const [width, setWidth] = useState(0);
+  const [width, setWidth] = useState(() =>
+    fallbackToWindowWidth && typeof window !== 'undefined' ? window.innerWidth : 0
+  );
 
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el) {
+      if (fallbackToWindowWidth) {
+        setWidth(typeof window === 'undefined' ? 0 : window.innerWidth);
+      }
+      return;
+    }
 
     const update = () => setWidth(el.getBoundingClientRect().width);
     update();
@@ -37,7 +56,7 @@ export function useContainerWidth<T extends HTMLElement = HTMLDivElement>(): {
       observer.disconnect();
       window.removeEventListener('resize', update);
     };
-  }, []);
+  }, [fallbackToWindowWidth]);
 
   return { ref, width };
 }

@@ -5,6 +5,16 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- AutoWork/IDMM: bypass-model (sidecar) decisions with confidence below 0.4
+  now fall back to the conservative rule action instead of being applied
+  verbatim, restoring the Phase-1 safety posture. Previously the floor was
+  0.0, so the low-confidence fallback never triggered.
+- Provider API: the retired `capabilities` field was removed from the
+  provider wire shape (`GET/POST/PUT /api/providers*`). The backing column
+  was dropped in an earlier migration and the field had been an
+  accepted-and-ignored `[]` ever since. The UI/API contract version was
+  bumped accordingly.
+
 - Knowledge-base imports and companion (memory/companion bundle) imports now
   enforce zip-bomb limits: at most 256 MB of cumulative decompressed data and
   20,000 entries per archive. Oversized import bundles fail instead of

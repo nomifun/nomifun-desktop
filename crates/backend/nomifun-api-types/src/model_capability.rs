@@ -1,6 +1,7 @@
 //! Per-model capability inference from the model NAME — the only per-model
-//! signal available (provider `capabilities` is provider-level; there is no
-//! user-authored per-model capability field). Ported from the frontend
+//! signal available (the retired provider-level `capabilities` wire field was
+//! removed at ui-api-contract v4; there is no user-authored per-model
+//! capability field). Ported from the frontend
 //! `ui/src/common/utils/modelCapabilities.ts`. Dep-free substring matching.
 //!
 //! Two heuristics live here and MUST stay in sync with the frontend twin:
@@ -111,8 +112,7 @@ const VIDEO_GENERATION_INCLUDE: &[&str] = &[
 /// Infer the Creative Workshop generation capabilities suggested by a model
 /// NAME. Returns [`ModelType::ImageGeneration`] and/or
 /// [`ModelType::VideoGeneration`] when the name matches a known generator
-/// family. The result is a **suggested default** — the user may override it
-/// (mirrors the `is_user_selected` semantics on provider capabilities).
+/// family. The result is a **suggested default** — the user may override it.
 ///
 /// This is intentionally decoupled from [`infer_model_modalities`]: generation
 /// models advertise NO chat modality here, so the execution participant router is

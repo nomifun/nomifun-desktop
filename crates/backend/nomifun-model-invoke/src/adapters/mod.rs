@@ -59,7 +59,7 @@ pub mod volc_voice;
 
 /// Build the standard adapter set registered on the service at assembly time.
 /// Adapters are stateless — the shared HTTP client is passed per call by the
-/// orchestration layer.
+/// invoke service layer.
 pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
     vec![
         Arc::new(openai_images::OpenAiImagesAdapter),

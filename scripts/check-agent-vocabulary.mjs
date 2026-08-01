@@ -55,6 +55,18 @@ const LEGACY_LINE_ALLOWLIST = new Map([
     [/smart_orchestration/],
   ],
   [
+    // SkillHub third-party package wire format: `orchestration:` is an
+    // external frontmatter key this parser must read (and a metadata field
+    // name to exclude from installable slugs). Not a product identity.
+    'crates/backend/nomifun-extension/src/market/package.rs',
+    [/^\s*"orchestration",$/, /root\.get\("orchestration"\)/, /\\norchestration:/],
+  ],
+  [
+    // Same external SkillHub metadata-field list on the UI side.
+    'ui/src/renderer/pages/settings/PresetSettings/PresetPackageMarketSettings.tsx',
+    [/^\s*'orchestration',$/],
+  ],
+  [
     'crates/backend/nomifun-companion/src/profile.rs',
     [/smart_orchestration/],
   ],

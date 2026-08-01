@@ -99,8 +99,7 @@ async fn create_provider(
             "base_url": base_url,
             "api_key": api_key,
             "models": models,
-            "enabled": true,
-            "capabilities": []
+            "enabled": true
         }),
         token,
         csrf,

@@ -21,15 +21,6 @@ pub enum ModelType {
     ExcludeFromPrimary,
 }
 
-/// A single model capability entry.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ModelCapability {
-    #[serde(rename = "type")]
-    pub capability_type: ModelType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_user_selected: Option<bool>,
-}
-
 /// Health status values for a model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
@@ -147,11 +138,6 @@ pub struct ProviderResponse {
     pub api_key: String,
     pub models: Vec<String>,
     pub enabled: bool,
-    /// Retired: the providers.capabilities column was dropped in migration
-    /// 017, so this is always `[]`. The field is kept for wire-shape
-    /// compatibility only.
-    #[serde(default)]
-    pub capabilities: Vec<ModelCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_context_limits: Option<HashMap<String, i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,11 +182,6 @@ pub struct CreateProviderRequest {
     pub models: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Accepted-and-ignored since P3: the providers.capabilities column was
-    /// dropped in migration 017. Kept so older clients sending it are not
-    /// rejected by `deny_unknown_fields`.
-    #[serde(default)]
-    pub capabilities: Vec<ModelCapability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_context_limits: Option<HashMap<String, i64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,9 +211,8 @@ fn default_true() -> bool {
 ///
 /// All fields are optional — partial update semantics.
 ///
-/// `capabilities` and `model_health` are accepted-and-ignored since P3:
-/// the providers.capabilities column was dropped in migration 017, and the
-/// server-side health probe is the only health writer.
+/// `model_health` is accepted-and-ignored since P3: the server-side health
+/// probe is the only health writer.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProviderRequest {
@@ -242,8 +222,6 @@ pub struct UpdateProviderRequest {
     pub api_key: Option<String>,
     pub models: Option<Vec<String>>,
     pub enabled: Option<bool>,
-    /// Accepted-and-ignored since P3 (column dropped in migration 017).
-    pub capabilities: Option<Vec<ModelCapability>>,
     pub model_context_limits: Option<HashMap<String, i64>>,
     pub model_protocols: Option<HashMap<String, String>>,
     pub model_descriptions: Option<HashMap<String, String>>,
@@ -451,30 +429,6 @@ mod tests {
         );
     }
 
-    // -- ModelCapability --
-
-    #[test]
-    fn test_model_capability_serialization() {
-        let cap = ModelCapability {
-            capability_type: ModelType::Vision,
-            is_user_selected: Some(true),
-        };
-        let json = serde_json::to_value(&cap).unwrap();
-        assert_eq!(json["type"], "vision");
-        assert_eq!(json["is_user_selected"], true);
-    }
-
-    #[test]
-    fn test_model_capability_optional_field_skipped() {
-        let cap = ModelCapability {
-            capability_type: ModelType::Text,
-            is_user_selected: None,
-        };
-        let json = serde_json::to_value(&cap).unwrap();
-        assert_eq!(json["type"], "text");
-        assert!(json.get("is_user_selected").is_none());
-    }
-
     // -- HealthStatus / ModelHealthStatus --
 
     #[test]
@@ -560,10 +514,6 @@ mod tests {
             api_key: "sk-ant-api03-plaintext".into(),
             models: vec!["claude-sonnet-4-20250514".into()],
             enabled: true,
-            capabilities: vec![ModelCapability {
-                capability_type: ModelType::Text,
-                is_user_selected: None,
-            }],
             model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
@@ -601,7 +551,6 @@ mod tests {
             api_key: "sk-secret-xyz".into(),
             models: vec![],
             enabled: true,
-            capabilities: vec![],
             model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
@@ -622,9 +571,11 @@ mod tests {
     // -- CreateProviderRequest --
 
     #[test]
-    fn test_provider_response_capabilities_defaults_when_absent() {
-        // Retired field: servers ≥ P3 always send [], but the serde default
-        // also tolerates the field being dropped entirely.
+    fn test_provider_response_tolerates_stray_capabilities() {
+        // Retired field (column dropped in migration 017; wire field removed
+        // at ui-api-contract v4). Responses are not `deny_unknown_fields`, so
+        // a stale server still sending `capabilities: []` deserializes fine —
+        // the value is simply dropped.
         let raw = json!({
             "provider_id": PROVIDER_ID,
             "platform": "openai",
@@ -633,13 +584,13 @@ mod tests {
             "api_key": "sk-test",
             "models": [],
             "enabled": true,
+            "capabilities": [],
             "is_full_url": false,
             "sort_order": 0,
             "created_at": 0,
             "updated_at": 0
         });
-        let resp: ProviderResponse = serde_json::from_value(raw).unwrap();
-        assert!(resp.capabilities.is_empty());
+        assert!(serde_json::from_value::<ProviderResponse>(raw).is_ok());
     }
 
     #[test]
@@ -657,7 +608,6 @@ mod tests {
         assert_eq!(req.api_key, "sk-ant-api03-test");
         assert!(req.models.is_empty());
         assert!(req.enabled);
-        assert!(req.capabilities.is_empty());
         assert!(req.model_context_limits.is_none());
         assert!(req.bedrock_config.is_none());
     }
@@ -670,6 +620,25 @@ mod tests {
     }
 
     #[test]
+    fn test_create_and_update_requests_reject_retired_capabilities_field() {
+        // The provider-level `capabilities` wire field was removed at
+        // ui-api-contract v4 (the providers.capabilities column was already
+        // dropped in migration 017/021). Requests still sending it now fail
+        // `deny_unknown_fields`; the contract bump forces stale UIs to rebuild.
+        let create = json!({
+            "platform": "openai",
+            "name": "OpenAI",
+            "base_url": "https://api.openai.com",
+            "api_key": "sk-test",
+            "capabilities": []
+        });
+        assert!(serde_json::from_value::<CreateProviderRequest>(create).is_err());
+
+        let update = json!({"capabilities": []});
+        assert!(serde_json::from_value::<UpdateProviderRequest>(update).is_err());
+    }
+
+    #[test]
     fn test_create_provider_request_with_optional_fields() {
         let raw = json!({
             "platform": "bedrock",
@@ -678,7 +647,6 @@ mod tests {
             "api_key": "",
             "models": ["anthropic.claude-3-sonnet"],
             "enabled": false,
-            "capabilities": [{"type": "text"}, {"type": "vision", "is_user_selected": true}],
             "model_context_limits": {"anthropic.claude-3-sonnet": 200000},
             "bedrock_config": {
                 "auth_method": "accessKey",
@@ -691,7 +659,6 @@ mod tests {
         assert!(req.provider_id.is_none());
         assert!(!req.enabled);
         assert_eq!(req.models.len(), 1);
-        assert_eq!(req.capabilities.len(), 2);
         assert_eq!(
             req.model_context_limits
                 .as_ref()
@@ -756,7 +723,6 @@ mod tests {
             api_key: "sk-test".into(),
             models: vec![],
             enabled: true,
-            capabilities: vec![],
             model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
@@ -1226,7 +1192,6 @@ mod tests {
             "api_key": "sk-test",
             "models": [],
             "enabled": true,
-            "capabilities": [],
             "is_full_url": false,
             "sort_order": 0,
             "created_at": 0,
@@ -1255,7 +1220,6 @@ mod tests {
             "api_key": "sk-test",
             "models": [],
             "enabled": true,
-            "capabilities": [],
             "is_full_url": false,
             "sort_order": 0,
             "created_at": 0,

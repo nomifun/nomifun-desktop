@@ -210,7 +210,6 @@ mod tests {
                 api_key: "sk-primary".into(),
                 models: vec![],
                 enabled: true,
-                capabilities: vec![],
                 model_context_limits: None,
                 model_protocols: None,
                 model_descriptions: None,

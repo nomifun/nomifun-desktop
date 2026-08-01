@@ -65,7 +65,7 @@ const MAX_MARKET_ITEMS_PER_SOURCE: usize = 200;
 const MARKET_SOURCE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
-// Orchestration
+// Fetch coordination
 // ---------------------------------------------------------------------------
 
 /// Fetch live rankings for the selected `sources` (empty = all supported),
