@@ -1,7 +1,7 @@
 {
   "version": "0.3.7",
   "notes": "## NomiFun v0.3.7\n\n- 优化自动更新安装体验：在桌面端更新弹窗中补充安装进度与状态反馈，让 Windows 用户能更清楚地看到更新正在执行。\n- 改进对话交付物文件路径展示与打开逻辑，减少相对路径、工作区路径和可点击交付文件之间的歧义。\n- 重构 browser managed-lane 调度实现，合并 tool 与 ManagedBrowserFacade 中重复的打开、列举、关闭、执行与 action alias 逻辑，降低浏览器自动化链路漂移风险。\n- 完成一轮 workspace-wide 技术债清理：移除大量死代码、历史 shim、重复实现和过期文档，收敛 channel 表单、runtime chat/sendbox、zip safety、idempotency、ANSI 清理与消息截断等公共逻辑。\n- 调整 provider / model API：移除已废弃的 provider capabilities 字段，更新 UI API contract，并补充前后端兼容性测试。\n- 加强仓库 Git 归因治理：新增仓库本地 hooks 与检查脚本，确保后续提交归因到人类开发者且不包含 AI credit trailer。\n- 维护 v0.3.6 macOS updater 清单记录；本次 v0.3.7 首发仍以 Windows x64 包为主，其他平台可后续在对应原生构建机追加。\n\n## Windows 包\n\n- 本次 GitHub 首发发布 Windows x64 安装包及 Tauri 自动更新签名资产。\n- 安装包未包含 Authenticode 签名，手动下载时可能出现 SmartScreen 或未知发布者提示；自动更新仍使用 Tauri 签名校验。",
-  "pub_date": "2026-08-02T12:15:45.676Z",
+  "pub_date": "2026-08-02T12:44:31.977Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODEvS0lDV1VpWnVTeDFiVHZtZ2h2VWx3cTVJQ2E3WlhLbnVLTVJ5QkJOY3FRdUZwZTlJWVdsdzZxbFhhSHZGY1hHcXJpNEhSV2l4WEZqMW52SENoaWdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1NjcxMDAzCWZpbGU6Tm9taUZ1bl8wLjMuN194NjQtc2V0dXAuZXhlCmk5NERTQkdhUDlqVWdack5hdkU1MlFBdFc3UzhjYy90K01LejF1YTR0M0xDNko2bVgvVUNETDdKT1Y3anVwZ2htV0xqalFPVU9YUjkyK1dWa0F0bUNRPT0K",
@@ -14,6 +14,10 @@
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODRkMkJnK0VDVmREbkRtdURpWGwrM1BtRWlKeEk0UklhSlc1TENFQ0lrMldhbzFJWllDMHVOVG5ERzlKQWhYY0dDQUkyVVo3S09LZnNjbjl1ZklMOXdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1NjcyNzc3CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ckp6RDJsNzI5UlYwWEc4ekYwVFN3aGoyTzZNeXc1Nm9qK3IzakdhNzBzWVBZZ1NKTm1jWkhqd1RrR3cyZ3VLdmdRMXdQQkY2eGZUUk02TXJSWGVyTUNBPT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.7/NomiFun.app.tar.gz"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJSRWlCbW1YVDFQZG41UTl2aHR2ZjYxejk4MGw3ZTUxT2lxMTlDWFpZaHNpMXcxdytmV21obS9SUUlmL3JRcWpuWVU5a3laL2dMNGttSjI2eE8xdHdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1Njc0NjcxCWZpbGU6Tm9taUZ1bl8wLjMuN19hbWQ2NC5BcHBJbWFnZQphNGNyOWtmSkpVaUh1Y0RSTWZZZUJlM0NoOWgzSDMrK29CT3NSZjduUzJxanRBYjlTWG5yK0huMmtwR2U3NDQvNys5WTltNHNrREtqdG1MNFZueHdEQT09Cg==",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.7/NomiFun_0.3.7_amd64.AppImage"
     }
   }
 }
