@@ -150,10 +150,22 @@ export async function tauriGetUpdaterInstallContext(): Promise<UpdaterInstallCon
   return invoke<UpdaterInstallContext>('get_updater_install_context');
 }
 
+export type TauriInstallUpdatePhase = 'checking' | 'downloading' | 'downloaded' | 'installing';
+
+export interface TauriInstallUpdateProgress {
+  phase: TauriInstallUpdatePhase;
+  chunkLength?: number;
+  contentLength?: number;
+}
+
 /** Install a checked update through the Rust-owned fail-closed updater path. */
-export async function tauriInstallUpdate(version: string): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('install_update', { version });
+export async function tauriInstallUpdate(
+  version: string,
+  onProgress: (event: TauriInstallUpdateProgress) => void
+): Promise<void> {
+  const { Channel, invoke } = await import('@tauri-apps/api/core');
+  const onEvent = new Channel<TauriInstallUpdateProgress>(onProgress);
+  await invoke('install_update', { version, onEvent });
 }
 
 /** Electron-style OpenDialog options accepted by call sites. */

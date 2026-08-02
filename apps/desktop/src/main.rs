@@ -308,14 +308,27 @@ fn default_data_dir() -> PathBuf {
     nomifun_app::bootstrap::resolve_startup_data_root(requested)
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallUpdateProgress {
+    phase: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunk_length: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_length: Option<u64>,
+}
+
 /// Install the exact update version selected by the renderer through a
 /// Rust-owned updater handle. The renderer may check/download for progress, but
-/// it is never allowed to invoke the plugin's raw install commands.
+/// it is never allowed to invoke the plugin's raw install commands. Progress is
+/// streamed over the request-scoped channel so the modal never appears frozen
+/// while this security boundary re-checks and downloads the signed package.
 #[tauri::command]
 async fn install_update(
     app: tauri::AppHandle,
     server: tauri::State<'_, Arc<DesktopServer>>,
     version: String,
+    on_event: tauri::ipc::Channel<InstallUpdateProgress>,
 ) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
 
@@ -323,6 +336,12 @@ async fn install_update(
     if requested_version.is_empty() {
         return Err("update version must not be empty".to_owned());
     }
+
+    let _ = on_event.send(InstallUpdateProgress {
+        phase: "checking",
+        chunk_length: None,
+        content_length: None,
+    });
 
     let shutdown_server = server.inner().clone();
     let cleanup_app = app.clone();
@@ -364,10 +383,33 @@ async fn install_update(
         ));
     }
 
+    let download_progress = on_event.clone();
+    let download_finished = on_event.clone();
     let bytes = update
-        .download(|_, _| {}, || {})
+        .download(
+            move |chunk_length, content_length| {
+                let _ = download_progress.send(InstallUpdateProgress {
+                    phase: "downloading",
+                    chunk_length: Some(chunk_length),
+                    content_length,
+                });
+            },
+            move || {
+                let _ = download_finished.send(InstallUpdateProgress {
+                    phase: "downloaded",
+                    chunk_length: None,
+                    content_length: None,
+                });
+            },
+        )
         .await
         .map_err(|error| error.to_string())?;
+
+    let _ = on_event.send(InstallUpdateProgress {
+        phase: "installing",
+        chunk_length: None,
+        content_length: None,
+    });
     update.install(bytes).map_err(|error| error.to_string())
 }
 

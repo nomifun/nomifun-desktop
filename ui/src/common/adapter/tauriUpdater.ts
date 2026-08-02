@@ -28,7 +28,11 @@
 
 import type { AutoUpdateStatus } from '@/common/update/updateTypes';
 import { isTauriRuntime } from './tauriRuntime';
-import { tauriGetUpdaterInstallContext, tauriInstallUpdate } from './tauriShell';
+import {
+  tauriGetUpdaterInstallContext,
+  tauriInstallUpdate,
+  type TauriInstallUpdateProgress,
+} from './tauriShell';
 import { installUpdateWithPreflight } from './tauriUpdateInstall';
 
 // Structural mirror of @tauri-apps/plugin-updater's public surface, so this
@@ -205,17 +209,76 @@ export async function tauriUpdateDownload(emit: (s: AutoUpdateStatus) => void): 
  * relaunch) terminates the process instead of returning control to a renderer
  * that may be sitting on top of a replaced app bundle.
  */
-export async function tauriUpdateInstallAndRelaunch(): Promise<void> {
-  if (!isTauriRuntime()) return;
-  if (!pendingUpdate) return;
+export async function tauriUpdateInstallAndRelaunch(emit: (s: AutoUpdateStatus) => void): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('Updater is unavailable outside the desktop shell');
+  if (!pendingUpdate || !downloadComplete) throw new Error('No downloaded update is ready to install');
   const version = pendingUpdate.version;
+  let total = 0;
+  let transferred = 0;
+  let speed = 0;
+  let lastTs = performance.now();
+  let lastBytes = 0;
+
+  const reportInstallProgress = (event: TauriInstallUpdateProgress): void => {
+    if (event.phase === 'checking') {
+      emit({ status: 'installing', installPhase: 'preparing' });
+      return;
+    }
+
+    if (event.phase === 'downloading') {
+      total = event.contentLength ?? total;
+      transferred += event.chunkLength ?? 0;
+      const now = performance.now();
+      const dt = now - lastTs;
+      if (dt >= 250) {
+        speed = ((transferred - lastBytes) / dt) * 1000;
+        lastTs = now;
+        lastBytes = transferred;
+      }
+      emit({
+        status: 'installing',
+        installPhase: 'downloading',
+        progress: {
+          percent: total > 0 ? Math.min(100, (transferred / total) * 100) : 0,
+          transferred,
+          total,
+          bytesPerSecond: speed,
+        },
+      });
+      return;
+    }
+
+    if (event.phase === 'downloaded') {
+      const final = total || transferred;
+      total = final;
+      transferred = final;
+      emit({
+        status: 'installing',
+        installPhase: 'downloading',
+        progress: { percent: 100, transferred: final, total: final, bytesPerSecond: 0 },
+      });
+      return;
+    }
+
+    if (event.phase === 'installing') {
+      const final = total || transferred;
+      emit({
+        status: 'installing',
+        installPhase: 'installing',
+        progress: { percent: 100, transferred: final, total: final, bytesPerSecond: 0 },
+      });
+    }
+  };
+
+  // Give immediate feedback while the native preflight and version check begin.
+  emit({ status: 'installing', installPhase: 'preparing' });
   await installUpdateWithPreflight({
     getContext: tauriGetUpdaterInstallContext,
     // No renderer-held resource needs cleanup before the Rust-owned install
     // today; the hook keeps the ordering contract (cleanup failure must
     // prevent installation) wired for when one appears.
     prepareShutdown: async () => {},
-    install: () => tauriInstallUpdate(version),
+    install: () => tauriInstallUpdate(version, reportInstallProgress),
     relaunch: async () => {
       const { relaunch } = await import('@tauri-apps/plugin-process');
       await relaunch();

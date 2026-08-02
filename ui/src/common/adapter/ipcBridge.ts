@@ -1046,7 +1046,10 @@ export const autoUpdate = {
     await tauriUpdateDownload((s) => autoUpdateStatusEmitter.emit(s));
     return { success: true };
   }, { success: false }),
-  quitAndInstall: shellProvider<void, void>(() => tauriUpdateInstallAndRelaunch(), undefined),
+  quitAndInstall: shellProvider<void, void>(
+    () => tauriUpdateInstallAndRelaunch((s) => autoUpdateStatusEmitter.emit(s)),
+    undefined
+  ),
   status: autoUpdateStatusEmitter,
 };
 
