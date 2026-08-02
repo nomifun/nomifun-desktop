@@ -2,5 +2,17 @@
   "selectFile": "Select File",
   "selectDirectory": "Select Directory",
   "pleaseSelectFile": "Please select a file",
-  "pleaseSelectDirectory": "Please select a directory"
+  "pleaseSelectDirectory": "Please select a directory",
+  "allFiles": "All files",
+  "newFolder": "New folder",
+  "newFolderName": "Folder name",
+  "createFolder": "Create folder",
+  "createFolderSuccess": "Folder created",
+  "folderNameRequired": "Enter a folder name",
+  "selectParentForNewFolder": "Select a parent folder first",
+  "emptyFolder": "This folder is empty",
+  "currentLocation": "Current location",
+  "selectedLocation": "Selected",
+  "truncated": "Only the first 500 items are shown",
+  "parentDirectory": "Parent folder"
 }
