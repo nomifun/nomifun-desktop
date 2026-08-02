@@ -88,6 +88,8 @@ const stripTrailingSlash = (value: string): string => value.replace(/\/+$/, '');
 interface NormalizedDeliverablePath {
   relativePath: string;
   absolutePath?: string;
+  /** Stable dedupe identity when the display path intentionally hides an absolute root. */
+  identityPath?: string;
 }
 
 /**
@@ -114,7 +116,15 @@ const normalizeDeliverablePath = (
         return { relativePath: normalized.slice(comparableRoot.length + 1), absolutePath: normalized };
       }
     }
-    return { relativePath: normalized, absolutePath: normalized };
+    // The deliverables card is scoped to the current conversation, so never
+    // expose a host absolute path when the backend target sits outside the
+    // active workspace. Keep the absolute path only for file actions and use
+    // the basename as the safest relative display fallback.
+    return {
+      relativePath: normalized.split('/').at(-1) ?? normalized,
+      absolutePath: normalized,
+      identityPath: normalized,
+    };
   }
 
   // Reject traversal in relative paths — a display path must never suggest a
@@ -332,7 +342,7 @@ const mergeDraft = (
   const normalized = normalizeDeliverablePath(draft.path, workspaceRoots);
   if (!normalized) return;
 
-  const key = normalized.relativePath.toLowerCase();
+  const key = (normalized.identityPath ?? normalized.relativePath).toLowerCase();
   const absolutePath = draft.absolutePath ?? normalized.absolutePath;
   const existing = byPath.get(key);
   if (!existing) {

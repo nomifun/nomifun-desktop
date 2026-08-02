@@ -11,6 +11,7 @@ import { isPreviewSupportedExt } from '@/renderer/pages/conversation/Workspace/u
 import { diffColors, iconColors } from '@/renderer/styles/colors';
 import { formatBytes } from '@/renderer/utils/file/formatBytes';
 import { getFileTypeInfo } from '@/renderer/utils/file/fileType';
+import { splitFileDisplayPath } from '@/renderer/utils/file/pathDisplay';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import {
   Code,
@@ -34,6 +35,7 @@ import { useTranslation } from 'react-i18next';
 import type { TurnDeliverableItem } from '../turnDeliverablesModel';
 
 const DEFAULT_VISIBLE_COUNT = 3;
+const DIRECTORY_PATH_COLOR = 'color-mix(in srgb, var(--text-secondary) 82%, var(--bg-base))';
 
 const ARCHIVE_EXTENSIONS = new Set(['zip', '7z', 'rar', 'tar', 'gz', 'bz2', 'xz', 'tgz']);
 
@@ -155,7 +157,7 @@ const DeliverableRow: React.FC<{
   const { t } = useTranslation();
   const { launchPreview, canPreview } = usePreviewLauncher();
   const showShellActions = isDesktopShell() && Boolean(item.statPath);
-  const secondaryPath = item.relativePath !== item.fileName ? item.relativePath : undefined;
+  const displayPath = splitFileDisplayPath(item.relativePath, item.fileName);
   const previewSupported = canPreview && isPreviewSupportedExt(item.fileName);
 
   const handlePreview = () => {
@@ -185,20 +187,30 @@ const DeliverableRow: React.FC<{
   return (
     <div
       data-deliverable-path={item.relativePath}
-      className='group flex items-center justify-between gap-8px px-16px py-10px hover:bg-3 transition-colors'
+      className='group flex items-center justify-between gap-8px px-12px py-6px hover:bg-3 transition-colors'
     >
       <div className='flex flex-1 items-center gap-8px min-w-0'>
         <span className='shrink-0 flex items-center' style={{ lineHeight: 0 }}>
           <DeliverableIcon fileName={item.fileName} />
         </span>
-        <span className='min-w-0 max-w-60% truncate text-14px text-t-primary' title={item.fileName}>
-          {item.fileName}
-        </span>
-        {secondaryPath && (
-          <span className='text-12px text-t-secondary truncate min-w-0' title={secondaryPath}>
-            {secondaryPath}
+        <span
+          className='flex min-w-0 max-w-full items-center text-14px leading-20px'
+          title={displayPath.fullPath}
+        >
+          {displayPath.directoryPath && (
+            <span className='min-w-0 truncate' style={{ color: DIRECTORY_PATH_COLOR }}>
+              {displayPath.directoryPath}
+            </span>
+          )}
+          <span
+            className={classNames(
+              'truncate text-t-primary',
+              displayPath.directoryPath ? 'shrink-0 max-w-60%' : 'min-w-0'
+            )}
+          >
+            {displayPath.fileName}
           </span>
-        )}
+        </span>
         {item.tier === 'receipt' && (
           <span
             className='shrink-0 flex items-center'
@@ -293,7 +305,7 @@ const TurnDeliverablesCard: React.FC<{
       data-testid='turn-deliverables-card'
       className='w-full box-border rounded-8px overflow-hidden border border-solid border-[var(--aou-2)]'
     >
-      <div className='flex items-center gap-8px px-16px py-12px select-none'>
+      <div className='flex items-center gap-8px px-12px py-8px select-none'>
         <span className='w-8px h-8px rounded-full shrink-0' style={{ backgroundColor: diffColors.addition }}></span>
         <span className='text-14px text-t-primary font-medium'>
           {t('messages.turnDeliverables.title', {
@@ -305,13 +317,13 @@ const TurnDeliverablesCard: React.FC<{
 
       <div className='w-full bg-2'>
         {visible.map((item) => (
-          <DeliverableRow key={item.relativePath} item={item} />
+          <DeliverableRow key={item.absolutePath ?? item.relativePath} item={item} />
         ))}
         {(hiddenCount > 0 || showAll) && (
           <button
             type='button'
             aria-expanded={showAll}
-            className='w-full flex items-center gap-8px px-16px py-10px text-13px text-t-secondary cursor-pointer bg-transparent border-none hover:bg-3 transition-colors'
+            className='w-full flex items-center gap-8px px-12px py-6px text-13px text-t-secondary cursor-pointer bg-transparent border-none hover:bg-3 transition-colors'
             onClick={() => setShowAll(!showAll)}
           >
             <Down

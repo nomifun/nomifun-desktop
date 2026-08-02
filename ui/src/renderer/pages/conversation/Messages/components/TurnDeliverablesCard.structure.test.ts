@@ -36,10 +36,24 @@ describe('TurnDeliverablesCard structure', () => {
     expect(cardSource.includes('messages.turnDeliverables.showLess')).toBe(true);
   });
 
-  test('gives the filename a wider share of the available row space', () => {
+  test('uses compact padding across the card header, file rows and reveal control', () => {
+    expect(cardSource.includes('gap-8px px-12px py-8px select-none')).toBe(true);
+    expect(cardSource.includes('gap-8px px-12px py-6px hover:bg-3 transition-colors')).toBe(true);
+    expect(cardSource.includes('gap-8px px-12px py-6px text-13px text-t-secondary')).toBe(true);
+  });
+
+  test('renders one relative path with muted directories and a primary filename', () => {
     expect(cardSource.includes("className='flex flex-1 items-center gap-8px min-w-0'")).toBe(true);
-    expect(cardSource.includes('min-w-0 max-w-60% truncate text-14px text-t-primary')).toBe(true);
-    expect(cardSource.includes('shrink-0 max-w-40%')).toBe(false);
+    expect(cardSource.includes('splitFileDisplayPath(item.relativePath, item.fileName)')).toBe(true);
+    expect(
+      cardSource.includes(
+        "const DIRECTORY_PATH_COLOR = 'color-mix(in srgb, var(--text-secondary) 82%, var(--bg-base))'"
+      )
+    ).toBe(true);
+    expect(cardSource.includes("className='min-w-0 truncate' style={{ color: DIRECTORY_PATH_COLOR }}")).toBe(true);
+    expect(cardSource.includes("'truncate text-t-primary'")).toBe(true);
+    expect(cardSource.includes('secondaryPath')).toBe(false);
+    expect(cardSource.includes('key={item.absolutePath ?? item.relativePath}')).toBe(true);
   });
 
   test('message list mounts the card once per turn behind the deliverables model', () => {
