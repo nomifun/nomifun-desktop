@@ -4,18 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Progress, Message } from '@arco-design/web-react';
 import { CheckOne, Download, FolderOpen, Refresh, CloseOne, Install } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import MarkdownView from '@/renderer/components/Markdown';
-import type { UpdateDownloadProgressEvent, UpdateReleaseInfo, AutoUpdateStatus } from '@/common/update/updateTypes';
+import type {
+  UpdateDownloadProgressEvent,
+  UpdateReleaseInfo,
+  AutoUpdateInstallPhase,
+  AutoUpdateStatus,
+} from '@/common/update/updateTypes';
 import { useTranslation } from 'react-i18next';
 import { getUpdateErrorMessageKey } from './updateErrorMessage';
 import { reportNoUpdateAvailable, reportUpdateAvailable } from '@renderer/hooks/system/useUpdateAvailability';
 
-type UpdateStatus = 'checking' | 'upToDate' | 'available' | 'downloading' | 'downloaded' | 'success' | 'error';
+type UpdateStatus =
+  | 'checking'
+  | 'upToDate'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'success'
+  | 'error';
 
 type UpdateInfo = UpdateReleaseInfo;
 
@@ -31,12 +44,14 @@ const UpdateModal: React.FC = () => {
   const [currentVersion, setCurrentVersion] = useState<string>('');
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [progress, setProgress] = useState({ percent: 0, speed: '', total: 0, transferred: 0 });
+  const [installPhase, setInstallPhase] = useState<AutoUpdateInstallPhase>('preparing');
   const [errorMsg, setErrorMsg] = useState('');
   const [downloadPath, setDownloadPath] = useState('');
   const [releasePageUrl, setReleasePageUrl] = useState('');
   // Whether electron-updater auto-update is available (determined automatically, not user-controllable)
   const [autoUpdateAvailable, setAutoUpdateAvailable] = useState(false);
   const [autoUpdateInfo, setAutoUpdateInfo] = useState<{ version: string; releaseNotes?: string } | null>(null);
+  const installRequestedRef = useRef(false);
 
   const resetState = () => {
     setStatus('checking');
@@ -44,6 +59,8 @@ const UpdateModal: React.FC = () => {
     setCurrentVersion('');
     setDownloadId(null);
     setProgress({ percent: 0, speed: '', total: 0, transferred: 0 });
+    setInstallPhase('preparing');
+    installRequestedRef.current = false;
     setErrorMsg('');
     setDownloadPath('');
     setReleasePageUrl('');
@@ -182,9 +199,17 @@ const UpdateModal: React.FC = () => {
   };
 
   const quitAndInstall = async () => {
+    if (installRequestedRef.current) return;
+    installRequestedRef.current = true;
+    setInstallPhase('preparing');
+    setProgress({ percent: 0, speed: '', total: 0, transferred: 0 });
+    setErrorMsg('');
+    setStatus('installing');
     try {
       await ipcBridge.autoUpdate.quitAndInstall.invoke();
     } catch (err: unknown) {
+      installRequestedRef.current = false;
+      setStatus('downloaded');
       const msg = err instanceof Error ? err.message : String(err);
       console.error('Install failed:', err);
       Message.error(t(getUpdateErrorMessageKey(msg)));
@@ -207,6 +232,7 @@ const UpdateModal: React.FC = () => {
 
   const handleOpenUpdateModal = () => {
     setVisible(true);
+    if (installRequestedRef.current) return;
     resetState();
     void checkForUpdates();
   };
@@ -256,6 +282,18 @@ const UpdateModal: React.FC = () => {
         case 'downloaded':
           setStatus('downloaded');
           break;
+        case 'installing':
+          setStatus('installing');
+          setInstallPhase(evt.installPhase || 'preparing');
+          if (evt.progress) {
+            setProgress({
+              percent: Math.round(evt.progress.percent),
+              speed: formatSpeed(evt.progress.bytesPerSecond),
+              total: evt.progress.total,
+              transferred: evt.progress.transferred,
+            });
+          }
+          break;
         case 'error':
           setStatus('error');
           setErrorMsg(evt.error || t('update.downloadFailed'));
@@ -297,6 +335,7 @@ const UpdateModal: React.FC = () => {
   }, [downloadId, t]);
 
   const handleClose = () => {
+    if (installRequestedRef.current) return;
     setVisible(false);
   };
 
@@ -491,6 +530,49 @@ const UpdateModal: React.FC = () => {
           </div>
         );
 
+      case 'installing': {
+        const isDownloadingPackage = installPhase === 'downloading';
+        const isHandingOff = installPhase === 'installing';
+        return (
+          <div className='flex flex-col items-center justify-center py-48px px-32px'>
+            <div className='w-56px h-56px mb-20px relative'>
+              <div className='absolute inset-0 border-3 border-fill-3 rounded-full' />
+              <div className='absolute inset-0 border-3 border-primary border-t-transparent rounded-full animate-spin' />
+              <div className='absolute inset-0 flex items-center justify-center'>
+                <Install size='20' fill='rgb(var(--primary-6))' />
+              </div>
+            </div>
+            <div aria-live='polite' className='text-center'>
+              <div className='text-16px text-t-primary font-600 mb-8px'>
+                {isHandingOff ? t('update.installingTitle') : t('update.preparingInstallTitle')}
+              </div>
+              <div className='text-13px text-t-tertiary max-w-360px'>
+                {isHandingOff ? t('update.installingDesc') : t('update.preparingInstallDesc')}
+              </div>
+            </div>
+            {isDownloadingPackage && (
+              <div className='w-full max-w-320px mt-20px'>
+                <Progress
+                  percent={progress.percent}
+                  status='normal'
+                  showText={false}
+                  strokeWidth={6}
+                  className='!mb-12px'
+                />
+                <div className='flex justify-between text-12px text-t-tertiary'>
+                  <span>
+                    {progress.total > 0
+                      ? `${formatSize(progress.transferred)} / ${formatSize(progress.total)}`
+                      : formatSize(progress.transferred)}
+                  </span>
+                  <span className='text-[rgb(var(--primary-6))] font-500'>{progress.speed}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
       case 'success':
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
@@ -545,7 +627,7 @@ const UpdateModal: React.FC = () => {
       size={status === 'available' ? 'medium' : 'small'}
       header={{
         title: t('update.modalTitle'),
-        showClose: true,
+        showClose: status !== 'installing',
       }}
       footer={{ render: () => null }}
       contentStyle={{

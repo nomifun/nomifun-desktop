@@ -23,7 +23,7 @@ describe('desktop updater security boundary', () => {
     expect(updaterSource.includes('install(): Promise<void>')).toBe(false);
     expect(updaterSource.includes('downloadAndInstall')).toBe(false);
     expect(updaterSource.includes('.install(')).toBe(false);
-    expect(updaterSource.includes('tauriInstallUpdate(version)')).toBe(true);
+    expect(updaterSource.includes('tauriInstallUpdate(version, reportInstallProgress)')).toBe(true);
   });
 
   test('install goes through the fail-closed preflight/fatal-exit contract', () => {
@@ -34,6 +34,15 @@ describe('desktop updater security boundary', () => {
     expect(updaterSource.includes('fatalExit')).toBe(true);
     expect(updaterSource.includes('prepareShutdown')).toBe(true);
     expect(/await\s+tauriInstallUpdate\(/.test(updaterSource)).toBe(false);
+  });
+
+  test('native re-check and download report progress without exposing raw install permissions', () => {
+    expect(shellSource.includes('new Channel<TauriInstallUpdateProgress>(onProgress)')).toBe(true);
+    expect(desktopSource.includes('tauri::ipc::Channel<InstallUpdateProgress>')).toBe(true);
+    expect(desktopSource.includes('phase: "downloading"')).toBe(true);
+    expect(desktopSource.includes('.download(|_, _| {}, || {})')).toBe(false);
+    expect(updaterSource.includes("installPhase: 'downloading'")).toBe(true);
+    expect(updaterSource.includes("throw new Error('No downloaded update is ready to install')")).toBe(true);
   });
 
   test('renderer adapter cannot invoke the removed pre-shutdown command', () => {

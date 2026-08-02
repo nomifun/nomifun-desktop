@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 
-import { tauriInstallUpdate } from './tauriShell';
+import { tauriInstallUpdate, type TauriInstallUpdateProgress } from './tauriShell';
 
 const originalWindow = globalThis.window;
 
@@ -27,7 +27,13 @@ const withTauriInternals = async (
 ): Promise<void> => {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
-    value: { __TAURI_INTERNALS__: { invoke } },
+    value: {
+      __TAURI_INTERNALS__: {
+        invoke,
+        transformCallback: () => 1,
+        unregisterCallback: () => {},
+      },
+    },
   });
 
   try {
@@ -40,13 +46,22 @@ const withTauriInternals = async (
 describe('tauriInstallUpdate', () => {
   test('invokes the Rust-owned updater command with the selected version', async () => {
     const calls: Array<{ command: string; args: unknown; options: unknown }> = [];
+    const events: TauriInstallUpdateProgress[] = [];
     await withTauriInternals(async (command, args, options) => {
       calls.push({ command, args, options });
+      const payload = args as {
+        onEvent: { onmessage: (event: TauriInstallUpdateProgress) => void };
+      };
+      payload.onEvent.onmessage({ phase: 'downloading', chunkLength: 64, contentLength: 128 });
     }, async () => {
-      await tauriInstallUpdate('1.2.3');
+      await tauriInstallUpdate('1.2.3', (event) => events.push(event));
     });
 
-    expect(calls).toEqual([{ command: 'install_update', args: { version: '1.2.3' }, options: undefined }]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.command).toBe('install_update');
+    expect((calls[0]?.args as { version: string }).version).toBe('1.2.3');
+    expect(calls[0]?.options).toBeUndefined();
+    expect(events).toEqual([{ phase: 'downloading', chunkLength: 64, contentLength: 128 }]);
   });
 
   test('propagates native installation failures', async () => {
@@ -55,7 +70,7 @@ describe('tauriInstallUpdate', () => {
       throw new Error('native updater failed');
     }, async () => {
       try {
-        await tauriInstallUpdate('1.2.3');
+        await tauriInstallUpdate('1.2.3', () => {});
       } catch (error) {
         errorMessage = error instanceof Error ? error.message : String(error);
       }

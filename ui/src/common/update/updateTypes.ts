@@ -71,8 +71,11 @@ export type AutoUpdateStatusType =
   | 'not-available'
   | 'downloading'
   | 'downloaded'
+  | 'installing'
   | 'error'
   | 'cancelled';
+
+export type AutoUpdateInstallPhase = 'preparing' | 'downloading' | 'installing';
 
 export interface AutoUpdateProgress {
   bytesPerSecond: number;
@@ -87,5 +90,6 @@ export interface AutoUpdateStatus {
   releaseDate?: string;
   releaseNotes?: string;
   progress?: AutoUpdateProgress;
+  installPhase?: AutoUpdateInstallPhase;
   error?: string;
 }
