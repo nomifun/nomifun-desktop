@@ -388,7 +388,7 @@ describe('collectTurnDeliverables', () => {
     expect(result.size).toBe(0);
   });
 
-  test('normalizes windows separators and keeps outside-workspace paths absolute', () => {
+  test('normalizes windows separators and hides outside-workspace absolute roots from display', () => {
     const result = collect([
       candidate({
         toolMessages: [
@@ -402,7 +402,26 @@ describe('collectTurnDeliverables', () => {
     ]);
 
     const items = result.get(TURN_1);
-    expect(items?.map((item) => item.relativePath)).toEqual(['outputs/win.md', 'D:/elsewhere/out.md']);
+    expect(items?.map((item) => item.relativePath)).toEqual(['outputs/win.md', 'out.md']);
     expect(items?.[1].absolutePath).toBe('D:/elsewhere/out.md');
+  });
+
+  test('keeps same-named files outside the workspace as separate deliverables', () => {
+    const result = collect([
+      candidate({
+        toolMessages: [
+          toolCall({ name: 'Write', args: { file_path: 'D:/reports/out.md' } }),
+          toolCall(
+            { call_id: 'call-2', name: 'Write', args: { file_path: 'E:/exports/out.md' } },
+            { message_id: MSG_2 }
+          ),
+        ],
+      }),
+    ]);
+
+    const items = result.get(TURN_1);
+    expect(items).toHaveLength(2);
+    expect(items?.map((item) => item.relativePath)).toEqual(['out.md', 'out.md']);
+    expect(items?.map((item) => item.absolutePath)).toEqual(['D:/reports/out.md', 'E:/exports/out.md']);
   });
 });
