@@ -81,6 +81,13 @@ review generated code, remove hallucinated APIs, do not paste private or
 licensed third-party code into prompts, and disclose material AI assistance in
 the PR notes when it helps reviewers understand the work.
 
+Git attribution must always identify the responsible human. AI models,
+products, vendors, bots, and agents must not appear as the author, committer,
+co-author, or other credited contributor. After cloning, run
+`bun run setup:git-hooks`; it enables checks only for this repository and does
+not change global Git configuration. Do not bypass the checks with
+`--no-verify`.
+
 ## Local Setup
 
 Prerequisites:
@@ -99,6 +106,7 @@ Install and smoke-check:
 git clone <repo-url> nomifun-tauri
 cd nomifun-tauri
 bun install
+bun run setup:git-hooks
 cargo check --workspace
 ```
 

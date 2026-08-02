@@ -1,0 +1,12 @@
+---
+description: Enforce human-only Git attribution for the nomifun-tauri repository
+alwaysApply: true
+---
+
+Follow the repository-wide rules in `/AGENTS.md`. Every Git author, committer,
+and co-author must identify the responsible human. Cursor and every other AI
+model or product may assist with changes but must not be credited in commit
+identity fields or attribution trailers.
+
+Use `bun run setup:git-hooks` after cloning. Do not change global Git
+configuration and do not bypass repository hooks with `--no-verify`.
