@@ -9,6 +9,14 @@
     { "id": "maint", "title": "维护 / 工具" }
   ],
   "scripts": {
+    "setup:git-hooks": {
+      "group": "maint",
+      "desc": "Enable this repository's human-only Git attribution hooks without changing global Git config."
+    },
+    "test:git-attribution": {
+      "group": "test",
+      "desc": "Validate the repository-local human-only Git attribution policy."
+    },
     "check:process-runtime-boundary": {
       "group": "check",
       "desc": "Enforce the supervised process runtime boundary and exact hand-off allowlist."

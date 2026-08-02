@@ -2,6 +2,12 @@
 
 English: [CONTRIBUTING.md](CONTRIBUTING.md)
 
+> **Git 署名规则：** 本仓库的 Author、Committer、Co-author 和其他贡献者署名必须是
+> 实际负责的人类开发者，不得使用 Claude、Codex、GPT、ChatGPT、Gemini、Copilot、
+> OpenAI、Anthropic 或其他模型、产品、厂商、机器人和 Agent 身份。克隆仓库并安装
+> 依赖后请运行 `bun run setup:git-hooks`；该命令只配置当前仓库，不修改全局 Git
+> 配置。不得使用 `--no-verify` 绕过检查。
+
 > **强制规则：本仓库绝对禁止使用 GitHub Actions。** 不得新增、恢复、生成、
 > 重命名或重新启用任何 workflow；已禁用、仅手动触发、临时、发布专用的
 > workflow 也不例外。构建、测试、打包和发布必须使用本地脚本及文档化的手动
