@@ -16,24 +16,14 @@ import {
 } from '@arco-design/web-react/icon';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { getBaseUrl } from '@/common/adapter/httpBridge';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import {
+  browseDirectory,
+  createDirectory,
+  type DirectoryData,
+  type DirectoryItem,
+} from './directorySelectionApi';
 import styles from './DirectorySelectionModal.module.css';
-
-interface DirectoryItem {
-  name: string;
-  path: string;
-  isDirectory: boolean;
-  isFile?: boolean;
-}
-
-interface DirectoryData {
-  items: DirectoryItem[];
-  currentPath: string;
-  canGoUp: boolean;
-  parentPath?: string;
-  truncated?: boolean;
-  isRoot?: boolean;
-}
 
 interface DirectoryTreeNode extends DirectoryItem {
   children?: DirectoryTreeNode[];
@@ -49,11 +39,6 @@ interface DirectorySelectionModalProps {
   isFileMode?: boolean;
   onConfirm: (paths: string[] | undefined) => void;
   onCancel: () => void;
-}
-
-interface ApiEnvelope<T> {
-  data?: T;
-  error?: string;
 }
 
 const sortNodes = (nodes: DirectoryTreeNode[]): DirectoryTreeNode[] =>
@@ -92,31 +77,9 @@ const findNodeByPath = (nodes: DirectoryTreeNode[], path: string): DirectoryTree
   return undefined;
 };
 
-const responseError = (rawText: string, status: number): Error => {
-  let message = '';
-  try {
-    const parsed = rawText ? (JSON.parse(rawText) as ApiEnvelope<unknown>) : null;
-    message = typeof parsed?.error === 'string' ? parsed.error : '';
-  } catch {
-    message = rawText.slice(0, 300);
-  }
-  return new Error(message || `HTTP ${status}`);
-};
-
-const requestData = async <T,>(url: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(url, {
-    credentials: 'include',
-    cache: 'no-store',
-    ...init,
-  });
-  const rawText = await response.text().catch(() => '');
-  if (!response.ok) throw responseError(rawText, response.status);
-
-  const envelope: ApiEnvelope<T> | T = rawText ? JSON.parse(rawText) : ({} as T);
-  if (envelope && typeof envelope === 'object' && 'data' in envelope) {
-    return (envelope as ApiEnvelope<T>).data as T;
-  }
-  return envelope as T;
+const requestErrorMessage = (error: unknown): string => {
+  if (isBackendHttpError(error) && error.backendMessage) return error.backendMessage;
+  return error instanceof Error ? error.message : String(error);
 };
 
 const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
@@ -139,10 +102,7 @@ const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
 
   const loadDirectory = useCallback(
     async (dirPath = ''): Promise<DirectoryData> => {
-      const showFiles = isFileMode ? 'true' : 'false';
-      const data = await requestData<DirectoryData>(
-        `${getBaseUrl()}/api/fs/browse?path=${encodeURIComponent(dirPath)}&showFiles=${showFiles}`
-      );
+      const data = await browseDirectory(dirPath, isFileMode);
       if (!data || !Array.isArray(data.items)) throw new Error('Invalid response from server');
       return data;
     },
@@ -184,7 +144,7 @@ const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
       ]);
     } catch (loadError) {
       if (initialRequestRef.current === requestId) {
-        setError(loadError instanceof Error ? loadError.message : String(loadError));
+        setError(requestErrorMessage(loadError));
       }
     } finally {
       if (initialRequestRef.current === requestId) setLoading(false);
@@ -226,7 +186,7 @@ const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
         );
         return true;
       } catch (loadError) {
-        const message = loadError instanceof Error ? loadError.message : String(loadError);
+        const message = requestErrorMessage(loadError);
         setTreeNodes((nodes) =>
           updateNodeByPath(nodes, path, (node) => ({ ...node, expanded: true, loading: false, error: message }))
         );
@@ -306,11 +266,7 @@ const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
     setCreatingFolder(true);
     setCreateError(null);
     try {
-      const created = await requestData<DirectoryItem>(`${getBaseUrl()}/api/fs/directory`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parentPath, name }),
-      });
+      const created = await createDirectory(parentPath, name);
       setTreeNodes((nodes) =>
         updateNodeByPath(nodes, parentPath, (node) => ({
           ...node,
@@ -326,7 +282,7 @@ const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
       setNewFolderName('');
       Message.success(t('fileSelection.createFolderSuccess'));
     } catch (createFolderError) {
-      setCreateError(createFolderError instanceof Error ? createFolderError.message : String(createFolderError));
+      setCreateError(requestErrorMessage(createFolderError));
     } finally {
       setCreatingFolder(false);
     }
