@@ -1,19 +1,11 @@
 {
-  "version": "0.3.6",
-  "notes": "## NomiFun v0.3.6\n\n- 修复数据库迁移编号冲突：将 connector credentials 清理迁移调整为 `023_drop_connector_credentials`，避免与 022 迁移碰撞，并补充数据库生命周期测试覆盖。\n- 修复 Terminal / Knowledge Base 残留链路问题，增强 terminal 任务恢复、输出增强、驱动层状态处理与中英文提示文案。\n- 强化 Knowledge MCP / stdio bridge 能力，补齐 knowledge stdio 命令、stdio 公共处理、gateway capability 与 service 层接口。\n- 优化 Requirement auto-work runner 与 prompt 逻辑，使自动工作流在 terminal / knowledge 场景下的上下文衔接更稳。\n- 补充 v0.3.5 多平台 updater 清单维护记录；本次 v0.3.6 首发仍以 Windows x64 包为主，其他平台可后续在对应原生构建机追加。\n\n## Windows 包\n\n- 本次 GitHub 首发发布 Windows x64 安装包及 Tauri 自动更新签名资产。\n- 安装包未包含 Authenticode 签名，手动下载时可能出现 SmartScreen 或未知发布者提示；自动更新仍使用 Tauri 签名校验。",
-  "pub_date": "2026-08-01T08:37:11.728Z",
+  "version": "0.3.7",
+  "notes": "## NomiFun v0.3.7\n\n- 优化自动更新安装体验：在桌面端更新弹窗中补充安装进度与状态反馈，让 Windows 用户能更清楚地看到更新正在执行。\n- 改进对话交付物文件路径展示与打开逻辑，减少相对路径、工作区路径和可点击交付文件之间的歧义。\n- 重构 browser managed-lane 调度实现，合并 tool 与 ManagedBrowserFacade 中重复的打开、列举、关闭、执行与 action alias 逻辑，降低浏览器自动化链路漂移风险。\n- 完成一轮 workspace-wide 技术债清理：移除大量死代码、历史 shim、重复实现和过期文档，收敛 channel 表单、runtime chat/sendbox、zip safety、idempotency、ANSI 清理与消息截断等公共逻辑。\n- 调整 provider / model API：移除已废弃的 provider capabilities 字段，更新 UI API contract，并补充前后端兼容性测试。\n- 加强仓库 Git 归因治理：新增仓库本地 hooks 与检查脚本，确保后续提交归因到人类开发者且不包含 AI credit trailer。\n- 维护 v0.3.6 macOS updater 清单记录；本次 v0.3.7 首发仍以 Windows x64 包为主，其他平台可后续在对应原生构建机追加。\n\n## Windows 包\n\n- 本次 GitHub 首发发布 Windows x64 安装包及 Tauri 自动更新签名资产。\n- 安装包未包含 Authenticode 签名，手动下载时可能出现 SmartScreen 或未知发布者提示；自动更新仍使用 Tauri 签名校验。",
+  "pub_date": "2026-08-02T11:43:24.184Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHkxNmlIUytYNGwreldraFJFcGsvNjFqTmR5bEdZMmQzQkp2S0FzaDJHSW95ODZ6RDZONVk5QUtnb2JrTjJ2VXNHZWZoSVZNVmpVM2xhamJ6c1dOOXdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1NTcyMTEyCWZpbGU6Tm9taUZ1bl8wLjMuNl94NjQtc2V0dXAuZXhlClQ1SzJleTQ1NU0rQ0FBSkVDR3ZrNWhqWWRRZC9nR2diV2pYTHJMM3JBRzNwTmlEN0t6ei82eE5BQjB6bHJJTGkvUnVBYVZraTBxR2dJZmFNcjMrbEF3PT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.6/NomiFun_0.3.6_x64-setup.exe"
-    },
-    "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNZNW1KR3hZV2NFbmVvUWsxbU9SUFhQY01heEJiRUJ1SkdqYjZVNWpvNlozN09selFWQjBTT0drZ0xXOXcyZHFacEk3MDNBV0x6aVpBUEpWZmdzQVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1NTczMzQwCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CjVnUUpxV3dKWlh3RXpHSU5Sd0lPa0NuVTZUbDdmQXZXSVVLd0ZJM1NyREtjdHd1OUtqZTRJc1Y2M3YvbmRJVjF1NjNsU1pkSjcvcTBZV1YycWlvdkRBPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.6/NomiFun.app.tar.gz"
-    },
-    "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNZNW1KR3hZV2NFbmVvUWsxbU9SUFhQY01heEJiRUJ1SkdqYjZVNWpvNlozN09selFWQjBTT0drZ0xXOXcyZHFacEk3MDNBV0x6aVpBUEpWZmdzQVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1NTczMzQwCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CjVnUUpxV3dKWlh3RXpHSU5Sd0lPa0NuVTZUbDdmQXZXSVVLd0ZJM1NyREtjdHd1OUtqZTRJc1Y2M3YvbmRJVjF1NjNsU1pkSjcvcTBZV1YycWlvdkRBPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.6/NomiFun.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODEvS0lDV1VpWnVTeDFiVHZtZ2h2VWx3cTVJQ2E3WlhLbnVLTVJ5QkJOY3FRdUZwZTlJWVdsdzZxbFhhSHZGY1hHcXJpNEhSV2l4WEZqMW52SENoaWdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1NjcxMDAzCWZpbGU6Tm9taUZ1bl8wLjMuN194NjQtc2V0dXAuZXhlCmk5NERTQkdhUDlqVWdack5hdkU1MlFBdFc3UzhjYy90K01LejF1YTR0M0xDNko2bVgvVUNETDdKT1Y3anVwZ2htV0xqalFPVU9YUjkyK1dWa0F0bUNRPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.7/NomiFun_0.3.7_x64-setup.exe"
     }
   }
 }
