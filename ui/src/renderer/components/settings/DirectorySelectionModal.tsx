@@ -4,11 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Modal, Spin } from '@arco-design/web-react';
-import { IconFile, IconFolder, IconUp } from '@arco-design/web-react/icon';
-import React, { useCallback, useEffect, useState } from 'react';
+import { Button, Input, Message, Modal, Spin } from '@arco-design/web-react';
+import {
+  IconCheck,
+  IconClose,
+  IconDown,
+  IconFile,
+  IconFolder,
+  IconFolderAdd,
+  IconRight,
+} from '@arco-design/web-react/icon';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getBaseUrl } from '@/common/adapter/httpBridge';
+import styles from './DirectorySelectionModal.module.css';
 
 interface DirectoryItem {
   name: string;
@@ -19,8 +28,20 @@ interface DirectoryItem {
 
 interface DirectoryData {
   items: DirectoryItem[];
+  currentPath: string;
   canGoUp: boolean;
   parentPath?: string;
+  truncated?: boolean;
+  isRoot?: boolean;
+}
+
+interface DirectoryTreeNode extends DirectoryItem {
+  children?: DirectoryTreeNode[];
+  expanded?: boolean;
+  loading?: boolean;
+  error?: string;
+  truncated?: boolean;
+  virtual?: boolean;
 }
 
 interface DirectorySelectionModalProps {
@@ -30,6 +51,74 @@ interface DirectorySelectionModalProps {
   onCancel: () => void;
 }
 
+interface ApiEnvelope<T> {
+  data?: T;
+  error?: string;
+}
+
+const sortNodes = (nodes: DirectoryTreeNode[]): DirectoryTreeNode[] =>
+  [...nodes].sort((left, right) => {
+    if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
+    return left.name.localeCompare(right.name);
+  });
+
+const toTreeNodes = (items: DirectoryItem[]): DirectoryTreeNode[] => sortNodes(items.map((item) => ({ ...item })));
+
+const pathLabel = (path: string): string => {
+  const normalized = path.replace(/[\\/]+$/, '');
+  return normalized.split(/[\\/]/).pop() || path;
+};
+
+const updateNodeByPath = (
+  nodes: DirectoryTreeNode[],
+  path: string,
+  update: (node: DirectoryTreeNode) => DirectoryTreeNode
+): DirectoryTreeNode[] =>
+  nodes.map((node) => {
+    if (!node.virtual && node.path === path) return update(node);
+    if (!node.children) return node;
+    const children = updateNodeByPath(node.children, path, update);
+    return children === node.children ? node : { ...node, children };
+  });
+
+const findNodeByPath = (nodes: DirectoryTreeNode[], path: string): DirectoryTreeNode | undefined => {
+  for (const node of nodes) {
+    if (!node.virtual && node.path === path) return node;
+    if (node.children) {
+      const child = findNodeByPath(node.children, path);
+      if (child) return child;
+    }
+  }
+  return undefined;
+};
+
+const responseError = (rawText: string, status: number): Error => {
+  let message = '';
+  try {
+    const parsed = rawText ? (JSON.parse(rawText) as ApiEnvelope<unknown>) : null;
+    message = typeof parsed?.error === 'string' ? parsed.error : '';
+  } catch {
+    message = rawText.slice(0, 300);
+  }
+  return new Error(message || `HTTP ${status}`);
+};
+
+const requestData = async <T,>(url: string, init?: RequestInit): Promise<T> => {
+  const response = await fetch(url, {
+    credentials: 'include',
+    cache: 'no-store',
+    ...init,
+  });
+  const rawText = await response.text().catch(() => '');
+  if (!response.ok) throw responseError(rawText, response.status);
+
+  const envelope: ApiEnvelope<T> | T = rawText ? JSON.parse(rawText) : ({} as T);
+  if (envelope && typeof envelope === 'object' && 'data' in envelope) {
+    return (envelope as ApiEnvelope<T>).data as T;
+  }
+  return envelope as T;
+};
+
 const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
   visible,
   isFileMode = false,
@@ -38,128 +127,404 @@ const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
 }) => {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(false);
-  const [directoryData, setDirectoryData] = useState<DirectoryData>({ items: [], canGoUp: false });
-  const [selectedPath, setSelectedPath] = useState<string>('');
-  const [currentPath, setCurrentPath] = useState<string>('');
+  const [treeNodes, setTreeNodes] = useState<DirectoryTreeNode[]>([]);
+  const [selectedPath, setSelectedPath] = useState('');
+  const [currentPath, setCurrentPath] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [newFolderParentPath, setNewFolderParentPath] = useState<string | null>(null);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const initialRequestRef = useRef(0);
 
   const loadDirectory = useCallback(
-    async (dirPath = '') => {
-      setLoading(true);
-      setError(null);
-      try {
-        const showFiles = isFileMode ? 'true' : 'false';
-        const response = await fetch(
-          `${getBaseUrl()}/api/fs/browse?path=${encodeURIComponent(dirPath)}&showFiles=${showFiles}`,
-          {
-            method: 'GET',
-            credentials: 'include',
-            cache: 'no-store',
-          }
-        );
-        if (!response.ok) {
-          // Error bodies are not guaranteed to be JSON: axum extractor
-          // rejections and reverse-proxy error pages are plain text. Fall
-          // back to the raw text so the real failure is never masked.
-          const rawText = await response.text().catch(() => '');
-          let message = '';
-          try {
-            const parsed: unknown = rawText ? JSON.parse(rawText) : null;
-            const err = (parsed as { error?: unknown } | null)?.error;
-            message = typeof err === 'string' ? err : '';
-          } catch {
-            message = rawText.slice(0, 300);
-          }
-          setError(message || `HTTP ${response.status}`);
-          return;
-        }
-        const envelope = await response.json();
-        // Backend wraps the payload in { success, data, ... }.
-        const data = envelope && typeof envelope === 'object' && 'data' in envelope ? envelope.data : envelope;
-        if (!data || !Array.isArray(data.items)) {
-          setError('Invalid response from server');
-          return;
-        }
-        setDirectoryData(data);
-        setCurrentPath(dirPath);
-      } catch (err) {
-        console.error('Failed to load directory:', err);
-        setError(err instanceof Error ? err.message : 'Failed to load directory');
-      } finally {
-        setLoading(false);
-      }
+    async (dirPath = ''): Promise<DirectoryData> => {
+      const showFiles = isFileMode ? 'true' : 'false';
+      const data = await requestData<DirectoryData>(
+        `${getBaseUrl()}/api/fs/browse?path=${encodeURIComponent(dirPath)}&showFiles=${showFiles}`
+      );
+      if (!data || !Array.isArray(data.items)) throw new Error('Invalid response from server');
+      return data;
     },
     [isFileMode]
   );
 
+  const loadInitialTree = useCallback(async (dirPath = '') => {
+    const requestId = initialRequestRef.current + 1;
+    initialRequestRef.current = requestId;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await loadDirectory(dirPath);
+      if (initialRequestRef.current !== requestId) return;
+      setCurrentPath(data.currentPath || '');
+      const visibleRoots: DirectoryTreeNode[] = data.currentPath
+        ? [
+            {
+              name: pathLabel(data.currentPath),
+              path: data.currentPath,
+              isDirectory: true,
+              isFile: false,
+              expanded: true,
+              children: toTreeNodes(data.items),
+              truncated: data.truncated,
+            },
+          ]
+        : toTreeNodes(data.items);
+      setTreeNodes([
+        {
+          name: t('fileSelection.allFiles'),
+          path: '',
+          isDirectory: true,
+          isFile: false,
+          virtual: true,
+          expanded: true,
+          children: visibleRoots,
+        },
+      ]);
+    } catch (loadError) {
+      if (initialRequestRef.current === requestId) {
+        setError(loadError instanceof Error ? loadError.message : String(loadError));
+      }
+    } finally {
+      if (initialRequestRef.current === requestId) setLoading(false);
+    }
+  }, [loadDirectory, t]);
+
   useEffect(() => {
-    if (visible) {
-      setSelectedPath('');
-      loadDirectory('').catch((error) => console.error('Failed to load initial directory:', error));
-    }
-  }, [visible, loadDirectory]);
+    if (!visible) return undefined;
 
-  const handleItemClick = (item: DirectoryItem) => {
-    if (item.isDirectory) {
-      loadDirectory(item.path).catch((error) => console.error('Failed to load directory:', error));
-    }
-  };
+    setSelectedPath('');
+    setCurrentPath('');
+    setTreeNodes([]);
+    setNewFolderParentPath(null);
+    setNewFolderName('');
+    setCreateError(null);
+    void loadInitialTree();
 
-  // Double-click behavior removed - single click now handles directory navigation
-  // 移除双击行为 - 单击现在处理目录导航
-  const handleItemDoubleClick = (_item: DirectoryItem) => {
-    // No-op: single click already handles navigation
-  };
+    return () => {
+      initialRequestRef.current += 1;
+    };
+  }, [visible, loadInitialTree]);
 
-  const handleSelect = (path: string) => {
+  const loadNodeChildren = useCallback(
+    async (path: string): Promise<boolean> => {
+      setTreeNodes((nodes) =>
+        updateNodeByPath(nodes, path, (node) => ({ ...node, expanded: true, loading: true, error: undefined }))
+      );
+      try {
+        const data = await loadDirectory(path);
+        setTreeNodes((nodes) =>
+          updateNodeByPath(nodes, path, (node) => ({
+            ...node,
+            expanded: true,
+            loading: false,
+            children: toTreeNodes(data.items),
+            truncated: data.truncated,
+            error: undefined,
+          }))
+        );
+        return true;
+      } catch (loadError) {
+        const message = loadError instanceof Error ? loadError.message : String(loadError);
+        setTreeNodes((nodes) =>
+          updateNodeByPath(nodes, path, (node) => ({ ...node, expanded: true, loading: false, error: message }))
+        );
+        return false;
+      }
+    },
+    [loadDirectory]
+  );
+
+  const canSelect = useCallback(
+    (item: DirectoryTreeNode) => !item.virtual && (isFileMode ? item.isFile === true : item.isDirectory),
+    [isFileMode]
+  );
+
+  const handleToggleDirectory = useCallback(
+    (item: DirectoryTreeNode) => {
+      if ((!item.isDirectory && !item.virtual) || item.loading) return;
+      if (item.expanded) {
+        setTreeNodes((nodes) =>
+          item.virtual
+            ? nodes.map((node) => (node.virtual ? { ...node, expanded: false } : node))
+            : updateNodeByPath(nodes, item.path, (node) => ({ ...node, expanded: false }))
+        );
+        return;
+      }
+      if (item.virtual) {
+        setTreeNodes((nodes) => nodes.map((node) => (node.virtual ? { ...node, expanded: true } : node)));
+      } else if (item.children) {
+        setTreeNodes((nodes) => updateNodeByPath(nodes, item.path, (node) => ({ ...node, expanded: true })));
+      } else {
+        void loadNodeChildren(item.path);
+      }
+    },
+    [loadNodeChildren]
+  );
+
+  const handleSelect = useCallback((path: string) => {
     setSelectedPath(path);
-  };
+    setNewFolderParentPath(null);
+    setNewFolderName('');
+    setCreateError(null);
+  }, []);
 
-  const handleGoUp = () => {
-    if (directoryData.parentPath !== undefined) {
-      // Handle '__ROOT__' as empty path to show drive list on Windows
-      // 处理 '__ROOT__' 为空路径，在 Windows 上显示驱动器列表
-      const targetPath = directoryData.parentPath === '__ROOT__' ? '' : directoryData.parentPath;
-      loadDirectory(targetPath).catch((error) => console.error('Failed to load parent directory:', error));
+  const selectedNode = useMemo(() => findNodeByPath(treeNodes, selectedPath), [treeNodes, selectedPath]);
+  const canCreateFolder = !isFileMode && Boolean(selectedNode?.isDirectory);
+
+  const handleStartCreateFolder = useCallback(async () => {
+    if (!selectedNode?.isDirectory) return;
+    setCreateError(null);
+    if (!selectedNode.children) {
+      const loaded = await loadNodeChildren(selectedNode.path);
+      if (!loaded) return;
+    } else if (!selectedNode.expanded) {
+      setTreeNodes((nodes) =>
+        updateNodeByPath(nodes, selectedNode.path, (node) => ({ ...node, expanded: true }))
+      );
     }
-  };
+    setNewFolderName('');
+    setNewFolderParentPath(selectedNode.path);
+  }, [loadNodeChildren, selectedNode]);
+
+  const handleCancelCreateFolder = useCallback(() => {
+    setNewFolderParentPath(null);
+    setNewFolderName('');
+    setCreateError(null);
+  }, []);
+
+  const handleCreateFolder = useCallback(async () => {
+    const parentPath = newFolderParentPath;
+    const name = newFolderName.trim();
+    if (!parentPath || creatingFolder) return;
+    if (!name) {
+      setCreateError(t('fileSelection.folderNameRequired'));
+      return;
+    }
+
+    setCreatingFolder(true);
+    setCreateError(null);
+    try {
+      const created = await requestData<DirectoryItem>(`${getBaseUrl()}/api/fs/directory`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPath, name }),
+      });
+      setTreeNodes((nodes) =>
+        updateNodeByPath(nodes, parentPath, (node) => ({
+          ...node,
+          expanded: true,
+          children: sortNodes([
+            ...(node.children || []).filter((child) => child.path !== created.path),
+            { ...created },
+          ]),
+        }))
+      );
+      setSelectedPath(created.path);
+      setNewFolderParentPath(null);
+      setNewFolderName('');
+      Message.success(t('fileSelection.createFolderSuccess'));
+    } catch (createFolderError) {
+      setCreateError(createFolderError instanceof Error ? createFolderError.message : String(createFolderError));
+    } finally {
+      setCreatingFolder(false);
+    }
+  }, [creatingFolder, newFolderName, newFolderParentPath, t]);
 
   const handleConfirm = () => {
-    if (selectedPath) {
-      onConfirm([selectedPath]);
-    }
+    if (selectedPath) onConfirm([selectedPath]);
   };
 
-  const canSelect = (item: DirectoryItem) => {
-    return isFileMode ? item.isFile : item.isDirectory;
+  const renderNewFolderRow = (depth: number) => (
+    <div
+      className={`${styles.treeRow} ${styles.newFolderRow} ${createError ? styles.newFolderRowError : ''}`}
+      style={{ paddingLeft: 12 + depth * 20 }}
+    >
+      <span className={styles.chevronPlaceholder} />
+      <IconFolder className={styles.folderIcon} />
+      <div className={styles.newFolderInputWrap}>
+        <Input
+          autoFocus
+          size='small'
+          value={newFolderName}
+          placeholder={t('fileSelection.newFolderName')}
+          status={createError ? 'error' : undefined}
+          disabled={creatingFolder}
+          onChange={(value) => {
+            setNewFolderName(value);
+            setCreateError(null);
+          }}
+          onPressEnter={() => void handleCreateFolder()}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.stopPropagation();
+              handleCancelCreateFolder();
+            }
+          }}
+        />
+        {createError && <span className={styles.inlineError}>{createError}</span>}
+      </div>
+      <button
+        type='button'
+        className={styles.inlineAction}
+        aria-label={t('fileSelection.createFolder')}
+        disabled={creatingFolder}
+        onClick={() => void handleCreateFolder()}
+      >
+        <IconCheck />
+      </button>
+      <button
+        type='button'
+        className={styles.inlineAction}
+        aria-label={t('common.cancel')}
+        disabled={creatingFolder}
+        onClick={handleCancelCreateFolder}
+      >
+        <IconClose />
+      </button>
+    </div>
+  );
+
+  const renderNode = (item: DirectoryTreeNode, depth: number): React.ReactNode => {
+    const isDirectory = item.isDirectory || item.virtual;
+    const selectable = canSelect(item);
+    const selected = selectable && selectedPath === item.path;
+    const childrenVisible = isDirectory && item.expanded;
+    const key = item.virtual ? '__all_files__' : item.path;
+
+    return (
+      <React.Fragment key={key}>
+        <div
+          role='treeitem'
+          aria-expanded={isDirectory ? Boolean(item.expanded) : undefined}
+          aria-selected={selectable ? selected : undefined}
+          tabIndex={0}
+          title={item.virtual ? undefined : item.path}
+          className={`${styles.treeRow} ${item.virtual ? styles.rootRow : ''} ${selected ? styles.selectedRow : ''}`}
+          style={{ paddingLeft: 12 + depth * 20 }}
+          onClick={() => {
+            if (selectable) handleSelect(item.path);
+            else if (item.virtual) handleToggleDirectory(item);
+          }}
+          onDoubleClick={() => {
+            if (isDirectory && !item.virtual) handleToggleDirectory(item);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              if (selectable) handleSelect(item.path);
+              else if (item.virtual) handleToggleDirectory(item);
+            } else if (event.key === 'ArrowRight' && isDirectory && !item.expanded) {
+              event.preventDefault();
+              handleToggleDirectory(item);
+            } else if (event.key === 'ArrowLeft' && isDirectory && item.expanded) {
+              event.preventDefault();
+              handleToggleDirectory(item);
+            }
+          }}
+        >
+          {isDirectory ? (
+            <button
+              type='button'
+              className={styles.chevronButton}
+              aria-label={item.expanded ? t('common.collapse') : t('common.expand')}
+              onClick={(event) => {
+                event.stopPropagation();
+                handleToggleDirectory(item);
+              }}
+            >
+              {item.loading ? (
+                <span className={styles.nodeSpinner} />
+              ) : item.expanded ? (
+                <IconDown />
+              ) : (
+                <IconRight />
+              )}
+            </button>
+          ) : (
+            <span className={styles.chevronPlaceholder} />
+          )}
+          {isDirectory ? <IconFolder className={styles.folderIcon} /> : <IconFile className={styles.fileIcon} />}
+          <span className={styles.nodeName}>{item.name}</span>
+        </div>
+
+        {childrenVisible && (
+          <div role='group'>
+            {newFolderParentPath === item.path && renderNewFolderRow(depth + 1)}
+            {item.children?.map((child) => renderNode(child, depth + 1))}
+            {!item.loading && item.children?.length === 0 && newFolderParentPath !== item.path && (
+              <div className={styles.emptyNode} style={{ paddingLeft: 48 + depth * 20 }}>
+                {t('fileSelection.emptyFolder')}
+              </div>
+            )}
+            {item.error && (
+              <div className={styles.nodeError} style={{ paddingLeft: 48 + depth * 20 }}>
+                <span>{item.error}</span>
+                <Button size='mini' type='text' onClick={() => void loadNodeChildren(item.path)}>
+                  {t('common.retry')}
+                </Button>
+              </div>
+            )}
+            {item.truncated && (
+              <div className={styles.truncated} style={{ paddingLeft: 48 + depth * 20 }}>
+                {t('fileSelection.truncated')}
+              </div>
+            )}
+          </div>
+        )}
+      </React.Fragment>
+    );
   };
+
+  const selectionHint = selectedPath
+    ? `${t('fileSelection.selectedLocation')}: ${selectedPath}`
+    : currentPath
+      ? `${t('fileSelection.currentLocation')}: ${currentPath}`
+      : isFileMode
+        ? t('fileSelection.pleaseSelectFile')
+        : t('fileSelection.pleaseSelectDirectory');
 
   return (
     <Modal
       visible={visible}
-      title={isFileMode ? '📄 ' + t('fileSelection.selectFile') : '📁 ' + t('fileSelection.selectDirectory')}
+      title={
+        <div className={styles.title}>
+          <span className={styles.titleIcon}>
+            {isFileMode ? <IconFile /> : <IconFolder />}
+          </span>
+          <span>{isFileMode ? t('fileSelection.selectFile') : t('fileSelection.selectDirectory')}</span>
+        </div>
+      }
       onCancel={onCancel}
       onOk={handleConfirm}
       okButtonProps={{ disabled: !selectedPath }}
-      className='nomifun-file-picker-modal w-[90vw] md:w-[600px]'
-      style={{ width: 'min(600px, 90vw)' }}
+      className={`nomifun-file-picker-modal ${styles.modal}`}
+      style={{ width: 'min(700px, 92vw)' }}
       wrapStyle={{ zIndex: 3000 }}
       maskStyle={{ zIndex: 2990 }}
+      alignCenter
       footer={
-        <div className='w-full flex justify-between items-center'>
-          <div
-            className='text-t-secondary text-14px overflow-hidden text-ellipsis whitespace-nowrap max-w-[70vw]'
-            title={selectedPath || currentPath}
-          >
-            {selectedPath ||
-              currentPath ||
-              (isFileMode ? t('fileSelection.pleaseSelectFile') : t('fileSelection.pleaseSelectDirectory'))}
-          </div>
-          <div className='flex gap-10px'>
-            <Button onClick={onCancel}>{t('common.cancel')}</Button>
+        <div className={styles.footer}>
+          {!isFileMode && (
+            <Button
+              type='text'
+              className={styles.newFolderButton}
+              icon={<IconFolderAdd />}
+              disabled={!canCreateFolder || creatingFolder}
+              title={canCreateFolder ? t('fileSelection.newFolder') : t('fileSelection.selectParentForNewFolder')}
+              onClick={() => void handleStartCreateFolder()}
+            >
+              {t('fileSelection.newFolder')}
+            </Button>
+          )}
+          <div className={styles.footerActions}>
+            <Button className={styles.cancelButton} onClick={onCancel}>
+              {t('common.cancel')}
+            </Button>
             <Button
               type='primary'
-              className='nomifun-file-picker-confirm'
+              className={`nomifun-file-picker-confirm ${styles.confirmButton}`}
               onClick={handleConfirm}
               disabled={!selectedPath}
             >
@@ -169,59 +534,30 @@ const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
         </div>
       }
     >
-      <Spin loading={loading} className='w-full'>
-        <div className='w-full border border-b-base rd-4px overflow-hidden' style={{ height: 'min(400px, 60vh)' }}>
-          <div className='h-full overflow-y-auto'>
-            {directoryData.canGoUp && (
-              <div
-                className='flex items-center p-10px border-b border-b-light cursor-pointer hover:bg-hover transition'
-                onClick={handleGoUp}
-              >
-                <IconUp className='mr-10px text-t-secondary' />
-                <span>..</span>
-              </div>
-            )}
-            {error && (
-              <div className='p-16px text-center text-danger text-13px'>
-                <div>{error}</div>
-                <Button size='mini' className='mt-8px' onClick={() => loadDirectory(currentPath).catch(() => {})}>
-                  {t('common.retry', { defaultValue: 'Retry' })}
+      <div className={styles.pickerBody}>
+        <Spin loading={loading} className={styles.spin}>
+          <div
+            className={styles.treeViewport}
+            role='tree'
+            aria-label={isFileMode ? t('fileSelection.selectFile') : t('fileSelection.selectDirectory')}
+          >
+            {error ? (
+              <div className={styles.initialError}>
+                <span>{error}</span>
+                <Button size='small' onClick={() => void loadInitialTree(currentPath)}>
+                  {t('common.retry')}
                 </Button>
               </div>
+            ) : (
+              treeNodes.map((node) => renderNode(node, 0))
             )}
-            {directoryData.items.map((item, index) => (
-              <div
-                key={index}
-                className='flex items-center justify-between p-10px border-b border-b-light cursor-pointer hover:bg-hover transition'
-                style={selectedPath === item.path ? { background: 'var(--brand-light)' } : {}}
-                onClick={() => handleItemClick(item)}
-                onDoubleClick={() => handleItemDoubleClick(item)}
-              >
-                <div className='flex items-center flex-1 min-w-0'>
-                  {item.isDirectory ? (
-                    <IconFolder className='mr-10px text-warning shrink-0' />
-                  ) : (
-                    <IconFile className='mr-10px text-primary shrink-0' />
-                  )}
-                  <span className='overflow-hidden text-ellipsis whitespace-nowrap'>{item.name}</span>
-                </div>
-                {canSelect(item) && (
-                  <Button
-                    type='primary'
-                    size='mini'
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleSelect(item.path);
-                    }}
-                  >
-                    {t('common.select')}
-                  </Button>
-                )}
-              </div>
-            ))}
           </div>
+        </Spin>
+        <div className={styles.selectionBar} title={selectionHint}>
+          <span className={selectedPath ? styles.selectionDotActive : styles.selectionDot} />
+          <span>{selectionHint}</span>
         </div>
-      </Spin>
+      </div>
     </Modal>
   );
 };

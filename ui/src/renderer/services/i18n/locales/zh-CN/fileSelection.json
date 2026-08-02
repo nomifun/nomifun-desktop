@@ -2,5 +2,17 @@
   "selectFile": "选择文件",
   "selectDirectory": "选择目录",
   "pleaseSelectFile": "请选择一个文件",
-  "pleaseSelectDirectory": "请选择一个目录"
+  "pleaseSelectDirectory": "请选择一个目录",
+  "allFiles": "全部文件",
+  "newFolder": "新建文件夹",
+  "newFolderName": "文件夹名称",
+  "createFolder": "创建文件夹",
+  "createFolderSuccess": "文件夹创建成功",
+  "folderNameRequired": "请输入文件夹名称",
+  "selectParentForNewFolder": "请先选择上级文件夹",
+  "emptyFolder": "此文件夹为空",
+  "currentLocation": "当前位置",
+  "selectedLocation": "已选择",
+  "truncated": "仅显示前 500 项",
+  "parentDirectory": "上级目录"
 }

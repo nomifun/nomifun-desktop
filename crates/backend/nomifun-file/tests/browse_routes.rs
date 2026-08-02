@@ -57,6 +57,29 @@ async fn get_json(router: axum::Router, uri: &str) -> (StatusCode, serde_json::V
     (status, json, raw)
 }
 
+async fn post_json(
+    router: axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value, String) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let raw = String::from_utf8_lossy(&bytes).into_owned();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json, raw)
+}
+
 #[tokio::test]
 async fn browse_accepts_the_webui_picker_wire_format() {
     let tmp = tempfile::tempdir().unwrap();
@@ -106,4 +129,39 @@ async fn browse_error_bodies_are_json_envelopes() {
         json["error"].as_str().is_some_and(|e| !e.is_empty()),
         "error body must carry a human-readable message: {raw}"
     );
+}
+
+#[tokio::test]
+async fn create_directory_adds_a_folder_visible_to_the_picker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent_path = tmp.path().to_str().unwrap();
+    let (status, json, raw) = post_json(
+        make_router(tmp.path()),
+        "/api/fs/directory",
+        serde_json::json!({ "parentPath": parent_path, "name": "new project" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "folder creation failed: {raw}");
+    assert_eq!(json["success"], true, "unexpected envelope: {raw}");
+    assert_eq!(json["data"]["name"], "new project");
+    assert_eq!(json["data"]["isDirectory"], true);
+    assert!(tmp.path().join("new project").is_dir());
+}
+
+#[tokio::test]
+async fn create_directory_rejects_nested_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (status, json, raw) = post_json(
+        make_router(tmp.path()),
+        "/api/fs/directory",
+        serde_json::json!({
+            "parentPath": tmp.path().to_str().unwrap(),
+            "name": "../outside"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unexpected response: {raw}");
+    assert_eq!(json["success"], false);
 }

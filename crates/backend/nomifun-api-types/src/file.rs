@@ -139,6 +139,20 @@ pub struct BrowseDirectoryQuery {
     pub show_files: Option<String>,
 }
 
+/// Request body for `POST /api/fs/directory` — create one folder from the
+/// WebUI host-file picker.
+///
+/// The parent is resolved through the same browse sandbox as
+/// [`BrowseDirectoryQuery`]. Only a single folder-name component is accepted;
+/// callers cannot use this endpoint to create an arbitrary nested path.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CreateDirectoryRequest {
+    #[serde(alias = "parent_path")]
+    pub parent_path: String,
+    pub name: String,
+}
+
 /// A single entry in a `/api/fs/browse` response.
 ///
 /// Uses camelCase on the wire to match the original Express contract the
@@ -350,6 +364,17 @@ mod tests {
 
         let path_only: BrowseDirectoryQuery = serde_urlencoded::from_str("path=").unwrap();
         assert_eq!(path_only.path.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn create_directory_request_accepts_webui_camelcase_wire_format() {
+        let req: CreateDirectoryRequest = serde_json::from_value(json!({
+            "parentPath": "/workspace",
+            "name": "new-folder"
+        }))
+        .unwrap();
+        assert_eq!(req.parent_path, "/workspace");
+        assert_eq!(req.name, "new-folder");
     }
 
     // -- Request deserialization tests --

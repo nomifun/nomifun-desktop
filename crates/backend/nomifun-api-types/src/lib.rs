@@ -131,6 +131,7 @@ pub use extension::{
 };
 pub use file::{
     BrowseDirectoryQuery, BrowseDirectoryResponse, BrowseEntry, CancelZipRequest, CopyFilesRequest,
+    CreateDirectoryRequest,
     CopyFilesResponse, FetchRemoteImageRequest,
     FileChangeInfoResponse, FileMetadataResponse, FileWatchRequest, GetFileMetadataRequest,
     GetImageBase64Request, ListWorkspaceFilesRequest,

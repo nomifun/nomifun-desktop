@@ -1,0 +1,367 @@
+.modal {
+  background: #fff;
+}
+
+.modal :global(.arco-modal-content) {
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--color-border-2);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(0 0 0 / 18%);
+}
+
+.modal :global(.arco-modal-header) {
+  height: auto;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--color-border-1);
+  background: #fff;
+}
+
+.modal :global(.arco-modal-title) {
+  width: 100%;
+}
+
+.modal :global(.arco-modal-close-icon) {
+  top: 14px;
+  right: 16px;
+  color: var(--color-text-3);
+}
+
+.modal :global(.arco-modal-footer) {
+  padding: 10px 16px;
+  border-top: 1px solid var(--color-border-1);
+  background: #fff;
+}
+
+.title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-1);
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.titleIcon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, rgb(var(--primary-6)) 11%, transparent);
+  color: rgb(var(--primary-6));
+  font-size: 16px;
+}
+
+.pickerBody {
+  display: flex;
+  min-height: 300px;
+  height: min(50vh, 430px);
+  flex-direction: column;
+  background: #fff;
+}
+
+.spin,
+.spin :global(.arco-spin-children) {
+  min-height: 0;
+  height: 100%;
+}
+
+.spin {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.treeViewport {
+  height: 100%;
+  overflow: auto;
+  padding: 4px 0 8px;
+  outline: none;
+}
+
+.treeRow {
+  display: flex;
+  min-height: 40px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+  padding-right: 14px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-1) 72%, transparent);
+  color: var(--color-text-1);
+  cursor: pointer;
+  outline: none;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.treeRow:hover,
+.treeRow:focus-visible {
+  background: var(--color-fill-1);
+}
+
+.treeRow:focus-visible {
+  box-shadow: inset 3px 0 rgb(var(--primary-6));
+}
+
+.rootRow {
+  min-height: 40px;
+  font-size: inherit;
+  font-weight: 500;
+}
+
+.selectedRow,
+.selectedRow:hover,
+.selectedRow:focus-visible {
+  background: color-mix(in srgb, rgb(var(--primary-6)) 11%, var(--color-bg-1));
+  color: rgb(var(--primary-6));
+}
+
+.chevronButton,
+.inlineAction {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-3);
+  cursor: pointer;
+}
+
+.chevronButton:hover,
+.inlineAction:hover {
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
+.chevronPlaceholder {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+}
+
+.nodeSpinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--color-border-3);
+  border-top-color: rgb(var(--primary-6));
+  border-radius: 50%;
+  animation: file-picker-spin 700ms linear infinite;
+}
+
+@keyframes file-picker-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.folderIcon,
+.fileIcon {
+  flex: 0 0 auto;
+  font-size: 18px;
+}
+
+.folderIcon {
+  color: #f6ad2f;
+}
+
+.fileIcon {
+  color: var(--color-text-3);
+}
+
+.nodeName {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.newFolderRow {
+  cursor: default;
+  background: color-mix(in srgb, rgb(var(--primary-6)) 6%, var(--color-bg-1));
+}
+
+.newFolderRowError {
+  padding-bottom: 18px;
+}
+
+.newFolderInputWrap {
+  position: relative;
+  min-width: 0;
+  flex: 1;
+  padding-bottom: 2px;
+}
+
+.newFolderInputWrap :global(.arco-input-wrapper) {
+  border-radius: 8px;
+}
+
+.inlineError {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 2px;
+  z-index: 1;
+  max-width: 100%;
+  overflow: hidden;
+  color: rgb(var(--danger-6));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inlineAction:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.emptyNode,
+.truncated {
+  padding-top: 6px;
+  padding-right: 14px;
+  padding-bottom: 6px;
+  color: var(--color-text-4);
+  font-size: 12px;
+}
+
+.truncated {
+  color: var(--color-text-3);
+}
+
+.nodeError {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 4px;
+  padding-right: 14px;
+  padding-bottom: 6px;
+  color: rgb(var(--danger-6));
+  font-size: 12px;
+}
+
+.nodeError span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.initialError {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  padding: 24px;
+  color: rgb(var(--danger-6));
+  font-size: 13px;
+  text-align: center;
+}
+
+.selectionBar {
+  display: flex;
+  min-height: 34px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--color-border-1);
+  background: #fff;
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+
+.selectionBar > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selectionDot,
+.selectionDotActive {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--color-text-4);
+}
+
+.selectionDotActive {
+  background: rgb(var(--primary-6));
+  box-shadow: 0 0 0 3px color-mix(in srgb, rgb(var(--primary-6)) 14%, transparent);
+}
+
+.footer {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.newFolderButton {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: rgb(var(--primary-6));
+  font-weight: 550;
+}
+
+.newFolderButton:not(:disabled):hover {
+  background: color-mix(in srgb, rgb(var(--primary-6)) 9%, transparent);
+  color: rgb(var(--primary-6));
+}
+
+.footerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cancelButton,
+.confirmButton {
+  min-width: 82px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+@media (max-width: 600px) {
+  .modal :global(.arco-modal-header) {
+    padding: 12px 14px 10px;
+  }
+
+  .pickerBody {
+    min-height: 280px;
+    height: 54vh;
+  }
+
+  .treeRow {
+    min-height: 38px;
+    padding-right: 10px;
+  }
+
+  .footer {
+    gap: 8px;
+  }
+
+  .newFolderButton {
+    padding: 0 8px;
+  }
+
+  .cancelButton,
+  .confirmButton {
+    min-width: 72px;
+  }
+}

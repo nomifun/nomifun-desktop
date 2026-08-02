@@ -303,6 +303,78 @@ pub fn browse(
     list_directory(&canonical, show_files, allowed_roots)
 }
 
+/// Create one direct child of a directory exposed by the WebUI browser.
+///
+/// Keeping this beside [`browse`] makes the read and write sides share the
+/// exact same root resolution. The folder name is deliberately restricted to
+/// one component so joining it to the canonical parent cannot escape through
+/// traversal or platform-specific separators.
+pub fn create_directory(
+    parent_raw: &str,
+    name: &str,
+    allowed_roots: &[PathBuf],
+) -> Result<BrowseEntry, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("folder name cannot be empty".into()));
+    }
+    if name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
+        return Err(AppError::BadRequest(
+            "folder name must be a single path component".into(),
+        ));
+    }
+
+    let parent = resolve_browse_path(parent_raw, allowed_roots)?;
+    if !parent.is_dir() {
+        return Err(AppError::BadRequest("parent path is not a directory".into()));
+    }
+
+    let target = parent.join(name);
+    match fs::create_dir(&target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(AppError::Conflict(format!(
+                "a file or folder named '{}' already exists",
+                name
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(AppError::Forbidden(format!(
+                "cannot create folder in '{}': {}",
+                parent.display(),
+                error
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+            return Err(AppError::BadRequest(format!(
+                "invalid folder name '{}': {}",
+                name, error
+            )));
+        }
+        Err(error) => {
+            return Err(AppError::Internal(format!(
+                "failed to create folder '{}': {}",
+                target.display(),
+                error
+            )));
+        }
+    }
+
+    let path = nomifun_common::paths::simplified(&target)
+        .to_string_lossy()
+        .into_owned();
+    Ok(BrowseEntry {
+        name: name.to_owned(),
+        path,
+        is_directory: true,
+        is_file: false,
+        size: Some(0),
+        modified: fs::metadata(&target)
+            .ok()
+            .and_then(|metadata| system_time_to_millis(metadata.modified().ok())),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -470,5 +542,30 @@ mod tests {
         let expanded = expand_tilde("~/Documents");
         assert_eq!(expanded, home.join("Documents"));
         assert_eq!(expand_tilde("~"), home);
+    }
+
+    #[test]
+    fn creates_one_folder_inside_the_browse_sandbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = roots_from(&[tmp.path()]);
+
+        let entry = create_directory(tmp.path().to_str().unwrap(), "new folder", &roots).unwrap();
+
+        assert_eq!(entry.name, "new folder");
+        assert!(entry.is_directory);
+        assert!(tmp.path().join("new folder").is_dir());
+    }
+
+    #[test]
+    fn create_directory_rejects_traversal_and_duplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = roots_from(&[tmp.path()]);
+
+        let traversal = create_directory(tmp.path().to_str().unwrap(), "../escape", &roots).unwrap_err();
+        assert!(matches!(traversal, AppError::BadRequest(_)));
+
+        fs::create_dir(tmp.path().join("existing")).unwrap();
+        let duplicate = create_directory(tmp.path().to_str().unwrap(), "existing", &roots).unwrap_err();
+        assert!(matches!(duplicate, AppError::Conflict(_)));
     }
 }

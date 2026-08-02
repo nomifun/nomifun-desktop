@@ -6,7 +6,8 @@ use std::path::Path;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use nomifun_api_types::{
-    ApiResponse, BrowseDirectoryQuery, BrowseDirectoryResponse, CancelZipRequest, CopyFilesRequest, CopyFilesResponse,
+    ApiResponse, BrowseDirectoryQuery, BrowseDirectoryResponse, BrowseEntry, CancelZipRequest, CopyFilesRequest,
+    CopyFilesResponse, CreateDirectoryRequest,
     FetchRemoteImageRequest, FileChangeInfoResponse, FileMetadataResponse,
     FileWatchRequest, GetFileMetadataRequest, GetImageBase64Request, ListWorkspaceFilesRequest,
     ReadFileRequest, RemoveEntryRequest, RenameRequest, RenameResponse, SnapshotBaselineRequest,
@@ -64,6 +65,7 @@ pub fn file_routes(state: FileRouterState) -> Router {
     Router::new()
         // A. Core file operations
         .route("/api/fs/browse", get(browse_directory))
+        .route("/api/fs/directory", post(create_directory))
         .route("/api/fs/list", post(list_workspace_files))
         .route("/api/fs/metadata", post(get_file_metadata))
         .route("/api/fs/read", post(read_file))
@@ -116,6 +118,23 @@ async fn browse_directory(
         .map_err(|e| AppError::Internal(format!("browse task failed: {}", e)))??;
 
     Ok(Json(ApiResponse::ok(response)))
+}
+
+/// `POST /api/fs/directory` — create a direct child folder for the WebUI
+/// picker. The blocking filesystem operation shares `/browse`'s root policy.
+async fn create_directory(
+    State(state): State<FileRouterState>,
+    body: Result<Json<CreateDirectoryRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<BrowseEntry>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let roots = state.browse_roots.clone();
+    let entry = tokio::task::spawn_blocking(move || {
+        browse::create_directory(&req.parent_path, &req.name, &roots)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("create-directory task failed: {}", e)))??;
+
+    Ok(Json(ApiResponse::ok(entry)))
 }
 
 async fn list_workspace_files(
