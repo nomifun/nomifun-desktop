@@ -1122,17 +1122,13 @@ impl CompanionService {
         if self.store.get_state(CONSENT_KEY).await?.is_some() {
             return Ok(self.config.read().await.clone()); // idempotent: already consented
         }
-        // Default-on set applied once on first consent. Deliberately EXCLUDES the
-        // model/agent OUTPUT side: `chat_assistant_replies` (long full replies) and
-        // `cron_runs` (untruncated agent output) stay opt-in — the user flips them on in
-        // the Collect tab if wanted. Skill mining keys off `tool_calls` and memory
-        // distillation off the user-request side, so neither core loop needs the output side.
+        // Default-on set applied once on first consent. Skill mining keys off
+        // `tool_calls` and memory distillation off owner-authored inputs.
         let patch = serde_json::json!({
             "collect": {
                 "tool_calls": true,
                 "chat_user_messages": true,
-                "requirements": true,
-                "conversation_lifecycle": true
+                "requirements": true
             },
             "learn": { "enabled": true },
             "evolve": { "enabled": true }
@@ -1151,10 +1147,7 @@ impl CompanionService {
         let patch = serde_json::json!({
             "collect": {
                 "chat_user_messages": false,
-                "chat_assistant_replies": false,
                 "requirements": false,
-                "cron_runs": false,
-                "conversation_lifecycle": false,
                 "terminal_sessions": false,
                 "tool_calls": false,
                 "companion_dialogues": false
@@ -2549,11 +2542,6 @@ mod tests {
             assert!(cfg.collect.tool_calls);
             assert!(cfg.collect.chat_user_messages);
             assert!(cfg.collect.requirements);
-            assert!(cfg.collect.conversation_lifecycle);
-            // OUTPUT side stays opt-in: long model replies + untruncated cron output
-            // are NOT auto-enabled (user-request-only collection policy).
-            assert!(!cfg.collect.chat_assistant_replies, "model replies must stay opt-in");
-            assert!(!cfg.collect.cron_runs, "cron output must stay opt-in");
             assert!(cfg.learn.enabled);
             assert!(cfg.evolve.enabled);
         }
