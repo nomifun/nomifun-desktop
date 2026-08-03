@@ -239,8 +239,6 @@ nomifun-creation.workspace = true
 nomifun-gateway.workspace = true
 nomifun-public.workspace = true
 nomifun-webhook.workspace = true
-# P3-X2: per-pet browser-use credential secret CRUD endpoints (web feature mounts routes).
-nomifun-secret = { workspace = true, features = ["web"] }
 nomifun-terminal.workspace = true
 nomifun-preset.workspace = true
 nomifun-runtime.workspace = true

@@ -267,12 +267,6 @@ pub const MANAGED_DATASET_ROOTS: &[ManagedDatasetRoot] = &[
         backup: BackupPolicy::Exclude(HOST_LOCAL_REFERENCE),
     },
     ManagedDatasetRoot {
-        path: "browser-secrets",
-        kind: DatasetRootKind::Directory,
-        reset: ResetPolicy::Retire,
-        backup: BackupPolicy::Include,
-    },
-    ManagedDatasetRoot {
         path: "codex-acp-home",
         kind: DatasetRootKind::Directory,
         reset: ResetPolicy::Retire,

@@ -176,7 +176,7 @@ pub enum ActSpec {
     Type { r#ref: String, text: TypeInput },
     /// 直接给一个表单控件设值（不模拟逐字键入）。
     ///
-    /// `secret == true` 标记 `value` 是敏感凭据（来自 facade 的 `secret:NAME` 解析）：Debug 脱敏
+    /// `secret == true` 标记 `value` 是敏感输入：Debug 脱敏
     /// （见枚举级 `Debug` impl）+ 引擎抑制 verify 锚点（[`CdpBackend::act_set_value`]）。
     /// `value` 本身仍是明文（要给 `insertText`/`fill`），`secret` 只让序列化/Debug/anchor 知道脱敏。
     SetValue {
@@ -483,13 +483,13 @@ pub fn parse_fill_outcome(value: Option<&serde_json::Value>) -> FillOutcome {
     }
 }
 
-/// **[纯逻辑] 取 [`TypeInput`] 的实际待键入文本**（C1：secret vault 解析在 E1，C1 走原值 insertText
-/// 路径——值经 `Input.insertText` 注入**不过 LLM**，与 Literal 同路径，区别只在 Debug 脱敏）。
+/// **[纯逻辑] 取 [`TypeInput`] 的实际待键入文本**。敏感输入和普通输入都走原值 insertText
+/// 路径，区别只在 Debug 脱敏。
 /// 抽纯函数便于单测「Secret 与 Literal 都返其内含字符串」。
 pub fn type_input_text(input: &TypeInput) -> &str {
     match input {
         TypeInput::Literal(s) => s,
-        // C1：secret 经 insertText 注入（不过 LLM，值不进日志）；E1 接 vault `secret:NAME` 解析。
+        // 敏感输入经 insertText 注入，并在调试输出中脱敏。
         TypeInput::Secret(s) => s,
     }
 }
@@ -1086,7 +1086,7 @@ impl CdpBackend {
     /// - tier2（'needsinput'）：[`Self::type_text`]（`Input.insertText`，IME/复杂控件兜底）；
     /// - tier3（仍失败）：逐键 [`Self::key_combo`] per char（最后逃生）。
     ///
-    /// `TypeInput::Secret`：C1 走原值 insertText（不过 LLM，值不进日志；vault `secret:NAME` 解析 E1 接）。
+    /// `TypeInput::Secret`：走原值 insertText，并在调试输出中脱敏。
     /// verify：读回 input.value → Effect{changed, before/after}。
     async fn act_type(
         &self,
@@ -1175,7 +1175,7 @@ impl CdpBackend {
     /// 直接 set value + 派发 input/change；text 类则 fill 'needsinput' 后一次性 insertText，不模拟逐键）。
     /// 适合大文本 / 受控组件快路径。check_states(editable) → fill → （needsinput 则 insertText）→ verify。
     ///
-    /// **安全红线（`secret == true`，来自 facade `secret:NAME` 解析）**：镜像 [`Self::act_type`] 的
+    /// **安全红线（`secret == true`）**：镜像 [`Self::act_type`] 的
     /// `is_secret` 处理——read-back 的 input.value 是注入进去的**明文凭据**，绝不能进 verify 锚点
     /// （否则 F2 把 anchor 透进 ToolResult 就 live 泄漏）。故 secret 时 before/after 锚点都置 `None`，
     /// `message` 只记字符数不记值（与 Debug 脱敏 + Serialize-时-anchor-空 共同构成 set_value secret 不泄漏）。

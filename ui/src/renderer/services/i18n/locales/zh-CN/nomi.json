@@ -14,7 +14,6 @@
     "migrate": "迁移",
     "knowledge": "专属知识库",
     "remote": "远程连接",
-    "secrets": "凭据",
     "skills": "技能"
   },
   "skills": {
@@ -60,28 +59,6 @@
     "learnedTitle": "伙伴专精",
     "configMissing": "未安装",
     "configMissingHint": "这个 Skill 当前未安装；重新安装后会自动恢复。"
-  },
-  "secrets": {
-    "title": "浏览器凭据",
-    "hint": "浏览器会话共享这些已存凭据，并可按引用注入。值在本机加密保存、不再回显也不送给模型——仅当页面域名匹配允许域时才注入。允许域同时限定浏览器可向哪些域发送数据。",
-    "add": "添加凭据",
-    "empty": "尚未注册任何凭据。",
-    "register": "注册",
-    "registered": "凭据已注册。",
-    "removed": "凭据已删除。",
-    "delete": "删除",
-    "removeConfirm": "删除凭据「{{name}}」？",
-    "nameLabel": "引用名",
-    "namePlaceholder": "如 github_password（在动作里以 secret:github_password 引用）",
-    "nameRequired": "请填写引用名。",
-    "valueLabel": "值",
-    "valuePlaceholder": "凭据值（密码、令牌等）",
-    "valueRequired": "请填写值。",
-    "valueWriteOnly": "只写：在本设备加密保存，不再回显、不送给模型。",
-    "originsLabel": "允许域",
-    "originsPlaceholder": "github.com\napi.github.com",
-    "originsHint": "每行一个或逗号分隔，会归一为可注册域。凭据仅在这些域注入，这些域同时作为浏览器出口允许名单。",
-    "originsRequired": "至少填写一个允许域。"
   },
   "domains": {
     "companion": "伙伴",
@@ -133,9 +110,7 @@
     "weeklyRuns": "学习次数",
     "companionSwitch": "桌面伙伴",
     "companionOn": "已显示",
-    "companionOff": "已隐藏",
-    "diary": "{{companionName}} 的日记",
-    "diaryEmpty": "还没有日记，等 {{companionName}} 完成第一次学习后再来看看吧～"
+    "companionOff": "已隐藏"
   },
   "memories": {
     "kindAll": "全部类型",

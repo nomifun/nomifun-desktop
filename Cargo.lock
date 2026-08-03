@@ -5104,7 +5104,6 @@ dependencies = [
  "nomi-tools",
  "nomi-types",
  "nomifun-browser-platform",
- "nomifun-secret",
  "serde",
  "serde_json",
  "tempfile",
@@ -5132,7 +5131,7 @@ dependencies = [
  "nomi-redact",
  "nomifun-common",
  "nomifun-net",
- "nomifun-secret",
+ "psl",
  "regex",
  "serde",
  "serde_json",
@@ -5456,7 +5455,6 @@ dependencies = [
  "nomifun-net",
  "nomifun-realtime",
  "nomifun-runtime",
- "nomifun-secret",
  "nomifun-terminal",
  "regex",
  "reqwest 0.12.28",
@@ -5545,7 +5543,6 @@ dependencies = [
  "nomifun-realtime",
  "nomifun-requirement",
  "nomifun-runtime",
- "nomifun-secret",
  "nomifun-shell",
  "nomifun-system",
  "nomifun-terminal",
@@ -6224,26 +6221,6 @@ dependencies = [
  "wait-timeout",
  "zip 2.4.2",
  "zstd",
-]
-
-[[package]]
-name = "nomifun-secret"
-version = "0.3.7"
-dependencies = [
- "axum",
- "getrandom 0.2.17",
- "http-body-util",
- "nomifun-api-types",
- "nomifun-auth",
- "nomifun-common",
- "psl",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "tracing",
 ]
 
 [[package]]

@@ -19,7 +19,6 @@ import MigrateTab from './tabs/MigrateTab';
 import KnowledgeTab from './tabs/KnowledgeTab';
 import RemoteTab from './tabs/RemoteTab';
 import SettingsTab from './tabs/SettingsTab';
-import SecretsTab from './tabs/SecretsTab';
 import SkillsTab from './tabs/SkillsTab';
 import CompanionSessionRail from './CompanionSessionRail';
 import FigureLibraryPage from './FigureLibraryPage';
@@ -32,7 +31,7 @@ import type { CompanionId } from '@/common/types/ids';
  *  is one click from the selected companion rather than buried under a "shared" domain switch.
  *  聊天已迁出管理中心 → 统一从「会话」侧边栏的桌面伙伴分组进入标准 /conversation/:id；
  *  本页只保留管理（形象/远程/记忆/技能/知识/设置）。 */
-const COMPANION_TABS = ['overview', 'remote', 'memories', 'review', 'knowledge', 'skills', 'secrets', 'settings'] as const;
+const COMPANION_TABS = ['overview', 'remote', 'memories', 'review', 'knowledge', 'skills', 'settings'] as const;
 const SHARED_TABS = ['collect', 'learn', 'suggestions', 'migrate'] as const;
 const ALL_TABS: readonly string[] = [...COMPANION_TABS, ...SHARED_TABS];
 /** Standalone figure-library domain (not companion-scoped, no tab set of its own). */
@@ -233,7 +232,6 @@ const NomiConfigPage: React.FC = () => {
                         <Radio value='review'>{t('nomi.tabs.review')}</Radio>
                         <Radio value='knowledge'>{t('nomi.tabs.knowledge')}</Radio>
                         <Radio value='skills'>{t('nomi.tabs.skills', { defaultValue: '技能' })}</Radio>
-                        <Radio value='secrets'>{t('nomi.tabs.secrets')}</Radio>
                         <Radio value='settings'>{t('nomi.tabs.settings')}</Radio>
                       </Radio.Group>
                       <Button
@@ -256,7 +254,6 @@ const NomiConfigPage: React.FC = () => {
                       {activeTab === 'knowledge' && <KnowledgeTab key={selectedCompanionId} companion={companion} />}
                       {activeTab === 'skills' && <SkillsTab key={selectedCompanionId} companion={companion} />}
                       {activeTab === 'remote' && <RemoteTab key={selectedCompanionId} companion={companion} />}
-                      {activeTab === 'secrets' && <SecretsTab key={selectedCompanionId} companion={companion} />}
                       {activeTab === 'settings' && (
                         <SettingsTab key={selectedCompanionId} companion={companion} onDeleted={handleDeleted} />
                       )}

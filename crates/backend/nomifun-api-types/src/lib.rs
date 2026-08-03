@@ -32,7 +32,6 @@ mod remote_agent;
 mod requirement;
 mod response;
 mod serde_util;
-mod secret;
 mod shell;
 mod skill;
 mod system;
@@ -206,7 +205,6 @@ pub use requirement::{
     ResumeTagRequest, TagPausedPayload, TagSummary, UpdateRequirementRequest, UpdateStatusRequest,
 };
 pub use response::{ApiResponse, ErrorResponse};
-pub use secret::{RegisterSecretRequest, SecretListItem};
 pub use shell::{
     CheckToolInstalledRequest, CheckToolInstalledResponse, DeepgramSpeechToTextConfig,
     OpenAISpeechToTextConfig, OpenExternalRequest, OpenFileRequest, OpenFolderWithRequest,

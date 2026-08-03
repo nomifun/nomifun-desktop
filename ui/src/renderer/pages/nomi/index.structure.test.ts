@@ -23,4 +23,14 @@ describe('Nomi companion tab order', () => {
     expect(remoteRadio).toBeGreaterThan(overviewRadio);
     expect(memoriesRadio).toBeGreaterThan(remoteRadio);
   });
+
+  test('does not expose retired credentials or overview diary UI', () => {
+    const source = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
+    const overview = readFileSync(new URL('./tabs/OverviewTab.tsx', import.meta.url), 'utf8');
+
+    expect(source.includes("'secrets'")).toBe(false);
+    expect(source.includes('SecretsTab')).toBe(false);
+    expect(overview.includes('listLearnRuns')).toBe(false);
+    expect(overview.includes('nomi.overview.diary')).toBe(false);
+  });
 });

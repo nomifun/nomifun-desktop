@@ -93,7 +93,6 @@ max_screenshot_edge = 1568
 
 [tools.browser]
 enabled = true
-allowed_origins = []
 # The trusted global default is headless; an installation owner may change it
 # live to external. Foreground/background Lane actions do not rewrite it.
 # Unknown legacy keys (e.g. old browser_path / idle_timeout_secs entries) are

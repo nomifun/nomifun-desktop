@@ -132,6 +132,7 @@ const RELEASED_V1_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     ("extensions", ManagedRootKind::Directory),
     ("extension-states.json", ManagedRootKind::File),
     ("custom-skill-paths.json", ManagedRootKind::File),
+    // Legacy cleanup only: the companion credential feature no longer owns this directory.
     ("browser-secrets", ManagedRootKind::Directory),
     ("codex-acp-home", ManagedRootKind::Directory),
     ("agent-executions", ManagedRootKind::Directory),

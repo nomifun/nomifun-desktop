@@ -17,9 +17,9 @@
 //! 账号写在磁盘上。故 vault **AES-256-GCM 加密**，**复用 [`nomifun_common`] 的
 //! [`encrypt_string`](nomifun_common::encrypt_string) /
 //! [`decrypt_string`](nomifun_common::decrypt_string)**（DESIGN §4/§16 裁决⑦：**不另起第二套 crypto
-//! 栈**——与 `nomifun-secret` 凭据 vault 同一实现）。key = 调用方传入的 **32 字节机器绑定密钥**（app
-//! data-dir 层 provision 的 `encryption_key`，全后端 `[u8; 32]` 一路穿透的同一把；本 crate **不**自造
-//! 机器绑定方案，与 `nomifun-secret` 同约定）。机器绑定 key + 加密落盘 → vault 文件即便被拷走，换台机器
+//! 栈**）。key = 调用方传入的 **32 字节机器绑定密钥**（app data-dir 层 provision 的
+//! `encryption_key`，全后端 `[u8; 32]` 一路穿透的同一把；本 crate **不**自造机器绑定方案）。
+//! 机器绑定 key + 加密落盘 → vault 文件即便被拷走，换台机器
 //! 也解不开（GCM 认证失败 → fail-closed 返 `None`）。
 //!
 //! ## 浏览器身份全局共享（用户决策：去 per-pet 隔离）
@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::storage_state::StorageState;
 
-/// AES-256-GCM key 的字节数（与 [`nomifun_common`] / `nomifun-secret` 同 = 32）。
+/// AES-256-GCM key 的字节数（与 [`nomifun_common`] 同 = 32）。
 pub const KEY_SIZE: usize = 32;
 
 /// per-pet workspace 下的 storage_state vault 文件名。**加密**落盘（`.enc` 后缀点明内容是密文，

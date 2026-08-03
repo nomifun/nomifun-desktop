@@ -24,14 +24,13 @@
 //!    secret / 敏感数据；安全红线）。**E5 只提供拦截 + 门控判定 + 预览构造**；实际审批路由（接
 //!    Exec tier approval pipeline）由 **F1** 接线——见 `decide` 里的 `TODO(E5->F1-egress-approval)`。
 //!
-//! **跨域判定**用 eTLD+1（[`is_cross_origin`]）：复用 `nomifun-secret` 的 PSL 机器
+//! **跨域判定**用 eTLD+1（[`is_cross_origin`]）：复用本 crate 的 PSL 域名工具
 //! （`same_etld_plus_one`），对 IP / `localhost` 等无 eTLD+1 的 host 退化为裸 host 比较——故
 //! 「同一 IP / 同一 localhost 间的 POST」**不**误判为跨域。
 //!
 //! 不变量（勿破坏）：
 //! - **SW 保持 attach 并对其 `Fetch.enable`**（不变量⑬）。
-//! - **`BrowserConfig.allowed_origins` 是死字段**（不变量⑭）——本模块**绝不**复用它，防火墙有独立
-//!   [`FirewallConfig`]。
+//! - 域名出口策略只来自显式注入的 [`FirewallConfig`]。
 //! - **预览绝不含字段值**（[`build_post_preview`] 单测断言）。
 
 use std::collections::{HashMap, HashSet};
@@ -42,22 +41,14 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// 出口防火墙配置（**独立**于死字段 `BrowserConfig.allowed_origins`，见模块 doc / 不变量⑭）。
+/// 出口防火墙配置。
 ///
 /// `Default` = 启用 IP 封禁（无副作用的纯 SSRF 防护，恒应开）+ 启用跨域 POST 门控**检测**（E5 只
 /// 检测 + 构造预览；F1 接审批路由）+ **空域名策略**（`allow_etld1`/`deny_etld1` 均空 = 不限制出口
 /// 域，现行为，零回归）。三挡分开是因为：IP 封禁是「硬封禁」（命中即拒，无审批语义）、跨域 POST 门控
 /// 是「升审批」（F1 才有放行/拒绝的人在回路）、域名 allowlist 是「出口域策略」（D1）。
 ///
-/// **P3-D1（裁决⑤）**：加 `allow_etld1`/`deny_etld1` 两个 eTLD+1 域名策略字段（复用 `nomifun_secret`
-/// 同一 PSL 机器解析目标域）。**数据源 = secret 的 per-pet `allowed_origins`**（与 secret 域**共用同一份
-/// 真值**）。D1 建机制（让 `FirewallConfig` 能携带域名策略 + `decide` 强制）；**P3-X2 已接真值**——
-/// `BrowserTool::ensure_secret_store_and_firewall`（`nomi-browser/tool.rs`）从 per-pet vault 加载的
-/// `SecretStore::allowed_etld1_union()` 灌进 `allow_etld1`，经 `EngineConfig.firewall` 注入（不再恒
-/// `default()`；空 secret store → 空 allowlist = 不限制出口域，零回归）。
-///
-/// **由 D1 加 `Vec` 字段，`FirewallConfig` 不再 `Copy`（改 `Clone`）**——同步 G1 链路（`cdp.rs` 的
-/// `firewall_config` 快照 / `spawn_fetch_firewall_loop` move 传入）从 Copy 用法改 Clone。
+/// `allow_etld1`/`deny_etld1` 使用同一套 PSL 域名解析；空列表表示不限制出口域。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FirewallConfig {
     /// 封禁解析到内网 / loopback / link-local（含云元数据）/ 其它非公网 IP 的出口请求。
@@ -71,16 +62,14 @@ pub struct FirewallConfig {
     /// ∉ 本表 → 升 [`FirewallDecision::GatePost`]（交 D2 审批）。**同 registrable domain 请求（页面加载
     /// 自己的子资源）与顶层 Document 导航豁免本档**（F6 白屏回归修 / P3 导航修——allowlist 是数据外泄
     /// 控制，不是把被访问站点自身渲染卡死的监狱）。
-    /// 条目应是 eTLD+1（`x.com`），但调用方传任意 host/origin 也安全——内部用 [`nomifun_secret::etld_plus_one`]
-    /// 归一后比较（与 secret `register` 的 `allowed_origins`→eTLD+1 归一同款 PSL 机器）。**真值来自 secret 的
-    /// per-pet `allowed_origins`，由 `BrowserTool::ensure_secret_store_and_firewall` 注入（P3-X2）**。无法解析出
+    /// 条目应是 eTLD+1（`x.com`），但调用方传任意 host/origin 也安全——内部用 [`crate::domain::etld_plus_one`]
+    /// 归一后比较。无法解析出
     /// eTLD+1 的目标域（IP/localhost/畸形）在 allowlist 非空时对**跨站**请求**保守门控**（fail-closed：无
     /// registrable domain 无从证明在白名单内；同裸 host 的请求按同站豁免）。
     pub allow_etld1: Vec<String>,
     /// **D1 域名 denylist（eTLD+1）**：出口域**黑名单**，**优先级高于 allowlist**。eTLD+1 命中 → 硬
     /// [`FirewallDecision::Block`]（即便同时在 allowlist 内也阻断）。空 = 无黑名单。条目按 eTLD+1 归一
-    /// （同 [`Self::allow_etld1`]）。**secret 配置只携带 allowlist（`allowed_origins`），无 denylist 概念**，
-    /// 故 X2 注入恒留空；本字段为机制预留（未来若加显式封禁名单可经此灌入），当前不暴露 UI。
+    /// （同 [`Self::allow_etld1`]）。
     pub deny_etld1: Vec<String>,
 }
 
@@ -186,7 +175,7 @@ fn is_blocked_ipv6(v6: Ipv6Addr) -> bool {
 /// 无法导出任何一侧的 host（畸形 URL）→ **保守判跨域**（`true`，fail-closed：宁可多门控一次也不
 /// 漏一个出口）。
 pub fn is_cross_origin(current_origin: &str, target_url: &str) -> bool {
-    use nomifun_secret::{etld_plus_one, host_of};
+    use crate::domain::{etld_plus_one, host_of};
 
     let cur_host = host_of(current_origin);
     let tgt_host = host_of(target_url);
@@ -252,7 +241,7 @@ pub fn build_post_preview(
     body: Option<&[u8]>,
     content_type: Option<&str>,
 ) -> PostPreview {
-    let host = nomifun_secret::host_of(target_url).unwrap_or_default();
+    let host = crate::domain::host_of(target_url).unwrap_or_default();
     let size = body.map(|b| b.len()).unwrap_or(0);
     let field_names = match (body, content_type) {
         (Some(b), Some(ct)) if is_form_urlencoded(ct) => parse_form_field_names(b),
@@ -383,14 +372,14 @@ pub struct RequestInfo<'a> {
 ///   Document 导航**，或**与当前页 origin 同 registrable domain**）→ 交由后续档（跨域 POST 门控 /
 ///   放行）处理。
 ///
-/// 复用 [`nomifun_secret::etld_plus_one`]（同一 PSL 机器，co.uk 等多级后缀正确）解析目标域。`deny`/`allow`
+/// 复用 [`crate::domain::etld_plus_one`]（同一 PSL 机器，co.uk 等多级后缀正确）解析目标域。`deny`/`allow`
 /// 条目同样经 `etld_plus_one` 归一后比较——故调用方传 `x.com` / `https://x.com:443` / `sub.x.com` 都安全
 /// （都归一到同一 registrable domain）。
 ///
 /// **GatePost 而非 Block**（裁决⑤/D2）：allowlist 外的域**升审批**（让 D2 的人在回路决定放行/拒），
 /// 与跨域 POST 门控复用同一 [`PostPreview`] 通道；唯 `deny` 命中是**硬 Block**（黑名单无审批语义）。
 fn domain_policy(config: &FirewallConfig, req: &RequestInfo<'_>) -> Option<FirewallDecision> {
-    use nomifun_secret::etld_plus_one;
+    use crate::domain::etld_plus_one;
 
     // 域名策略两表都空 = 不限制出口域（现行为/零回归）→ 不触发域名档。
     if config.allow_etld1.is_empty() && config.deny_etld1.is_empty() {
@@ -502,9 +491,7 @@ pub fn decide(config: &FirewallConfig, req: &RequestInfo<'_>) -> FirewallDecisio
     //    （出口到未授权域，交 D2 审批）。**所有请求都过此档**（allowlist 是导航/资源出口策略，不止 POST）。
     //    空策略（两表皆空）= 不限制 = 现行为/零回归。
     //
-    //    X2 已接真值：`allow_etld1` 来自 secret 的 per-pet `allowed_origins`（裁决⑤，与 secret 域共用同一份
-    //    配置）——由 `BrowserTool::ensure_secret_store_and_firewall` 从 per-pet vault 加载后经
-    //    `EngineConfig.firewall` 注入。`deny_etld1` 为机制预留（secret 配置无 denylist 概念，恒空）。
+    //    两张表都由调用方通过 `EngineConfig.firewall` 显式注入。
     if let Some(domain_decision) = domain_policy(config, req) {
         return domain_decision;
     }
@@ -620,19 +607,19 @@ pub struct ApprovedDomains {
 
 /// **P3-D2 [纯逻辑]：取一个目标 URL 用于「域信任」（always_allow）的 registrable domain**。
 ///
-/// 与 [`domain_policy`]/`FirewallConfig.allow_etld1` 的 [`nomifun_secret::etld_plus_one`] 同款 PSL
+/// 与 [`domain_policy`]/`FirewallConfig.allow_etld1` 的 [`crate::domain::etld_plus_one`] 同款 PSL
 /// 归一，**但额外排除 IP 字面量 host**：`psl` 不校验 IP，会对 `10.0.0.5` 吐出伪 registrable domain
 /// `0.5`——而 IP 出口归 [`is_blocked_ip`] 的 IP 封禁档管，「记住此域」是**域信任**语义，对 IP 无意义
 /// 且危险（会把一个伪域记进白名单）。故 host 是 IP 字面量 → `None`（fail-closed，IP 永不进 always_allow
 /// 集合，仍受 IP 封禁档约束）。localhost/畸形（无 eTLD+1）同样 `None`。
 fn registrable_domain_for_trust(target: &str) -> Option<String> {
     // host 是 IP 字面量（v4/v6）→ 不作为可信域（归 IP 封禁档）。
-    if let Some(host) = nomifun_secret::host_of(target)
+    if let Some(host) = crate::domain::host_of(target)
         && ip_literal_of_host(&host).is_some()
     {
         return None;
     }
-    nomifun_secret::etld_plus_one(target)
+    crate::domain::etld_plus_one(target)
 }
 
 impl ApprovedDomains {
@@ -1204,9 +1191,8 @@ mod tests {
 
     // ── [纯逻辑] D1 域名档（allow_etld1/deny_etld1，deny>allow，空=不限）──────────
     //
-    // 复用 nomifun_secret::etld_plus_one 同一 PSL 机器解析目标域。GatePost = 出口到未授权域升审批
-    // （D2 接人在回路）；deny 命中 = 硬 Block（黑名单无审批语义）。**真值来自 secret per-pet
-    // allowed_origins，注入是 X2**——这些纯逻辑测试直接构造 FirewallConfig 验 decide 强制域名策略。
+    // 复用 crate::domain::etld_plus_one 同一 PSL 机器解析目标域。GatePost = 出口到未授权域升审批
+    // （D2 接人在回路）；deny 命中 = 硬 Block（黑名单无审批语义）。
 
     /// 构造一个「公网 GET、无 POST body」的请求（隔离域名档逻辑：IP 封禁不触发、跨域 POST 门控不触发，
     /// 所有裁决差异都来自域名档）。`resolved_ip=None`（域名未解析 IP），方法 GET 无 body。

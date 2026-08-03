@@ -79,8 +79,6 @@
 | [`nomifun-creation`](../../crates/backend/nomifun-creation/) | 生成引擎：工坊画布生成节点背后的异步任务队列。供应商无关的状态机（`queued → running → succeeded/failed/canceled`），按供应商并发上限 + 全局上限、取消与启动对账；模型执行委托 `nomifun-model-invoke`，产物字节交给 `AssetSink`。 |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | 客服独立域：面向 IM 渠道陌生人的独立服务域，与伙伴 / 会话体系不共享概念——对话是本域自己的聚合，回复由一次性引擎会话产出，工具注册表固定为只读三件套。 |
 | [`nomifun-public`](../../crates/backend/nomifun-public/) | 由伙伴令牌鉴权的公开对外入口：`/mcp`、`/mcp-agent` 与 `/v1`。 |
-| [`nomifun-secret`](../../crates/backend/nomifun-secret/) | 按伙伴的 browser-use 密钥存储与凭据查询。 |
-
 ## 基础设施特性
 
 | Crate | 职责 |
