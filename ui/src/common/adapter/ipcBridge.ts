@@ -5162,38 +5162,6 @@ export const companion = {
   }),
 };
 
-// ==================== Browser-use credential secrets (P3-X2) ====================
-
-/** A registered browser-use secret as returned to the client — metadata ONLY.
- *  The plaintext `value` is write-only (register) and is NEVER returned by any
- *  endpoint (it is encrypted into a per-pet, machine-bound vault). */
-export interface ISecretListItem {
-  /** The reference name used as `secret:NAME` in a browser type/set_value action. */
-  name: string;
-  /** The registrable domains (eTLD+1) this secret is bound to. These also feed the
-   *  browser egress domain allowlist (shared per-pet config). */
-  allowed_origins: string[];
-}
-
-/** Global browser-use credential secret CRUD. The value is write-only. */
-export const browserSecret = {
-  /** List registered secrets (name + bound origins; NEVER the value). */
-  list: httpGet<ISecretListItem[], void>('/api/browser-secrets'),
-  /** Register (or overwrite) a secret. `value` is encrypted into the vault and never echoed. */
-  register: httpPost<void, { name: string; value: string; allowed_origins: string[] }>(
-    '/api/browser-secrets',
-    (p) => ({
-      name: p.name,
-      value: p.value,
-      allowed_origins: p.allowed_origins,
-    })
-  ),
-  /** Remove a secret by name. */
-  remove: httpDelete<void, { name: string }>(
-    (p) => `/api/browser-secrets/${encodeURIComponent(p.name)}`
-  ),
-};
-
 /** Phase 2b「登录我的浏览器」status returned by open/close/status. */
 export interface IBrowserLoginStatus {
   /** Whether a visible login browser is currently open. */

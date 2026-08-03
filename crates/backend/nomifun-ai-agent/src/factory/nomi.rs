@@ -557,21 +557,7 @@ pub(super) async fn build(
 
     let browser_use_enabled = overrides.browser_use.unwrap_or(browser_use_default);
 
-    // Build the shared browser secret-vault descriptor when browser-use is on.
-    // Every caller uses `{data_dir}/browser-secrets/shared`; this policy store
-    // backs Native, Gateway, and registration paths. Bootstrap passes the
-    // machine-bound key to the Hub-backed Browser tool adapter so `secret:NAME`
-    // resolves under origin checks and registered `allowed_origins` contribute
-    // to the egress firewall. It is not a Chromium profile and conveys no
-    // Browser Host ownership.
-    let browser_secret_vault = if browser_use_enabled {
-        Some(crate::types::BrowserSecretVault {
-            vault_path: nomifun_secret::shared_vault_path(&deps.data_dir),
-            key: deps.encryption_key,
-        })
-    } else {
-        None
-    };
+    let persistent_login_key = browser_use_enabled.then_some(deps.encryption_key);
 
     #[cfg(feature = "browser-use")]
     let browser_lane_binding = if browser_use_enabled {
@@ -672,10 +658,8 @@ pub(super) async fn build(
                 g.max_auto_continuations.unwrap_or(8),
             )
         }),
-        // Shared browser secret-vault descriptor (built above; None when
-        // browser-use is off). It carries policy credentials, not Host/profile
-        // ownership.
-        browser_secret_vault,
+        // Persistent-login encryption key; absent when browser-use is off.
+        persistent_login_key,
         // Owning conversation instance identity — the nomi manager stamps it
         // onto the session after build so a future reused id is rejected.
         owner_token: owner_token.clone(),

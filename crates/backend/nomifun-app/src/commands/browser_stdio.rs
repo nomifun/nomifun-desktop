@@ -149,8 +149,7 @@ struct RefParams {
 struct TypeParams {
     /// A `[ref=f<seq>e<n>]` element from the most recent `observe`.
     r#ref: String,
-    /// Text to type. Use "secret:NAME" to inject a stored credential bound to the
-    /// current origin WITHOUT the value passing through this conversation.
+    /// Text to type.
     text: String,
     #[serde(flatten)]
     lane: LaneParams,
@@ -161,7 +160,7 @@ struct TypeParams {
 struct SetValueParams {
     /// A `[ref=f<seq>e<n>]` element from the most recent `observe`.
     r#ref: String,
-    /// Value to set on the control. Also accepts "secret:NAME".
+    /// Value to set on the control.
     value: String,
     #[serde(flatten)]
     lane: LaneParams,
@@ -713,7 +712,7 @@ impl BrowserStdioServer {
 
     #[tool(
         name = "type",
-        description = "Type `text` into the element with the given `ref`. Use \"secret:NAME\" to inject a stored credential bound to the current origin without the value passing through this conversation (fails closed on this bridge if no secret store is configured)."
+        description = "Type `text` into the element with the given `ref`."
     )]
     async fn type_text(&self, Parameters(p): Parameters<TypeParams>) -> CallToolResult {
         self.run(json!({
@@ -727,7 +726,7 @@ impl BrowserStdioServer {
 
     #[tool(
         name = "set_value",
-        description = "Set the `value` of the control with the given `ref` (good for text fields). Also accepts \"secret:NAME\"."
+        description = "Set the `value` of the control with the given `ref` (good for text fields)."
     )]
     async fn set_value(&self, Parameters(p): Parameters<SetValueParams>) -> CallToolResult {
         self.run(json!({

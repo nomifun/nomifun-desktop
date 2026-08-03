@@ -14,6 +14,7 @@ pub mod aria_ref;
 pub mod backend;
 pub mod debug_capture;
 pub mod display;
+pub mod domain;
 pub mod download;
 pub mod engine;
 pub mod errmap;
@@ -79,8 +80,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 
-/// Session-scoped registry of the agent's own resolved secret plaintext values (from the
-/// facade's `secret:NAME` → vault resolution). Used **solely** for deterministic exact-blackout
+/// Session-scoped registry of sensitive plaintext values handled by browser actions. Used
+/// **solely** for deterministic exact-blackout
 /// redaction in debug serializers: any debug output containing one of these values has it
 /// replaced with `[KNOWN_SECRET_REDACTED]` BEFORE heuristic passes run.
 ///
@@ -91,8 +92,8 @@ use std::sync::Arc;
 /// - Used exclusively for read-side redaction (never written to disk, logs, or network).
 /// - Only values with `len >= 4` are inserted (avoid over-matching trivial values).
 ///
-/// The facade (BrowserTool) owns the canonical Arc and populates it on each successful
-/// `secret:NAME` resolution; the engine holds a clone and reads it during serialization.
+/// The browser layer owns the canonical Arc; the engine holds a clone and reads it during
+/// serialization.
 pub type KnownSecretValues = Arc<std::sync::Mutex<HashSet<String>>>;
 
 /// 创建引擎的配置。`Default` 给出合理本机默认（临时数据目录、无打包目录、headless）。
@@ -147,8 +148,7 @@ pub struct EngineConfig {
     /// 经 `from_launched` / `from_host` → [`crate::backend::cdp::spawn_fetch_firewall_loop`] 透传
     /// （**不再硬编码 `FirewallConfig::default()`**）。`Default` = `FirewallConfig::default()`（IP 封禁开
     /// 与跨域 POST 门控检测开）——默认即现行为，零回归。**域名 allowlist（`allow_etld1`/`deny_etld1`）
-    /// 的真值注入是 D1 的活**（上层从 secret 的 per-pet `allowed_origins` 灌真策略，⑤共用真值）；G1 只打通
-    /// 链路使 firewall **可注入**，facade 暂传 `default()`。
+    /// 的真值由上层注入；G1 只打通链路使 firewall **可注入**，浏览器层暂传 `default()`。
     pub firewall: crate::firewall::FirewallConfig,
     /// **W4d 持久登录：storage_state vault 灌入态**。上层从共享 vault
     /// （[`crate::vault::load_storage_state`]）解密读出的跨会话登录态 JSON（[`crate::StorageState`] 的
@@ -167,10 +167,9 @@ pub struct EngineConfig {
     pub egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
     /// **Known-secret exact-blackout registry** (debug-capture security keystone).
     ///
-    /// Session-scoped set of the agent's own resolved secret plaintext values. The facade
-    /// populates it on each successful `secret:NAME` resolution; the engine's debug serializers
-    /// apply exact `String::replace` before any heuristic redaction, guaranteeing deterministic
-    /// blackout of known secrets regardless of format, position, or entropy.
+    /// Session-scoped set of sensitive plaintext values handled by the browser layer. The
+    /// engine's debug serializers apply exact `String::replace` before any heuristic redaction,
+    /// guaranteeing deterministic blackout regardless of format, position, or entropy.
     ///
     /// See [`KnownSecretValues`] for security invariants and retention bounds.
     pub known_secret_values: KnownSecretValues,
@@ -266,7 +265,7 @@ impl Default for EngineConfig {
             storage_state: None,
             // P3-D2：默认无出口审批通道 → 被门控请求 fail-closed（拒绝）。facade/网关注入真 approver。
             egress_approver: None,
-            // Known-secret blackout: default empty (no secrets known until facade resolves some).
+            // Known-secret blackout: default empty.
             known_secret_values: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }

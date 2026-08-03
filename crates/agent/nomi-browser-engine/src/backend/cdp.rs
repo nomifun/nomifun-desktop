@@ -8089,7 +8089,7 @@ async fn handle_paused_request(
 
     // 目标 host 若**本身是 IP 字面量**（最危险的 SSRF 形态：直接拿内网/元数据 IP 当 URL）→ 同步判 IP
     // 封禁，无需 DNS。域名 host 的异步 DNS→IP 路径见 TODO（E5 同步覆盖 IP 字面量这一主面）。
-    let target_host = nomifun_secret::host_of(&url);
+    let target_host = crate::domain::host_of(&url);
     let resolved_ip = target_host
         .as_deref()
         .and_then(crate::firewall::ip_literal_of_host);

@@ -12,9 +12,8 @@
 //! pollute the user's searchable knowledge bases with machine-generated browser hints.
 //! Keyed globally by eTLD+1 (NOT per-pet — browser identity is globally shared).
 //!
-//! **Locked invariant:** No secret value EVER stored. Entries sourced from a
-//! `secret:NAME` action or whose accessible_name is a redaction placeholder are
-//! dropped before persistence.
+//! **Locked invariant:** descriptors containing a redaction placeholder are dropped before
+//! persistence.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,23 +37,19 @@ pub struct SiteMemoryEntry {
     pub accessible_name: String,
     /// A CSS selector (if available) for faster re-location.
     pub selector: Option<String>,
-    /// Whether this entry originated from a secret-carrying action.
-    /// If true, the entry is NEVER persisted (dropped at record time).
-    #[serde(default)]
-    pub from_secret: bool,
 }
 
-// ─── Redaction placeholders (locked invariant: secret → drop) ────────────────
+// ─── Redaction placeholders ──────────────────────────────────────────────────
 
 /// Redaction placeholder markers. If an entry's accessible_name matches any of
-/// these, the entry is considered secret-sourced and MUST NOT be persisted.
+/// these, the entry MUST NOT be persisted.
 const REDACTION_MARKERS: &[&str] = &[
     "[REDACTED]",
     "[REDACTED_SECRET]",
     "[KNOWN_SECRET_REDACTED]",
 ];
 
-/// Returns true if `name` is a redaction placeholder (secret-sourced).
+/// Returns true if `name` contains a redaction placeholder.
 fn is_redaction_placeholder(name: &str) -> bool {
     REDACTION_MARKERS.iter().any(|m| name.contains(m))
 }
@@ -64,17 +59,17 @@ fn is_redaction_placeholder(name: &str) -> bool {
 /// Extract the eTLD+1 key for a given URL. Returns `None` for IPs, localhost,
 /// or anything without a registrable domain.
 ///
-/// Reuses the same PSL machinery as the firewall (`nomifun_secret::etld_plus_one`),
+/// Reuses the same PSL machinery as the browser firewall.
 /// plus the IP-literal guard (`ip_literal_of_host`) to reject numeric hosts that the
 /// PSL crate misclassifies as domains.
 pub fn key_for(url: &str) -> Option<String> {
     // Guard: IP literals (v4/v6) have no registrable domain — reject before PSL.
     // Same pattern as firewall's `registrable_domain_for_trust`.
-    let host = nomifun_secret::host_of(url)?;
+    let host = nomi_browser_engine::domain::host_of(url)?;
     if nomi_browser_engine::firewall::ip_literal_of_host(&host).is_some() {
         return None;
     }
-    nomifun_secret::etld_plus_one(url)
+    nomi_browser_engine::domain::etld_plus_one(url)
 }
 
 // ─── SiteMemorySink trait ────────────────────────────────────────────────────
@@ -265,12 +260,10 @@ impl SiteMemoryStore {
 
     /// Record a successful action's element descriptor.
     ///
-    /// **Locked invariant:** drops the entry if `from_secret == true` OR the
-    /// accessible_name is a redaction placeholder. No secret value ever reaches
-    /// the sink.
+    /// **Locked invariant:** drops the entry if the accessible name contains a redaction
+    /// placeholder.
     pub fn record(&self, entry: SiteMemoryEntry) {
-        // Secret guard: never persist secret-sourced descriptors.
-        if entry.from_secret || is_redaction_placeholder(&entry.accessible_name) {
+        if is_redaction_placeholder(&entry.accessible_name) {
             return;
         }
         self.sink.write(&entry.etld1, &entry);
@@ -326,7 +319,6 @@ mod tests {
             role: "button".into(),
             accessible_name: name.into(),
             selector: Some(format!("#{name}")),
-            from_secret: false,
         }
     }
 
@@ -405,17 +397,14 @@ mod tests {
     }
 
     #[test]
-    fn store_over_file_sink_drops_secret_entries() {
-        // Locked invariant holds through the real file sink: secret-sourced entries
-        // never reach disk.
+    fn store_over_file_sink_drops_redacted_entries() {
+        // Locked invariant holds through the real file sink: redacted entries never reach disk.
         let dir = TempDir::new().unwrap();
         let store = SiteMemoryStore::new(Box::new(FileSiteMemorySink::new(dir.path())));
-        let mut secret = entry("bank.com", "[REDACTED]");
-        secret.from_secret = true;
-        store.record(secret);
+        store.record(entry("bank.com", "[REDACTED]"));
         store.record(entry("bank.com", "normal-button"));
         let got = store.query("bank.com");
-        assert_eq!(got.len(), 1, "secret entry must be dropped, normal kept");
+        assert_eq!(got.len(), 1, "redacted entry must be dropped, normal kept");
         assert_eq!(got[0].accessible_name, "normal-button");
     }
 }

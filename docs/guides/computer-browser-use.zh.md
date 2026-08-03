@@ -70,7 +70,6 @@ max_screenshot_edge = 1568   # 截图长边像素上限
 
 [tools.browser]
 enabled = true
-allowed_origins = []         # 可选 origin 白名单；空=全放行，仅纵深防御
 # 可信全局默认值为 headless；安装 owner 可实时改为 external。
 # 对 Lane 的前台/后台切换不会改写该默认值。
 # 未知的旧配置键（如早期的 browser_path / idle_timeout_secs）会被忽略，

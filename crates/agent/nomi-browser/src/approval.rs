@@ -39,7 +39,7 @@ pub enum ApprovalKind {
         /// The facade action name (e.g. `click`, `press_key`, `navigate`).
         action: String,
         /// A human-readable description (e.g. the target element's accessible name).
-        /// **Never a resolved secret** — the facade resolves `secret:NAME` itself.
+        /// **Never a sensitive value** — only a safe human-readable description.
         description: String,
     },
     /// A gated cross-origin POST egress (SD-5). Carries the safe preview: target host,
