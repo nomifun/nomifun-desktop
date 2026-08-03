@@ -4524,7 +4524,6 @@ export interface ICompanionEvolveConfig {
   model: ICompanionModelRef | null;
   min_pattern_count: number;
   min_distinct_sessions: number;
-  reflect_enabled: boolean;
   auto_activate: boolean;
   auto_threshold: number;
 }

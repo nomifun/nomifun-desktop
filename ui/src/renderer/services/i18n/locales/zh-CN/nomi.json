@@ -48,7 +48,6 @@
     "giftPick": "选择接收的伙伴",
     "giftedOk": "已赠送给对方",
     "source_mined": "重复挖掘",
-    "source_reflected": "任务反思",
     "source_demonstrated": "示范教学",
     "source_manual": "手动",
     "configuredTitle": "已配置能力",
@@ -255,8 +254,6 @@
     "enabled": "开启技能进化",
     "interval": "挖掘间隔",
     "minSessions": "重复会话数阈值",
-    "reflect": "任务后反思",
-    "reflectHint": "复杂任务完成后也反思是否值得固化",
     "autoActivate": "高置信自动生效",
     "autoActivateHint": "多次重复的高置信技能直接启用（仍可在技能页撤销）"
   },

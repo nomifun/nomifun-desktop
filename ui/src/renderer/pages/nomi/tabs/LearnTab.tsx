@@ -179,17 +179,6 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
             />
           </div>
           <div className='flex items-center gap-8px'>
-            <span className='text-13px text-t-secondary'>{t('nomi.evolve.reflect', { defaultValue: '任务后反思' })}</span>
-            <Switch
-              {...COMPANION_SWITCH_PROPS}
-              checked={sharedConfig.evolve.reflect_enabled}
-              onChange={(checked) => void patchSharedConfig({ evolve: { reflect_enabled: checked } })}
-            />
-            <span className='text-11px text-t-tertiary'>
-              {t('nomi.evolve.reflectHint', { defaultValue: '复杂任务完成后也反思是否值得固化' })}
-            </span>
-          </div>
-          <div className='flex items-center gap-8px'>
             <span className='text-13px text-t-secondary'>{t('nomi.evolve.autoActivate', { defaultValue: '高置信自动生效' })}</span>
             <Switch
               {...COMPANION_SWITCH_PROPS}

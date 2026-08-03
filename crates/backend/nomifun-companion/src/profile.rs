@@ -290,12 +290,10 @@ pub struct SharedEvolveConfig {
     pub min_pattern_count: i64,
     /// A pattern must appear across at least this many distinct sessions.
     pub min_distinct_sessions: usize,
-    /// Also reflect on single complex work sessions (not just repeated patterns) — design §5.5 任务后反思.
-    pub reflect_enabled: bool,
     /// Auto-activate a drafted skill (skip human review) when confidence ≥ `auto_threshold`.
     /// Default off (gated): the user opts into high-confidence auto-activation.
     pub auto_activate: bool,
-    /// Confidence cutoff for `auto_activate` (repetition-derived; single-session reflections stay below it).
+    /// Confidence cutoff for `auto_activate`.
     pub auto_threshold: f64,
     /// Skill strength half-life in days (decay clock = time since last use). Used skills reinforce.
     pub skill_half_life_days: f64,
@@ -311,7 +309,6 @@ impl Default for SharedEvolveConfig {
             model: None,
             min_pattern_count: 3,
             min_distinct_sessions: 2,
-            reflect_enabled: true,
             auto_activate: false,
             auto_threshold: 0.85,
             skill_half_life_days: 45.0,
@@ -423,15 +420,40 @@ impl SharedCompanionConfig {
     }
 
     /// Load from `{dir}/config.json` (dir is the shared dir). Only a missing
-    /// file uses defaults; unreadable or malformed data fails closed.
+    /// file uses defaults; unreadable or malformed data fails closed. A removed
+    /// evolution setting is stripped once during load so pre-removal installs
+    /// can upgrade without weakening unknown-field validation for current data.
     pub fn load(dir: &Path) -> Result<Self, nomifun_common::AppError> {
         let path = Self::config_path(dir);
-        crate::fsio::load_json_missing_or_default(&path).map_err(|error| {
+        let loaded = crate::fsio::load_json_optional::<serde_json::Value>(&path).map_err(|error| {
             nomifun_common::AppError::Internal(format!(
                 "load shared companion config {}: {error}",
                 path.display()
             ))
-        })
+        })?;
+        let Some(mut value) = loaded else {
+            return Ok(Self::default());
+        };
+        let removed_legacy_setting = value
+            .get_mut("evolve")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|evolve| evolve.remove("reflect_enabled"))
+            .is_some();
+        let config: Self = serde_json::from_value(value).map_err(|error| {
+            nomifun_common::AppError::Internal(format!(
+                "load shared companion config {}: {error}",
+                path.display()
+            ))
+        })?;
+        if removed_legacy_setting {
+            config.save(dir).map_err(|error| {
+                nomifun_common::AppError::Internal(format!(
+                    "migrate shared companion config {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        Ok(config)
     }
 
     /// Atomically persist to `{dir}/config.json` (unique temp file + rename).
@@ -634,6 +656,34 @@ mod tests {
         let again = SharedCompanionConfig::load(dir.path()).unwrap();
         assert_eq!(again, cfg);
         assert!(again.learn.model.is_some());
+    }
+
+    #[test]
+    fn shared_load_removes_retired_evolution_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(SharedCompanionConfig::default()).unwrap();
+        value["evolve"]["reflect_enabled"] = serde_json::json!(true);
+        std::fs::write(
+            SharedCompanionConfig::config_path(dir.path()),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = SharedCompanionConfig::load(dir.path()).unwrap();
+        assert_eq!(loaded, SharedCompanionConfig::default());
+        let migrated: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(SharedCompanionConfig::config_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        assert!(migrated["evolve"].get("reflect_enabled").is_none());
+    }
+
+    #[test]
+    fn shared_config_still_rejects_unknown_evolution_settings() {
+        let result = serde_json::from_value::<SharedCompanionConfig>(serde_json::json!({
+            "evolve": {"unknown_setting": true}
+        }));
+        assert!(result.is_err());
     }
 
     #[test]

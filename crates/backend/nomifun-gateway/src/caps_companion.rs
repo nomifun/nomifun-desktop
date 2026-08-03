@@ -346,12 +346,6 @@ struct SharedEvolvePatch {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
-    reflect_enabled: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present"
-    )]
     auto_activate: Option<bool>,
     #[serde(
         default,

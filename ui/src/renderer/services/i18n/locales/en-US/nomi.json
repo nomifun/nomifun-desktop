@@ -48,7 +48,6 @@
     "giftPick": "Pick a companion",
     "giftedOk": "Gifted",
     "source_mined": "Mined",
-    "source_reflected": "Reflected",
     "source_demonstrated": "Demonstrated",
     "source_manual": "Manual",
     "configuredTitle": "Configured capabilities",
@@ -255,8 +254,6 @@
     "enabled": "Enable skill evolution",
     "interval": "Mining interval",
     "minSessions": "Repeat-session threshold",
-    "reflect": "Post-task reflection",
-    "reflectHint": "Also reflect after a complex task whether it's worth saving",
     "autoActivate": "Auto-activate high-confidence",
     "autoActivateHint": "Strongly-repeated high-confidence skills activate directly (still revocable in the Skills tab)"
   },
