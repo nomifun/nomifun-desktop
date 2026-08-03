@@ -399,7 +399,7 @@ function isEngineProductionPath(path) {
 }
 
 function browserToolConstructorPattern() {
-  return /\b(?:[A-Za-z_]\w*\s*::\s*)*BrowserTool\s*::\s*(?:new|new_standalone|with_data_dir|with_secret_store)\s*(?:::<[^;{}()]*>\s*)?\(/g;
+  return /\b(?:[A-Za-z_]\w*\s*::\s*)*BrowserTool\s*::\s*(?:new|new_standalone|with_data_dir)\s*(?:::<[^;{}()]*>\s*)?\(/g;
 }
 
 function browserPolicyConstructorPattern() {
@@ -442,7 +442,7 @@ function functionBody(source, name) {
 }
 
 function standaloneBrowserConstructorPattern() {
-  return /\b(?:Self|BrowserTool)\s*::\s*(?:new|new_standalone|with_data_dir|with_secret_store)\s*(?:::<[^;{}()]*>\s*)?\(/g;
+  return /\b(?:Self|BrowserTool)\s*::\s*(?:new|new_standalone|with_data_dir)\s*(?:::<[^;{}()]*>\s*)?\(/g;
 }
 
 function browserProfileAllocationPattern() {

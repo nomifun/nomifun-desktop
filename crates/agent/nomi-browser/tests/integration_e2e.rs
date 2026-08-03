@@ -2,12 +2,12 @@
 //!
 //! 这是 P2 收官的端到端验证：**经 `BrowserTool` facade（`Tool::execute`）**串起完整真实流程，证明
 //! P2 的各组件（navigate settle / observe ref 表 / actionability 五检查 + 三级兜底 / verify-after-act /
-//! 不可逆分类器 + facade 独立 fail-closed 门 / secret 域绑定）在真 Chrome 上**协同工作**。
+//! 不可逆分类器 + facade 独立 fail-closed 门）在真 Chrome 上**协同工作**。
 //!
 //! 与 engine 层集成测试（`nomi-browser-engine/tests/integration_act.rs` 的 `c1_*`/`c2_*`）的区别：
 //! 那些直接驱动 `engine.act(&ActSpec, &Progress)`（引擎契约）；本测试走**更高层**——经 facade 的
 //! `execute(json!{...})`（LLM 真正调用的入口），故同时覆盖：①facade 的 dispatch/参数解析；②facade 的
-//! redline 独立门（在 dispatch 前拦审批旁路会话的不可逆动作）；③facade 的 `secret:NAME` origin 门。
+//! redline 独立门（在 dispatch 前拦审批旁路会话的不可逆动作）。
 //!
 //! ## 覆盖的 P2 DoD 验收点
 //! - **多步协同**：navigate → observe → type username → type password → select_option Pro → click submit
@@ -15,8 +15,7 @@
 //! - **安全门生效（红线）**：
 //!   1. **yolo/审批旁路会话** click submit（accname="Submit order" → 分类 Irreversible）→ facade redline
 //!      门 **hard-deny Blocked**（设计裁决⑧：不靠被旁路的 approval pipeline，靠 facade 独立 fail-closed 门）；
-//!   2. **普通会话** 同一 submit → 门**不拦**（交 approval pipeline），动作真执行；
-//!   3. **secret 域绑定 fail-closed**：`secret:NAME` 在 file:// 源（无 eTLD+1）→ Blocked，明文不入输出。
+//!   2. **普通会话** 同一 submit → 门**不拦**（交 approval pipeline），动作真执行。
 //!
 //! 手动跑（本机 Windows 有系统 Chrome）：
 //!   set NOMIFUN_CHROME_BINARY=C:\Program Files\Google\Chrome\Application\chrome.exe
@@ -131,8 +130,7 @@ async fn e2e_multistep_form_flow_through_facade_normal_session() {
     assert!(!type_user.is_error, "type username must succeed: {}", type_user.content);
     assert!(type_user.content.contains("changed=true"), "type username should change value: {}", type_user.content);
 
-    // ── 4. type password（literal——secret 路径的 fail-closed 在专门用例验，见下；正向 secret
-    //        路径需真 http 源 + eTLD+1，离线 file:// 测不到，由 facade/engine 既有测试覆盖）─────
+    // ── 4. type password（literal）────────────────────────────────────────────
     let type_pass = tool
         .execute(json!({"action": "type", "ref": pass_ref, "text": "literal-pw-not-secret"}))
         .await;
@@ -244,62 +242,6 @@ async fn e2e_security_gate_blocks_irreversible_submit_in_bypassing_session() {
          result       = HARD-DENY Blocked (facade fail-closed gate, NOT approval pipeline)\n\
          message      = {:?}",
         blocked.content
-    );
-}
-
-/// **安全门生效证据（secret 域绑定 fail-closed）：`secret:NAME` 在无 eTLD+1 的 file:// 源 → Blocked，
-/// 明文绝不入输出。**
-///
-/// secret 正向注入路径需真 http 源（eTLD+1 域绑定），离线 file:// 无 registrable domain → 域门 fail-closed。
-/// 这正好验**最关键的安全方向**：源不匹配 / 无源 → 拒绝解析，且 `secret:NAME` 字面量绝不当普通文本输入、
-/// 也绝不泄漏配置的值。即便 yolo 会话也拦（门是 vault 的属性，非 tool-execution 审批）。
-#[tokio::test]
-#[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 --run-ignored all"]
-async fn e2e_secret_origin_gate_fails_closed_on_file_origin() {
-    use nomifun_secret::SecretStore;
-
-    // 配一个绑定到 example.com 的 secret（其值绝不应出现在任何输出里）。
-    let mut store = SecretStore::ephemeral().expect("ephemeral store");
-    let secret_plaintext = "F3-TOP-SECRET-PLAINTEXT-must-never-leak";
-    store
-        .register("login_pw", secret_plaintext, vec!["example.com".to_string()])
-        .expect("register secret");
-
-    let tool = BrowserTool::with_secret_store(isolated_data_dir("secret"), false, store);
-
-    let nav = tool
-        .execute(json!({"action": "navigate", "url": fixture_url("e2e-form.html")}))
-        .await;
-    assert!(!nav.is_error, "navigate must succeed: {}", nav.content);
-
-    let obs = tool.execute(json!({"action": "observe"})).await;
-    assert!(!obs.is_error, "observe must succeed: {}", obs.content);
-    let pass_ref = find_ref(&obs.content, "textbox", "Password");
-
-    // current origin = file://...e2e-form.html → 无 eTLD+1 → secret 域门 fail-closed（即便 secret 存在）。
-    let res = tool
-        .execute(json!({"action": "type", "ref": pass_ref, "text": "secret:login_pw"}))
-        .await;
-    eprintln!("type secret on file:// origin -> is_error={} content={:?}", res.is_error, res.content);
-    assert!(
-        res.is_error,
-        "a secret bound to example.com must NOT resolve on a file:// origin (fail-closed): {}",
-        res.content
-    );
-    // 安全铁律：明文绝不出现在错误输出里；`secret:login_pw` 字面量也不能被当普通文本输入（值不泄漏）。
-    assert!(
-        !res.content.contains(secret_plaintext),
-        "SECURITY: the secret plaintext must NEVER appear in the tool output: {}",
-        res.content
-    );
-
-    eprintln!(
-        "=== F3 SECRET GATE EVIDENCE ===\n\
-         origin       = file:// (no registrable eTLD+1)\n\
-         secret       = bound to example.com (mismatch)\n\
-         result       = fail-closed Blocked; plaintext NOT typed, NOT in output\n\
-         message      = {:?}",
-        res.content
     );
 }
 
@@ -670,4 +612,3 @@ async fn visual_fallback_som_smoke() {
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }
-

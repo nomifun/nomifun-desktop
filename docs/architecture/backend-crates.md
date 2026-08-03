@@ -97,8 +97,6 @@ identifiers remain opaque.
 | [`nomifun-creation`](../../crates/backend/nomifun-creation/) | Media generation engine behind the Workshop canvas's generation nodes: provider-agnostic async task queue (`queued → running → succeeded/failed/canceled`) with per-provider concurrency plus a global cap, cancellation, and boot reconciliation. Delegates model execution to `nomifun-model-invoke` and hands produced bytes to an `AssetSink`. |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | Standalone customer-service domain for serving strangers over IM channels. Shares no concepts with the companion/conversation system: dialogues are the domain's own aggregate and replies come from a disposable one-shot engine session with a fixed read-only tool registry. |
 | [`nomifun-public`](../../crates/backend/nomifun-public/) | Companion-token authenticated public front doors: `/mcp`, `/mcp-agent`, and `/v1`. |
-| [`nomifun-secret`](../../crates/backend/nomifun-secret/) | Per-companion browser-use secret storage and credential lookup. |
-
 ## Infrastructure features
 
 | Crate | Responsibility |

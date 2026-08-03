@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Alert, Button, Message, Modal, Progress, Slider, Spin, Switch, Tag } from '@arco-design/web-react';
 import { IconEdit } from '@arco-design/web-react/icon';
 import { ipcBridge } from '@/common';
-import type { ICompanionLearnRun, ICompanionWeeklyDigest } from '@/common/adapter/ipcBridge';
+import type { ICompanionWeeklyDigest } from '@/common/adapter/ipcBridge';
 import CompanionAvatar from '@renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@renderer/pages/companion/characters/customMeta';
 import { FIGURE_HEIGHTS, SIZE_MIN, SIZE_MAX } from '@renderer/pages/companion/characters/customDesk';
@@ -36,7 +36,6 @@ interface Props {
 const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
   const { t } = useTranslation();
   const { profile, status, loading, patchCompanion } = companion;
-  const [diaries, setDiaries] = useState<ICompanionLearnRun[]>([]);
   const [adjustOpen, setAdjustOpen] = useState(false);
   // First-launch self-evolution disclosure: render-gated by localStorage (per-browser
   // "seen"); the actual default-ON write is gated server-side by a consent KV flag, so
@@ -72,13 +71,6 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
       .catch((e) => Message.error(String(e)));
     dismissDisclosure();
   };
-
-  useEffect(() => {
-    void ipcBridge.companion.listLearnRuns
-      .invoke({ limit: 10 })
-      .then((runs) => setDiaries(runs.filter((r) => r.summary)))
-      .catch(() => {});
-  }, [status?.last_learn?.learn_run_id]);
 
   const [digest, setDigest] = useState<ICompanionWeeklyDigest | null>(null);
   useEffect(() => {
@@ -317,25 +309,6 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
           )}
         </div>
       )}
-      <div>
-        <h3 className='m-0 mb-8px text-15px text-t-primary'>{t('nomi.overview.diary', { companionName })}</h3>
-        {diaries.length === 0 ? (
-          <div className='text-13px text-t-tertiary'>{t('nomi.overview.diaryEmpty', { companionName })}</div>
-        ) : (
-          <div className='flex flex-col gap-6px'>
-            {diaries.map((run) => (
-              <div
-                key={run.learn_run_id}
-                className='text-13px text-t-secondary bg-fill-2 rd-8px px-12px py-8px'
-              >
-                <span className='text-t-tertiary mr-8px'>{new Date(run.started_at).toLocaleString()}</span>
-                {run.summary}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
       <Modal
         title={t('nomi.customFigure.adjustFigure')}
         visible={adjustOpen}

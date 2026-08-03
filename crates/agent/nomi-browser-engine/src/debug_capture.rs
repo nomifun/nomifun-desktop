@@ -437,8 +437,8 @@ pub fn patch_loading_failed(entry: &mut NetworkEntry, params: &serde_json::Value
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── Known-secret exact-blackout (deterministic, not heuristic) ──────────────────────────
-// The facade resolves `secret:NAME` → plaintext and inserts each resolved value into a
-// session-scoped `KnownSecretValues` set (shared via `Arc<Mutex<HashSet<String>>>`). The
+// The browser layer may insert sensitive plaintext into a session-scoped `KnownSecretValues`
+// set (shared via `Arc<Mutex<HashSet<String>>>`). The
 // debug serializers apply `String::replace(value, "[KNOWN_SECRET_REDACTED]")` as the FIRST
 // redaction step — catching the value ANYWHERE (URL path, JSON body, console arg, stack)
 // regardless of format or entropy. This is the deterministic guarantee; the structural URL
@@ -458,8 +458,8 @@ pub fn patch_loading_failed(entry: &mut NetworkEntry, params: &serde_json::Value
 /// because the secret set is small (typically 1-5 entries) and the text is bounded by the
 /// ring buffer cap.
 ///
-/// NOTE: This is the deterministic keystone — it catches the agent's OWN `secret:NAME` values
-/// regardless of format, entropy, or position. Page-origin secrets that the agent never resolved
+/// NOTE: This is the deterministic keystone — it catches registered sensitive values regardless
+/// of format, entropy, or position. Page-origin secrets that the agent never handled
 /// are handled heuristically by `redact_debug_text` (see its "Accepted residual" doc).
 fn apply_known_secret_blackout(mut text: String, known_secrets: &HashSet<String>) -> String {
     for secret in known_secrets {
@@ -1616,7 +1616,7 @@ mod tests {
         assert!(!output.contains("leaktoken99"), "Third secret leaked:\n{output}");
     }
 
-    /// Short secrets (len < 4) are NOT inserted by the facade (invariant), but if somehow
+    /// Short secrets (len < 4) are not expected to be inserted, but if somehow
     /// present in the set the blackout still applies. This test verifies the blackout function
     /// itself works for any non-empty string in the set.
     #[test]

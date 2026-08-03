@@ -2576,22 +2576,14 @@ impl AppServices {
                 storage_state,
                 ..Default::default()
             };
-            let secret_source = nomi_browser::BrowserSecretSource {
-                vault_path: nomifun_secret::shared_vault_path(&services.data_dir),
-                key: services.encryption_key,
-            };
+            let persistent_login_key = services.encryption_key;
             let factory = nomi_browser::ManagedEngineHostFactory::new(engine_config)
                 .with_identity_vault(
                     nomi_browser_engine::shared_storage_state_path(&services.data_dir),
                     services.encryption_key,
                 )
-                // F6 (裁决⑤): the same vault also feeds the HOST egress
-                // allowlist, so managed lanes enforce the allow_etld1 the
-                // standalone path enforces (and secret injection stays gated
-                // on that enforced list).
-                .with_secret_source(secret_source.clone())
                 .with_lane_policy(Arc::new(move |tool| {
-                    tool.secret_source(secret_source.clone())
+                    tool.persistent_login_key(persistent_login_key)
                 }));
             let mut hub_config = nomifun_browser_platform::HubConfig {
                 // Hub applies this preference only to Primary identity when
