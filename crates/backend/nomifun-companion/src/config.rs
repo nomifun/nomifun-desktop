@@ -15,10 +15,7 @@ pub(crate) const DEFAULT_CHARACTER: &str = "mochi";
 #[serde(deny_unknown_fields)]
 pub struct CollectConfig {
     pub chat_user_messages: bool,
-    pub chat_assistant_replies: bool,
     pub requirements: bool,
-    pub cron_runs: bool,
-    pub conversation_lifecycle: bool,
     pub terminal_sessions: bool,
     /// Tool-call capture from owner work sessions: tool NAME + normalized param
     /// SHAPE only (sorted top-level arg keys + JSON types), never values. The
@@ -33,10 +30,7 @@ impl Default for CollectConfig {
     fn default() -> Self {
         Self {
             chat_user_messages: false,
-            chat_assistant_replies: false,
             requirements: false,
-            cron_runs: false,
-            conversation_lifecycle: false,
             terminal_sessions: false,
             tool_calls: false,
             companion_dialogues: true,
@@ -50,10 +44,7 @@ impl CollectConfig {
     /// by default and would make this vacuously true.
     pub fn any_enabled(&self) -> bool {
         self.chat_user_messages
-            || self.chat_assistant_replies
             || self.requirements
-            || self.cron_runs
-            || self.conversation_lifecycle
             || self.terminal_sessions
             || self.tool_calls
     }
@@ -153,5 +144,9 @@ mod tests {
         let config = CollectConfig::default();
         assert!(config.companion_dialogues);
         assert!(!config.any_enabled());
+        let wire = serde_json::to_value(config).unwrap();
+        assert!(wire.get("chat_assistant_replies").is_none());
+        assert!(wire.get("cron_runs").is_none());
+        assert!(wire.get("conversation_lifecycle").is_none());
     }
 }

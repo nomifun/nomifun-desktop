@@ -1,6 +1,6 @@
 //! Opt-in event collector. Subscribes to the global broadcast bus and appends
 //! normalized JSONL records to `{companion_dir}/events/YYYYMMDD.jsonl` for the
-//! sources the user has enabled. Assistant replies are accumulated per
+//! sources the user has enabled. Companion replies are accumulated per
 //! `(conversation_id, msg_id)` from `message.stream` content chunks and only
 //! flushed on `turn.completed` — the bus has no single "assistant reply
 //! finished" event carrying the full text.
@@ -20,8 +20,9 @@ const MAX_FIELD_CHARS: usize = 2000;
 const MAX_REPLY_CHARS: usize = 4000;
 /// Global cap on concurrently buffered assistant replies. A `turn.completed`
 /// lost to a Lagged bus receiver orphans its buffers; without a cap they
-/// accumulate for the life of the process (companion_dialogues defaults ON, so
-/// every conversation buffers). Oldest-created entries are evicted first.
+/// accumulate for the life of the process. `companion_dialogues` defaults ON,
+/// so concurrent companion conversations may buffer. Oldest-created entries
+/// are evicted first.
 const MAX_REPLY_BUFFERS: usize = 64;
 
 /// One normalized JSONL record.
@@ -69,20 +70,6 @@ fn truncate_chars(s: &str, max: usize) -> String {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}…")
     }
-}
-
-/// Truncate every top-level string field of a JSON object to `max` chars (non-objects
-/// returned unchanged). Used for `cron_runs`, whose payload (`job_id`/`status`/`error`)
-/// carries an `error` field that can be an arbitrarily long traceback/model error.
-fn truncate_json_strings(mut value: serde_json::Value, max: usize) -> serde_json::Value {
-    if let Some(obj) = value.as_object_mut() {
-        for v in obj.values_mut() {
-            if let serde_json::Value::String(s) = v {
-                *v = serde_json::Value::String(truncate_chars(s, max));
-            }
-        }
-    }
-    value
 }
 
 /// Normalized SHAPE of a tool's args: sorted `"key:type"` for each top-level key,
@@ -294,7 +281,7 @@ impl Collector {
                 });
                 self.append("chat_user_messages", &msg.name, data);
             }
-            "message.stream" if collect.chat_assistant_replies || collect.companion_dialogues || collect.tool_calls => {
+            "message.stream" if collect.companion_dialogues || collect.tool_calls => {
                 // Accumulate visible content chunks; flushed on turn.completed.
                 let kind = msg.data.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 // Tool-call signal (design §5.1): the primary skill-mining input.
@@ -348,6 +335,10 @@ impl Collector {
                 // as owner intent (the indirect feedback loop). Mirrors the
                 // userCreated origin filter; drop anything already buffered.
                 if payload_origin(&msg.data).is_some() {
+                    self.reply_buffers.remove(&key);
+                    return;
+                }
+                if !collect.companion_dialogues || !self.is_companion_event(&msg.data).await {
                     self.reply_buffers.remove(&key);
                     return;
                 }
@@ -430,31 +421,10 @@ impl Collector {
                     }
                     return;
                 }
-                if !collect.chat_assistant_replies {
-                    // Only this conversation's buffers — another (companion)
-                    // conversation may still have a companion_dialogues flush
-                    // pending.
-                    self.reply_buffers.retain(|(c, _), _| c != conv);
-                    return;
-                }
-                let drained: Vec<(String, String)> = self
-                    .reply_buffers
-                    .iter()
-                    .filter(|((c, _), _)| c == conv)
-                    .map(|((c, m), _)| (c.clone(), m.clone()))
-                    .collect();
-                for key in drained {
-                    if let Some(text) = self.reply_buffers.remove(&key) {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
-                        let data = serde_json::json!({
-                            "conversation_id": key.0,
-                            "content": truncate_chars(&text, MAX_REPLY_CHARS),
-                        });
-                        self.append("chat_assistant_replies", "assistant.reply", data);
-                    }
-                }
+                // Work-session model replies are not a collection source. Drop
+                // only this conversation's speculative buffers; another
+                // companion conversation may still have a reply flush pending.
+                self.reply_buffers.retain(|(c, _), _| c != conv);
             }
             "requirement.created" if collect.requirements => {
                 // Agent-created requirements (gateway tools, autowork) are
@@ -473,12 +443,6 @@ impl Collector {
                     "tag": msg.data.get("tag"),
                 });
                 self.append("requirements", &msg.name, data);
-            }
-            "cron.job-executed" if collect.cron_runs => {
-                self.append("cron_runs", &msg.name, truncate_json_strings(msg.data.clone(), MAX_FIELD_CHARS));
-            }
-            "conversation.listChanged" if collect.conversation_lifecycle => {
-                self.append("conversation_lifecycle", &msg.name, msg.data.clone());
             }
             "terminal.created" | "terminal.exit" | "terminal.removed" if collect.terminal_sessions => {
                 // Metadata only — never PTY output content.
@@ -767,33 +731,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cron_runs_truncates_long_error_payload() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        let mut config = SharedCompanionConfig::default();
-        config.collect.cron_runs = true;
-        let mut collector = Collector::new(dir.path().to_path_buf(), Arc::new(RwLock::new(config)), store);
-
-        let long_err = "x".repeat(MAX_FIELD_CHARS * 3);
-        collector
-            .handle(&WebSocketMessage::new(
-                "cron.job-executed",
-                serde_json::json!({"job_id": "j1", "status": "failed", "error": long_err}),
-            ))
-            .await;
-
-        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].source, "cron_runs");
-        assert_eq!(events[0].data["job_id"], "j1");
-        assert_eq!(events[0].data["status"], "failed");
-        // error truncated to the field cap (+ ellipsis), not the raw 3× blob.
-        let err = events[0].data["error"].as_str().unwrap();
-        assert!(err.chars().count() <= MAX_FIELD_CHARS + 1, "cron error must be truncated, got {} chars", err.chars().count());
-        assert!(err.ends_with('…'));
-    }
-
-    #[tokio::test]
     async fn running_tool_calls_and_origin_marked_are_not_collected() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
@@ -842,6 +779,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_work_sources_are_not_collected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let conversation = conversation_fixture(22);
+        let config = SharedCompanionConfig::default();
+        let mut collector = Collector::new(
+            dir.path().to_path_buf(),
+            Arc::new(RwLock::new(config)),
+            store,
+        );
+
+        collector
+            .handle(&WebSocketMessage::new(
+                "message.stream",
+                serde_json::json!({
+                    "conversation_id": &conversation,
+                    "msg_id": "m1",
+                    "type": "content",
+                    "data": "work-session model reply",
+                }),
+            ))
+            .await;
+        collector
+            .handle(&WebSocketMessage::new(
+                "turn.completed",
+                serde_json::json!({"conversation_id": &conversation}),
+            ))
+            .await;
+        collector
+            .handle(&WebSocketMessage::new(
+                "cron.job-executed",
+                serde_json::json!({"job_id": "j1", "status": "ok"}),
+            ))
+            .await;
+        collector
+            .handle(&WebSocketMessage::new(
+                "conversation.listChanged",
+                serde_json::json!({"conversation_id": &conversation}),
+            ))
+            .await;
+
+        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
+        assert!(events.is_empty());
+        assert!(collector.reply_buffers.is_empty());
+    }
+
+    #[tokio::test]
     async fn companion_turns_earn_xp_and_skip_collection_when_companion_dialogues_off() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
@@ -852,7 +836,6 @@ mod tests {
         store.insert_companion_thread(&companion_conversation, &companion, "聊天").await.unwrap();
         let mut config = SharedCompanionConfig::default();
         config.collect.chat_user_messages = true;
-        config.collect.chat_assistant_replies = true;
         config.collect.companion_dialogues = false;
         let mut collector = Collector::new(
             dir.path().to_path_buf(),
@@ -899,7 +882,7 @@ mod tests {
         assert_eq!(store.get_state_i64("xp").await.unwrap(), 0);
         assert_eq!(store.get_companion_state_i64(&other_companion, "xp").await.unwrap(), 0);
 
-        // Normal conversation turn: reply collected, no XP.
+        // Normal work-session model replies are not collected; no XP either.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
@@ -913,7 +896,7 @@ mod tests {
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
         assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
     }
 
@@ -1078,13 +1061,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn origin_marked_turn_replies_are_never_collected() {
+    async fn origin_marked_and_work_turn_replies_are_never_collected() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
         let work_conversation = conversation_fixture(2);
         let cron_conversation = conversation_fixture(4);
-        let mut config = SharedCompanionConfig::default();
-        config.collect.chat_assistant_replies = true;
+        let config = SharedCompanionConfig::default();
         let mut collector = Collector::new(
             dir.path().to_path_buf(),
             Arc::new(RwLock::new(config)),
@@ -1092,8 +1074,7 @@ mod tests {
         );
 
         // Companion-driven work turn: every stream fragment carries origin="companion"
-        // (stamped by the relay) — nothing may be buffered or flushed, even
-        // with chat_assistant_replies on.
+        // (stamped by the relay) — nothing may be buffered or flushed.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
@@ -1108,7 +1089,7 @@ mod tests {
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert!(events.is_empty(), "companion-driven replies must not become assistant.reply");
+        assert!(events.is_empty(), "companion-driven replies must not become work-reply events");
 
         // Defense in depth: chunks already buffered (e.g. before a Lagged
         // skip) are dropped the moment an origin-marked fragment or
@@ -1129,7 +1110,7 @@ mod tests {
         assert!(events.is_empty(), "origin-marked turn must drop buffered replies unflushed");
         assert!(collector.reply_buffers.is_empty());
 
-        // origin: null → owner-driven turn, collected as before.
+        // origin: null → an owner-driven work turn, also not collected.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
@@ -1144,9 +1125,8 @@ mod tests {
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].name, "assistant.reply");
-        assert_eq!(events[0].data["content"], "修好了");
+        assert!(events.is_empty());
+        assert!(collector.reply_buffers.is_empty());
     }
 
     #[tokio::test]
@@ -1155,8 +1135,8 @@ mod tests {
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
         let conversation_a = conversation_fixture(11);
         let conversation_b = conversation_fixture(12);
-        let mut config = SharedCompanionConfig::default();
-        config.collect.chat_assistant_replies = true;
+        let companion = companion_fixture(11);
+        let config = SharedCompanionConfig::default();
         let mut collector = Collector::new(
             dir.path().to_path_buf(),
             Arc::new(RwLock::new(config)),
@@ -1168,24 +1148,27 @@ mod tests {
             .handle(&WebSocketMessage::new(
                 "message.stream",
                 serde_json::json!({"conversation_id": conversation_a, "msg_id": "m1", "type": "content",
-                                   "data": "好的 [CRON_CREATE {\"name\":\"备份\"}]"}),
+                                   "data": "好的 [CRON_CREATE {\"name\":\"备份\"}]",
+                                   "companion": true, "companion_id": &companion}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
                 serde_json::json!({"conversation_id": conversation_a, "msg_id": "m1", "type": "content",
-                                   "data": {"content": "好的"}, "hidden": false, "replace": true}),
+                                   "data": {"content": "好的"}, "hidden": false, "replace": true,
+                                   "companion": true, "companion_id": &companion}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": conversation_a}),
+                serde_json::json!({"conversation_id": conversation_a, "companion": true, "companion_id": &companion}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
         assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, "companion_dialogues");
         assert_eq!(events[0].data["content"], "好的", "collected reply must be the cleaned text");
 
         // Hidden override (middleware emptied the whole reply): the raw
@@ -1194,20 +1177,22 @@ mod tests {
             .handle(&WebSocketMessage::new(
                 "message.stream",
                 serde_json::json!({"conversation_id": conversation_b, "msg_id": "m2", "type": "content",
-                                   "data": "[CRON_DELETE job_1]"}),
+                                   "data": "[CRON_DELETE job_1]",
+                                   "companion": true, "companion_id": &companion}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
                 serde_json::json!({"conversation_id": conversation_b, "msg_id": "m2", "type": "content",
-                                   "data": {"content": ""}, "hidden": true, "replace": true}),
+                                   "data": {"content": ""}, "hidden": true, "replace": true,
+                                   "companion": true, "companion_id": &companion}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": conversation_b}),
+                serde_json::json!({"conversation_id": conversation_b, "companion": true, "companion_id": &companion}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
@@ -1218,8 +1203,7 @@ mod tests {
     async fn reply_buffers_enforce_global_entry_cap() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        let mut config = SharedCompanionConfig::default();
-        config.collect.chat_assistant_replies = true;
+        let config = SharedCompanionConfig::default();
         let mut collector = Collector::new(
             dir.path().to_path_buf(),
             Arc::new(RwLock::new(config)),
@@ -1234,7 +1218,8 @@ mod tests {
                 .handle(&WebSocketMessage::new(
                     "message.stream",
                     serde_json::json!({"conversation_id": conversation_id, "msg_id": "m", "type": "content",
-                                       "data": format!("回复 {i}")}),
+                                       "data": format!("回复 {i}"), "companion": true,
+                                       "companion_id": companion_fixture(i as u64 + 100)}),
                 ))
                 .await;
         }
@@ -1254,7 +1239,11 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": conversation_fixture(total as u64 + 99)}),
+                serde_json::json!({
+                    "conversation_id": conversation_fixture(total as u64 + 99),
+                    "companion": true,
+                    "companion_id": companion_fixture(total as u64 + 99),
+                }),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 200).unwrap();
@@ -1446,8 +1435,8 @@ mod tests {
                 &CollectedEvent {
                     event_id: nomifun_common::generate_id(),
                     ts: base + i,
-                    source: "cron_runs".into(),
-                    name: "cron.job-executed".into(),
+                    source: "terminal_sessions".into(),
+                    name: "terminal.exit".into(),
                     data: serde_json::json!({"n": i}),
                 },
             )
