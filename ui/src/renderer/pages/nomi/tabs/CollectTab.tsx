@@ -14,11 +14,8 @@ import type { useCompanionShared } from '../useNomi';
 const SOURCES: { key: keyof ICompanionCollectConfig; sensitivity: 'low' | 'medium' | 'high' }[] = [
   { key: 'tool_calls', sensitivity: 'medium' },
   { key: 'chat_user_messages', sensitivity: 'high' },
-  { key: 'chat_assistant_replies', sensitivity: 'high' },
   { key: 'requirements', sensitivity: 'medium' },
   { key: 'terminal_sessions', sensitivity: 'medium' },
-  { key: 'cron_runs', sensitivity: 'low' },
-  { key: 'conversation_lifecycle', sensitivity: 'low' },
 ];
 
 const SENSITIVITY_COLOR = { low: 'green', medium: 'orange', high: 'red' } as const;

@@ -194,10 +194,6 @@
         "name": "会话提问内容",
         "desc": "你在各个会话里发送的提问文本"
       },
-      "chat_assistant_replies": {
-        "name": "模型回复内容",
-        "desc": "助手在会话里给出的回复全文"
-      },
       "requirements": {
         "name": "需求平台内容",
         "desc": "你创建的需求标题、描述与标签"
@@ -205,14 +201,6 @@
       "terminal_sessions": {
         "name": "终端会话元数据",
         "desc": "终端会话的创建/退出记录（不含输出内容）"
-      },
-      "cron_runs": {
-        "name": "定时任务执行",
-        "desc": "定时任务的执行结果与错误"
-      },
-      "conversation_lifecycle": {
-        "name": "会话生命周期",
-        "desc": "会话的创建/更新/删除节奏"
       }
     }
   },

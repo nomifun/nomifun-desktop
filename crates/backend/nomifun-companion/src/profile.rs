@@ -420,8 +420,8 @@ impl SharedCompanionConfig {
     }
 
     /// Load from `{dir}/config.json` (dir is the shared dir). Only a missing
-    /// file uses defaults; unreadable or malformed data fails closed. A removed
-    /// evolution setting is stripped once during load so pre-removal installs
+    /// file uses defaults; unreadable or malformed data fails closed. Removed
+    /// settings are stripped once during load so pre-removal installs
     /// can upgrade without weakening unknown-field validation for current data.
     pub fn load(dir: &Path) -> Result<Self, nomifun_common::AppError> {
         let path = Self::config_path(dir);
@@ -434,18 +434,30 @@ impl SharedCompanionConfig {
         let Some(mut value) = loaded else {
             return Ok(Self::default());
         };
-        let removed_legacy_setting = value
+        let mut removed_legacy_settings = value
             .get_mut("evolve")
             .and_then(serde_json::Value::as_object_mut)
             .and_then(|evolve| evolve.remove("reflect_enabled"))
             .is_some();
+        if let Some(collect) = value
+            .get_mut("collect")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for key in [
+                "chat_assistant_replies",
+                "cron_runs",
+                "conversation_lifecycle",
+            ] {
+                removed_legacy_settings |= collect.remove(key).is_some();
+            }
+        }
         let config: Self = serde_json::from_value(value).map_err(|error| {
             nomifun_common::AppError::Internal(format!(
                 "load shared companion config {}: {error}",
                 path.display()
             ))
         })?;
-        if removed_legacy_setting {
+        if removed_legacy_settings {
             config.save(dir).map_err(|error| {
                 nomifun_common::AppError::Internal(format!(
                     "migrate shared companion config {}: {error}",
@@ -659,10 +671,13 @@ mod tests {
     }
 
     #[test]
-    fn shared_load_removes_retired_evolution_setting() {
+    fn shared_load_removes_retired_settings() {
         let dir = tempfile::tempdir().unwrap();
         let mut value = serde_json::to_value(SharedCompanionConfig::default()).unwrap();
         value["evolve"]["reflect_enabled"] = serde_json::json!(true);
+        value["collect"]["chat_assistant_replies"] = serde_json::json!(true);
+        value["collect"]["cron_runs"] = serde_json::json!(true);
+        value["collect"]["conversation_lifecycle"] = serde_json::json!(true);
         std::fs::write(
             SharedCompanionConfig::config_path(dir.path()),
             serde_json::to_vec_pretty(&value).unwrap(),
@@ -676,12 +691,23 @@ mod tests {
         )
         .unwrap();
         assert!(migrated["evolve"].get("reflect_enabled").is_none());
+        assert!(migrated["collect"].get("chat_assistant_replies").is_none());
+        assert!(migrated["collect"].get("cron_runs").is_none());
+        assert!(migrated["collect"].get("conversation_lifecycle").is_none());
     }
 
     #[test]
     fn shared_config_still_rejects_unknown_evolution_settings() {
         let result = serde_json::from_value::<SharedCompanionConfig>(serde_json::json!({
             "evolve": {"unknown_setting": true}
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shared_config_still_rejects_unknown_collection_settings() {
+        let result = serde_json::from_value::<SharedCompanionConfig>(serde_json::json!({
+            "collect": {"unknown_setting": true}
         }));
         assert!(result.is_err());
     }

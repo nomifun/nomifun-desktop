@@ -194,10 +194,6 @@
         "name": "Chat prompts",
         "desc": "The questions you send in conversations"
       },
-      "chat_assistant_replies": {
-        "name": "Model replies",
-        "desc": "Full assistant replies in conversations"
-      },
       "requirements": {
         "name": "Requirements",
         "desc": "Titles, descriptions and tags of requirements you create"
@@ -205,14 +201,6 @@
       "terminal_sessions": {
         "name": "Terminal session metadata",
         "desc": "Terminal create/exit records (no output content)"
-      },
-      "cron_runs": {
-        "name": "Scheduled task runs",
-        "desc": "Cron execution results and errors"
-      },
-      "conversation_lifecycle": {
-        "name": "Conversation lifecycle",
-        "desc": "Create/update/delete rhythm of conversations"
       }
     }
   },

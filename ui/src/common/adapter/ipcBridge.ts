@@ -4257,10 +4257,7 @@ export const agentExecutionTemplate = {
 
 export interface ICompanionCollectConfig {
   chat_user_messages: boolean;
-  chat_assistant_replies: boolean;
   requirements: boolean;
-  cron_runs: boolean;
-  conversation_lifecycle: boolean;
   terminal_sessions: boolean;
   tool_calls: boolean;
 }
