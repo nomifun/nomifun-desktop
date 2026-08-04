@@ -1676,15 +1676,16 @@ const CompanionPage: React.FC = () => {
         return;
       }
       if (action === 'open-memories') {
-        // Lands on the scope-aware Memories tab for this companion (shared +
-        // its own private). Memories live in the companion domain now.
+        // Lands on this companion's 记忆&知识库 tab. Memory is per-companion now —
+        // the former shared/private scope switch is gone.
         void openMainAt(
-          companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=memories` : '/nomi?tab=memories'
+          companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=memory` : '/nomi?tab=memory'
         );
         return;
       }
       if (action === 'open-config') {
-        void openMainAt(companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=settings` : '/nomi');
+        // 设置 tab was folded into 总览; identity/persona/model all live there now.
+        void openMainAt(companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=overview` : '/nomi');
         return;
       }
       if (action === 'clear-unread') {

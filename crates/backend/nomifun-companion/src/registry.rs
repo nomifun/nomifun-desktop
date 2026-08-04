@@ -291,14 +291,23 @@ impl CompanionRegistry {
         })
     }
 
-    /// All companions, oldest first (`created_at` ascending, `companion_id` as tie-break so the
-    /// order is stable even for same-millisecond creations).
+    /// All companions in sidebar order: explicitly reordered ones first by
+    /// `order_index`, then never-reordered ones by `created_at` ascending
+    /// (`companion_id` as tie-break so the order is stable even for
+    /// same-millisecond creations).
     pub async fn list(&self) -> Vec<CompanionProfileConfig> {
         let mut companions: Vec<CompanionProfileConfig> = self.inner.read().await.values().cloned().collect();
         companions.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.companion_id.cmp(&b.companion_id))
+            // `None` sorts last: a companion the user never dragged belongs after
+            // the ones they positioned deliberately.
+            match (a.order_index, b.order_index) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| a.created_at.cmp(&b.created_at))
+            .then_with(|| a.companion_id.cmp(&b.companion_id))
         });
         companions
     }
