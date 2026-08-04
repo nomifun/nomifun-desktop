@@ -22853,4 +22853,512 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn task_download_rebind_cycles_inherit_cumulative_cap_until_hub_clear() {
+        let authority = HubTaskDownloadAuthority::new();
+        let family = "family-download-rebind-cycles";
+        let quarter = MAX_TASK_COMPLETED_DOWNLOAD_BYTES / 4;
+
+        // Four successive owner generations, each separated by a real
+        // zero-owner interval (child restart, renew failure, login reopen).
+        for cycle in 0..4 {
+            let owner = OwnerLeaseId::new();
+            authority.register_owner(family, &owner).unwrap();
+            let reservation = authority
+                .reserve(family, "lane", &format!("cycle-{cycle}"))
+                .await
+                .unwrap();
+            reservation.update_progress(quarter, Some(quarter)).unwrap();
+            reservation.complete(quarter).unwrap();
+            drop(reservation);
+            authority.retire_owner(&owner);
+            let (owners, bytes, files, active) =
+                authority.usage_for(family).expect("family stays sticky");
+            assert_eq!(owners, 0, "the zero-owner interval is real");
+            assert_eq!(active, 0);
+            assert_eq!(files, cycle + 1);
+            assert_eq!(
+                bytes,
+                quarter * (cycle as u64 + 1),
+                "each rebind inherits the accumulated family charge"
+            );
+        }
+
+        // The fifth rebind inherits a saturated 1 GiB ledger: owner rotation
+        // cannot wash a task's download budget.
+        let owner = OwnerLeaseId::new();
+        authority.register_owner(family, &owner).unwrap();
+        assert_eq!(
+            authority.usage_for(family),
+            Some((1, MAX_TASK_COMPLETED_DOWNLOAD_BYTES, 4, 0))
+        );
+        assert!(
+            authority
+                .reserve(family, "lane", "cycle-overflow")
+                .await
+                .is_err(),
+            "a rebind cycle must not mint fresh cumulative download bytes"
+        );
+
+        // Only Hub/application shutdown is global finalization proof.
+        authority.clear();
+        assert_eq!(authority.usage_for(family), None);
+        let successor = OwnerLeaseId::new();
+        authority.register_owner(family, &successor).unwrap();
+        let fresh = authority
+            .reserve(family, "lane", "post-clear")
+            .await
+            .expect("a new Hub lifetime starts from an empty ledger");
+        fresh.update_progress(1, Some(1)).unwrap();
+        fresh.complete(1).unwrap();
+        assert_eq!(authority.usage_for(family), Some((1, 1, 1, 0)));
+    }
+
+    /// Primary fence harness: a footprint-limited policy whose Primary Host is
+    /// launched but not yet sampled.
+    fn primary_fence_harness() -> Harness {
+        let mut config = HubConfig::default();
+        config.primary_profile_policy.max_bytes = 10;
+        config.primary_profile_policy.sample_navigation_interval = 1;
+        harness_with_config(config)
+    }
+
+    fn assert_primary_fence_error(error: &BrowserPlatformError) {
+        assert_eq!(error.code, BrowserErrorCode::PrimaryProfileStorageLimit);
+        assert_eq!(error.metadata["primary_profile_fenced"], true);
+        assert_eq!(error.metadata["persistent_identity_preserved"], true);
+        assert_eq!(error.metadata["automatic_profile_deletion"], false);
+    }
+
+    #[tokio::test]
+    async fn primary_first_observe_samples_and_fences_before_dispatch() {
+        let harness = primary_fence_harness();
+        harness
+            .probe
+            .profile_footprint_bytes
+            .store(10, Ordering::Release);
+        let lane = open_identity(
+            &harness.client,
+            "primary-first-observe",
+            BrowserIdentityMode::Primary,
+        )
+        .await;
+
+        let error = harness.client.execute(&lane, observe()).await.unwrap_err();
+
+        assert_primary_fence_error(&error);
+        assert_eq!(
+            harness.probe.profile_footprint_calls.load(Ordering::Acquire),
+            1,
+            "the first Primary operation forces one sample"
+        );
+        assert_eq!(
+            harness.probe.entries.load(Ordering::Acquire),
+            0,
+            "no operation may reach the browser after the boundary is detected"
+        );
+        assert!(harness.hub.primary_profile_fence().is_some());
+    }
+
+    #[tokio::test]
+    async fn primary_public_sweep_samples_silent_host() {
+        let harness = primary_fence_harness();
+        let lane = open_identity(
+            &harness.client,
+            "primary-silent-host",
+            BrowserIdentityMode::Primary,
+        )
+        .await;
+        // The Host is live but never dispatched an operation.
+        assert!(harness.hub.primary_profile_fence().is_none());
+        assert_eq!(
+            harness.probe.profile_footprint_calls.load(Ordering::Acquire),
+            0
+        );
+
+        harness
+            .probe
+            .profile_footprint_bytes
+            .store(10, Ordering::Release);
+        harness.clock.advance(20_000);
+        harness.hub.sweep_primary_profile_hygiene().await;
+
+        assert!(
+            harness.hub.primary_profile_fence().is_some(),
+            "the periodic sweep must sample a silent Primary Host"
+        );
+        let error = harness.client.execute(&lane, observe()).await.unwrap_err();
+        assert_primary_fence_error(&error);
+    }
+
+    #[tokio::test]
+    async fn primary_cold_launch_is_never_fenced_by_the_sweep() {
+        let harness = primary_fence_harness();
+        harness
+            .probe
+            .profile_footprint_bytes
+            .store(10, Ordering::Release);
+        harness
+            .probe
+            .block_host_launch
+            .store(true, Ordering::Release);
+        let client = harness.client.clone();
+        let opening = tokio::spawn(async move {
+            client
+                .open(
+                    Some("primary-cold-launch"),
+                    BrowserIdentityMode::Primary,
+                    None,
+                )
+                .await
+        });
+        // Wait until the slot exists with no published driver yet.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let cold = harness
+                    .hub
+                    .inner
+                    .host_slots
+                    .read()
+                    .await
+                    .iter()
+                    .any(|(key, slot)| {
+                        key.identity_mode == BrowserIdentityMode::Primary
+                            && slot.get().is_none()
+                    });
+                if cold {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a cold Primary launch slot was never observed");
+
+        harness.clock.advance(20_000);
+        harness.hub.sweep_primary_profile_hygiene().await;
+        assert!(
+            harness.hub.primary_profile_fence().is_none(),
+            "a launch whose driver is not published yet must never be fenced"
+        );
+        assert_eq!(
+            harness.probe.profile_footprint_calls.load(Ordering::Acquire),
+            0,
+            "a cold slot has no driver to sample"
+        );
+
+        harness.probe.host_launch_release.add_permits(1);
+        harness
+            .probe
+            .block_host_launch
+            .store(false, Ordering::Release);
+        let _ = opening.await.expect("cold launch task joins");
+    }
+
+    #[tokio::test]
+    async fn primary_sticky_fence_blocks_existing_and_new_open() {
+        let harness = primary_fence_harness();
+        harness
+            .probe
+            .profile_footprint_bytes
+            .store(10, Ordering::Release);
+        let existing = open_identity(
+            &harness.client,
+            "primary-sticky-existing",
+            BrowserIdentityMode::Primary,
+        )
+        .await;
+        let trigger = harness
+            .client
+            .execute(&existing, observe())
+            .await
+            .unwrap_err();
+        assert_primary_fence_error(&trigger);
+
+        // An already-open Lane cannot dispatch again...
+        let repeat = harness
+            .client
+            .execute(&existing, observe())
+            .await
+            .unwrap_err();
+        assert_primary_fence_error(&repeat);
+        // ...and a brand new Primary open is refused at admission.
+        let refused = harness
+            .client
+            .open(
+                Some("primary-sticky-new"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_primary_fence_error(&refused);
+
+        // Exact cleanup completion clears the cleanup epoch but never the
+        // process-lifetime sticky fence.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let epochs_drained = harness
+                    .hub
+                    .inner
+                    .primary_profile_cleanup_epochs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_empty();
+                if epochs_drained {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("exact Primary cleanup never converged");
+        let after_cleanup = harness
+            .client
+            .open(
+                Some("primary-sticky-after-cleanup"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_primary_fence_error(&after_cleanup);
+        assert_eq!(
+            harness.factory.launches.load(Ordering::Acquire),
+            1,
+            "a fenced Primary profile is never relaunched in this Hub lifetime"
+        );
+    }
+
+    #[tokio::test]
+    async fn primary_shutdown_failure_retries_exact_epoch_without_replacement() {
+        let harness = primary_fence_harness();
+        harness
+            .probe
+            .profile_footprint_bytes
+            .store(10, Ordering::Release);
+        let lane = open_identity(
+            &harness.client,
+            "primary-cleanup-failure",
+            BrowserIdentityMode::Primary,
+        )
+        .await;
+        let fenced_epoch = harness.client.status(&lane).await.unwrap().browser_epoch;
+        harness
+            .probe
+            .host_shutdown_fail_from
+            .store(1, Ordering::Release);
+
+        let error = harness.client.execute(&lane, observe()).await.unwrap_err();
+        assert_primary_fence_error(&error);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            harness.probe.wait_for_host_shutdowns(1),
+        )
+        .await
+        .expect("exact Primary Host cleanup was never attempted");
+
+        // A failing shutdown retains the exact epoch as cleanup debt and does
+        // not start a replacement Host.
+        assert!(
+            harness
+                .hub
+                .inner
+                .primary_profile_cleanup_epochs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&fenced_epoch),
+            "a failed exact cleanup must retain its epoch authority"
+        );
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 1);
+        assert!(harness.hub.primary_profile_fence().is_some());
+
+        // Once the injected failure is lifted the retained epoch converges,
+        // still without a replacement launch and still fenced.
+        harness
+            .probe
+            .host_shutdown_fail_from
+            .store(usize::MAX, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let drained = harness
+                    .hub
+                    .inner
+                    .primary_profile_cleanup_epochs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_empty();
+                if drained {
+                    break;
+                }
+                harness.hub.sweep_primary_profile_hygiene().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retained exact Primary cleanup debt never converged");
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 1);
+        assert!(
+            harness.hub.primary_profile_fence().is_some(),
+            "cleanup completion must not lift the sticky fence"
+        );
+    }
+
+    #[tokio::test]
+    async fn primary_worker_panic_rearms_exact_cleanup() {
+        let harness = primary_fence_harness();
+        harness
+            .probe
+            .profile_footprint_bytes
+            .store(10, Ordering::Release);
+        let lane = open_identity(
+            &harness.client,
+            "primary-worker-panic",
+            BrowserIdentityMode::Primary,
+        )
+        .await;
+        let fenced_epoch = harness.client.status(&lane).await.unwrap().browser_epoch;
+        harness
+            .hub
+            .inner
+            .primary_profile_cleanup_panics_remaining
+            .store(1, Ordering::Release);
+
+        let error = harness.client.execute(&lane, observe()).await.unwrap_err();
+        assert_primary_fence_error(&error);
+
+        // The panicking worker releases its membership without losing the
+        // exact epoch, so the debt is still armed.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let panic_consumed = harness
+                    .hub
+                    .inner
+                    .primary_profile_cleanup_panics_remaining
+                    .load(Ordering::Acquire)
+                    == 0;
+                let worker_absent = !harness
+                    .hub
+                    .inner
+                    .primary_profile_cleanup_workers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains(&fenced_epoch);
+                if panic_consumed && worker_absent {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the panicking Primary cleanup worker retained its membership");
+
+        // Re-arming converges the same retained debt.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                harness.hub.rearm_pending_primary_profile_cleanup();
+                let drained = harness
+                    .hub
+                    .inner
+                    .primary_profile_cleanup_epochs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_empty();
+                if drained {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a panicked Primary cleanup worker did not re-arm and converge");
+        assert!(harness.hub.primary_profile_fence().is_some());
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn primary_visibility_restart_cannot_bypass_sticky_fence() {
+        let harness = primary_fence_harness();
+        harness
+            .probe
+            .profile_footprint_bytes
+            .store(10, Ordering::Release);
+        let lane = open_identity(
+            &harness.client,
+            "primary-visibility-bypass",
+            BrowserIdentityMode::Primary,
+        )
+        .await;
+        let error = harness.client.execute(&lane, observe()).await.unwrap_err();
+        assert_primary_fence_error(&error);
+        let launches_when_fenced = harness.factory.launches.load(Ordering::Acquire);
+
+        // A visibility transition is a central launch entry point; it must
+        // observe the fence instead of minting a replacement Primary Host.
+        let _ = harness
+            .hub
+            .set_primary_visibility(BrowserVisibility::Headful)
+            .await;
+        let _ = harness
+            .hub
+            .set_primary_visibility(BrowserVisibility::Headless)
+            .await;
+
+        assert_eq!(
+            harness.factory.launches.load(Ordering::Acquire),
+            launches_when_fenced,
+            "a visibility restart must not bypass the sticky Primary fence"
+        );
+        assert!(harness.hub.primary_profile_fence().is_some());
+        let refused = harness
+            .client
+            .open(
+                Some("primary-after-visibility"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_primary_fence_error(&refused);
+    }
+
+    /// The stable Primary profile is never deleted by the fence path: the Hub
+    /// stops the exact Host and preserves identity data. Physical sentinel
+    /// survival is asserted by the real-Chrome `integration_managed_host`
+    /// ignored suite; at this layer the contract surface is the absence of any
+    /// profile-deletion authority plus the honest error metadata.
+    #[tokio::test]
+    async fn primary_fence_preserves_identity_data_and_never_deletes_the_profile() {
+        let harness = primary_fence_harness();
+        harness
+            .probe
+            .profile_footprint_bytes
+            .store(10, Ordering::Release);
+        let lane = open_identity(
+            &harness.client,
+            "primary-profile-preserved",
+            BrowserIdentityMode::Primary,
+        )
+        .await;
+
+        let error = harness.client.execute(&lane, observe()).await.unwrap_err();
+
+        assert_primary_fence_error(&error);
+        assert_eq!(error.metadata["profile_hygiene"], "footprint_limit");
+        assert!(
+            !error.retryable,
+            "a fenced Primary profile needs a deliberate user action, not a retry"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            harness.probe.wait_for_host_shutdowns(1),
+        )
+        .await
+        .expect("the fence must stop the exact Primary Host");
+        assert_eq!(
+            harness.factory.launches.load(Ordering::Acquire),
+            1,
+            "stopping is not rotating: no replacement Primary profile is created"
+        );
+    }
 }

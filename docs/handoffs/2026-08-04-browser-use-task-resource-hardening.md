@@ -63,7 +63,19 @@
 - Anonymous profile 已有 512 MiB / 50k entries / 30 min / 256 navigation 的 Host 生命周期围栏、单飞采样、精确轮换和删除闭环。
 - Primary 是稳定共享档案，原先不受 profile footprint 策略约束；站点可持续写 IndexedDB、CacheStorage、Service Worker、OPFS 等。
 - 已把 64 MiB HTTP cache、32 MiB media cache、禁用 GPU shader disk cache 应用于所有平台托管 profile（Primary/Anonymous/Replica/Isolated），但这些 flags 不能限制整个 Primary origin storage。
-- Primary 独立 2 GiB / 100k entries sticky fence 正在收口：首次操作前强制单飞采样，达界或检查失败后永久阻断本 Hub 生命周期内的新 Primary open/dispatch，精确停止旧 Host，不自动重启，不删除 Cookies/Local Storage/IndexedDB/Service Worker/CacheStorage/OPFS。详见“当前 WIP”。
+- Primary 独立 2 GiB / 100k entries sticky fence 已收口（含故障注入测试）：首次操作前强制单飞采样，达界或检查失败后永久阻断本 Hub 生命周期内的新 Primary open/dispatch，精确停止旧 Host，不自动重启，不删除 Cookies/Local Storage/IndexedDB/Service Worker/CacheStorage/OPFS。详见第 5.1 节。
+
+### 2.7 下载 staging 目录曾是跨 Host 数据破坏源
+
+- 旧实现让**所有** managed Host 共享 `<data_dir>/downloads` 作为 Chromium
+  `allowAndName` 落点（`derive_host_config` 恒置 `workspace_dir = None`，Host 级
+  fallback 又回落 `data_dir`），且 5 分钟 mtime 扫描器只看文件年龄。
+  结果：一个 Host 的扫描器可以删掉另一个 Host 正在写的慢下载；无 workspace 的
+  Lane 会把 staging 当最终输出目录，于是**已完成的有效产物**与在写工件混在同一
+  目录里，同样会被按年龄清掉。
+- 现在 staging 是 per-exact-Host 独占目录，名字只由受信任的 root 进程身份
+  （pid + platform start key）派生；扫描器跳过 active/retained-cancel GUID 且只
+  扫本 Host 目录；无受管 workspace 时直接拒绝下载/PDF 输出而不是退化复用 staging。
 
 ## 3. 当前资源策略
 
@@ -136,11 +148,108 @@
 
 本次归档没有在最终 WIP 增量后重跑真实 Chrome ignored 集和全部 Rust/UI 大集；这些仍是接手者完成下述 P1/P2 后的最终验收项，不能用上述编译与定向测试替代。
 
-## 5. 当前未封板 WIP（接手优先级最高）
+### 4.1 第二轮（WIP 收口后）重跑结果
 
-### 5.1 WIP-A：Primary stable profile sticky fence
+- `cargo fmt --all -- --check`：通过。
+- `git diff --check`：通过。
+- `cargo check -p nomi-browser-engine --all-targets`：0 error。
+- `cargo test -p nomi-browser-engine --lib`：**783 passed / 0 failed / 9 ignored**
+  （检查点为 764 + 9 ignored；本轮新增 19 项，含 download 全套 52 项）。
+- `cargo test -p nomifun-browser-platform --lib`：**263 passed / 0 failed**（原 251 + 8 Primary/下载新测试 + 4）。
+- `cargo test -p nomi-process-runtime --lib`：117 passed / 0 failed。
+- `bun run check`：全部通过。
+- `bun run test:ui`：**1666 pass / 0 fail**（339 文件）。
+- `.github/workflows` 中 `.yml` / `.yaml` 数量：0。
 
-当前设计已确定，代码正在接线/编译收口：
+顺带修掉一个**先于本轮就存在**的测试脆弱性（在检查点提交上可稳定复现）：
+`launch::tests::cleanup_quarantine_worker_panic_retries_the_same_retained_debt`
+用「睡一半退避时间后断言无进展」探测退避，而 test-only 退避常量只有 10ms——
+低于 Windows 计时器粒度（约 15.6ms），探测本身会睡过整个窗口而误报「在自旋」。
+把 test-only 的 `BROWSER_CLEANUP_RETRY_INITIAL/MAX` 提到 80ms 后连跑 8 次全绿
+（改前在检查点上 6 次里有 1 次失败，改后 8/8 通过）。这不影响生产退避常量。
+
+**真实 Chrome ignored 集仍未在本轮增量后重跑**——它是唯一能证明「exact
+process/profile residue = 0」与「stable profile sentinel 物理存活」的验收，仍
+必须在本机（或任一有 Chrome 的机器）执行第 7 节的命令。
+
+### 4.2 第二轮修掉的两处 WIP-A 附带破损
+
+**(1) fake driver 继承 `profile_footprint` 默认值导致 Primary 被误 fence（已修）**
+
+`BrowserHostDriver::profile_footprint` 有一个默认实现返回 `Ok(None)`，而 WIP-A
+把 `Ok(None)` 判为 `footprint_measurement_unavailable` 并 **fail-closed 永久
+fence Primary**。生产侧安全：`derive_host_config` 恒设
+`config.user_data_dir = Some(profile)`（platform_adapter.rs:1507），所以真实
+`ManagedEngineHostDriver` 永远走到实测分支，不会返回 `Ok(None)`；fail-closed
+方向本身也是安全方向。但 **13 个测试 fake driver 全部继承了这个默认值**，于是
+gateway/public/app/ai-agent 的 Primary 相关测试在检查点上成批失败（WIP-A 归档时
+未重跑这些 crate，所以没被发现）。
+
+修法：新增 `BrowserProfileFootprint::EMPTY`（一次**完成的**零测量，语义上区别于
+`Ok(None)` 的「测不出来」），并在每个测试 fake 上显式覆写 `profile_footprint`
+返回它——fake 本来就没有落盘 profile，这个测量是诚实的。生产策略与 fail-closed
+语义**一字未改**。`nomifun-public` 的 fake 用的是手写 desugared future 风格，
+其覆写也照该风格写。
+
+**(2) `active_owner_bindings_scale_with_distinct_signed_tasks` 编码了前专项预期（已修）**
+
+该测试用 64 个不同 `agent_id` 但**同一个 `CONVERSATION_ID`** 申请 owner lease，
+断言 64 个全部成功。但本专项把 conversation 定为 task-resource family 边界
+（§2.1），而 `MAX_ACTIVE_OWNER_LEASES_PER_PREBIND_FAMILY = 32`（lease.rs:18），
+所以 64 个同 conversation 的 agent 属于**同一个 family**、共享 32 的额度——生产
+行为正确，测试预期过时。按测试自己的断言语义（「MCP 不得对**独立**任务施加进程级
+上限」）改为每个任务用**独立 conversation id**，即真正独立的 family，64 个即全部
+通过。生产上限未改。
+
+### 4.3 仍未通过的既有失败（非本轮引入，已在检查点上复现）
+
+1. `nomifun-app`：`commands::stdio_common::tests::at_most_once_retries_undelivered_connection_failures`。
+   该测试 abort 掉本地 server 后期望客户端把发送失败判为「**可证明未送达**」
+   （`reqwest::Error::is_connect()`）从而重试。本机（Windows）上实际错误未被归类为
+   connect 错误，于是生产逻辑按 at-most-once 语义 **fail-closed 拒绝重试**——
+   生产判断是对的（「可能已执行」的浏览器动作绝不能重投）。推测原因：
+   `ScopedBridgeClient::from_bootstrap` 的 renew 调用已经预热了 reqwest 连接池，
+   重试复用了已被关闭的 keep-alive 连接，这类失败 reqwest 不报 connect 错误。
+   **不应为此放宽 at-most-once 判据**；正确做法是让该测试确保首次尝试走全新连接
+   （例如为该测试禁用连接复用）。属平台相关的测试脆弱性，留给负责人决策。
+2. `nomi-browser-engine --test integration_managed_host --ignored` 中 3 项：
+   `managed_host_real_chromium_acceptance_matrix`、
+   `managed_host_sixteen_lane_real_chromium_acceptance`、
+   `shared_host_rss_is_materially_below_four_independent_hosts`。
+   三者同一根因：`STANDALONE_MAX_LIVE_LANES_PER_SCOPE = 4`（host.rs:31）与测试
+   要求的 16 Lane / 4 独立 Host 冲突，报
+   `standalone browser task reached its live Lane safety limit (4)`。
+   已在检查点上逐项复现，且本轮 diff 完全没有触碰该常量或 lane 记账
+   （host.rs 只有新增测试、零删除行）。要么提高 standalone scope 的 Lane 上限，
+   要么让这些验收测试改用平台 Hub 的多 Lane 路径——需要负责人先定方向。
+
+### 4.4 真实 Chrome ignored 集（本轮已跑）
+
+```
+NOMIFUN_CHROME_BINARY='C:\Program Files\Google\Chrome\Application\chrome.exe'
+cargo test -p nomi-browser-engine --test integration_managed_host -- --ignored --test-threads=1
+```
+
+结果 **3 passed / 3 failed**，3 项失败全部是上述 4-Lane 既有问题。与本专项直接
+相关的三项全部通过：
+
+- `managed_host_drop_reaps_full_tree_and_ephemeral_profile`：
+  `residual_pids=[] profile_removed=true provisional_marker_removed=true
+  committed_record_removed=true`（Drop 收割整棵 Chromium 树并删除 ephemeral profile）；
+- `managed_host_shutdown_clears_only_exact_runtime_profile_artifacts`：
+  **stable profile sentinel 在 exact shutdown 后保留**（第 5.1 节项 7 的物理验收）；
+- `create_engine_drop_reaps_hidden_host_runtime_and_allows_stable_relaunch`。
+
+运行前后按 executable path 精确统计 Chrome：**前 0、后 0**。per-Host 独占 staging
+子目录残留 **0**（只剩下可复用的空 staging 根目录，符合设计）。
+
+## 5. WIP 收口结果（2026-08-04 第二轮接手）
+
+两条 WIP 均已实现并有测试证据。下面保留原设计说明，并在每条末尾记录实际落地状态。
+
+### 5.1 WIP-A：Primary stable profile sticky fence — 已完成
+
+当前设计已确定，代码已接线并有故障注入/竞态测试：
 
 归档时实际状态：生产接线已经完成到可编译检查点；`cargo check -p nomifun-browser-platform`、`cargo check -p nomifun-app --features browser-use`、platform `--no-run`、既有 Anonymous profile 4 项回归、fmt 和 diff check 均通过。尚缺的是下列 Primary 专项故障注入/竞态测试，因此仍按 WIP 交接，不能标为发布完成。
 
@@ -165,19 +274,53 @@
 6. visibility/resource restart 不能绕过 sticky fence
 7. stable profile sentinel 在 exact shutdown 后保留
 
-### 5.2 WIP-B：下载 task-family 配额最终闭环
+**实际落地（2026-08-04 第二轮）**：全部 7 项已写入
+`crates/backend/nomifun-browser-platform/src/hub.rs` 的 `mod tests` 并通过。
+项 6 的测试名为 `primary_visibility_restart_cannot_bypass_sticky_fence`；项 7 在
+Hub 层实现为 `primary_fence_preserves_identity_data_and_never_deletes_the_profile`
+（断言 fence 只精确停 Host、不 replacement、错误 metadata 诚实声明
+`automatic_profile_deletion=false` / `persistent_identity_preserved=true`）——
+**物理 sentinel 存活仍由真实 Chrome `integration_managed_host` ignored 集断言，
+Hub 层无 profile 删除权威，不能替代该验收**。额外补了
+`primary_cold_launch_is_never_fenced_by_the_sweep`（driver 未发布的 cold launch
+不被 sweep 误永久 fence）。
+
+### 5.2 WIP-B：下载 task-family 配额最终闭环 — 已完成
 
 初版目标：单 task family 累计 1 GiB、单文件 512 MiB、256 completed files、4 active downloads；Host/runtime/Lane 轮换不能重置；`save_as_pdf` 同一账本。
 
-归档时实际状态：sticky completed-family ledger、4096 family 上限、两阶段 reservation trait/Hub/standalone/bridge、Lane unregister/TTL retained-cancel、5 秒无终态 poison+shutdown 已实现；platform/engine/nomi-browser 三 crate check、sticky 3 项测试、retained TTL 1 项测试、fmt/diff check 通过。以下缺口仍未实现，尤其不能把“poison 已发出”误写成“物理下载已停止”：
+归档时（第一轮）实际状态：sticky completed-family ledger、4096 family 上限、两阶段 reservation trait/Hub/standalone/bridge、Lane unregister/TTL retained-cancel、5 秒无终态 poison+shutdown 已实现。下列缺口在第二轮全部补齐：
 
-- `CdpHostRuntime::Drop` 尚未把 router/reservation 所有权挂到 `DurableProcessCleanup` ticket；当前 Arc 仍可能早于 exact process stop 释放。
-- progress lag/Closed 虽会 poison，但受同一 Drop guard 缺口影响。
-- `finish_download` / `save_as_pdf` 尚未接入已新增的 prepare/finalize 两阶段接口与 RAII/no-clobber 发布事务。
-- exact Host 唯一 staging、无 workspace 拒绝、scanner 跳过 active/retained GUID 尚未实现。
-- fake cancel failure + continuous write、publish rollback/delete failure、双 Host staging 动态测试尚未补。
+- ~~`CdpHostRuntime::Drop` 尚未把 router/reservation 所有权挂到 `DurableProcessCleanup` ticket~~ →
+  新增 `launch::HostStopReconcile` trait 与 `PostStopReconcileCell`：Host 的下载账本
+  （`HostDownloadLedger`：路由表 + 每条 `PendingDownload` 持有的 reservation + 独占
+  staging 目录）从 `HostTargetRouter` 中拆出，由 `DurableProcessCleanup` 持 `Arc`。
+  reconcile **只在** `clean_dropped_browser_once` / `clean_reclaimable_dropped_browser`
+  / 直接 `finish()` 证明 exact 进程树停止（且 profile artifact 清理成功）之后运行一次；
+  panic 被 `catch_unwind` 包住，不会把已证明的进程清理反转成未证明。Host Drop 同时把
+  download loop 的 JoinHandle 交给 relay 的 `runtime_tasks`，relay 先 settle 任务再
+  终止进程，最后 reconcile——Arc 不可能早于停止证明释放 active 配额。
+- ~~progress lag/Closed 受同一 Drop guard 缺口影响~~ → 同上修复覆盖。
+- ~~`finish_download` / `save_as_pdf` 未接入 prepare/finalize 两阶段与 RAII/no-clobber 发布事务~~ →
+  新增 `download::publish_task_output`：`prepare_complete(实际字节)` → 唯一同卷
+  `.nomifun-<nonce>.part`（`create_new`，不覆盖）→ hard-link 原子发布（不覆盖既有
+  产物，退化文件系统走 exists-guarded rename）→ 无 await `finalize_complete()`。
+  失败路径删除 temp 并放弃预留（drop reservation 即退还 active 记账）；temp 删不掉时
+  **提交计费**并把路径作为保留清理债返回（`TaskOutputPublishError { charged, residual }`），
+  绝不留下未计费产物。`finish_download` 与 `act_save_as_pdf` 都走这一条路径。
+- ~~exact Host 唯一 staging、无 workspace 拒绝、scanner 跳过 active/retained GUID~~ →
+  staging 从共享 `<data_dir>/downloads` 改为 `<data_dir>/download-staging/host-<pid>-<start_key>`
+  （名字只由**受信任的 root 进程身份**派生）；Host 无该身份时 `Browser.setDownloadBehavior`
+  设为 `deny` fail-closed，绝不回落用户 Downloads。Lane 最终输出目录仅在有受管
+  workspace 时存在，否则 `begin_download` 拒绝准入。mtime 扫描器现在跳过 active 与
+  retained-cancel GUID（含 `.crdownload`/`.tmp` 变体），且只扫本 Host 目录；reconcile
+  无残债后删除整个独占目录。启动时 `sweep_orphan_host_staging_dirs` 按
+  `probe_process_identity` 的**确证死亡**（无进程或 start key 不符=PID 回收）清理硬杀
+  残留，探测出错或身份仍存活一律不动。
+- ~~fake cancel failure + continuous write、publish rollback/delete failure、双 Host staging 动态测试~~ →
+  见下方测试清单。
 
-最终对抗审计发现以下必须修完的问题：
+最终对抗审计的问题状态：
 
 #### P1：zero-owner gap 清空同任务账本
 
@@ -214,6 +357,18 @@
 5. publish/create/write/rename/complete/delete-cleanup failure 的事务测试；
 6. completed metadata 用实际 size，不能相信 CDP total；
 7. `save_as_pdf` 使用同一 family ledger，CDP 64 MiB wire cap仍在打印响应前提供上界。
+
+**第二轮新增测试与覆盖对应**（全部通过）：
+
+| 验收项 | 测试 |
+| --- | --- |
+| 1 | `task_download_rebind_cycles_inherit_cumulative_cap_until_hub_clear`（hub.rs，4 轮真实 zero-owner rebind 后第 5 次被 1 GiB 拒绝，`clear()` 后新生命周期恢复）+ 既有 `task_download_sticky_family_table_fails_closed_at_structural_limit` |
+| 2 | `cancel_failure_retains_reservation_until_host_stop_finalization`（fake 让 `Browser.cancelDownload` 返回协议错误：路由/reservation 保留、Host 准入毒化、工件不被 sweep 清、只有 host-stop 终态化才释放）、`cancel_ack_without_terminal_event_poisons_after_bounded_grace`、`handed_off_cleanup_retains_download_reservations_until_exact_stop_proof`（真 relay 证明进程树停止后才释放并删独占 staging）+ 既有 TTL 测试 |
+| 3 | `staging_sweep_skips_owned_guids_and_never_crosses_hosts`、`lane_without_workspace_denies_download_admission_fail_closed`、`host_staging_dir_name_round_trips_and_rejects_foreign_names`、`orphan_staging_sweep_requires_exact_dead_process_proof` |
+| 4 | 既有 `download_progress_numeric_conversion_fails_closed`；伪 total 由 `finish_download` 改用**实际 metadata 字节**记账后失去意义（见项 6） |
+| 5 | `publish_task_output_prepare_denial_produces_no_artifact`、`publish_task_output_never_clobbers_and_rolls_back_on_full_collision`、`publish_task_output_undeletable_residual_keeps_the_charge`、`publish_task_output_moves_staged_file_and_consumes_source`、`finish_download_publish_failure_rolls_back_charge_and_releases_reservation` + 既有 delete-cleanup 保留债测试 |
+| 6 | `finish_download_two_phase_charges_actual_size_and_never_clobbers`（断言 `prepare_complete` 收到的是落盘 `metadata().len()`，且既有同名产物不被覆盖） |
+| 7 | `standalone_download_*` 5 项（host.rs：4 active 上限与 Drop 归还、512 MiB/1 GiB 边界、prepare/finalize 幂等与不双扣、同 key 幂等与 4 KiB key 界、completed 计费跨 Lane 轮换存活）；`act_save_as_pdf` 现与浏览器下载共用 `publish_task_output` 与同一 family ledger |
 
 ## 6. 接手后的第一轮检查
 
@@ -337,11 +492,44 @@ Get-CimInstance Win32_Process |
 
 只有同时满足以下条件，才能把专项从 WIP 改为完成：
 
-- Primary sticky fence 的 open/execute/restart/sweep/exact cleanup 全路径测试通过；
-- 下载的 3 个 P1 + 1 个 P2 对抗用例通过，final adversarial review 无新增确定 P0/P1/P2；
-- Rust 格式、diff、关键完整 crate、UI、边界脚本全部通过；
-- 真实 Chrome normal/error/Drop/16-Lane/RSS 测试结束后 exact process/profile residue 为 0；
-- `.github/workflows` YAML 为 0；
+- ~~Primary sticky fence 的 open/execute/restart/sweep/exact cleanup 全路径测试通过~~ ✅ 第 5.1 节，8 项通过；
+- ~~下载的 3 个 P1 + 1 个 P2 对抗用例通过~~ ✅ 第 5.2 节表格，全部通过；final adversarial review 仍应在推送前跑一次；
+- ~~Rust 格式、diff、关键完整 crate、UI、边界脚本全部通过~~ ✅ 第 4.1 节（engine 783 / platform 263 / nomi-browser 252 / ai-agent 867 / gateway 211 / public 41 / app 444 / process-runtime 117 / UI 1666 / `bun run check` / `cargo fmt --all --check` / `git diff --check`）；**唯一红项**是第 4.3 节 (1) 的既有 Windows 平台脆弱测试；
+- 真实 Chrome：**已跑**（第 4.4 节）。normal/error/Drop 与 stable sentinel 三项通过，exact process residue 前后均为 0、per-Host staging 残留 0；**16-Lane 与 4-Host RSS 对照仍红**，根因是第 4.3 节 (2) 的既有 4-Lane standalone 上限，需负责人定方向；
+- `.github/workflows` YAML 为 0（已确认 0）；
 - 最终提交作者/提交者是负责人类开发者，无 AI attribution；
 - 分支已经推送到 origin，另一台电脑可直接 fetch/switch；
-- 发布说明诚实保留共享 Host 物理归因、rmcp 1024 fuse、Primary persistent storage 与 OS filesystem quota 的结构边界。
+- 发布说明诚实保留共享 Host 物理归因、rmcp 1024 fuse、Primary persistent storage 与 OS filesystem quota 的结构边界；新增：**per-Host 独占 staging 只保证目录归属与清理权威，不构成对 Chromium 写入速率或磁盘总量的 OS 级配额**。
+
+## 12. 本轮新增/改动的关键代码位置
+
+- `crates/agent/nomi-browser-engine/src/launch.rs`
+  - `HostStopReconcile` trait、`PostStopReconcileCell`（停止证明后跑且只跑一次的 reconcile 挂点）；
+  - `PendingDroppedBrowserCleanup` / `ReclaimableDroppedBrowserCleanup` 新增
+    `post_stop_reconcile` 字段；两条 cleanup 路径在证明成功后调用它；
+  - test-only 退避常量 10ms → 80ms（Windows 计时器粒度）。
+- `crates/agent/nomi-browser-engine/src/backend/cdp.rs`
+  - 新增 `HostDownloadLedger`（路由/拒绝表/独占 staging/清理债/毒化位/`downloads_finalized`
+    终态围栏），`HostTargetRouter` 改为持 `Arc<HostDownloadLedger>` 并委托；
+  - `impl HostStopReconcile for HostDownloadLedger`：终态化 → 释放保留 reservation →
+    残债为 0 时删除独占 staging 目录；
+  - `DurableProcessCleanup` 新增 `post_stop_reconcile` 槽 + `install_post_stop_reconcile`；
+    `hand_off_with_runtime_tasks` 移交它，`finish()` 在成功后运行它；
+  - `from_launched` 派生 per-Host staging + 启动孤儿清扫 + 无身份时
+    `set_download_behavior_deny` fail-closed；`launch_in_mode` 不再用 `data_dir` 当下载落点；
+  - `finish_download` 改为两阶段发布事务；`sweep_stale_staging_files_at` 跳过被持有的 GUID；
+  - `CdpHostRuntime::Drop` 把 download loop 句柄交给 relay 的 `runtime_tasks`。
+- `crates/agent/nomi-browser-engine/src/download.rs`
+  - `download_staging_root` / `host_staging_dir_name` / `parse_host_staging_dir_name` /
+    `sweep_orphan_host_staging_dirs`（确证死亡才删）；
+  - `publish_task_output` + `TaskOutputPayload` + `TaskOutputPublishError`（两阶段补偿事务）。
+- `crates/agent/nomi-browser-engine/src/actions.rs`：`act_save_as_pdf` 走 `publish_task_output`。
+- `crates/agent/nomi-browser-engine/src/host.rs`：新增 5 项 standalone 下载配额测试。
+- `crates/backend/nomifun-browser-platform/src/hub.rs`：新增 7 项 Primary fence 测试 + 1 项
+  rebind 累计配额测试。
+- `crates/backend/nomifun-browser-platform/src/driver.rs`：新增
+  `BrowserProfileFootprint::EMPTY`（完成的零测量，区别于 `Ok(None)` 的测不出来）。
+- 13 个测试 fake host 显式覆写 `profile_footprint`（gateway ×3 含集成测试、app ×6、
+  public ×1、ai-agent ×1 等），修掉 WIP-A 的 fail-closed 默认值成批 fence 测试的问题。
+- `crates/backend/nomifun-app/src/browser_mcp_server.rs`：
+  `active_owner_bindings_scale_with_distinct_signed_tasks` 改用独立 conversation。

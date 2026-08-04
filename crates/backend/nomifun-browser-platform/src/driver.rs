@@ -155,6 +155,20 @@ pub struct BrowserProfileFootprint {
     pub limit_reached: bool,
 }
 
+impl BrowserProfileFootprint {
+    /// A completed measurement of a driver that manages no on-disk profile.
+    ///
+    /// This is a positive measurement, not "unknown": profile-hygiene policy
+    /// may proceed. Returning `Ok(None)` instead means the driver could not
+    /// measure, which fences the stable Primary profile fail-closed. Test
+    /// drivers must therefore say which of the two they mean.
+    pub const EMPTY: Self = Self {
+        bytes: 0,
+        entries: 0,
+        limit_reached: false,
+    };
+}
+
 #[derive(Clone, Debug)]
 pub struct LaneLaunchRequest {
     pub lane_id: BrowserLaneId,

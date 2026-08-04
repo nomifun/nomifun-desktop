@@ -371,6 +371,7 @@ mod tests {
     #[cfg(feature = "browser-use")]
     use nomifun_browser_platform::{
         BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserLaneDriver,
+        BrowserProfileFootprint,
         BrowserOperation, BrowserOperationResult, BrowserPlatformError, BrowserSessionHub,
         DriverOperationContext, HostLaunchRequest, HostLifecycleState, HubConfig,
         LaneLaunchRequest, ManualClock,
@@ -464,6 +465,32 @@ mod tests {
 
         fn epoch(&self) -> u64 {
             self.epoch
+        }
+
+        // This fake manages no on-disk profile, so report a completed
+        // zero measurement. Inheriting the trait default would instead
+        // mean "could not measure", which fences Primary fail-closed.
+        // Desugared to match this impl's hand-written future style.
+        fn profile_footprint<'a, 'async_trait>(
+            &'a self,
+            _stop_after_bytes: u64,
+            _stop_after_entries: u64,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Option<BrowserProfileFootprint>,
+                            BrowserPlatformError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(Some(BrowserProfileFootprint::EMPTY)) })
         }
 
         fn state(&self) -> HostLifecycleState {

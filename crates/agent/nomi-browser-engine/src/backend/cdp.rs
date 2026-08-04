@@ -884,11 +884,29 @@ struct HostTargetRouter {
         Option<tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>>,
     >,
     cleanup_changed: tokio::sync::Notify,
+    /// Shared with [`DurableProcessCleanup`]: the ledger owns every pending
+    /// download route (and its task reservation) and this Host's exclusive
+    /// staging directory, so retained download state survives Host Drop until
+    /// the exact Chromium process-tree stop has been proven.
+    download_ledger: Arc<HostDownloadLedger>,
+}
+
+/// Download routing/cleanup state with a lifetime bound to the exact Chromium
+/// process, not to the Rust Host object.
+///
+/// It deliberately holds no connection, router, or process-cleanup reference:
+/// the [`DurableProcessCleanup`] completion ticket retains an `Arc` of this
+/// ledger and reconciles it after proving the exact process tree stopped.
+/// Dropping a `PendingDownload` entry is the single point where an active
+/// task download reservation is released.
+struct HostDownloadLedger {
     downloads: Mutex<HashMap<String, PendingDownload>>,
     rejected_downloads: Mutex<HashMap<String, std::time::Instant>>,
-    /// The shared Host's browser-level `allowAndName` landing directory.  It
-    /// is not a user Downloads directory; exact GUID artifacts can therefore
-    /// be reconciled on cancel, timeout, lag, and shutdown.
+    /// This exact Host's private browser-level `allowAndName` landing
+    /// directory, derived from the trusted root process identity. It is never
+    /// a user Downloads directory and never shared with a sibling Host, so
+    /// exact GUID artifacts can be reconciled on cancel, timeout, lag, and
+    /// shutdown, and the whole directory can be removed after exact stop.
     download_staging_dir: Option<PathBuf>,
     download_cleanup_retries: Mutex<HashSet<PathBuf>>,
     download_staging_scan: Mutex<DownloadStagingScanState>,
@@ -898,6 +916,45 @@ struct HostTargetRouter {
     download_directory_cleanup_generation: AtomicU64,
     download_directory_cleanup_completed_generation: AtomicU64,
     download_cleanup_poisoned: AtomicBool,
+    /// Sticky admission fence set by the final post-stop drain. A download
+    /// loop beat racing that drain must not insert a fresh route (and retain
+    /// its reservation forever) after the ledger has been reconciled.
+    downloads_finalized: AtomicBool,
+}
+
+impl HostDownloadLedger {
+    fn new(download_staging_dir: Option<PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            downloads: Mutex::new(HashMap::new()),
+            rejected_downloads: Mutex::new(HashMap::new()),
+            download_staging_dir,
+            download_cleanup_retries: Mutex::new(HashSet::new()),
+            download_staging_scan: Mutex::new(DownloadStagingScanState::default()),
+            download_directory_cleanup_generation: AtomicU64::new(0),
+            download_directory_cleanup_completed_generation: AtomicU64::new(0),
+            download_cleanup_poisoned: AtomicBool::new(false),
+            downloads_finalized: AtomicBool::new(false),
+        })
+    }
+}
+
+/// Runs under exact process-tree stop proof from the durable cleanup relay.
+/// This is the only place a retained (cancel-unacknowledged, TTL-expired,
+/// lagged, or Host-dropped) download reservation is released.
+impl crate::launch::HostStopReconcile for HostDownloadLedger {
+    fn reconcile_after_exact_host_stop(&self) {
+        let reconciled = self.finalize_downloads_after_host_stop();
+        if !reconciled.is_empty() {
+            tracing::info!(
+                count = reconciled.len(),
+                "released retained download reservations after proven exact host stop"
+            );
+        }
+        let residual = self.retry_staging_cleanup();
+        if residual == 0 {
+            self.remove_exclusive_staging_dir();
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -966,14 +1023,7 @@ impl HostTargetRouter {
             barrier_tx,
             barrier_rx: std::sync::Mutex::new(Some(barrier_rx)),
             cleanup_changed: tokio::sync::Notify::new(),
-            downloads: Mutex::new(HashMap::new()),
-            rejected_downloads: Mutex::new(HashMap::new()),
-            download_staging_dir,
-            download_cleanup_retries: Mutex::new(HashSet::new()),
-            download_staging_scan: Mutex::new(DownloadStagingScanState::default()),
-            download_directory_cleanup_generation: AtomicU64::new(0),
-            download_directory_cleanup_completed_generation: AtomicU64::new(0),
-            download_cleanup_poisoned: AtomicBool::new(false),
+            download_ledger: HostDownloadLedger::new(download_staging_dir),
         }))
     }
 
@@ -1541,6 +1591,7 @@ impl HostTargetRouter {
         drop(state);
         let retired_guids = {
             let mut downloads = self
+                .download_ledger
                 .downloads
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1559,7 +1610,8 @@ impl HostTargetRouter {
         };
         for guid in &retired_guids {
             if !cancel_download_best_effort(&self.conn, guid, "owning browser Lane closed").await {
-                self.download_cleanup_poisoned
+                self.download_ledger
+                    .download_cleanup_poisoned
                     .store(true, Ordering::Release);
                 self.conn.shutdown().await;
                 break;
@@ -1722,7 +1774,11 @@ impl HostTargetRouter {
         {
             return false;
         }
-        if self.download_cleanup_poisoned.load(Ordering::Acquire) {
+        if self
+            .download_ledger
+            .download_cleanup_poisoned
+            .load(Ordering::Acquire)
+        {
             return false;
         }
         if !download_capacity_available(self.pending_download_count()) {
@@ -1797,9 +1853,25 @@ impl HostTargetRouter {
             }
         }
         let mut downloads = self
+            .download_ledger
             .downloads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Re-check the sticky fences under the routes lock: the final drain
+        // fences before draining, so a reservation obtained while that drain
+        // was racing is dropped here (releasing its active charge) instead of
+        // being retained past exact host stop.
+        if self
+            .download_ledger
+            .download_cleanup_poisoned
+            .load(Ordering::Acquire)
+            || self
+                .download_ledger
+                .downloads_finalized
+                .load(Ordering::Acquire)
+        {
+            return false;
+        }
         // Repeated GUIDs cannot replace an existing routing authority.  A
         // duplicate (or a race at the hard cap) is denied fail-closed.
         if downloads.contains_key(guid) || !download_capacity_available(downloads.len()) {
@@ -1864,7 +1936,9 @@ impl HostTargetRouter {
         }
         None
     }
+}
 
+impl HostDownloadLedger {
     fn update_download_progress(
         &self,
         guid: &str,
@@ -1895,7 +1969,7 @@ impl HostTargetRouter {
         }
     }
 
-    async fn finish_download(&self, guid: &str, source: &std::path::Path) -> bool {
+    fn finish_download(&self, guid: &str, source: &std::path::Path) -> bool {
         let route = self
             .downloads
             .lock()
@@ -1905,6 +1979,8 @@ impl HostTargetRouter {
             self.cancel_pending_download(guid);
             return false;
         };
+        // The task-lifetime charge uses the artifact's actual on-disk size;
+        // CDP-reported totals are page-influenced and never trusted here.
         let actual_bytes = match std::fs::metadata(source) {
             Ok(metadata) if metadata.is_file() => metadata.len(),
             Ok(_) => {
@@ -1917,63 +1993,53 @@ impl HostTargetRouter {
                 return false;
             }
         };
-        // Commit the task-lifetime completed byte/file charge before any move
-        // or cross-volume copy can publish the output into the task workspace.
-        if let Err(error) = route.reservation.complete(actual_bytes) {
-            tracing::warn!(
-                %guid,
-                lane_id = %route.lane_id,
-                %error,
-                "completed download exceeded its task boundary; staging output removed"
-            );
-            self.cleanup_staged_download(guid, Some(source));
-            return false;
-        }
         let filename = std::path::Path::new(&route.suggested_filename)
             .file_name()
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
             .unwrap_or(guid);
-        let mut destination = std::path::Path::new(&route.download_dir).join(filename);
-        if destination.exists() {
-            destination =
-                std::path::Path::new(&route.download_dir).join(format!("{guid}-{filename}"));
-        }
-        if source != destination && let Err(rename_error) = std::fs::rename(source, &destination) {
-            // Workspaces can live on another Windows volume. Fall back to
-            // copy+remove when an atomic cross-volume rename is unavailable.
-            if let Err(copy_error) = std::fs::copy(source, &destination) {
-                let _ = std::fs::remove_file(&destination);
+        // Two-phase compensating transaction: prepare the final charge, stage
+        // into a unique same-volume temp, publish atomically without
+        // clobbering, then finalize with no intervening await. A failed
+        // publication rolls the charge back (or keeps it, fail-closed, when
+        // the residual artifact cannot be deleted).
+        match crate::download::publish_task_output(
+            route.reservation.as_ref(),
+            actual_bytes,
+            crate::download::TaskOutputPayload::StagedFile(source),
+            std::path::Path::new(&route.download_dir),
+            filename,
+            guid,
+        ) {
+            Ok(destination) => {
+                if let Err(error) = crate::download::write_motw(&destination) {
+                    tracing::debug!(
+                        %error,
+                        file = %destination.display(),
+                        "MOTW write failed after lane download routing"
+                    );
+                }
+                // Reconcile any cross-volume staging leftover.
+                self.cleanup_staged_download(guid, Some(source));
+                true
+            }
+            Err(failure) => {
                 tracing::warn!(
                     %guid,
                     lane_id = %route.lane_id,
-                    from = %source.display(),
-                    to = %destination.display(),
-                    %rename_error,
-                    %copy_error,
-                    "failed to route completed download to its owning lane"
+                    charged = failure.charged,
+                    error = %failure.message,
+                    "failed to publish completed download to its owning lane"
                 );
+                if let Some(residual) = failure.residual {
+                    // We created this temp file, so deletion authority is
+                    // ours; the bounded retry table keeps converging on it.
+                    self.cleanup_or_retain_staging_path(residual);
+                }
                 self.cleanup_staged_download(guid, Some(source));
-                return false;
-            }
-            if let Err(error) = std::fs::remove_file(source) {
-                tracing::debug!(
-                    %guid,
-                    file = %source.display(),
-                    %error,
-                    "routed download copied successfully but staging cleanup was deferred"
-                );
-                self.cleanup_staged_download(guid, Some(source));
+                false
             }
         }
-        if let Err(error) = crate::download::write_motw(&destination) {
-            tracing::debug!(
-                %error,
-                file = %destination.display(),
-                "MOTW write failed after lane download routing"
-            );
-        }
-        true
     }
 
     fn pending_download_count(&self) -> usize {
@@ -2106,6 +2172,10 @@ impl HostTargetRouter {
     /// Final bounded drain. Callers must already hold exact Host/process-stop
     /// proof; connection closure or cancel acknowledgement is insufficient.
     fn finalize_downloads_after_host_stop(&self) -> Vec<String> {
+        // Sticky admission fence first: a download-loop beat racing this
+        // drain must not insert a fresh route (and retain its reservation
+        // forever) after the ledger has been reconciled.
+        self.downloads_finalized.store(true, Ordering::Release);
         let mut guids = self
             .downloads
             .lock()
@@ -2237,6 +2307,24 @@ impl HostTargetRouter {
         let Some(staging_dir) = self.download_staging_dir.as_deref() else {
             return;
         };
+        // Active and retained-cancel routes still own their staging artifacts:
+        // a cancel acknowledgement or TTL expiry is not terminal proof, so a
+        // stalled-but-owned GUID file must never be swept by age alone.
+        let owned_guids = {
+            let downloads = self
+                .downloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let rejected = self
+                .rejected_downloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            downloads
+                .keys()
+                .cloned()
+                .chain(rejected.keys().cloned())
+                .collect::<HashSet<String>>()
+        };
         let mut scan = self
             .download_staging_scan
             .lock()
@@ -2292,6 +2380,23 @@ impl HostTargetRouter {
                 }
                 continue;
             }
+            let owned = entry
+                .file_name()
+                .to_str()
+                .map(|name| {
+                    let stem = name
+                        .strip_suffix(".crdownload")
+                        .or_else(|| name.strip_suffix(".tmp"))
+                        .unwrap_or(name);
+                    owned_guids.contains(stem)
+                })
+                .unwrap_or(false);
+            if owned {
+                if self.directory_cleanup_pending() {
+                    scan.saw_remaining_artifact = true;
+                }
+                continue;
+            }
             let old_enough = metadata
                 .modified()
                 .ok()
@@ -2317,6 +2422,84 @@ impl HostTargetRouter {
                     .store(current_generation, Ordering::Release);
             }
         }
+    }
+
+    /// Removes this exact Host's private staging directory once reconcile
+    /// left no residual cleanup debt. The path was derived from the exact
+    /// root process identity, so no sibling Host can own files inside it.
+    fn remove_exclusive_staging_dir(&self) {
+        let Some(staging_dir) = self.download_staging_dir.as_deref() else {
+            return;
+        };
+        if let Err(error) = std::fs::remove_dir_all(staging_dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::debug!(
+                dir = %staging_dir.display(),
+                %error,
+                "exclusive download staging directory removal deferred to the orphan sweep"
+            );
+        }
+    }
+}
+
+impl HostTargetRouter {
+    fn update_download_progress(
+        &self,
+        guid: &str,
+        received_bytes: u64,
+        total_bytes: Option<u64>,
+    ) -> bool {
+        self.download_ledger
+            .update_download_progress(guid, received_bytes, total_bytes)
+    }
+
+    async fn finish_download(&self, guid: &str, source: &std::path::Path) -> bool {
+        self.download_ledger.finish_download(guid, source)
+    }
+
+    fn pending_download_count(&self) -> usize {
+        self.download_ledger.pending_download_count()
+    }
+
+    fn expire_pending_downloads(&self) -> Vec<String> {
+        self.download_ledger.expire_pending_downloads()
+    }
+
+    fn cancel_terminal_grace_expired(&self) -> bool {
+        self.download_ledger.cancel_terminal_grace_expired()
+    }
+
+    fn cancel_pending_download(&self, guid: &str) {
+        self.download_ledger.cancel_pending_download(guid);
+    }
+
+    fn quarantine_rejected_download(&self, guid: &str) -> bool {
+        self.download_ledger.quarantine_rejected_download(guid)
+    }
+
+    fn poison_downloads_for_host_stop(&self) -> Vec<String> {
+        self.download_ledger.poison_downloads_for_host_stop()
+    }
+
+    fn finalize_downloads_after_host_stop(&self) -> Vec<String> {
+        self.download_ledger.finalize_downloads_after_host_stop()
+    }
+
+    fn download_cancel_requested(&self, guid: &str) -> bool {
+        self.download_ledger.download_cancel_requested(guid)
+    }
+
+    fn cleanup_staged_download(&self, guid: &str, event_path: Option<&std::path::Path>) {
+        self.download_ledger.cleanup_staged_download(guid, event_path);
+    }
+
+    fn retry_staging_cleanup(&self) -> usize {
+        self.download_ledger.retry_staging_cleanup()
+    }
+
+    fn sweep_stale_staging_files(&self) {
+        self.download_ledger.sweep_stale_staging_files();
     }
 
     async fn handle_attached(self: &Arc<Self>, pending: PendingPage) {
@@ -3723,11 +3906,16 @@ impl CdpHostRuntime {
             user_data_dir: user_data_dir.clone(),
             headful: config.headful,
         };
-        let workspace = config
+        // Downloads land in a per-exact-Host staging directory derived from
+        // the trusted root process identity after launch; only a real task
+        // workspace may serve as a Lane's final output fallback. `data_dir`
+        // is never a download destination anymore.
+        let download_staging_root =
+            Some(crate::download::download_staging_root(&config.data_dir));
+        let lane_fallback_download_dir = config
             .workspace_dir
-            .clone()
-            .unwrap_or_else(|| config.data_dir.clone());
-        let download_dir = Some(crate::download::ensure_download_dir(&workspace));
+            .as_deref()
+            .map(crate::download::ensure_download_dir);
         let _launch_permit = crate::launch_semaphore()
             .acquire()
             .await
@@ -3755,7 +3943,8 @@ impl CdpHostRuntime {
             launched,
             headful,
             display_available,
-            download_dir,
+            download_staging_root,
+            lane_fallback_download_dir,
             config.firewall,
             config.egress_approver,
             config.storage_state,
@@ -3769,7 +3958,8 @@ impl CdpHostRuntime {
         launched: Launched,
         headful: bool,
         display_available: bool,
-        download_dir: Option<String>,
+        download_staging_root: Option<PathBuf>,
+        lane_fallback_download_dir: Option<String>,
         firewall: crate::firewall::FirewallConfig,
         egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
         storage_state: Option<serde_json::Value>,
@@ -3794,6 +3984,32 @@ impl CdpHostRuntime {
         ));
         let mut pending_runtime = PendingCdpHostRuntime::new(Arc::clone(&cleanup));
         let root_process_id = cleanup.process_id();
+        // Every Host stages downloads in its own exclusive directory named by
+        // the exact root process identity. Without that identity there is no
+        // cleanup-ownership proof, so downloads are denied outright below.
+        let download_staging_dir = match (&download_staging_root, root_process_id) {
+            (Some(staging_root), Some(pid)) => {
+                crate::download::sweep_orphan_host_staging_dirs(staging_root);
+                let staging_dir = staging_root.join(
+                    crate::download::host_staging_dir_name(
+                        pid,
+                        root_process_platform_start_key,
+                    ),
+                );
+                match std::fs::create_dir_all(&staging_dir) {
+                    Ok(()) => Some(staging_dir),
+                    Err(error) => {
+                        tracing::warn!(
+                            dir = %staging_dir.display(),
+                            %error,
+                            "exclusive download staging directory creation failed; downloads are disabled for this host"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let conn = match Connection::connect_launched(transport).await {
             Ok(conn) => conn,
             Err(error) => {
@@ -3811,7 +4027,7 @@ impl CdpHostRuntime {
         let router = match HostTargetRouter::try_new(
             conn.clone(),
             Some(Arc::clone(&cleanup)),
-            download_dir.as_deref().map(PathBuf::from),
+            download_staging_dir.clone(),
         ) {
             Ok(router) => router,
             Err(error) => {
@@ -3819,6 +4035,12 @@ impl CdpHostRuntime {
                 return Err(error);
             }
         };
+        // From here on the download ledger (routes, task reservations, and
+        // the exclusive staging directory) is retained by the exact process
+        // cleanup authority and reconciled only after proven stop.
+        cleanup.install_post_stop_reconcile(
+            Arc::clone(&router.download_ledger) as Arc<dyn crate::launch::HostStopReconcile>
+        );
         pending_runtime.target_router_loop = Some(router.spawn());
         pending_runtime.attach_loop = Some(conn.run_attach_loop());
         if let Err(error) = conn.enable_auto_attach().await {
@@ -3826,13 +4048,19 @@ impl CdpHostRuntime {
             return Err(map_transport_err(error));
         }
 
-        if let Some(ref dir) = download_dir {
+        if let Some(ref staging_dir) = download_staging_dir {
             let handle = spawn_download_loop(conn.clone(), Some(router.clone()));
             pending_runtime.download_loop = Some(handle);
-            if let Err(error) = set_download_behavior_sandbox(&conn, dir).await {
+            let staging_path = staging_dir.to_string_lossy().into_owned();
+            if let Err(error) = set_download_behavior_sandbox(&conn, &staging_path).await {
                 conn.shutdown().await;
                 return Err(error);
             }
+        } else if let Err(error) = set_download_behavior_deny(&conn).await {
+            // Without an exclusive staging identity Chromium must never fall
+            // back to its default (user Downloads) directory.
+            conn.shutdown().await;
+            return Err(error);
         }
 
         let firewall_config = firewall.clone();
@@ -3866,7 +4094,7 @@ impl CdpHostRuntime {
             download_loop,
             firewall_runtime,
             router,
-            download_dir,
+            download_dir: lane_fallback_download_dir,
             firewall_config,
             approved_domains,
             storage_state,
@@ -4024,6 +4252,12 @@ struct DurableProcessCleanup {
     /// `hand_off` moves it into the durable completion ticket so asynchronous
     /// cleanup debt cannot be used to mint another live Host.
     host_cleanup_lease: std::sync::Mutex<Option<HostCleanupLease>>,
+    /// Post-stop reconciliation authority (the Host download ledger). Direct
+    /// cleanup runs it after proving the exact process tree stopped;
+    /// `hand_off` moves it into the relay job so a dropped Host cannot
+    /// release retained download reservations before that proof exists.
+    post_stop_reconcile:
+        std::sync::Mutex<Option<Arc<dyn crate::launch::HostStopReconcile>>>,
     #[cfg(test)]
     test_hooks: Option<Arc<DurableProcessCleanupTestHooks>>,
 }
@@ -4053,9 +4287,22 @@ impl DurableProcessCleanup {
             cleanup_user_data_dir: cleanup_authority.into_profile_dir(),
             ownership_token,
             host_cleanup_lease: std::sync::Mutex::new(host_cleanup_lease),
+            post_stop_reconcile: std::sync::Mutex::new(None),
             #[cfg(test)]
             test_hooks: None,
         }
+    }
+
+    /// Installs the Host-scoped reconcile authority. Must run before the Host
+    /// is published to callers so no hand-off can precede installation.
+    fn install_post_stop_reconcile(
+        &self,
+        reconcile: Arc<dyn crate::launch::HostStopReconcile>,
+    ) {
+        self.post_stop_reconcile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(reconcile);
     }
 
     fn process_id(&self) -> Option<u32> {
@@ -4112,12 +4359,18 @@ impl DurableProcessCleanup {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        let post_stop_reconcile = self
+            .post_stop_reconcile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         let ticket = crate::launch::hand_off_dropped_browser_cleanup_with_host_lease_and_tasks(
             process,
             self.ownership_token.clone(),
             self.cleanup_user_data_dir.clone(),
             host_cleanup_lease,
             runtime_tasks,
+            crate::launch::PostStopReconcileCell::new(post_stop_reconcile),
         );
         self.handoff_ticket.send_replace(Some(ticket));
     }
@@ -4195,6 +4448,24 @@ impl DurableProcessCleanup {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
+            // Exact process-tree stop (and profile artifact cleanup) is now
+            // proven, so the retained download state may be reconciled and
+            // its reservations released.
+            let reconcile = self
+                .post_stop_reconcile
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(reconcile) = reconcile
+                && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    reconcile.reconcile_after_exact_host_stop();
+                }))
+                .is_err()
+            {
+                tracing::error!(
+                    "post-stop host reconcile panicked during direct cleanup; retained download state was still released"
+                );
+            }
         }
         result
     }
@@ -4222,15 +4493,22 @@ impl Drop for CdpHostRuntime {
         self.target_router_loop.abort();
         self.firewall_runtime.abort();
         self.attach_loop.abort();
-        if let Some(loop_handle) = &self.download_loop {
-            loop_handle.abort();
-        }
+        // Fence and cancel-request every tracked download; reservations stay
+        // retained. Only the durable cleanup relay may release them, after it
+        // proves the exact Chromium process tree stopped.
         self.router.poison_downloads_for_host_stop();
         self.router.retry_staging_cleanup();
-        // The bounded cleanup executor can still be retained by a queued
-        // target authority. Explicit handoff prevents that bounded cycle from
+        // The download loop mutates the retained ledger, so its JoinHandle is
+        // settled by the relay before process termination and reconcile. The
+        // bounded cleanup executor can still be retained by a queued target
+        // authority; explicit handoff prevents that bounded cycle from
         // postponing whole-tree teardown after the Host itself is gone.
-        self.cleanup.hand_off();
+        let mut runtime_tasks = Vec::with_capacity(1);
+        if let Some(handle) = self.download_loop.take() {
+            handle.abort();
+            runtime_tasks.push(handle);
+        }
+        self.cleanup.hand_off_with_runtime_tasks(runtime_tasks);
     }
 }
 
@@ -5416,10 +5694,19 @@ impl CdpBackend {
         // Host/router + Lane protocol used by production instead: one reliable
         // attach authority, one trusted task tab budget, and durable exact
         // target/process cleanup on every failure or cancellation seam.
+        let download_staging_root = workspace_dir
+            .as_deref()
+            .map(crate::download::download_staging_root)
+            .or_else(|| {
+                download_dir
+                    .as_deref()
+                    .map(|dir| std::path::Path::new(dir).join(".staging"))
+            });
         let host = CdpHostRuntime::from_launched(
             launched,
             headful,
             display_available,
+            download_staging_root,
             download_dir,
             firewall,
             egress_approver,
@@ -10684,6 +10971,22 @@ async fn set_download_behavior_sandbox(
     Ok(())
 }
 
+/// Fail-closed download posture for a Host without an exclusive staging
+/// identity: Chromium must never write into its default (user Downloads)
+/// directory on our behalf.
+async fn set_download_behavior_deny(conn: &Connection) -> Result<(), BrowserError> {
+    let params = SetDownloadBehaviorParams {
+        behavior: SetDownloadBehaviorBehavior::Deny,
+        browser_context_id: None,
+        download_path: None,
+        events_enabled: Some(false),
+    };
+    conn.send::<SetDownloadBehaviorParams>(ROOT_SESSION, &params)
+        .await
+        .map_err(map_transport_err)?;
+    Ok(())
+}
+
 /// **E4 下载事件后台循环**：订阅 `Browser.downloadProgress`，对**完成**的下载在其落盘文件上打
 /// Win MOTW（`Zone.Identifier` ADS）。
 ///
@@ -10889,7 +11192,11 @@ fn spawn_download_loop(
                                 // children are deleted; arbitrary paths from a
                                 // malformed event are left untouched.
                                 router.cleanup_staged_download(&p.guid, Some(path));
-                                if router.download_cleanup_poisoned.load(Ordering::Acquire) {
+                                if router
+                                    .download_ledger
+                                    .download_cleanup_poisoned
+                                    .load(Ordering::Acquire)
+                                {
                                     router.poison_downloads_for_host_stop();
                                     conn.shutdown().await;
                                     break;
@@ -10944,7 +11251,10 @@ fn spawn_download_loop(
                         router.sweep_stale_staging_files();
                         router.retry_staging_cleanup();
                         if router.cancel_terminal_grace_expired()
-                            || router.download_cleanup_poisoned.load(Ordering::Acquire)
+                            || router
+                                .download_ledger
+                                .download_cleanup_poisoned
+                                .load(Ordering::Acquire)
                         {
                             router.poison_downloads_for_host_stop();
                             conn.shutdown().await;
@@ -12339,6 +12649,7 @@ mod tests {
                 Launched,
                 bool,
                 bool,
+                Option<PathBuf>,
                 Option<String>,
                 crate::firewall::FirewallConfig,
                 Option<Arc<dyn crate::firewall::EgressApprover>>,
@@ -13740,6 +14051,7 @@ mod tests {
 
         let insert_route = |guid: &str, created_at: std::time::Instant| {
             router
+                .download_ledger
                 .downloads
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -13810,6 +14122,7 @@ mod tests {
         router.cleanup_staged_download("guid-retry", Some(&blocked_path));
         assert_eq!(
             router
+                .download_ledger
                 .download_cleanup_retries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -13854,6 +14167,7 @@ mod tests {
 
         {
             let mut downloads = router
+                .download_ledger
                 .downloads
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13875,6 +14189,7 @@ mod tests {
         }
         {
             let mut rejected = router
+                .download_ledger
                 .rejected_downloads
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13891,6 +14206,7 @@ mod tests {
             MAX_PENDING_DOWNLOADS_PER_HOST + MAX_QUARANTINED_DOWNLOADS_PER_HOST
         );
         let retained = router
+            .download_ledger
             .download_cleanup_retries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -13898,10 +14214,13 @@ mod tests {
         assert_eq!(retained.len(), MAX_DOWNLOAD_CLEANUP_RETRIES);
         assert_eq!(retained, expected_paths, "no exact cleanup path may be lost");
         assert!(
-            !router.download_cleanup_poisoned.load(Ordering::Acquire),
+            !router
+                .download_ledger
+                .download_cleanup_poisoned
+                .load(Ordering::Acquire),
             "the complete admitted 64+64 inventory must fit its exact retry authority"
         );
-        assert!(!router.directory_cleanup_pending());
+        assert!(!router.download_ledger.directory_cleanup_pending());
 
         connection.shutdown().await;
         server.abort();
@@ -13936,7 +14255,7 @@ mod tests {
         // order is platform-defined; convergence, not first-pass order, is the
         // contract.
         for _ in 0..4 {
-            router.sweep_stale_staging_files_at(future);
+            router.download_ledger.sweep_stale_staging_files_at(future);
             if !old_tail.exists() {
                 break;
             }
@@ -13966,6 +14285,535 @@ mod tests {
         ));
         assert!(!is_chromium_download_guid_name("report.pdf"));
         assert!(!is_chromium_download_guid_name("guid-rejected"));
+    }
+
+    /// Byte/lifecycle-recording download reservation for two-phase publish
+    /// assertions (the plain [`TestTaskDownloadReservation`] ignores bytes).
+    struct RecordingTaskDownloadReservation {
+        prepared_bytes: Mutex<Option<u64>>,
+        finalized: AtomicBool,
+    }
+
+    impl RecordingTaskDownloadReservation {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                prepared_bytes: Mutex::new(None),
+                finalized: AtomicBool::new(false),
+            })
+        }
+
+        fn prepared(&self) -> Option<u64> {
+            *self
+                .prepared_bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        fn is_finalized(&self) -> bool {
+            self.finalized.load(Ordering::Acquire)
+        }
+    }
+
+    impl TaskDownloadReservation for RecordingTaskDownloadReservation {
+        fn update_progress(
+            &self,
+            _received_bytes: u64,
+            _total_bytes: Option<u64>,
+        ) -> Result<(), BrowserError> {
+            Ok(())
+        }
+
+        fn prepare_complete(&self, actual_bytes: u64) -> Result<(), BrowserError> {
+            self.prepared_bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .replace(actual_bytes);
+            Ok(())
+        }
+
+        fn finalize_complete(&self) {
+            self.finalized.store(true, Ordering::Release);
+        }
+    }
+
+    fn ledger_route(
+        lane_dir: &std::path::Path,
+        filename: &str,
+        reservation: Arc<dyn TaskDownloadReservation>,
+    ) -> PendingDownload {
+        PendingDownload {
+            lane_id: "lane-a".into(),
+            download_dir: lane_dir.to_string_lossy().into_owned(),
+            suggested_filename: filename.into(),
+            created_at: std::time::Instant::now(),
+            cancel_requested_at: None,
+            reservation,
+        }
+    }
+
+    /// P2 回归：finish_download 走两阶段补偿事务——prepare 用**实际落盘字节数**
+    /// 记账(不信 CDP total)、经唯一临时文件原子发布、不覆盖既有产物、发布成功后
+    /// 才 finalize 永久入账。
+    #[tokio::test]
+    async fn finish_download_two_phase_charges_actual_size_and_never_clobbers() {
+        let temp = tempfile::tempdir().expect("create publish test root");
+        let staging = temp.path().join("host-staging");
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        std::fs::create_dir_all(&lane_dir).expect("create lane dir");
+        let ledger = HostDownloadLedger::new(Some(staging.clone()));
+
+        // A pre-existing destination must never be overwritten.
+        std::fs::write(lane_dir.join("report.pdf"), b"pre-existing")
+            .expect("seed existing output");
+        let reservation = RecordingTaskDownloadReservation::new();
+        ledger
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "guid-pub".into(),
+                ledger_route(&lane_dir, "report.pdf", reservation.clone()),
+            );
+        let staged = staging.join("guid-pub");
+        std::fs::write(&staged, b"7-bytes").expect("stage artifact");
+
+        assert!(ledger.finish_download("guid-pub", &staged));
+        assert_eq!(
+            reservation.prepared(),
+            Some(7),
+            "the charge must use the actual on-disk size"
+        );
+        assert!(reservation.is_finalized());
+        assert_eq!(
+            std::fs::read(lane_dir.join("report.pdf")).expect("existing output intact"),
+            b"pre-existing"
+        );
+        assert_eq!(
+            std::fs::read(lane_dir.join("guid-pub-report.pdf"))
+                .expect("published under a non-clobbering name"),
+            b"7-bytes"
+        );
+        assert!(!staged.exists(), "staging artifact is consumed");
+        assert!(
+            std::fs::read_dir(&lane_dir)
+                .expect("lane dir readable")
+                .flatten()
+                .all(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    !name.ends_with(".crdownload")
+                }),
+            "no publication temp may survive in the lane output directory"
+        );
+    }
+
+    /// P2 回归：发布失败(目标目录不可用)时回滚——不 finalize、staging 清理、
+    /// route 的 reservation 被丢弃从而释放 active 记账。
+    #[tokio::test]
+    async fn finish_download_publish_failure_rolls_back_charge_and_releases_reservation() {
+        let temp = tempfile::tempdir().expect("create publish failure root");
+        let staging = temp.path().join("host-staging");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        // The lane output "directory" is actually a file: create_dir_all and
+        // every publication step below it must fail.
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::write(&lane_dir, b"not-a-directory").expect("occupy lane dir path");
+        let ledger = HostDownloadLedger::new(Some(staging.clone()));
+
+        let reservation = RecordingTaskDownloadReservation::new();
+        ledger
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "guid-fail".into(),
+                ledger_route(&lane_dir, "report.pdf", reservation.clone()),
+            );
+        let staged = staging.join("guid-fail");
+        std::fs::write(&staged, b"payload").expect("stage artifact");
+
+        assert!(!ledger.finish_download("guid-fail", &staged));
+        assert!(!staged.exists(), "failed publication cleans its staging artifact");
+        assert!(
+            !reservation.is_finalized(),
+            "a rolled-back publication must not commit the permanent charge"
+        );
+        assert_eq!(
+            Arc::strong_count(&reservation),
+            1,
+            "the ledger drops its reservation so the active charge is released"
+        );
+        assert_eq!(ledger.pending_download_count(), 0);
+    }
+
+    /// P1(staging 隔离)回归：双 Host 各自独占 staging 目录,扫描器只扫本 Host
+    /// 目录;active 与 retained-cancel GUID 的滞留工件绝不被按 mtime 清除。
+    #[tokio::test]
+    async fn staging_sweep_skips_owned_guids_and_never_crosses_hosts() {
+        let temp = tempfile::tempdir().expect("create dual staging root");
+        let staging_a = temp.path().join("host-a");
+        let staging_b = temp.path().join("host-b");
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::create_dir_all(&staging_a).expect("create staging a");
+        std::fs::create_dir_all(&staging_b).expect("create staging b");
+        std::fs::create_dir_all(&lane_dir).expect("create lane dir");
+        assert_ne!(staging_a, staging_b, "hosts never share a staging directory");
+        let ledger_a = HostDownloadLedger::new(Some(staging_a.clone()));
+
+        // Active route + retained-cancel (rejected) artifacts in A.
+        ledger_a
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "guid-active".into(),
+                ledger_route(
+                    &lane_dir,
+                    "slow.bin",
+                    Arc::new(TestTaskDownloadReservation),
+                ),
+            );
+        assert!(ledger_a.quarantine_rejected_download("guid-retained"));
+        std::fs::write(staging_a.join("guid-active"), b"active").expect("stage active");
+        std::fs::write(staging_a.join("guid-active.crdownload"), b"active-part")
+            .expect("stage active part");
+        std::fs::write(staging_a.join("guid-retained"), b"retained").expect("stage retained");
+        std::fs::write(staging_a.join("guid-unowned"), b"stale").expect("stage unowned");
+        std::fs::write(staging_b.join("guid-other-host"), b"other").expect("stage other");
+
+        let future = std::time::SystemTime::now()
+            .checked_add(DOWNLOAD_ROUTE_TTL + Duration::from_secs(1))
+            .expect("test clock remains representable");
+        for _ in 0..4 {
+            ledger_a.sweep_stale_staging_files_at(future);
+            if !staging_a.join("guid-unowned").exists() {
+                break;
+            }
+        }
+
+        assert!(
+            !staging_a.join("guid-unowned").exists(),
+            "unowned stale artifacts are still reclaimed"
+        );
+        assert!(
+            staging_a.join("guid-active").exists()
+                && staging_a.join("guid-active.crdownload").exists(),
+            "an active route's artifacts survive the age-based sweep"
+        );
+        assert!(
+            staging_a.join("guid-retained").exists(),
+            "a retained-cancel artifact survives until terminal proof"
+        );
+        assert!(
+            staging_b.join("guid-other-host").exists(),
+            "another Host's staging directory is never touched"
+        );
+    }
+
+    /// P1(无 workspace 拒绝)回归:download_dir 为 None 的 Lane(即无受管
+    /// workspace)在 admission 处 fail-closed;有 workspace 的对照 Lane 正常获准。
+    #[tokio::test]
+    async fn lane_without_workspace_denies_download_admission_fail_closed() {
+        let temp = tempfile::tempdir().expect("create no-workspace test root");
+        let staging = temp.path().join("host-staging");
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        std::fs::create_dir_all(&lane_dir).expect("create lane dir");
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new_with_download_staging(
+            connection.clone(),
+            staging.clone(),
+        );
+
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_target = Arc::new(AsyncMutex::new("tab-none".to_string()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane(
+                "lane-none".into(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                Arc::new(AtomicBool::new(false)),
+                None,
+            )
+            .await
+            .expect("workspace-less lane registers");
+        assert!(router.claim_target("lane-none", "tab-none").await);
+        router.claim_frame("lane-none", "tab-none").await;
+        assert!(
+            !router.begin_download("tab-none", "guid-none", "file.pdf").await,
+            "a lane without a managed workspace must not admit downloads"
+        );
+
+        let tabs_b = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_target_b = Arc::new(AsyncMutex::new("tab-some".to_string()));
+        let active_frame_b = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane(
+                "lane-some".into(),
+                &tabs_b,
+                &active_target_b,
+                &active_frame_b,
+                Arc::new(AtomicBool::new(false)),
+                Some(lane_dir.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("workspace lane registers");
+        assert!(router.claim_target("lane-some", "tab-some").await);
+        router.claim_frame("lane-some", "tab-some").await;
+        assert!(
+            router.begin_download("tab-some", "guid-some", "file.pdf").await,
+            "the workspace-backed control lane admits the same download"
+        );
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// P1(Host Drop 精确收敛)回归:hand_off 后,router/PendingDownload/reservation
+    /// 的所有权跟随 DurableProcessCleanup 的 completion ticket;active reservation
+    /// 只在 exact 进程树停止被证明后释放,且独占 staging 目录随之删除。
+    #[cfg(any(windows, unix))]
+    #[tokio::test]
+    async fn handed_off_cleanup_retains_download_reservations_until_exact_stop_proof() {
+        let (temp, profile, cleanup, pid) =
+            durable_process_cleanup_fixture("hold-downloads-profile", None).await;
+        // Staging lives outside the ephemeral profile so its removal below is
+        // attributable to the post-stop reconcile, not to profile cleanup.
+        let staging = temp.path().join("download-staging-host");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        let ledger = HostDownloadLedger::new(Some(staging.clone()));
+
+        let reservation = RecordingTaskDownloadReservation::new();
+        let observed = Arc::downgrade(&reservation);
+        ledger
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "guid-held".into(),
+                ledger_route(&profile, "held.bin", reservation),
+            );
+        std::fs::write(staging.join("guid-held"), b"held").expect("stage held artifact");
+        cleanup.install_post_stop_reconcile(
+            Arc::clone(&ledger) as Arc<dyn crate::launch::HostStopReconcile>
+        );
+
+        assert!(
+            observed.upgrade().is_some(),
+            "the reservation is retained while no stop proof exists"
+        );
+        cleanup.hand_off();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(20), cleanup.finish())
+                .await
+                .expect("handed-off cleanup completes")
+                .is_ok(),
+            "the relay proves exact process-tree stop"
+        );
+
+        // Reconcile ran under stop proof: the pending route was drained, its
+        // reservation dropped (releasing the active charge), staging removed.
+        assert!(
+            observed.upgrade().is_none(),
+            "the retained reservation is released only after exact stop proof"
+        );
+        assert!(
+            !staging.exists(),
+            "the exclusive staging directory is removed after reconcile"
+        );
+        assert_eq!(ledger.pending_download_count(), 0);
+        wait_for_durable_cleanup_process_exit(pid).await;
+    }
+
+    /// P1(取消不是终态)回归:Lane unregister 触发的 Browser.cancelDownload 被
+    /// 拒绝(fake 返回协议错误)时——路由与 reservation 保持、Host 下载准入被
+    /// 毒化、"Chromium 仍在写盘"的滞留工件不被按 mtime 清扫;只有 host-stop
+    /// 终态化才释放 reservation 并回收工件。
+    #[tokio::test]
+    async fn cancel_failure_retains_reservation_until_host_stop_finalization() {
+        let temp = tempfile::tempdir().expect("create cancel failure root");
+        let staging = temp.path().join("host-staging");
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        std::fs::create_dir_all(&lane_dir).expect("create lane dir");
+
+        // Minimal fake: Browser.cancelDownload → protocol error; anything
+        // else → empty success.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind cancel-failure fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            while let Some(Ok(message)) = futures_util::StreamExt::next(&mut websocket).await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                let mut response = if request["method"] == "Browser.cancelDownload" {
+                    serde_json::json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "cancel refused by fixture" }
+                    })
+                } else {
+                    serde_json::json!({ "id": id, "result": {} })
+                };
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ),
+                )
+                .await
+                .expect("fake sends response");
+            }
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect cancel-failure fake websocket");
+        let router = HostTargetRouter::new_with_download_staging(
+            connection.clone(),
+            staging.clone(),
+        );
+
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_target = Arc::new(AsyncMutex::new("tab-1".to_string()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        let registration = router
+            .register_lane(
+                "lane-a".into(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                Arc::new(AtomicBool::new(false)),
+                Some(lane_dir.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("lane registers");
+        let reservation = RecordingTaskDownloadReservation::new();
+        router
+            .download_ledger
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "guid-writing".into(),
+                ledger_route(&lane_dir, "writing.bin", reservation.clone()),
+            );
+        std::fs::write(staging.join("guid-writing"), b"still-being-written")
+            .expect("stage in-flight artifact");
+
+        assert!(
+            router
+                .unregister_lane_if_current("lane-a", registration)
+                .await
+        );
+        // The cancel command was refused: the route stays retained-cancel,
+        // its reservation is still held, and Host download admission is
+        // poisoned fail-closed.
+        assert_eq!(router.pending_download_count(), 1);
+        assert!(router.download_cancel_requested("guid-writing"));
+        assert!(
+            Arc::strong_count(&reservation) > 1,
+            "a refused cancel must not release the active reservation"
+        );
+        assert!(
+            router
+                .download_ledger
+                .download_cleanup_poisoned
+                .load(Ordering::Acquire),
+            "a refused cancel poisons this Host's download admission"
+        );
+
+        // Chromium may keep writing: the age-based sweep must not reclaim
+        // the owned artifact.
+        let future = std::time::SystemTime::now()
+            .checked_add(DOWNLOAD_ROUTE_TTL + Duration::from_secs(1))
+            .expect("test clock remains representable");
+        for _ in 0..4 {
+            router.download_ledger.sweep_stale_staging_files_at(future);
+        }
+        assert!(
+            staging.join("guid-writing").exists(),
+            "a retained-cancel artifact survives the sweep while unproven"
+        );
+
+        // Only host-stop finalization (exact process-stop proof held by the
+        // caller) releases the reservation and reclaims the artifact.
+        assert_eq!(
+            router.finalize_downloads_after_host_stop(),
+            vec!["guid-writing"]
+        );
+        assert_eq!(Arc::strong_count(&reservation), 1);
+        assert!(!reservation.is_finalized());
+        assert!(!staging.join("guid-writing").exists());
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// P1(取消不是终态)回归:cancel 已发出(甚至已被 ack)但迟迟没有 terminal
+    /// `downloadProgress` ——有界宽限期后 Host 下载面被毒化(触发上层
+    /// poison+shutdown),期间 reservation/route 全程保留。
+    #[tokio::test]
+    async fn cancel_ack_without_terminal_event_poisons_after_bounded_grace() {
+        let temp = tempfile::tempdir().expect("create cancel grace root");
+        let staging = temp.path().join("host-staging");
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        std::fs::create_dir_all(&lane_dir).expect("create lane dir");
+        let ledger = HostDownloadLedger::new(Some(staging.clone()));
+
+        let reservation = RecordingTaskDownloadReservation::new();
+        ledger
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "guid-grace".into(),
+                ledger_route(&lane_dir, "grace.bin", reservation.clone()),
+            );
+        // The cancel request was issued a full grace period ago and no
+        // terminal event arrived.
+        ledger
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut("guid-grace")
+            .expect("route present")
+            .cancel_requested_at =
+            Some(std::time::Instant::now() - DOWNLOAD_CANCEL_TERMINAL_GRACE - Duration::from_secs(1));
+
+        assert!(
+            ledger.cancel_terminal_grace_expired(),
+            "a cancel without terminal proof must poison after the bounded grace"
+        );
+        assert!(
+            ledger.download_cleanup_poisoned.load(Ordering::Acquire),
+            "grace expiry marks the Host download surface poisoned"
+        );
+        // The reservation and route stay retained: only host-stop
+        // finalization releases them.
+        assert_eq!(ledger.pending_download_count(), 1);
+        assert!(Arc::strong_count(&reservation) > 1);
+        assert_eq!(
+            ledger.finalize_downloads_after_host_stop(),
+            vec!["guid-grace"]
+        );
+        assert_eq!(Arc::strong_count(&reservation), 1);
+        assert!(!reservation.is_finalized());
     }
 
     /// **F52**：`abort_tab_record` 契约——三个后台循环（inject/oopif/**debug**）
