@@ -204,6 +204,7 @@ browser-use = [
     "dep:nomi-browser",
     "dep:nomi-browser-engine",
     "dep:nomifun-browser-platform",
+    "dep:nomi-process-runtime",
     "dep:sysinfo",
     "dep:nomi-config",
     "dep:nomi-tools",
@@ -249,6 +250,7 @@ dirs.workspace = true
 # (bootstrap/server_lock.rs) — same dep nomifun-db's migrate lock uses.
 fs2.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
@@ -286,6 +288,7 @@ nomi-browser = { workspace = true, optional = true }
 # engine. Only the browser-use feature pulls this dependency.
 nomi-browser-engine = { workspace = true, optional = true }
 nomifun-browser-platform = { workspace = true, optional = true }
+nomi-process-runtime = { workspace = true, optional = true }
 sysinfo = { workspace = true, optional = true }
 nomi-config = { workspace = true, optional = true }
 nomi-tools = { workspace = true, optional = true }

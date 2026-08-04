@@ -151,6 +151,10 @@ describe('Browser Use settings contract', () => {
     expect(source.includes("<Radio value='high_concurrency'>")).toBe(true);
     expect(source.includes("name='advanced'")).toBe(true);
     expect(source.includes("'max_memory_ratio'")).toBe(true);
+    expect(source.includes("'max_task_memory_bytes'")).toBe(true);
+    expect(source.includes("'max_task_active_operations'")).toBe(true);
+    expect(source.includes("'max_task_open_lanes'")).toBe(true);
+    expect(source.includes("'max_task_tabs'")).toBe(true);
     expect(source.includes("'reserved_memory_bytes'")).toBe(true);
     expect(source.includes("'max_active_operations'")).toBe(true);
     expect(source.includes("'max_open_lanes'")).toBe(true);
@@ -298,6 +302,10 @@ describe('Browser Use settings contract', () => {
   test('matches the backend resource-policy boundaries and cross-constraint', () => {
     expect(BROWSER_RESOURCE_POLICY_LIMITS).toEqual({
       max_memory_ratio: { min: 0.1, max: 0.8 },
+      max_task_memory_bytes: { min: 256 * 1024 * 1024, max: 16 * 1024 * 1024 * 1024 },
+      max_task_active_operations: { min: 1, max: 16 },
+      max_task_open_lanes: { min: 1, max: 32 },
+      max_task_tabs: { min: 1, max: 64 },
       reserved_memory_bytes: { min: 256 * 1024 * 1024, max: 512 * 1024 * 1024 * 1024 },
       max_active_operations: { min: 1, max: 64 },
       max_open_lanes: { min: 1, max: 128 },
@@ -309,6 +317,10 @@ describe('Browser Use settings contract', () => {
       preset: 'automatic' as const,
       advanced: {
         max_memory_ratio: 0.1,
+        max_task_memory_bytes: 256 * 1024 * 1024,
+        max_task_active_operations: 1,
+        max_task_open_lanes: 1,
+        max_task_tabs: 1,
         reserved_memory_bytes: 256 * 1024 * 1024,
         max_active_operations: 1,
         max_open_lanes: 1,
@@ -323,6 +335,10 @@ describe('Browser Use settings contract', () => {
         advanced: {
           ...valid.advanced,
           max_memory_ratio: 0.8,
+          max_task_memory_bytes: 16 * 1024 * 1024 * 1024,
+          max_task_active_operations: 16,
+          max_task_open_lanes: 32,
+          max_task_tabs: 64,
           reserved_memory_bytes: 512 * 1024 * 1024 * 1024,
           max_active_operations: 64,
           max_open_lanes: 128,
@@ -335,6 +351,14 @@ describe('Browser Use settings contract', () => {
     const boundaryCases = [
       ['max_memory_ratio', 0.099],
       ['max_memory_ratio', 0.801],
+      ['max_task_memory_bytes', 256 * 1024 * 1024 - 1],
+      ['max_task_memory_bytes', 16 * 1024 * 1024 * 1024 + 1],
+      ['max_task_active_operations', 0],
+      ['max_task_active_operations', 17],
+      ['max_task_open_lanes', 0],
+      ['max_task_open_lanes', 33],
+      ['max_task_tabs', 0],
+      ['max_task_tabs', 65],
       ['reserved_memory_bytes', 256 * 1024 * 1024 - 1],
       ['reserved_memory_bytes', 512 * 1024 * 1024 * 1024 + 1],
       ['max_active_operations', 0],
@@ -363,6 +387,25 @@ describe('Browser Use settings contract', () => {
     ).toEqual({
       field: 'max_owner_queued_requests',
       message: 'max_owner_queued_requests cannot exceed max_queued_requests.',
+    });
+
+    expect(
+      validateBrowserResourcePolicy({
+        preset: 'automatic',
+        advanced: { max_active_operations: 2, max_task_active_operations: 3 },
+      })
+    ).toEqual({
+      field: 'max_task_active_operations',
+      message: 'max_task_active_operations cannot exceed max_active_operations.',
+    });
+    expect(
+      validateBrowserResourcePolicy({
+        preset: 'automatic',
+        advanced: { max_open_lanes: 2, max_task_open_lanes: 3 },
+      })
+    ).toEqual({
+      field: 'max_task_open_lanes',
+      message: 'max_task_open_lanes cannot exceed max_open_lanes.',
     });
   });
 
@@ -681,6 +724,10 @@ describe('Browser Use settings contract', () => {
       'browserResourcePolicySaving',
       'browserResourcePolicyHighConcurrency',
       'browserResourcePolicyAdvanced',
+      'browserResourceMaxTaskMemoryBytes',
+      'browserResourceMaxTaskActiveOperations',
+      'browserResourceMaxTaskOpenLanes',
+      'browserResourceMaxTaskTabs',
       'browserLoginQueuedHint',
     ];
 
