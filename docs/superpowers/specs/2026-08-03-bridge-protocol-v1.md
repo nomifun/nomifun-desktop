@@ -98,7 +98,7 @@ mac  = hex(HMAC-SHA256(key = prk, msg = desktop_pk_bytes || mobile_pk_bytes))
 | method | params | result |
 |---|---|---|
 | `device.info` | `{}` | `{"name","version","platform","agent_types":["..."],"capabilities":["conversations","cron","confirmations"]}` |
-| `conversations.list` | `{"cursor"?,"limit"?}` | `{"items":[{"id","name","type","status","is_processing","updated_at"}],"next_cursor":null\|""}` |
+| `conversations.list` | `{"cursor"?,"limit"?}` | `{"items":[{"id","name","type","status","is_processing","updated_at"}],"has_more":bool}` |
 | `conversations.create` | `{"name"?,"type"?}`（type 缺省为桌面默认 agent 类型） | `{"id","name","type"}` |
 | `conversations.send` | `{"conversation_id","content"}` | `{"msg_id","completed","result_ok"?,"result_text"?,"truncated"?}` |
 | `conversations.status` | `{"conversation_id"}` | `{"id","name","status","runtime":{"state","is_processing","pending_confirmations","active_turn_id","processing_started_at"}}` |
