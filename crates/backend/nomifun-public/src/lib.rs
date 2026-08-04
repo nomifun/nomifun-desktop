@@ -23,7 +23,10 @@ mod session;
 pub use handler::RemoteMcpHandler;
 pub use rest::public_rest_router;
 pub use result::build_tool_result;
-pub use router::{PublicMcpState, public_mcp_router};
+pub use router::{
+    PublicMcpState, public_mcp_router, public_mcp_router_with_admission,
+};
+pub use session::RemoteMcpSessionAdmissionAuthority;
 
 /// Curated "agent" profile for the Remote surface: the do-work capability
 /// domains an external task-delegation agent typically needs, excluding

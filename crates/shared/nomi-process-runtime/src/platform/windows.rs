@@ -3,7 +3,7 @@ mod handles;
 
 use std::{
     cmp::Ordering,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString, c_void},
     io,
     mem,
@@ -31,11 +31,12 @@ use windows_sys::Win32::{
     Storage::FileSystem::{ReadFile, WriteFile},
     System::{
         Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
-            Thread32Next,
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         },
         JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            IsProcessInJob,
             JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
             JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation,
@@ -58,6 +59,9 @@ use windows_sys::Win32::{
 use self::handles::{OwnedHandle, ProcThreadAttributeList};
 use self::conpty::{PreparedConPty, PseudoConsoleControl};
 use super::{ExitFact, PlatformProcess, SpawnedPlatformProcess};
+use super::poller::{
+    LifecyclePoll, LifecyclePollJob, PlatformLifecyclePermit, platform_lifecycle_poller,
+};
 use crate::{
     CleanupReport, CommandSpec, ProcessError, NormalizedProcessRequest, OutputBuffer,
     OutputStream, ProcessSnapshot, ProcessState, SandboxPolicy, ShellKind, SpawnFailure,
@@ -71,7 +75,6 @@ const CONPTY_NATURAL_CLOSE_WAIT: Duration = Duration::from_millis(250);
 const CONPTY_INPUT_CLOSE_GRACE: Duration = Duration::from_millis(250);
 const JOB_EMPTY_POLL: Duration = Duration::from_millis(2);
 const WRITE_CHUNK_BYTES: usize = 64 * 1024;
-const LIFECYCLE_WAIT_HORIZON: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 const MAX_COMMAND_LINE_UNITS: usize = 32_767;
 const TERMINATED_BY_HOST_EXIT_CODE: u32 = 0xC000_013A;
 
@@ -111,6 +114,25 @@ impl WindowsExactProcess {
 
     fn wait_until(&self, deadline: Instant) -> io::Result<()> {
         wait_handle_until(self.process.as_raw(), deadline)
+    }
+
+    fn is_terminated(&self) -> io::Result<bool> {
+        handle_is_signaled(self.process.as_raw())
+    }
+
+    fn terminate_until(&self, deadline: Instant) -> io::Result<()> {
+        if self.is_terminated()? {
+            return Ok(());
+        }
+        // SAFETY: this exact process handle carries PROCESS_TERMINATE and is
+        // retained until the terminal wait below completes.
+        if unsafe { TerminateProcess(self.process.as_raw(), TERMINATED_BY_HOST_EXIT_CODE) } == 0 {
+            let error = io::Error::last_os_error();
+            if !self.is_terminated()? {
+                return Err(error);
+            }
+        }
+        self.wait_until(deadline)
     }
 }
 
@@ -186,12 +208,6 @@ impl WindowsRecoveryJob {
     }
 
     pub fn assign(&self, process: &WindowsExactProcess) -> io::Result<()> {
-        if self.armed {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "cannot add a process after the recovery Job is armed",
-            ));
-        }
         let job = self
             .job
             .raw_handle()
@@ -239,6 +255,266 @@ impl WindowsRecoveryJob {
         }
         self.job.wait_empty_until(deadline)?;
         self.job.close_proven_empty()
+    }
+}
+
+/// Adopt and terminate one already-running exact Windows process tree.
+///
+/// Assigning only the root to a new Job is insufficient: Job inheritance is
+/// prospective and does not pull in children that existed before recovery.
+/// This routine therefore locks the root first, repeatedly snapshots and
+/// opens every reachable descendant through exact process handles, validates
+/// each immutable parent PID against monotonically ordered creation times,
+/// and assigns all live pre-existing members before termination. A post-kill
+/// pass directly terminates any descendant that raced the pre-kill adoption.
+/// No absence or timeout is converted into success without exact handles.
+pub(crate) fn terminate_exact_process_tree(
+    root: WindowsExactProcess,
+    timeout: Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "timeout is too large"))?;
+    let mut job = WindowsRecoveryJob::new_unarmed()?;
+    // Arm before the first assignment so every error path at least preserves
+    // kill-on-close authority for members already adopted into this Job.
+    job.arm_kill_on_close()?;
+    job.assign(&root)?;
+    #[cfg(test)]
+    run_recovery_after_root_assign_hook();
+
+    let mut processes = vec![root];
+    loop {
+        ensure_recovery_deadline(deadline)?;
+        let discovered = discover_exact_descendants(&processes)?;
+        if discovered.is_empty() {
+            break;
+        }
+        for process in discovered {
+            if !process.is_terminated()? {
+                if let Err(assign_error) = job.assign(&process) {
+                    let termination = process.terminate_until(deadline);
+                    return Err(match termination {
+                        Ok(()) => io::Error::new(
+                            assign_error.kind(),
+                            format!(
+                                "assign pre-existing descendant {} to recovery Job: {assign_error}",
+                                process.identity.pid
+                            ),
+                        ),
+                        Err(termination_error) => io::Error::other(format!(
+                            "assign pre-existing descendant {} to recovery Job: {assign_error}; exact fallback termination failed: {termination_error}",
+                            process.identity.pid
+                        )),
+                    });
+                }
+            }
+            processes.push(process);
+        }
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Windows recovery tree adoption exceeded its deadline",
+        ));
+    }
+    job.terminate_and_wait(processes.iter(), remaining)?;
+
+    // Every known parent is now pinned and terminal, so it cannot create new
+    // descendants. Repeated post scans catch pre-assignment races; exact
+    // handles prevent a recycled numeric PID from being signalled.
+    loop {
+        ensure_recovery_deadline(deadline)?;
+        let discovered = discover_exact_descendants(&processes)?;
+        if discovered.is_empty() {
+            break;
+        }
+        for process in discovered {
+            process.terminate_until(deadline).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "terminate raced recovery descendant {}: {error}",
+                        process.identity.pid
+                    ),
+                )
+            })?;
+            processes.push(process);
+        }
+    }
+    for process in &processes {
+        process.wait_until(deadline)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+type RecoveryAfterRootAssignHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+fn recovery_after_root_assign_hook() -> &'static Mutex<Option<RecoveryAfterRootAssignHook>> {
+    static HOOK: OnceLock<Mutex<Option<RecoveryAfterRootAssignHook>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn set_recovery_after_root_assign_hook(hook: RecoveryAfterRootAssignHook) {
+    *recovery_after_root_assign_hook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+}
+
+#[cfg(test)]
+fn run_recovery_after_root_assign_hook() {
+    let hook = recovery_after_root_assign_hook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProcessLineageEntry {
+    pid: u32,
+    parent_pid: u32,
+}
+
+fn discover_exact_descendants(
+    known: &[WindowsExactProcess],
+) -> io::Result<Vec<WindowsExactProcess>> {
+    let snapshot = process_lineage_snapshot()?;
+    let known_ids = known
+        .iter()
+        .map(|process| (process.identity.pid, process.identity.platform_start_key))
+        .collect::<HashMap<_, _>>();
+    let mut lineage_start_keys = known_ids.clone();
+    let mut reachable = known_ids.keys().copied().collect::<HashSet<_>>();
+    let mut ordered = Vec::new();
+    loop {
+        let mut progressed = false;
+        for entry in &snapshot {
+            if entry.pid == 0
+                || reachable.contains(&entry.pid)
+                || !reachable.contains(&entry.parent_pid)
+            {
+                continue;
+            }
+            reachable.insert(entry.pid);
+            ordered.push(*entry);
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    let reachable_children = ordered
+        .iter()
+        .map(|entry| entry.parent_pid)
+        .collect::<HashSet<_>>();
+    let mut discovered = Vec::new();
+    for entry in ordered {
+        if known_ids.contains_key(&entry.pid) {
+            continue;
+        }
+        let process = match WindowsExactProcess::open_for_recovery(entry.pid) {
+            Ok(process) => process,
+            Err(error)
+                if error.raw_os_error()
+                    == Some(i32::try_from(ERROR_INVALID_PARAMETER).unwrap_or(87)) =>
+            {
+                if reachable_children.contains(&entry.pid) {
+                    return Err(io::Error::other(format!(
+                        "descendant {} exited before its child lineage could be locked",
+                        entry.pid
+                    )));
+                }
+                continue;
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("open exact recovery descendant {}: {error}", entry.pid),
+                ));
+            }
+        };
+        let fresh_parent = process_lineage_snapshot()?
+            .into_iter()
+            .find(|fresh| fresh.pid == entry.pid)
+            .map(|fresh| fresh.parent_pid)
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "descendant {} disappeared before parent lineage revalidation",
+                    entry.pid
+                ))
+            })?;
+        if fresh_parent != entry.parent_pid {
+            return Err(io::Error::other(format!(
+                "descendant {} parent changed during exact-handle acquisition",
+                entry.pid
+            )));
+        }
+        let parent_start_key = lineage_start_keys
+            .get(&entry.parent_pid)
+            .copied()
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "descendant {} has no locked exact parent {}",
+                    entry.pid, entry.parent_pid
+                ))
+            })?;
+        if process.identity.platform_start_key < parent_start_key {
+            return Err(io::Error::other(format!(
+                "descendant {} predates exact parent {}; refusing recycled lineage",
+                entry.pid, entry.parent_pid
+            )));
+        }
+        lineage_start_keys.insert(entry.pid, process.identity.platform_start_key);
+        discovered.push(process);
+    }
+    Ok(discovered)
+}
+
+fn process_lineage_snapshot() -> io::Result<Vec<ProcessLineageEntry>> {
+    // SAFETY: the flags and process id are plain values.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    // SAFETY: a successful snapshot call returns one fresh owned handle.
+    let snapshot = unsafe { OwnedHandle::from_raw(snapshot)? };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: u32::try_from(mem::size_of::<PROCESSENTRY32W>())
+            .expect("PROCESSENTRY32W fits in u32"),
+        ..PROCESSENTRY32W::default()
+    };
+    // SAFETY: snapshot is live and entry advertises its exact writable size.
+    if unsafe { Process32FirstW(snapshot.as_raw(), &mut entry) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut processes = Vec::new();
+    loop {
+        processes.push(ProcessLineageEntry {
+            pid: entry.th32ProcessID,
+            parent_pid: entry.th32ParentProcessID,
+        });
+        // SAFETY: snapshot and writable entry remain live for iteration.
+        if unsafe { Process32NextW(snapshot.as_raw(), &mut entry) } == 0 {
+            break;
+        }
+    }
+    Ok(processes)
+}
+
+fn ensure_recovery_deadline(deadline: Instant) -> io::Result<()> {
+    if Instant::now() >= deadline {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Windows recovery process-tree proof timed out",
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -356,7 +632,13 @@ impl ChildProcessCleanup {
                 })?;
             }
         };
-        tokio::time::timeout(CLEANUP_TIMEOUT + Duration::from_secs(1), wait)
+        // The reaper has one normal proof window and, when that proof fails,
+        // one kill-on-close exact-handle settlement window. Keep the public
+        // wait bounded while allowing both phases to converge.
+        tokio::time::timeout(
+            CLEANUP_TIMEOUT + CLEANUP_TIMEOUT + Duration::from_secs(1),
+            wait,
+        )
             .await
             .map_err(|_| io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -374,18 +656,11 @@ impl ChildProcessCleanup {
                 "handed-off child process has no host-owned Windows Job cleanup authority",
             ));
         };
-        let members = process.job.member_process_handles()?;
-        process.job.terminate()?;
-        let child_result = child.wait().await.map(|_| ());
+        request_child_process_job_shutdown(process);
+        let child_result = wait_child_after_job_shutdown(process, child).await;
         let cleanup_result = self.wait().await;
         child_result?;
-        cleanup_result?;
-        wait_process_handles_until(
-            &members,
-            Instant::now()
-                .checked_add(CLEANUP_TIMEOUT)
-                .unwrap_or_else(Instant::now),
-        )
+        cleanup_result
     }
 }
 
@@ -402,40 +677,125 @@ pub(crate) fn spawn_child_process(
         });
     }
 
+    // Reserve cleanup authority before CreateProcess can create a physical
+    // child. Quarantined Job proof debt therefore fails closed here instead
+    // of multiplying another process and another reaper.
+    let poller = platform_lifecycle_poller()?;
+    let platform_permit = poller.reserve()?;
+
     command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
     let job = Arc::new(JobControl::new(create_process_job()?));
+    #[cfg(test)]
+    let test_fault = take_test_child_spawn_fault();
     let child = command.spawn()?;
-    let pid = child.id().ok_or_else(|| {
-        io::Error::other("child process exited before its process Job could be registered")
-    })?;
-    let process = child.raw_handle().ok_or_else(|| {
-        io::Error::other("child process handle disappeared before Job assignment")
-    })?;
-    let job_handle = job
-        .raw_handle()
-        .ok_or_else(|| io::Error::other("child-process Job closed before assignment"))?;
+    #[cfg(test)]
+    if test_fault == TestChildSpawnFault::MissingId {
+        return Err(retain_failed_windows_child_spawn(
+            child,
+            job,
+            platform_permit,
+            false,
+            io::Error::other("injected missing child id after CreateProcess"),
+        ));
+    }
+    let Some(pid) = child.id() else {
+        return Err(retain_failed_windows_child_spawn(
+            child,
+            job,
+            platform_permit,
+            false,
+            io::Error::other("child process exited before its process Job could be registered"),
+        ));
+    };
+    #[cfg(test)]
+    if test_fault == TestChildSpawnFault::MissingRawHandle {
+        return Err(retain_failed_windows_child_spawn(
+            child,
+            job,
+            platform_permit,
+            false,
+            io::Error::other("injected missing child process handle after CreateProcess"),
+        ));
+    }
+    let Some(process) = child.raw_handle() else {
+        return Err(retain_failed_windows_child_spawn(
+            child,
+            job,
+            platform_permit,
+            false,
+            io::Error::other("child process handle disappeared before Job assignment"),
+        ));
+    };
+    #[cfg(test)]
+    if test_fault == TestChildSpawnFault::MissingJobHandle {
+        return Err(retain_failed_windows_child_spawn(
+            child,
+            job,
+            platform_permit,
+            false,
+            io::Error::other("injected missing Job handle after CreateProcess"),
+        ));
+    }
+    let Some(job_handle) = job.raw_handle() else {
+        return Err(retain_failed_windows_child_spawn(
+            child,
+            job,
+            platform_permit,
+            false,
+            io::Error::other("child-process Job closed before assignment"),
+        ));
+    };
+    #[cfg(test)]
+    if test_fault == TestChildSpawnFault::Assignment {
+        return Err(retain_failed_windows_child_spawn(
+            child,
+            job,
+            platform_permit,
+            false,
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected AssignProcessToJobObject failure after CreateProcess",
+            ),
+        ));
+    }
     // SAFETY: both handles are live for this call. The process handle remains
     // owned by tokio::process::Child and the Job is retained by `job`.
     if unsafe { AssignProcessToJobObject(job_handle, process.cast()) } == 0 {
         let assignment_error = io::Error::last_os_error();
-        // Assignment failure must not return a live unowned child. The exact
-        // process handle is still valid even though Tokio owns it.
-        let _ = unsafe { TerminateProcess(process.cast(), TERMINATED_BY_HOST_EXIT_CODE) };
-        let _ = unsafe { WaitForSingleObject(process.cast(), 5_000) };
-        return Err(io::Error::new(
-            assignment_error.kind(),
-            format!("assign child process to process Job: {assignment_error}"),
+        return Err(retain_failed_windows_child_spawn(
+            child,
+            job,
+            platform_permit,
+            false,
+            io::Error::new(
+                assignment_error.kind(),
+                format!("assign child process to process Job: {assignment_error}"),
+            ),
         ));
     }
 
+    #[cfg(test)]
+    if test_fault == TestChildSpawnFault::DuplicateHandle {
+        return Err(retain_failed_windows_child_spawn(
+            child,
+            job,
+            platform_permit,
+            true,
+            io::Error::other("injected child-process handle duplication failure"),
+        ));
+    }
     let process = match duplicate_non_inheritable(process.cast()) {
         Ok(process) => process,
         Err(error) => {
-            let _ = job.close_for_kill();
-            let _ = unsafe { WaitForSingleObject(process.cast(), 5_000) };
-            return Err(io::Error::new(
-                error.kind(),
-                format!("duplicate child-process handle: {error}"),
+            return Err(retain_failed_windows_child_spawn(
+                child,
+                job,
+                platform_permit,
+                true,
+                io::Error::new(
+                    error.kind(),
+                    format!("duplicate child-process handle: {error}"),
+                ),
             ));
         }
     };
@@ -444,8 +804,13 @@ pub(crate) fn spawn_child_process(
         process,
         job,
         completion,
+        shutdown_requested: AtomicBool::new(false),
     });
-    if let Err(error) = register_child_process_job(pid, Arc::clone(&process)) {
+    if let Err(error) = register_child_process_job(
+        pid,
+        Arc::clone(&process),
+        platform_permit,
+    ) {
         let _ = process.job.close_for_kill();
         let _ = unsafe { WaitForSingleObject(process.process.as_raw(), 5_000) };
         return Err(error);
@@ -463,6 +828,225 @@ pub(crate) fn spawn_child_process(
     Ok((child, cleanup))
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TestChildSpawnFault {
+    #[default]
+    None,
+    MissingId,
+    MissingRawHandle,
+    MissingJobHandle,
+    Assignment,
+    DuplicateHandle,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_CHILD_SPAWN_FAULT: std::cell::Cell<TestChildSpawnFault> =
+        const { std::cell::Cell::new(TestChildSpawnFault::None) };
+    static TEST_CHILD_SPAWN_COMPLETION:
+        std::cell::RefCell<Option<mpsc::SyncSender<bool>>> = const {
+            std::cell::RefCell::new(None)
+        };
+}
+
+#[cfg(test)]
+fn take_test_child_spawn_fault() -> TestChildSpawnFault {
+    TEST_CHILD_SPAWN_FAULT.with(|fault| fault.replace(TestChildSpawnFault::None))
+}
+
+#[cfg(test)]
+fn inject_test_child_spawn_fault(fault: TestChildSpawnFault) -> mpsc::Receiver<bool> {
+    let (completion, receiver) = mpsc::sync_channel(1);
+    TEST_CHILD_SPAWN_FAULT.with(|slot| {
+        assert_eq!(
+            slot.replace(fault),
+            TestChildSpawnFault::None,
+            "a child-spawn fault injection was already armed on this thread"
+        );
+    });
+    TEST_CHILD_SPAWN_COMPLETION.with(|slot| {
+        assert!(
+            slot.borrow_mut().replace(completion).is_none(),
+            "a child-spawn completion probe was already armed on this thread"
+        );
+    });
+    receiver
+}
+
+#[cfg(test)]
+fn take_test_child_spawn_completion() -> Option<mpsc::SyncSender<bool>> {
+    TEST_CHILD_SPAWN_COMPLETION.with(|slot| slot.borrow_mut().take())
+}
+
+fn retain_failed_windows_child_spawn(
+    mut child: tokio::process::Child,
+    job: Arc<JobControl>,
+    permit: PlatformLifecyclePermit,
+    assigned_to_job: bool,
+    error: io::Error,
+) -> io::Error {
+    let mut diagnostics = Vec::new();
+    if assigned_to_job {
+        if let Err(snapshot_error) = job.capture_pre_termination_members_with_retry() {
+            diagnostics.push(format!(
+                "capture exact suspended Job members: {snapshot_error}"
+            ));
+        }
+        if let Err(termination_error) = job.terminate() {
+            diagnostics.push(format!("terminate suspended process Job: {termination_error}"));
+        }
+        if let Err(snapshot_error) = job.retain_current_members() {
+            diagnostics.push(format!(
+                "capture post-termination suspended Job members: {snapshot_error}"
+            ));
+        }
+    } else if let Err(kill_error) = child.start_kill()
+        && kill_error.kind() != io::ErrorKind::InvalidInput
+        && kill_error.kind() != io::ErrorKind::NotFound
+    {
+        diagnostics.push(format!("terminate exact suspended child: {kill_error}"));
+    }
+
+    let debt: Box<dyn LifecyclePollJob> = Box::new(WindowsChildSpawnFailurePoller {
+        child: Some(child),
+        job,
+        assigned_to_job,
+        started_at: Instant::now(),
+        initial_error: error.to_string(),
+        _permit: permit,
+        #[cfg(test)]
+        test_completion: take_test_child_spawn_completion(),
+    });
+    match platform_lifecycle_poller() {
+        Ok(poller) => {
+            if let Err(debt) = poller.submit(debt) {
+                poller.quarantine_unscheduled(
+                    debt,
+                    "Windows post-CreateProcess cleanup submission failed",
+                );
+            }
+        }
+        Err(poller_error) => {
+            diagnostics.push(format!("platform cleanup poller unavailable: {poller_error}"));
+            std::mem::forget(debt);
+        }
+    }
+    let suffix = if diagnostics.is_empty() {
+        "exact cleanup retained by the bounded platform poller".to_owned()
+    } else {
+        format!(
+            "exact cleanup retained by the bounded platform poller; {}",
+            diagnostics.join("; ")
+        )
+    };
+    io::Error::new(error.kind(), format!("{error}; {suffix}"))
+}
+
+struct WindowsChildSpawnFailurePoller {
+    child: Option<tokio::process::Child>,
+    job: Arc<JobControl>,
+    assigned_to_job: bool,
+    started_at: Instant,
+    initial_error: String,
+    _permit: PlatformLifecyclePermit,
+    #[cfg(test)]
+    test_completion: Option<mpsc::SyncSender<bool>>,
+}
+
+impl WindowsChildSpawnFailurePoller {
+    fn poll_once(&mut self, now: Instant) -> LifecyclePoll {
+        let Some(child) = self.child.as_mut() else {
+            return LifecyclePoll::Quarantine {
+                reason: "Windows failed-spawn direct child authority disappeared".to_owned(),
+            };
+        };
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                if !self.assigned_to_job {
+                    return LifecyclePoll::ExactComplete;
+                }
+                match self
+                    .job
+                    .wait_empty_until(Instant::now())
+                    .and_then(|_| self.job.wait_retained_members_until(Instant::now()))
+                    .and_then(|_| self.job.close_proven_empty())
+                {
+                    Ok(()) => LifecyclePoll::ExactComplete,
+                    Err(error) if now.duration_since(self.started_at) < CLEANUP_TIMEOUT => {
+                        tracing::warn!(%error, "Windows failed-spawn Job proof is still pending");
+                        LifecyclePoll::Pending {
+                            next_poll: now + Duration::from_millis(10),
+                        }
+                    }
+                    Err(error) => LifecyclePoll::Quarantine {
+                        reason: format!(
+                            "{}; suspended Job cleanup remained unproven: {error}",
+                            self.initial_error
+                        ),
+                    },
+                }
+            }
+            Ok(None) if now.duration_since(self.started_at) < CLEANUP_TIMEOUT => {
+                let _ = child.start_kill();
+                LifecyclePoll::Pending {
+                    next_poll: now + Duration::from_millis(10),
+                }
+            }
+            Ok(None) => LifecyclePoll::Quarantine {
+                reason: format!(
+                    "{}; exact suspended child did not reap before the bounded deadline",
+                    self.initial_error
+                ),
+            },
+            Err(error) => LifecyclePoll::Quarantine {
+                reason: format!(
+                    "{}; exact suspended child reap probe failed: {error}",
+                    self.initial_error
+                ),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn publish_test_completion(&mut self, outcome: &LifecyclePoll) {
+        let exact = match outcome {
+            LifecyclePoll::ExactComplete => true,
+            LifecyclePoll::Quarantine { .. } => false,
+            LifecyclePoll::Pending { .. } | LifecyclePoll::Blocking => return,
+        };
+        if let Some(completion) = self.test_completion.take() {
+            let _ = completion.send(exact);
+        }
+    }
+}
+
+impl LifecyclePollJob for WindowsChildSpawnFailurePoller {
+    fn poll(&mut self, now: Instant) -> LifecyclePoll {
+        let outcome = self.poll_once(now);
+        #[cfg(test)]
+        self.publish_test_completion(&outcome);
+        outcome
+    }
+
+    fn poller_failed(&mut self, _reason: &str) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+        if self.assigned_to_job {
+            let _ = self.job.close_for_kill();
+        }
+        #[cfg(test)]
+        if let Some(completion) = self.test_completion.take() {
+            let _ = completion.send(false);
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        "windows-child-spawn-failure"
+    }
+}
+
 pub(crate) async fn kill_process_tree(
     child: &mut tokio::process::Child,
 ) -> io::Result<()> {
@@ -475,24 +1059,103 @@ pub(crate) async fn kill_process_tree(
     };
 
     let cleanup = ChildProcessCleanup::from_process(&process);
-    let members = process.job.member_process_handles()?;
-    process.job.terminate()?;
-    let child_result = child.wait().await.map(|_| ());
+    request_child_process_job_shutdown(&process);
+    let child_result = wait_child_after_job_shutdown(&process, child).await;
     let cleanup_result = cleanup.wait().await;
     child_result?;
-    cleanup_result?;
-    wait_process_handles_until(
-        &members,
-        Instant::now()
-            .checked_add(CLEANUP_TIMEOUT)
-            .unwrap_or_else(Instant::now),
-    )
+    cleanup_result
+}
+
+/// Capture exact members before requesting termination, but never let a
+/// fallible snapshot suppress the kill request. If TerminateJobObject itself
+/// fails, retry it once before closing the kill-on-close Job so a transient
+/// failure can still produce a complete post-request member snapshot.
+fn request_child_process_job_shutdown(process: &ChildProcessJob) {
+    process.shutdown_requested.store(true, AtomicOrdering::Release);
+    if let Err(error) = process
+        .job
+        .capture_pre_termination_members_with_retry()
+    {
+        tracing::warn!(%error, "could not capture child-process Job members before termination");
+    }
+    match process.job.terminate() {
+        Ok(()) => {
+            if let Err(error) = process.job.retain_current_members() {
+                tracing::warn!(%error, "could not merge child-process Job members after termination");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not terminate child-process Job; retrying before kill-on-close");
+            // A failed TerminateJobObject call does not mark termination
+            // requested, so refresh the exact-member snapshot before the
+            // retry. Reusing the original idempotent capture here would leave
+            // members created after the first snapshot outside the retained
+            // interval proof.
+            if let Err(snapshot_error) = process
+                .job
+                .refresh_pre_termination_members_with_retry()
+            {
+                tracing::warn!(
+                    %snapshot_error,
+                    "could not capture child-process Job members before termination retry"
+                );
+            }
+            match process.job.terminate() {
+                Ok(()) => {
+                    if let Err(snapshot_error) = process.job.retain_current_members() {
+                        tracing::warn!(
+                            %snapshot_error,
+                            "could not merge child-process Job members after termination retry"
+                        );
+                    }
+                }
+                Err(retry_error) => {
+                    tracing::warn!(
+                        %retry_error,
+                        "child-process Job termination retry failed; using kill-on-close fallback"
+                    );
+                    // Retain any last observable members for diagnostics and
+                    // best-effort waiting, but do not mark this as a complete
+                    // post-termination proof.
+                    let _ = process.job.retain_current_members();
+                    if let Err(close_error) = process.job.close_for_kill() {
+                        tracing::warn!(
+                            %close_error,
+                            "could not issue child-process Job kill-on-close fallback"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn wait_child_after_job_shutdown(
+    process: &ChildProcessJob,
+    child: &mut tokio::process::Child,
+) -> io::Result<()> {
+    match tokio::time::timeout(CLEANUP_TIMEOUT, child.wait()).await {
+        Ok(result) => result.map(|_| ()),
+        Err(_) => {
+            process.job.close_for_kill()?;
+            tokio::time::timeout(CLEANUP_TIMEOUT, child.wait())
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "direct child did not exit after process Job kill-on-close fallback",
+                    )
+                })?
+                .map(|_| ())
+        }
+    }
 }
 
 struct ChildProcessJob {
     process: OwnedHandle,
     job: Arc<JobControl>,
     completion: watch::Sender<Option<Result<(), Arc<str>>>>,
+    shutdown_requested: AtomicBool,
 }
 
 fn child_process_jobs() -> &'static Mutex<HashMap<u32, Arc<ChildProcessJob>>> {
@@ -500,29 +1163,15 @@ fn child_process_jobs() -> &'static Mutex<HashMap<u32, Arc<ChildProcessJob>>> {
     JOBS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn register_child_process_job(pid: u32, process: Arc<ChildProcessJob>) -> io::Result<()> {
-    let start_gate = Arc::new(std::sync::Barrier::new(2));
-    let worker_gate = Arc::clone(&start_gate);
-    let worker_process = Arc::clone(&process);
-    let worker = std::thread::Builder::new()
-        .name(format!("nomi-child-process-job-{pid}"))
-        .spawn(move || {
-            worker_gate.wait();
-            reap_child_process_job(pid, worker_process);
-        })?;
-
+fn register_child_process_job(
+    pid: u32,
+    process: Arc<ChildProcessJob>,
+    permit: PlatformLifecyclePermit,
+) -> io::Result<()> {
     let registered = {
-        let mut jobs = match child_process_jobs().lock() {
-            Ok(jobs) => jobs,
-            Err(_) => {
-                let _ = process.job.close_for_kill();
-                start_gate.wait();
-                let _ = worker.join();
-                return Err(io::Error::other(
-                    "child-process Job registry is poisoned",
-                ));
-            }
-        };
+        let mut jobs = child_process_jobs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let std::collections::hash_map::Entry::Vacant(entry) = jobs.entry(pid) {
             entry.insert(Arc::clone(&process));
             true
@@ -530,17 +1179,41 @@ fn register_child_process_job(pid: u32, process: Arc<ChildProcessJob>) -> io::Re
             false
         }
     };
-    start_gate.wait();
     if !registered {
-        let _ = process.job.close_for_kill();
-        let _ = worker.join();
+        let job: Box<dyn LifecyclePollJob> = Box::new(ChildProcessJobPoller {
+            pid,
+            process: Arc::clone(&process),
+            _permit: permit,
+        });
+        let poller = platform_lifecycle_poller()?;
+        poller.quarantine_unscheduled(
+            job,
+            "duplicate Windows child-process Job registry key after physical spawn",
+        );
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("child-process Job already exists for PID {pid}"),
         ));
     }
-    drop(worker);
-    Ok(())
+    let job: Box<dyn LifecyclePollJob> = Box::new(ChildProcessJobPoller {
+        pid,
+        process: Arc::clone(&process),
+        _permit: permit,
+    });
+    let poller = platform_lifecycle_poller()?;
+    match poller.submit(job) {
+        Ok(()) => Ok(()),
+        Err(job) => {
+            remove_child_process_job(pid, &process);
+            poller.quarantine_unscheduled(
+                job,
+                "platform lifecycle poller rejected an already-admitted Windows Job",
+            );
+            Err(io::Error::other(
+                "platform lifecycle poller rejected Windows Job registration",
+            ))
+        }
+    }
 }
 
 fn child_process_job(pid: u32) -> io::Result<Option<Arc<ChildProcessJob>>> {
@@ -562,41 +1235,179 @@ fn remove_child_process_job(pid: u32, expected: &Arc<ChildProcessJob>) {
     }
 }
 
-fn reap_child_process_job(pid: u32, process: Arc<ChildProcessJob>) {
-    let deadline = Instant::now()
-        .checked_add(LIFECYCLE_WAIT_HORIZON)
-        .unwrap_or_else(Instant::now);
-    let result = wait_handle_until(process.process.as_raw(), deadline).and_then(|()| {
-        let members = process.job.member_process_handles()?;
-        if process.job.active_processes()? != 0 {
-            process.job.terminate()?;
+struct ChildProcessJobPoller {
+    pid: u32,
+    process: Arc<ChildProcessJob>,
+    _permit: PlatformLifecyclePermit,
+}
+
+impl ChildProcessJobPoller {
+    fn publish(&self, result: Result<(), Arc<str>>) {
+        if self.process.completion.borrow().is_none() {
+            self.process.completion.send_replace(Some(result));
         }
-        process.job.wait_empty_until(deadline)?;
-        wait_process_handles_until(&members, deadline)?;
+        remove_child_process_job(self.pid, &self.process);
+    }
+}
+
+impl LifecyclePollJob for ChildProcessJobPoller {
+    fn poll(&mut self, now: Instant) -> LifecyclePoll {
+        match handle_is_signaled(self.process.process.as_raw()) {
+            Ok(true) => LifecyclePoll::Blocking,
+            Ok(false) if self.process.shutdown_requested.load(AtomicOrdering::Acquire) => {
+                LifecyclePoll::Blocking
+            }
+            Ok(false) => LifecyclePoll::Pending {
+                next_poll: now + Duration::from_millis(25),
+            },
+            Err(error) => {
+                tracing::warn!(pid = self.pid, %error, "exact Windows child liveness probe failed; entering bounded cleanup");
+                LifecyclePoll::Blocking
+            }
+        }
+    }
+
+    fn poll_blocking(&mut self) -> LifecyclePoll {
+        match reap_child_process_job(&self.process) {
+            Ok(()) => {
+                self.publish(Ok(()));
+                LifecyclePoll::ExactComplete
+            }
+            Err(error) => {
+                let reason = Arc::<str>::from(error.to_string());
+                self.publish(Err(Arc::clone(&reason)));
+                LifecyclePoll::Quarantine {
+                    reason: reason.to_string(),
+                }
+            }
+        }
+    }
+
+    fn poller_failed(&mut self, reason: &str) {
+        request_child_process_job_shutdown(&self.process);
+        let _ = self.process.job.close_for_kill();
+        self.publish(Err(Arc::<str>::from(reason.to_owned())));
+    }
+
+    fn label(&self) -> &'static str {
+        "windows-child-process-job"
+    }
+}
+
+fn reap_child_process_job(process: &ChildProcessJob) -> io::Result<()> {
+    let pid = process_identity_from_handle(process.process.as_raw())
+        .map(|identity| identity.pid)
+        .unwrap_or(0);
+    // This function runs on one of four shared workers. It must never inherit
+    // the one-year live-process horizon used by a dedicated waiter: poll()
+    // dispatches it only after exit/shutdown/error, and this final wait is
+    // strictly bounded so four bad Jobs cannot pin the whole pool forever.
+    let lifecycle_deadline = Instant::now()
+        .checked_add(CLEANUP_TIMEOUT)
+        .unwrap_or_else(Instant::now);
+    let result = wait_handle_until(process.process.as_raw(), lifecycle_deadline).and_then(|()| {
+        // Once the direct child exits, cleanup gets a short, independent
+        // deadline. Reusing the one-year lifecycle horizon here used to leave
+        // the reaper blocked long after every cleanup waiter had timed out.
+        let cleanup_deadline = Instant::now()
+            .checked_add(CLEANUP_TIMEOUT)
+            .unwrap_or_else(Instant::now);
+        // Snapshot first, but issue termination regardless of snapshot/query
+        // failure. The retained pre-termination handles are the exact proof;
+        // the post-request merge covers the narrow snapshot-to-kill interval.
+        let snapshot_result = process
+            .job
+            .capture_pre_termination_members_with_retry();
+        let termination_result = process.job.terminate();
+        let supplemental_snapshot_result = process.job.retain_current_members();
+        snapshot_result?;
+        termination_result?;
+        supplemental_snapshot_result?;
+        process.job.wait_empty_until(cleanup_deadline)?;
+        process
+            .job
+            .wait_retained_members_until(cleanup_deadline)?;
         process.job.close_proven_empty()
     });
-    let completion = match result {
+    match result {
         Ok(()) => Ok(()),
         Err(error) => {
-        tracing::warn!(
-            pid,
-            %error,
-            "child-process Job reaper could not prove process-tree cleanup"
-        );
-            let fallback = process.job.close_for_kill();
-            let message = match fallback {
-                Ok(()) => format!(
-                    "child-process Job cleanup was not proven ({error}); kill-on-close fallback was issued"
-                ),
-                Err(fallback_error) => format!(
-                    "child-process Job cleanup was not proven ({error}); kill-on-close fallback failed ({fallback_error})"
-                ),
-            };
-            Err(Arc::<str>::from(message))
+            tracing::warn!(
+                pid,
+                %error,
+                "child-process Job reaper could not prove process-tree cleanup"
+            );
+            match settle_child_process_job_after_failure(process) {
+                Ok(()) => {
+                    tracing::warn!(
+                        pid,
+                        "child-process Job cleanup converged after kill-on-close fallback"
+                    );
+                    Ok(())
+                }
+                Err(fallback_error) => Err(io::Error::other(format!(
+                    "child-process Job cleanup was not proven ({error}); fallback proof failed ({fallback_error})"
+                ))),
+            }
         }
-    };
-    process.completion.send_replace(Some(completion));
-    remove_child_process_job(pid, &process);
+    }
+}
+
+/// Last-resort convergence after the normal Job proof fails.
+///
+/// The Job is snapshotted once more if termination has not yet succeeded,
+/// terminated again, merged with a post-request snapshot, and finally released
+/// through kill-on-close. A temporary accounting/query failure is recovered
+/// only when a complete pre-termination snapshot was retained and every exact
+/// handle reaches the terminal state.
+fn settle_child_process_job_after_failure(process: &ChildProcessJob) -> io::Result<()> {
+    let mut errors = Vec::new();
+    let snapshot_error = process
+        .job
+        .refresh_pre_termination_members_with_retry()
+        .err();
+    let termination_error = process.job.terminate().err();
+    let supplemental_snapshot_error = process.job.retain_current_members().err();
+    if let Err(error) = process.job.close_for_kill() {
+        errors.push(format!("issue process Job kill-on-close fallback: {error}"));
+    }
+
+    let deadline = Instant::now()
+        .checked_add(CLEANUP_TIMEOUT)
+        .unwrap_or_else(Instant::now);
+    if let Err(error) = wait_handle_until(process.process.as_raw(), deadline) {
+        errors.push(format!("wait exact direct child after fallback: {error}"));
+    }
+    if let Err(error) = process.job.require_complete_member_interval_proof() {
+        errors.push(format!("verify exact Job member interval after fallback: {error}"));
+    } else if let Err(error) = process.job.wait_retained_members_until(deadline) {
+        errors.push(format!("wait retained exact Job members after fallback: {error}"));
+    }
+
+    if errors.is_empty() {
+        // Closing a kill-on-close Job and observing every exact handle reach
+        // the terminal state is the proof. A preceding TerminateJobObject
+        // error is therefore diagnostic only once that stronger fallback
+        // proof has succeeded.
+        Ok(())
+    } else {
+        if let Some(error) = snapshot_error {
+            errors.insert(
+                0,
+                format!("capture exact Job members during fallback: {error}"),
+            );
+        }
+        if let Some(error) = termination_error {
+            errors.insert(0, format!("terminate process Job during fallback: {error}"));
+        }
+        if let Some(error) = supplemental_snapshot_error {
+            errors.insert(
+                0,
+                format!("merge post-termination Job members during fallback: {error}"),
+            );
+        }
+        Err(io::Error::other(errors.join("; ")))
+    }
 }
 
 fn duplicate_non_inheritable(handle: HANDLE) -> io::Result<OwnedHandle> {
@@ -737,6 +1548,10 @@ async fn spawn_inner(
         .checked_add(setup_timeout)
         .ok_or_else(|| invalid_command("Windows setup deadline overflowed"))?;
     let runtime = tokio::runtime::Handle::current();
+    let platform_permit = platform_lifecycle_poller()
+        .map_err(spawn_failed)?
+        .reserve()
+        .map_err(spawn_failed)?;
     let mut cancellation = StartCancellationGuard::new();
     let cancelled = cancellation.worker_flag();
     let mut transaction = tokio::task::spawn_blocking(move || {
@@ -748,6 +1563,7 @@ async fn spawn_inner(
             deadline,
             cancelled,
             transport,
+            platform_permit,
         )
     });
 
@@ -846,6 +1662,7 @@ fn spawn_transaction(
     deadline: Instant,
     cancellation: Arc<StartCancellation>,
     transport: SpawnTransport,
+    platform_permit: PlatformLifecyclePermit,
 ) -> Result<WindowsOwner, ProcessError> {
     ensure_setup_active(deadline, &cancellation).map_err(spawn_failed)?;
 
@@ -854,7 +1671,7 @@ fn spawn_transaction(
     ensure_setup_active(deadline, &cancellation).map_err(spawn_failed)?;
     let job = create_process_job().map_err(spawn_failed)?;
     let job = Arc::new(JobControl::new(job));
-    let mut transaction = SpawnTransaction::new(Arc::clone(&job), io);
+    let mut transaction = SpawnTransaction::new(Arc::clone(&job), io, platform_permit);
 
     let mut attributes = match ProcThreadAttributeList::new_one() {
         Ok(attributes) => attributes,
@@ -1024,45 +1841,45 @@ fn spawn_transaction(
             .expect("created process remains owned"),
     );
     let lifecycle_job = Arc::clone(&job);
-    runtime.spawn_blocking(move || {
-        let failure_pseudoconsole = pseudoconsole.clone();
-        let lifecycle_deadline = Instant::now()
-            .checked_add(LIFECYCLE_WAIT_HORIZON)
-            .unwrap_or_else(Instant::now);
-        let result = run_lifecycle(
-            Arc::clone(&lifecycle_process),
-            Arc::clone(&lifecycle_job),
-            readers,
-            pseudoconsole,
-            lifecycle_deadline,
-        );
-        let completion = match result {
-            Ok(fact) => LifecycleCompletion::Reaped(fact),
-            Err(error) => {
-                let kind = error.kind();
-                let mut message = lifecycle_failure_message(
-                    error,
-                    &lifecycle_process,
-                    &lifecycle_job,
-                );
-                if let Some(pseudoconsole) = failure_pseudoconsole {
-                    let close_deadline = Instant::now()
-                        .checked_add(conpty::CLOSE_TIMEOUT)
-                        .unwrap_or_else(Instant::now);
-                    if let Err(error) = pseudoconsole.close_until(close_deadline) {
-                        message.push_str(&format!(
-                            "; close pseudoconsole after lifecycle failure: {error}"
-                        ));
-                    }
-                }
-                LifecycleCompletion::Failed {
-                    kind,
-                    message: Arc::from(message),
-                }
-            }
-        };
-        completion_sender.send_replace(completion);
+    let permit = transaction
+        .platform_permit
+        .take()
+        .expect("Windows spawn retained platform lifecycle admission");
+    let wrapped: Box<dyn LifecyclePollJob> = Box::new(WindowsLifecyclePollerJob {
+        process: Arc::clone(&lifecycle_process),
+        job: Arc::clone(&lifecycle_job),
+        readers: Some(readers),
+        pseudoconsole: pseudoconsole.clone(),
+        completion: completion_sender,
+        _permit: permit,
     });
+    let poller = platform_lifecycle_poller()
+        .expect("Windows lifecycle poller was initialized before physical spawn");
+    if let Err(job) = poller.submit(wrapped) {
+        poller.quarantine_unscheduled(
+            job,
+            "Windows lifecycle poller rejected an already-admitted process",
+        );
+        transaction.disarmed = true;
+        return Err(start_lost(
+            "windows_lifecycle_poller_rejected",
+            "Windows process cleanup authority was quarantined before publication".to_owned(),
+            transaction.pid.map(|pid| ProcessSnapshot {
+                pid,
+                state: ProcessState::Lost,
+                started_at: Instant::now(),
+                last_activity_at: Instant::now(),
+            }),
+            CleanupReport {
+                force_kill_attempted: true,
+                reaped: false,
+                errors: vec![
+                    "platform poller retained exact Windows Job/process authority".to_owned(),
+                ],
+                ..CleanupReport::default()
+            },
+        ));
+    }
 
     let pid = transaction.pid.expect("created process has a PID");
     let process = transaction
@@ -1079,6 +1896,120 @@ fn spawn_transaction(
         pty_input_close_not_before,
         completion: completion_receiver,
     })
+}
+
+/// One live supervisor process monitored by the process-wide fixed poller.
+/// The short `poll` path never waits; only terminal cleanup reaches one of the
+/// four bounded blocking workers.
+struct WindowsLifecyclePollerJob {
+    process: Arc<OwnedHandle>,
+    job: Arc<JobControl>,
+    readers: Option<Vec<ReaderCompletion>>,
+    pseudoconsole: Option<Arc<PseudoConsoleControl>>,
+    completion: watch::Sender<LifecycleCompletion>,
+    _permit: PlatformLifecyclePermit,
+}
+
+impl LifecyclePollJob for WindowsLifecyclePollerJob {
+    fn poll(&mut self, now: Instant) -> LifecyclePoll {
+        match handle_is_signaled(self.process.as_raw()) {
+            Ok(true) | Err(_) => LifecyclePoll::Blocking,
+            Ok(false) => LifecyclePoll::Pending {
+                next_poll: now + Duration::from_millis(25),
+            },
+        }
+    }
+
+    fn poll_blocking(&mut self) -> LifecyclePoll {
+        let readers = self.readers.take().unwrap_or_default();
+        let failure_pseudoconsole = self.pseudoconsole.clone();
+        let lifecycle_deadline = Instant::now()
+            .checked_add(CLEANUP_TIMEOUT)
+            .unwrap_or_else(Instant::now);
+        match run_lifecycle(
+            Arc::clone(&self.process),
+            Arc::clone(&self.job),
+            readers,
+            self.pseudoconsole.take(),
+            lifecycle_deadline,
+        ) {
+            Ok(fact) => {
+                self.completion
+                    .send_replace(LifecycleCompletion::Reaped(fact));
+                LifecyclePoll::ExactComplete
+            }
+            Err(error) => {
+                let kind = error.kind();
+                let mut message =
+                    lifecycle_failure_message(error, &self.process, &self.job);
+                if let Some(pseudoconsole) = failure_pseudoconsole {
+                    let close_deadline = Instant::now()
+                        .checked_add(conpty::CLOSE_TIMEOUT)
+                        .unwrap_or_else(Instant::now);
+                    if let Err(error) = pseudoconsole.close_until(close_deadline) {
+                        message.push_str(&format!(
+                            "; close pseudoconsole after lifecycle failure: {error}"
+                        ));
+                    }
+                }
+                self.completion.send_replace(LifecycleCompletion::Failed {
+                    kind,
+                    message: Arc::from(message.clone()),
+                });
+                if self.job.is_proven_empty_and_closed() {
+                    LifecyclePoll::ExactComplete
+                } else {
+                    LifecyclePoll::Quarantine { reason: message }
+                }
+            }
+        }
+    }
+
+    fn poller_failed(&mut self, reason: &str) {
+        let _ = self.job.terminate();
+        let _ = self.job.close_for_kill();
+        if let Some(pseudoconsole) = self.pseudoconsole.as_ref() {
+            let _ = pseudoconsole.begin_close();
+        }
+        self.completion.send_replace(LifecycleCompletion::Failed {
+            kind: io::ErrorKind::Other,
+            message: Arc::from(reason.to_owned()),
+        });
+    }
+
+    fn label(&self) -> &'static str {
+        "windows-process-lifecycle"
+    }
+}
+
+/// Sticky proof debt created only when a pre-publication spawn cleanup could
+/// not be proven. The Job/process handles and the admission lease are retained
+/// together, so repeated failures eventually fence new physical spawns rather
+/// than growing without bound.
+struct WindowsFailedSpawnDebt {
+    process: Option<Arc<OwnedHandle>>,
+    job: Arc<JobControl>,
+    _permit: PlatformLifecyclePermit,
+}
+
+impl LifecyclePollJob for WindowsFailedSpawnDebt {
+    fn poll(&mut self, _now: Instant) -> LifecyclePoll {
+        LifecyclePoll::Quarantine {
+            reason: "Windows pre-publication process cleanup remains unproven".to_owned(),
+        }
+    }
+
+    fn poller_failed(&mut self, _reason: &str) {
+        let _ = self.job.terminate();
+        let _ = self.job.close_for_kill();
+        // Retain the exact process handle even after kill-on-close; absence is
+        // intentionally not claimed without the missing Job interval proof.
+        let _ = self.process.as_ref();
+    }
+
+    fn label(&self) -> &'static str {
+        "windows-failed-spawn-debt"
+    }
 }
 
 trait Win32Facade: Send + Sync {
@@ -1195,11 +2126,16 @@ struct SpawnTransaction {
     job: Arc<JobControl>,
     io: Option<PreparedIo>,
     phase: SpawnPhase,
+    platform_permit: Option<PlatformLifecyclePermit>,
     disarmed: bool,
 }
 
 impl SpawnTransaction {
-    fn new(job: Arc<JobControl>, io: PreparedIo) -> Self {
+    fn new(
+        job: Arc<JobControl>,
+        io: PreparedIo,
+        platform_permit: PlatformLifecyclePermit,
+    ) -> Self {
         Self {
             pid: None,
             process: None,
@@ -1207,6 +2143,7 @@ impl SpawnTransaction {
             job,
             io: Some(io),
             phase: SpawnPhase::Preparing,
+            platform_permit: Some(platform_permit),
             disarmed: false,
         }
     }
@@ -1284,6 +2221,23 @@ impl SpawnTransaction {
                 .unwrap_or(setup_deadline),
         );
         let cleanup = self.cleanup(cleanup_deadline);
+        if !cleanup.reaped
+            && let Some(permit) = self.platform_permit.take()
+        {
+            let debt: Box<dyn LifecyclePollJob> = Box::new(WindowsFailedSpawnDebt {
+                process: self.process.take(),
+                job: Arc::clone(&self.job),
+                _permit: permit,
+            });
+            if let Ok(poller) = platform_lifecycle_poller() {
+                poller.quarantine_unscheduled(
+                    debt,
+                    "Windows spawn cleanup ended without exact process-tree proof",
+                );
+            } else {
+                std::mem::forget(debt);
+            }
+        }
         self.disarmed = true;
 
         if phase != SpawnPhase::Resumed && cleanup.reaped && cleanup.errors.is_empty() {
@@ -1374,7 +2328,6 @@ impl SpawnTransaction {
                 .push(format!("close Windows transport: {error}"));
         }
         self.io.take();
-        self.process.take();
         cleanup.elapsed = started.elapsed();
         cleanup
     }
@@ -1776,12 +2729,23 @@ fn process_identity_from_handle(handle: HANDLE) -> io::Result<WindowsProcessIden
 
 struct JobControl {
     state: Mutex<JobState>,
+    #[cfg(test)]
+    test_member_snapshot_failures: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    test_supplemental_snapshot_failures: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    test_wait_empty_failures: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    test_terminate_failures: std::sync::atomic::AtomicUsize,
 }
 
 struct JobState {
     handle: Option<OwnedHandle>,
     termination_requested: bool,
     empty_proven: bool,
+    retained_member_handles: Vec<OwnedHandle>,
+    pre_termination_snapshot_complete: bool,
+    post_termination_snapshot_complete: bool,
 }
 
 impl JobControl {
@@ -1791,8 +2755,43 @@ impl JobControl {
                 handle: Some(handle),
                 termination_requested: false,
                 empty_proven: false,
+                retained_member_handles: Vec::new(),
+                pre_termination_snapshot_complete: false,
+                post_termination_snapshot_complete: false,
             }),
+            #[cfg(test)]
+            test_member_snapshot_failures: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            test_supplemental_snapshot_failures: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            test_wait_empty_failures: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            test_terminate_failures: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    fn inject_member_snapshot_failures(&self, count: usize) {
+        self.test_member_snapshot_failures
+            .store(count, AtomicOrdering::Release);
+    }
+
+    #[cfg(test)]
+    fn inject_supplemental_snapshot_failures(&self, count: usize) {
+        self.test_supplemental_snapshot_failures
+            .store(count, AtomicOrdering::Release);
+    }
+
+    #[cfg(test)]
+    fn inject_wait_empty_failures(&self, count: usize) {
+        self.test_wait_empty_failures
+            .store(count, AtomicOrdering::Release);
+    }
+
+    #[cfg(test)]
+    fn inject_terminate_failures(&self, count: usize) {
+        self.test_terminate_failures
+            .store(count, AtomicOrdering::Release);
     }
 
     fn raw_handle(&self) -> Option<HANDLE> {
@@ -1800,50 +2799,164 @@ impl JobControl {
         state.handle.as_ref().map(OwnedHandle::as_raw)
     }
 
-    /// Snapshot exact handles for every process still assigned to this Job.
-    ///
-    /// `ActiveProcesses == 0` may become visible a few scheduler ticks before
-    /// an already-open process handle is signalled. Retaining these handles
-    /// lets the cleanup completion prove that leader-first descendants have
-    /// reached the Windows process-object terminal state, not merely that Job
-    /// termination was requested.
-    fn member_process_handles(&self) -> io::Result<Vec<OwnedHandle>> {
-        let state = self
+    /// Retain a complete exact-member snapshot before any host termination
+    /// request. Post-termination accounting alone is not sufficient because a
+    /// process can leave the Job PID list just before its process handle is
+    /// signalled.
+    fn capture_pre_termination_members(&self) -> io::Result<()> {
+        let mut state = self
             .state
             .lock()
             .map_err(|_| io::Error::other("process Job state is poisoned"))?;
+        if state.pre_termination_snapshot_complete {
+            return Ok(());
+        }
+        if state.termination_requested {
+            return Err(io::Error::other(
+                "process Job termination was requested before an exact member snapshot completed",
+            ));
+        }
         if state.empty_proven {
-            return Ok(Vec::new());
+            state.pre_termination_snapshot_complete = true;
+            return Ok(());
+        }
+        #[cfg(test)]
+        if consume_injected_failure(&self.test_member_snapshot_failures) {
+            return Err(io::Error::other(
+                "injected process Job member snapshot failure",
+            ));
         }
         let handle = state
             .handle
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "process Job is closed"))?
             .as_raw();
-        let process_ids = query_job_process_ids(handle)?;
-        let mut processes = Vec::with_capacity(process_ids.len());
-        for pid in process_ids {
-            // SAFETY: OpenProcess validates the PID and returns a fresh
-            // non-inheritable process handle on success.
-            let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-            if raw.is_null() {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error()
-                    == Some(i32::try_from(ERROR_INVALID_PARAMETER).unwrap_or(87))
-                {
-                    // The exact member completed between the Job snapshot and
-                    // OpenProcess, which already proves it cannot execute.
-                    continue;
-                }
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!("open Job member process {pid} for exit proof: {error}"),
-                ));
-            }
-            // SAFETY: OpenProcess returned a fresh owned handle.
-            processes.push(unsafe { OwnedHandle::from_raw(raw)? });
+        let members = query_verified_job_members(handle)?;
+        state.retained_member_handles.extend(members);
+        state.pre_termination_snapshot_complete = true;
+        Ok(())
+    }
+
+    fn capture_pre_termination_members_with_retry(&self) -> io::Result<()> {
+        match self.capture_pre_termination_members() {
+            Ok(()) => Ok(()),
+            Err(first_error) => self.capture_pre_termination_members().map_err(|second_error| {
+                io::Error::other(format!(
+                    "capture exact Job members before termination failed twice ({first_error}; {second_error})"
+                ))
+            }),
         }
-        Ok(processes)
+    }
+
+    /// Refresh the retained pre-termination boundary even when an earlier
+    /// snapshot already completed. This is required before retrying a failed
+    /// termination request: the Job remained live during that failure window
+    /// and could have acquired additional descendants.
+    fn refresh_pre_termination_members(&self) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("process Job state is poisoned"))?;
+        if state.termination_requested {
+            return if state.pre_termination_snapshot_complete {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    "process Job termination was requested before an exact member snapshot completed",
+                ))
+            };
+        }
+        if state.empty_proven {
+            state.pre_termination_snapshot_complete = true;
+            return Ok(());
+        }
+        #[cfg(test)]
+        if consume_injected_failure(&self.test_member_snapshot_failures) {
+            return Err(io::Error::other(
+                "injected process Job member snapshot failure",
+            ));
+        }
+        let handle = state
+            .handle
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "process Job is closed"))?
+            .as_raw();
+        let members = query_verified_job_members(handle)?;
+        state.retained_member_handles.extend(members);
+        state.pre_termination_snapshot_complete = true;
+        Ok(())
+    }
+
+    fn refresh_pre_termination_members_with_retry(&self) -> io::Result<()> {
+        match self.refresh_pre_termination_members() {
+            Ok(()) => Ok(()),
+            Err(first_error) => self.refresh_pre_termination_members().map_err(|second_error| {
+                io::Error::other(format!(
+                    "refresh exact Job members before termination retry failed twice ({first_error}; {second_error})"
+                ))
+            }),
+        }
+    }
+
+    /// Merge a post-request snapshot into the retained evidence. This catches
+    /// members created in the narrow snapshot-to-termination interval, but it
+    /// deliberately does not establish pre-termination completeness by itself.
+    fn retain_current_members(&self) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("process Job state is poisoned"))?;
+        if !state.termination_requested {
+            return Err(io::Error::other(
+                "process Job member merge completed before termination was requested",
+            ));
+        }
+        if state.empty_proven {
+            state.post_termination_snapshot_complete = true;
+            return Ok(());
+        }
+        #[cfg(test)]
+        if consume_injected_failure(&self.test_supplemental_snapshot_failures) {
+            return Err(io::Error::other(
+                "injected process Job supplemental member snapshot failure",
+            ));
+        }
+        let handle = state
+            .handle
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "process Job is closed"))?
+            .as_raw();
+        let members = query_verified_job_members(handle)?;
+        state.retained_member_handles.extend(members);
+        state.post_termination_snapshot_complete = true;
+        Ok(())
+    }
+
+    fn require_complete_member_interval_proof(&self) -> io::Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("process Job state is poisoned"))?;
+        if !state.pre_termination_snapshot_complete {
+            return Err(io::Error::other(
+                "no complete exact Job member snapshot was obtained before termination",
+            ));
+        }
+        if !state.post_termination_snapshot_complete {
+            return Err(io::Error::other(
+                "no complete exact Job member snapshot was obtained after termination",
+            ));
+        }
+        Ok(())
+    }
+
+    fn wait_retained_members_until(&self, deadline: Instant) -> io::Result<()> {
+        self.require_complete_member_interval_proof()?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("process Job state is poisoned"))?;
+        wait_process_handles_until(&state.retained_member_handles, deadline)
     }
 
     fn terminate(&self) -> io::Result<()> {
@@ -1856,6 +2969,10 @@ impl JobControl {
         }
         if state.termination_requested {
             return Ok(());
+        }
+        #[cfg(test)]
+        if consume_injected_failure(&self.test_terminate_failures) {
+            return Err(io::Error::other("injected process Job termination failure"));
         }
         let handle = state
             .handle
@@ -1911,7 +3028,22 @@ impl JobControl {
         Ok(())
     }
 
+    fn is_proven_empty_and_closed(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.empty_proven && state.handle.is_none()
+    }
+
     fn wait_empty_until(&self, deadline: Instant) -> io::Result<()> {
+        #[cfg(test)]
+        if consume_injected_failure(&self.test_wait_empty_failures) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "injected process Job empty-proof timeout",
+            ));
+        }
         loop {
             if self.active_processes()? == 0 {
                 return Ok(());
@@ -1940,6 +3072,67 @@ impl JobControl {
         drop(handle);
         Ok(())
     }
+}
+
+#[cfg(test)]
+fn consume_injected_failure(counter: &std::sync::atomic::AtomicUsize) -> bool {
+    counter
+        .fetch_update(
+            AtomicOrdering::AcqRel,
+            AtomicOrdering::Acquire,
+            |remaining| remaining.checked_sub(1),
+        )
+        .is_ok()
+}
+
+fn query_verified_job_members(job: HANDLE) -> io::Result<Vec<OwnedHandle>> {
+    let process_ids = query_job_process_ids(job)?;
+    let mut processes = Vec::with_capacity(process_ids.len());
+    for pid in process_ids {
+        if let Some(process) = open_verified_job_member(job, pid)? {
+            processes.push(process);
+        }
+    }
+    Ok(processes)
+}
+
+fn open_verified_job_member(job: HANDLE, pid: u32) -> io::Result<Option<OwnedHandle>> {
+    // SAFETY: OpenProcess validates the PID and returns a fresh,
+    // non-inheritable process handle on success. IsProcessInJob additionally
+    // requires query-limited-information access on the process handle.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if raw.is_null() {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(i32::try_from(ERROR_INVALID_PARAMETER).unwrap_or(87)) {
+            // The exact member completed between the Job snapshot and
+            // OpenProcess, which already proves it cannot execute.
+            return Ok(None);
+        }
+        return Err(io::Error::new(
+            error.kind(),
+            format!("open Job member process {pid} for exit proof: {error}"),
+        ));
+    }
+    // SAFETY: OpenProcess returned a fresh owned handle.
+    let process = unsafe { OwnedHandle::from_raw(raw)? };
+    let mut still_in_job = 0;
+    // A member can exit and its numeric PID can be reused between the Job PID
+    // query and OpenProcess. Verify the opened process object, not the number,
+    // before accepting it as cleanup authority.
+    if unsafe { IsProcessInJob(process.as_raw(), job, &mut still_in_job) } == 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!("verify process {pid} remains in process Job: {error}"),
+        ));
+    }
+    Ok((still_in_job != 0).then_some(process))
 }
 
 fn query_job_process_ids(job: HANDLE) -> io::Result<Vec<u32>> {
@@ -2919,6 +4112,412 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn job_member_verification_rejects_an_opened_process_outside_the_job() {
+        let job = JobControl::new(create_process_job().expect("empty process Job should be created"));
+        let job_handle = job
+            .raw_handle()
+            .expect("new process Job should retain its handle");
+
+        let member = open_verified_job_member(job_handle, std::process::id())
+            .expect("current process membership should be queryable");
+
+        assert!(
+            member.is_none(),
+            "an opened process object outside the Job must not be accepted after a PID race"
+        );
+    }
+
+    #[test]
+    fn termination_retry_refreshes_an_already_complete_pre_snapshot() {
+        let job = JobControl::new(create_process_job().expect("empty process Job should be created"));
+        job.capture_pre_termination_members()
+            .expect("initial exact-member snapshot should complete");
+        job.inject_member_snapshot_failures(1);
+
+        let error = job
+            .refresh_pre_termination_members()
+            .expect_err("retry refresh must query again instead of accepting the old snapshot");
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected process Job member snapshot failure"),
+            "refresh should exercise a new member query: {error}"
+        );
+        job.close_for_kill()
+            .expect("empty test Job should close through kill-on-close");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn every_post_create_child_spawn_failure_is_reaped_by_the_bounded_poller() {
+        let temporary = TempDir::new().expect("temporary marker directory should be created");
+        let cases = [
+            (TestChildSpawnFault::MissingId, "missing child id"),
+            (
+                TestChildSpawnFault::MissingRawHandle,
+                "missing child process handle",
+            ),
+            (TestChildSpawnFault::MissingJobHandle, "missing Job handle"),
+            (
+                TestChildSpawnFault::Assignment,
+                "AssignProcessToJobObject failure",
+            ),
+            (
+                TestChildSpawnFault::DuplicateHandle,
+                "handle duplication failure",
+            ),
+        ];
+
+        for (index, (fault, expected_message)) in cases.into_iter().enumerate() {
+            let marker = temporary.path().join(format!("must-not-run-{index}.marker"));
+            let mut command = tokio::process::Command::new(command_shell());
+            command
+                .args([
+                    OsString::from("/D"),
+                    OsString::from("/S"),
+                    OsString::from("/C"),
+                    OsString::from(format!(
+                        ">\"{}\" echo resumed & ping -n 30 127.0.0.1 >NUL",
+                        marker.display()
+                    )),
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let admitted_before =
+                crate::platform::poller::platform_lifecycle_metrics().admitted;
+            let completion = inject_test_child_spawn_fault(fault);
+
+            let error = match spawn_child_process(command, false) {
+                Ok(_) => panic!("injected post-CreateProcess failure must reject the spawn"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(expected_message),
+                "unexpected injected failure for {fault:?}: {error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("exact cleanup retained by the bounded platform poller"),
+                "post-create failure did not report durable cleanup retention: {error}"
+            );
+            assert_eq!(
+                completion
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("failed-spawn cleanup must publish a bounded result"),
+                true,
+                "{fault:?} did not reach exact direct-child/Job cleanup proof"
+            );
+            let release_deadline = Instant::now() + Duration::from_secs(1);
+            while crate::platform::poller::platform_lifecycle_metrics().admitted
+                > admitted_before
+                && Instant::now() < release_deadline
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                crate::platform::poller::platform_lifecycle_metrics().admitted
+                    <= admitted_before,
+                "{fault:?} retained its lifecycle slot after exact cleanup"
+            );
+            assert!(
+                !marker.exists(),
+                "{fault:?} resumed the suspended child and executed user code"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn child_job_registry_removes_the_exact_entry_at_terminal_cleanup() {
+        let mut command = tokio::process::Command::new(command_shell());
+        command
+            .args(["/D", "/S", "/C", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, cleanup) = spawn_child_process(command, false)
+            .expect("managed child with registry authority should start");
+        let pid = child.id().expect("managed child should expose its PID");
+        child.wait().await.expect("direct child should reap");
+        cleanup
+            .wait()
+            .await
+            .expect("process Job should publish exact cleanup");
+
+        assert!(
+            child_process_job(pid)
+                .expect("registry lookup should remain healthy")
+                .is_none(),
+            "terminal child-process Job entry was not retired"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn child_cleanup_survives_a_temporary_member_snapshot_failure() {
+        let mut command = tokio::process::Command::new(command_shell());
+        command
+            .args(["/D", "/S", "/C", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, cleanup) = spawn_child_process(command, false)
+            .expect("managed child with process Job should start");
+        let process = cleanup
+            .process
+            .as_ref()
+            .expect("managed child should retain Job cleanup authority");
+        process.job.inject_member_snapshot_failures(1);
+
+        cleanup
+            .shutdown(&mut child)
+            .await
+            .expect("termination must converge despite one member snapshot failure");
+
+        assert!(
+            child
+                .try_wait()
+                .expect("reaped child status should be readable")
+                .is_some(),
+            "snapshot failure skipped process Job termination or direct-child reap"
+        );
+        assert_eq!(
+            process
+                .job
+                .test_member_snapshot_failures
+                .load(AtomicOrdering::Acquire),
+            0,
+            "the injected member snapshot failure was not exercised"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn child_cleanup_recovers_a_temporary_supplemental_snapshot_failure() {
+        let mut command = tokio::process::Command::new(command_shell());
+        command
+            .args(["/D", "/S", "/C", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, cleanup) = spawn_child_process(command, false)
+            .expect("managed child with process Job should start");
+        let process = cleanup
+            .process
+            .as_ref()
+            .expect("managed child should retain Job cleanup authority");
+        process.job.inject_supplemental_snapshot_failures(1);
+
+        cleanup
+            .shutdown(&mut child)
+            .await
+            .expect("a later complete post-termination snapshot should recover one query failure");
+
+        assert_eq!(
+            process
+                .job
+                .test_supplemental_snapshot_failures
+                .load(AtomicOrdering::Acquire),
+            0,
+            "the injected supplemental snapshot failure was not exercised"
+        );
+        assert!(
+            matches!(process.completion.borrow().as_ref(), Some(Ok(()))),
+            "a complete retry must publish successful interval proof"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn persistent_supplemental_snapshot_failure_kills_but_fails_closed() {
+        let mut command = tokio::process::Command::new(command_shell());
+        command
+            .args(["/D", "/S", "/C", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, cleanup) = spawn_child_process(command, false)
+            .expect("managed child with process Job should start");
+        let process = cleanup
+            .process
+            .as_ref()
+            .expect("managed child should retain Job cleanup authority");
+        process.job.inject_supplemental_snapshot_failures(3);
+
+        let error = cleanup
+            .shutdown(&mut child)
+            .await
+            .expect_err("persistent interval-query failure must never publish cleanup success");
+
+        assert!(
+            child
+                .try_wait()
+                .expect("reaped child status should be readable")
+                .is_some(),
+            "proof failure must not suppress TerminateJobObject or kill-on-close"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("no complete exact Job member snapshot was obtained after termination"),
+            "persistent supplemental failure should report missing interval proof: {error}"
+        );
+        assert!(
+            matches!(process.completion.borrow().as_ref(), Some(Err(_))),
+            "persistent missing interval proof must be published as failure"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn reaper_fails_closed_without_any_complete_member_snapshot() {
+        let mut command = tokio::process::Command::new(command_shell());
+        command
+            .args(["/D", "/S", "/C", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, cleanup) = spawn_child_process(command, false)
+            .expect("managed child with process Job should start");
+        let process = cleanup
+            .process
+            .as_ref()
+            .expect("managed child should retain Job cleanup authority");
+        process.job.inject_member_snapshot_failures(2);
+
+        let error = cleanup
+            .shutdown(&mut child)
+            .await
+            .expect_err("cleanup must remain unproven when both snapshots fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("no complete exact Job member snapshot was obtained"),
+            "persistent snapshot failure should report the missing proof: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn child_cleanup_retries_a_temporary_terminate_failure() {
+        let mut command = tokio::process::Command::new(command_shell());
+        command
+            .args(["/D", "/S", "/C", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, cleanup) = spawn_child_process(command, false)
+            .expect("managed child with process Job should start");
+        let process = cleanup
+            .process
+            .as_ref()
+            .expect("managed child should retain Job cleanup authority");
+        process.job.inject_terminate_failures(1);
+
+        cleanup
+            .shutdown(&mut child)
+            .await
+            .expect("termination retry should converge after one temporary failure");
+
+        assert_eq!(
+            process
+                .job
+                .test_terminate_failures
+                .load(AtomicOrdering::Acquire),
+            0,
+            "the injected TerminateJobObject failure was not exercised"
+        );
+        assert!(
+            child
+                .try_wait()
+                .expect("reaped child status should be readable")
+                .is_some(),
+            "termination retry did not terminate the direct child"
+        );
+        assert!(
+            matches!(process.completion.borrow().as_ref(), Some(Ok(()))),
+            "pre/post exact handles should make the termination retry provable"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn persistent_terminate_failure_kills_on_close_but_remains_unproven() {
+        let mut command = tokio::process::Command::new(command_shell());
+        command
+            .args(["/D", "/S", "/C", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, cleanup) = spawn_child_process(command, false)
+            .expect("managed child with process Job should start");
+        let process = cleanup
+            .process
+            .as_ref()
+            .expect("managed child should retain Job cleanup authority");
+        process.job.inject_terminate_failures(2);
+
+        let error = cleanup
+            .shutdown(&mut child)
+            .await
+            .expect_err("close-only fallback cannot claim a complete exact-member proof");
+
+        assert!(
+            child
+                .try_wait()
+                .expect("reaped child status should be readable")
+                .is_some(),
+            "persistent termination failure left the direct child alive"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("no complete exact Job member snapshot was obtained after termination"),
+            "persistent termination failure should fail closed on missing interval proof: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn reaper_fallback_publishes_success_after_exact_handles_terminate() {
+        let mut command = tokio::process::Command::new(command_shell());
+        command
+            .args(["/D", "/S", "/C", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, cleanup) = spawn_child_process(command, false)
+            .expect("managed child with process Job should start");
+        let process = cleanup
+            .process
+            .as_ref()
+            .expect("managed child should retain Job cleanup authority");
+        process.job.inject_wait_empty_failures(1);
+
+        cleanup
+            .shutdown(&mut child)
+            .await
+            .expect("kill-on-close fallback should settle verified exact handles");
+
+        assert_eq!(
+            process
+                .job
+                .test_wait_empty_failures
+                .load(AtomicOrdering::Acquire),
+            0,
+            "the injected normal Job proof failure was not exercised"
+        );
+        assert!(
+            matches!(process.completion.borrow().as_ref(), Some(Ok(()))),
+            "a recovered fallback must publish success instead of a sticky error"
+        );
     }
 
     #[test]

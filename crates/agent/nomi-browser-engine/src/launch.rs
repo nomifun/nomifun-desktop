@@ -95,18 +95,20 @@ impl Launched {
         LaunchTransport,
         crate::profile::BrowserOwnershipToken,
         Option<PathBuf>,
+        Option<crate::host::HostCleanupLease>,
     ) {
         let transport = self
             .transport
             .take()
             .expect("launched browser still owns its transport");
-        let (process, ownership_token, cleanup_user_data_dir) =
+        let (process, ownership_token, cleanup_user_data_dir, host_cleanup_lease) =
             self.cleanup.take_managed();
         (
             process,
             transport,
             ownership_token,
             cleanup_user_data_dir,
+            host_cleanup_lease,
         )
     }
 
@@ -125,13 +127,14 @@ impl Launched {
         (LaunchedProcessGuard, crate::transport::Connection),
         crate::transport::TransportError,
     > {
-        let (process, transport, ownership_token, cleanup_user_data_dir) =
+        let (process, transport, ownership_token, cleanup_user_data_dir, host_cleanup_lease) =
             self.into_managed();
         let process = LaunchedProcessGuard {
-            cleanup: CommittedLaunchGuard::new(
+            cleanup: CommittedLaunchGuard::new_with_host_lease(
                 process,
                 ownership_token,
                 cleanup_user_data_dir,
+                host_cleanup_lease,
             ),
         };
         let connection = crate::transport::Connection::connect_launched(transport).await?;
@@ -252,6 +255,7 @@ struct UncommittedLaunchGuard<'claim> {
     process: Option<nomi_process_runtime::ManagedChildProcess>,
     ephemeral_cleanup: Option<crate::profile::EphemeralProfileCleanupToken>,
     ownership_claim: &'claim crate::profile::ProfileLaunchClaim,
+    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
 }
 
 impl<'claim> UncommittedLaunchGuard<'claim> {
@@ -259,10 +263,19 @@ impl<'claim> UncommittedLaunchGuard<'claim> {
         ownership_claim: &'claim crate::profile::ProfileLaunchClaim,
         ephemeral_cleanup: Option<crate::profile::EphemeralProfileCleanupToken>,
     ) -> Self {
+        Self::new_with_host_lease(ownership_claim, ephemeral_cleanup, None)
+    }
+
+    fn new_with_host_lease(
+        ownership_claim: &'claim crate::profile::ProfileLaunchClaim,
+        ephemeral_cleanup: Option<crate::profile::EphemeralProfileCleanupToken>,
+        host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    ) -> Self {
         Self {
             process: None,
             ephemeral_cleanup,
             ownership_claim,
+            host_cleanup_lease,
         }
     }
 
@@ -289,7 +302,12 @@ impl<'claim> UncommittedLaunchGuard<'claim> {
             .ephemeral_cleanup
             .take()
             .map(crate::profile::EphemeralProfileCleanupToken::into_profile_dir);
-        CommittedLaunchGuard::new(process, ownership_token, cleanup_user_data_dir)
+        CommittedLaunchGuard::new_with_host_lease(
+            process,
+            ownership_token,
+            cleanup_user_data_dir,
+            self.host_cleanup_lease.take(),
+        )
     }
 
     async fn cleanup_under_claim(mut self) -> Result<(), BrowserError> {
@@ -305,20 +323,28 @@ impl<'claim> UncommittedLaunchGuard<'claim> {
         }
         self.process.take();
         self.ephemeral_cleanup.take();
+        self.host_cleanup_lease.take();
         Ok(())
     }
 }
 
 impl Drop for UncommittedLaunchGuard<'_> {
     fn drop(&mut self) {
+        let host_cleanup_lease = self.host_cleanup_lease.take();
         match (self.process.take(), self.ephemeral_cleanup.take()) {
             (Some(process), Some(ephemeral_cleanup)) => {
-                hand_off_uncommitted_browser_cleanup(process, ephemeral_cleanup);
+                hand_off_uncommitted_browser_cleanup(
+                    process,
+                    Some(ephemeral_cleanup),
+                    host_cleanup_lease,
+                );
             }
             (Some(process), None) => {
-                // ManagedChildProcess owns the stable-profile process proof and
-                // delegates it to its durable cleanup relay on drop.
-                drop(process);
+                hand_off_uncommitted_browser_cleanup(
+                    process,
+                    None,
+                    host_cleanup_lease,
+                );
             }
             (None, Some(ephemeral_cleanup)) => {
                 if crate::profile::cleanup_uncommitted_ephemeral_profile_after_exact_shutdown_under_launch_claim(
@@ -347,6 +373,7 @@ struct CommittedLaunchGuard {
     process: Option<nomi_process_runtime::ManagedChildProcess>,
     ownership_token: Option<crate::profile::BrowserOwnershipToken>,
     cleanup_user_data_dir: Option<PathBuf>,
+    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
 }
 
 impl CommittedLaunchGuard {
@@ -355,10 +382,20 @@ impl CommittedLaunchGuard {
         ownership_token: crate::profile::BrowserOwnershipToken,
         cleanup_user_data_dir: Option<PathBuf>,
     ) -> Self {
+        Self::new_with_host_lease(process, ownership_token, cleanup_user_data_dir, None)
+    }
+
+    fn new_with_host_lease(
+        process: nomi_process_runtime::ManagedChildProcess,
+        ownership_token: crate::profile::BrowserOwnershipToken,
+        cleanup_user_data_dir: Option<PathBuf>,
+        host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    ) -> Self {
         Self {
             process: Some(process),
             ownership_token: Some(ownership_token),
             cleanup_user_data_dir,
+            host_cleanup_lease,
         }
     }
 
@@ -374,6 +411,7 @@ impl CommittedLaunchGuard {
         nomi_process_runtime::ManagedChildProcess,
         crate::profile::BrowserOwnershipToken,
         Option<PathBuf>,
+        Option<crate::host::HostCleanupLease>,
     ) {
         (
             self.process
@@ -383,6 +421,7 @@ impl CommittedLaunchGuard {
                 .take()
                 .expect("committed launch still owns its ownership token"),
             self.cleanup_user_data_dir.take(),
+            self.host_cleanup_lease.take(),
         )
     }
 
@@ -406,6 +445,7 @@ impl CommittedLaunchGuard {
         if result.is_ok() {
             self.process.take();
             self.ownership_token.take();
+            self.host_cleanup_lease.take();
         }
         result
     }
@@ -422,6 +462,7 @@ impl Drop for CommittedLaunchGuard {
             process,
             ownership_token,
             self.cleanup_user_data_dir.take(),
+            self.host_cleanup_lease.take(),
         );
     }
 }
@@ -430,15 +471,40 @@ fn spawn_committed_launch_cleanup(
     process: nomi_process_runtime::ManagedChildProcess,
     ownership_token: crate::profile::BrowserOwnershipToken,
     cleanup_user_data_dir: Option<PathBuf>,
+    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
 ) {
-    hand_off_dropped_browser_cleanup(
+    hand_off_dropped_browser_cleanup_with_host_lease(
         std::sync::Arc::new(tokio::sync::Mutex::new(process)),
         ownership_token,
         cleanup_user_data_dir,
+        host_cleanup_lease,
     );
 }
 
 const DROPPED_BROWSER_CLEANUP_MAX_ATTEMPTS: usize = 20;
+const BROWSER_CLEANUP_RELAY_CAPACITY: usize = 64;
+/// Exact authorities which exhausted the automatic relay remain pinned here
+/// instead of disappearing when the caller ignored the completion ticket.
+/// Crossing this failure-debt threshold fences new launches; already-admitted
+/// tasks may still hand off without blocking. This is not a live-browser cap.
+const BROWSER_CLEANUP_QUARANTINE_CAPACITY: usize = 64;
+const BROWSER_CLEANUP_RELAY_WORKERS: usize = 2;
+const BROWSER_CLEANUP_THREAD_STACK_BYTES: usize = 512 * 1024;
+const BROWSER_CLEANUP_SYNC_GRACE: Duration = Duration::from_millis(500);
+const BROWSER_CLEANUP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+const BROWSER_CLEANUP_ADMISSION_WAIT: Duration = Duration::from_millis(500);
+#[cfg(not(test))]
+const BROWSER_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(250);
+// Test backoffs must stay well above the Windows timer granularity (~15.6ms):
+// a "sleep half the backoff, assert no progress" probe with a 10ms backoff
+// legitimately oversleeps the whole window and reports a phantom spin.
+#[cfg(test)]
+const BROWSER_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(80);
+#[cfg(not(test))]
+const BROWSER_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const BROWSER_CLEANUP_RETRY_MAX: Duration = Duration::from_millis(80);
+const BROWSER_CLEANUP_DISPATCH_TICK: Duration = Duration::from_millis(25);
 
 #[cfg(test)]
 std::thread_local! {
@@ -484,6 +550,637 @@ struct PendingDroppedBrowserCleanup {
     process: std::sync::Arc<tokio::sync::Mutex<nomi_process_runtime::ManagedChildProcess>>,
     authority: DroppedBrowserCleanupAuthority,
     completion: DroppedBrowserCleanupTicket,
+    runtime_tasks: std::sync::Arc<PendingRuntimeTaskCleanup>,
+    post_stop_reconcile: std::sync::Arc<PostStopReconcileCell>,
+}
+
+/// Fixed per-Host initialization tasks which must reach a terminal JoinHandle
+/// state before the process/profile cleanup ticket may publish completion.
+///
+/// The existing bounded browser cleanup relay owns this set on cancellation;
+/// no extra detached supervisor or unbounded task registry is created.
+pub(crate) struct PendingRuntimeTaskCleanup {
+    handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl PendingRuntimeTaskCleanup {
+    pub(crate) fn new(handles: Vec<tokio::task::JoinHandle<()>>) -> Self {
+        for handle in &handles {
+            handle.abort();
+        }
+        Self {
+            handles: std::sync::Mutex::new(handles),
+        }
+    }
+
+    fn empty() -> Self {
+        Self::new(Vec::new())
+    }
+
+    async fn settle(self: &std::sync::Arc<Self>) -> bool {
+        let handles = std::mem::take(
+            &mut *self
+                .handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut lease = PendingRuntimeTaskJoinLease {
+            owner: std::sync::Arc::clone(self),
+            handles,
+            current: None,
+        };
+        while let Some(handle) = lease.handles.pop() {
+            lease.current = Some(handle);
+            // Abort is idempotent. A task panic/cancellation is a terminal
+            // JoinHandle state and therefore a successful lifecycle join.
+            lease.current.as_ref().expect("current task exists").abort();
+            let _ = lease
+                .current
+                .as_mut()
+                .expect("current task exists")
+                .await;
+            lease.current.take();
+        }
+        true
+    }
+}
+
+struct PendingRuntimeTaskJoinLease {
+    owner: std::sync::Arc<PendingRuntimeTaskCleanup>,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    current: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for PendingRuntimeTaskJoinLease {
+    fn drop(&mut self) {
+        if let Some(current) = self.current.take() {
+            self.handles.push(current);
+        }
+        if self.handles.is_empty() {
+            return;
+        }
+        let mut retained = self
+            .owner
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        retained.append(&mut self.handles);
+    }
+}
+
+/// Host-scoped state that must stay owned until the exact Chromium process
+/// tree stop has been proven, then be reconciled exactly once.
+///
+/// The canonical implementor retains every pending download route and its
+/// task reservation: a dropped Rust handle is not evidence that Chromium
+/// stopped writing, so active download quota is only returned here (or on a
+/// trusted terminal `downloadProgress` event), never in a `Drop` impl.
+pub(crate) trait HostStopReconcile: Send + Sync {
+    fn reconcile_after_exact_host_stop(&self);
+}
+
+/// One-shot carrier for a [`HostStopReconcile`] authority across the dropped
+/// browser cleanup relay. The authority is retained through every retry and
+/// executed exactly once, only after an attempt proves the exact process
+/// tree (and profile artifacts) are gone.
+pub(crate) struct PostStopReconcileCell {
+    reconcile: std::sync::Mutex<Option<std::sync::Arc<dyn HostStopReconcile>>>,
+}
+
+impl PostStopReconcileCell {
+    pub(crate) fn new(
+        reconcile: Option<std::sync::Arc<dyn HostStopReconcile>>,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            reconcile: std::sync::Mutex::new(reconcile),
+        })
+    }
+
+    fn empty() -> std::sync::Arc<Self> {
+        Self::new(None)
+    }
+
+    /// Runs the retained authority exactly once. Callers must hold exact
+    /// process-tree stop proof; a panic inside the reconcile is contained so
+    /// it can never un-prove an already-proven process cleanup.
+    fn run_after_proven_stop(&self) {
+        let reconcile = self
+            .reconcile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(reconcile) = reconcile else {
+            return;
+        };
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reconcile.reconcile_after_exact_host_stop();
+        }))
+        .is_err()
+        {
+            tracing::error!(
+                "post-stop host reconcile panicked; retained download state was still released with the authority"
+            );
+        }
+    }
+}
+
+/// Point-in-time diagnostics for the process-local browser cleanup relay.
+///
+/// `retained` is the hard ownership bound: it includes queued, executing and
+/// delayed exact process/profile authorities. A saturated relay backpressures
+/// the dropping caller before accepting another authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BrowserCleanupRelayMetrics {
+    pub capacity: usize,
+    pub retained: usize,
+    pub queued: usize,
+    pub active: usize,
+    pub delayed: usize,
+    pub workers: usize,
+    pub running: bool,
+    pub submitted: u64,
+    pub completed: u64,
+    pub deferred: u64,
+    pub retries: u64,
+    pub saturated_handoffs: u64,
+    /// Repeatedly-unprovable exact authorities pinned in the fixed-worker debt
+    /// quarantine. This is not a count of healthy live browsers.
+    pub quarantined: usize,
+    /// New launches are paused before profile creation while failure debt is at
+    /// the safety threshold; already-running Hosts are not affected.
+    pub launch_fenced: bool,
+}
+
+#[derive(Default)]
+struct BrowserCleanupRelayState {
+    retained: std::sync::atomic::AtomicUsize,
+    active: std::sync::atomic::AtomicUsize,
+    delayed: std::sync::atomic::AtomicUsize,
+    workers: std::sync::atomic::AtomicUsize,
+    submitted: std::sync::atomic::AtomicU64,
+    completed: std::sync::atomic::AtomicU64,
+    deferred: std::sync::atomic::AtomicU64,
+    retries: std::sync::atomic::AtomicU64,
+    saturated_handoffs: std::sync::atomic::AtomicU64,
+    running: std::sync::atomic::AtomicBool,
+}
+
+struct BrowserCleanupAdmission {
+    retained: std::sync::Mutex<usize>,
+    available: std::sync::Condvar,
+    capacity: usize,
+    state: std::sync::Arc<BrowserCleanupRelayState>,
+}
+
+impl BrowserCleanupAdmission {
+    fn new(capacity: usize, state: std::sync::Arc<BrowserCleanupRelayState>) -> Self {
+        Self {
+            retained: std::sync::Mutex::new(0),
+            available: std::sync::Condvar::new(),
+            capacity,
+            state,
+        }
+    }
+
+    fn acquire(self: &std::sync::Arc<Self>) -> Option<BrowserCleanupAdmissionPermit> {
+        use std::sync::atomic::Ordering;
+
+        let mut retained = self
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut saturation_recorded = false;
+        let deadline = std::time::Instant::now() + BROWSER_CLEANUP_ADMISSION_WAIT;
+        while *retained >= self.capacity {
+            if !saturation_recorded {
+                self.state
+                    .saturated_handoffs
+                    .fetch_add(1, Ordering::Relaxed);
+                saturation_recorded = true;
+            }
+            if !self.state.running.load(Ordering::Acquire) {
+                return None;
+            }
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return None;
+            };
+            retained = self
+                .available
+                .wait_timeout(retained, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        if !self.state.running.load(Ordering::Acquire) {
+            return None;
+        }
+        *retained += 1;
+        self.state.retained.store(*retained, Ordering::Release);
+        Some(BrowserCleanupAdmissionPermit {
+            admission: std::sync::Arc::clone(self),
+        })
+    }
+
+    fn release(&self) {
+        use std::sync::atomic::Ordering;
+
+        let mut retained = self
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *retained == 0 {
+            tracing::error!("browser cleanup relay admission underflow");
+            return;
+        }
+        *retained -= 1;
+        self.state.retained.store(*retained, Ordering::Release);
+        self.available.notify_one();
+    }
+}
+
+struct BrowserCleanupAdmissionPermit {
+    admission: std::sync::Arc<BrowserCleanupAdmission>,
+}
+
+impl Drop for BrowserCleanupAdmissionPermit {
+    fn drop(&mut self) {
+        self.admission.release();
+    }
+}
+
+struct BrowserCleanupJob {
+    cleanup: PendingDroppedBrowserCleanup,
+    attempts: u32,
+    ready_at: std::time::Instant,
+    _admission: BrowserCleanupAdmissionPermit,
+}
+
+struct BrowserCleanupWorkerResult {
+    worker_id: usize,
+    job: Option<BrowserCleanupJob>,
+    error: Option<String>,
+}
+
+struct BrowserCleanupWorker {
+    sender: std::sync::mpsc::SyncSender<BrowserCleanupJob>,
+    busy: bool,
+    alive: bool,
+}
+
+struct BrowserCleanupRelay {
+    sender: Option<std::sync::mpsc::SyncSender<BrowserCleanupJob>>,
+    admission: std::sync::Arc<BrowserCleanupAdmission>,
+    state: std::sync::Arc<BrowserCleanupRelayState>,
+}
+
+struct BrowserCleanupDispatcherGuard {
+    admission: std::sync::Arc<BrowserCleanupAdmission>,
+    state: std::sync::Arc<BrowserCleanupRelayState>,
+}
+
+struct BrowserCleanupWorkerGuard {
+    state: std::sync::Arc<BrowserCleanupRelayState>,
+    active: bool,
+}
+
+impl Drop for BrowserCleanupWorkerGuard {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        if self.active {
+            self.state.active.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.state.workers.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Drop for BrowserCleanupDispatcherGuard {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        self.state.running.store(false, Ordering::Release);
+        self.admission.available.notify_all();
+    }
+}
+
+static BROWSER_CLEANUP_RELAY: std::sync::OnceLock<BrowserCleanupRelay> =
+    std::sync::OnceLock::new();
+static BROWSER_CLEANUP_QUARANTINE: std::sync::OnceLock<BrowserCleanupQuarantine> =
+    std::sync::OnceLock::new();
+/// Structural Host cleanup leases survive even a failed cleanup-dispatch
+/// handoff. This covers both standalone capacity and the platform Hub's
+/// provisional launch authority. A ticket removes itself only after exact
+/// cleanup completion.
+static HOST_CLEANUP_LEASE_DEBTS: std::sync::OnceLock<
+    std::sync::Mutex<Vec<DroppedBrowserCleanupTicket>>,
+> = std::sync::OnceLock::new();
+
+struct BrowserCleanupQuarantine {
+    tickets: std::sync::Mutex<Vec<DroppedBrowserCleanupTicket>>,
+    available: std::sync::Condvar,
+    launch_fenced: std::sync::atomic::AtomicBool,
+    worker_start: std::sync::Mutex<()>,
+    next_worker_generation: std::sync::atomic::AtomicU64,
+    live_worker_generation: std::sync::atomic::AtomicU64,
+    shutdown: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    force_spawn_failures: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    force_worker_panics: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    worker_attempts: std::sync::atomic::AtomicUsize,
+}
+
+impl BrowserCleanupQuarantine {
+    fn new() -> Self {
+        Self {
+            tickets: std::sync::Mutex::new(Vec::new()),
+            available: std::sync::Condvar::new(),
+            launch_fenced: std::sync::atomic::AtomicBool::new(false),
+            worker_start: std::sync::Mutex::new(()),
+            next_worker_generation: std::sync::atomic::AtomicU64::new(1),
+            live_worker_generation: std::sync::atomic::AtomicU64::new(0),
+            shutdown: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            force_spawn_failures: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            force_worker_panics: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            worker_attempts: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn global() -> &'static Self {
+        BROWSER_CLEANUP_QUARANTINE.get_or_init(Self::new)
+    }
+
+    /// Ensure exactly one live failure-debt worker generation. A failed spawn
+    /// leaves generation zero, so a later admission can retry instead of an
+    /// unconditional OnceLock caching the failed attempt forever.
+    fn ensure_worker(&'static self) -> bool {
+        use std::sync::atomic::Ordering;
+
+        if self.live_worker_generation.load(Ordering::Acquire) != 0 {
+            return true;
+        }
+        let _start = self
+            .worker_start
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.live_worker_generation.load(Ordering::Acquire) != 0 {
+            return true;
+        }
+
+        #[cfg(test)]
+        if decrement_failure_injection(&self.force_spawn_failures) {
+            tracing::error!(
+                "synthetic failure starting browser cleanup failure-debt worker"
+            );
+            return false;
+        }
+
+        let mut generation = self
+            .next_worker_generation
+            .fetch_add(1, Ordering::AcqRel);
+        if generation == 0 {
+            generation = self
+                .next_worker_generation
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        self.live_worker_generation
+            .store(generation, Ordering::Release);
+        match std::thread::Builder::new()
+            .name("nomi-browser-cleanup-debt".into())
+            .stack_size(BROWSER_CLEANUP_THREAD_STACK_BYTES)
+            .spawn(move || {
+                let _liveness = BrowserCleanupQuarantineWorkerLiveness {
+                    quarantine: self,
+                    generation,
+                };
+                run_browser_cleanup_quarantine_worker(self);
+            })
+        {
+            Ok(_worker) => true,
+            Err(error) => {
+                let _ = self.live_worker_generation.compare_exchange(
+                    generation,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                tracing::error!(%error, generation, "failed to start browser cleanup failure-debt worker");
+                false
+            }
+        }
+    }
+}
+
+struct BrowserCleanupQuarantineWorkerLiveness {
+    quarantine: &'static BrowserCleanupQuarantine,
+    generation: u64,
+}
+
+impl Drop for BrowserCleanupQuarantineWorkerLiveness {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        let _ = self.quarantine.live_worker_generation.compare_exchange(
+            self.generation,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.quarantine.available.notify_all();
+    }
+}
+
+fn run_browser_cleanup_quarantine_worker(quarantine: &'static BrowserCleanupQuarantine) {
+    let mut failed_generations = 0_u32;
+    loop {
+        let generation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_browser_cleanup_quarantine_generation(quarantine)
+        }));
+        if quarantine
+            .shutdown
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        match generation_result {
+            Ok(()) => tracing::error!(
+                "browser cleanup failure-debt worker generation stopped unexpectedly; restarting in place"
+            ),
+            Err(_) => tracing::error!(
+                "browser cleanup failure-debt worker panicked; retaining debt and restarting in place"
+            ),
+        }
+        failed_generations = failed_generations.saturating_add(1);
+        let retry_after = browser_cleanup_retry_delay(failed_generations);
+        wait_for_browser_cleanup_quarantine_backoff(quarantine, retry_after);
+    }
+}
+
+fn wait_for_browser_cleanup_quarantine_backoff(
+    quarantine: &'static BrowserCleanupQuarantine,
+    retry_after: Duration,
+) {
+    use std::sync::atomic::Ordering;
+
+    let deadline = std::time::Instant::now() + retry_after;
+    let mut tickets = quarantine
+        .tickets
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while !quarantine.shutdown.load(Ordering::Acquire) {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            break;
+        };
+        let (retained, timed) = quarantine
+            .available
+            .wait_timeout(tickets, remaining)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tickets = retained;
+        if timed.timed_out() {
+            break;
+        }
+        // New debt and spurious notifications must not defeat panic backoff.
+        // Shutdown is the only early wake condition.
+    }
+}
+
+fn run_browser_cleanup_quarantine_generation(
+    quarantine: &'static BrowserCleanupQuarantine,
+) {
+    let mut cursor = 0usize;
+    let mut runtime = build_browser_cleanup_runtime();
+    loop {
+        let ticket = {
+            let mut tickets = quarantine
+            .tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            tickets.retain(|ticket| !ticket.is_complete());
+            if tickets.len() <= BROWSER_CLEANUP_QUARANTINE_CAPACITY / 2 {
+                quarantine
+                    .launch_fenced
+                    .store(false, std::sync::atomic::Ordering::Release);
+            }
+            while tickets.is_empty()
+                && !quarantine
+                    .shutdown
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tickets = quarantine
+                    .available
+                    .wait(tickets)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                tickets.retain(|ticket| !ticket.is_complete());
+            }
+            if quarantine
+                .shutdown
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            cursor %= tickets.len();
+            let ticket = tickets[cursor].clone();
+            cursor = cursor.wrapping_add(1);
+            ticket
+        };
+
+        #[cfg(test)]
+        {
+            quarantine
+                .worker_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if decrement_failure_injection(&quarantine.force_worker_panics) {
+                panic!("synthetic browser cleanup failure-debt worker panic");
+            }
+        }
+
+        if runtime.is_none() {
+            runtime = build_browser_cleanup_runtime();
+        }
+        let outcome = runtime.as_ref().and_then(|runtime| {
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(
+                        BROWSER_CLEANUP_ATTEMPT_TIMEOUT,
+                        ticket.wait_or_retry(),
+                    )
+                    .await
+                    .ok()
+                })
+        });
+        if matches!(outcome, Some(DroppedBrowserCleanupCompletion::Complete)) {
+            quarantine.available.notify_all();
+            continue;
+        }
+
+        let tickets = quarantine
+            .tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = quarantine
+            .available
+            .wait_timeout(tickets, BROWSER_CLEANUP_RETRY_MAX)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
+#[cfg(test)]
+fn decrement_failure_injection(counter: &std::sync::atomic::AtomicUsize) -> bool {
+    use std::sync::atomic::Ordering;
+
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+}
+
+pub fn browser_cleanup_relay_metrics() -> BrowserCleanupRelayMetrics {
+    use std::sync::atomic::Ordering;
+
+    let Some(relay) = BROWSER_CLEANUP_RELAY.get() else {
+        return BrowserCleanupRelayMetrics {
+            capacity: BROWSER_CLEANUP_RELAY_CAPACITY,
+            ..BrowserCleanupRelayMetrics::default()
+        };
+    };
+    let retained = relay.state.retained.load(Ordering::Acquire);
+    let active = relay.state.active.load(Ordering::Acquire);
+    let delayed = relay.state.delayed.load(Ordering::Acquire);
+    let (quarantined, launch_fenced) = BROWSER_CLEANUP_QUARANTINE
+        .get()
+        .map(|quarantine| {
+            (
+                quarantine
+                    .tickets
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .filter(|ticket| !ticket.is_complete())
+                    .count(),
+                quarantine.launch_fenced.load(Ordering::Acquire),
+            )
+        })
+        .unwrap_or((0, false));
+    BrowserCleanupRelayMetrics {
+        capacity: relay.admission.capacity,
+        retained,
+        queued: retained.saturating_sub(active.saturating_add(delayed)),
+        active,
+        delayed,
+        workers: relay.state.workers.load(Ordering::Acquire),
+        running: relay.state.running.load(Ordering::Acquire),
+        submitted: relay.state.submitted.load(Ordering::Acquire),
+        completed: relay.state.completed.load(Ordering::Acquire),
+        deferred: relay.state.deferred.load(Ordering::Acquire),
+        retries: relay.state.retries.load(Ordering::Acquire),
+        saturated_handoffs: relay.state.saturated_handoffs.load(Ordering::Acquire),
+        quarantined,
+        launch_fenced,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -501,6 +1198,10 @@ struct DroppedBrowserCleanupTicketInner {
     state: std::sync::atomic::AtomicU8,
     changed: tokio::sync::watch::Sender<u8>,
     recovery: std::sync::Mutex<Option<ReclaimableDroppedBrowserCleanup>>,
+    /// Opaque structural Host authority follows the exact process/profile
+    /// cleanup ticket. It is released only when this ticket publishes proven
+    /// completion, never merely because the public Host/runtime was dropped.
+    host_cleanup_lease: std::sync::Mutex<Option<crate::host::HostCleanupLease>>,
 }
 
 struct ReclaimableDroppedBrowserCleanup {
@@ -508,18 +1209,36 @@ struct ReclaimableDroppedBrowserCleanup {
         tokio::sync::Mutex<nomi_process_runtime::ManagedChildProcess>,
     >,
     authority: DroppedBrowserCleanupAuthority,
+    runtime_tasks: std::sync::Arc<PendingRuntimeTaskCleanup>,
+    post_stop_reconcile: std::sync::Arc<PostStopReconcileCell>,
 }
 
 impl DroppedBrowserCleanupTicket {
     fn pending() -> Self {
+        Self::pending_with_host_lease(None)
+    }
+
+    fn pending_with_host_lease(
+        host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    ) -> Self {
+        let retain_structural_debt = host_cleanup_lease.is_some();
         let (changed, _) = tokio::sync::watch::channel(0);
-        Self {
+        let ticket = Self {
             inner: std::sync::Arc::new(DroppedBrowserCleanupTicketInner {
                 state: std::sync::atomic::AtomicU8::new(0),
                 changed,
                 recovery: std::sync::Mutex::new(None),
+                host_cleanup_lease: std::sync::Mutex::new(host_cleanup_lease),
             }),
+        };
+        if retain_structural_debt {
+            HOST_CLEANUP_LEASE_DEBTS
+                .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ticket.clone());
         }
+        ticket
     }
 
     fn publish_complete(&self) {
@@ -534,8 +1253,26 @@ impl DroppedBrowserCleanupTicket {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
+            self.inner
+                .host_cleanup_lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
             self.inner.changed.send_replace(1);
+            if let Some(debts) = HOST_CLEANUP_LEASE_DEBTS.get() {
+                debts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .retain(|ticket| !std::sync::Arc::ptr_eq(&ticket.inner, &self.inner));
+            }
+            if let Some(quarantine) = BROWSER_CLEANUP_QUARANTINE.get() {
+                quarantine.available.notify_all();
+            }
         }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.inner.state.load(std::sync::atomic::Ordering::Acquire) == 1
     }
 
     fn publish_recoverable(
@@ -544,6 +1281,8 @@ impl DroppedBrowserCleanupTicket {
             tokio::sync::Mutex<nomi_process_runtime::ManagedChildProcess>,
         >,
         authority: DroppedBrowserCleanupAuthority,
+        runtime_tasks: std::sync::Arc<PendingRuntimeTaskCleanup>,
+        post_stop_reconcile: std::sync::Arc<PostStopReconcileCell>,
     ) {
         if self.inner.state.load(std::sync::atomic::Ordering::Acquire) == 1 {
             return;
@@ -557,7 +1296,12 @@ impl DroppedBrowserCleanupTicket {
             return;
         }
         if recovery.is_none() {
-            *recovery = Some(ReclaimableDroppedBrowserCleanup { process, authority });
+            *recovery = Some(ReclaimableDroppedBrowserCleanup {
+                process,
+                authority,
+                runtime_tasks,
+                post_stop_reconcile,
+            });
         }
         drop(recovery);
         self.inner
@@ -631,6 +1375,11 @@ impl DroppedBrowserCleanupTicket {
                     self.restore_recovery(cleanup);
                     return DroppedBrowserCleanupCompletion::RetryPending;
                 }
+                // Another caller (normally the fixed failure-debt worker) is
+                // already driving this exact authority. Do not make a Host
+                // shutdown waiter inherit that worker's full attempt timeout;
+                // the shared ticket remains authoritative and retryable.
+                3 => return DroppedBrowserCleanupCompletion::RetryPending,
                 _ => {
                     // watch retains the latest state even when completion
                     // lands between this load and the async registration.
@@ -661,7 +1410,12 @@ impl Drop for PendingDroppedBrowserCleanup {
         // one bounded retry round; final ticket Drop alone falls back to the
         // ManagedChildProcess relay and startup ownership audit.
         self.completion
-            .publish_recoverable(self.process.clone(), self.authority.clone());
+            .publish_recoverable(
+                self.process.clone(),
+                self.authority.clone(),
+                std::sync::Arc::clone(&self.runtime_tasks),
+                std::sync::Arc::clone(&self.post_stop_reconcile),
+            );
     }
 }
 
@@ -674,6 +1428,7 @@ enum DroppedBrowserCleanupAuthority {
     UncommittedEphemeral {
         cleanup_token: crate::profile::EphemeralProfileCleanupToken,
     },
+    UncommittedStable,
 }
 
 fn defer_dropped_browser_cleanups(cleanups: Vec<PendingDroppedBrowserCleanup>) {
@@ -688,13 +1443,59 @@ fn defer_dropped_browser_cleanups(cleanups: Vec<PendingDroppedBrowserCleanup>) {
     drop(cleanups);
 }
 
+/// Preserve failure-path cleanup authority even when the public ticket is
+/// ignored. A single fixed worker round-robins these debts until exact process
+/// and profile cleanup succeeds; it never creates a thread/runtime per browser.
+/// Completed tickets are compacted opportunistically. Reaching the failure
+/// threshold fences new launch/profile creation, while already-admitted tasks
+/// may still transfer their exact authority without blocking a Tokio worker.
+/// Per-task Host admission bounds each task's contribution; global debt may
+/// scale only with independently admitted tasks, matching the product's
+/// intentional multi-task concurrency model.
+fn quarantine_dropped_browser_cleanups(cleanups: Vec<PendingDroppedBrowserCleanup>) {
+    quarantine_dropped_browser_cleanups_in(BrowserCleanupQuarantine::global(), cleanups);
+}
+
+fn quarantine_dropped_browser_cleanups_in(
+    quarantine: &'static BrowserCleanupQuarantine,
+    cleanups: Vec<PendingDroppedBrowserCleanup>,
+) {
+    // Do not pin a new batch behind a worker generation that never started.
+    // Returning these jobs to their durable tickets preserves caller retry;
+    // once the final ticket owner drops, ManagedChildProcess's existing fixed
+    // relay owns process shutdown and marker lineage remains for startup audit.
+    if !quarantine.ensure_worker() {
+        defer_dropped_browser_cleanups(cleanups);
+        return;
+    }
+    for cleanup in cleanups {
+        let retained_ticket = cleanup.completion.clone();
+        // PendingDroppedBrowserCleanup::drop publishes the indivisible exact
+        // process/profile authority into the shared ticket before we pin it.
+        drop(cleanup);
+        let mut tickets = quarantine
+            .tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tickets.retain(|ticket| !ticket.is_complete());
+        tickets.push(retained_ticket);
+        if tickets.len() >= BROWSER_CLEANUP_QUARANTINE_CAPACITY {
+            quarantine
+                .launch_fenced
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        quarantine.available.notify_one();
+    }
+}
+
 /// Hand one dropped browser's indivisible process/token/profile authority to a
 /// process-local relay that does not depend on the caller's Tokio runtime.
 ///
-/// Thread-spawn and independent-runtime construction failures return the exact
-/// job to the completion ticket, allowing an authoritative shutdown caller to
-/// take over one bounded retry round. If nobody retained the ticket, final
-/// Drop releases the process into `nomi-process-runtime` and preserves marker
+/// One singleton owns a fixed worker set; handoffs never create a per-browser
+/// OS thread or Tokio runtime. Startup failure, bounded-admission saturation,
+/// or exhausted retries return the exact job to the completion ticket. If
+/// nobody retained that ticket, final Drop releases the process into the
+/// separately bounded `nomi-process-runtime` relay and preserves marker
 /// lineage for startup recovery.
 pub(crate) fn hand_off_dropped_browser_cleanup(
     process: std::sync::Arc<
@@ -703,7 +1504,44 @@ pub(crate) fn hand_off_dropped_browser_cleanup(
     ownership_token: crate::profile::BrowserOwnershipToken,
     cleanup_user_data_dir: Option<PathBuf>,
 ) -> DroppedBrowserCleanupTicket {
-    let completion = DroppedBrowserCleanupTicket::pending();
+    hand_off_dropped_browser_cleanup_with_host_lease(
+        process,
+        ownership_token,
+        cleanup_user_data_dir,
+        None,
+    )
+}
+
+pub(crate) fn hand_off_dropped_browser_cleanup_with_host_lease(
+    process: std::sync::Arc<
+        tokio::sync::Mutex<nomi_process_runtime::ManagedChildProcess>,
+    >,
+    ownership_token: crate::profile::BrowserOwnershipToken,
+    cleanup_user_data_dir: Option<PathBuf>,
+    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+) -> DroppedBrowserCleanupTicket {
+    hand_off_dropped_browser_cleanup_with_host_lease_and_tasks(
+        process,
+        ownership_token,
+        cleanup_user_data_dir,
+        host_cleanup_lease,
+        Vec::new(),
+        PostStopReconcileCell::empty(),
+    )
+}
+
+pub(crate) fn hand_off_dropped_browser_cleanup_with_host_lease_and_tasks(
+    process: std::sync::Arc<
+        tokio::sync::Mutex<nomi_process_runtime::ManagedChildProcess>,
+    >,
+    ownership_token: crate::profile::BrowserOwnershipToken,
+    cleanup_user_data_dir: Option<PathBuf>,
+    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    runtime_tasks: Vec<tokio::task::JoinHandle<()>>,
+    post_stop_reconcile: std::sync::Arc<PostStopReconcileCell>,
+) -> DroppedBrowserCleanupTicket {
+    let completion =
+        DroppedBrowserCleanupTicket::pending_with_host_lease(host_cleanup_lease);
     let batch = vec![PendingDroppedBrowserCleanup {
         process,
         authority: DroppedBrowserCleanupAuthority::Committed {
@@ -711,6 +1549,8 @@ pub(crate) fn hand_off_dropped_browser_cleanup(
             cleanup_user_data_dir,
         },
         completion: completion.clone(),
+        runtime_tasks: std::sync::Arc::new(PendingRuntimeTaskCleanup::new(runtime_tasks)),
+        post_stop_reconcile,
     }];
     hand_off_pending_browser_cleanups(batch);
     completion
@@ -718,13 +1558,22 @@ pub(crate) fn hand_off_dropped_browser_cleanup(
 
 fn hand_off_uncommitted_browser_cleanup(
     process: nomi_process_runtime::ManagedChildProcess,
-    cleanup_token: crate::profile::EphemeralProfileCleanupToken,
+    cleanup_token: Option<crate::profile::EphemeralProfileCleanupToken>,
+    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
 ) {
-    let completion = DroppedBrowserCleanupTicket::pending();
+    let completion =
+        DroppedBrowserCleanupTicket::pending_with_host_lease(host_cleanup_lease);
     hand_off_pending_browser_cleanups(vec![PendingDroppedBrowserCleanup {
         process: std::sync::Arc::new(tokio::sync::Mutex::new(process)),
-        authority: DroppedBrowserCleanupAuthority::UncommittedEphemeral { cleanup_token },
+        authority: cleanup_token.map_or(
+            DroppedBrowserCleanupAuthority::UncommittedStable,
+            |cleanup_token| DroppedBrowserCleanupAuthority::UncommittedEphemeral {
+                cleanup_token,
+            },
+        ),
         completion,
+        runtime_tasks: std::sync::Arc::new(PendingRuntimeTaskCleanup::empty()),
+        post_stop_reconcile: PostStopReconcileCell::empty(),
     }]);
 }
 
@@ -735,44 +1584,417 @@ fn hand_off_pending_browser_cleanups(batch: Vec<PendingDroppedBrowserCleanup>) {
         return;
     }
 
-    let retained = std::sync::Arc::new(std::sync::Mutex::new(Some(batch)));
-    let worker_retained = std::sync::Arc::clone(&retained);
-    let worker = move || {
-        let batch = worker_retained
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        let Some(batch) = batch else {
-            return;
-        };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-        match runtime {
-            Ok(runtime) => runtime.block_on(clean_dropped_browsers(batch)),
-            Err(_) => defer_dropped_browser_cleanups(batch),
-        }
-    };
+    use std::sync::atomic::Ordering;
 
-    if std::thread::Builder::new()
-        .name("nomi-browser-cleanup".into())
-        .spawn(worker)
-        .is_err()
-    {
-        let batch = retained
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(batch) = batch {
-            defer_dropped_browser_cleanups(batch);
+    let relay = BROWSER_CLEANUP_RELAY.get_or_init(start_browser_cleanup_relay);
+    for cleanup in batch {
+        relay.state.submitted.fetch_add(1, Ordering::Relaxed);
+        let Some(sender) = relay.sender.as_ref() else {
+            relay.state.deferred.fetch_add(1, Ordering::Relaxed);
+            quarantine_dropped_browser_cleanups(vec![cleanup]);
+            continue;
+        };
+
+        if relay.state.retained.load(Ordering::Acquire) >= relay.admission.capacity {
+            // Stop consuming OS resources before waiting for bounded relay
+            // admission. Exact descendant/profile proof stays attached to the
+            // same cleanup and is completed by a worker after a slot opens.
+            best_effort_synchronous_browser_stop(&cleanup);
+        }
+
+        // Admission happens while the caller still owns the indivisible job.
+        // The relay therefore cannot accumulate an unbounded overflow list:
+        // saturation applies at most one bounded wait before deferring exact
+        // authority to the ticket/lower relay rather than blocking a runtime.
+        let Some(permit) = relay.admission.acquire() else {
+            relay.state.deferred.fetch_add(1, Ordering::Relaxed);
+            quarantine_dropped_browser_cleanups(vec![cleanup]);
+            continue;
+        };
+        let job = BrowserCleanupJob {
+            cleanup,
+            attempts: 0,
+            ready_at: std::time::Instant::now(),
+            _admission: permit,
+        };
+        if let Err(error) = sender.send(job) {
+            relay.state.running.store(false, Ordering::Release);
+            relay.admission.available.notify_all();
+            relay.state.deferred.fetch_add(1, Ordering::Relaxed);
+            quarantine_dropped_browser_cleanups(vec![error.0.cleanup]);
         }
     }
 }
 
-async fn clean_dropped_browsers(cleanups: Vec<PendingDroppedBrowserCleanup>) {
-    for cleanup in cleanups {
+fn best_effort_synchronous_browser_stop(cleanup: &PendingDroppedBrowserCleanup) {
+    let Ok(mut process) = cleanup.process.try_lock() else {
+        return;
+    };
+    let child = process.child_mut();
+    if let Err(error) = child.start_kill()
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(error_kind = ?error.kind(), "saturated browser cleanup could not synchronously request direct-child stop");
+    }
+    let deadline = std::time::Instant::now() + BROWSER_CLEANUP_SYNC_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(error_kind = ?error.kind(), "saturated browser cleanup could not synchronously reap direct child");
+                return;
+            }
+        }
+    }
+}
+
+fn start_browser_cleanup_relay() -> BrowserCleanupRelay {
+    use std::sync::atomic::Ordering;
+
+    let state = std::sync::Arc::new(BrowserCleanupRelayState::default());
+    let admission = std::sync::Arc::new(BrowserCleanupAdmission::new(
+        BROWSER_CLEANUP_RELAY_CAPACITY,
+        std::sync::Arc::clone(&state),
+    ));
+    let (incoming_sender, incoming_receiver) =
+        std::sync::mpsc::sync_channel(BROWSER_CLEANUP_RELAY_CAPACITY);
+    let (result_sender, result_receiver) =
+        std::sync::mpsc::sync_channel(BROWSER_CLEANUP_RELAY_WORKERS);
+    let mut workers = Vec::with_capacity(BROWSER_CLEANUP_RELAY_WORKERS);
+
+    for worker_id in 0..BROWSER_CLEANUP_RELAY_WORKERS {
+        let (worker_sender, worker_receiver) = std::sync::mpsc::sync_channel(1);
+        let worker_results = result_sender.clone();
+        let worker_state = std::sync::Arc::clone(&state);
+        match std::thread::Builder::new()
+            .name(format!("nomi-browser-cleanup-{worker_id}"))
+            .stack_size(BROWSER_CLEANUP_THREAD_STACK_BYTES)
+            .spawn(move || {
+                run_browser_cleanup_worker(
+                    worker_id,
+                    worker_receiver,
+                    worker_results,
+                    worker_state,
+                )
+            })
+        {
+            Ok(_worker) => workers.push(BrowserCleanupWorker {
+                sender: worker_sender,
+                busy: false,
+                alive: true,
+            }),
+            Err(error) => tracing::error!(worker_id, %error, "failed to start browser cleanup worker"),
+        }
+    }
+    drop(result_sender);
+
+    if workers.is_empty() {
+        tracing::error!("browser cleanup relay has no worker; exact jobs remain reclaimable");
+        return BrowserCleanupRelay {
+            sender: None,
+            admission,
+            state,
+        };
+    }
+
+    state.workers.store(workers.len(), Ordering::Release);
+    let dispatcher_state = std::sync::Arc::clone(&state);
+    let dispatcher_admission = std::sync::Arc::clone(&admission);
+    match std::thread::Builder::new()
+        .name("nomi-browser-cleanup-dispatch".to_owned())
+        .stack_size(BROWSER_CLEANUP_THREAD_STACK_BYTES)
+        .spawn(move || {
+            run_browser_cleanup_dispatcher(
+                incoming_receiver,
+                result_receiver,
+                workers,
+                dispatcher_admission,
+                dispatcher_state,
+            )
+        })
+    {
+        Ok(_dispatcher) => {
+            state.running.store(true, Ordering::Release);
+            BrowserCleanupRelay {
+                sender: Some(incoming_sender),
+                admission,
+                state,
+            }
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to start browser cleanup dispatcher; exact jobs remain reclaimable");
+            BrowserCleanupRelay {
+                sender: None,
+                admission,
+                state,
+            }
+        }
+    }
+}
+
+fn run_browser_cleanup_dispatcher(
+    incoming: std::sync::mpsc::Receiver<BrowserCleanupJob>,
+    results: std::sync::mpsc::Receiver<BrowserCleanupWorkerResult>,
+    mut workers: Vec<BrowserCleanupWorker>,
+    admission: std::sync::Arc<BrowserCleanupAdmission>,
+    state: std::sync::Arc<BrowserCleanupRelayState>,
+) {
+    use std::collections::VecDeque;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+
+    let _dispatcher_guard = BrowserCleanupDispatcherGuard {
+        admission: std::sync::Arc::clone(&admission),
+        state: std::sync::Arc::clone(&state),
+    };
+    let mut ready = VecDeque::new();
+    let mut delayed = Vec::new();
+    let mut incoming_open = true;
+    loop {
+        loop {
+            match results.try_recv() {
+                Ok(mut result) => {
+                    state.active.fetch_sub(1, Ordering::AcqRel);
+                    if let Some(worker) = workers.get_mut(result.worker_id) {
+                        worker.busy = false;
+                    }
+                    if let Some(mut job) = result.job.take() {
+                        job.attempts = job.attempts.saturating_add(1);
+                        if job.attempts >= DROPPED_BROWSER_CLEANUP_MAX_ATTEMPTS as u32 {
+                            state.deferred.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(
+                                attempts = job.attempts,
+                                "browser exact cleanup exhausted bounded relay retries; pinning authority in the failure quarantine"
+                            );
+                            quarantine_dropped_browser_cleanups(vec![job.cleanup]);
+                            continue;
+                        }
+                        job.ready_at = std::time::Instant::now()
+                            + browser_cleanup_retry_delay(job.attempts);
+                        state.retries.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            attempts = job.attempts,
+                            error = result.error.as_deref().unwrap_or("unknown cleanup failure"),
+                            "browser exact cleanup remains retained for automatic retry"
+                        );
+                        delayed.push(job);
+                    } else {
+                        state.completed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+
+        if incoming_open {
+            loop {
+                match incoming.try_recv() {
+                    Ok(job) => ready.push_back(job),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        incoming_open = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let now = std::time::Instant::now();
+        let mut index = 0;
+        while index < delayed.len() {
+            if delayed[index].ready_at <= now {
+                ready.push_back(delayed.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+
+        for worker_id in 0..workers.len() {
+            if ready.is_empty() {
+                break;
+            }
+            if workers[worker_id].busy || !workers[worker_id].alive {
+                continue;
+            }
+            let Some(job) = ready.pop_front() else {
+                break;
+            };
+            match workers[worker_id].sender.send(job) {
+                Ok(()) => {
+                    workers[worker_id].busy = true;
+                    state.active.fetch_add(1, Ordering::AcqRel);
+                }
+                Err(error) => {
+                    workers[worker_id].alive = false;
+                    ready.push_front(error.0);
+                    tracing::error!(worker_id, "browser cleanup worker disconnected");
+                }
+            }
+        }
+        state.delayed.store(delayed.len(), Ordering::Release);
+
+        if state.workers.load(Ordering::Acquire) == 0
+            || workers.iter().all(|worker| !worker.alive)
+        {
+            state.running.store(false, Ordering::Release);
+            admission.available.notify_all();
+            tracing::error!("all browser cleanup workers stopped; returning exact jobs to tickets");
+            for job in ready.drain(..).chain(delayed.drain(..)) {
+                state.deferred.fetch_add(1, Ordering::Relaxed);
+                quarantine_dropped_browser_cleanups(vec![job.cleanup]);
+            }
+            break;
+        }
+
+        match incoming.recv_timeout(BROWSER_CLEANUP_DISPATCH_TICK) {
+            Ok(job) => ready.push_back(job),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => incoming_open = false,
+        }
+    }
+}
+
+fn run_browser_cleanup_worker(
+    worker_id: usize,
+    receiver: std::sync::mpsc::Receiver<BrowserCleanupJob>,
+    results: std::sync::mpsc::SyncSender<BrowserCleanupWorkerResult>,
+    state: std::sync::Arc<BrowserCleanupRelayState>,
+) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::Ordering;
+
+    let mut worker_guard = BrowserCleanupWorkerGuard {
+        state: std::sync::Arc::clone(&state),
+        active: false,
+    };
+    let mut runtime = build_browser_cleanup_runtime();
+    while let Ok(job) = receiver.recv() {
+        worker_guard.active = true;
+        if runtime.is_none() {
+            runtime = build_browser_cleanup_runtime();
+        }
+        let outcome = runtime.as_ref().map_or_else(
+            || Err("Tokio browser cleanup runtime is unavailable".to_owned()),
+            |runtime| {
+                match catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(async {
+                        tokio::time::timeout(
+                            BROWSER_CLEANUP_ATTEMPT_TIMEOUT,
+                            clean_dropped_browser_once(&job.cleanup),
+                        )
+                        .await
+                    })
+                })) {
+                    Ok(Ok(true)) => Ok(()),
+                    Ok(Ok(false)) => Err("exact browser cleanup remains unproven".to_owned()),
+                    Ok(Err(_elapsed)) => Err(format!(
+                        "browser cleanup attempt exceeded {} seconds",
+                        BROWSER_CLEANUP_ATTEMPT_TIMEOUT.as_secs()
+                    )),
+                    Err(_panic) => Err("browser cleanup attempt panicked".to_owned()),
+                }
+            },
+        );
+        let result = match outcome {
+            Ok(()) => {
+                job.cleanup.completion.publish_complete();
+                BrowserCleanupWorkerResult {
+                    worker_id,
+                    job: None,
+                    error: None,
+                }
+            }
+            Err(error) => BrowserCleanupWorkerResult {
+                worker_id,
+                job: Some(job),
+                error: Some(error),
+            },
+        };
+        worker_guard.active = false;
+        if let Err(error) = results.send(result) {
+            state.active.fetch_sub(1, Ordering::AcqRel);
+            if let Some(job) = error.0.job {
+                state.deferred.fetch_add(1, Ordering::Relaxed);
+                quarantine_dropped_browser_cleanups(vec![job.cleanup]);
+            }
+            break;
+        }
+    }
+}
+
+fn build_browser_cleanup_runtime() -> Option<tokio::runtime::Runtime> {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            tracing::error!(%error, "failed to build browser cleanup runtime");
+            None
+        }
+    }
+}
+
+fn browser_cleanup_retry_delay(attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(16);
+    BROWSER_CLEANUP_RETRY_INITIAL
+        .saturating_mul(1_u32 << shift)
+        .min(BROWSER_CLEANUP_RETRY_MAX)
+}
+
+async fn clean_dropped_browser_once(cleanup: &PendingDroppedBrowserCleanup) -> bool {
+    if !cleanup.runtime_tasks.settle().await {
+        return false;
+    }
+    let proven = {
         let mut process = cleanup.process.lock().await;
-        let complete = match &cleanup.authority {
+        match &cleanup.authority {
+            DroppedBrowserCleanupAuthority::Committed {
+                ownership_token,
+                cleanup_user_data_dir,
+            } => terminate_launched_process_tree_and_cleanup_profile(
+                &mut process,
+                ownership_token,
+                cleanup_user_data_dir.as_deref(),
+            )
+            .await
+            .is_ok(),
+            DroppedBrowserCleanupAuthority::UncommittedEphemeral { cleanup_token } => {
+                let result = async {
+                    terminate_launched_process_tree(&mut process).await?;
+                    crate::profile::cleanup_uncommitted_ephemeral_profile_after_exact_shutdown(
+                        cleanup_token,
+                    )
+                    .map_err(|_| ownership_artifact_cleanup_error())
+                }
+                .await;
+                result.is_ok()
+            }
+            DroppedBrowserCleanupAuthority::UncommittedStable => {
+                terminate_launched_process_tree(&mut process).await.is_ok()
+            }
+        }
+    };
+    if proven {
+        cleanup.post_stop_reconcile.run_after_proven_stop();
+    }
+    proven
+}
+
+async fn clean_reclaimable_dropped_browser(
+    cleanup: &ReclaimableDroppedBrowserCleanup,
+) -> bool {
+    if !cleanup.runtime_tasks.settle().await {
+        return false;
+    }
+    let proven = {
+        let mut process = cleanup.process.lock().await;
+        match &cleanup.authority {
             DroppedBrowserCleanupAuthority::Committed {
                 ownership_token,
                 cleanup_user_data_dir,
@@ -787,43 +2009,26 @@ async fn clean_dropped_browsers(cleanups: Vec<PendingDroppedBrowserCleanup>) {
             DroppedBrowserCleanupAuthority::UncommittedEphemeral { cleanup_token } => {
                 retry_dropped_uncommitted_browser_cleanup(&mut process, cleanup_token).await
             }
-        };
-        if complete {
-            cleanup.completion.publish_complete();
+            DroppedBrowserCleanupAuthority::UncommittedStable => {
+                retry_dropped_uncommitted_stable_browser_cleanup(&mut process).await
+            }
         }
-        drop(process);
+    };
+    if proven {
+        cleanup.post_stop_reconcile.run_after_proven_stop();
     }
+    proven
 }
 
-async fn clean_reclaimable_dropped_browser(
-    cleanup: &ReclaimableDroppedBrowserCleanup,
-) -> bool {
-    let mut process = cleanup.process.lock().await;
-    match &cleanup.authority {
-        DroppedBrowserCleanupAuthority::Committed {
-            ownership_token,
-            cleanup_user_data_dir,
-        } => {
-            retry_dropped_browser_cleanup(
-                &mut process,
-                ownership_token,
-                cleanup_user_data_dir.as_deref(),
-            )
-            .await
-        }
-        DroppedBrowserCleanupAuthority::UncommittedEphemeral { cleanup_token } => {
-            retry_dropped_uncommitted_browser_cleanup(&mut process, cleanup_token).await
-        }
-    }
-}
-
-/// Retry a dropped browser's exact cleanup on an OS-thread-owned runtime.
+/// Retry a dropped browser's exact cleanup when an authoritative shutdown
+/// caller explicitly takes over a relay failure.
 ///
 /// The retry is deliberately bounded. If process proof or artifact cleanup is
 /// permanently fail-closed (for example, the marker was replaced), dropping
 /// `process` delegates tree cleanup to `nomi-process-runtime` and leaves the
 /// profile artifacts for its startup ownership audit instead of keeping an
-/// immortal browser cleanup task.
+/// immortal caller-owned retry task. The normal drop path uses the bounded
+/// singleton relay above and keeps failed jobs in its delayed set.
 pub(crate) async fn retry_dropped_browser_cleanup(
     process: &mut nomi_process_runtime::ManagedChildProcess,
     ownership_token: &crate::profile::BrowserOwnershipToken,
@@ -880,6 +2085,25 @@ async fn retry_dropped_uncommitted_browser_cleanup(
     false
 }
 
+async fn retry_dropped_uncommitted_stable_browser_cleanup(
+    process: &mut nomi_process_runtime::ManagedChildProcess,
+) -> bool {
+    for attempt in 0..DROPPED_BROWSER_CLEANUP_MAX_ATTEMPTS {
+        if terminate_launched_process_tree(process).await.is_ok() {
+            return true;
+        }
+        if attempt + 1 < DROPPED_BROWSER_CLEANUP_MAX_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    tracing::warn!(
+        target: "nomi_browser_engine::launch",
+        attempts = DROPPED_BROWSER_CLEANUP_MAX_ATTEMPTS,
+        "uncommitted stable-profile browser cleanup could not be proven"
+    );
+    false
+}
+
 /// CDP 连接运输。**Unix 生产用 `--remote-debugging-pipe`**（fd3/fd4；浏览器在本进程死亡——含
 /// SIGKILL——时,内核关闭继承的 fd → Chromium 自行退出,跨平台父死自清的最优解,见
 /// docs/superpowers/specs/browser-use/2026-06-19-macos-pdeath-pipe-transport-design.md）。
@@ -923,6 +2147,64 @@ pub fn build_chrome_args(user_data_dir: &Path, force_headless: bool) -> Vec<Stri
     )
 }
 
+fn is_platform_managed_profile(user_data_dir: &Path) -> bool {
+    let mut components = Vec::new();
+    for component in user_data_dir.components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                let value = value.to_string_lossy();
+                #[cfg(windows)]
+                components.push(value.to_ascii_lowercase());
+                #[cfg(not(windows))]
+                components.push(value.into_owned());
+            }
+            // A trailing `..` must never be ignored and accidentally make an
+            // external profile look like one of the trusted managed suffixes.
+            std::path::Component::ParentDir => return false,
+            std::path::Component::Prefix(_)
+            | std::path::Component::RootDir
+            | std::path::Component::CurDir => {}
+        }
+    }
+
+    let numbered = |value: &str, prefix: &str| {
+        value.strip_prefix(prefix).is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    };
+    let hosted = |value: &str| {
+        value
+            .strip_prefix("host-")
+            .is_some_and(|suffix| !suffix.is_empty())
+    };
+
+    match components.as_slice() {
+        [.., root, identity, generation]
+            if root == "platform-profiles"
+                && identity == "primary"
+                && numbered(generation, "generation-") =>
+        {
+            true
+        }
+        [.., root, identity, host]
+            if root == "platform-profiles"
+                && matches!(identity.as_str(), "anonymous" | "isolated")
+                && hosted(host) =>
+        {
+            true
+        }
+        [.., root, identity, generation, host]
+            if root == "platform-profiles"
+                && identity == "replica"
+                && numbered(generation, "generation-")
+                && hosted(host) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
 /// 按显式 Host 展示模式构造 Chromium 参数。
 ///
 /// 不允许用 `--start-minimized` 模拟静默执行：Headless 必须包含
@@ -942,6 +2224,15 @@ pub fn build_chrome_args_for_mode(
     args.push("--remote-debugging-port=0".into());
 
     args.push(format!("--user-data-dir={}", user_data_dir.display()));
+    if is_platform_managed_profile(user_data_dir) {
+        // Every platform-managed Host uses an application-owned profile. Keep
+        // its reconstructible caches bounded independently of persistent
+        // cookies and origin state. Standalone/external profile layouts do not
+        // match the trusted platform suffixes and retain their existing args.
+        args.push("--disk-cache-size=67108864".into());
+        args.push("--media-cache-size=33554432".into());
+        args.push("--disable-gpu-shader-disk-cache".into());
+    }
 
     // 静态硬化基线（零后台出站 / 容器防崩 / 截图可复现；Linux 含 dev-shm）。
     args.extend(crate::switches::chromium_switches());
@@ -1098,17 +2389,45 @@ pub async fn launch_chrome(
     config: &LaunchConfig,
     force_headless: bool,
 ) -> Result<Launched, BrowserError> {
-    launch_chrome_with_cleanup_profile(config, force_headless, None).await
+    launch_chrome_with_cleanup_profile(config, force_headless, None, None).await
+}
+
+fn prepare_profile_directory_for_launch(
+    config: &LaunchConfig,
+    cleanup_debt_fenced: bool,
+) -> Result<(), BrowserError> {
+    if cleanup_debt_fenced {
+        return Err(BrowserError::Blocked {
+            reason: "browser launch paused because exact cleanup failure debt reached its safety bound; existing Hosts remain available while cleanup retries continue".into(),
+        });
+    }
+    std::fs::create_dir_all(&config.user_data_dir).map_err(|_| safe_profile_prepare_error())
 }
 
 pub(crate) async fn launch_chrome_with_cleanup_profile(
     config: &LaunchConfig,
     force_headless: bool,
     cleanup_user_data_dir: Option<PathBuf>,
+    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
 ) -> Result<Launched, BrowserError> {
+    // This fence represents retained, repeatedly-unprovable cleanup debt only.
+    // It is checked before creating or mutating a profile and is never held by
+    // healthy live Hosts, so normal multi-task concurrency does not become a
+    // process-wide browser-count cap.
+    let cleanup_debt_fenced =
+        BROWSER_CLEANUP_QUARANTINE
+            .get()
+            .is_some_and(|quarantine| {
+                // A previous generation can have ended after preserving all
+                // debt. Launch admission itself is another bounded restart
+                // opportunity, including while the debt fence is active.
+                let _ = quarantine.ensure_worker();
+                quarantine
+                    .launch_fenced
+                    .load(std::sync::atomic::Ordering::Acquire)
+            });
+    prepare_profile_directory_for_launch(config, cleanup_debt_fenced)?;
     // user-data-dir 必须存在（专属目录；红线已在 config 构造处保证非用户 profile）。
-    std::fs::create_dir_all(&config.user_data_dir).map_err(|_| safe_profile_prepare_error())?;
-
     // Ownership must be resolved before touching Preferences, Singleton files,
     // or any other profile state. A live owner or in-progress recovery makes
     // the whole launch fail closed.
@@ -1126,8 +2445,11 @@ pub(crate) async fn launch_chrome_with_cleanup_profile(
     // From this point forward the uncommitted guard owns exact ephemeral
     // cleanup authority. Before spawn it can remove the profile synchronously;
     // after spawn it keeps that authority indivisible from the process proof.
-    let first_attempt =
-        UncommittedLaunchGuard::new(&ownership_claim, first_ephemeral_cleanup);
+    let first_attempt = UncommittedLaunchGuard::new_with_host_lease(
+        &ownership_claim,
+        first_ephemeral_cleanup,
+        host_cleanup_lease.clone(),
+    );
 
     // **脏 profile 根治（keystone）**：上次 chrome 必被硬杀（kill_on_drop / Job Object / app 同步
     // exit），profile.exit_type 停在 "Crashed" → 下次启动弹「未正确关闭 / 恢复页面?」气泡 + 跑会话
@@ -1199,8 +2521,11 @@ pub(crate) async fn launch_chrome_with_cleanup_profile(
                         None
                     }
                 };
-                let retry_attempt =
-                    UncommittedLaunchGuard::new(&ownership_claim, retry_ephemeral_cleanup);
+                let retry_attempt = UncommittedLaunchGuard::new_with_host_lease(
+                    &ownership_claim,
+                    retry_ephemeral_cleanup,
+                    host_cleanup_lease.clone(),
+                );
                 crate::profile::prepare_runtime_port_for_launch(
                     &config.user_data_dir,
                     &ownership_claim,
@@ -1458,6 +2783,625 @@ fn chrome_args_with_startup_page(args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn isolated_cleanup_quarantine() -> &'static BrowserCleanupQuarantine {
+        Box::leak(Box::new(BrowserCleanupQuarantine::new()))
+    }
+
+    fn stop_isolated_cleanup_quarantine(quarantine: &'static BrowserCleanupQuarantine) {
+        use std::sync::atomic::Ordering;
+
+        quarantine.shutdown.store(true, Ordering::Release);
+        quarantine.available.notify_all();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while quarantine.live_worker_generation.load(Ordering::Acquire) != 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            quarantine.live_worker_generation.load(Ordering::Acquire),
+            0,
+            "isolated cleanup worker reaches a terminal generation"
+        );
+    }
+
+    #[test]
+    fn cleanup_debt_fence_rejects_before_profile_creation() {
+        let temp = tempfile::tempdir().expect("temporary launch parent");
+        let profile = temp.path().join("must-not-be-created");
+        let config = LaunchConfig {
+            chrome_path: temp.path().join("unused-browser"),
+            user_data_dir: profile.clone(),
+            headful: false,
+        };
+
+        let error = prepare_profile_directory_for_launch(&config, true)
+            .expect_err("full cleanup debt must fail launch admission");
+        assert!(matches!(error, BrowserError::Blocked { .. }));
+        assert!(
+            !profile.exists(),
+            "debt admission must run before creating a profile or marker"
+        );
+    }
+
+    #[test]
+    fn cleanup_quarantine_spawn_failure_is_retryable_with_one_live_generation() {
+        use std::sync::atomic::Ordering;
+
+        let quarantine = isolated_cleanup_quarantine();
+        quarantine.force_spawn_failures.store(1, Ordering::Release);
+        assert!(
+            !quarantine.ensure_worker(),
+            "a failed spawn is reported to the handoff caller"
+        );
+        assert_eq!(
+            quarantine.live_worker_generation.load(Ordering::Acquire),
+            0,
+            "failed startup must not be cached as a live worker"
+        );
+
+        assert!(
+            quarantine.ensure_worker(),
+            "the next admission retries worker startup"
+        );
+        let generation = quarantine.live_worker_generation.load(Ordering::Acquire);
+        assert_ne!(generation, 0);
+        assert!(quarantine.ensure_worker());
+        assert_eq!(
+            quarantine.live_worker_generation.load(Ordering::Acquire),
+            generation,
+            "concurrent admissions share the fixed live worker generation"
+        );
+        stop_isolated_cleanup_quarantine(quarantine);
+    }
+
+    #[test]
+    fn cleanup_quarantine_worker_panic_retries_the_same_retained_debt() {
+        use std::sync::atomic::Ordering;
+
+        let quarantine = isolated_cleanup_quarantine();
+        let ticket = DroppedBrowserCleanupTicket::pending();
+        quarantine
+            .tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ticket.clone());
+        quarantine.force_worker_panics.store(3, Ordering::Release);
+        assert!(quarantine.ensure_worker());
+        let generation = quarantine.live_worker_generation.load(Ordering::Acquire);
+        quarantine.available.notify_all();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while quarantine.worker_attempts.load(Ordering::Acquire) < 1
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let attempts_after_first_panic = quarantine.worker_attempts.load(Ordering::Acquire);
+        std::thread::sleep(BROWSER_CLEANUP_RETRY_INITIAL / 2);
+        assert_eq!(
+            quarantine.worker_attempts.load(Ordering::Acquire),
+            attempts_after_first_panic,
+            "deterministic repeated panics must back off instead of spinning a CPU"
+        );
+        while quarantine.worker_attempts.load(Ordering::Acquire) < 4
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            quarantine.worker_attempts.load(Ordering::Acquire) >= 4,
+            "panic containment retries the selected debt instead of losing its consumer"
+        );
+        assert_eq!(
+            quarantine.live_worker_generation.load(Ordering::Acquire),
+            generation,
+            "a contained job panic does not create a second worker generation"
+        );
+        assert!(
+            quarantine
+                .tickets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|retained| std::sync::Arc::ptr_eq(&retained.inner, &ticket.inner)),
+            "the same exact debt remains pinned across the panic"
+        );
+
+        ticket.publish_complete();
+        stop_isolated_cleanup_quarantine(quarantine);
+    }
+
+    #[tokio::test]
+    async fn cleanup_quarantine_spawn_failure_falls_back_to_managed_process_relay() {
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("quarantine-spawn-fallback");
+        std::fs::create_dir_all(&profile).unwrap();
+        let claim = crate::profile::prepare_ownership_marker_for_launch(&profile)
+            .expect("exclusive launch claim");
+        let (process, executable) = spawn_long_running_fixture();
+        let token = crate::profile::write_browser_ownership_marker(
+            &claim,
+            &profile,
+            &executable,
+            process.child(),
+            None,
+        )
+        .await
+        .expect("commit exact ownership marker");
+        let pid = process.id().expect("fixture child pid");
+        drop(claim);
+
+        let ticket = DroppedBrowserCleanupTicket::pending();
+        let quarantine = isolated_cleanup_quarantine();
+        quarantine.force_spawn_failures.store(1, Ordering::Release);
+        quarantine_dropped_browser_cleanups_in(
+            quarantine,
+            vec![PendingDroppedBrowserCleanup {
+                process: std::sync::Arc::new(tokio::sync::Mutex::new(process)),
+                authority: DroppedBrowserCleanupAuthority::Committed {
+                    ownership_token: token,
+                    cleanup_user_data_dir: Some(profile.clone()),
+                },
+                completion: ticket.clone(),
+                runtime_tasks: std::sync::Arc::new(PendingRuntimeTaskCleanup::empty()),
+                post_stop_reconcile: PostStopReconcileCell::empty(),
+            }],
+        );
+        assert!(
+            quarantine
+                .tickets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a failed worker spawn must not pin the new batch behind no consumer"
+        );
+        assert!(
+            ticket
+                .inner
+                .recovery
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some(),
+            "a retained caller ticket keeps exact retry authority"
+        );
+
+        drop(ticket);
+        wait_for_process_exit(pid).await;
+        assert!(
+            profile.join(crate::profile::OWNERSHIP_MARKER_FILE).exists(),
+            "the lower process relay stops Chromium while marker lineage remains for startup audit"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_quarantine_recovers_after_permanent_evidence_failure_is_repaired() {
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("quarantine-repaired-evidence");
+        std::fs::create_dir_all(&profile).unwrap();
+        let claim = crate::profile::prepare_ownership_marker_for_launch(&profile)
+            .expect("exclusive launch claim");
+        let (process, executable) = spawn_long_running_fixture();
+        let token = crate::profile::write_browser_ownership_marker(
+            &claim,
+            &profile,
+            &executable,
+            process.child(),
+            None,
+        )
+        .await
+        .expect("commit exact ownership marker");
+        let pid = process.id().expect("fixture child pid");
+        let marker_path = profile.join(crate::profile::OWNERSHIP_MARKER_FILE);
+        let original_marker = std::fs::read(&marker_path).unwrap();
+        std::fs::write(&marker_path, b"{}").unwrap();
+        drop(claim);
+
+        let ticket = DroppedBrowserCleanupTicket::pending();
+        let quarantine = isolated_cleanup_quarantine();
+        quarantine_dropped_browser_cleanups_in(
+            quarantine,
+            vec![PendingDroppedBrowserCleanup {
+                process: std::sync::Arc::new(tokio::sync::Mutex::new(process)),
+                authority: DroppedBrowserCleanupAuthority::Committed {
+                    ownership_token: token,
+                    cleanup_user_data_dir: Some(profile.clone()),
+                },
+                completion: ticket.clone(),
+                runtime_tasks: std::sync::Arc::new(PendingRuntimeTaskCleanup::empty()),
+                post_stop_reconcile: PostStopReconcileCell::empty(),
+            }],
+        );
+        wait_for_process_exit(pid).await;
+        assert!(
+            !ticket.is_complete(),
+            "mismatched evidence remains durable failure debt"
+        );
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while quarantine.worker_attempts.load(Ordering::Acquire) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("unrepaired evidence returns the same debt for another attempt");
+
+        std::fs::write(&marker_path, original_marker).unwrap();
+        quarantine.available.notify_all();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !ticket.is_complete() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("repairing exact evidence lets the same debt converge");
+        assert!(!profile.exists());
+        assert!(quarantine.worker_attempts.load(Ordering::Acquire) >= 2);
+        stop_isolated_cleanup_quarantine(quarantine);
+    }
+
+    #[test]
+    fn dropped_host_cleanup_tickets_retain_structural_slots_until_exact_completion() {
+        let scope = crate::host::StandaloneResourceScope::new();
+        let mut cleanup_debts = Vec::new();
+        for _ in 0..crate::host::STANDALONE_MAX_LIVE_HOSTS_PER_SCOPE {
+            let lease = scope
+                .reserve_host()
+                .expect("repeated Host construction remains within the task cap");
+            // Models CdpHostRuntime::Drop after it has transferred process and
+            // profile authority. A permanently pending cleanup ticket must keep
+            // the structural lease even though the runtime itself is gone.
+            cleanup_debts.push(DroppedBrowserCleanupTicket::pending_with_host_lease(Some(
+                crate::host::HostCleanupLease::new(lease),
+            )));
+        }
+        assert!(
+            scope.reserve_host().is_err(),
+            "the fifth Host must fail closed while four dropped Hosts remain cleanup-pending"
+        );
+        assert_eq!(
+            scope.counts().0,
+            crate::host::STANDALONE_MAX_LIVE_HOSTS_PER_SCOPE
+        );
+
+        cleanup_debts[0].publish_complete();
+        let replacement = scope
+            .reserve_host()
+            .expect("exact process/profile completion returns one Host slot");
+        drop(replacement);
+        for ticket in &cleanup_debts[1..] {
+            ticket.publish_complete();
+        }
+        drop(cleanup_debts);
+        assert_eq!(scope.counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn opaque_platform_cleanup_lease_is_pinned_until_ticket_publishes_exact_completion() {
+        struct CountDrop(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for CountDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticket = DroppedBrowserCleanupTicket::pending_with_host_lease(Some(
+            crate::host::HostCleanupLease::new(CountDrop(std::sync::Arc::clone(&drops))),
+        ));
+        assert_eq!(drops.load(std::sync::atomic::Ordering::Acquire), 0);
+        ticket.publish_complete();
+        assert_eq!(drops.load(std::sync::atomic::Ordering::Acquire), 1);
+        ticket.publish_complete();
+        assert_eq!(drops.load(std::sync::atomic::Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_runtime_cleanup_joins_forever_pending_and_panicked_tasks() {
+        struct CountDrop(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for CountDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let pending_drops = std::sync::Arc::clone(&drops);
+        let forever_pending = tokio::spawn(async move {
+            let _guard = CountDrop(pending_drops);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("forever-pending task started");
+        let panicked = tokio::spawn(async move {
+            panic!("synthetic pending-runtime worker panic");
+        });
+        let tasks = std::sync::Arc::new(PendingRuntimeTaskCleanup::new(vec![
+            forever_pending,
+            panicked,
+        ]));
+
+        tokio::time::timeout(Duration::from_secs(2), tasks.settle())
+            .await
+            .expect("aborted pending-runtime tasks must reach terminal joins");
+        assert_eq!(drops.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert!(
+            tasks
+                .handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_runtime_task_join_restores_handle_for_relay_retry() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocking = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx.recv().unwrap();
+        let tasks = std::sync::Arc::new(PendingRuntimeTaskCleanup::new(vec![blocking]));
+        let settling = {
+            let tasks = std::sync::Arc::clone(&tasks);
+            tokio::spawn(async move { tasks.settle().await })
+        };
+        tokio::task::yield_now().await;
+        settling.abort();
+        let _ = settling.await;
+        assert_eq!(
+            tasks
+                .handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1,
+            "cancelled join attempts must return the exact JoinHandle to retained authority"
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), tasks.settle())
+            .await
+            .expect("a later relay attempt joins the restored task");
+        assert!(
+            tasks
+                .handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn browser_cleanup_admission_is_hard_bounded_and_backpressures() {
+        use std::sync::atomic::Ordering;
+
+        let state = std::sync::Arc::new(BrowserCleanupRelayState::default());
+        state.running.store(true, Ordering::Release);
+        let admission = std::sync::Arc::new(BrowserCleanupAdmission::new(
+            2,
+            std::sync::Arc::clone(&state),
+        ));
+        let first = admission.acquire().expect("first cleanup authority");
+        let second = admission.acquire().expect("second cleanup authority");
+        assert_eq!(state.retained.load(Ordering::Acquire), 2);
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+        let waiting_admission = std::sync::Arc::clone(&admission);
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let permit = waiting_admission
+                .acquire()
+                .expect("saturated admission eventually opens");
+            admitted_tx.send(permit).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            admitted_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "a third authority must remain with its caller instead of overflowing"
+        );
+        assert_eq!(state.retained.load(Ordering::Acquire), 2);
+        assert_eq!(state.saturated_handoffs.load(Ordering::Acquire), 1);
+
+        drop(first);
+        let third = admitted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("releasing a slot wakes exactly one blocked handoff");
+        assert_eq!(state.retained.load(Ordering::Acquire), 2);
+        drop(second);
+        drop(third);
+        waiter.join().unwrap();
+        assert_eq!(state.retained.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn saturated_browser_cleanup_handoff_has_a_bounded_wait() {
+        use std::sync::atomic::Ordering;
+
+        let state = std::sync::Arc::new(BrowserCleanupRelayState::default());
+        state.running.store(true, Ordering::Release);
+        let admission = std::sync::Arc::new(BrowserCleanupAdmission::new(
+            1,
+            std::sync::Arc::clone(&state),
+        ));
+        let first = admission.acquire().expect("first cleanup authority");
+
+        let started = std::time::Instant::now();
+        assert!(
+            admission.acquire().is_none(),
+            "saturation transfers to cleanup debt instead of blocking Drop forever"
+        );
+        let elapsed = started.elapsed();
+        assert!(elapsed >= BROWSER_CLEANUP_ADMISSION_WAIT);
+        assert!(elapsed < Duration::from_secs(2));
+        assert_eq!(state.retained.load(Ordering::Acquire), 1);
+        assert_eq!(state.saturated_handoffs.load(Ordering::Acquire), 1);
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn cleanup_relay_many_handoffs_use_fixed_workers_and_converge_without_polling() {
+        const COUNT: usize = 8;
+
+        let temp = tempfile::tempdir().unwrap();
+        let before = browser_cleanup_relay_metrics();
+        let mut profiles = Vec::with_capacity(COUNT);
+        let mut pids = Vec::with_capacity(COUNT);
+        let mut tickets = Vec::with_capacity(COUNT);
+        for index in 0..COUNT {
+            let profile = temp.path().join(format!("bounded-relay-{index}"));
+            std::fs::create_dir_all(&profile).unwrap();
+            let claim = crate::profile::prepare_ownership_marker_for_launch(&profile)
+                .expect("exclusive launch claim");
+            let (process, executable) = spawn_long_running_fixture();
+            let token = crate::profile::write_browser_ownership_marker(
+                &claim,
+                &profile,
+                &executable,
+                process.child(),
+                None,
+            )
+            .await
+            .expect("commit exact ownership marker");
+            let pid = process.id().expect("fixture child pid");
+            drop(claim);
+            tickets.push(hand_off_dropped_browser_cleanup(
+                std::sync::Arc::new(tokio::sync::Mutex::new(process)),
+                token,
+                Some(profile.clone()),
+            ));
+            profiles.push(profile);
+            pids.push(pid);
+        }
+
+        let admitted = browser_cleanup_relay_metrics();
+        assert_eq!(admitted.capacity, BROWSER_CLEANUP_RELAY_CAPACITY);
+        assert!(
+            admitted.workers <= BROWSER_CLEANUP_RELAY_WORKERS,
+            "N handoffs must not create N cleanup threads: {admitted:?}"
+        );
+        assert!(admitted.retained <= admitted.capacity);
+        assert!(admitted.submitted >= before.submitted + COUNT as u64);
+
+        // Do not call a ticket retry method here. The singleton dispatcher
+        // must make progress even when no later browser request arrives.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if profiles.iter().all(|profile| !profile.exists()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("all exact process/profile jobs converge autonomously");
+        for pid in pids {
+            wait_for_process_exit(pid).await;
+        }
+        for ticket in tickets {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), ticket.wait_or_retry())
+                    .await
+                    .expect("completion is sticky after autonomous cleanup"),
+                DroppedBrowserCleanupCompletion::Complete
+            );
+        }
+        let complete = browser_cleanup_relay_metrics();
+        assert!(complete.retained <= complete.capacity);
+        assert!(complete.completed >= before.completed + COUNT as u64);
+        assert!(complete.workers <= BROWSER_CLEANUP_RELAY_WORKERS);
+    }
+
+    #[tokio::test]
+    async fn permanently_unprovable_cleanup_releases_relay_slot_without_losing_authority() {
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("permanent-marker-mismatch");
+        std::fs::create_dir_all(&profile).unwrap();
+        let claim = crate::profile::prepare_ownership_marker_for_launch(&profile)
+            .expect("exclusive launch claim");
+        let (process, executable) = spawn_long_running_fixture();
+        let token = crate::profile::write_browser_ownership_marker(
+            &claim,
+            &profile,
+            &executable,
+            process.child(),
+            None,
+        )
+        .await
+        .expect("commit exact ownership marker");
+        let pid = process.id().expect("fixture child pid");
+        // Replacing the marker makes artifact deletion permanently
+        // unprovable for this exact token while process-tree shutdown remains
+        // valid. The relay must not retain its hard slot forever.
+        std::fs::write(
+            profile.join(crate::profile::OWNERSHIP_MARKER_FILE),
+            b"{}",
+        )
+        .unwrap();
+        drop(claim);
+
+        let before = browser_cleanup_relay_metrics();
+        let ticket = hand_off_dropped_browser_cleanup(
+            std::sync::Arc::new(tokio::sync::Mutex::new(process)),
+            token,
+            Some(profile.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(ticket.inner.state.load(Ordering::Acquire), 2 | 3) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("bounded retries return permanent failure to durable authority");
+        assert!(browser_cleanup_relay_metrics().deferred > before.deferred);
+        wait_for_process_exit(pid).await;
+
+        let ticket_state = ticket.inner.state.load(Ordering::Acquire);
+        assert!(
+            matches!(ticket_state, 2 | 3),
+            "the exact process/profile authority remains reclaimable or is actively retried"
+        );
+        if ticket_state == 2 {
+            assert!(
+                ticket
+                    .inner
+                    .recovery
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some(),
+                "idle failure debt must retain exact cleanup authority"
+            );
+        }
+        assert!(
+            BrowserCleanupQuarantine::global()
+                .tickets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|retained| std::sync::Arc::ptr_eq(&retained.inner, &ticket.inner)),
+            "an ignored caller ticket must remain pinned by the fixed debt worker"
+        );
+        assert!(
+            profile.join(crate::profile::OWNERSHIP_MARKER_FILE).exists(),
+            "mismatched ownership evidence must fail closed for startup audit"
+        );
+        assert!(browser_cleanup_relay_metrics().retained <= BROWSER_CLEANUP_RELAY_CAPACITY);
+    }
 
     #[tokio::test]
     async fn dropped_cleanup_ticket_is_persistent_for_racing_multiple_and_late_waiters() {
@@ -1731,6 +3675,61 @@ mod tests {
     }
 
     #[test]
+    fn cache_limits_apply_to_every_exact_platform_managed_profile_shape() {
+        for profile in [
+            "/data/platform-profiles/primary/generation-1",
+            "/data/platform-profiles/anonymous/host-shared",
+            "/data/platform-profiles/replica/generation-1/host-one",
+            "/data/platform-profiles/isolated/host-one",
+        ] {
+            let args = build_chrome_args(Path::new(profile), true);
+            for expected in [
+                "--disk-cache-size=67108864",
+                "--media-cache-size=33554432",
+                "--disable-gpu-shader-disk-cache",
+            ] {
+                assert!(
+                    args.iter().any(|arg| arg == expected),
+                    "missing cache boundary for {profile}: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cache_limits_never_apply_to_standalone_or_malformed_profile_shapes() {
+        for profile in [
+            "/data/profile",
+            "/data/profiles/browser-1",
+            "/data/platform-profiles/primary/generation-",
+            "/data/platform-profiles/primary/generation-one",
+            "/data/platform-profiles/primary/generation-1/child",
+            "/data/platform-profiles/anonymous/not-a-host",
+            "/data/platform-profiles/anonymous/host-",
+            "/data/platform-profiles/replica/generation-1",
+            "/data/platform-profiles/replica/generation-one/host-one",
+            "/data/platform-profiles/isolated/not-a-host",
+            "/data/platform-profiles/isolated/host-one/..",
+        ] {
+            let args = build_chrome_args(Path::new(profile), true);
+            assert!(
+                !args.iter().any(|arg| arg.starts_with("--disk-cache-size=")),
+                "external or malformed profile received a disk-cache cap: {profile}"
+            );
+            assert!(
+                !args.iter().any(|arg| arg.starts_with("--media-cache-size=")),
+                "external or malformed profile received a media-cache cap: {profile}"
+            );
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == "--disable-gpu-shader-disk-cache"),
+                "external or malformed profile had its shader cache disabled: {profile}"
+            );
+        }
+    }
+
+    #[test]
     fn extra_chrome_args_cannot_override_managed_profile_or_transport() {
         let managed_profile = Path::new("/managed/profile");
         let mut args = build_chrome_args(managed_profile, true);
@@ -1887,6 +3886,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let profile = temp.path().join("cancelled-uncommitted-launch");
         std::fs::create_dir_all(&profile).unwrap();
+        let scope = crate::host::StandaloneResourceScope::new();
+        let host_lease = crate::host::HostCleanupLease::new(
+            scope
+                .reserve_host()
+                .expect("standalone Host transaction slot"),
+        );
         let task_profile = profile.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -1897,14 +3902,22 @@ mod tests {
                     .expect("durable provisional cleanup marker");
             let (process, _) = spawn_long_running_fixture();
             let pid = process.id().expect("fixture child pid");
-            let mut uncommitted =
-                UncommittedLaunchGuard::new(&claim, Some(cleanup_token));
+            let mut uncommitted = UncommittedLaunchGuard::new_with_host_lease(
+                &claim,
+                Some(cleanup_token),
+                Some(host_lease),
+            );
             uncommitted.attach_process(process);
             ready_tx.send(pid).unwrap();
             std::future::pending::<()>().await;
         });
 
         let pid = ready_rx.await.expect("guard reached pre-commit state");
+        assert_eq!(
+            scope.counts().0,
+            1,
+            "the structural Host slot is already inside the launch transaction after physical spawn"
+        );
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
 
@@ -1919,6 +3932,7 @@ mod tests {
                 );
                 if system.process(sysinfo::Pid::from_u32(pid)).is_none()
                     && !profile.exists()
+                    && scope.counts().0 == 0
                 {
                     break;
                 }
@@ -1926,7 +3940,7 @@ mod tests {
             }
         })
         .await
-        .expect("cancelled pre-commit launch reaps tree before deleting profile");
+        .expect("cancelled pre-commit launch reaps tree before deleting profile and returning its Host slot");
     }
 
     #[tokio::test]

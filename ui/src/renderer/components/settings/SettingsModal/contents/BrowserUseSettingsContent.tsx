@@ -316,6 +316,10 @@ const FULL_POWER_KEY = 'agent.browserUse.fullPower' as const;
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
 const INTEGER_RESOURCE_POLICY_FIELDS = new Set<keyof BrowserResourcePolicyAdvanced>([
+  'max_task_memory_bytes',
+  'max_task_active_operations',
+  'max_task_open_lanes',
+  'max_task_tabs',
   'reserved_memory_bytes',
   'max_active_operations',
   'max_open_lanes',
@@ -325,6 +329,10 @@ const INTEGER_RESOURCE_POLICY_FIELDS = new Set<keyof BrowserResourcePolicyAdvanc
 
 export const BROWSER_RESOURCE_POLICY_LIMITS = {
   max_memory_ratio: { min: 0.1, max: 0.8 },
+  max_task_memory_bytes: { min: 256 * MIB, max: 16 * GIB },
+  max_task_active_operations: { min: 1, max: 16 },
+  max_task_open_lanes: { min: 1, max: 32 },
+  max_task_tabs: { min: 1, max: 64 },
   reserved_memory_bytes: { min: 256 * MIB, max: 512 * GIB },
   max_active_operations: { min: 1, max: 64 },
   max_open_lanes: { min: 1, max: 128 },
@@ -371,6 +379,30 @@ export function validateBrowserResourcePolicy(
     return {
       field: 'max_owner_queued_requests',
       message: 'max_owner_queued_requests cannot exceed max_queued_requests.',
+    };
+  }
+
+  const taskOperations =
+    advanced?.max_task_active_operations ?? fallbackAdvanced?.max_task_active_operations;
+  const globalOperations =
+    advanced?.max_active_operations ?? fallbackAdvanced?.max_active_operations;
+  if (
+    taskOperations !== undefined &&
+    globalOperations !== undefined &&
+    taskOperations > globalOperations
+  ) {
+    return {
+      field: 'max_task_active_operations',
+      message: 'max_task_active_operations cannot exceed max_active_operations.',
+    };
+  }
+
+  const taskLanes = advanced?.max_task_open_lanes ?? fallbackAdvanced?.max_task_open_lanes;
+  const globalLanes = advanced?.max_open_lanes ?? fallbackAdvanced?.max_open_lanes;
+  if (taskLanes !== undefined && globalLanes !== undefined && taskLanes > globalLanes) {
+    return {
+      field: 'max_task_open_lanes',
+      message: 'max_task_open_lanes cannot exceed max_open_lanes.',
     };
   }
 
@@ -1249,6 +1281,67 @@ const BrowserUseSettingsContent: React.FC = () => {
                       placeholder={resourcePolicyPlaceholder}
                       style={{ width: 180 }}
                       onChange={(value) => handleResourcePolicyAdvancedChange('max_memory_ratio', value)}
+                    />
+                  </PreferenceRow>
+                  <PreferenceRow
+                    label={t('settings.browserResourceMaxTaskMemoryBytes')}
+                    description={t('settings.browserResourceMaxTaskMemoryBytesDesc')}
+                  >
+                    <InputNumber
+                      value={resourcePolicy.advanced?.max_task_memory_bytes}
+                      disabled={resourcePolicyDisabled}
+                      min={BROWSER_RESOURCE_POLICY_LIMITS.max_task_memory_bytes.min}
+                      max={BROWSER_RESOURCE_POLICY_LIMITS.max_task_memory_bytes.max}
+                      step={268435456}
+                      suffix='B'
+                      placeholder={resourcePolicyPlaceholder}
+                      style={{ width: 180 }}
+                      onChange={(value) => handleResourcePolicyAdvancedChange('max_task_memory_bytes', value)}
+                    />
+                  </PreferenceRow>
+                  <PreferenceRow
+                    label={t('settings.browserResourceMaxTaskActiveOperations')}
+                    description={t('settings.browserResourceMaxTaskActiveOperationsDesc')}
+                  >
+                    <InputNumber
+                      value={resourcePolicy.advanced?.max_task_active_operations}
+                      disabled={resourcePolicyDisabled}
+                      min={BROWSER_RESOURCE_POLICY_LIMITS.max_task_active_operations.min}
+                      max={BROWSER_RESOURCE_POLICY_LIMITS.max_task_active_operations.max}
+                      precision={0}
+                      placeholder={resourcePolicyPlaceholder}
+                      style={{ width: 180 }}
+                      onChange={(value) => handleResourcePolicyAdvancedChange('max_task_active_operations', value)}
+                    />
+                  </PreferenceRow>
+                  <PreferenceRow
+                    label={t('settings.browserResourceMaxTaskOpenLanes')}
+                    description={t('settings.browserResourceMaxTaskOpenLanesDesc')}
+                  >
+                    <InputNumber
+                      value={resourcePolicy.advanced?.max_task_open_lanes}
+                      disabled={resourcePolicyDisabled}
+                      min={BROWSER_RESOURCE_POLICY_LIMITS.max_task_open_lanes.min}
+                      max={BROWSER_RESOURCE_POLICY_LIMITS.max_task_open_lanes.max}
+                      precision={0}
+                      placeholder={resourcePolicyPlaceholder}
+                      style={{ width: 180 }}
+                      onChange={(value) => handleResourcePolicyAdvancedChange('max_task_open_lanes', value)}
+                    />
+                  </PreferenceRow>
+                  <PreferenceRow
+                    label={t('settings.browserResourceMaxTaskTabs')}
+                    description={t('settings.browserResourceMaxTaskTabsDesc')}
+                  >
+                    <InputNumber
+                      value={resourcePolicy.advanced?.max_task_tabs}
+                      disabled={resourcePolicyDisabled}
+                      min={BROWSER_RESOURCE_POLICY_LIMITS.max_task_tabs.min}
+                      max={BROWSER_RESOURCE_POLICY_LIMITS.max_task_tabs.max}
+                      precision={0}
+                      placeholder={resourcePolicyPlaceholder}
+                      style={{ width: 180 }}
+                      onChange={(value) => handleResourcePolicyAdvancedChange('max_task_tabs', value)}
                     />
                   </PreferenceRow>
                   <PreferenceRow

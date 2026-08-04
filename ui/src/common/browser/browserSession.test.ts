@@ -251,6 +251,16 @@ describe('normalizeBrowserOverview Host projection', () => {
     const overview = normalizeBrowserOverview({
       running_lanes: 2,
       queued_lanes: 1,
+      capacity: {
+        active: 2,
+        max_active: 8,
+        global_memory_pressure_threshold_bytes: 12 * 1024 * 1024 * 1024,
+        max_task_memory_bytes: 1024 * 1024 * 1024,
+        max_task_active_operations: 2,
+        max_task_open_lanes: 4,
+        max_task_tabs: 16,
+        browser_memory_limit_bytes: 123,
+      },
       hosts: [
         {
           host_id: 'host-primary',
@@ -283,6 +293,22 @@ describe('normalizeBrowserOverview Host projection', () => {
     expect(overview.hosts?.[0] && 'debugging_port' in overview.hosts[0]).toBe(false);
     expect(overview.hosts?.[0] && 'cdp_endpoint' in overview.hosts[0]).toBe(false);
     expect(overview.hosts?.[0] && 'profile_path' in overview.hosts[0]).toBe(false);
+    expect(overview.capacity).toEqual({
+      active: 2,
+      queued: undefined,
+      max_active: 8,
+      max_open_lanes: undefined,
+      global_memory_pressure_threshold_bytes: 12 * 1024 * 1024 * 1024,
+      max_task_memory_bytes: 1024 * 1024 * 1024,
+      max_task_active_operations: 2,
+      max_task_open_lanes: 4,
+      max_task_tabs: 16,
+      recommended_concurrency: undefined,
+      reason_code: undefined,
+    });
+    expect(
+      overview.capacity && 'browser_memory_limit_bytes' in overview.capacity
+    ).toBe(false);
   });
 
   test('accepts legacy aliases while rejecting malformed Hosts', () => {
