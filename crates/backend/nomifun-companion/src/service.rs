@@ -19,14 +19,14 @@ use crate::companion::{CompanionThreads, build_companion_system_prompt};
 use crate::events::CompanionEventEmitter;
 use crate::evolution::{EvolutionEngine, NoopTranscriptSource};
 use crate::gamify::level_for_xp;
-use crate::learner::{Learner, CompanionCompleter};
+use crate::learner::{CompanionCompleter, CompanionLearnResult, Learner};
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::skill_sink::CompanionSkillStoreSink;
 use crate::store::{
     CompanionThread, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage, MemoryScope,
-    CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion,
+    CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion,
     SuggestionPage, memory_contents_similar,
 };
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
@@ -97,20 +97,17 @@ pub struct CompanionStatus {
     pub skills_active: i64,
     pub model_configured: bool,
     pub collect_any_enabled: bool,
-    pub last_learn: Option<CompanionLearnRun>,
 }
 
-/// "What I learned this week" digest. Skills are per-companion; memories/learn-runs are
-/// global (memory.db is one shared store, learn_runs has no companion column) — the UI labels this honestly.
+/// "What I learned this week" digest. Skills are per-companion; memories are
+/// global because the memory hub is shared by the whole companion roster.
 #[derive(Debug, Serialize)]
 pub struct CompanionWeeklyDigest {
     pub since_ms: i64,
     pub skills_learned: i64,
     pub skills_active_new: i64,
     pub memories_added: i64,
-    pub learn_runs: i64,
     pub new_skill_names: Vec<String>,
-    pub recent_summaries: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -841,7 +838,6 @@ impl CompanionService {
             skills_active: self.store.count_active_skills(id).await?,
             model_configured: profile.model.is_some(),
             collect_any_enabled: cfg.collect.any_enabled(),
-            last_learn: self.store.list_learn_runs(1).await?.into_iter().next(),
         })
     }
 
@@ -851,18 +847,12 @@ impl CompanionService {
         let skills_active_new = self.store.count_skills_since(companion_id, since_ms, Some("active")).await?;
         let memories_added = self.store.count_memories_since(since_ms).await?;
         let new_skill_names = self.store.list_skill_names_since(companion_id, since_ms, 12).await?;
-        let runs = self.store.list_learn_runs(50).await?;
-        let learn_runs = runs.iter().filter(|r| r.started_at >= since_ms).count() as i64;
-        let recent_summaries: Vec<String> =
-            runs.iter().filter(|r| r.started_at >= since_ms).filter_map(|r| r.summary.clone()).take(5).collect();
         Ok(CompanionWeeklyDigest {
             since_ms,
             skills_learned,
             skills_active_new,
             memories_added,
-            learn_runs,
             new_skill_names,
-            recent_summaries,
         })
     }
 
@@ -1188,7 +1178,6 @@ impl CompanionService {
             skills_active: 0,
             model_configured: false,
             collect_any_enabled: cfg.collect.any_enabled(),
-            last_learn: self.store.list_learn_runs(1).await?.into_iter().next(),
         })
     }
 
@@ -1882,12 +1871,8 @@ impl CompanionService {
 
     // ----- learning -----
 
-    pub async fn run_learn_now(&self) -> Result<CompanionLearnRun, AppError> {
+    pub async fn run_learn_now(&self) -> Result<CompanionLearnResult, AppError> {
         self.learner.run_once().await
-    }
-
-    pub async fn list_learn_runs(&self, limit: i64) -> Result<Vec<CompanionLearnRun>, AppError> {
-        self.store.list_learn_runs(limit).await
     }
 
     // ----- events -----

@@ -184,7 +184,7 @@ v3 reset/restore，不通过历史逐行迁移导入。多伙伴布局如下：
 │   ├── config.json              SharedCompanionConfig：采集开关、学习间隔与学习模型、default_companion_id
 │   ├── events/YYYYMMDD.jsonl    采集链路的原始事件（隐私敏感，导出需显式勾选）
 │   └── memory.db                独立 SQLite（PRAGMA user_version 版本阶梯）：
-│                                共享记忆/建议/学习历史 + 每宠运行态（companion_runtime_state：XP 等）
+│                                共享记忆/建议 + 每宠运行态（companion_runtime_state：XP 等）
 └── companions/
     └── {companion_id}/                companion_id 为裸标准 UUIDv7，目录即真相
         └── config.json          CompanionProfileConfig：名称/形象/人格/每宠模型/桌宠开关与位置

@@ -3,7 +3,8 @@
 //!
 //! Package layouts (zip root), enveloped by a strict `manifest.json`:
 //! - memory bundle (`kind: "memory"`): `memories.jsonl` (every companion_memories
-//!   row, archived included), `learn_runs.jsonl`, `state.json`
+//!   row, archived included), `state.json`, and an empty legacy
+//!   `learn_runs.jsonl` compatibility marker
 //!   (`{"mood": …}`), optional raw `events/*.jsonl` day files.
 //! - companion bundle (`kind: "companion"`): `companion.json` (full profile), `state.json`
 //!   (`{"xp": …}`), `knowledge_refs.json` (`{"names": […]}` — binding names
@@ -24,14 +25,14 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use nomifun_common::{AppError, TimestampMs, now_ms, zip_safe};
+use nomifun_common::{AppError, TimestampMs, now_ms, validate_uuidv7, zip_safe};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::profile::CompanionProfileConfig;
 use crate::registry::CompanionRegistry;
 use crate::service::CompanionService;
-use crate::store::{CompanionLearnRun, CompanionMemory, CompanionStore};
+use crate::store::{CompanionMemory, CompanionStore};
 
 /// v3 is a hard export/import baseline. Any other package version is rejected.
 pub const EXPORT_FORMAT: &str = "nomifun-export";
@@ -51,7 +52,8 @@ pub struct ExportSummary {
     pub dest_path: String,
     /// Memory rows in the package (0 for companion bundles).
     pub memories: u64,
-    /// Learn-run rows in the package (0 for companion bundles).
+    /// Always zero. Kept on the v3 response wire for compatibility; learning
+    /// run history is no longer recorded or exported.
     pub learn_runs: u64,
     /// Raw `events/*.jsonl` files in the package (0 unless requested).
     pub event_files: u64,
@@ -111,6 +113,31 @@ struct RequiredOptionalString(Option<String>);
 #[serde(deny_unknown_fields)]
 struct MemoryStatePayload {
     mood: RequiredOptionalString,
+}
+
+/// Closed schema for the retired v3 `learn_runs.jsonl` payload. New exports
+/// write an empty compatibility marker; old packages are still validated, then
+/// their historical rows are deliberately discarded rather than re-persisted.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyLearnRun {
+    learn_run_id: String,
+    #[serde(rename = "started_at")]
+    _started_at: TimestampMs,
+    #[serde(rename = "finished_at")]
+    _finished_at: Option<TimestampMs>,
+    #[serde(rename = "status")]
+    _status: String,
+    #[serde(rename = "events_processed")]
+    _events_processed: i64,
+    #[serde(rename = "memories_added")]
+    _memories_added: i64,
+    #[serde(rename = "suggestions_added")]
+    _suggestions_added: i64,
+    #[serde(rename = "error")]
+    _error: Option<String>,
+    #[serde(rename = "summary")]
+    _summary: Option<String>,
 }
 
 /// `state.json` of a companion bundle.
@@ -188,8 +215,8 @@ impl CompanionRoster for CompanionRegistry {
 
 // ── Export ──────────────────────────────────────────────────────────
 
-/// Package the shared memory hub (memories + learn runs + mood, optionally
-/// the raw event day files) into a zip at `dest_path`, written atomically via
+/// Package the shared memory hub (memories + mood, optionally the raw event
+/// day files) into a zip at `dest_path`, written atomically via
 /// a same-directory tempfile + persist.
 pub async fn export_memory_bundle(
     store: &CompanionStore,
@@ -201,19 +228,19 @@ pub async fn export_memory_bundle(
         return Err(AppError::BadRequest("dest_path must be absolute".into()));
     }
     let memories = store.dump_memories_all().await?;
-    let learn_runs = store.dump_learn_runs_all().await?;
     let mood = store.get_state("mood").await?;
 
     let dest = dest_path.to_path_buf();
     let events_dir = include_events.then(|| shared_dir.join("events"));
     let memories_count = memories.len() as u64;
-    let learn_runs_count = learn_runs.len() as u64;
     let (file_count, total_bytes, event_files) = tokio::task::spawn_blocking(move || {
         atomic_zip(&dest, |zip| {
             let mut total_bytes = 0u64;
             add_json_entry(zip, "manifest.json", &manifest_for(EXPORT_KIND_MEMORY))?;
             total_bytes += add_jsonl_entry(zip, "memories.jsonl", &memories)?;
-            total_bytes += add_jsonl_entry(zip, "learn_runs.jsonl", &learn_runs)?;
+            // v3 importers require this entry. It intentionally contains no
+            // rows now that learning-run history has been retired.
+            add_raw_entry(zip, "learn_runs.jsonl", &[])?;
             total_bytes += add_json_entry(
                 zip,
                 "state.json",
@@ -295,7 +322,7 @@ pub async fn export_memory_bundle(
         total_bytes,
         dest_path: dest_path.to_string_lossy().to_string(),
         memories: memories_count,
-        learn_runs: learn_runs_count,
+        learn_runs: 0,
         event_files,
     })
 }
@@ -477,12 +504,16 @@ async fn import_memory_bundle(
     extract_dir: &Path,
 ) -> Result<ImportOutcome, AppError> {
     let memories = parse_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", true)?;
-    let learn_runs =
-        parse_jsonl::<CompanionLearnRun>(&extract_dir.join("learn_runs.jsonl"), "learn_runs.jsonl", true)?;
+    let legacy_learn_runs =
+        parse_jsonl::<LegacyLearnRun>(&extract_dir.join("learn_runs.jsonl"), "learn_runs.jsonl", true)?;
+    for run in &legacy_learn_runs {
+        validate_uuidv7(&run.learn_run_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid legacy learn-run id: {error}")))?;
+    }
     let _state: MemoryStatePayload = read_json_strict(&extract_dir.join("state.json"), "state.json")?;
     let event_plan = plan_event_import(&extract_dir.join("events"), &shared_dir.join("events"))?;
 
-    let transaction = store.begin_memory_import(&memories, &learn_runs).await?;
+    let transaction = store.begin_memory_import(&memories).await?;
     let stats = transaction.stats();
     let published = match publish_event_import(&event_plan) {
         Ok(published) => published,
@@ -1030,27 +1061,12 @@ mod tests {
             store_a.insert_memory_raw(m).await.unwrap();
         }
         store_a.set_state("mood", "happy").await.unwrap();
-        let learn_run_id = nomifun_common::CompanionLearnRunId::new().into_string();
-        store_a
-            .insert_learn_run(&CompanionLearnRun {
-                learn_run_id: learn_run_id.clone(),
-                started_at: 10,
-                finished_at: Some(20),
-                status: "ok".into(),
-                events_processed: 5,
-                memories_added: 2,
-                suggestions_added: 1,
-                error: None,
-                summary: Some("学到了".into()),
-            })
-            .await
-            .unwrap();
 
         let zip_path = dir.path().join("out").join("memory.zip");
         let summary = export_memory_bundle(&store_a, &shared_a, &zip_path, true).await.unwrap();
         assert_eq!(summary.kind, "memory");
         assert_eq!(summary.memories, 3);
-        assert_eq!(summary.learn_runs, 1);
+        assert_eq!(summary.learn_runs, 0);
         assert_eq!(summary.event_files, 1);
         assert_eq!(summary.file_count, 4);
         assert!(summary.total_bytes > 0);
@@ -1058,6 +1074,12 @@ mod tests {
         assert!(
             !dir.path().join("out").join("memory.zip.tmp").exists(),
             "tmp must be renamed away"
+        );
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+        assert_eq!(
+            archive.by_name("learn_runs.jsonl").unwrap().size(),
+            0,
+            "the v3 compatibility marker must never contain history rows"
         );
 
         // Import into a fresh machine: full fidelity, mood untouched.
@@ -1077,12 +1099,11 @@ mod tests {
         let mut restored = store_b.dump_memories_all().await.unwrap();
         assert_eq!(sorted_json(&mut restored), sorted_json(&mut originals));
         assert_eq!(store_b.get_state("mood").await.unwrap().as_deref(), Some("calm"));
-        assert!(store_b.learn_run_exists(&learn_run_id).await.unwrap());
         let landed = shared_b.join("events").join("20260601.jsonl");
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), format!("{event_line}\n"));
 
-        // Re-import with byte-identical events: everything (incl. the archived
-        // row and event file) is idempotently skipped.
+        // Re-import with byte-identical events: the archived row and event file
+        // are idempotently skipped.
         let outcome = import_bundle(&store_b, &roster_b, &shared_b, &zip_path).await.unwrap();
         assert_eq!(
             outcome,
@@ -1092,7 +1113,6 @@ mod tests {
             }
         );
         assert_eq!(store_b.dump_memories_all().await.unwrap().len(), 3);
-        assert_eq!(store_b.dump_learn_runs_all().await.unwrap().len(), 1);
 
         // A same-name event is never silently preferred. Different hash or
         // bytes is a hard conflict and leaves both DB and local file unchanged.
@@ -1106,8 +1126,58 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("event import conflict"), "{error}");
         assert_eq!(store_b.dump_memories_all().await.unwrap().len(), 3);
-        assert_eq!(store_b.dump_learn_runs_all().await.unwrap().len(), 1);
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), local_event);
+    }
+
+    #[tokio::test]
+    async fn legacy_memory_bundle_validates_then_discards_learn_history() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = CompanionStore::open_memory().await.unwrap();
+        let roster = scan_registry(dir.path(), "companions");
+        let archive = dir.path().join("legacy-memory.zip");
+        let memory_id = memory_fixture(77);
+        let legacy_memory = raw_memory(&memory_id, "preference", "旧备份中的有效记忆", "active");
+        let memory_row = format!("{}\n", serde_json::to_string(&legacy_memory).unwrap());
+        let legacy_row = format!(
+            "{{\"learn_run_id\":\"{}\",\"started_at\":1,\"finished_at\":2,\"status\":\"ok\",\"events_processed\":3,\"memories_added\":1,\"suggestions_added\":1,\"error\":null,\"summary\":\"legacy diary\"}}\n",
+            nomifun_common::generate_id()
+        );
+        write_test_zip(
+            &archive,
+            &[
+                ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
+                ("memories.jsonl", &memory_row),
+                ("learn_runs.jsonl", &legacy_row),
+                ("state.json", r#"{"mood":null}"#),
+            ],
+        );
+
+        let outcome = import_bundle(
+            &store,
+            &roster,
+            &dir.path().join("shared"),
+            &archive,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ImportOutcome::Memory {
+                imported: 1,
+                skipped_duplicates: 0,
+            }
+        );
+        assert_eq!(
+            store.get_memory(&memory_id).await.unwrap().unwrap().content,
+            "旧备份中的有效记忆"
+        );
+        let retired_table_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'companion_learn_runs'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(retired_table_count, 0, "legacy rows must never recreate the retired table");
     }
 
     #[tokio::test]
@@ -1434,41 +1504,24 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
         let roster = scan_registry(dir.path(), "companions");
-        let conflict_id = nomifun_common::CompanionLearnRunId::new().into_string();
-        store
-            .insert_learn_run(&CompanionLearnRun {
-                learn_run_id: conflict_id.clone(),
-                started_at: 1,
-                finished_at: Some(2),
-                status: "local".into(),
-                events_processed: 0,
-                memories_added: 0,
-                suggestions_added: 0,
-                error: None,
-                summary: Some("local".into()),
-            })
-            .await
-            .unwrap();
+        let conflict_id = memory_fixture(51);
+        let local = raw_memory(&conflict_id, "knowledge", "本机原内容", "active");
+        store.insert_memory_raw(&local).await.unwrap();
 
-        let imported_memory = raw_memory(&memory_fixture(50), "knowledge", "先写入事务再触发冲突", "active");
-        let imported_run = CompanionLearnRun {
-            learn_run_id: conflict_id,
-            started_at: 9,
-            finished_at: Some(10),
-            status: "imported".into(),
-            events_processed: 1,
-            memories_added: 1,
-            suggestions_added: 0,
-            error: None,
-            summary: Some("不同内容".into()),
-        };
+        let imported_first = raw_memory(&memory_fixture(50), "knowledge", "先写入事务再触发冲突", "active");
+        let imported_conflict = raw_memory(&conflict_id, "knowledge", "导入包不同内容", "active");
+        let memory_lines = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&imported_first).unwrap(),
+            serde_json::to_string(&imported_conflict).unwrap()
+        );
         let archive = dir.path().join("rollback.zip");
         write_test_zip(
             &archive,
             &[
                 ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
-                ("memories.jsonl", &format!("{}\n", serde_json::to_string(&imported_memory).unwrap())),
-                ("learn_runs.jsonl", &format!("{}\n", serde_json::to_string(&imported_run).unwrap())),
+                ("memories.jsonl", &memory_lines),
+                ("learn_runs.jsonl", ""),
                 ("state.json", r#"{"mood":null}"#),
             ],
         );
@@ -1476,12 +1529,9 @@ mod tests {
         let error = import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("learn-run import ID collision"), "{error}");
-        assert!(
-            store.dump_memories_all().await.unwrap().is_empty(),
-            "rows staged before the conflict must be rolled back"
-        );
-        assert_eq!(store.dump_learn_runs_all().await.unwrap().len(), 1);
+        assert!(error.to_string().contains("memory import ID collision"), "{error}");
+        assert!(store.get_memory(&imported_first.memory_id).await.unwrap().is_none());
+        assert_eq!(store.dump_memories_all().await.unwrap(), vec![local]);
     }
 
     #[tokio::test]

@@ -169,7 +169,7 @@ dialog):
 
 | Bundle | Contents | Import semantics |
 | --- | --- | --- |
-| **Memory bundle** | All long-term memories + learning history + mood; **optionally** the raw event data (checkbox) | **Merged with dedup** into local memories (original timestamps and sources preserved) |
+| **Memory bundle** | All long-term memories + mood; **optionally** the raw event data (checkbox) | **Merged with dedup** into local memories (original timestamps and sources preserved) |
 | **Companion bundle** | One companion's persona / character / settings / XP + the **name list** of its bound knowledge bases (`knowledge_refs`) | Creates a new companion under a fresh id, name conflicts get a "(2)" suffix; knowledge refs are matched **by name** against local bases to rebuild bindings — unmatched names are listed so you can import those knowledge bundles first and bind manually |
 | **Knowledge-base bundle** | Base metadata + the md file tree verbatim | Lands as a new knowledge base, name conflicts get "(2)" |
 
