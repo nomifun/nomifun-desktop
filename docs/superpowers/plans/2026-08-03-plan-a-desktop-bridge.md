@@ -576,7 +576,8 @@ mod tests {
             .route(
                 "/api/conversations",
                 get(|| async {
-                    Json(json!({"success":true,"data":{"items":[{"conversation_id":"c1","name":"demo","type":"nomi","status":"finished","runtime":{"state":"idle","is_processing":false,"pending_confirmations":0,"active_turn_id":null,"processing_started_at":null},"modified_at":42}],"total":1,"has_more":false}}))
+                    // 真实 list 端点不填 runtime（仅单个 get 填），条目无 runtime 键
+                    Json(json!({"success":true,"data":{"items":[{"conversation_id":"c1","name":"demo","type":"nomi","status":"running","modified_at":42}],"total":1,"has_more":false}}))
                 })
                 .post(|Json(body): Json<Value>| async move {
                     Json(json!({"success":true,"data":{"conversation_id":"c2","name":body["name"],"type":body["type"],"status":"pending"}}))
@@ -602,7 +603,8 @@ mod tests {
                 "/api/conversations/{id}/confirmations/{call_id}/confirm",
                 post(|Path((_, call_id)): Path<(String, String)>, Json(body): Json<Value>| async move {
                     assert_eq!(call_id, "call9");
-                    assert_eq!(body["msg_id"], "mid1");
+                    // 真实端点对 msg_id 做严格 UUIDv7 校验——桥端必须合成合法 UUID
+                    assert!(uuid::Uuid::parse_str(body["msg_id"].as_str().unwrap()).is_ok());
                     Json(json!({"success":true}))
                 }),
             )
@@ -623,9 +625,15 @@ mod tests {
     async fn conversations_list_maps_fields() {
         let r = handler().dispatch("r1", "conversations.list", &json!({})).await.unwrap();
         assert_eq!(r["items"][0]["id"], "c1");
-        assert_eq!(r["items"][0]["is_processing"], false);
+        // list 端点不带 runtime：is_processing 由 status 推导
+        assert_eq!(r["items"][0]["is_processing"], true);
         assert_eq!(r["items"][0]["updated_at"], 42);
         assert_eq!(r["has_more"], false);
+    }
+
+    #[tokio::test]
+    async fn confirm_synthesizes_valid_uuid_msg_id() {
+        handler().dispatch("r1", "confirmations.confirm", &json!({"conversation_id":"c1","call_id":"call9"})).await.unwrap();
     }
 
     #[tokio::test]
@@ -763,7 +771,8 @@ impl RpcHandler {
                 let data = self.call(Method::GET, &path, None, None).await?;
                 let items: Vec<Value> = data["items"].as_array().cloned().unwrap_or_default().iter().map(|it| json!({
                     "id": it["conversation_id"], "name": it["name"], "type": it["type"], "status": it["status"],
-                    "is_processing": it["runtime"]["is_processing"], "updated_at": it["modified_at"],
+                    // list 端点不填 runtime（仅 get 填）：由 status 推导
+                    "is_processing": it["status"] == "running", "updated_at": it["modified_at"],
                 })).collect();
                 Ok(json!({"items": items, "has_more": data["has_more"]}))
             }
@@ -816,8 +825,10 @@ impl RpcHandler {
             "confirmations.confirm" => {
                 let cid = str_param("conversation_id")?;
                 let call_id = str_param("call_id")?;
+                // 真实端点对 msg_id 做严格 UUIDv7 校验，而 confirmations.list 返回的
+                // Confirmation 不含 msg_id（两个 agent 实现均忽略该值）——桥端自行合成。
                 let body = json!({
-                    "msg_id": str_param("msg_id")?,
+                    "msg_id": uuid::Uuid::now_v7().to_string(),
                     "data": if params["data"].is_null() { json!({}) } else { params["data"].clone() },
                     "always_allow": params["always_allow"].as_bool().unwrap_or(false),
                 });
@@ -893,14 +904,19 @@ pub fn truncate_utf8(s: &str, max_bytes: usize) -> (String, bool) {
 - Produces:
 
 ```rust
+/// 帧处理结果：调用方（lan.rs / relay_client.rs）对连续 Bad 计数，
+/// 达到 MAX_DECRYPT_FAILURES 即关闭该连接；任何非 Bad 结果将计数清零。
+#[derive(Debug, PartialEq)]
+pub enum FrameOutcome { Authed(String /*device_id，供调用方登记连接*/), Ignored, Bad }
 pub struct BridgeCore { .. }
 impl BridgeCore {
     pub fn new(identity: Identity, store: DeviceStore, pairing: PairingManager, rpc: RpcHandler, desktop_name: String) -> Arc<Self>;
     /// 处理一个入站 E2E 帧（JSON 文本）。回复经 reply 发送（E2EFrame 的 JSON 文本）。
-    /// 返回 Some(device_id) 表示该连接已认证为此设备（供调用方登记连接）。
-    pub async fn handle_frame_json(self: &Arc<Self>, text: &str, reply: &tokio::sync::mpsc::Sender<String>) -> Option<String>;
+    /// Bad = 解密失败/未配对非 pair 帧/ctr 重放；Ignored = 已处理但无需登记（如 pair_err）。
+    pub async fn handle_frame_json(self: &Arc<Self>, text: &str, reply: &tokio::sync::mpsc::Sender<String>) -> FrameOutcome;
     pub fn register_conn(&self, device_id: &str, tx: mpsc::Sender<String>);
     pub fn unregister_conn(&self, device_id: &str);
+    pub fn disconnect(&self, device_id: &str); // 吊销/顶替时用：unregister 并 drop sender（连接随之收尾）
     pub async fn broadcast_event(&self, name: &str, data: serde_json::Value); // 逐在线已配对设备 seal(Inner::Event) 发送
     pub fn identity(&self) -> &Identity; pub fn store(&self) -> &DeviceStore; pub fn pairing(&self) -> &PairingManager;
 }
@@ -931,7 +947,9 @@ mod tests {
         (core, desktop)
     }
 
-    fn now_ms() -> i64 { 0 } // PairingManager 由测试直接调用 generate(now) 控制时间
+    fn now_ms() -> i64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+    } // 与 handle_frame_json 内部取时一致，避免配对码"生成即过期"
 
     #[tokio::test]
     async fn full_pair_then_rpc_flow() {
@@ -944,7 +962,7 @@ mod tests {
         // 1) pair_request（帧带 pk）
         let req = seal(&json!({"kind":"pair_request","ctr":1,"code":code,"name":"Pixel","platform":"android"}), &mobile.device_id, Some(&mobile.pk), &desktop.pk, &mobile.sk);
         let authed = core.handle_frame_json(&serde_json::to_string(&req).unwrap(), &tx).await;
-        assert_eq!(authed.as_deref(), Some(mobile.device_id.as_str()));
+        assert!(matches!(authed, FrameOutcome::Authed(ref id) if *id == mobile.device_id));
         // 2) 收到 pair_ok，mac 可验证
         let reply: crate::crypto::E2EFrame = serde_json::from_str(&rx.recv().await.unwrap()).unwrap();
         let inner = open(&reply, &desktop.pk, &mobile.sk).unwrap();
@@ -970,7 +988,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
         let req = seal(&json!({"kind":"pair_request","ctr":1,"code":"00000000","name":"P","platform":"h5"}), &mobile.device_id, Some(&mobile.pk), &desktop.pk, &mobile.sk);
         let authed = core.handle_frame_json(&serde_json::to_string(&req).unwrap(), &tx).await;
-        assert_eq!(authed, None);
+        assert_eq!(authed, FrameOutcome::Ignored); // 解密成功但配对码错误：不计入解密失败
         let reply: crate::crypto::E2EFrame = serde_json::from_str(&rx.recv().await.unwrap()).unwrap();
         let inner = open(&reply, &desktop.pk, &mobile.sk).unwrap();
         assert_eq!(inner["kind"], "pair_err");
@@ -985,7 +1003,8 @@ mod tests {
         core.store().insert(DeviceRecord { id: mobile.device_id.clone(), pk: crate::crypto::b64_encode(mobile.pk.as_bytes()), name: "P".into(), platform: "h5".into(), paired_at_ms: 0, last_ctr_in: 5, last_ctr_out: 1 });
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
         let rpc = seal(&json!({"kind":"rpc","ctr":5,"id":"r1","method":"device.info","params":{}}), &mobile.device_id, None, &desktop.pk, &mobile.sk);
-        core.handle_frame_json(&serde_json::to_string(&rpc).unwrap(), &tx).await;
+        let outcome = core.handle_frame_json(&serde_json::to_string(&rpc).unwrap(), &tx).await;
+        assert_eq!(outcome, FrameOutcome::Bad); // ctr 重放：计入解密失败计数
         assert!(rx.try_recv().is_err()); // 静默丢弃
     }
 
@@ -997,8 +1016,19 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
         let rpc = seal(&json!({"kind":"rpc","ctr":1,"id":"r1","method":"device.info","params":{}}), &mobile.device_id, None, &desktop.pk, &mobile.sk);
         let authed = core.handle_frame_json(&serde_json::to_string(&rpc).unwrap(), &tx).await;
-        assert_eq!(authed, None);
+        assert_eq!(authed, FrameOutcome::Bad); // 未配对且非 pair 帧
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnect_drops_live_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _desktop) = core_with(dir.path());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        core.register_conn("m1", tx);
+        core.disconnect("m1");
+        core.broadcast_event("cron.executed", serde_json::json!({})).await;
+        assert!(rx.try_recv().is_err()); // sender 已被丢弃，收不到任何帧
     }
 
     #[tokio::test]
@@ -1020,9 +1050,10 @@ mod tests {
 
 - [ ] **Step 2: 验证失败** — `cargo test -p nomifun-bridge core`
 - [ ] **Step 3: 实现**（要点）
-  - `handle_frame_json`：解析 E2EFrame；`store.get(from)` 命中 → 用存储 pk `open`，失败静默计数；`Inner::Rpc` 先 `store.accept_in_ctr`（失败静默丢弃），再 `rpc.dispatch`，结果 `seal(Inner::RpcResult{ctr: store.next_out_ctr(from)…})` 回 `reply`，并 `register_conn(from, reply.clone())`，返回 `Some(from)`。
-  - 未知设备且 `frame.pk` 存在：解析 pk → `open`；`Inner::PairRequest` → `pairing.take_if_valid(code, now)`：成功 → `store.insert(DeviceRecord{last_ctr_in: ctr, last_ctr_out: 1})`、回 `PairOk{ctr:1, name, mac: pair_mac(...)}`、`register_conn`、返回 Some(id)；失败 → 回 `PairErr{ctr:1, code:"pair_invalid_code"}`（用请求帧 pk seal），返回 None。
-  - 其余情况静默丢弃。`now` 取 `SystemTime` 毫秒（测试经由 `pairing().generate(now)` 控制过期语义，不需注入时钟）。
+  - `handle_frame_json`：解析 E2EFrame（JSON 解析失败 → `Bad`）；`store.get(from)` 命中 → 用存储 pk `open`（失败 → `Bad`）；`Inner::Rpc` 先 `store.accept_in_ctr`（失败 → `Bad`，静默无回复），再 `rpc.dispatch`，结果 `seal(Inner::RpcResult{ctr: store.next_out_ctr(from)…})` 回 `reply`，并 `register_conn(from, reply.clone())`，返回 `Authed(from)`。
+  - 未知设备且 `frame.pk` 存在：解析 pk → `open`（失败 → `Bad`）；`Inner::PairRequest` → `pairing.take_if_valid(code, now)`：成功 → `store.insert(DeviceRecord{last_ctr_in: ctr, last_ctr_out: 1})`、回 `PairOk{ctr:1, name, mac: pair_mac(...)}`、`register_conn`、返回 `Authed(id)`；失败 → 回 `PairErr{ctr:1, code:"pair_invalid_code"}`（用请求帧 pk seal），返回 `Ignored`（解密成功，不计失败）。
+  - 未知设备且无 `pk`、或已知设备发 PairRequest 之外的未认证内层 → `Bad`。`now` 取 `SystemTime` 毫秒。
+  - `disconnect(id)`：从 conns 移除并 drop sender（外层连接任务随 channel 关闭收尾）。
   - `broadcast_event`：遍历 conns（`Mutex<HashMap<String, mpsc::Sender<String>>>`），对每个已配对设备 `next_out_ctr` + seal `Inner::Event` 发送；发送失败则 `unregister_conn`。
 - [ ] **Step 4: 验证通过** — `cargo test -p nomifun-bridge core`
 - [ ] **Step 5: Commit** — `git commit -am "feat(bridge): core frame handler with pairing and rpc routing"`
@@ -1031,7 +1062,7 @@ mod tests {
 
 **Interfaces:**
 - Consumes: `Arc<BroadcastEventBus>`（`nomifun_realtime::BroadcastEventBus`，`subscribe_user() -> Receiver<UserEventEnvelope{user_id, event: WebSocketMessage<Value>{name, data}}>`）、`Arc<BridgeCore>`
-- Produces: `pub fn spawn_event_forwarder(bus: Arc<BroadcastEventBus>, core: Arc<BridgeCore>, shutdown: tokio_util::sync::CancellationToken) -> tokio::task::JoinHandle<()>`（若 tokio-util 不在依赖，用 `watch::Receiver<bool>` 作停机信号）
+- Produces: `pub fn spawn_event_forwarder(bus: Arc<BroadcastEventBus>, core: Arc<BridgeCore>, shutdown: tokio::sync::watch::Receiver<bool>) -> tokio::task::JoinHandle<()>`
 
 - [ ] **Step 1: 失败测试**
 
@@ -1082,18 +1113,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_stream_is_never_forwarded() {
-        // 同上装配；发 message.stream 后短暂等待，断言 rx 无帧
-        // bus.send_to_user("u1", WebSocketMessage::new("message.stream", json!({"x":1})));
+    async fn permission_stream_event_triggers_attention_without_content() {
+        // 装配同上。桌面本地检测 message.stream 元数据（这是 attention 的主触发路径：
+        // turn.completed 只在轮次结束后广播，而待确认项恰恰阻塞轮次结束）。
+        // bus.send_to_user("u1", WebSocketMessage::new("message.stream",
+        //     json!({"conversation_id":"c1","type":"permission","data":{"secret":"MUST-NOT-LEAK"}})));
+        // 断言：收到 1 帧 conversations.attention，data 仅含 conversation_id；
+        //       序列化后的帧明文不含 "MUST-NOT-LEAK"。
+    }
+
+    #[tokio::test]
+    async fn content_stream_is_never_forwarded() {
+        // 同上装配；发 content 类过程事件后短暂等待，断言 rx 无帧
+        // bus.send_to_user("u1", WebSocketMessage::new("message.stream", json!({"conversation_id":"c1","type":"content","data":{"content":"chunk"}})));
         // tokio::time::sleep(100ms); assert!(rx.try_recv().is_err());
     }
 }
 ```
 
-（`message_stream_is_never_forwarded` 按注释写成完整测试。）
+（两个注释体测试均按注释写成完整测试。）
 
 - [ ] **Step 2: 验证失败** — `cargo test -p nomifun-bridge events`
-- [ ] **Step 3: 实现**（loop `select!` on `rx.recv()` / shutdown；match `event.name.as_str()`：`"turn.completed"` → 取 `data["conversation_id"]`，调 `core` 内部 rpc `conversations.result` 拿 text（错误则空串），`truncate_utf8(text, 2048*4)` 后按协议 §7 拼 `task.completed` data 并 `core.broadcast_event`；若 `data["runtime"]["pending_confirmations"].as_u64()>0` 再发 `conversations.attention`；`"cron.job-executed"` → `cron.executed`（加 `ts`）；其余（含 `message.stream`）一律忽略；`RecvError::Lagged` 继续循环）
+- [ ] **Step 3: 实现**（loop `select!` on `rx.recv()` / shutdown（`watch::Receiver<bool>` 变 true 退出）；match `event.name.as_str()`：
+  - `"turn.completed"` → 取 `data["conversation_id"]`，调 `core` 内部 rpc `conversations.result` 拿 text（错误则空串），**按字符**截断 `text.chars().take(2048)` 后按协议 §7 拼 `task.completed` data 并 `core.broadcast_event`；若 `data["runtime"]["pending_confirmations"].as_u64()>0` 再发 `conversations.attention`（兜底路径）。
+  - `"message.stream"` → 仅当 `data["type"]` 为 `"permission"` 或 `"acp_permission"` 时提取 `data["conversation_id"]` 发 `conversations.attention`（**主触发路径**：待确认项会阻塞轮次结束，turn.completed 到不了；只带会话 ID，绝不带 data 内容；同一会话 5s 内去重——`HashMap<String, Instant>`）；其余 type 一律忽略。
+  - `"cron.job-executed"` → `cron.executed`（加 `ts`）；其余事件忽略；`RecvError::Lagged` 继续循环）
 - [ ] **Step 4: 验证通过** — `cargo test -p nomifun-bridge events`
 - [ ] **Step 5: Commit** — `git commit -am "feat(bridge): result-only event forwarder"`
 
@@ -1125,7 +1169,7 @@ impl LanHandle { pub async fn stop(self); }
 （测试代码按上述断言完整写出：连接 `ws://127.0.0.1:{port}/bridge/ws`，逐帧 send/recv，用 `Identity::from_secret_bytes` 固定密钥。）
 
 - [ ] **Step 2: 验证失败** — `cargo test -p nomifun-bridge --test lan_ws`
-- [ ] **Step 3: 实现**（axum `Router::new().route("/bridge/info", get(info)).route("/bridge/ws", get(ws))`，state `(Arc<BridgeCore>, String)`；ws 循环与 Plan B session 类似但无注册握手/限速——不受信 LAN 客户端只能走 pair 流程，核心保护在 E2E 层）
+- [ ] **Step 3: 实现**（axum `Router::new().route("/bridge/info", get(info)).route("/bridge/ws", get(ws))`，state `(Arc<BridgeCore>, String)`；ws 循环与 Plan B session 类似但无注册握手/限速——不受信 LAN 客户端只能走 pair 流程，核心保护在 E2E 层；对 `handle_frame_json` 返回的 `FrameOutcome::Bad` 连续计数，达到 `MAX_DECRYPT_FAILURES`（10）即关闭连接，非 Bad 清零）
 - [ ] **Step 4: 验证通过** — `cargo test -p nomifun-bridge --test lan_ws`
 - [ ] **Step 5: Commit** — `git commit -am "feat(bridge): lan listener with discovery probe and ws"`
 
@@ -1145,7 +1189,7 @@ impl RelayHandle { pub async fn stop(self); }
 
 - [ ] **Step 1: 失败集成测试**（`tests/relay_client_test.rs`：测试内起一个**微型 stub relay**（axum ws，直接内联 ~60 行：注册表 HashMap + forward/deliver，逻辑同 Plan B 但无限速/超时），desktop 侧 `start_relay(initial_backoff_ms=50)`；手机侧用 tungstenite 客户端注册后发 forward(pair_request)，断言收到 deliver(pair_ok)、rpc 往返；再关停 stub relay 重启，断言 desktop 自动重连（再次收到 Register））
 - [ ] **Step 2: 验证失败** — `cargo test -p nomifun-bridge --test relay_client_test`
-- [ ] **Step 3: 实现**（如上行为描述；`ts` 取系统毫秒；注意 reply 适配器：`mpsc::channel<String>` + 转发任务把 E2EFrame 文本包成 `RelayFrame::Forward{to: from_device, frame: parse(text)}` 写 ws sink）
+- [ ] **Step 3: 实现**（如上行为描述；`ts` 取系统毫秒；注意 reply 适配器：`mpsc::channel<String>` + 转发任务把 E2EFrame 文本包成 `RelayFrame::Forward{to: from_device, frame: parse(text)}` 写 ws sink；对 `handle_frame_json` 的 `FrameOutcome::Bad` **按来源设备**连续计数，达到 10 丢弃该来源后续帧 60s——中继连接本身不能因单一恶意来源而断开）
 - [ ] **Step 4: 验证通过** — `cargo test -p nomifun-bridge --test relay_client_test -- --test-threads=2`
 - [ ] **Step 5: Commit** — `git commit -am "feat(bridge): outbound relay client with reconnect backoff"`
 
@@ -1166,7 +1210,7 @@ impl BridgeService {
     pub async fn set_relay(&self, cfg: Option<RelayConfig>, enabled: bool) -> BridgeStatus; // 持久化 config.json 并重启 relay 任务
     pub fn status(&self) -> BridgeStatus; pub fn subscribe_status(&self) -> watch::Receiver<BridgeStatus>;
     pub fn generate_pairing(&self) -> PairingInfo; // qr_text = "nomifun-bridge:"+base64url(json §5，含 code)；bridge_string = 同 json 去 code
-    pub fn list_devices(&self) -> Vec<PairedDeviceView>; pub async fn revoke_device(&self, id: &str) -> bool;
+    pub fn list_devices(&self) -> Vec<PairedDeviceView>; pub async fn revoke_device(&self, id: &str) -> bool; // 除删 store 记录外必须 core.disconnect(id) 断开在线连接
 }
 fn primary_lan_ip() -> Option<String> // UdpSocket connect 8.8.8.8:80 取 local_addr
 ```

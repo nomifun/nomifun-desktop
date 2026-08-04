@@ -105,7 +105,7 @@ mac  = hex(HMAC-SHA256(key = prk, msg = desktop_pk_bytes || mobile_pk_bytes))
 | `conversations.result` | `{"conversation_id"}` | `{"message_id","text","truncated","created_at"}`（最近一条助手消息） |
 | `conversations.cancel` | `{"conversation_id"}` | `{}` |
 | `confirmations.list` | `{"conversation_id"}` | `{"items":[<桌面 Confirmation 原样>]}` |
-| `confirmations.confirm` | `{"conversation_id","call_id","msg_id","data"?,"always_allow"?}` | `{}` |
+| `confirmations.confirm` | `{"conversation_id","call_id","data"?,"always_allow"?}`（桌面端自行合成 UUIDv7 `msg_id`：真实端点对其做严格校验，而 `confirmations.list` 的条目不含 msg_id，agent 实现忽略该值） | `{}` |
 | `cron.list` | `{}` | `{"items":[<CronJobResponse 原样>]}` |
 | `cron.create` | `{"name","schedule":<CronScheduleDto>,"message","conversation_id"?,"agent_type"?}` | `<CronJobResponse>` |
 | `cron.update` | `{"cron_job_id","patch":<UpdateCronJobRequest>}` | `<CronJobResponse>` |
@@ -121,7 +121,7 @@ mac  = hex(HMAC-SHA256(key = prk, msg = desktop_pk_bytes || mobile_pk_bytes))
 | name | data |
 |---|---|
 | `task.completed` | `{"conversation_id","turn_id","status","result_text"(≤2048字符),"truncated","ts"}` |
-| `conversations.attention` | `{"conversation_id"}`（有待确认项；手机端收到后按需调 `confirmations.list`） |
+| `conversations.attention` | `{"conversation_id"}`（触发：桌面在本地 `message.stream` 元数据中检测到 `type` 为 `permission`/`acp_permission` 时仅转发会话 ID——不含任何过程内容；`turn.completed` 的 `pending_confirmations>0` 作为兜底。同一会话 5s 内去重。手机端收到后按需调 `confirmations.list`） |
 | `cron.executed` | `{"cron_job_id","status","error"?,"ts"}` |
 
 ## 8. 互操作测试向量

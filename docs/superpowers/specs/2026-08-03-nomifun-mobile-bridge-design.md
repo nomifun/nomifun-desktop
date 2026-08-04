@@ -40,8 +40,8 @@
 
 密码学原语选用 NaCl `crypto_box`（X25519 + XSalsa20-Poly1305），Rust 侧用 RustCrypto `crypto_box` crate，JS 侧用 `tweetnacl`，两者字节级互操作（用固定向量做互操作测试）。
 
-- **身份**：桌面与每台手机各持一对 X25519 静态密钥。桌面密钥存于数据目录 `bridge/identity.key`（0600）；手机存于 `uni.setStorage`。`device_id` = 公钥的 base58 编码前 16 字符（展示用短 ID）。
-- **消息加密**：每帧 `payload = crypto_box(plaintext, nonce24_random, peer_pk, self_sk)`，信封含 `{from, to, n, c, ctr}`；`ctr` 为每方向单调递增计数器，接收方拒绝 `ctr ≤ last_seen`（抗重放）。前向保密列为后续工作（v1 不做，YAGNI）。
+- **身份**：桌面与每台手机各持一对 X25519 静态密钥。桌面密钥存于数据目录 `bridge/identity.key`（0600）；手机存于 `uni.setStorage`。`device_id` = `SHA-512(公钥)` 前 8 字节的小写 hex（16 字符）。
+- **消息加密**：每帧 `payload = crypto_box(plaintext, nonce24_random, peer_pk, self_sk)`，信封为 `{v, from, pk?, n, c}`（以协议文档 §2 为准）；`ctr` 位于明文内层，为每方向单调递增计数器，接收方拒绝 `ctr ≤ last_seen`（抗重放）。前向保密列为后续工作（v1 不做，YAGNI）。
 - **配对（密钥交换）**：
   1. 桌面设置页生成**一次性配对码 PC**（8 位，TTL 5 分钟，单次使用）+ 二维码。QR 内容：`{v:1, id, pk, lan:{ip,port}?, relay:{url,key}?}`（公钥经物理可信信道传递，无 MITM）。
   2. 手机扫码（H5/无摄像头时手动输入"桥接串"文本 + 配对码）→ 发送 `pair_request`：信封明文携带 `mobile_pk`，密文 = box(含 PC 的配对载荷, desktop_pk, mobile_sk)。
@@ -69,7 +69,7 @@
   - `conversations.result` — 最近一次最终助手消息（≤16KB 截断）
   - `confirmations.list` / `confirmations.confirm`
   - `cron.list/create/update/delete/runNow`（复用 `CronService` 与现有 DTO 精简版）
-- **事件转发器**：订阅用户事件总线，仅转发结果类事件到已连接手机：`turn.completed`（含摘要/耗时/stop_reason）、`confirmation.requested`、`cron.job-executed`、`bridge.status`。**不转发 `message.stream`**。
+- **事件转发器**：订阅用户事件总线，仅转发结果类事件到已连接手机（协议 §7）：`task.completed`（含结果摘要）、`conversations.attention`（由本地 `message.stream` 的 permission 元数据触发，仅带会话 ID）、`cron.executed`。**不转发 `message.stream` 过程内容**。
 - **传输**：
   - LAN：独立 axum 监听 `0.0.0.0:25810`，路由仅 `GET /bridge/info`（无鉴权发现探针，返回 id/名称/公钥指纹/版本，CORS `*` 以支持 H5）与 `GET /bridge/ws`（鉴权即 E2E 配对本身：未配对客户端只能发起带有效配对码的 pair_request）。
   - 中继：tokio-tungstenite 出站连接，断线指数退避重连（1s→60s 封顶）。
