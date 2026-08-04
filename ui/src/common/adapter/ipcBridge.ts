@@ -177,7 +177,6 @@ import {
   parseChannelUserId,
   parseCompanionEventId,
   parseCompanionId,
-  parseCompanionLearnRunId,
   parseCompanionMemoryId,
   parseCompanionSessionWindowId,
   parseCompanionSkillId,
@@ -215,7 +214,6 @@ import {
   type CronJobRunId,
   type CompanionEventId,
   type CompanionId,
-  type CompanionLearnRunId,
   type CompanionMemoryId,
   type CompanionSessionWindowId,
   type CompanionSkillId,
@@ -4365,10 +4363,7 @@ export interface ICompanionSkillEvent {
   skill_name: string;
 }
 
-export interface ICompanionLearnRun {
-  learn_run_id: CompanionLearnRunId;
-  started_at: number;
-  finished_at?: number | null;
+export interface ICompanionLearnResult {
   status: string;
   events_processed: number;
   memories_added: number;
@@ -4389,18 +4384,15 @@ export interface ICompanionStatus {
   skills_active: number;
   model_configured: boolean;
   collect_any_enabled: boolean;
-  last_learn?: ICompanionLearnRun | null;
 }
 
-/** "What I learned this week" digest (skills per-companion; memories/learn-runs global). */
+/** "What I learned this week" digest (skills per-companion; memories global). */
 export interface ICompanionWeeklyDigest {
   since_ms: number;
   skills_learned: number;
   skills_active_new: number;
   memories_added: number;
-  learn_runs: number;
   new_skill_names: string[];
-  recent_summaries: string[];
 }
 
 export interface ICompanionSourceStats {
@@ -4658,11 +4650,33 @@ const fromApiCompanionSkill = (raw: unknown): ICompanionSkill => {
   };
 };
 
-const fromApiCompanionLearnRun = (raw: unknown): ICompanionLearnRun => {
-  const value = asWireObject(raw, 'companion learn run');
+const fromApiCompanionLearnResult = (raw: unknown): ICompanionLearnResult => {
+  const value = asWireObject(raw, 'companion learn result');
+  for (const retiredField of ['learn_run_id', 'started_at', 'finished_at']) {
+    if (Object.prototype.hasOwnProperty.call(value, retiredField)) {
+      throw new TypeError(`companion learn result must not contain retired history field "${retiredField}"`);
+    }
+  }
+  if (typeof value.status !== 'string') {
+    throw new TypeError('companion learn result status must be a string');
+  }
+  for (const countField of ['events_processed', 'memories_added', 'suggestions_added'] as const) {
+    if (typeof value[countField] !== 'number' || !Number.isSafeInteger(value[countField])) {
+      throw new TypeError(`companion learn result ${countField} must be a safe integer`);
+    }
+  }
+  for (const textField of ['error', 'summary'] as const) {
+    if (value[textField] != null && typeof value[textField] !== 'string') {
+      throw new TypeError(`companion learn result ${textField} must be a string or null`);
+    }
+  }
   return {
-    ...(value as unknown as ICompanionLearnRun),
-    learn_run_id: parseCompanionLearnRunId(value.learn_run_id),
+    status: value.status,
+    events_processed: value.events_processed as number,
+    memories_added: value.memories_added as number,
+    suggestions_added: value.suggestions_added as number,
+    error: value.error as string | null | undefined,
+    summary: value.summary as string | null | undefined,
   };
 };
 
@@ -4671,7 +4685,6 @@ const fromApiCompanionStatus = (raw: unknown): ICompanionStatus => {
   return {
     ...(value as unknown as ICompanionStatus),
     companion_id: nullableCompanionId(value.companion_id),
-    last_learn: value.last_learn == null ? null : fromApiCompanionLearnRun(value.last_learn),
   };
 };
 
@@ -4939,13 +4952,7 @@ export const companion = {
   ),
   runLearn: withResponseMap(
     httpPost<unknown, void>('/api/companion/learn/run'),
-    fromApiCompanionLearnRun
-  ),
-  listLearnRuns: withResponseMap(
-    httpGet<unknown[], { limit?: number }>(
-      (p) => `/api/companion/learn/runs${p?.limit ? `?limit=${p.limit}` : ''}`
-    ),
-    (raw): ICompanionLearnRun[] => raw.map(fromApiCompanionLearnRun)
+    fromApiCompanionLearnResult
   ),
   eventStats: httpGet<ICompanionSourceStats[], void>('/api/companion/events/stats'),
   recentEvents: httpGet<ICompanionCollectedEvent[], { limit?: number }>(
@@ -5089,12 +5096,12 @@ export const companion = {
     const value = asWireObject(raw, 'companion learn-started event');
     return value.companion_id == null ? {} : { companion_id: parseCompanionId(value.companion_id) };
   }),
-  onLearnFinished: wsMappedEmitter<ICompanionLearnRun & { companion_id?: CompanionId }>(
+  onLearnFinished: wsMappedEmitter<ICompanionLearnResult & { companion_id?: CompanionId }>(
     'companion.learn-finished',
     (raw) => {
       const value = asWireObject(raw, 'companion learn-finished event');
       return {
-        ...fromApiCompanionLearnRun(value),
+        ...fromApiCompanionLearnResult(value),
         ...(value.companion_id == null ? {} : { companion_id: parseCompanionId(value.companion_id) }),
       };
     }

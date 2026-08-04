@@ -73,14 +73,30 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
   };
 
   const [digest, setDigest] = useState<ICompanionWeeklyDigest | null>(null);
-  useEffect(() => {
-    const cid = companion.profile?.companion_id;
+  const refreshDigest = useCallback(() => {
+    const cid = profile?.companion_id;
     if (!cid) return;
     void ipcBridge.companion.weeklyDigest
       .invoke({ companion_id: cid })
       .then(setDigest)
       .catch(() => {});
-  }, [companion.profile?.companion_id, status?.last_learn?.learn_run_id]);
+  }, [profile?.companion_id]);
+
+  useEffect(() => {
+    const cid = profile?.companion_id;
+    if (!cid) return;
+    refreshDigest();
+    const refreshSkill = (event: { companion_id: string }) => {
+      if (event.companion_id === cid) refreshDigest();
+    };
+    const unsubs = [
+      ipcBridge.companion.onLearnFinished.on(refreshDigest),
+      ipcBridge.companion.onSkillDrafted.on(refreshSkill),
+      ipcBridge.companion.onSkillLearned.on(refreshSkill),
+      ipcBridge.companion.onSkillArchived.on(refreshSkill),
+    ];
+    return () => unsubs.forEach((unsubscribe) => unsubscribe());
+  }, [profile?.companion_id, refreshDigest]);
 
   // ── 自定义形象尺寸滑块（仅 custom 形象）──
   // cf 从 profile 解析（profile 可能为 null，customFigureMetaOf 已防御 → null）。
@@ -279,7 +295,7 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
           )}
         </div>
       )}
-      {digest && (digest.skills_learned > 0 || digest.memories_added > 0 || digest.learn_runs > 0) && (
+      {digest && (digest.skills_learned > 0 || digest.memories_added > 0) && (
         <div className='bg-fill-2 rd-10px px-14px py-12px'>
           <div className='text-14px text-t-primary font-500 mb-6px'>
             {t('nomi.overview.weeklyTitle', { defaultValue: '我这周学到了什么' })}
@@ -292,10 +308,6 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
             <span>
               {t('nomi.overview.weeklyMemories', { defaultValue: '新记忆' })}:{' '}
               <b className='text-t-primary'>{digest.memories_added}</b>
-            </span>
-            <span>
-              {t('nomi.overview.weeklyRuns', { defaultValue: '学习次数' })}:{' '}
-              <b className='text-t-primary'>{digest.learn_runs}</b>
             </span>
           </div>
           {digest.new_skill_names.length > 0 && (

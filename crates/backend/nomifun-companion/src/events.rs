@@ -69,7 +69,7 @@ impl CompanionEventEmitter {
         self.broadcast("companion.learn-started", &serde_json::json!({ "companion_id": companion_id }));
     }
 
-    pub fn emit_learn_finished(&self, companion_id: &str, run: &crate::store::CompanionLearnRun) {
+    pub fn emit_learn_finished(&self, companion_id: &str, run: &crate::learner::CompanionLearnResult) {
         self.broadcast_scoped("companion.learn-finished", companion_id, run);
     }
 

@@ -6,20 +6,12 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, InputNumber, Message, Select, Spin, Switch, Table, Tag } from '@arco-design/web-react';
+import { Button, InputNumber, Message, Select, Spin, Switch } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
-import type { ICompanionLearnRun } from '@/common/adapter/ipcBridge';
 import type { ProviderId } from '@/common/types/ids';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import type { useCompanionShared } from '../useNomi';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
-
-const STATUS_COLOR: Record<string, string> = {
-  ok: 'green',
-  error: 'red',
-  no_events: 'gray',
-  model_unconfigured: 'orange',
-};
 
 const COMPANION_SWITCH_PROPS = { size: 'small' as const, className: 'compact-dark-switch' };
 
@@ -34,7 +26,6 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
   const { groups: chatGroups } = useModelsForTask('chat');
   const providers = useMemo(() => chatGroups.map((group) => group.provider), [chatGroups]);
   const providerLabel = useModelSelectorProviderLabel();
-  const [runs, setRuns] = useState<ICompanionLearnRun[]>([]);
   const [running, setRunning] = useState(false);
   const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
 
@@ -51,19 +42,6 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
     [chatGroups, draftProviderId]
   );
 
-  const refreshRuns = useCallback(() => {
-    void ipcBridge.companion.listLearnRuns
-      .invoke({ limit: 30 })
-      .then(setRuns)
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    refreshRuns();
-    const unsub = ipcBridge.companion.onLearnFinished.on(refreshRuns);
-    return unsub;
-  }, [refreshRuns]);
-
   const runNow = useCallback(async () => {
     setRunning(true);
     try {
@@ -73,13 +51,12 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
       } else {
         Message.info(t(`nomi.learn.status.${run.status}`, run.status));
       }
-      refreshRuns();
     } catch (e) {
       Message.error(String(e));
     } finally {
       setRunning(false);
     }
-  }, [refreshRuns, t]);
+  }, [t]);
 
   if (!sharedConfig) {
     return (
@@ -259,35 +236,6 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
           </div>
         </div>
       </div>
-
-      <Table
-        rowKey='id'
-        data={runs}
-        pagination={false}
-        size='small'
-        columns={[
-          {
-            title: t('nomi.learn.colTime'),
-            dataIndex: 'started_at',
-            render: (v: number) => new Date(v).toLocaleString(),
-          },
-          {
-            title: t('nomi.learn.colStatus'),
-            dataIndex: 'status',
-            render: (s: string) => <Tag color={STATUS_COLOR[s] || 'gray'}>{t(`nomi.learn.status.${s}`, s)}</Tag>,
-          },
-          { title: t('nomi.learn.colEvents'), dataIndex: 'events_processed' },
-          { title: t('nomi.learn.colMemories'), dataIndex: 'memories_added' },
-          { title: t('nomi.learn.colSuggestions'), dataIndex: 'suggestions_added' },
-          {
-            title: t('nomi.learn.colNote'),
-            dataIndex: 'summary',
-            render: (_: unknown, run: ICompanionLearnRun) => (
-              <span className='text-12px text-t-secondary'>{run.error || run.summary || '-'}</span>
-            ),
-          },
-        ]}
-      />
     </div>
   );
 };
