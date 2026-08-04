@@ -83,7 +83,7 @@
 - 桌宠窗口的未读徽标与详情弹窗中渲染建议卡片的部分。
 - i18n：`nomi.suggestions.*`（9 键）、`nomi.tabs.suggestions`、`nomi.overview.newSuggestions`。
 
-**替代通道。** `propose_companion_memory`（召唤会话写回）今天靠建议做写前确认。删除后改为在 `companion_memories` 上使用 `pending` 状态，在「记忆&知识库」里作为待确认队列复核。工具本身保留。
+**替代通道（实施时修正）。** 原计划把 `propose_companion_memory`（召唤会话写回）改用 `companion_memories` 的 `pending` 状态在「记忆&知识库」里复核。实施中确认：建议卡片是该能力**唯一的存储与唯一的复核界面**，所以它随建议一起删除了，而不是改道。这是有意的取舍——保留一个没有确认界面的写回工具，等于留一个静默写用户记忆的后门。若之后仍需要这个能力，它需要一份新的"写前确认"设计，而不是恢复本次删除的一部分。
 
 ### 4.2 共享域 / Shared domain
 
@@ -237,3 +237,35 @@ components/layout/ContentSider/  新增 footer slot
 **Wave 4 — 收尾**：i18n 两语 + 类型再生成、测试重写、文档（`docs/guides/companions*.md` 的共享记忆章节、README 头条卖点）、`ui-api-contract-version.txt` 递增、CHANGELOG。
 
 Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无引用"指引下的纯删除。任一波次结束都是可编译、测试通过、应用可运行的状态。
+
+## 11. 实施状态（2026-08-04）
+
+分支 `feat/companion-workspace-redesign`，4 个提交，未推远端。
+
+**已完成**
+
+- 三栏骨架、`ContentAside`、`ContentSider` footer slot、`SegmentedTabs` 注意力圆点。
+- 七个标签全部实现并各自拆分为聚焦文件（旧 `MemoriesTab` 单文件 725 行 → 新 `MemoryTab` 9 个文件，最大 279 行）。
+- 侧栏：新建 CTA / 可拖拽排序名册 / 形象库底部入口；`order_index` 落到 profile 与 registry 排序。
+- 建议功能整体删除（前端、桌宠未读徽标、分离弹窗及其 Rust 窗口模块、两个路由、两个 WS 事件、两个 agent 工具、learner 的建议蒸馏、`companion_suggestions` 表）。
+- i18n 两语落地 167 个新键、按代码证据删除 144 个死键，键集与顺序逐字节对等。
+- 删除死代码：`useCompanionShared`、`pages/nomi` 下三处 Arco 图标引用改为 icon-park。
+- 新增 `workspace/shell.structure.test.ts`（标签注册表 / URL 契约 / 删除不变量，经变异测试确认有效）与 `shellPrimitives.test.ts`。
+- 契约版本 4 → 5；CHANGELOG 记录降级不可逆。
+
+**验证证据**
+
+- `bun run check` 全 8 个子门通过；`bun test --cwd ui` 1661 通过 / 1 失败（该失败在干净树上同样存在，为测试间污染，非本次引入）；`cargo nextest run -p nomifun-companion` 236/236；`cargo check --workspace --all-targets` 干净；`bun run build:ui` 通过。
+- **迁移端到端实测**：把真实 0.3.8 期数据目录（含 `companion_suggestions` 表）复制出来、植入一条金丝雀记忆，用真实 `nomifun-web` 启动 —— 后端正常启动（无启动即砖）、表已删除、金丝雀记忆逐字保留、external-content FTS5 索引仍能检索到它、`/api/companion/suggestions` 返回 404。
+- **未做**：UI 的视觉验证。本机为 Wayland 会话且无截图工具，Firefox headless `--screenshot` 连本地静态页都无法产出，因此新页面的实际观感尚未被人眼或截图确认过——这是本次交付最大的未验证面。
+
+**未完成（按优先级）**
+
+1. 共享记忆改归属（§4.3 Stage 1–3）：写入方改归属、一次性回填、wire/UI 移除。当前 `MemoryDetailPane` 会为 `scope_kind='user'` 的行显示"装机级"只读标注，是诚实的过渡态，但共享记忆本身尚未删除。
+2. 技能专精的后端残余：`giftSkill` 路由与共享作用域技能行仍存在（UI 已不再调用，`include_shared: false`）。
+3. 进化配置改为按伙伴（§5.1）：目前 `EvolutionTab` 通过 `useEvolutionConfig.ts` 适配器读写装机级共享配置，并在每个分区标注"当前对所有伙伴生效"。该文件顶部注明了迁移接缝位置。
+4. 采集配置迁出到应用设置 · 隐私（§5.2）。
+5. 聊天历史的后端按天索引接口（§5.4）；当前为客户端分页分组 + 显式「加载更早」。
+6. 导出范围补齐（§5.5）；当前范围复选框中后端无法兑现的项已禁用并标注。
+7. 文档：`docs/guides/companions*.md` 与 README 头条卖点仍在描述"共享记忆中枢"，需随第 1 项一起改。
+
