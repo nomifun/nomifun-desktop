@@ -6,7 +6,7 @@
     "overview": "总览",
     "memories": "记忆",
     "review": "会话回顾",
-    "collect": "数据采集",
+    "collect": "学习&知识共享",
     "learn": "知识共享交流",
     "suggestions": "建议",
     "chat": "聊天",
@@ -97,6 +97,7 @@
     "affective": "情感"
   },
   "overview": {
+    "basicConfig": "基础配置",
     "modelMissing": "还没有为 {{companionName}} 配置聊天模型，它暂时无法学习和聊天。",
     "goConfig": "去配置",
     "collectOff": "所有数据采集都处于关闭状态，{{companionName}} 学不到任何东西哦。",
@@ -166,6 +167,7 @@
     "source_merge": "合并产生"
   },
   "collect": {
+    "sectionTitle": "数据采集",
     "intro": "勾选伙伴们可以学习的工作数据范围。开启后写入本地 companion/shared/events/ 目录，并按下方策略自动清理。",
     "sensitivity": {
       "low": "低敏感",
@@ -220,6 +222,7 @@
     "enabled": "已开启，桌面伙伴会从你的使用里学习"
   },
   "evolve": {
+    "sectionTitle": "技能配置",
     "title": "技能进化",
     "hint": "从你重复的多步操作里自动沉淀技能，复用上面的学习模型。",
     "enabled": "开启技能进化",
@@ -244,7 +247,8 @@
     "enabled": "开启智能协作"
   },
   "learn": {
-    "enabled": "定时学习",
+    "sectionTitle": "学习配置",
+    "enabled": "开启定时学习",
     "interval": "学习间隔",
     "minutes": "分钟",
     "runNow": "立即学习",
@@ -298,6 +302,8 @@
     "retry": "重试"
   },
   "settings": {
+    "basicSection": "基础配置",
+    "behaviorSection": "个性与习惯",
     "name": "名字",
     "nameHint": "伙伴的称呼，会出现在聊天与桌面伙伴里",
     "providerPlaceholder": "选择服务商",

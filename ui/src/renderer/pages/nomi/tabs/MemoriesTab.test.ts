@@ -55,9 +55,10 @@ describe('archive browsing and sorting', () => {
   test('a sort selector feeds the list request', () => {
     expect(source.includes("useState<ICompanionMemorySort>('relevance')")).toBe(true);
     expect(source.includes('sort,\n        limit: pageSize')).toBe(true);
-    expect(source.includes("<Select.Option value='relevance'>")).toBe(true);
-    expect(source.includes("<Select.Option value='time'>")).toBe(true);
-    expect(source.includes("<Select.Option value='importance'>")).toBe(true);
+    expect(source.includes("<NomiSelect.Option value='relevance'>")).toBe(true);
+    expect(source.includes("<NomiSelect.Option value='time'>")).toBe(true);
+    expect(source.includes("<NomiSelect.Option value='importance'>")).toBe(true);
+    expect(source.includes('<NomiSelect contentFit contentMaxWidth={180} value={sort}')).toBe(true);
   });
 });
 

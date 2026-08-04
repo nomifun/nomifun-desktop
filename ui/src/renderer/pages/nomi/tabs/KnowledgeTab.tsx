@@ -8,6 +8,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Spin } from '@arco-design/web-react';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
+import { NomiSettingList, NomiSettingRow } from '@/renderer/components/base/NomiSettingLayout';
 import type { useCompanion } from '../useNomi';
 
 interface Props {
@@ -33,16 +34,14 @@ const KnowledgeTab: React.FC<Props> = ({ companion }) => {
   const companionName = profile.name;
 
   return (
-    <div className='flex flex-col gap-10px py-8px'>
-      <div className='flex items-start gap-16px bg-fill-2 rd-10px px-14px py-12px'>
-        <div className='w-200px shrink-0'>
-          <div className='text-14px text-t-primary font-500'>{t('nomi.settings.knowledge')}</div>
-          <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.settings.knowledgeHint', { companionName })}</div>
-        </div>
-        <div className='flex-1 min-w-0'>
-          <KnowledgeControl target={{ kind: 'companion', id: profile.companion_id }} />
-        </div>
-      </div>
+    <div className='py-8px'>
+      <NomiSettingList>
+        <NomiSettingRow
+          title={t('nomi.settings.knowledge')}
+          description={t('nomi.settings.knowledgeHint', { companionName })}
+          controls={<KnowledgeControl target={{ kind: 'companion', id: profile.companion_id }} />}
+        />
+      </NomiSettingList>
     </div>
   );
 };

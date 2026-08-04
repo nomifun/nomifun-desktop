@@ -6,8 +6,12 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Input, Message, Modal, Radio, Spin, TimePicker } from '@arco-design/web-react';
+import { Button, Input, Message, Modal, Spin, TimePicker } from '@arco-design/web-react';
+import { Attention } from '@icon-park/react';
 import { ipcBridge } from '@/common';
+import NomiInput from '@/renderer/components/base/NomiInput';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
+import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import { CUSTOM_CHARACTER_ID } from '@renderer/pages/companion/characters';
 import { customFigureMetaOf } from '@renderer/pages/companion/characters/customMeta';
 import CharacterPicker from '../CharacterPicker';
@@ -93,103 +97,126 @@ const SettingsTab: React.FC<Props> = ({ companion, onDeleted }) => {
 
   const companionName = profile.name;
 
-  const row = (label: string, hint: string | null, control: React.ReactNode) => (
-    <div className='flex items-start gap-16px bg-fill-2 rd-10px px-14px py-12px'>
-      <div className='w-200px shrink-0'>
-        <div className='text-14px text-t-primary font-500'>{label}</div>
-        {hint && <div className='text-12px text-t-tertiary mt-2px'>{hint}</div>}
-      </div>
-      <div className='flex-1 min-w-0'>{control}</div>
-    </div>
-  );
-
   return (
-    <div className='flex flex-col gap-10px py-8px'>
-      {row(
-        t('nomi.settings.name'),
-        t('nomi.settings.nameHint'),
-        <Input style={{ width: 260 }} value={nameDraft} onChange={onNameChange} maxLength={30} />
-      )}
-      {row(
-        t('nomi.settings.character'),
-        t('nomi.settings.characterHint'),
-        <CharacterPicker
-          value={profile.character || 'mochi'}
-          figureId={customFigureMetaOf(profile)?.figureId}
-          onSelectCharacter={(character) => void patchCompanion({ character, appearance: { custom_figure: null } })}
-          onSelectFigure={(fig) =>
-            void patchCompanion({
-              character: CUSTOM_CHARACTER_ID,
-              appearance: { custom_figure: figureToCustomPatch(fig) },
-            })
-          }
-        />
-      )}
-      {row(
-        t('nomi.settings.preset'),
-        t('nomi.settings.presetHint'),
-        <PresetApplyControl
-          target='companion'
-          appliedPreset={profile.applied_preset}
-          onApply={async (presetId, locale) => {
-            await ipcBridge.companion.applyPreset.invoke({
-              companion_id: profile.companion_id,
-              preset_id: presetId,
-              locale,
-            });
-            await companion.refresh();
-          }}
-        />
-      )}
-      {row(
-        t('nomi.settings.persona'),
-        t('nomi.settings.personaHint', { companionName }),
-        <div className='flex flex-col gap-8px'>
-          <Radio.Group
-            type='button'
-            value={profile.persona.preset}
-            onChange={(preset: string) => void patchCompanion({ persona: { preset } })}
-          >
-            <Radio value='lively'>{t('nomi.settings.personaLively')}</Radio>
-            <Radio value='calm'>{t('nomi.settings.personaCalm')}</Radio>
-            <Radio value='sassy'>{t('nomi.settings.personaSassy')}</Radio>
-          </Radio.Group>
-          <Input.TextArea
-            rows={2}
-            placeholder={t('nomi.settings.personaCustomPlaceholder')}
-            value={customDraft}
-            onChange={onCustomChange}
+    <div className='flex flex-col gap-22px py-8px'>
+      <NomiSettingSection title={t('nomi.settings.basicSection')}>
+        <NomiSettingList>
+          <NomiSettingRow
+            title={t('nomi.settings.name')}
+            description={t('nomi.settings.nameHint')}
+            controls={<NomiInput contentFit value={nameDraft} onChange={onNameChange} maxLength={30} />}
+          />
+          <NomiSettingRow
+            title={t('nomi.settings.preset')}
+            description={t('nomi.settings.presetHint')}
+            controls={
+              <PresetApplyControl
+                compact
+                target='companion'
+                appliedPreset={profile.applied_preset}
+                onApply={async (presetId, locale) => {
+                  await ipcBridge.companion.applyPreset.invoke({
+                    companion_id: profile.companion_id,
+                    preset_id: presetId,
+                    locale,
+                  });
+                  await companion.refresh();
+                }}
+              />
+            }
+          />
+        </NomiSettingList>
+      </NomiSettingSection>
+
+      <NomiSettingSection
+        title={t('nomi.settings.character')}
+        description={t('nomi.settings.characterHint')}
+      >
+        <div className='overflow-hidden rd-10px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-8px'>
+          <CharacterPicker
+            compact
+            value={profile.character || 'mochi'}
+            figureId={customFigureMetaOf(profile)?.figureId}
+            onSelectCharacter={(character) => void patchCompanion({ character, appearance: { custom_figure: null } })}
+            onSelectFigure={(fig) =>
+              void patchCompanion({
+                character: CUSTOM_CHARACTER_ID,
+                appearance: { custom_figure: figureToCustomPatch(fig) },
+              })
+            }
           />
         </div>
-      )}
-      {row(
-        t('nomi.settings.quietHours'),
-        t('nomi.settings.quietHoursHint'),
-        <TimePicker.RangePicker
-          format='HH:mm'
-          allowClear
-          value={
-            profile.appearance.quiet_start && profile.appearance.quiet_end
-              ? [profile.appearance.quiet_start, profile.appearance.quiet_end]
-              : undefined
-          }
-          onChange={(value) => {
-            const [quiet_start, quiet_end] = (value as string[] | undefined) ?? ['', ''];
-            void patchCompanion({
-              appearance: { quiet_start: quiet_start || '', quiet_end: quiet_end || '' },
-            });
-          }}
-        />
-      )}
+      </NomiSettingSection>
 
-      <div className='mt-8px text-13px font-600 text-[rgb(var(--danger-6))]'>{t('nomi.settings.danger')}</div>
-      {row(
-        t('nomi.settings.deleteCompanion'),
-        t('nomi.settings.deleteCompanionHint', { companionName }),
-        <Button status='danger' onClick={confirmDelete}>
-          {t('nomi.settings.deleteCompanion')}
-        </Button>
-      )}
+      <NomiSettingList>
+        <NomiSettingRow
+          title={t('nomi.settings.persona')}
+          description={t('nomi.settings.personaHint', { companionName })}
+          controls={
+            <NomiSelect
+              contentFit
+              contentMaxWidth={260}
+              value={profile.persona.preset}
+              onChange={(preset: string) => void patchCompanion({ persona: { preset } })}
+            >
+              <NomiSelect.Option value='lively'>{t('nomi.settings.personaLively')}</NomiSelect.Option>
+              <NomiSelect.Option value='calm'>{t('nomi.settings.personaCalm')}</NomiSelect.Option>
+              <NomiSelect.Option value='sassy'>{t('nomi.settings.personaSassy')}</NomiSelect.Option>
+            </NomiSelect>
+          }
+          footer={
+            <Input.TextArea
+              autoSize={{ minRows: 1, maxRows: 3 }}
+              className='!bg-[var(--color-bg-1)] !border-[var(--color-border-2)] !rd-8px !px-10px !py-7px !leading-20px'
+              placeholder={t('nomi.settings.personaCustomPlaceholder')}
+              value={customDraft}
+              onChange={onCustomChange}
+            />
+          }
+        />
+        <NomiSettingRow
+          title={t('nomi.settings.quietHours')}
+          description={t('nomi.settings.quietHoursHint')}
+          controls={
+            <TimePicker.RangePicker
+              format='HH:mm'
+              allowClear
+              className='nomi-quiet-hours-picker !h-36px !w-260px shrink-0 !bg-[var(--color-bg-1)] !border-[var(--color-border-2)] !rd-8px max-[760px]:!w-full'
+              value={
+                profile.appearance.quiet_start && profile.appearance.quiet_end
+                  ? [profile.appearance.quiet_start, profile.appearance.quiet_end]
+                  : undefined
+              }
+              onChange={(value) => {
+                const [quiet_start, quiet_end] = (value as string[] | undefined) ?? ['', ''];
+                void patchCompanion({
+                  appearance: { quiet_start: quiet_start || '', quiet_end: quiet_end || '' },
+                });
+              }}
+            />
+          }
+        />
+      </NomiSettingList>
+
+      <NomiSettingList>
+        <NomiSettingRow
+          title={t('nomi.settings.deleteCompanion')}
+          leading={
+            <Attention
+              theme='filled'
+              size={14}
+              fill='currentColor'
+              className='line-height-0 shrink-0 text-[rgb(var(--danger-6))]'
+            />
+          }
+          description={t('nomi.settings.deleteCompanionHint', { companionName })}
+          controls={
+            <Button status='danger' onClick={confirmDelete}>
+              {t('nomi.settings.deleteCompanion')}
+            </Button>
+          }
+        />
+      </NomiSettingList>
     </div>
   );
 };

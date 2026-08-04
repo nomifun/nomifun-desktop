@@ -6,8 +6,11 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, InputNumber, Message, Popconfirm, Spin, Switch, Tag } from '@arco-design/web-react';
+import { Button, Message, Popconfirm, Spin, Switch, Tag } from '@arco-design/web-react';
+import { Attention } from '@icon-park/react';
 import { ipcBridge } from '@/common';
+import NomiInputNumber from '@/renderer/components/base/NomiInputNumber';
+import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import type {
   ICompanionEventStorageStatus,
   ICompanionSourceStats,
@@ -162,118 +165,11 @@ const CollectTab: React.FC<Props> = ({ shared }) => {
   );
 
   return (
-    <div ref={rootRef} className='flex flex-col gap-12px py-8px'>
-      <p className='m-0 text-13px text-t-secondary'>{t('nomi.collect.intro')}</p>
-      <div className='flex flex-col gap-8px'>
-        {SOURCES.map(({ key, sensitivity }) => {
-          const stat = statFor(key);
-          return (
-            <div key={key} className='flex items-center gap-12px bg-fill-2 rd-10px px-12px py-10px'>
-              <Switch
-                size='small'
-                className='compact-dark-switch'
-                checked={sharedConfig.collect[key]}
-                onChange={(checked) => {
-                  void patchSharedConfig({ collect: { [key]: checked } }).catch((e) =>
-                    Message.error(String(e))
-                  );
-                }}
-              />
-              <div className='flex-1 min-w-0'>
-                <div className='flex items-center gap-8px'>
-                  <span className='text-14px text-t-primary font-500'>{t(`nomi.collect.sources.${key}.name`)}</span>
-                  <Tag size='small' color={SENSITIVITY_COLOR[sensitivity]}>
-                    {t(`nomi.collect.sensitivity.${sensitivity}`)}
-                  </Tag>
-                </div>
-                <div className='text-12px text-t-tertiary mt-2px'>{t(`nomi.collect.sources.${key}.desc`)}</div>
-              </div>
-              <div className='text-12px text-t-secondary shrink-0 text-right'>
-                <div>
-                  {t('nomi.collect.today')}: {stat?.today ?? 0}
-                </div>
-                <div>
-                  {t('nomi.collect.total')}: {stat?.total ?? 0}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div className='flex items-start gap-16px bg-fill-2 rd-10px px-14px py-12px flex-wrap'>
-        <div className='w-220px shrink-0'>
-          <div className='text-14px text-t-primary font-500'>{t('nomi.collect.retentionTitle')}</div>
-          <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.collect.retentionHint')}</div>
-        </div>
-        <div className='flex-1 min-w-280px flex flex-col gap-10px'>
-          <div className='flex items-center gap-8px flex-wrap'>
-            <span className='text-13px text-t-secondary'>{t('nomi.collect.retentionDays')}</span>
-            <InputNumber
-              style={{ width: 120 }}
-              min={7}
-              max={365}
-              precision={0}
-              value={retentionDraft ?? undefined}
-              onChange={(value) => {
-                const parsed = Number(value);
-                setRetentionDraft(Number.isFinite(parsed) ? parsed : null);
-              }}
-              suffix={t('nomi.collect.days')}
-            />
-          </div>
-          <div className='flex items-center gap-8px flex-wrap'>
-            <span className='text-13px text-t-secondary'>{t('nomi.collect.capacityLimit')}</span>
-            <InputNumber
-              style={{ width: 120 }}
-              min={16}
-              max={512}
-              precision={0}
-              value={capacityDraft ?? undefined}
-              onChange={(value) => {
-                const parsed = Number(value);
-                setCapacityDraft(Number.isFinite(parsed) ? parsed : null);
-              }}
-              suffix='MiB'
-            />
-          </div>
-          <div>
-            {lowersPolicy ? (
-              <Popconfirm title={t('nomi.collect.lowerPolicyConfirm')} onOk={applyStoragePolicy}>
-                {applyPolicyButton}
-              </Popconfirm>
-            ) : (
-              applyPolicyButton
-            )}
-          </div>
-        </div>
-        <div className='min-w-220px text-12px text-t-secondary leading-20px'>
-          {storageError && !storageLoading ? (
-            <div className='text-t-tertiary'>{t('nomi.collect.storageUnavailable')}</div>
-          ) : storage ? (
-            <>
-              <div>
-                {t('nomi.collect.storageUsage', {
-                  used: formatBytes(storage.total_bytes),
-                  max: formatBytes(storage.max_bytes),
-                })}
-              </div>
-              <div>
-                {storage.oldest_day && storage.newest_day
-                  ? t('nomi.collect.storedRange', {
-                      from: storage.oldest_day,
-                      to: storage.newest_day,
-                      count: storage.file_count,
-                    })
-                  : t('nomi.collect.noStoredEvents')}
-              </div>
-              <div className='text-t-tertiary'>{t('nomi.collect.hardLimitHint')}</div>
-            </>
-          ) : (
-            <div className='text-t-tertiary'>{t('nomi.collect.storageLoading')}</div>
-          )}
-        </div>
-      </div>
-      <div className='flex items-center gap-12px flex-wrap'>
+    <NomiSettingSection
+      ref={rootRef}
+      title={t('nomi.collect.sectionTitle')}
+      description={t('nomi.collect.intro')}
+      action={
         <Popconfirm
           title={t('nomi.collect.disableAllConfirm', {
             defaultValue: '停止所有采集、学习与进化？已学到的技能和记忆会保留，模型配置不变，随时可再开启。',
@@ -289,12 +185,141 @@ const CollectTab: React.FC<Props> = ({ shared }) => {
               .catch((e) => Message.error(String(e)));
           }}
         >
-          <Button status='danger' type='primary'>
+          <Button status='danger' type='primary' size='small' className='shrink-0'>
             {t('nomi.collect.disableAll', { defaultValue: '一键全关' })}
           </Button>
         </Popconfirm>
-      </div>
-    </div>
+      }
+    >
+      <NomiSettingList>
+        {SOURCES.map(({ key, sensitivity }) => {
+          const stat = statFor(key);
+          return (
+            <NomiSettingRow
+              key={key}
+              title={
+                <span className='flex items-center gap-8px'>
+                  <span className='text-14px text-t-primary font-500'>{t(`nomi.collect.sources.${key}.name`)}</span>
+                  <Tag size='small' color={SENSITIVITY_COLOR[sensitivity]}>
+                    {t(`nomi.collect.sensitivity.${sensitivity}`)}
+                  </Tag>
+                </span>
+              }
+              description={t(`nomi.collect.sources.${key}.desc`)}
+              controls={
+                <>
+                  <div className='shrink-0 text-right text-12px leading-18px text-t-secondary'>
+                    <div>
+                      {t('nomi.collect.today')}: {stat?.today ?? 0}
+                    </div>
+                    <div>
+                      {t('nomi.collect.total')}: {stat?.total ?? 0}
+                    </div>
+                  </div>
+                  <Switch
+                    size='small'
+                    className='compact-dark-switch shrink-0'
+                    checked={sharedConfig.collect[key]}
+                    onChange={(checked) => {
+                      void patchSharedConfig({ collect: { [key]: checked } }).catch((e) =>
+                        Message.error(String(e))
+                      );
+                    }}
+                  />
+                </>
+              }
+            />
+          );
+        })}
+
+        <NomiSettingRow
+          title={t('nomi.collect.retentionTitle')}
+          leading={
+            <Attention
+              theme='filled'
+              size={14}
+              fill='currentColor'
+              className='line-height-0 shrink-0 text-[rgb(var(--danger-6))]'
+            />
+          }
+          description={
+            <>
+              <div>{t('nomi.collect.retentionHint')}</div>
+              <div className='mt-6px text-t-secondary leading-19px'>
+                {storageError && !storageLoading ? (
+                  <div className='text-t-tertiary'>{t('nomi.collect.storageUnavailable')}</div>
+                ) : storage ? (
+                  <>
+                    <div className='flex items-center gap-16px whitespace-nowrap max-[760px]:flex-wrap max-[760px]:gap-x-10px'>
+                      <span>
+                        {t('nomi.collect.storageUsage', {
+                          used: formatBytes(storage.total_bytes),
+                          max: formatBytes(storage.max_bytes),
+                        })}
+                      </span>
+                      <span>
+                        {storage.oldest_day && storage.newest_day
+                          ? t('nomi.collect.storedRange', {
+                              from: storage.oldest_day,
+                              to: storage.newest_day,
+                              count: storage.file_count,
+                            })
+                          : t('nomi.collect.noStoredEvents')}
+                      </span>
+                    </div>
+                    <div className='text-t-tertiary'>{t('nomi.collect.hardLimitHint')}</div>
+                  </>
+                ) : (
+                  <div className='text-t-tertiary'>{t('nomi.collect.storageLoading')}</div>
+                )}
+              </div>
+            </>
+          }
+          controlsClassName='gap-12px'
+          controls={
+            <>
+              <label className='flex items-center gap-7px'>
+                <span className='text-12px text-t-secondary'>{t('nomi.collect.retentionDays')}</span>
+                <NomiInputNumber
+                  contentFit
+                  min={7}
+                  max={365}
+                precision={0}
+                value={retentionDraft ?? undefined}
+                onChange={(value) => {
+                  const parsed = Number(value);
+                  setRetentionDraft(Number.isFinite(parsed) ? parsed : null);
+                }}
+                  suffix={t('nomi.collect.days')}
+                />
+              </label>
+              <label className='flex items-center gap-7px'>
+                <span className='text-12px text-t-secondary'>{t('nomi.collect.capacityLimit')}</span>
+                <NomiInputNumber
+                  contentFit
+                  min={16}
+                  max={512}
+                precision={0}
+                value={capacityDraft ?? undefined}
+                onChange={(value) => {
+                  const parsed = Number(value);
+                  setCapacityDraft(Number.isFinite(parsed) ? parsed : null);
+                }}
+                  suffix='MiB'
+                />
+              </label>
+              {lowersPolicy ? (
+                <Popconfirm title={t('nomi.collect.lowerPolicyConfirm')} onOk={applyStoragePolicy}>
+                  {applyPolicyButton}
+                </Popconfirm>
+              ) : (
+                applyPolicyButton
+              )}
+            </>
+          }
+        />
+      </NomiSettingList>
+    </NomiSettingSection>
   );
 };
 

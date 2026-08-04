@@ -22,6 +22,10 @@ export interface NomiSelectProps extends NativeSelectProps {
   className?: string;
   /** 统一尺寸，新增 middle（32px）/ Unified size with additional "middle" (32px) */
   size?: NomiSelectSize;
+  /** Shrink the field to its visible selection instead of filling the row. */
+  contentFit?: boolean;
+  contentMinWidth?: React.CSSProperties['minWidth'];
+  contentMaxWidth?: React.CSSProperties['maxWidth'];
 }
 
 /**
@@ -111,13 +115,36 @@ type NomiSelectComponent = React.ForwardRefExoticComponent<NomiSelectProps & Rea
 };
 
 const InternalSelect = React.forwardRef<SelectHandle, NomiSelectProps>(
-  ({ className, getPopupContainer, size = 'middle', ...rest }, ref) => {
+  (
+    {
+      className,
+      getPopupContainer,
+      size = 'middle',
+      style,
+      contentFit = false,
+      contentMinWidth = 0,
+      contentMaxWidth = '100%',
+      triggerProps,
+      ...rest
+    },
+    ref
+  ) => {
     const normalizedSize = mapSizeToNative(size);
     return (
       <Select
         ref={ref}
         size={normalizedSize}
-        className={classNames(BASE_CLASS, className)}
+        className={classNames(BASE_CLASS, contentFit && 'w-max shrink-0', className)}
+        style={{
+          ...(contentFit
+            ? { width: 'max-content', minWidth: contentMinWidth, maxWidth: contentMaxWidth }
+            : undefined),
+          ...style,
+        }}
+        triggerProps={{
+          ...(contentFit ? { autoAlignPopupWidth: false } : undefined),
+          ...triggerProps,
+        }}
         getPopupContainer={getPopupContainer || defaultGetPopupContainer}
         {...rest}
       />

@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, InputNumber, Message, Select, Spin, Switch } from '@arco-design/web-react';
-import { ipcBridge } from '@/common';
+import { Spin, Switch } from '@arco-design/web-react';
 import type { ProviderId } from '@/common/types/ids';
+import NomiInputNumber from '@/renderer/components/base/NomiInputNumber';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
+import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import type { useCompanionShared } from '../useNomi';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
@@ -17,16 +19,16 @@ const COMPANION_SWITCH_PROPS = { size: 'small' as const, className: 'compact-dar
 
 interface Props {
   shared: ReturnType<typeof useCompanionShared>;
+  collectionSection?: React.ReactNode;
 }
 
-const LearnTab: React.FC<Props> = ({ shared }) => {
+const LearnTab: React.FC<Props> = ({ shared, collectionSection }) => {
   const { t } = useTranslation();
   const { sharedConfig, patchSharedConfig } = shared;
   // 学习模型做对话补全 —— 供应商/模型清单来自统一 chat catalog（后端 resolve）。
   const { groups: chatGroups } = useModelsForTask('chat');
   const providers = useMemo(() => chatGroups.map((group) => group.provider), [chatGroups]);
   const providerLabel = useModelSelectorProviderLabel();
-  const [running, setRunning] = useState(false);
   const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
 
   useEffect(() => {
@@ -42,22 +44,6 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
     [chatGroups, draftProviderId]
   );
 
-  const runNow = useCallback(async () => {
-    setRunning(true);
-    try {
-      const run = await ipcBridge.companion.runLearn.invoke();
-      if (run.status === 'ok') {
-        Message.success(t('nomi.learn.runOk', { memories: run.memories_added, suggestions: run.suggestions_added }));
-      } else {
-        Message.info(t(`nomi.learn.status.${run.status}`, run.status));
-      }
-    } catch (e) {
-      Message.error(String(e));
-    } finally {
-      setRunning(false);
-    }
-  }, [t]);
-
   if (!sharedConfig) {
     return (
       <div className='flex justify-center py-40px'>
@@ -67,175 +53,178 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
   }
 
   return (
-    <div className='flex flex-col gap-16px py-8px'>
-      <div className='flex items-center gap-16px flex-wrap'>
-        <div className='flex items-center gap-8px'>
-          <span className='text-13px text-t-secondary'>{t('nomi.learn.enabled')}</span>
-          <Switch
-            {...COMPANION_SWITCH_PROPS}
-            checked={sharedConfig.learn.enabled}
-            onChange={(checked) => void patchSharedConfig({ learn: { enabled: checked } })}
-          />
-        </div>
-        <div className='flex items-center gap-8px'>
-          <span className='text-13px text-t-secondary'>{t('nomi.learn.interval')}</span>
-          <InputNumber
-            style={{ width: 120 }}
-            min={5}
-            max={1440}
-            value={sharedConfig.learn.interval_minutes}
-            onChange={(v) =>
-              void patchSharedConfig({ learn: { interval_minutes: Number(v) || 60 } })
+    <div className='flex flex-col gap-22px py-8px'>
+      <NomiSettingSection title={t('nomi.learn.sectionTitle')}>
+        <NomiSettingList>
+          <NomiSettingRow
+            title={t('nomi.learn.enabled')}
+            controls={
+              <Switch
+                {...COMPANION_SWITCH_PROPS}
+                checked={sharedConfig.learn.enabled}
+                onChange={(checked) => void patchSharedConfig({ learn: { enabled: checked } })}
+              />
             }
-            suffix={t('nomi.learn.minutes')}
           />
-        </div>
-        <Button type='primary' loading={running} onClick={() => void runNow()}>
-          {t('nomi.learn.runNow')}
-        </Button>
-      </div>
-
-      {/* Shared learning model — all companions learn through this one. */}
-      <div className='flex items-start gap-16px bg-fill-2 rd-10px px-14px py-12px'>
-        <div className='w-200px shrink-0'>
-          <div className='text-14px text-t-primary font-500'>{t('nomi.learn.model')}</div>
-          <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.learn.modelHint')}</div>
-        </div>
-        <div className='flex-1 min-w-0 flex gap-8px flex-wrap'>
-          <Select
-            style={{ width: 220 }}
-            placeholder={t('nomi.settings.providerPlaceholder')}
-            value={draftProviderId ?? undefined}
-            onChange={(provider_id: ProviderId) => setDraftProviderId(provider_id)}
-          >
-            {providers.map((p) => (
-              <Select.Option key={p.id} value={p.id}>
-                {providerLabel(p)}
-              </Select.Option>
-            ))}
-          </Select>
-          <Select
-            style={{ width: 260 }}
-            placeholder={t('nomi.settings.modelPlaceholder')}
-            value={
-              sharedConfig.learn.model?.provider_id === draftProviderId
-                ? sharedConfig.learn.model.model
-                : undefined
+          <NomiSettingRow
+            title={t('nomi.learn.interval')}
+            controls={
+              <NomiInputNumber
+                contentFit
+                min={5}
+                max={1440}
+                value={sharedConfig.learn.interval_minutes}
+                onChange={(v) => void patchSharedConfig({ learn: { interval_minutes: Number(v) || 60 } })}
+                suffix={t('nomi.learn.minutes')}
+              />
             }
-            disabled={!currentProvider}
-            onChange={(model: string) => {
-              if (draftProviderId) {
-                void patchSharedConfig({ learn: { model: { provider_id: draftProviderId, model } } });
-              }
-            }}
-          >
-            {(currentProvider ? currentProviderModels : []).map((m) => (
-              <Select.Option key={m} value={m}>
-                {m}
-              </Select.Option>
-            ))}
-          </Select>
-        </div>
-      </div>
+          />
+          <NomiSettingRow
+            title={t('nomi.learn.model')}
+            description={t('nomi.learn.modelHint')}
+            controls={
+              <>
+              <NomiSelect
+                contentFit
+                contentMaxWidth={240}
+                placeholder={t('nomi.settings.providerPlaceholder')}
+                value={draftProviderId ?? undefined}
+                onChange={(provider_id: ProviderId) => setDraftProviderId(provider_id)}
+              >
+                {providers.map((p) => (
+                  <NomiSelect.Option key={p.id} value={p.id}>
+                    {providerLabel(p)}
+                  </NomiSelect.Option>
+                ))}
+              </NomiSelect>
+              <NomiSelect
+                contentFit
+                contentMaxWidth={300}
+                placeholder={t('nomi.settings.modelPlaceholder')}
+                value={
+                  sharedConfig.learn.model?.provider_id === draftProviderId
+                    ? sharedConfig.learn.model.model
+                    : undefined
+                }
+                disabled={!currentProvider}
+                onChange={(model: string) => {
+                  if (draftProviderId) {
+                    void patchSharedConfig({ learn: { model: { provider_id: draftProviderId, model } } });
+                  }
+                }}
+              >
+                {(currentProvider ? currentProviderModels : []).map((m) => (
+                  <NomiSelect.Option key={m} value={m}>
+                    {m}
+                  </NomiSelect.Option>
+                ))}
+              </NomiSelect>
+              </>
+            }
+          />
+        </NomiSettingList>
+      </NomiSettingSection>
 
-      {/* Skill evolution — mines repeated work into reviewable skills. Uses the shared learning model. */}
-      <div className='flex items-start gap-16px bg-fill-2 rd-10px px-14px py-12px'>
-        <div className='w-200px shrink-0'>
-          <div className='text-14px text-t-primary font-500'>{t('nomi.evolve.title', { defaultValue: '技能进化' })}</div>
-          <div className='text-12px text-t-tertiary mt-2px'>
-            {t('nomi.evolve.hint', { defaultValue: '从你重复的多步操作里自动沉淀技能，复用上面的学习模型。' })}
-          </div>
-        </div>
-        <div className='flex-1 min-w-0 flex flex-col gap-10px'>
-          <div className='flex items-center gap-8px'>
-            <span className='text-13px text-t-secondary'>{t('nomi.evolve.enabled', { defaultValue: '开启技能进化' })}</span>
-            <Switch
-              {...COMPANION_SWITCH_PROPS}
-              checked={sharedConfig.evolve.enabled}
-              onChange={(checked) => void patchSharedConfig({ evolve: { enabled: checked } })}
-            />
-          </div>
-          <div className='flex items-center gap-8px'>
-            <span className='text-13px text-t-secondary'>{t('nomi.evolve.autoActivate', { defaultValue: '高置信自动生效' })}</span>
-            <Switch
-              {...COMPANION_SWITCH_PROPS}
-              checked={sharedConfig.evolve.auto_activate}
-              onChange={(checked) => void patchSharedConfig({ evolve: { auto_activate: checked } })}
-            />
-            <span className='text-11px text-t-tertiary'>
-              {t('nomi.evolve.autoActivateHint', { defaultValue: '多次重复的高置信技能直接启用（仍可在技能页撤销）' })}
-            </span>
-          </div>
-          <div className='flex items-center gap-8px flex-wrap'>
-            <span className='text-13px text-t-secondary'>{t('nomi.evolve.interval', { defaultValue: '挖掘间隔' })}</span>
-            <InputNumber
-              style={{ width: 120 }}
-              min={5}
-              max={1440}
-              value={sharedConfig.evolve.interval_minutes}
-              onChange={(v) => void patchSharedConfig({ evolve: { interval_minutes: Number(v) || 30 } })}
-              suffix={t('nomi.learn.minutes')}
-            />
-            <span className='text-13px text-t-secondary ml-8px'>
-              {t('nomi.evolve.minSessions', { defaultValue: '重复会话数阈值' })}
-            </span>
-            <InputNumber
-              style={{ width: 90 }}
-              min={2}
-              max={20}
-              value={sharedConfig.evolve.min_distinct_sessions}
-              onChange={(v) => void patchSharedConfig({ evolve: { min_distinct_sessions: Number(v) || 2 } })}
-            />
-          </div>
-        </div>
-      </div>
+      {collectionSection}
 
-      {/* Session archiving — compress idle chat windows into day-digests + reset live context. */}
-      <div className='flex items-start gap-16px bg-fill-2 rd-10px px-14px py-12px'>
-        <div className='w-200px shrink-0'>
-          <div className='text-14px text-t-primary font-500'>{t('nomi.archive.title')}</div>
-          <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.archive.hint')}</div>
-        </div>
-        <div className='flex-1 min-w-0 flex flex-col gap-10px'>
-          <div className='flex items-center gap-8px'>
-            <span className='text-13px text-t-secondary'>{t('nomi.archive.enabled')}</span>
-            <Switch
-              {...COMPANION_SWITCH_PROPS}
-              checked={sharedConfig.archive?.enabled ?? false}
-              onChange={(checked) => void patchSharedConfig({ archive: { enabled: checked } })}
-            />
-          </div>
-          <div className='flex items-center gap-8px'>
-            <span className='text-13px text-t-secondary'>{t('nomi.archive.idleMinutes')}</span>
-            <InputNumber
-              style={{ width: 120 }}
-              min={5}
-              max={1440}
-              value={sharedConfig.archive?.idle_minutes ?? 30}
-              onChange={(v) => void patchSharedConfig({ archive: { idle_minutes: Number(v) || 30 } })}
-              suffix={t('nomi.learn.minutes')}
-            />
-          </div>
-        </div>
-      </div>
+      <NomiSettingSection
+        title={t('nomi.evolve.sectionTitle')}
+        description={t('nomi.evolve.hint', {
+          defaultValue: '从你重复的多步操作里自动沉淀技能，复用上面的学习模型。',
+        })}
+      >
+        <NomiSettingList>
+          <NomiSettingRow
+            title={t('nomi.evolve.enabled')}
+            controls={
+              <Switch
+                {...COMPANION_SWITCH_PROPS}
+                checked={sharedConfig.evolve.enabled}
+                onChange={(checked) => void patchSharedConfig({ evolve: { enabled: checked } })}
+              />
+            }
+          />
+          <NomiSettingRow
+            title={t('nomi.evolve.autoActivate')}
+            description={t('nomi.evolve.autoActivateHint')}
+            controls={
+              <Switch
+                {...COMPANION_SWITCH_PROPS}
+                checked={sharedConfig.evolve.auto_activate}
+                onChange={(checked) => void patchSharedConfig({ evolve: { auto_activate: checked } })}
+              />
+            }
+          />
+          <NomiSettingRow
+            title={t('nomi.evolve.interval')}
+            controls={
+              <NomiInputNumber
+                contentFit
+                min={5}
+                max={1440}
+                value={sharedConfig.evolve.interval_minutes}
+                onChange={(v) => void patchSharedConfig({ evolve: { interval_minutes: Number(v) || 30 } })}
+                suffix={t('nomi.learn.minutes')}
+              />
+            }
+          />
+          <NomiSettingRow
+            title={t('nomi.evolve.minSessions')}
+            controls={
+              <NomiInputNumber
+                contentFit
+                min={2}
+                max={20}
+                value={sharedConfig.evolve.min_distinct_sessions}
+                onChange={(v) => void patchSharedConfig({ evolve: { min_distinct_sessions: Number(v) || 2 } })}
+              />
+            }
+          />
+        </NomiSettingList>
+      </NomiSettingSection>
 
-      {/* Smart collaboration lets a companion delegate complex work to isolated collaborators. */}
-      <div className='flex items-start gap-16px bg-fill-2 rd-10px px-14px py-12px'>
-        <div className='w-200px shrink-0'>
-          <div className='text-14px text-t-primary font-500'>{t('nomi.collaboration.title')}</div>
-          <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.collaboration.hint')}</div>
-        </div>
-        <div className='flex-1 min-w-0 flex flex-col gap-10px'>
-          <div className='flex items-center gap-8px'>
-            <span className='text-13px text-t-secondary'>{t('nomi.collaboration.enabled')}</span>
-            <Switch
-              {...COMPANION_SWITCH_PROPS}
-              checked={sharedConfig.smart_collaboration ?? false}
-              onChange={(checked) => void patchSharedConfig({ smart_collaboration: checked })}
-            />
-          </div>
-        </div>
-      </div>
+      <NomiSettingSection title={t('nomi.collaboration.title')} description={t('nomi.collaboration.hint')}>
+        <NomiSettingList>
+          <NomiSettingRow
+            title={t('nomi.collaboration.enabled')}
+            controls={
+              <Switch
+                {...COMPANION_SWITCH_PROPS}
+                checked={sharedConfig.smart_collaboration ?? false}
+                onChange={(checked) => void patchSharedConfig({ smart_collaboration: checked })}
+              />
+            }
+          />
+        </NomiSettingList>
+      </NomiSettingSection>
+
+      <NomiSettingSection title={t('nomi.archive.title')} description={t('nomi.archive.hint')}>
+        <NomiSettingList>
+          <NomiSettingRow
+            title={t('nomi.archive.enabled')}
+            controls={
+              <Switch
+                {...COMPANION_SWITCH_PROPS}
+                checked={sharedConfig.archive?.enabled ?? false}
+                onChange={(checked) => void patchSharedConfig({ archive: { enabled: checked } })}
+              />
+            }
+          />
+          <NomiSettingRow
+            title={t('nomi.archive.idleMinutes')}
+            controls={
+              <NomiInputNumber
+                contentFit
+                min={5}
+                max={1440}
+                value={sharedConfig.archive?.idle_minutes ?? 30}
+                onChange={(v) => void patchSharedConfig({ archive: { idle_minutes: Number(v) || 30 } })}
+                suffix={t('nomi.learn.minutes')}
+              />
+            }
+          />
+        </NomiSettingList>
+      </NomiSettingSection>
     </div>
   );
 };

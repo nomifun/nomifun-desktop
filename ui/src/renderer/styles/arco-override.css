@@ -1,5 +1,19 @@
 /* Arco Design custom overrides - non-theme related */
 
+/* Keep the companion quiet-hours range picker calm when one side is active. */
+.nomi-quiet-hours-picker.arco-picker-focused,
+.nomi-quiet-hours-picker.arco-picker-focused:hover {
+  background-color: var(--color-bg-1) !important;
+  border-color: rgba(var(--primary-rgb), 0.42) !important;
+  box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.08);
+}
+
+.nomi-quiet-hours-picker.arco-picker-focused .arco-picker-input-active input,
+.nomi-quiet-hours-picker.arco-picker-focused:hover .arco-picker-input-active input {
+  background: rgba(var(--primary-rgb), 0.06) !important;
+  border-radius: 4px;
+}
+
 /* Arco's arco.css puts 'Inter' first in font-family, which causes very thin
    text on systems that have Inter installed. Override to use system fonts. */
 html,
