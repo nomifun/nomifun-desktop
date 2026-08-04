@@ -8,7 +8,7 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
 import { Message, Modal } from '@arco-design/web-react';
-import { IconDelete, IconPlus } from '@arco-design/web-react/icon';
+import { Delete, Plus } from '@icon-park/react';
 import { getBaseUrl, isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IFigureMeta } from '@/common/adapter/ipcBridge';
 import type { FigureId } from '@/common/types/ids';
@@ -136,7 +136,7 @@ const CharacterPicker: React.FC<{
                     if (!used) confirmDelete(fig);
                   }}
                 >
-                  <IconDelete className='text-13px' />
+                  <Delete theme='outline' size='13' fill='currentColor' />
                 </FigureActionButton>
               </FigureActionSurface>
               <span
@@ -177,7 +177,7 @@ const CharacterPicker: React.FC<{
               compact ? 'h-64px text-26px' : 'h-84px text-32px'
             )}
           >
-            <IconPlus />
+            <Plus theme='outline' size='14' fill='currentColor' />
           </span>
           <span className='text-13px font-600 text-t-primary'>{t('nomi.customFigure.createNew')}</span>
           <span className='text-11px text-t-tertiary text-center leading-snug'>{t('nomi.customFigure.cardHint')}</span>

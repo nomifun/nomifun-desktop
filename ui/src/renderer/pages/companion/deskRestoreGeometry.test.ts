@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pickHostMonitor, resolveDeskRestoreLayout, type MonitorLayout } from './memoryPanelGeometry';
+import { pickHostMonitor, resolveDeskRestoreLayout, type MonitorLayout } from './deskRestoreGeometry';
 
 const MONITOR = { x: 0, y: 0, width: 1920, height: 1080 };
 

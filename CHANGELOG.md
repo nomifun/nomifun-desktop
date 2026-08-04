@@ -5,6 +5,35 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- Desktop companion management page (`/nomi`) rebuilt as a three-pane
+  workspace: a companion sidebar (create, drag-reorder, 形象库), a seven-tab
+  centre workspace (总览 / 记忆&知识库 / 远程控制 / 进化 / 技能 / 聊天历史 /
+  其他), and an on-demand right detail pane. The previous page stacked two
+  identical `Radio.Group` controls — an outer 伙伴/共享/形象库 "domain" switch
+  above an inner tab switch — which existed only because half the settings were
+  install-wide rather than per-companion. New in the rebuild: a per-companion
+  chat-history reader grouped by day, and a persisted sidebar order
+  (`order_index` on the companion profile). Removed from 总览: the counter row
+  that summed memories/suggestions/skills across **all** companions while
+  rendering inside a single companion's card.
+
+- **Breaking / no downgrade.** The 建议 (Suggestions) feature is removed
+  entirely — the `/nomi` tab, the desktop-pet unread badge, the detached
+  suggestion popup window (`/nomi-memory-panel`), the learner's suggestion
+  distillation, both `/api/companion/suggestions*` endpoints, the
+  `companion.suggestion-created` / `-decided` WebSocket events, the
+  `nomi_companion_list_suggestions` / `nomi_companion_decide_suggestion` agent
+  tools, and the `companion_suggestions` table. The table is dropped on first
+  launch after upgrading, which destroys any pending suggestion cards.
+  **Downgrading to 0.3.8 after this upgrade fails at boot**: 0.3.8 validates an
+  exact table set and refuses to start when a table is missing. Export anything
+  you need before upgrading. The UI/API contract version was bumped
+  accordingly (`suggestions_new` is gone from the companion status shape and
+  `suggestions_added` from the learn result).
+  The summoned-session `propose_companion_memory` capability went with it:
+  suggestion cards were its only storage and its only review surface, so it has
+  no confirm-before-write channel left. Restoring it needs a new design.
+
 - WebUI realtime delivery behind reverse proxies: the `/ws` WebSocket
   handshake no longer rejects browsers whose proxy rewrites the `Host` header
   (e.g. nginx's default `proxy_set_header Host $proxy_host`). The

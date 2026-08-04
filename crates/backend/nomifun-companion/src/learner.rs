@@ -1,6 +1,6 @@
 //! The scheduled learning loop: every tick, if enabled and due, read new
 //! collected events, run one LLM distillation call, and apply the output
-//! (memories / reinforcement / supersedes / suggestions / mood / diary).
+//! (memories / reinforcement / supersedes / mood / diary).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,7 +32,6 @@ pub struct CompanionLearnResult {
     pub status: String,
     pub events_processed: i64,
     pub memories_added: i64,
-    pub suggestions_added: i64,
     pub error: Option<String>,
     /// Nomi's one-line diary for this pass, used by the live companion bubble.
     pub summary: Option<String>,
@@ -137,7 +136,6 @@ impl Learner {
             status: "ok".into(),
             events_processed: 0,
             memories_added: 0,
-            suggestions_added: 0,
             error: None,
             summary: None,
         };
@@ -169,8 +167,7 @@ impl Learner {
             self.emitter.emit_learn_started(target);
         }
 
-        // Existing-memory digest for reinforcement/conflict matching, plus
-        // the pending suggestions so the model can avoid re-raising them.
+        // Existing-memory digest for reinforcement/conflict matching.
         let existing = self
             .store
             .list_memories(&MemoryFilter {
@@ -179,7 +176,6 @@ impl Learner {
                 ..Default::default()
             })
             .await?;
-        let pending_suggestions = self.store.list_suggestions(Some("new"), 50).await.unwrap_or_default();
         let event_lines: Vec<String> = events
             .iter()
             .map(|event| {
@@ -188,7 +184,7 @@ impl Learner {
                 })
             })
             .collect::<Result<_, _>>()?;
-        let user_prompt = prompt::build_learn_prompt(&existing, &pending_suggestions, &event_lines, truncated);
+        let user_prompt = prompt::build_learn_prompt(&existing, &event_lines, truncated);
 
         // One retry on parse failure (the model occasionally wraps in prose).
         let mut parsed = None;
@@ -252,7 +248,6 @@ impl Learner {
             .archive_memories(&output.supersede_memory_ids)
             .await?;
 
-        let prior_active = self.store.count_memories("active").await.unwrap_or(0);
         for m in &output.memories {
             if self.store.find_similar_active(&m.kind, &m.content).await?.is_some() {
                 continue;
@@ -262,44 +257,6 @@ impl Learner {
                 .await?;
             run.memories_added += 1;
         }
-        // First-preference milestone: the moment nomi visibly "gets" you.
-        if prior_active == 0 && run.memories_added > 0 {
-            let milestone = self
-                .store
-                .insert_suggestion(
-                    "insight",
-                    "nomi 学会了关于你的第一条记忆！",
-                    "我开始懂你了，快来记忆页看看吧～",
-                    Some(&serde_json::json!({"type": "navigate", "to": "/nomi?tab=memories"})),
-                )
-                .await?;
-            run.suggestions_added += 1;
-            if let Some(target) = target.as_deref() {
-                self.emitter.emit_suggestion_created(target, &milestone);
-            }
-        }
-        for s in output.suggestions.iter().take(3) {
-            // Insert-side dedup backstop: even when the model ignores the
-            // "don't repeat pending suggestions" rule, a similar status='new'
-            // suggestion blocks the duplicate. The hit is not silently
-            // dropped: the existing suggestion is touched (created_at bumped)
-            // so repeated evidence re-floats it instead of vanishing.
-            if let Some(existing_id) = self.store.find_similar_suggestion(&s.kind, &s.title, &s.body).await? {
-                if let Err(e) = self.store.touch_suggestion(&existing_id).await {
-                    tracing::warn!(error = %e, suggestion_id = %existing_id, "companion learn failed to touch duplicate suggestion");
-                }
-                continue;
-            }
-            let created = self
-                .store
-                .insert_suggestion(&s.kind, &s.title, &s.body, s.action.as_ref())
-                .await?;
-            run.suggestions_added += 1;
-            if let Some(target) = target.as_deref() {
-                self.emitter.emit_suggestion_created(target, &created);
-            }
-        }
-
         if let Some(mood) = &output.mood {
             self.store.set_state("mood", mood).await?;
             if let Some(target) = target.as_deref() {
@@ -391,15 +348,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_event(dir.path());
         let reply = r#"{"memories":[{"kind":"profile","content":"主人是 Rust 工程师","importance":0.9}],
-            "suggestions":[{"kind":"insight","title":"洞察","body":"最近常调编译错误"}],
             "mood":"content","diary":"今天陪主人修了 bug～"}"#;
         let (learner, companion_id) = make_learner(dir.path(), reply).await;
         let run = learner.run_once().await.unwrap();
         assert_eq!(run.status, "ok");
         assert_eq!(run.events_processed, 1);
         assert_eq!(run.memories_added, 1);
-        // 1 real suggestion + 1 first-memory milestone
-        assert_eq!(run.suggestions_added, 2);
         assert_eq!(learner.store.get_state("mood").await.unwrap().unwrap(), "content");
         assert!(learner.store.get_state_i64("learn_cursor_ts").await.unwrap() > 0);
         // Shared XP grant lands on every registered companion (1 event + 1*5).
@@ -408,56 +362,6 @@ mod tests {
         // Cursor advanced: a second run sees no events.
         let run2 = learner.run_once().await.unwrap();
         assert_eq!(run2.status, "no_events");
-    }
-
-    #[tokio::test]
-    async fn run_once_skips_duplicate_pending_suggestions() {
-        let dir = tempfile::tempdir().unwrap();
-        seed_event(dir.path());
-        let reply = r#"{"suggestions":[{"kind":"insight","title":"最近常调编译错误","body":"建议看看构建脚本"}]}"#;
-        let (learner, _) = make_learner(dir.path(), reply).await;
-
-        let run1 = learner.run_once().await.unwrap();
-        assert_eq!(run1.suggestions_added, 1);
-        assert_eq!(learner.store.count_suggestions("new").await.unwrap(), 1);
-        let first = &learner.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
-        let (first_suggestion_id, first_created_at) =
-            (first.suggestion_id.clone(), first.created_at);
-
-        // Same model output over a new event batch: the pending suggestion
-        // blocks the duplicate, and the dedup hit touches it (created_at
-        // bumped) instead of silently dropping the repeated evidence.
-        // (Sleep keeps the new event's ms timestamp past the advanced
-        // cursor and guarantees a strictly larger touch timestamp.)
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        seed_event(dir.path());
-        let run2 = learner.run_once().await.unwrap();
-        assert_eq!(run2.status, "ok");
-        assert_eq!(run2.suggestions_added, 0);
-        assert_eq!(learner.store.count_suggestions("new").await.unwrap(), 1);
-        let touched = &learner.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
-        assert_eq!(
-            touched.suggestion_id, first_suggestion_id,
-            "dedup must keep the existing suggestion"
-        );
-        assert!(
-            touched.created_at > first_created_at,
-            "dedup hit must touch the existing suggestion ({} -> {})",
-            first_created_at,
-            touched.created_at
-        );
-
-        // Once decided, the same suggestion may be raised again.
-        let pending = learner.store.list_suggestions(Some("new"), 10).await.unwrap();
-        learner
-            .store
-            .decide_suggestion(&pending[0].suggestion_id, false)
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        seed_event(dir.path());
-        let run3 = learner.run_once().await.unwrap();
-        assert_eq!(run3.suggestions_added, 1);
     }
 
     #[tokio::test]
@@ -495,7 +399,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_event(dir.path());
         let reply = r#"{"memories":[{"kind":"profile","content":"主人是 Rust 工程师","importance":0.9}],
-            "suggestions":[{"kind":"insight","title":"洞察","body":"最近常调编译错误"}],
             "mood":"content","diary":"今天陪主人修了 bug～"}"#;
 
         let mut config = SharedCompanionConfig::default();
@@ -530,7 +433,6 @@ mod tests {
 
         let events = bc.events.lock().unwrap().clone();
         for name in [
-            "companion.suggestion-created",
             "companion.mood-changed",
             "companion.learn-finished",
             "companion.learn-started",
@@ -559,7 +461,6 @@ mod tests {
             "events_processed",
             "memories_added",
             "status",
-            "suggestions_added",
             "summary",
         ]
         .into_iter()
