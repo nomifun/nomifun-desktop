@@ -240,7 +240,8 @@ pub use mcp_bridge::{
     REQUIREMENT_CAPABILITY_DOMAIN, REQUIREMENT_COMPLETE_TOOL,
     REQUIREMENT_UPDATE_STATUS_TOOL, RequirementCapabilityClaims,
     RequirementCapabilityScope, RequirementMcpChildConfig, RequirementMcpConfig,
-    ScopedMcpChildBootstrap, ScopedMcpChildConfig, browser_tool_operation,
+    MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY, ScopedMcpChildBootstrap,
+    ScopedMcpChildConfig, browser_tool_operation,
 };
 pub use terminal::{
     CreateTerminalRequest, TerminalExitEvent, TerminalInputRequest, TerminalOutputEvent,
