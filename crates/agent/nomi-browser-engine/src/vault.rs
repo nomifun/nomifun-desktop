@@ -33,14 +33,19 @@
 //! = 部分写入/磁盘坏块、key 不对 = 换机/换 key、JSON 形态变了）——持久登录是**增强**，vault 坏了应
 //! **静默退回「无登录态」起点**（用户重新登录即可），绝不让一个坏 vault 文件阻断引擎启动。
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::storage_state::StorageState;
+use crate::storage_state::{MAX_STORAGE_STATE_JSON_BYTES, StorageState};
 
 /// AES-256-GCM key 的字节数（与 [`nomifun_common`] / `nomifun-secret` 同 = 32）。
 pub const KEY_SIZE: usize = 32;
+
+/// Exact encrypted envelope for one bounded StorageState JSON document: AES-GCM appends a
+/// 12-byte nonce and 16-byte tag, then the common crypto helper applies standard base64.
+pub const MAX_STORAGE_STATE_VAULT_BYTES: usize =
+    4 * ((MAX_STORAGE_STATE_JSON_BYTES + 12 + 16 + 2) / 3);
 
 /// per-pet workspace 下的 storage_state vault 文件名。**加密**落盘（`.enc` 后缀点明内容是密文，
 /// 非明文 JSON），与 `<workspace>/downloads`（[`crate::download::DOWNLOAD_SUBDIR`]）等子产物平级隔离。
@@ -92,9 +97,24 @@ pub fn save_storage_state(
     vault_path: &Path,
     key: &[u8],
 ) -> Result<(), VaultError> {
+    state
+        .validate_bounds()
+        .map_err(|error| VaultError::TooLarge(error.to_string()))?;
     let json = serde_json::to_string(state).map_err(|e| VaultError::Serialize(e.to_string()))?;
+    if json.len() > MAX_STORAGE_STATE_JSON_BYTES {
+        return Err(VaultError::TooLarge(format!(
+            "plaintext JSON is {} bytes; limit is {MAX_STORAGE_STATE_JSON_BYTES}",
+            json.len()
+        )));
+    }
     let ciphertext = nomifun_common::encrypt_string(&json, key)
         .map_err(|e| VaultError::Crypto(e.to_string()))?;
+    if ciphertext.len() > MAX_STORAGE_STATE_VAULT_BYTES {
+        return Err(VaultError::TooLarge(format!(
+            "encrypted payload is {} bytes; limit is {MAX_STORAGE_STATE_VAULT_BYTES}",
+            ciphertext.len()
+        )));
+    }
     if let Some(parent) = vault_path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
@@ -218,14 +238,47 @@ fn sync_directory(_directory: &Path) -> std::io::Result<()> {
 /// 这把「坏 vault 阻断启动」的风险彻底消除：最坏情况是丢登录态（用户重登），不是崩。
 pub fn load_storage_state(vault_path: &Path, key: &[u8]) -> Option<StorageState> {
     // vault 不存在 = 首次登录前的正常态，连 warn 都不必（Ok(None) 路径）。
-    let ciphertext = match std::fs::read_to_string(vault_path) {
-        Ok(s) => s,
+    let file = match std::fs::File::open(vault_path) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
             tracing::warn!(
                 target: "nomi_browser_engine::vault",
                 error = %e, path = %vault_path.display(),
                 "read storage_state vault failed; falling back to no persisted login"
+            );
+            return None;
+        }
+    };
+    // The bounded reader is authoritative even if the file grows after open. A metadata-only
+    // check would leave a TOCTOU window before an unbounded `read_to_string` allocation.
+    let mut bytes = Vec::new();
+    let mut bounded = file.take((MAX_STORAGE_STATE_VAULT_BYTES + 1) as u64);
+    if let Err(e) = bounded.read_to_end(&mut bytes) {
+        tracing::warn!(
+            target: "nomi_browser_engine::vault",
+            error = %e, path = %vault_path.display(),
+            "read storage_state vault failed; falling back to no persisted login"
+        );
+        return None;
+    }
+    if bytes.len() > MAX_STORAGE_STATE_VAULT_BYTES {
+        tracing::warn!(
+            target: "nomi_browser_engine::vault",
+            path = %vault_path.display(),
+            size = bytes.len(),
+            limit = MAX_STORAGE_STATE_VAULT_BYTES,
+            "storage_state vault exceeds its per-task hard boundary; falling back to no persisted login"
+        );
+        return None;
+    }
+    let ciphertext = match String::from_utf8(bytes) {
+        Ok(ciphertext) => ciphertext,
+        Err(error) => {
+            tracing::warn!(
+                target: "nomi_browser_engine::vault",
+                error = %error, path = %vault_path.display(),
+                "storage_state vault is not UTF-8; falling back to no persisted login"
             );
             return None;
         }
@@ -242,6 +295,16 @@ pub fn load_storage_state(vault_path: &Path, key: &[u8]) -> Option<StorageState>
             return None;
         }
     };
+    if plaintext.len() > MAX_STORAGE_STATE_JSON_BYTES {
+        tracing::warn!(
+            target: "nomi_browser_engine::vault",
+            path = %vault_path.display(),
+            size = plaintext.len(),
+            limit = MAX_STORAGE_STATE_JSON_BYTES,
+            "decrypted storage_state exceeds its per-task hard boundary; falling back to no persisted login"
+        );
+        return None;
+    }
     let value: serde_json::Value = match serde_json::from_str(&plaintext) {
         Ok(v) => v,
         Err(e) => {
@@ -270,6 +333,10 @@ pub fn load_storage_state(vault_path: &Path, key: &[u8]) -> Option<StorageState>
 /// `None`（fail-closed 优雅降级，见其 doc）。
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
+    /// Per-task structural or byte boundary exceeded. Save rejects before touching the current
+    /// vault, preserving the last known-good identity.
+    #[error("storage_state exceeds hard boundary: {0}")]
+    TooLarge(String),
     /// 序列化 [`StorageState`] → JSON 失败（理论上不会——本结构全可序列化）。
     #[error("serialize storage_state failed: {0}")]
     Serialize(String),
@@ -604,5 +671,45 @@ mod tests {
         assert!(queue_store.key_path.is_none());
         assert!(queue_store.auto_increment);
         assert_eq!(queue_store.records.len(), 2);
+    }
+
+    #[test]
+    fn oversized_vault_file_is_bounded_and_left_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = storage_state_path(dir.path());
+        let oversized = vec![b'A'; MAX_STORAGE_STATE_VAULT_BYTES + 1];
+        std::fs::write(&path, &oversized).expect("write oversized legacy vault");
+
+        assert!(load_storage_state(&path, &test_key()).is_none());
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").len(),
+            oversized.len() as u64,
+            "fail-closed load must not truncate or delete the legacy vault"
+        );
+    }
+
+    #[test]
+    fn oversized_save_does_not_replace_known_good_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = storage_state_path(dir.path());
+        save_storage_state(&full_state(), &path, &test_key()).expect("save known-good vault");
+        let before = std::fs::read(&path).expect("read known-good vault");
+
+        let oversized = StorageState {
+            cookies: vec![],
+            local_storage: vec![OriginStorage::new_local_storage(
+                "https://oversized.example",
+                [("payload".into(), "x".repeat(MAX_STORAGE_STATE_JSON_BYTES))],
+            )],
+        };
+        assert!(matches!(
+            save_storage_state(&oversized, &path, &test_key()),
+            Err(VaultError::TooLarge(_))
+        ));
+        assert_eq!(
+            std::fs::read(&path).expect("read preserved vault"),
+            before,
+            "oversized capture must be rejected before atomic replacement"
+        );
     }
 }

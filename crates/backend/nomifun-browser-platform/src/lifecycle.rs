@@ -14,6 +14,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
@@ -499,14 +500,17 @@ impl HostRestartSingleFlight {
         }
     }
 
-    fn spawn_attempt<F, Fut>(
+    fn spawn_attempt<F, Fut, C, CFut>(
         &self,
         attempt: Arc<RestartAttempt>,
         restart: F,
         attempt_timeout: Option<Duration>,
+        on_terminal: C,
     ) where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = RestartResult> + Send + 'static,
+        C: FnOnce(RestartResult) -> CFut + Send + 'static,
+        CFut: Future<Output = ()> + Send + 'static,
     {
         let inner = self.inner.clone();
         tokio::spawn(async move {
@@ -534,6 +538,19 @@ impl HostRestartSingleFlight {
                     }
                 },
             };
+            // Timeout and JoinError/panic are produced by this supervisor,
+            // outside the restart closure. Run the Hub's terminal callback
+            // here as another owned task so caller cancellation cannot skip
+            // lifecycle failure publication. A callback panic is isolated and
+            // must not strand the single-flight result.
+            if let Err(join_error) = tokio::spawn(on_terminal(result.clone())).await {
+                tracing::error!(
+                    cancelled = join_error.is_cancelled(),
+                    panic = join_error.is_panic(),
+                    observed_epoch,
+                    "browser Host restart terminal callback failed"
+                );
+            }
             let mut state = inner.state.lock().await;
             if result.is_ok() {
                 state.last_success = result.as_ref().ok().copied();
@@ -570,18 +587,22 @@ impl HostRestartSingleFlight {
         }
     }
 
-    async fn run_inner<F, Fut>(
+    async fn run_inner<F, Fut, C, CFut>(
         &self,
         observed_epoch: u64,
         restart: F,
         attempt_timeout: Option<Duration>,
         wait_timeout: Option<Duration>,
+        on_terminal: C,
     ) -> HostRestartFlightResult
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = RestartResult> + Send + 'static,
+        C: FnOnce(RestartResult) -> CFut + Send + 'static,
+        CFut: Future<Output = ()> + Send + 'static,
     {
         let mut restart = Some(restart);
+        let mut on_terminal = Some(on_terminal);
         loop {
             match self.select_role(observed_epoch).await {
                 RestartRole::Cached(transition) => {
@@ -604,12 +625,20 @@ impl HostRestartSingleFlight {
                     };
                 }
                 RestartRole::Lead(attempt) => {
+                    // Keep this synchronous with the Ready result from
+                    // `select_role`. Tokio cancellation is cooperative, so
+                    // the owned attempt is armed in the same poll that
+                    // publishes `state.in_flight`. Do not insert an await
+                    // between role selection and this spawn.
                     self.spawn_attempt(
                         Arc::clone(&attempt),
                         restart
                             .take()
                             .expect("restart closure is consumed only by the leader"),
                         attempt_timeout,
+                        on_terminal
+                            .take()
+                            .expect("terminal callback is consumed only by the leader"),
                     );
                     return HostRestartFlightResult {
                         leader: true,
@@ -629,7 +658,8 @@ impl HostRestartSingleFlight {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = RestartResult> + Send + 'static,
     {
-        self.run_inner(observed_epoch, restart, None, None).await
+        self.run_inner(observed_epoch, restart, None, None, |_| async {})
+            .await
     }
 
     /// Runs one restart attempt with an owned deadline. The underlying restart
@@ -652,6 +682,34 @@ impl HostRestartSingleFlight {
             restart,
             Some(attempt_timeout),
             Some(wait_timeout),
+            |_| async {},
+        )
+        .await
+    }
+
+    /// Bounded restart with one terminal callback owned by the single-flight
+    /// supervisor. The callback observes closure errors as well as timeout,
+    /// cancellation and panic synthesized by the supervisor itself.
+    pub async fn run_bounded_with_terminal_callback<F, Fut, C, CFut>(
+        &self,
+        observed_epoch: u64,
+        attempt_timeout: Duration,
+        restart: F,
+        on_terminal: C,
+    ) -> HostRestartFlightResult
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = RestartResult> + Send + 'static,
+        C: FnOnce(RestartResult) -> CFut + Send + 'static,
+        CFut: Future<Output = ()> + Send + 'static,
+    {
+        let wait_timeout = attempt_timeout.saturating_add(Duration::from_secs(1));
+        self.run_inner(
+            observed_epoch,
+            restart,
+            Some(attempt_timeout),
+            Some(wait_timeout),
+            on_terminal,
         )
         .await
     }
@@ -671,7 +729,39 @@ impl HostRestartSingleFlight {
 /// Registry of independent restart gates. Calls for the same key join one
 /// attempt; different Host keys never share a gate.
 pub struct PerKeyHostRestartSingleFlight<K> {
-    gates: Mutex<HashMap<K, HostRestartSingleFlight>>,
+    gates: Mutex<HashMap<K, Arc<PerKeyHostRestartGateEntry>>>,
+}
+
+struct PerKeyHostRestartGateEntry {
+    gate: HostRestartSingleFlight,
+    /// Callers that have taken this registry entry but may not yet have
+    /// registered themselves in `gate.state.in_flight`.
+    leases: AtomicUsize,
+}
+
+impl Default for PerKeyHostRestartGateEntry {
+    fn default() -> Self {
+        Self {
+            gate: HostRestartSingleFlight::default(),
+            leases: AtomicUsize::new(0),
+        }
+    }
+}
+
+struct PerKeyHostRestartGateLease {
+    entry: Arc<PerKeyHostRestartGateEntry>,
+}
+
+impl PerKeyHostRestartGateLease {
+    fn gate(&self) -> &HostRestartSingleFlight {
+        &self.entry.gate
+    }
+}
+
+impl Drop for PerKeyHostRestartGateLease {
+    fn drop(&mut self) {
+        self.entry.leases.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl<K> Default for PerKeyHostRestartSingleFlight<K> {
@@ -686,9 +776,16 @@ impl<K> PerKeyHostRestartSingleFlight<K>
 where
     K: Clone + Eq + Hash,
 {
-    async fn gate(&self, key: K) -> HostRestartSingleFlight {
+    async fn lease(&self, key: K) -> PerKeyHostRestartGateLease {
         let mut gates = self.gates.lock().await;
-        gates.entry(key).or_default().clone()
+        let entry = Arc::clone(gates.entry(key).or_default());
+        entry.leases.fetch_add(1, Ordering::AcqRel);
+        PerKeyHostRestartGateLease { entry }
+    }
+
+    #[cfg(test)]
+    async fn gate(&self, key: K) -> HostRestartSingleFlight {
+        self.lease(key).await.gate().clone()
     }
 
     pub async fn run<F, Fut>(
@@ -701,7 +798,8 @@ where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = RestartResult> + Send + 'static,
     {
-        self.gate(key).await.run(observed_epoch, restart).await
+        let lease = self.lease(key).await;
+        lease.gate().run(observed_epoch, restart).await
     }
 
     pub async fn run_bounded<F, Fut>(
@@ -715,9 +813,36 @@ where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = RestartResult> + Send + 'static,
     {
-        self.gate(key)
-            .await
+        let lease = self.lease(key).await;
+        lease
+            .gate()
             .run_bounded(observed_epoch, attempt_timeout, restart)
+            .await
+    }
+
+    pub async fn run_bounded_with_terminal_callback<F, Fut, C, CFut>(
+        &self,
+        key: K,
+        observed_epoch: u64,
+        attempt_timeout: Duration,
+        restart: F,
+        on_terminal: C,
+    ) -> HostRestartFlightResult
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = RestartResult> + Send + 'static,
+        C: FnOnce(RestartResult) -> CFut + Send + 'static,
+        CFut: Future<Output = ()> + Send + 'static,
+    {
+        let lease = self.lease(key).await;
+        lease
+            .gate()
+            .run_bounded_with_terminal_callback(
+                observed_epoch,
+                attempt_timeout,
+                restart,
+                on_terminal,
+            )
             .await
     }
 
@@ -727,13 +852,17 @@ where
     /// replica identity generations); without eviction every failed Host on a
     /// unique key retains its gate for the process lifetime. A gate with an
     /// in-flight attempt is kept so the single-flight guarantee is never
-    /// split across two gate instances.
+    /// split across two gate instances. A leased gate is also kept: its caller
+    /// may be between taking the registry entry and registering the attempt.
     pub async fn evict_settled(&self, key: &K) {
         let mut gates = self.gates.lock().await;
-        if let Some(gate) = gates.get(key)
-            && gate.inner.state.lock().await.in_flight.is_some()
-        {
-            return;
+        if let Some(entry) = gates.get(key) {
+            if entry.leases.load(Ordering::Acquire) != 0 {
+                return;
+            }
+            if entry.gate.inner.state.lock().await.in_flight.is_some() {
+                return;
+            }
         }
         gates.remove(key);
     }
@@ -1009,6 +1138,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evict_settled_keeps_a_gate_leased_before_attempt_registration() {
+        let flights = Arc::new(PerKeyHostRestartSingleFlight::<String>::default());
+        let key = "isolated-lease-window".to_owned();
+
+        // Hold the first caller in the exact window between taking the map
+        // entry and `select_role` registering an in-flight attempt.
+        let first_lease = flights.lease(key.clone()).await;
+        assert_eq!(
+            first_lease.gate().active_observed_epoch().await,
+            None,
+            "the test must exercise the pre-registration window"
+        );
+
+        flights.evict_settled(&key).await;
+        assert_eq!(
+            flights.gate_count().await,
+            1,
+            "eviction must retain an entry already handed to a caller"
+        );
+
+        let second_lease = flights.lease(key.clone()).await;
+        assert!(
+            Arc::ptr_eq(&first_lease.entry, &second_lease.entry),
+            "both callers must receive the same gate across the eviction race"
+        );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let first_gate = first_lease.gate().clone();
+        let first = {
+            let calls = Arc::clone(&calls);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                let result = first_gate
+                    .run(7, move || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let permit = release.acquire().await.unwrap();
+                        permit.forget();
+                        HostRestartTransition::new(7, 8)
+                    })
+                    .await;
+                drop(first_lease);
+                result
+            })
+        };
+
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let second_gate = second_lease.gate().clone();
+        let second = {
+            let calls = Arc::clone(&calls);
+            tokio::spawn(async move {
+                let result = second_gate
+                    .run(7, move || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        HostRestartTransition::new(7, 9)
+                    })
+                    .await;
+                drop(second_lease);
+                result
+            })
+        };
+
+        release.add_permits(1);
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            first.result.unwrap(),
+            HostRestartTransition {
+                old_epoch: 7,
+                new_epoch: 8,
+            }
+        );
+        assert_eq!(
+            second.result.unwrap(),
+            HostRestartTransition {
+                old_epoch: 7,
+                new_epoch: 8,
+            }
+        );
+
+        flights.evict_settled(&key).await;
+        assert_eq!(flights.gate_count().await, 0);
+    }
+
+    #[tokio::test]
     async fn same_key_restart_is_single_flight_and_stale_callers_reuse_success() {
         let flights = Arc::new(PerKeyHostRestartSingleFlight::<String>::default());
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1229,5 +1447,121 @@ mod tests {
             }
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_callback_observes_timeout_after_leader_waiter_is_cancelled() {
+        let flights = Arc::new(PerKeyHostRestartSingleFlight::<String>::default());
+        let entered = Arc::new(Notify::new());
+        let callback_result = Arc::new(StdMutex::new(None::<RestartResult>));
+        let leader = {
+            let flights = Arc::clone(&flights);
+            let entered = Arc::clone(&entered);
+            let callback_result = Arc::clone(&callback_result);
+            tokio::spawn(async move {
+                flights
+                    .run_bounded_with_terminal_callback(
+                        "primary".to_owned(),
+                        21,
+                        Duration::from_secs(5),
+                        move || async move {
+                            entered.notify_one();
+                            std::future::pending::<RestartResult>().await
+                        },
+                        move |result| async move {
+                            *callback_result
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(result);
+                        },
+                    )
+                    .await
+            })
+        };
+        entered.notified().await;
+        leader.abort();
+        assert!(leader.await.unwrap_err().is_cancelled());
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        for _ in 0..32 {
+            if callback_result
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let result = callback_result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("owned timeout terminal callback did not run");
+        let error = result.expect_err("hung restart must time out");
+        assert_eq!(error.metadata["restart_timeout"], true);
+        assert_eq!(error.metadata["restart_wait_timeout"], false);
+        assert_eq!(error.metadata["observed_epoch"], 21);
+    }
+
+    #[tokio::test]
+    async fn terminal_callback_observes_restart_panic_once() {
+        let flights = Arc::new(PerKeyHostRestartSingleFlight::<String>::default());
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let callback_error = Arc::new(StdMutex::new(None::<BrowserPlatformError>));
+        let result = flights
+            .run_bounded_with_terminal_callback(
+                "primary".to_owned(),
+                31,
+                Duration::from_secs(5),
+                || async move { panic!("simulated restart panic") },
+                {
+                    let callback_calls = Arc::clone(&callback_calls);
+                    let callback_error = Arc::clone(&callback_error);
+                    move |result| async move {
+                        callback_calls.fetch_add(1, Ordering::SeqCst);
+                        *callback_error
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            result.err();
+                    }
+                },
+            )
+            .await;
+
+        assert!(result.result.is_err());
+        assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
+        let error = callback_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("panic terminal callback did not receive the error");
+        assert_eq!(error.metadata["restart_task_failed"], true);
+        assert_eq!(error.metadata["task_panicked"], true);
+    }
+
+    #[tokio::test]
+    async fn terminal_callback_panic_cannot_strand_restart_completion() {
+        let gate = HostRestartSingleFlight::default();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            gate.run_bounded_with_terminal_callback(
+                41,
+                Duration::from_secs(5),
+                || async { HostRestartTransition::new(41, 42) },
+                |_| async { panic!("simulated terminal callback panic") },
+            ),
+        )
+        .await
+        .expect("callback panic must not strand the owned restart flight");
+
+        assert_eq!(
+            result.result.unwrap(),
+            HostRestartTransition {
+                old_epoch: 41,
+                new_epoch: 42,
+            }
+        );
+        assert_eq!(gate.active_observed_epoch().await, None);
     }
 }

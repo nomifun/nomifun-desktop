@@ -19,6 +19,7 @@ pub enum BrowserErrorCode {
     BrowserRestarted,
     IdentityReplicaStale,
     NeedsPrimaryIdentity,
+    PrimaryProfileStorageLimit,
     LaneNotFound,
     OperationNotAllowed,
     BrowserUnavailable,

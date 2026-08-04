@@ -1,31 +1,32 @@
 //! Hub-backed rendering [`PageFetcher`] for knowledge URL sources.
 //!
 //! The application composition root supplies the one process-wide
-//! [`BrowserSessionHub`]. This adapter owns an application-issued lease and a
-//! stable Anonymous lane; it never constructs an engine, chooses a profile, or
-//! launches Chromium itself.
+//! [`BrowserSessionHub`]. This adapter owns an application-issued lease and one
+//! transaction-scoped Anonymous lane at a time; it never constructs an engine,
+//! chooses a profile, or launches Chromium itself.
 //!
 //! A rendered fetch is a two-operation transaction (`navigate`, then
 //! `rendered_html`). Knowledge fetch batching is concurrent, so a local mutex
-//! protects the complete transaction from a second fetch navigating the stable
-//! lane between those operations. The Hub remains authoritative for lane
-//! serialization, admission, browser lifecycle, and cleanup.
+//! protects the complete transaction from overlapping with a second fetch. The
+//! Hub remains authoritative for lane serialization, admission, browser
+//! lifecycle, and cleanup, and every transaction releases its Lane before
+//! returning.
 //!
 //! The raw rendered HTML is converted with the same [`html_to_markdown`]
 //! pipeline as the HTTP fetcher. It intentionally bypasses LLM-facing browser
 //! extraction products, which may redact or wrap content.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use nomifun_browser_platform::{
-    BrowserErrorCode, BrowserIdentityMode, BrowserLaneClient, BrowserLaneSnapshot,
-    BrowserOperation, BrowserOperationKind, BrowserPlatformError, BrowserSessionHub,
-    BrowserSurface, CallerIdentity, LaneLifecycleState, OpenLaneOutcome, OwnerLease,
-    OwnerLeaseId,
+    BrowserErrorCode, BrowserIdentityMode, BrowserLaneClient, BrowserLaneId,
+    BrowserLaneSnapshot, BrowserOperation, BrowserOperationKind, BrowserPlatformError,
+    BrowserSessionHub, BrowserSurface, CallerIdentity, LaneLifecycleState, OpenLaneOutcome,
+    OwnerLease, OwnerLeaseId,
 };
 use nomifun_common::{AppError, generate_id};
 use nomifun_knowledge::PageFetcher;
@@ -35,7 +36,7 @@ use nomifun_knowledge::source_url::{
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-const KNOWLEDGE_LANE_NAME: &str = "knowledge-render";
+const KNOWLEDGE_LANE_PREFIX: &str = "knowledge";
 const KNOWLEDGE_RUNTIME_PREFIX: &str = "knowledge-renderer";
 /// Bounded wait for scheduler promotion of a queued knowledge Lane (F40). The
 /// pre-Hub fetcher owned a serialized private engine where contention could
@@ -48,6 +49,66 @@ const KNOWLEDGE_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Upper bound for the detached Drop-time owner revoke (F49).
 const DROP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Cancellation-safe cleanup authority for one knowledge-render transaction.
+///
+/// Normal completion closes the exact Lane. If the fetch future is cancelled
+/// after admission, Drop synchronously transfers the exact Lane id and sealed
+/// owner generation to the Hub's bounded supervisor. Each transaction also
+/// has a unique Lane name, so a replacement fetch cannot reuse the old Lane
+/// while its physical cleanup is still pending.
+struct FetchLaneCleanup {
+    client: BrowserLaneClient,
+    lane_id: BrowserLaneId,
+    armed: bool,
+}
+
+impl FetchLaneCleanup {
+    fn new(client: BrowserLaneClient, lane_id: BrowserLaneId) -> Self {
+        Self {
+            client,
+            lane_id,
+            armed: true,
+        }
+    }
+
+    async fn finish(mut self) -> Result<(), BrowserPlatformError> {
+        match self.client.close(&self.lane_id).await {
+            Ok(_) => {
+                self.armed = false;
+                Ok(())
+            }
+            Err(error) => {
+                // `close` has already retained exact driver/Host authority
+                // when physical teardown is uncertain. This handoff also
+                // covers pre-driver failures such as a capability expiring
+                // between the transaction and cleanup.
+                self.client
+                    .handoff_bound_lane_cleanup(self.lane_id.clone())?;
+                self.armed = false;
+                Err(error)
+            }
+        }
+    }
+}
+
+impl Drop for FetchLaneCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) = self
+                .client
+                .handoff_bound_lane_cleanup(self.lane_id.clone())
+            {
+                tracing::error!(
+                    lane_id = %self.lane_id,
+                    code = ?error.code,
+                    "failed to retain exact knowledge Lane cleanup authority"
+                );
+            }
+            self.armed = false;
+        }
+    }
+}
+
 /// Hub-backed rendering fetcher pinned to Anonymous identity.
 pub struct BrowserFetcher {
     hub: Arc<BrowserSessionHub>,
@@ -55,6 +116,7 @@ pub struct BrowserFetcher {
     runtime_instance_id: String,
     owner_lease_id: StdMutex<Option<OwnerLeaseId>>,
     fetch_gate: Mutex<()>,
+    lane_sequence: AtomicU64,
     closed: AtomicBool,
     cleanup_retry_pending: AtomicBool,
     queue_wait_timeout: Duration,
@@ -82,6 +144,7 @@ impl BrowserFetcher {
             runtime_instance_id,
             owner_lease_id: StdMutex::new(None),
             fetch_gate: Mutex::new(()),
+            lane_sequence: AtomicU64::new(1),
             closed: AtomicBool::new(false),
             cleanup_retry_pending: AtomicBool::new(false),
             queue_wait_timeout: KNOWLEDGE_QUEUE_WAIT_TIMEOUT,
@@ -91,6 +154,12 @@ impl BrowserFetcher {
     #[cfg(test)]
     fn set_queue_wait_timeout(&mut self, timeout: Duration) {
         self.queue_wait_timeout = timeout;
+    }
+
+    fn next_lane_name(&self) -> String {
+        let sequence = self.lane_sequence.fetch_add(1, Ordering::AcqRel);
+        // 26 ASCII bytes, safely below the platform's 32-byte Lane-name cap.
+        format!("{KNOWLEDGE_LANE_PREFIX}-{sequence:016x}")
     }
 
     fn owner_lease_id(&self) -> Option<OwnerLeaseId> {
@@ -230,7 +299,6 @@ impl BrowserFetcher {
                 LaneLifecycleState::Frozen
                 | LaneLifecycleState::Stopping
                 | LaneLifecycleState::Failed => {
-                    let _ = client.close(&lane.lane_id).await;
                     return Err(FetchFailure::platform(
                         "waiting for the queued knowledge lane",
                         BrowserPlatformError::new(
@@ -249,9 +317,6 @@ impl BrowserFetcher {
                     .as_ref()
                     .and_then(|value| serde_json::to_value(value).ok())
                     .unwrap_or(Value::Null);
-                // Cancel the owned queue entry so it cannot start later as an
-                // orphan after this request has already failed.
-                let _ = client.close(&lane.lane_id).await;
                 return Err(FetchFailure::platform(
                     "opening Anonymous knowledge lane",
                     BrowserPlatformError::new(
@@ -275,10 +340,11 @@ impl BrowserFetcher {
         &self,
         client: &BrowserLaneClient,
         raw_url: &str,
-    ) -> Result<(String, String), FetchFailure> {
+    ) -> Result<(String, String, bool), FetchFailure> {
+        let lane_name = self.next_lane_name();
         let outcome = client
             .open(
-                Some(KNOWLEDGE_LANE_NAME),
+                Some(&lane_name),
                 BrowserIdentityMode::Anonymous,
                 None,
             )
@@ -287,65 +353,98 @@ impl BrowserFetcher {
                 FetchFailure::platform("opening Anonymous knowledge lane", error)
             })?;
 
+        // Arm cleanup immediately after admission and before another await.
+        // Cancellation during `open` is owned by the Hub's admission guards;
+        // cancellation after `open` is owned by this transaction guard.
+        let initial_lane = outcome.lane().clone();
+        let cleanup = FetchLaneCleanup::new(client.clone(), initial_lane.lane_id.clone());
+
         let lane = match outcome {
             OpenLaneOutcome::Running { lane } => lane,
             // F40: a queued admission waits (bounded) for scheduler promotion
             // so knowledge ingestion degrades to "slower" under contention,
             // not "failed" — matching the pre-Hub serialized-engine behavior.
             OpenLaneOutcome::Queued { lane } => {
-                self.wait_for_queued_lane(client, lane).await?
+                match self.wait_for_queued_lane(client, lane).await {
+                    Ok(lane) => lane,
+                    Err(error) => {
+                        return match cleanup.finish().await {
+                            Ok(()) => Err(error),
+                            Err(cleanup_error) => Err(FetchFailure::platform(
+                                "closing the Anonymous knowledge lane after a queue failure",
+                                cleanup_error,
+                            )),
+                        };
+                    }
+                }
             }
         };
 
-        if lane.identity_mode != BrowserIdentityMode::Anonymous {
-            return Err(FetchFailure::platform(
-                "validating knowledge lane identity",
-                BrowserPlatformError::new(
-                    BrowserErrorCode::InvalidCallerIdentity,
-                    "Knowledge rendering requires an Anonymous browser lane.",
-                    false,
-                    "Recreate the renderer through the application Browser Session Hub.",
+        let result = async {
+            if lane.identity_mode != BrowserIdentityMode::Anonymous {
+                return Err(FetchFailure::platform(
+                    "validating knowledge lane identity",
+                    BrowserPlatformError::new(
+                        BrowserErrorCode::InvalidCallerIdentity,
+                        "Knowledge rendering requires an Anonymous browser lane.",
+                        false,
+                        "Recreate the renderer through the application Browser Session Hub.",
+                    )
+                    .for_lane(lane.lane_id.clone()),
+                ));
+            }
+
+            let navigation = client
+                .execute(
+                    &lane.lane_id,
+                    crawl_operation("navigate", json!({ "url": raw_url, "new_tab": false })),
                 )
-                .for_lane(lane.lane_id),
-            ));
+                .await
+                .map_err(|error| {
+                    FetchFailure::platform("navigating the knowledge URL", error)
+                })?;
+            let final_url = navigation
+                .output
+                .get("final_url")
+                .and_then(Value::as_str)
+                .unwrap_or(raw_url)
+                .to_owned();
+
+            let rendered = client
+                .execute(
+                    &lane.lane_id,
+                    crawl_operation("rendered_html", json!({})),
+                )
+                .await
+                .map_err(|error| {
+                    FetchFailure::platform("reading rendered knowledge HTML", error)
+                })?;
+            let html = rendered
+                .output
+                .get("html")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    FetchFailure::invalid_response(
+                        "The Browser Platform returned no rendered HTML for the knowledge URL.",
+                    )
+                })?
+                .to_owned();
+            let html_truncated = rendered
+                .output
+                .get("html_truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok((final_url, html, html_truncated))
         }
+        .await;
 
-        let navigation = client
-            .execute(
-                &lane.lane_id,
-                crawl_operation("navigate", json!({ "url": raw_url, "new_tab": false })),
-            )
-            .await
-            .map_err(|error| {
-                FetchFailure::platform("navigating the knowledge URL", error)
-            })?;
-        let final_url = navigation
-            .output
-            .get("final_url")
-            .and_then(Value::as_str)
-            .unwrap_or(raw_url)
-            .to_owned();
-
-        let rendered = client
-            .execute(
-                &lane.lane_id,
-                crawl_operation("rendered_html", json!({})),
-            )
-            .await
-            .map_err(|error| {
-                FetchFailure::platform("reading rendered knowledge HTML", error)
-            })?;
-        let html = rendered
-            .output
-            .get("html")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                FetchFailure::invalid_response(
-                    "The Browser Platform returned no rendered HTML for the knowledge URL.",
-                )
-            })?
-            .to_owned();
-        Ok((final_url, html))
+        match cleanup.finish().await {
+            Ok(()) => result,
+            Err(error) => Err(FetchFailure::platform(
+                "closing the Anonymous knowledge lane after rendering",
+                error,
+            )),
+        }
     }
 
     /// Deterministically revoke the capability and close all lanes owned by
@@ -379,8 +478,12 @@ impl PageFetcher for BrowserFetcher {
                 )
             })?;
             match self.fetch_once(&client, raw_url).await {
-                Ok((final_url, html)) => {
-                    return Ok(rendered_to_page(&final_url, &html));
+                Ok((final_url, html, html_truncated)) => {
+                    return Ok(rendered_to_page_with_source_truncation(
+                        &final_url,
+                        &html,
+                        html_truncated,
+                    ));
                 }
                 Err(FetchFailure::Platform { error, .. })
                     if attempt == 0 && error.code == BrowserErrorCode::OwnerLeaseExpired =>
@@ -528,9 +631,17 @@ fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn rendered_to_page(final_url: &str, html: &str) -> FetchedPage {
+    rendered_to_page_with_source_truncation(final_url, html, false)
+}
+
+fn rendered_to_page_with_source_truncation(
+    final_url: &str,
+    html: &str,
+    source_truncated: bool,
+) -> FetchedPage {
     let (title, markdown) = html_to_markdown(html);
-    let truncated = markdown.len() > FETCH_MAX_BYTES;
-    let markdown = if truncated {
+    let markdown_truncated = markdown.len() > FETCH_MAX_BYTES;
+    let markdown = if markdown_truncated {
         truncate_to_bytes(&markdown, FETCH_MAX_BYTES).to_owned()
     } else {
         markdown
@@ -539,7 +650,7 @@ fn rendered_to_page(final_url: &str, html: &str) -> FetchedPage {
         final_url: final_url.to_owned(),
         title,
         markdown,
-        truncated,
+        truncated: source_truncated || markdown_truncated,
     }
 }
 

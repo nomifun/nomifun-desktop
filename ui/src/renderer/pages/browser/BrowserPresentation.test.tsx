@@ -591,10 +591,16 @@ describe('Browser management presentation', () => {
       total_lanes: 3,
       pressure_state: 'pressured',
       capacity: {
+        active_lanes: 2,
         active: 2,
         queued: 1,
         max_active: 8,
         max_open_lanes: 32,
+        global_memory_pressure_threshold_bytes: 12 * 1024 * 1024 * 1024,
+        max_task_memory_bytes: 1024 * 1024 * 1024,
+        max_task_active_operations: 2,
+        max_task_open_lanes: 4,
+        max_task_tabs: 16,
         recommended_concurrency: 4,
         reason_code: 'browser_memory_pressure',
       },
@@ -617,8 +623,12 @@ describe('Browser management presentation', () => {
     expect(html.includes('<details')).toBe(true);
     expect(html.includes(' open')).toBe(false);
     expect(html.includes('Host diagnostics')).toBe(true);
+    expect(html.includes('Active lanes')).toBe(true);
+    expect(html.includes('2 / 32')).toBe(true);
     expect(html.includes('host-primary')).toBe(true);
     expect(html.includes('64 MiB')).toBe(true);
+    expect(html.includes('12 GiB')).toBe(true);
+    expect(html.includes('Estimated memory budget per task')).toBe(true);
     expect(html.includes('Primary')).toBe(true);
     expect(html.includes('Silent headless')).toBe(true);
     expect(html.includes('browser_memory_pressure')).toBe(true);

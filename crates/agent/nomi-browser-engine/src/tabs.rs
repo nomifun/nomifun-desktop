@@ -20,7 +20,37 @@ use std::collections::HashMap;
 
 use crate::aria_ref::RefTable;
 use crate::debug_capture::DebugBuffers;
+use crate::host::TaskTabReservation;
 use crate::injected::InjectionManager;
+
+/// Page-controlled display metadata may arrive on otherwise valid CDP
+/// events.  Entry-count limits alone are therefore not a memory bound: one
+/// URL or title can be almost as large as the whole inbound frame.  These
+/// byte limits are shared by the Host router (which rejects oversized
+/// retained metadata) and the transient tab-list renderer below.
+pub(crate) const MAX_RETAINED_TARGET_URL_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_RETAINED_TARGET_TITLE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_RETAINED_DOWNLOAD_FILENAME_BYTES: usize = 4 * 1024;
+
+/// The LLM-facing tab inventory is transient, but it must not turn the
+/// bounded per-task tab count into a multi-megabyte response allocation.
+pub(crate) const MAX_RENDERED_TAB_LIST_BYTES: usize = 256 * 1024;
+
+/// Return the largest valid UTF-8 prefix whose byte length is at most `limit`.
+///
+/// This is only for lossy display surfaces.  Cleanup identities and routing
+/// correlation fields must instead reject an oversized value fail-closed;
+/// truncating those fields could target the wrong browser resource.
+pub(crate) fn utf8_prefix_at_most(value: &str, limit: usize) -> &str {
+    if value.len() <= limit {
+        return value;
+    }
+    let mut end = limit;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
 
 /// 一个被 backend 纳管的标签页：吸收原先直挂在 [`crate::backend::cdp::CdpBackend`] 上的全部
 /// **per-tab** 状态。`tabs: HashMap<targetId, TabRecord>` 的值。
@@ -33,6 +63,12 @@ use crate::injected::InjectionManager;
 /// 出这个 Arc、释放 `tabs` 锁后再独立锁 ref_table 跨多 await——不必持 `tabs` 锁跨 observe（见模块
 /// 级锁设计）。per-tab 隔离：每 tab 自有一张 ref 表（switch 无需作废逻辑，DESIGN 开放问题 4）。
 pub struct TabRecord {
+    /// Cross-Host task quota permit. The Host router retains a sibling Arc
+    /// until exact target close/absence proof, so removing a UI record alone
+    /// cannot release physical capacity early.
+    pub(crate) _task_tab_reservation: Option<
+        std::sync::Arc<dyn TaskTabReservation>,
+    >,
     /// 该 tab 的 page target 的 targetId（CDP 约定 == 主 frameId）。tabs 表的 key 即此。
     pub target_id: String,
     /// 该 tab page 的 CDP sessionId（原 `CdpBackend::page_session`；navigate/screenshot/输入发到它）。
@@ -46,7 +82,7 @@ pub struct TabRecord {
     pub main_frame_id: String,
     /// 该 tab 的 OOPIF 子 session 注入管线表：sessionId → 已 arm 的 [`InjectionManager`]（+ loop 保活）。
     /// `Arc` 让 OOPIF arm 循环（`'static` 任务）与 observe 共享同一份真相（克隆 Arc 锁外用）。
-    pub oopif_managers: std::sync::Arc<tokio::sync::Mutex<HashMap<String, OopifEntry>>>,
+    pub oopif_managers: std::sync::Arc<std::sync::Mutex<HashMap<String, OopifEntry>>>,
     /// OOPIF arm 后台循环句柄——保活。
     pub _oopif_loop: tokio::task::JoinHandle<()>,
     /// 该 tab 的代际 ref 表（per-tab 隔离）。`Arc<AsyncMutex<..>>`：clone Arc 出来独立锁，避免
@@ -60,11 +96,39 @@ pub struct TabRecord {
     pub _debug_loop: tokio::task::JoinHandle<()>,
 }
 
+impl Drop for TabRecord {
+    fn drop(&mut self) {
+        // JoinHandle::drop detaches, so TabRecord itself is the final safety
+        // net for every removal path (including Lane/Host teardown paths that
+        // do not call the backend's explicit abort helper).
+        self._inject_loop.abort();
+        self._oopif_loop.abort();
+        self._debug_loop.abort();
+        self.oopif_managers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
 /// 一个已 arm 的 OOPIF 子 session 注入管线 + 其后台 loop 句柄（保活）。
 /// （从 [`crate::backend::cdp`] 下放至此，与 [`TabRecord`] 同模块——per-tab OOPIF 表的值。）
 pub struct OopifEntry {
+    /// Target id is retained so `Target.targetDestroyed` can retire an entry
+    /// even when Chromium no longer includes its session id in the event.
+    pub target_id: String,
     pub manager: InjectionManager,
     pub _loop: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for OopifEntry {
+    fn drop(&mut self) {
+        // Dropping a Tokio JoinHandle detaches the task.  An OOPIF entry must
+        // instead own exact cancellation authority so every removal path
+        // (detach, destroy, cap reconciliation, or tab teardown) stops its
+        // injection loop.
+        self._loop.abort();
+    }
 }
 
 /// **active tab 的句柄快照**（[`crate::backend::cdp::CdpBackend::active_tab_handles`] 返回）：
@@ -86,7 +150,7 @@ pub struct TabHandles {
     /// active tab 的主帧 frameId。
     pub main_frame_id: String,
     /// active tab 的 OOPIF 管理表（克隆 Arc，锁外独立锁）。
-    pub oopif_managers: std::sync::Arc<tokio::sync::Mutex<HashMap<String, OopifEntry>>>,
+    pub oopif_managers: std::sync::Arc<std::sync::Mutex<HashMap<String, OopifEntry>>>,
     /// active tab 的代际 ref 表（克隆 Arc，锁外独立锁——observe 跨多 await 不持 tabs 锁）。
     pub ref_table: std::sync::Arc<tokio::sync::Mutex<Option<RefTable>>>,
     /// active tab 的调试缓冲（克隆 Arc，读取动作用）。
@@ -239,23 +303,66 @@ pub fn render_tab_list(items: &[TabListItem]) -> String {
     if items.is_empty() {
         return "no tabs open".to_string();
     }
-    let mut lines = Vec::with_capacity(items.len() + 1);
-    lines.push(format!("{} tab(s) open (use the [id] with switch_tab/close_tab):", items.len()));
+    let mut output = format!(
+        "{} tab(s) open (use the [id] with switch_tab/close_tab):",
+        items.len()
+    );
     for it in items {
         let active = if it.is_active { " (active)" } else { "" };
-        let title = if it.title.is_empty() {
+        let bounded_title =
+            utf8_prefix_at_most(&it.title, MAX_RETAINED_TARGET_TITLE_BYTES);
+        let bounded_url =
+            utf8_prefix_at_most(&it.url, MAX_RETAINED_TARGET_URL_BYTES);
+        let title = if bounded_title.is_empty() {
             String::new()
         } else {
-            format!(" {:?}", it.title)
+            format!(" {bounded_title:?}")
         };
-        lines.push(format!("- [{}]{active}{title} {}", it.last4, it.url));
+        let line = format!("- [{}]{active}{title} {bounded_url}", it.last4);
+        let required = 1usize.saturating_add(line.len());
+        if output.len().saturating_add(required) > MAX_RENDERED_TAB_LIST_BYTES {
+            const OMITTED: &str = "\n... remaining tab metadata omitted (byte limit reached)";
+            if output.len().saturating_add(OMITTED.len()) <= MAX_RENDERED_TAB_LIST_BYTES {
+                output.push_str(OMITTED);
+            }
+            break;
+        }
+        output.push('\n');
+        output.push_str(&line);
     }
-    lines.join("\n")
+    output
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf8_prefix_respects_bytes_without_splitting_a_character() {
+        assert_eq!(utf8_prefix_at_most("ab你好", 5), "ab你");
+        assert_eq!(utf8_prefix_at_most("ab你好", 4), "ab");
+        assert_eq!(utf8_prefix_at_most("short", 32), "short");
+    }
+
+    #[test]
+    fn rendered_tab_list_has_a_hard_total_byte_bound() {
+        let hostile = "\\".repeat(MAX_RETAINED_TARGET_TITLE_BYTES);
+        let huge_url = "u".repeat(MAX_RETAINED_TARGET_URL_BYTES * 2);
+        let items = (0..16)
+            .map(|index| TabListItem {
+                last4: format!("{index:04}"),
+                target_id: format!("target-{index}"),
+                url: huge_url.clone(),
+                title: hostile.clone(),
+                is_active: index == 0,
+            })
+            .collect::<Vec<_>>();
+
+        let rendered = render_tab_list(&items);
+        assert!(rendered.len() <= MAX_RENDERED_TAB_LIST_BYTES);
+        assert!(rendered.contains("byte limit reached"));
+        assert!(rendered.is_char_boundary(rendered.len()));
+    }
 
     #[test]
     fn last4_extracts_last_four_chars() {
