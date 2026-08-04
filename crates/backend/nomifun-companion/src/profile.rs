@@ -150,6 +150,12 @@ pub struct CompanionProfileConfig {
     /// companion-owned; this snapshot only supplies execution preferences.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_preset: Option<nomifun_api_types::ResolvedPresetSnapshot>,
+    /// User-chosen sidebar position. `None` = never reordered; such companions
+    /// sort after every explicitly ordered one, by `created_at`. Distinct from
+    /// [`Self::seq`], which is a registry-owned never-reused display ordinal and
+    /// therefore cannot express a user's ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_index: Option<i64>,
     pub created_at: i64,
 }
 
@@ -169,6 +175,7 @@ impl CompanionProfileConfig {
             skills: CompanionSkillConfig::default(),
             appearance: CompanionWindowConfig::default(),
             applied_preset: None,
+            order_index: None,
             created_at: now_ms(),
         }
     }

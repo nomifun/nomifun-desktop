@@ -4507,6 +4507,12 @@ export interface ICompanionProfile {
   appearance: ICompanionWindowConfig;
   /** Frozen execution configuration last applied to this companion. */
   applied_preset?: ResolvedPresetSnapshot;
+  /**
+   * User-chosen sidebar position. Absent = never reordered; such companions sort
+   * after every explicitly ordered one, by creation time. Distinct from `seq`,
+   * which is a registry-owned never-reused display ordinal.
+   */
+  order_index?: number | null;
   created_at: number;
 }
 
@@ -4558,6 +4564,7 @@ export type ICompanionProfilePatch = {
   model?: ICompanionModelRef | null;
   skills?: Partial<ICompanionSkillConfig>;
   appearance?: Partial<ICompanionWindowConfig>;
+  order_index?: number | null;
 };
 
 /// RFC 7396 merge patch over ICompanionSharedConfig — nested partial objects merge.
