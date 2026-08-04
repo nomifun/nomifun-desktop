@@ -206,6 +206,47 @@ The app already provides its own login screen, so **do not configure HTTP basic 
 
 For a LAN-only host without a public domain you can use an internal name with `tls internal`, or just publish port `8787` directly without Caddy (the in-app login still protects it).
 
+## Other reverse proxies: preserve the original Host
+
+Realtime updates (streaming replies, tool calls, task/queue status) flow over
+the WebSocket at `/ws`. The handshake enforces a browser-origin check: the
+`Origin` sent by the browser must match the authority the backend sees. A
+proxy that **rewrites `Host` to its upstream address** (nginx does this by
+default — `proxy_set_header Host $proxy_host`) breaks that match, so every
+`/ws` handshake is rejected with `403` while regular HTTP API calls keep
+working. The visible symptom is a WebUI that stays on "executing" until you
+refresh the page.
+
+The handshake accepts, in order:
+
+1. an `Origin` matching the request `Host`;
+2. an `Origin` matching the first `X-Forwarded-Host` entry (set by the proxy);
+3. an `Origin` listed in `NOMIFUN_ALLOWED_ORIGINS` (comma-separated full
+   origins, e.g. `NOMIFUN_ALLOWED_ORIGINS=https://nomi.example.com`).
+
+Caddy needs no configuration (it preserves `Host`). For nginx, forward the
+original authority and the upgrade headers:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;                 # preserve the browser-facing authority
+    proxy_set_header X-Forwarded-Host $host;     # belt-and-braces for chained proxies
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;      # WebSocket upgrade at /ws
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 300s;                     # idle WS connections outlive 60s defaults
+}
+```
+
+If the proxy or tunnel in front cannot be configured to forward either header
+(some port-forwarding/tunnel products), set `NOMIFUN_ALLOWED_ORIGINS` to the
+exact public origin(s) users type into the browser. Rejected handshakes are
+logged server-side at `WARN` with the offending `origin` / `host` /
+`forwarded_host` values, so `docker compose logs | grep "rejected websocket"`
+shows precisely what to configure.
+
 ## systemd (Linux server, no Docker)
 
 The repo includes `packaging/linux/nomifun-web.service` and a long-form Linux deployment guide at `packaging/linux/README.md`.
@@ -311,6 +352,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 **`invalid --host '<value>'`.** Pass an IP literal (`127.0.0.1`, `0.0.0.0`, an explicit interface IP). Hostnames are not parsed.
 
 **Cookies don't stick over HTTPS.** Set `NOMIFUN_HTTPS=true` so the `Secure` flag is added. Without it, browsers reject the cookie on HTTPS responses.
+
+**Replies/task status only update after a page refresh (WebUI looks stuck on "executing").** The `/ws` WebSocket handshake is being rejected — check the server log for `rejected websocket upgrade` (WARN, includes the offending `origin`/`host`/`forwarded_host`) or `GET /ws` → `403` lines. Almost always a reverse proxy that rewrites `Host`: see [Other reverse proxies: preserve the original Host](#other-reverse-proxies-preserve-the-original-host).
 
 **Agent commands fail with `bun: command not found` under systemd.** Install bun system-wide (see the bun-on-PATH section above) or rebuild with `NOMIFUN_EMBED_BUN=1`.
 

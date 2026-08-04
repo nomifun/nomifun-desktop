@@ -35,6 +35,7 @@ fn default_state() -> (WsHandlerState, Arc<WebSocketManager>) {
     let manager = Arc::new(WebSocketManager::new());
     let state = WsHandlerState {
         manager: manager.clone(),
+        allowed_origins: Arc::from(Vec::new()),
         token_authenticator: Arc::new(|t| (t == "valid-token").then(|| "user".to_owned())),
         token_extractor: Arc::new(|headers| {
             headers
@@ -51,6 +52,7 @@ fn all_auth_sources_state() -> (WsHandlerState, Arc<WebSocketManager>) {
     let manager = Arc::new(WebSocketManager::new());
     let state = WsHandlerState {
         manager: manager.clone(),
+        allowed_origins: Arc::from(Vec::new()),
         token_authenticator: Arc::new(|token| {
             matches!(token, "valid-token" | "local-trust-token").then(|| "user".to_owned())
         }),
@@ -89,6 +91,7 @@ fn no_auth_state() -> (WsHandlerState, Arc<WebSocketManager>) {
     let manager = Arc::new(WebSocketManager::new());
     let state = WsHandlerState {
         manager: manager.clone(),
+        allowed_origins: Arc::from(Vec::new()),
         token_authenticator: Arc::new(|_| Some("user".to_owned())),
         token_extractor: Arc::new(|_| Some("local".to_owned())),
     };
@@ -250,6 +253,76 @@ async fn same_origin_browser_cookie_connects_successfully() {
     assert_eq!(manager.client_count(), 1);
 }
 
+/// The Docker WebUI regression: a reverse proxy that rewrites `Host` to its
+/// upstream address must not break the cookie-authenticated browser
+/// handshake as long as it forwards the original authority in
+/// `X-Forwarded-Host`. Before the fix every such handshake was rejected 403
+/// and realtime delivery never established.
+#[tokio::test]
+async fn proxied_browser_with_rewritten_host_connects_via_forwarded_host() {
+    let (state, manager) = all_auth_sources_state();
+    let addr = start_server(state).await;
+    let mut request = upgrade_request(addr);
+    // The proxy rewrote Host to the upstream (`addr` here plays that role in
+    // upgrade_request); the browser-facing authority arrives forwarded.
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://nomi.example.com"),
+    );
+    request.headers_mut().insert(
+        "x-forwarded-host",
+        HeaderValue::from_static("nomi.example.com"),
+    );
+    request.headers_mut().insert(
+        header::COOKIE,
+        HeaderValue::from_static("nomifun-session=valid-token"),
+    );
+
+    let (_socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.status().as_u16(), 101);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(manager.client_count(), 1);
+}
+
+/// `NOMIFUN_ALLOWED_ORIGINS`-style configuration admits an explicitly listed
+/// origin even when the proxy forwards no usable authority at all — and only
+/// that origin.
+#[tokio::test]
+async fn configured_allowed_origin_connects_and_stays_exact() {
+    let (base_state, manager) = all_auth_sources_state();
+    let state = WsHandlerState {
+        allowed_origins: Arc::from(vec!["https://nomi.example.com".to_owned()]),
+        ..base_state
+    };
+    let addr = start_server(state).await;
+
+    let mut request = upgrade_request(addr);
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://nomi.example.com"),
+    );
+    request.headers_mut().insert(
+        header::COOKIE,
+        HeaderValue::from_static("nomifun-session=valid-token"),
+    );
+    let (_socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.status().as_u16(), 101);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(manager.client_count(), 1);
+
+    // A non-listed origin with the same cookie stays rejected.
+    let mut request = upgrade_request(addr);
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://attacker.example"),
+    );
+    request.headers_mut().insert(
+        header::COOKIE,
+        HeaderValue::from_static("nomifun-session=valid-token"),
+    );
+    assert_eq!(rejected_status(request).await, 403);
+}
+
 #[tokio::test]
 async fn untrusted_browser_origin_is_rejected_before_cookie_or_bearer_authentication() {
     let manager = Arc::new(WebSocketManager::new());
@@ -257,6 +330,7 @@ async fn untrusted_browser_origin_is_rejected_before_cookie_or_bearer_authentica
     let authenticator_calls = Arc::new(AtomicUsize::new(0));
     let state = WsHandlerState {
         manager: manager.clone(),
+        allowed_origins: Arc::from(Vec::new()),
         token_authenticator: {
             let calls = authenticator_calls.clone();
             Arc::new(move |_| {
@@ -492,6 +566,7 @@ async fn authenticated_user_scope_is_enforced_end_to_end() {
     let manager = Arc::new(WebSocketManager::new());
     let state = WsHandlerState {
         manager: manager.clone(),
+        allowed_origins: Arc::from(Vec::new()),
         token_authenticator: Arc::new(|token| match token {
             "alice-token" => Some("alice".to_owned()),
             "bob-token" => Some("bob".to_owned()),

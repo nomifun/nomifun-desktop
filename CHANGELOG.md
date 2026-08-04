@@ -5,6 +5,17 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- WebUI realtime delivery behind reverse proxies: the `/ws` WebSocket
+  handshake no longer rejects browsers whose proxy rewrites the `Host` header
+  (e.g. nginx's default `proxy_set_header Host $proxy_host`). The
+  browser-origin check now also accepts the first `X-Forwarded-Host` entry
+  and an explicit `NOMIFUN_ALLOWED_ORIGINS` allowlist (comma-separated full
+  origins). Previously every handshake in such deployments failed with a
+  silent 403, so streaming replies, tool-call progress, and task/queue status
+  only appeared after a manual page refresh. Rejected handshakes are now
+  logged at WARN with the offending `origin`/`host`/`forwarded_host` values
+  (once per distinct combination).
+
 - AutoWork/IDMM: bypass-model (sidecar) decisions with confidence below 0.4
   now fall back to the conservative rule action instead of being applied
   verbatim, restoring the Phase-1 safety posture. Previously the floor was
