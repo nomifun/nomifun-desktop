@@ -457,6 +457,12 @@ impl SharedCompanionConfig {
                 path.display()
             ))
         })?;
+        config.collect.validate_storage_policy().map_err(|error| {
+            nomifun_common::AppError::Internal(format!(
+                "load shared companion config {}: {error}",
+                path.display()
+            ))
+        })?;
         if removed_legacy_settings {
             config.save(dir).map_err(|error| {
                 nomifun_common::AppError::Internal(format!(
@@ -472,6 +478,9 @@ impl SharedCompanionConfig {
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         validate_persisted_model(self.learn.model.as_ref()).map_err(std::io::Error::other)?;
         validate_persisted_model(self.evolve.model.as_ref()).map_err(std::io::Error::other)?;
+        self.collect
+            .validate_storage_policy()
+            .map_err(std::io::Error::other)?;
         crate::fsio::save_json_atomic(dir, "config.json", self)
     }
 }
@@ -694,6 +703,45 @@ mod tests {
         assert!(migrated["collect"].get("chat_assistant_replies").is_none());
         assert!(migrated["collect"].get("cron_runs").is_none());
         assert!(migrated["collect"].get("conversation_lifecycle").is_none());
+    }
+
+    #[test]
+    fn shared_load_backfills_event_storage_policy_for_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(SharedCompanionConfig::default()).unwrap();
+        value["collect"]["chat_user_messages"] = serde_json::json!(true);
+        value["collect"].as_object_mut().unwrap().remove("event_retention_days");
+        value["collect"].as_object_mut().unwrap().remove("event_max_storage_mb");
+        std::fs::write(
+            SharedCompanionConfig::config_path(dir.path()),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = SharedCompanionConfig::load(dir.path()).unwrap();
+        assert!(loaded.collect.chat_user_messages);
+        assert_eq!(
+            loaded.collect.event_retention_days,
+            crate::config::DEFAULT_EVENT_RETENTION_DAYS
+        );
+        assert_eq!(
+            loaded.collect.event_max_storage_mb,
+            crate::config::DEFAULT_EVENT_MAX_STORAGE_MB
+        );
+    }
+
+    #[test]
+    fn shared_load_rejects_an_out_of_range_event_storage_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(SharedCompanionConfig::default()).unwrap();
+        value["collect"]["event_max_storage_mb"] = serde_json::json!(15);
+        std::fs::write(
+            SharedCompanionConfig::config_path(dir.path()),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        assert!(SharedCompanionConfig::load(dir.path()).is_err());
     }
 
     #[test]

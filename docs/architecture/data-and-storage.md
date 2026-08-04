@@ -286,7 +286,7 @@ on the next sync.
 ## Companion data (the `companion/` file domain)
 
 The virtual companion's data stays outside the main product database tables.
-It is a file domain that can be exported or wiped as a whole (see the
+It is a file domain that can be exported or cleared by the managed-data reset flow (see the
 [Companions guide](../guides/companions.md)). Its v3 files are reset or
 restored as part of the managed dataset; they are not imported through
 historical row migrations. The multi-companion layout:
@@ -294,10 +294,10 @@ historical row migrations. The multi-companion layout:
 ```
 <data_dir>/companion/
 ├── shared/                      shared memory hub (one copy for all companions)
-│   ├── config.json              SharedCompanionConfig: collect switches, learn interval & model, default_companion_id
-│   ├── events/YYYYMMDD.jsonl    raw events from the collection pipeline (privacy-sensitive; export is opt-in)
+│   ├── config.json              SharedCompanionConfig: collect switches, event retention/capacity, learn interval & model, default_companion_id
+│   ├── events/YYYYMMDD.jsonl    raw events (automatic age/hard-cap cleanup; privacy-sensitive; export is opt-in)
 │   └── memory.db                standalone SQLite (PRAGMA user_version ladder):
-│                                shared memories/suggestions/learn history + per-companion runtime
+│                                shared memories/suggestions + per-companion runtime
 │                                state (companion_runtime_state: XP, …)
 └── companions/
     └── {companion_id}/                bare UUIDv7 companion ID; the directory is the source of truth

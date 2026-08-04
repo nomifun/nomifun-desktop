@@ -49,4 +49,42 @@ describe('Nomi companion tab order', () => {
     expect(bridge.includes('onLearnFinished')).toBe(true);
     expect(bridge.includes('ICompanionLearnResult')).toBe(true);
   });
+
+  test('replaces raw event viewing and manual clearing with an explicit retention policy', () => {
+    const collect = readFileSync(new URL('./tabs/CollectTab.tsx', import.meta.url), 'utf8');
+    const bridge = readFileSync(new URL('../../../common/adapter/ipcBridge.ts', import.meta.url), 'utf8');
+
+    expect(collect.includes('rawEvents')).toBe(false);
+    expect(collect.includes('loadRawEvents')).toBe(false);
+    expect(bridge.includes('/api/companion/events/recent')).toBe(false);
+    expect(bridge.includes("httpDelete<void, void>('/api/companion/events')")).toBe(false);
+
+    expect(bridge.includes("eventStorage: httpGet<ICompanionEventStorageStatus, void>('/api/companion/events/storage')"))
+      .toBe(true);
+    expect(collect.includes('event_retention_days: retentionDraft')).toBe(true);
+    expect(collect.includes('event_max_storage_mb: capacityDraft')).toBe(true);
+    expect(collect.includes('lowerPolicyConfirm')).toBe(true);
+    expect(collect.includes('onOk={applyStoragePolicy}')).toBe(true);
+    expect(collect.includes('min={7}')).toBe(true);
+    expect(collect.includes('max={365}')).toBe(true);
+    expect(collect.includes('min={16}')).toBe(true);
+    expect(collect.includes('max={512}')).toBe(true);
+
+    // Unknown/failed status must not be reported as an empty zero-byte store.
+    expect(collect.includes('storage?.total_bytes ?? 0')).toBe(false);
+    expect(collect.includes('storageError && !storageLoading ?')).toBe(true);
+    expect(collect.includes('refreshStorage(true)')).toBe(true);
+    expect(collect.includes('storageUnavailable')).toBe(true);
+    expect(collect.includes('storageLoading')).toBe(true);
+
+    const enNomi = JSON.parse(
+      readFileSync(new URL('../../services/i18n/locales/en-US/nomi.json', import.meta.url), 'utf8')
+    );
+    const zhNomi = JSON.parse(
+      readFileSync(new URL('../../services/i18n/locales/zh-CN/nomi.json', import.meta.url), 'utf8')
+    );
+    expect(enNomi.collect.storedRange_one.includes('{{count}} daily file)')).toBe(true);
+    expect(enNomi.collect.storedRange_other.includes('{{count}} daily files)')).toBe(true);
+    expect(Object.keys(enNomi.collect).sort()).toEqual(Object.keys(zhNomi.collect).sort());
+  });
 });

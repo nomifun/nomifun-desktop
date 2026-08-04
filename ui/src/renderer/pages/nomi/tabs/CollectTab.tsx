@@ -6,12 +6,17 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Message, Popconfirm, Spin, Switch, Tag } from '@arco-design/web-react';
+import { Button, InputNumber, Message, Popconfirm, Spin, Switch, Tag } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
-import type { ICompanionCollectConfig, ICompanionCollectedEvent, ICompanionSourceStats } from '@/common/adapter/ipcBridge';
+import type {
+  ICompanionEventStorageStatus,
+  ICompanionSourceStats,
+} from '@/common/adapter/ipcBridge';
 import type { useCompanionShared } from '../useNomi';
 
-const SOURCES: { key: keyof ICompanionCollectConfig; sensitivity: 'low' | 'medium' | 'high' }[] = [
+type CollectionSourceKey = 'tool_calls' | 'chat_user_messages' | 'requirements' | 'terminal_sessions';
+
+const SOURCES: { key: CollectionSourceKey; sensitivity: 'low' | 'medium' | 'high' }[] = [
   { key: 'tool_calls', sensitivity: 'medium' },
   { key: 'chat_user_messages', sensitivity: 'high' },
   { key: 'requirements', sensitivity: 'medium' },
@@ -19,6 +24,11 @@ const SOURCES: { key: keyof ICompanionCollectConfig; sensitivity: 'low' | 'mediu
 ];
 
 const SENSITIVITY_COLOR = { low: 'green', medium: 'orange', high: 'red' } as const;
+
+const formatBytes = (bytes: number): string => {
+  if (bytes < 1024 * 1024) return `${Math.max(0, bytes / 1024).toFixed(1)} KiB`;
+  return `${Math.max(0, bytes / (1024 * 1024)).toFixed(1)} MiB`;
+};
 
 interface Props {
   shared: ReturnType<typeof useCompanionShared>;
@@ -28,21 +38,45 @@ const CollectTab: React.FC<Props> = ({ shared }) => {
   const { t } = useTranslation();
   const { sharedConfig, patchSharedConfig } = shared;
   const [stats, setStats] = useState<ICompanionSourceStats[]>([]);
-  const [rawEvents, setRawEvents] = useState<ICompanionCollectedEvent[] | null>(null);
+  const [storage, setStorage] = useState<ICompanionEventStorageStatus | null>(null);
+  const [storageLoading, setStorageLoading] = useState(true);
+  const [storageError, setStorageError] = useState(false);
+  const [retentionDraft, setRetentionDraft] = useState<number | null>(null);
+  const [capacityDraft, setCapacityDraft] = useState<number | null>(null);
+  const [applyingPolicy, setApplyingPolicy] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const storageRequestRef = useRef(0);
+
+  const refreshStorage = (showLoading: boolean) => {
+    const storageRequest = ++storageRequestRef.current;
+    if (showLoading) {
+      setStorage(null);
+      setStorageLoading(true);
+      setStorageError(false);
+    }
+    void ipcBridge.companion.eventStorage
+      .invoke()
+      .then((nextStorage) => {
+        if (storageRequest !== storageRequestRef.current) return;
+        setStorage(nextStorage);
+        setStorageError(false);
+      })
+      .catch(() => {
+        if (storageRequest !== storageRequestRef.current) return;
+        setStorage(null);
+        setStorageError(true);
+      })
+      .finally(() => {
+        if (storageRequest === storageRequestRef.current) setStorageLoading(false);
+      });
+  };
 
   const refreshStats = () => {
     void ipcBridge.companion.eventStats
       .invoke()
       .then(setStats)
       .catch(() => {});
-  };
-
-  const loadRawEvents = () => {
-    void ipcBridge.companion.recentEvents
-      .invoke({ limit: 100 })
-      .then(setRawEvents)
-      .catch((e) => Message.error(String(e)));
+    refreshStorage(false);
   };
 
   useEffect(() => {
@@ -58,8 +92,15 @@ const CollectTab: React.FC<Props> = ({ shared }) => {
     return () => {
       clearInterval(timer);
       unsubLearn();
+      storageRequestRef.current += 1;
     };
   }, []);
+
+  useEffect(() => {
+    if (!sharedConfig) return;
+    setRetentionDraft(sharedConfig.collect.event_retention_days);
+    setCapacityDraft(sharedConfig.collect.event_max_storage_mb);
+  }, [sharedConfig?.collect.event_retention_days, sharedConfig?.collect.event_max_storage_mb]);
 
   if (!sharedConfig) {
     return (
@@ -70,6 +111,55 @@ const CollectTab: React.FC<Props> = ({ shared }) => {
   }
 
   const statFor = (key: string) => stats.find((s) => s.source === key);
+  const retentionValid =
+    retentionDraft != null && Number.isInteger(retentionDraft) && retentionDraft >= 7 && retentionDraft <= 365;
+  const capacityValid =
+    capacityDraft != null && Number.isInteger(capacityDraft) && capacityDraft >= 16 && capacityDraft <= 512;
+  const policyChanged =
+    retentionValid &&
+    capacityValid &&
+    (retentionDraft !== sharedConfig.collect.event_retention_days ||
+      capacityDraft !== sharedConfig.collect.event_max_storage_mb);
+  const lowersPolicy =
+    retentionValid &&
+    capacityValid &&
+    (retentionDraft < sharedConfig.collect.event_retention_days ||
+      capacityDraft < sharedConfig.collect.event_max_storage_mb);
+
+  const applyStoragePolicy = async () => {
+    if (!retentionValid || !capacityValid) return;
+    setApplyingPolicy(true);
+    try {
+      await patchSharedConfig({
+        collect: {
+          event_retention_days: retentionDraft,
+          event_max_storage_mb: capacityDraft,
+        },
+      });
+      void ipcBridge.companion.eventStats
+        .invoke()
+        .then(setStats)
+        .catch(() => {});
+      refreshStorage(true);
+      Message.success(t('nomi.collect.policyApplied'));
+    } catch (error) {
+      Message.error(String(error));
+    } finally {
+      setApplyingPolicy(false);
+    }
+  };
+
+  const applyPolicyButton = (
+    <Button
+      type='primary'
+      size='small'
+      disabled={!policyChanged}
+      loading={applyingPolicy}
+      onClick={lowersPolicy ? undefined : () => void applyStoragePolicy()}
+    >
+      {t('nomi.collect.applyPolicy')}
+    </Button>
+  );
 
   return (
     <div ref={rootRef} className='flex flex-col gap-12px py-8px'>
@@ -110,6 +200,79 @@ const CollectTab: React.FC<Props> = ({ shared }) => {
           );
         })}
       </div>
+      <div className='flex items-start gap-16px bg-fill-2 rd-10px px-14px py-12px flex-wrap'>
+        <div className='w-220px shrink-0'>
+          <div className='text-14px text-t-primary font-500'>{t('nomi.collect.retentionTitle')}</div>
+          <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.collect.retentionHint')}</div>
+        </div>
+        <div className='flex-1 min-w-280px flex flex-col gap-10px'>
+          <div className='flex items-center gap-8px flex-wrap'>
+            <span className='text-13px text-t-secondary'>{t('nomi.collect.retentionDays')}</span>
+            <InputNumber
+              style={{ width: 120 }}
+              min={7}
+              max={365}
+              precision={0}
+              value={retentionDraft ?? undefined}
+              onChange={(value) => {
+                const parsed = Number(value);
+                setRetentionDraft(Number.isFinite(parsed) ? parsed : null);
+              }}
+              suffix={t('nomi.collect.days')}
+            />
+          </div>
+          <div className='flex items-center gap-8px flex-wrap'>
+            <span className='text-13px text-t-secondary'>{t('nomi.collect.capacityLimit')}</span>
+            <InputNumber
+              style={{ width: 120 }}
+              min={16}
+              max={512}
+              precision={0}
+              value={capacityDraft ?? undefined}
+              onChange={(value) => {
+                const parsed = Number(value);
+                setCapacityDraft(Number.isFinite(parsed) ? parsed : null);
+              }}
+              suffix='MiB'
+            />
+          </div>
+          <div>
+            {lowersPolicy ? (
+              <Popconfirm title={t('nomi.collect.lowerPolicyConfirm')} onOk={applyStoragePolicy}>
+                {applyPolicyButton}
+              </Popconfirm>
+            ) : (
+              applyPolicyButton
+            )}
+          </div>
+        </div>
+        <div className='min-w-220px text-12px text-t-secondary leading-20px'>
+          {storageError && !storageLoading ? (
+            <div className='text-t-tertiary'>{t('nomi.collect.storageUnavailable')}</div>
+          ) : storage ? (
+            <>
+              <div>
+                {t('nomi.collect.storageUsage', {
+                  used: formatBytes(storage.total_bytes),
+                  max: formatBytes(storage.max_bytes),
+                })}
+              </div>
+              <div>
+                {storage.oldest_day && storage.newest_day
+                  ? t('nomi.collect.storedRange', {
+                      from: storage.oldest_day,
+                      to: storage.newest_day,
+                      count: storage.file_count,
+                    })
+                  : t('nomi.collect.noStoredEvents')}
+              </div>
+              <div className='text-t-tertiary'>{t('nomi.collect.hardLimitHint')}</div>
+            </>
+          ) : (
+            <div className='text-t-tertiary'>{t('nomi.collect.storageLoading')}</div>
+          )}
+        </div>
+      </div>
       <div className='flex items-center gap-12px flex-wrap'>
         <Popconfirm
           title={t('nomi.collect.disableAllConfirm', {
@@ -130,59 +293,6 @@ const CollectTab: React.FC<Props> = ({ shared }) => {
             {t('nomi.collect.disableAll', { defaultValue: '一键全关' })}
           </Button>
         </Popconfirm>
-        <Popconfirm
-          title={t('nomi.collect.clearConfirm')}
-          onOk={() => {
-            void ipcBridge.companion.clearEvents
-              .invoke()
-              .then(() => {
-                Message.success(t('nomi.collect.cleared'));
-                refreshStats();
-                if (rawEvents) loadRawEvents();
-              })
-              .catch((e) => Message.error(String(e)));
-          }}
-        >
-          <Button status='danger'>{t('nomi.collect.clear')}</Button>
-        </Popconfirm>
-        <span className='text-12px text-t-tertiary'>{t('nomi.collect.clearHint')}</span>
-      </div>
-
-      <div className='flex flex-col gap-8px'>
-        <Button
-          size='small'
-          className='self-start'
-          onClick={() => {
-            if (rawEvents) {
-              setRawEvents(null);
-            } else {
-              loadRawEvents();
-            }
-          }}
-        >
-          {rawEvents
-            ? t('nomi.collect.hideRaw', { defaultValue: '收起采集内容' })
-            : t('nomi.collect.viewRaw', { defaultValue: '查看采集到的内容' })}
-        </Button>
-        {rawEvents && (
-          <div className='flex flex-col gap-4px max-h-360px overflow-y-auto bg-fill-1 rd-10px p-10px'>
-            {rawEvents.length === 0 ? (
-              <span className='text-12px text-t-tertiary'>
-                {t('nomi.collect.rawEmpty', { defaultValue: '还没有采集到任何内容。' })}
-              </span>
-            ) : (
-              rawEvents.map((ev) => (
-                <div key={ev.event_id} className='flex items-start gap-8px text-12px'>
-                  <Tag size='small' color='arcoblue'>
-                    {ev.source}
-                  </Tag>
-                  <span className='text-t-tertiary shrink-0'>{new Date(ev.ts).toLocaleTimeString()}</span>
-                  <span className='text-t-secondary break-all min-w-0'>{JSON.stringify(ev.data)}</span>
-                </div>
-              ))
-            )}
-          </div>
-        )}
       </div>
     </div>
   );

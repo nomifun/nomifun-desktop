@@ -13,7 +13,7 @@ use nomifun_db::IProviderRepository;
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::collector::{self, Collector, SharedConfig};
+use crate::collector::{self, Collector, SharedConfig, SharedEventStoreLock};
 use crate::archiver::Archiver;
 use crate::companion::{CompanionThreads, build_companion_system_prompt};
 use crate::events::CompanionEventEmitter;
@@ -204,6 +204,7 @@ pub struct CompanionService {
     /// Serializes figure-library index read-modify-write.
     figures_lock: Mutex<()>,
     config: SharedConfig,
+    event_store_lock: SharedEventStoreLock,
     registry: Arc<CompanionRegistry>,
     pub(crate) store: CompanionStore,
     emitter: CompanionEventEmitter,
@@ -271,6 +272,7 @@ impl CompanionService {
         let models_dir = data_dir.join(crate::COMPANION_MODELS_REL_DIR);
         let figures_dir = data_dir.join(crate::COMPANION_FIGURES_REL_DIR);
         let config: SharedConfig = Arc::new(RwLock::new(SharedCompanionConfig::load(&shared_dir)?));
+        let event_store_lock: SharedEventStoreLock = Arc::new(RwLock::new(()));
         let registry = Arc::new(CompanionRegistry::scan_with_provider_lifecycle(
             companions_dir,
             shared_dir.clone(),
@@ -319,6 +321,16 @@ impl CompanionService {
         let store = CompanionStore::open(&shared_dir).await?;
         store.validate_companion_references(&live_companion_ids).await?;
         collector::validate_event_store(&shared_dir)?;
+        let startup_config = config.read().await.clone();
+        let protected_after_ts =
+            collector::active_consumer_watermark(&store, &startup_config).await?;
+        collector::prune_event_store(
+            &shared_dir,
+            startup_config.collect.event_retention_days,
+            startup_config.collect.event_max_storage_mb,
+            protected_after_ts,
+            0,
+        )?;
         crate::figures::validate_store(&figures_dir)?;
         let live_figure_ids = crate::figures::id_set(&figures_dir)?;
         registry.validate_figure_references(&live_figure_ids).await?;
@@ -326,7 +338,13 @@ impl CompanionService {
         crate::skill_io::validate_store(&skill_paths, &skills).await?;
         let emitter = CompanionEventEmitter::new(bus.clone(), authoritative_user_id.to_string());
 
-        Collector::new(shared_dir.clone(), config.clone(), store.clone()).spawn(bus);
+        Collector::with_event_store_lock(
+            shared_dir.clone(),
+            config.clone(),
+            store.clone(),
+            event_store_lock.clone(),
+        )
+        .spawn(bus);
 
         let learner = Arc::new(Learner {
             companion_dir: shared_dir.clone(),
@@ -336,6 +354,7 @@ impl CompanionService {
             completer: completer.clone(),
             emitter: emitter.clone(),
             run_lock: Arc::new(Mutex::new(())),
+            event_store_lock: event_store_lock.clone(),
         });
         learner.clone().spawn();
 
@@ -355,6 +374,7 @@ impl CompanionService {
             // tool-name steps until then.
             transcript: std::sync::RwLock::new(Arc::new(NoopTranscriptSource)),
             run_lock: Arc::new(Mutex::new(())),
+            event_store_lock: event_store_lock.clone(),
         });
         evolution.clone().spawn();
 
@@ -366,6 +386,7 @@ impl CompanionService {
             figures_dir,
             figures_lock: Mutex::new(()),
             config,
+            event_store_lock,
             registry,
             store,
             emitter,
@@ -440,6 +461,7 @@ impl CompanionService {
             config: self.config.clone(),
             emitter: self.emitter.clone(),
             companion_dir: self.shared_dir.clone(),
+            event_store_lock: self.event_store_lock.clone(),
         })
     }
 
@@ -1049,21 +1071,61 @@ impl CompanionService {
         } else {
             None
         };
-        let merged = {
+        // Event-store lock precedes config everywhere. Keeping it across the
+        // merge, save and optional prune prevents a collector append or
+        // competing policy PATCH from observing a stale capacity.
+        let _event_guard = self.event_store_lock.write().await;
+        let (merged, storage_policy_changed) = {
             let mut cfg = self.config.write().await;
             let mut value = serde_json::to_value(&*cfg)
                 .map_err(|e| AppError::Internal(format!("serialize shared companion config: {e}")))?;
             json_merge_patch(&mut value, &patch);
             let merged: SharedCompanionConfig =
                 serde_json::from_value(value).map_err(|e| AppError::BadRequest(format!("invalid config patch: {e}")))?;
+            merged
+                .collect
+                .validate_storage_policy()
+                .map_err(AppError::BadRequest)?;
             self.validate_shared_provider_models(&merged).await?;
             self.validate_default_companion_reference(&merged).await?;
+            let storage_policy_changed = cfg.collect.event_retention_days
+                != merged.collect.event_retention_days
+                || cfg.collect.event_max_storage_mb != merged.collect.event_max_storage_mb;
+            // Persist the policy before performing any destructive cleanup.
+            // If this save fails, the PATCH has no in-memory effect and no raw
+            // event file has been removed. Cleanup errors after a successful
+            // save are retryable maintenance failures: the collector already
+            // enforces the committed hard cap before every subsequent append.
             merged
                 .save(&self.shared_dir)
                 .map_err(|e| AppError::Internal(format!("save shared companion config: {e}")))?;
             *cfg = merged.clone();
-            merged
+            (merged, storage_policy_changed)
         };
+        if storage_policy_changed {
+            match collector::active_consumer_watermark(&self.store, &merged).await {
+                Ok(protected_after_ts) => {
+                    if let Err(error) = collector::prune_event_store(
+                        &self.shared_dir,
+                        merged.collect.event_retention_days,
+                        merged.collect.event_max_storage_mb,
+                        protected_after_ts,
+                        0,
+                    ) {
+                        tracing::warn!(
+                            error = %error,
+                            "companion event cleanup after committed storage-policy update failed; will retry"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "companion event cleanup could not read consumer cursors after committed storage-policy update; will retry"
+                    );
+                }
+            }
+        }
         self.emitter.emit_shared_config_updated(&merged);
         Ok(merged)
     }
@@ -1131,8 +1193,8 @@ impl CompanionService {
     /// Master kill switch (design §9, 一键全关): stop ALL collection (incl. `companion_dialogues`,
     /// which `any_enabled()` deliberately excludes), learning, and evolution in one atomic write.
     /// Leaves models/intervals intact so re-enable needs no reconfiguration, and does NOT clear the
-    /// consent flag (a user who explicitly disabled is never silently re-enabled). Purging already-
-    /// collected events is a separate `clear_events` call.
+    /// consent flag (a user who explicitly disabled is never silently re-enabled). Already-
+    /// collected events remain governed by the automatic retention and capacity policy.
     pub async fn disable_all(&self) -> Result<SharedCompanionConfig, AppError> {
         let patch = serde_json::json!({
             "collect": {
@@ -1146,16 +1208,6 @@ impl CompanionService {
             "evolve": { "enabled": false }
         });
         self.patch_config(patch).await
-    }
-
-    /// Newest `limit` collected events (cross-companion), for the transparency viewer. Events are
-    /// already sanitized at collection time ({ts,source,name,data}; tool_calls = name + param shape,
-    /// never values). Reuses `read_recent_events` (bounded window, never loads full history).
-    pub fn recent_events(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<collector::CollectedEvent>, AppError> {
-        collector::read_recent_events(&self.shared_dir, limit)
     }
 
     // ----- status -----
@@ -1744,7 +1796,10 @@ impl CompanionService {
     /// collected tool-calls and draft a reviewable skill from it. Requires `collect.tool_calls` to
     /// have been on for that session. Returns the drafted skill name.
     pub async fn draft_skill_from_session(&self, companion_id: &str, conversation_id: &str) -> Result<Option<String>, AppError> {
-        let events = crate::collector::read_recent_events(&self.shared_dir, 1000)?;
+        let events = {
+            let _event_guard = self.event_store_lock.read().await;
+            crate::collector::read_recent_events(&self.shared_dir, 1000)?
+        };
         let mut steps: Vec<String> = Vec::new();
         let mut call_ids: Vec<String> = Vec::new();
         let mut start_ts = i64::MAX;
@@ -1877,15 +1932,56 @@ impl CompanionService {
 
     // ----- events -----
 
-    pub fn event_stats(&self) -> Result<Vec<SourceStats>, AppError> {
-        Ok(collector::event_stats(&self.shared_dir)?
+    pub async fn event_stats(&self) -> Result<Vec<SourceStats>, AppError> {
+        let stats = {
+            let _event_guard = self.event_store_lock.read().await;
+            collector::event_stats(&self.shared_dir)?
+        };
+        Ok(stats
             .into_iter()
             .map(|(source, (today, total))| SourceStats { source, today, total })
             .collect())
     }
 
-    pub fn clear_events(&self) -> Result<(), AppError> {
-        collector::clear_events(&self.shared_dir).map_err(|e| AppError::Internal(format!("clear companion events: {e}")))
+    pub async fn event_storage(&self) -> Result<collector::EventStorageStatus, AppError> {
+        let _event_guard = self.event_store_lock.read().await;
+        let config = self.config.read().await;
+        collector::event_storage_status(
+            &self.shared_dir,
+            config.collect.event_retention_days,
+            config.collect.event_max_storage_mb,
+        )
+    }
+
+    pub async fn export_memory_bundle(
+        &self,
+        dest_path: &std::path::Path,
+        include_events: bool,
+    ) -> Result<crate::export::ExportSummary, AppError> {
+        let _event_guard = self.event_store_lock.read().await;
+        crate::export::export_memory_bundle(
+            &self.store,
+            &self.shared_dir,
+            dest_path,
+            include_events,
+        )
+        .await
+    }
+
+    pub async fn import_bundle(
+        &self,
+        src_path: &std::path::Path,
+    ) -> Result<crate::export::ImportOutcome, AppError> {
+        let outcome = crate::export::import_bundle_with_event_lock(
+            &self.store,
+            self,
+            &self.shared_dir,
+            src_path,
+            self.event_store_lock.clone(),
+            self.config.clone(),
+        )
+        .await?;
+        Ok(outcome)
     }
 }
 
@@ -2465,28 +2561,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recent_events_returns_newest_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let svc = service(dir.path()).await;
-        let base = nomifun_common::now_ms();
-        for i in 0..5 {
-            crate::collector::append_event(
-                &svc.shared_dir,
-                &crate::collector::CollectedEvent {
-                    event_id: nomifun_common::generate_id(),
-                    ts: base + i,
-                    source: "tool_calls".into(),
-                    name: "tool.call".into(),
-                    data: serde_json::json!({ "name": format!("t{i}") }),
-                },
-            )
-            .unwrap();
-        }
-        assert_eq!(svc.recent_events(3).unwrap().len(), 3);
-        assert_eq!(svc.recent_events(100).unwrap().len(), 5);
-    }
-
-    #[tokio::test]
     async fn disable_all_turns_everything_off_but_keeps_models() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
@@ -2570,6 +2644,110 @@ mod tests {
         assert_eq!(crate::registry::CompanionSeqState::load(&shared_dir).unwrap().last_companion_seq, 3);
         let cfg_raw = std::fs::read_to_string(SharedCompanionConfig::config_path(&shared_dir)).unwrap();
         assert!(!cfg_raw.contains("last_companion_seq"), "config.json must not carry the watermark: {cfg_raw}");
+    }
+
+    #[tokio::test]
+    async fn failed_storage_policy_save_does_not_prune_raw_events_or_publish_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        crate::collector::append_event(
+            &svc.shared_dir,
+            &crate::collector::CollectedEvent {
+                event_id: nomifun_common::generate_id(),
+                ts: nomifun_common::now_ms() - 10 * 24 * 60 * 60 * 1000,
+                source: "chat_user_messages".into(),
+                name: "message.userCreated".into(),
+                data: serde_json::json!({"content": "must survive a failed config save"}),
+            },
+        )
+        .unwrap();
+        assert_eq!(crate::collector::read_recent_events(&svc.shared_dir, 10).unwrap().len(), 1);
+
+        // Make atomic replacement of config.json fail on every platform: a
+        // directory cannot be replaced with the temporary config file.
+        let config_path = SharedCompanionConfig::config_path(&svc.shared_dir);
+        if config_path.exists() {
+            std::fs::remove_file(&config_path).unwrap();
+        }
+        std::fs::create_dir(&config_path).unwrap();
+
+        let error = svc
+            .patch_config(serde_json::json!({
+                "collect": {"event_retention_days": 7}
+            }))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("save shared companion config"), "{error}");
+        assert_eq!(
+            svc.get_config().await.collect.event_retention_days,
+            crate::config::DEFAULT_EVENT_RETENTION_DAYS
+        );
+        assert_eq!(
+            crate::collector::read_recent_events(&svc.shared_dir, 10)
+                .unwrap()
+                .len(),
+            1,
+            "a failed PATCH must not perform the destructive cleanup it requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_prunes_expired_events_before_the_service_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared_dir = dir.path().join(crate::COMPANION_SHARED_REL_DIR);
+        crate::collector::append_event(
+            &shared_dir,
+            &crate::collector::CollectedEvent {
+                event_id: nomifun_common::generate_id(),
+                ts: nomifun_common::now_ms() - 31 * 24 * 60 * 60 * 1000,
+                source: "tool_calls".into(),
+                name: "tool.call".into(),
+                data: serde_json::json!({"name": "expired-before-start"}),
+            },
+        )
+        .unwrap();
+        assert_eq!(crate::collector::read_recent_events(&shared_dir, 10).unwrap().len(), 1);
+
+        let svc = service(dir.path()).await;
+
+        assert!(
+            crate::collector::read_recent_events(&svc.shared_dir, 10)
+                .unwrap()
+                .is_empty(),
+            "startup must enforce retention before callers can use the service"
+        );
+    }
+
+    #[tokio::test]
+    async fn lowering_retention_prunes_expired_events_before_patch_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        crate::collector::append_event(
+            &svc.shared_dir,
+            &crate::collector::CollectedEvent {
+                event_id: nomifun_common::generate_id(),
+                ts: nomifun_common::now_ms() - 10 * 24 * 60 * 60 * 1000,
+                source: "requirements".into(),
+                name: "requirement.created".into(),
+                data: serde_json::json!({"title": "expired-after-policy-change"}),
+            },
+        )
+        .unwrap();
+
+        let updated = svc
+            .patch_config(serde_json::json!({
+                "collect": {"event_retention_days": 7}
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(updated.collect.event_retention_days, 7);
+        assert!(
+            crate::collector::read_recent_events(&svc.shared_dir, 10)
+                .unwrap()
+                .is_empty(),
+            "a successful policy PATCH must complete its immediate retention pass before returning"
+        );
     }
 
     #[tokio::test]

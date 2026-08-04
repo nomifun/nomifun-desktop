@@ -4258,15 +4258,9 @@ export interface ICompanionCollectConfig {
   requirements: boolean;
   terminal_sessions: boolean;
   tool_calls: boolean;
-}
-
-/** One sanitized collected event ({event_id,ts,source,name,data}) for the transparency viewer. */
-export interface ICompanionCollectedEvent {
-  event_id: string;
-  ts: number;
-  source: string;
-  name: string;
-  data: unknown;
+  companion_dialogues: boolean;
+  event_retention_days: number;
+  event_max_storage_mb: number;
 }
 
 export type ICompanionMemoryKind = 'profile' | 'preference' | 'knowledge' | 'episode' | 'task' | 'affective';
@@ -4399,6 +4393,16 @@ export interface ICompanionSourceStats {
   source: string;
   today: number;
   total: number;
+}
+
+export interface ICompanionEventStorageStatus {
+  total_bytes: number;
+  max_bytes: number;
+  file_count: number;
+  oldest_day: string | null;
+  newest_day: string | null;
+  retention_days: number;
+  max_storage_mb: number;
 }
 
 /** One archived session-window day-digest (伙伴会话归档回看). */
@@ -4955,10 +4959,7 @@ export const companion = {
     fromApiCompanionLearnResult
   ),
   eventStats: httpGet<ICompanionSourceStats[], void>('/api/companion/events/stats'),
-  recentEvents: httpGet<ICompanionCollectedEvent[], { limit?: number }>(
-    (p) => `/api/companion/events/recent${p?.limit ? `?limit=${p.limit}` : ''}`
-  ),
-  clearEvents: httpDelete<void, void>('/api/companion/events'),
+  eventStorage: httpGet<ICompanionEventStorageStatus, void>('/api/companion/events/storage'),
   /** First-launch consent: apply self-evolution default-ON once (server KV-gated). */
   applyConsent: httpPost<ICompanionSharedConfig, void>('/api/companion/consent'),
   /** Master kill switch: stop all collection + learning + evolution. */

@@ -166,24 +166,33 @@
     "source_merge": "合并产生"
   },
   "collect": {
-    "intro": "勾选伙伴们可以学习的数据范围。所有数据默认不采集，开启后写入本地 companion/nomi/ 目录，随时可以一键清空。",
+    "intro": "勾选伙伴们可以学习的工作数据范围。开启后写入本地 companion/shared/events/ 目录，并按下方策略自动清理。",
     "sensitivity": {
       "low": "低敏感",
       "medium": "中敏感",
       "high": "高敏感"
     },
     "today": "今日",
-    "total": "累计",
-    "clear": "清空全部采集数据",
-    "clearConfirm": "将删除 companion/nomi/events 下的全部采集数据，已提炼的记忆不受影响。继续？",
-    "cleared": "采集数据已清空",
-    "clearHint": "只删除原始事件文件，不影响已学到的记忆。",
+    "total": "当前保留",
     "disableAll": "一键全关",
     "disableAllConfirm": "停止所有采集、学习与进化？已学到的技能和记忆会保留，模型配置不变，随时可再开启。",
     "disabledAll": "已全部关闭",
-    "viewRaw": "查看采集到的内容",
-    "hideRaw": "收起采集内容",
-    "rawEmpty": "还没有采集到任何内容。",
+    "retentionTitle": "自动清理",
+    "retentionHint": "超过目标保留期且已被所有启用的学习、进化处理后，自动清理原始事件；已提炼的记忆和技能不受影响。",
+    "retentionDays": "目标保留期",
+    "days": "天",
+    "capacityLimit": "容量上限",
+    "applyPolicy": "应用清理策略",
+    "policyApplied": "清理策略已应用",
+    "lowerPolicyConfirm": "降低保留期或容量可能立即删除最旧的原始事件，且无法恢复。已提炼的记忆和技能会保留。继续应用？",
+    "storageUsage": "当前占用：{{used}} / {{max}}",
+    "storedRange": "数据范围：{{from}} 至 {{to}}（{{count}} 个日文件）",
+    "storedRange_one": "数据范围：{{from}} 至 {{to}}（{{count}} 个日文件）",
+    "storedRange_other": "数据范围：{{from}} 至 {{to}}（{{count}} 个日文件）",
+    "noStoredEvents": "当前没有采集事件文件",
+    "storageLoading": "正在读取存储状态…",
+    "storageUnavailable": "暂时无法读取存储状态",
+    "hardLimitHint": "容量是硬上限；始终从最旧日文件开始删除，必要时也会删除尚未处理的数据。",
     "sources": {
       "tool_calls": {
         "name": "工具调用",
@@ -205,7 +214,7 @@
   },
   "disclosure": {
     "title": "让桌面伙伴越用越懂你",
-    "body": "开启后，伙伴会从你使用平台的行为（工具调用、任务、对话）里学习，自动沉淀技能与记忆。所有数据仅保存在本地，随时可在「数据采集」里查看、清空或一键全关。",
+    "body": "开启后，伙伴会从你使用平台的行为（工具调用、任务、对话）里学习，自动沉淀技能与记忆。所有数据仅保存在本地，可在「数据采集」里调整自动清理策略或一键全关。",
     "enable": "开启自学习",
     "later": "暂不开启",
     "enabled": "已开启，桌面伙伴会从你的使用里学习"
