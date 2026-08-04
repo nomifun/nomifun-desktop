@@ -2084,6 +2084,14 @@ pub async fn build_extension_states(
 
 /// Build the default `WsHandlerState` from application services.
 pub fn build_ws_state(services: &AppServices) -> WsHandlerState {
+    // Operator escape hatch for deployments behind a reverse proxy that
+    // forwards neither the original `Host` nor `X-Forwarded-Host`: the WS
+    // handshake additionally accepts these exact browser origins.
+    let allowed_origins: Arc<[String]> = std::env::var("NOMIFUN_ALLOWED_ORIGINS")
+        .map(|raw| nomifun_realtime::parse_allowed_origins(&raw))
+        .unwrap_or_default()
+        .into();
+
     // NoAuth: every upgrade is accepted (dev / `--insecure-no-auth`).
     if services.auth_policy.is_no_auth() {
         let authoritative_user_id = services.authoritative_user_id.to_string();
@@ -2091,6 +2099,7 @@ pub fn build_ws_state(services: &AppServices) -> WsHandlerState {
             manager: services.ws_manager.clone(),
             token_authenticator: Arc::new(move |_| Some(authoritative_user_id.clone())),
             token_extractor: Arc::new(|_| Some("local".into())),
+            allowed_origins,
         };
     }
 
@@ -2116,6 +2125,7 @@ pub fn build_ws_state(services: &AppServices) -> WsHandlerState {
         manager: services.ws_manager.clone(),
         token_authenticator,
         token_extractor,
+        allowed_origins,
     }
 }
 
