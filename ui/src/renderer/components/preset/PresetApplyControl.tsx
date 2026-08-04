@@ -5,6 +5,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Message } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
+import classNames from 'classnames';
 import type { Preset, PresetReference, PresetTarget, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import useSWR from 'swr';
@@ -18,9 +19,11 @@ type Props = {
   appliedPreset?: ResolvedPresetSnapshot;
   onApply: (presetId: PresetReference, locale: string) => Promise<void>;
   disabled?: boolean;
+  /** Fit the selector to its visible content instead of filling the row. */
+  compact?: boolean;
 };
 
-const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, disabled = false }) => {
+const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, disabled = false, compact = false }) => {
   const { t, i18n } = useTranslation();
   const [applying, setApplying] = useState(false);
   const [selectedId, setSelectedId] = useState<PresetReference | undefined>(appliedPreset?.preset_id);
@@ -62,8 +65,8 @@ const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, d
   };
 
   return (
-    <div className='flex flex-col gap-8px'>
-      <div className='flex items-center gap-8px flex-wrap'>
+    <div className={classNames('flex flex-col gap-8px', compact && 'items-end max-[760px]:items-start')}>
+      <div className='flex items-center justify-end gap-8px flex-wrap max-[760px]:justify-start'>
         <NomiSelect
           value={selectedId}
           onChange={(value) => setSelectedId(value as PresetReference | undefined)}
@@ -71,7 +74,9 @@ const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, d
           loading={loading}
           showSearch
           allowClear
-          className='min-w-240px flex-1'
+          contentFit={compact}
+          contentMaxWidth={260}
+          className={compact ? undefined : 'min-w-240px flex-1'}
           placeholder={t('settings.presetApplyPlaceholder', { defaultValue: 'Choose a preset' })}
           notFoundContent={t('settings.presetApplyEmpty', { defaultValue: 'No preset supports this target yet' })}
         >

@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Alert, Button, Message, Modal, Progress, Slider, Spin, Switch, Tag } from '@arco-design/web-react';
 import { IconEdit } from '@arco-design/web-react/icon';
 import { ipcBridge } from '@/common';
+import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import type { ICompanionWeeklyDigest } from '@/common/adapter/ipcBridge';
 import CompanionAvatar from '@renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@renderer/pages/companion/characters/customMeta';
@@ -158,17 +159,22 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
           type='info'
           closable
           onClose={dismissDisclosure}
+          className='!items-start !px-12px !py-9px [&_.arco-alert-icon]:!mt-1px'
           style={{ background: 'var(--color-fill-2)', border: '1px solid var(--color-border-2)' }}
-          title={t('nomi.disclosure.title', { defaultValue: '让桌面伙伴越用越懂你' })}
+          title={
+            <span className='text-14px leading-20px font-600'>
+              {t('nomi.disclosure.title', { defaultValue: '让桌面伙伴越用越懂你' })}
+            </span>
+          }
           content={
-            <div className='flex flex-col gap-8px'>
-              <span className='text-12px text-t-secondary'>
+            <div className='flex flex-col gap-6px'>
+              <span className='text-12px leading-18px text-t-secondary'>
                 {t('nomi.disclosure.body', {
                   defaultValue:
                     '开启后，伙伴会从你使用平台的行为（工具调用、任务、对话）里学习，自动沉淀技能与记忆。所有数据仅保存在本地，可在「数据采集」里调整自动清理策略或一键全关。',
                 })}
               </span>
-              <div className='flex gap-8px'>
+              <div className='flex gap-6px'>
                 <Button size='small' type='primary' onClick={acknowledgeDisclosure}>
                   {t('nomi.disclosure.enable', { defaultValue: '开启自学习' })}
                 </Button>
@@ -180,36 +186,41 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
           }
         />
       )}
-      <div className='flex items-center gap-16px bg-fill-2 rd-10px px-14px py-12px'>
-        <div className='flex-1 min-w-0'>
-          <div className='text-14px text-t-primary font-500'>{t('nomi.settings.companionEnabled')}</div>
-          <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.settings.companionEnabledHint')}</div>
-        </div>
-        <span className='text-13px text-t-secondary'>
-          {profile.appearance.companion_enabled ? t('nomi.overview.companionOn') : t('nomi.overview.companionOff')}
-        </span>
-        <Switch
-          checked={profile.appearance.companion_enabled}
-          onChange={(companion_enabled) => void patchCompanion({ appearance: { companion_enabled } })}
-        />
-      </div>
-      {/* 对话模型：唯一事实源入口，直接在总览就地可配（免去跳到聊天页头部找）。
-          未配置=暖色警示 + 引导文案；已配置=常规卡 + 全局生效说明。始终可见可改。 */}
-      <div
-        className='flex flex-col gap-10px rd-10px px-14px py-12px'
-        style={
-          status.model_configured
-            ? { background: 'var(--color-fill-2)' }
-            : { background: 'rgb(var(--warning-1))', border: '1px solid rgb(var(--warning-3))' }
-        }
-      >
-        <div className='text-12px text-t-secondary'>
-          {status.model_configured
-            ? t('nomi.chat.modelConfigHint')
-            : t('nomi.overview.modelMissing', { companionName })}
-        </div>
-        <CompanionModelControl companion={companion} />
-      </div>
+      <NomiSettingSection title={t('nomi.overview.basicConfig')}>
+        <NomiSettingList>
+          <NomiSettingRow
+            title={t('nomi.settings.companionEnabled')}
+            description={t('nomi.settings.companionEnabledHint')}
+            controls={
+              <>
+                <span className='shrink-0 text-13px text-t-secondary'>
+                  {profile.appearance.companion_enabled
+                    ? t('nomi.overview.companionOn')
+                    : t('nomi.overview.companionOff')}
+                </span>
+                <Switch
+                  size='small'
+                  className='compact-dark-switch shrink-0'
+                  checked={profile.appearance.companion_enabled}
+                  onChange={(companion_enabled) => void patchCompanion({ appearance: { companion_enabled } })}
+                />
+              </>
+            }
+          />
+
+          {/* 对话模型：唯一事实源入口，直接在总览就地可配（免去跳到聊天页头部找）。 */}
+          <NomiSettingRow
+            title={t('nomi.chat.modelConfig')}
+            description={
+              status.model_configured
+                ? t('nomi.chat.modelConfigHint')
+                : t('nomi.overview.modelMissing', { companionName })
+            }
+            style={status.model_configured ? undefined : { background: 'rgb(var(--warning-1))' }}
+            controls={<CompanionModelControl companion={companion} showLabel={false} />}
+          />
+        </NomiSettingList>
+      </NomiSettingSection>
       {!status.collect_any_enabled && (
         <Alert
           type='info'
@@ -223,12 +234,12 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
         />
       )}
       <div className='flex items-center gap-20px flex-wrap'>
-        <div className='flex flex-col items-center gap-8px'>
+        <div className='flex flex-col items-center gap-4px'>
           <button
             type='button'
             onClick={() => setAdjustOpen(true)}
             title={t('nomi.customFigure.adjustFigure')}
-            className='group relative flex items-center justify-center rd-16px p-4px cursor-pointer bg-transparent border-none transition-transform hover:scale-[1.02]'
+            className='group relative flex items-center justify-center rd-12px p-2px cursor-pointer bg-transparent border-none transition-transform hover:scale-[1.02]'
           >
             <CompanionAvatar
               character={profile.character}
@@ -236,10 +247,10 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
               customFigure={cf}
               mood={(status.mood as CompanionMood) || 'content'}
               activity='idle'
-              size={120}
+              size={88}
             />
-            <span className='absolute inset-4px flex items-end justify-center rd-16px bg-gradient-to-t from-[rgba(0,0,0,0.45)] to-transparent opacity-0 group-hover:opacity-100 transition-opacity'>
-              <span className='mb-8px flex items-center gap-4px text-12px font-600 text-white'>
+            <span className='absolute inset-2px flex items-end justify-center rd-12px bg-gradient-to-t from-[rgba(0,0,0,0.45)] to-transparent opacity-0 group-hover:opacity-100 transition-opacity'>
+              <span className='mb-5px flex items-center gap-4px text-11px font-600 text-white'>
                 <IconEdit /> {t('nomi.customFigure.adjustFigure')}
               </span>
             </span>
@@ -273,27 +284,32 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
         </div>
       </div>
       {cf && (
-        <div className='flex items-center gap-12px bg-fill-2 rd-10px px-14px py-12px flex-wrap'>
-          <span className='text-13px text-t-secondary shrink-0'>{t('nomi.customFigure.sizeLabel')}</span>
-          <span className='text-12px text-t-tertiary shrink-0'>{t('nomi.customFigure.sizeS')}</span>
-          <Slider
-            className='flex-1 min-w-160px'
-            min={SIZE_MIN}
-            max={SIZE_MAX}
-            step={4}
-            value={sizeDraft}
-            onChange={onFigureSizeChange}
+        <NomiSettingList>
+          <NomiSettingRow
+            title={t('nomi.customFigure.sizeLabel')}
+            controlsClassName='max-w-full'
+            controls={
+              <>
+                <span className='shrink-0 text-12px text-t-tertiary'>{t('nomi.customFigure.sizeS')}</span>
+                <Slider
+                  className='w-180px shrink-0 max-[760px]:w-160px'
+                  min={SIZE_MIN}
+                  max={SIZE_MAX}
+                  step={4}
+                  value={sizeDraft}
+                  onChange={onFigureSizeChange}
+                />
+                <span className='shrink-0 text-12px text-t-tertiary'>{t('nomi.customFigure.sizeL')}</span>
+                <span className='w-46px shrink-0 text-right text-12px text-t-primary'>{sizeDraft}px</span>
+                {cf.sizePx != null && (
+                  <Button size='mini' type='text' onClick={onFigureSizeReset}>
+                    {t('nomi.customFigure.sizeReset')}
+                  </Button>
+                )}
+              </>
+            }
           />
-          <span className='text-12px text-t-tertiary shrink-0'>{t('nomi.customFigure.sizeL')}</span>
-          <span className='text-12px text-t-primary text-right shrink-0' style={{ width: 46 }}>
-            {sizeDraft}px
-          </span>
-          {cf.sizePx != null && (
-            <Button size='mini' type='text' onClick={onFigureSizeReset}>
-              {t('nomi.customFigure.sizeReset')}
-            </Button>
-          )}
-        </div>
+        </NomiSettingList>
       )}
       {digest && (digest.skills_learned > 0 || digest.memories_added > 0) && (
         <div className='bg-fill-2 rd-10px px-14px py-12px'>
