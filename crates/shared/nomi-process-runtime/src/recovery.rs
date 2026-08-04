@@ -227,7 +227,7 @@ fn confirm_recorded_instance_absent(
 mod windows_impl {
     use super::*;
     use crate::platform::windows::{
-        WindowsExactProcess, WindowsRecoveryJob, probe_running_process_identity,
+        WindowsExactProcess, probe_running_process_identity, terminate_exact_process_tree,
     };
 
     const ERROR_INVALID_PARAMETER: i32 = 87;
@@ -261,14 +261,9 @@ mod windows_impl {
             return Ok(OrphanTerminationOutcome::AlreadyDead);
         }
 
-        let mut job = WindowsRecoveryJob::new_unarmed()
-            .map_err(|e| io::Error::new(e.kind(), format!("create recovery job: {e}")))?;
-        job.assign(&process)
-            .map_err(|e| io::Error::new(e.kind(), format!("assign recovery job: {e}")))?;
-        job.arm_kill_on_close()
-            .map_err(|e| io::Error::new(e.kind(), format!("arm recovery job: {e}")))?;
-        job.terminate_and_wait([&process], timeout)
-            .map_err(|e| io::Error::new(e.kind(), format!("terminate recovery job: {e}")))?;
+        terminate_exact_process_tree(process, timeout).map_err(|e| {
+            io::Error::new(e.kind(), format!("terminate exact recovery process tree: {e}"))
+        })?;
         Ok(OrphanTerminationOutcome::KilledAndProven)
     }
 }
@@ -297,6 +292,13 @@ mod linux_impl {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "malformed /proc stat line")
             })?;
+        // A zombie has completed execution and cannot own descendants or run
+        // user code. Treat it as terminal even when its parent has not yet
+        // collected the wait status; otherwise verified SIGKILL recovery can
+        // time out forever waiting for `/proc/<pid>` itself to disappear.
+        if after_comm.split_ascii_whitespace().next() == Some("Z") {
+            return Ok(None);
+        }
         let platform_start_key = after_comm
             .split_ascii_whitespace()
             .nth(19)
@@ -514,6 +516,131 @@ mod tests {
         let child = sleeper_command().spawn().expect("spawn test sleeper");
         let identity = capture_child_identity(&child).expect("capture identity");
         (child, identity)
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn windows_recovery_reaps_a_descendant_created_before_job_adoption() {
+        let directory = tempfile::tempdir().expect("temporary recovery directory");
+        let marker = directory.path().join("preexisting-descendant.pid");
+        let marker_literal = marker.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$p = Start-Process -FilePath ping.exe -ArgumentList @('-n','60','127.0.0.1') -PassThru; Set-Content -LiteralPath '{marker_literal}' -Value $p.Id; Wait-Process -Id $p.Id"
+        );
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut root = command.spawn().expect("spawn recovery tree root");
+        let identity = capture_child_identity(&root).expect("capture exact root identity");
+        let descendant_pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&marker)
+                    && let Ok(pid) = contents.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pre-existing descendant publishes its PID");
+        assert!(
+            probe_process_identity(descendant_pid)
+                .expect("probe pre-existing descendant")
+                .is_some()
+        );
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            terminate_verified_orphan(&identity, Duration::from_secs(10))
+        })
+        .await
+        .expect("recovery worker joins")
+        .expect("exact Windows tree recovery succeeds");
+        assert_eq!(outcome, OrphanTerminationOutcome::KilledAndProven);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if probe_process_identity(descendant_pid)
+                    .expect("probe recovered descendant")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pre-existing descendant is included in recovery proof");
+        root.wait().await.expect("reap exact recovery root");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn windows_recovery_locks_a_descendant_created_during_job_adoption() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
+        };
+
+        let directory = tempfile::tempdir().expect("temporary recovery race directory");
+        let gate = directory.path().join("release-child-spawn");
+        let marker = directory.path().join("raced-descendant.pid");
+        let gate_literal = gate.to_string_lossy().replace('\'', "''");
+        let marker_literal = marker.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "while (-not (Test-Path -LiteralPath '{gate_literal}')) {{ Start-Sleep -Milliseconds 5 }}; $p = Start-Process -FilePath ping.exe -ArgumentList @('-n','60','127.0.0.1') -PassThru; Set-Content -LiteralPath '{marker_literal}' -Value $p.Id; Wait-Process -Id $p.Id"
+        );
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut root = command.spawn().expect("spawn recovery race root");
+        let identity = capture_child_identity(&root).expect("capture exact race root identity");
+        let raced_pid = Arc::new(AtomicU32::new(0));
+        let hook_pid = Arc::clone(&raced_pid);
+        let hook_gate = gate.clone();
+        let hook_marker = marker.clone();
+        crate::platform::windows::set_recovery_after_root_assign_hook(Box::new(move || {
+            std::fs::write(&hook_gate, b"go").expect("release raced child spawn");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&hook_marker)
+                    && let Ok(pid) = contents.trim().parse::<u32>()
+                {
+                    hook_pid.store(pid, Ordering::Release);
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "raced descendant did not publish its PID"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }));
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            terminate_verified_orphan(&identity, Duration::from_secs(10))
+        })
+        .await
+        .expect("raced recovery worker joins")
+        .expect("raced exact Windows tree recovery succeeds");
+        assert_eq!(outcome, OrphanTerminationOutcome::KilledAndProven);
+        let descendant_pid = raced_pid.load(Ordering::Acquire);
+        assert_ne!(descendant_pid, 0, "race hook observed a real descendant");
+        assert!(
+            probe_process_identity(descendant_pid)
+                .expect("probe raced descendant after recovery")
+                .is_none(),
+            "descendant created after root Job adoption must be terminal"
+        );
+        root.wait().await.expect("reap raced recovery root");
     }
 
     #[test]

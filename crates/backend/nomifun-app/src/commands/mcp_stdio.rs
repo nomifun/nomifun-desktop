@@ -12,6 +12,35 @@
 
 use std::process::ExitCode;
 
+use crate::cli::Command;
+
+/// Stdio helpers do async pipe/loopback work and need no CPU-sized worker pool.
+/// The caller thread drives the current-thread runtime; only a small, fixed
+/// blocking pool may be created by dependencies.
+pub const MCP_STDIO_MAX_BLOCKING_THREADS: usize = 4;
+
+pub fn build_mcp_stdio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(MCP_STDIO_MAX_BLOCKING_THREADS)
+        .thread_name("nomifun-mcp-stdio")
+        .build()
+}
+
+pub fn is_mcp_stdio_cli_command(command: Option<&Command>) -> bool {
+    matches!(
+        command,
+        Some(
+            Command::McpRequirementStdio
+                | Command::McpKnowledgeStdio
+                | Command::McpGatewayStdio
+                | Command::McpOpenStdio
+                | Command::McpComputerStdio
+                | Command::McpBrowserStdio
+        )
+    )
+}
+
 /// The MCP stdio bridge subcommands a host binary must honor when spawned by an
 /// ACP agent CLI. These kebab strings are load-bearing: they mirror the clap
 /// `Command` kebab names that external CLIs spawn verbatim.
@@ -52,10 +81,7 @@ pub fn run_mcp_stdio_subcommand_if_present() -> Option<ExitCode> {
 
     // Check MCP stdio bridges first.
     if let Some(which) = mcp_stdio_subcommand(argv1_str) {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build MCP stdio runtime");
+        let runtime = build_mcp_stdio_runtime().expect("failed to build MCP stdio runtime");
         let code = runtime.block_on(async move {
             match which {
                 "mcp-requirement-stdio" => super::run_requirement_stdio().await,
@@ -74,10 +100,7 @@ pub fn run_mcp_stdio_subcommand_if_present() -> Option<ExitCode> {
     // Check `terminal-hook` — same reason (pre-GUI/DB), but it carries --event.
     if argv1_str == Some(TERMINAL_HOOK_SUBCOMMAND) {
         let event = parse_terminal_hook_event_arg();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build terminal-hook runtime");
+        let runtime = build_mcp_stdio_runtime().expect("failed to build terminal-hook runtime");
         let code = runtime.block_on(async move { super::run_terminal_hook(&event).await });
         return Some(code);
     }
@@ -195,5 +218,38 @@ mod tests {
                 "'{sub}' parsed but not to an MCP stdio command"
             );
         }
+    }
+
+    #[test]
+    fn every_stdio_cli_variant_selects_the_fixed_current_thread_runtime() {
+        for sub in MCP_STDIO_SUBCOMMANDS {
+            let cli = Cli::try_parse_from(["nomicore", sub]).unwrap();
+            assert!(is_mcp_stdio_cli_command(cli.command.as_ref()));
+        }
+        let server = Cli::try_parse_from(["nomicore"]).unwrap();
+        assert!(!is_mcp_stdio_cli_command(server.command.as_ref()));
+
+        let runtime = build_mcp_stdio_runtime().unwrap();
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread
+        );
+        assert_eq!(MCP_STDIO_MAX_BLOCKING_THREADS, 4);
+    }
+
+    #[test]
+    fn both_binary_entrypoints_use_the_shared_bounded_stdio_runtime_builder() {
+        let embedded_source = include_str!("mcp_stdio.rs");
+        let cli_source = include_str!("../main.rs");
+        assert!(
+            embedded_source.contains(
+                "let runtime = build_mcp_stdio_runtime().expect(\"failed to build MCP stdio runtime\")"
+            ),
+            "embedded host dispatcher must use the shared bounded runtime"
+        );
+        assert!(
+            cli_source.contains("commands::build_mcp_stdio_runtime()?"),
+            "nomicore CLI dispatcher must use the shared bounded runtime"
+        );
     }
 }

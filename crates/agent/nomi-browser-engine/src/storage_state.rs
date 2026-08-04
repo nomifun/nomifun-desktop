@@ -38,6 +38,123 @@ use chromiumoxide::cdp::browser_protocol::network::{
     TimeSinceEpoch,
 };
 use serde::{Deserialize, Serialize};
+use std::io::Write;
+
+/// Hard upper bound for the canonical JSON representation retained by one browser task.
+///
+/// This is deliberately a per-state/per-task limit, not a process-wide budget: independent
+/// tasks can still scale out, while one corrupt vault or hostile origin cannot grow without
+/// bound inside the browser process.
+pub const MAX_STORAGE_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_STORAGE_STATE_COOKIES: usize = 4_096;
+pub const MAX_STORAGE_STATE_ORIGINS: usize = 32;
+pub const MAX_STORAGE_STATE_LOCAL_ITEMS_PER_ORIGIN: usize = 4_096;
+pub const MAX_STORAGE_STATE_IDB_DATABASES_PER_ORIGIN: usize = 64;
+pub const MAX_STORAGE_STATE_IDB_STORES_PER_DATABASE: usize = 256;
+pub const MAX_STORAGE_STATE_IDB_RECORDS_TOTAL: usize = 16_384;
+pub const MAX_STORAGE_STATE_JSON_DEPTH: usize = 64;
+pub const MAX_STORAGE_STATE_JSON_NODES: usize = 131_072;
+
+/// Renderer-side budget used while copying localStorage out through CDP. Keeping this below
+/// the final JSON limit leaves headroom for JSON escaping, cookies, and transport envelopes.
+pub const MAX_CAPTURED_LOCAL_STORAGE_UTF16_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("storage_state exceeds its per-task hard boundary: {reason}")]
+pub struct StorageStateBoundsError {
+    reason: String,
+}
+
+impl StorageStateBoundsError {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct BoundedJsonCounter {
+    written: usize,
+    exceeded: bool,
+}
+
+impl Write for BoundedJsonCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Some(next) = self.written.checked_add(bytes.len()) else {
+            self.exceeded = true;
+            return Err(std::io::Error::other("storage_state JSON length overflow"));
+        };
+        if next > MAX_STORAGE_STATE_JSON_BYTES {
+            self.exceeded = true;
+            return Err(std::io::Error::other("storage_state JSON byte limit exceeded"));
+        }
+        self.written = next;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_serialized_len<T: Serialize>(value: &T) -> Result<usize, StorageStateBoundsError> {
+    let mut counter = BoundedJsonCounter::default();
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) => Ok(counter.written),
+        Err(_) if counter.exceeded => Err(StorageStateBoundsError::new(format!(
+            "serialized JSON is larger than {MAX_STORAGE_STATE_JSON_BYTES} bytes"
+        ))),
+        Err(error) => Err(StorageStateBoundsError::new(format!(
+            "JSON serialization failed: {error}"
+        ))),
+    }
+}
+
+fn validate_json_value_shape(
+    root: &serde_json::Value,
+    total_nodes: &mut usize,
+) -> Result<(), StorageStateBoundsError> {
+    let mut stack = vec![(root, 1_usize)];
+    while let Some((value, depth)) = stack.pop() {
+        if depth > MAX_STORAGE_STATE_JSON_DEPTH {
+            return Err(StorageStateBoundsError::new(format!(
+                "JSON depth is greater than {MAX_STORAGE_STATE_JSON_DEPTH}"
+            )));
+        }
+        *total_nodes = total_nodes.saturating_add(1);
+        if *total_nodes > MAX_STORAGE_STATE_JSON_NODES {
+            return Err(StorageStateBoundsError::new(format!(
+                "JSON node count is greater than {MAX_STORAGE_STATE_JSON_NODES}"
+            )));
+        }
+
+        let child_count = match value {
+            serde_json::Value::Array(values) => values.len(),
+            serde_json::Value::Object(values) => values.len(),
+            _ => 0,
+        };
+        if (*total_nodes)
+            .saturating_add(stack.len())
+            .saturating_add(child_count)
+            > MAX_STORAGE_STATE_JSON_NODES
+        {
+            return Err(StorageStateBoundsError::new(format!(
+                "JSON node count is greater than {MAX_STORAGE_STATE_JSON_NODES}"
+            )));
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                stack.extend(values.iter().map(|child| (child, depth + 1)));
+            }
+            serde_json::Value::Object(values) => {
+                stack.extend(values.values().map(|child| (child, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 
 /// **storage_state（W4b cookie + W4c localStorage）**：默认（全局共享）browser context 的持久登录态快照。
 ///
@@ -437,6 +554,93 @@ impl StorageStateCookie {
 }
 
 impl StorageState {
+    /// Drop page-owned storage while preserving browser-context cookies. Managed Browser Use
+    /// calls this when importing legacy vaults so startup and replicas cannot revive an older
+    /// full-state capture path.
+    pub fn into_cookie_only(mut self) -> Self {
+        self.local_storage.clear();
+        self
+    }
+
+    /// Validate all retained browser identity data against per-task structural and byte bounds.
+    /// The JSON size is counted through a capped writer, so rejecting an oversized in-memory
+    /// state does not first allocate another oversized serialization.
+    pub fn validate_bounds(&self) -> Result<(), StorageStateBoundsError> {
+        if self.cookies.len() > MAX_STORAGE_STATE_COOKIES {
+            return Err(StorageStateBoundsError::new(format!(
+                "cookie count {} is greater than {MAX_STORAGE_STATE_COOKIES}",
+                self.cookies.len()
+            )));
+        }
+        if self.local_storage.len() > MAX_STORAGE_STATE_ORIGINS {
+            return Err(StorageStateBoundsError::new(format!(
+                "origin count {} is greater than {MAX_STORAGE_STATE_ORIGINS}",
+                self.local_storage.len()
+            )));
+        }
+
+        let mut total_records = 0_usize;
+        let mut total_json_nodes = 0_usize;
+        for origin in &self.local_storage {
+            if origin.local_storage.len() > MAX_STORAGE_STATE_LOCAL_ITEMS_PER_ORIGIN {
+                return Err(StorageStateBoundsError::new(format!(
+                    "localStorage item count for one origin is greater than {MAX_STORAGE_STATE_LOCAL_ITEMS_PER_ORIGIN}"
+                )));
+            }
+            let Some(index_db) = origin.index_db.as_ref() else {
+                continue;
+            };
+            if index_db.databases.len() > MAX_STORAGE_STATE_IDB_DATABASES_PER_ORIGIN {
+                return Err(StorageStateBoundsError::new(format!(
+                    "IndexedDB database count for one origin is greater than {MAX_STORAGE_STATE_IDB_DATABASES_PER_ORIGIN}"
+                )));
+            }
+            for database in &index_db.databases {
+                if database.stores.len() > MAX_STORAGE_STATE_IDB_STORES_PER_DATABASE {
+                    return Err(StorageStateBoundsError::new(format!(
+                        "IndexedDB store count for one database is greater than {MAX_STORAGE_STATE_IDB_STORES_PER_DATABASE}"
+                    )));
+                }
+                for store in &database.stores {
+                    total_records = total_records.saturating_add(store.records.len());
+                    if total_records > MAX_STORAGE_STATE_IDB_RECORDS_TOTAL {
+                        return Err(StorageStateBoundsError::new(format!(
+                            "IndexedDB record count is greater than {MAX_STORAGE_STATE_IDB_RECORDS_TOTAL}"
+                        )));
+                    }
+                    for record in &store.records {
+                        validate_json_value_shape(record, &mut total_json_nodes)?;
+                    }
+                }
+            }
+        }
+
+        bounded_serialized_len(self).map(|_| ())
+    }
+
+    /// Serialize only after enforcing the same hard boundary used by vault and restore paths.
+    pub fn to_json_bounded(&self) -> Result<serde_json::Value, StorageStateBoundsError> {
+        self.validate_bounds()?;
+        serde_json::to_value(self).map_err(|error| {
+            StorageStateBoundsError::new(format!("JSON serialization failed: {error}"))
+        })
+    }
+
+    /// Parse an already materialized JSON value without allowing it to bypass the production
+    /// StorageState boundary. Callers reading bytes from disk must cap those bytes first.
+    pub fn from_json_bounded(
+        value: serde_json::Value,
+    ) -> Result<Self, StorageStateBoundsError> {
+        let mut nodes = 0_usize;
+        validate_json_value_shape(&value, &mut nodes)?;
+        bounded_serialized_len(&value)?;
+        let state: Self = serde_json::from_value(value).map_err(|error| {
+            StorageStateBoundsError::new(format!("JSON shape is not a StorageState: {error}"))
+        })?;
+        state.validate_bounds()?;
+        Ok(state)
+    }
+
     /// **[纯逻辑] 从 CDP `Storage.getCookies` 的 cookie 数组建 storage_state**（全字段保真）。
     /// `local_storage` 留空（cookie 与 localStorage 是两条独立捕获路径——cookie 走 `Storage.getCookies`，
     /// localStorage 走注入 `Object.entries`，见 [`crate::backend::CdpBackend`]）。
@@ -454,14 +658,14 @@ impl StorageState {
 
     /// **[纯逻辑] 转 `serde_json::Value`**（塞进 `EngineConfig.storage_state` 的 `Option<Value>`）。
     /// 失败（理论上不会——本结构全可序列化）→ `Err`，绝不 panic。
-    pub fn to_json(&self) -> Result<serde_json::Value, serde_json::Error> {
-        serde_json::to_value(self)
+    pub fn to_json(&self) -> Result<serde_json::Value, StorageStateBoundsError> {
+        self.to_json_bounded()
     }
 
     /// **[纯逻辑] 从 `serde_json::Value` 解析**（`EngineConfig.storage_state` 灌入侧）。缺 `cookies`
     /// 键 → 空（`#[serde(default)]`，向后兼容 W4c 加字段）。
-    pub fn from_json(v: serde_json::Value) -> Result<Self, serde_json::Error> {
-        serde_json::from_value(v)
+    pub fn from_json(v: serde_json::Value) -> Result<Self, StorageStateBoundsError> {
+        Self::from_json_bounded(v)
     }
 }
 
@@ -864,5 +1068,81 @@ mod tests {
         let s = serde_json::to_string(&state).expect("serialize");
         assert!(s.contains("\"indexDb\""), "indexDb must appear when Some: {s}");
         assert!(s.contains("\"appdb\""), "db name must appear: {s}");
+    }
+
+    fn state_with_idb_record(record: serde_json::Value) -> StorageState {
+        StorageState {
+            cookies: vec![],
+            local_storage: vec![OriginStorage {
+                origin: "https://bounded.example".into(),
+                local_storage: vec![],
+                index_db: Some(IndexedDbDump {
+                    databases: vec![IdbDatabase {
+                        name: "bounded".into(),
+                        version: 1,
+                        stores: vec![IdbStore {
+                            name: "records".into(),
+                            key_path: None,
+                            auto_increment: false,
+                            records: vec![record],
+                        }],
+                    }],
+                }),
+            }],
+        }
+    }
+
+    #[test]
+    fn storage_state_rejects_origin_count_over_per_task_boundary() {
+        let origin = OriginStorage::new_local_storage(
+            "https://bounded.example",
+            std::iter::empty::<(String, String)>(),
+        );
+        let at_limit = StorageState {
+            cookies: vec![],
+            local_storage: vec![origin.clone(); MAX_STORAGE_STATE_ORIGINS],
+        };
+        assert!(at_limit.validate_bounds().is_ok());
+        let over_limit = StorageState {
+            cookies: vec![],
+            local_storage: vec![origin; MAX_STORAGE_STATE_ORIGINS + 1],
+        };
+        assert!(over_limit.validate_bounds().is_err());
+    }
+
+    #[test]
+    fn storage_state_rejects_json_over_byte_boundary_without_full_copy() {
+        let state = StorageState {
+            cookies: vec![],
+            local_storage: vec![OriginStorage::new_local_storage(
+                "https://bounded.example",
+                [("oversized".into(), "x".repeat(MAX_STORAGE_STATE_JSON_BYTES))],
+            )],
+        };
+        assert!(state.validate_bounds().is_err());
+        assert!(state.to_json().is_err());
+    }
+
+    #[test]
+    fn storage_state_json_depth_boundary_is_exact() {
+        let mut accepted = serde_json::Value::Null;
+        for _ in 1..MAX_STORAGE_STATE_JSON_DEPTH {
+            accepted = serde_json::Value::Array(vec![accepted]);
+        }
+        assert!(state_with_idb_record(accepted).validate_bounds().is_ok());
+
+        let mut rejected = serde_json::Value::Null;
+        for _ in 0..MAX_STORAGE_STATE_JSON_DEPTH {
+            rejected = serde_json::Value::Array(vec![rejected]);
+        }
+        assert!(state_with_idb_record(rejected).validate_bounds().is_err());
+    }
+
+    #[test]
+    fn cookie_only_conversion_strips_all_page_storage() {
+        let state = state_with_idb_record(serde_json::json!({"token": "legacy"}));
+        let cookie_only = state.into_cookie_only();
+        assert!(cookie_only.local_storage.is_empty());
+        assert!(cookie_only.validate_bounds().is_ok());
     }
 }

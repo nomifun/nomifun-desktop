@@ -42,6 +42,7 @@ fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String
 
 #[cfg(feature = "browser-use")]
 struct BrowserPlatformTasks {
+    shutdown: BrowserPlatformTaskShutdown,
     sweep: tokio::task::JoinHandle<()>,
     events: tokio::task::JoinHandle<()>,
     telemetry: tokio::task::JoinHandle<()>,
@@ -50,10 +51,172 @@ struct BrowserPlatformTasks {
 #[cfg(feature = "browser-use")]
 impl Drop for BrowserPlatformTasks {
     fn drop(&mut self) {
+        // Cancellation makes every supervised loop return cooperatively. Abort
+        // as well so AppServices Drop never detaches a loop that is currently
+        // inside Hub I/O; there is no separately spawned inner worker.
+        self.shutdown.cancel();
         self.sweep.abort();
         self.events.abort();
         self.telemetry.abort();
     }
+}
+
+#[cfg(feature = "browser-use")]
+#[derive(Clone)]
+struct BrowserPlatformTaskShutdown {
+    state: tokio::sync::watch::Sender<bool>,
+}
+
+#[cfg(feature = "browser-use")]
+impl Default for BrowserPlatformTaskShutdown {
+    fn default() -> Self {
+        let (state, _receiver) = tokio::sync::watch::channel(false);
+        Self { state }
+    }
+}
+
+#[cfg(feature = "browser-use")]
+impl BrowserPlatformTaskShutdown {
+    fn cancel(&self) {
+        self.state.send_replace(true);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        *self.state.borrow()
+    }
+
+    async fn cancelled(&self) {
+        let mut state = self.state.subscribe();
+        loop {
+            if *state.borrow() {
+                return;
+            }
+            if state.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "browser-use")]
+const BROWSER_PLATFORM_LOOP_RESTART_INITIAL: Duration = Duration::from_millis(100);
+#[cfg(feature = "browser-use")]
+const BROWSER_PLATFORM_LOOP_RESTART_MAX: Duration = Duration::from_secs(5);
+
+#[cfg(feature = "browser-use")]
+fn browser_platform_loop_restart_delay(
+    failure_count: u32,
+    initial: Duration,
+    maximum: Duration,
+) -> Duration {
+    let multiplier = 1_u32
+        .checked_shl(failure_count.min(31))
+        .unwrap_or(u32::MAX);
+    initial.saturating_mul(multiplier).min(maximum)
+}
+
+/// Run exactly one instance of a Browser background loop at a time.
+///
+/// The loop future executes inline in this supervisor task. This is important:
+/// aborting the retained supervisor handle drops the active future instead of
+/// detaching an untracked inner Tokio task. Both synchronous factory panics and
+/// asynchronous loop panics are contained, then retried with capped backoff.
+#[cfg(feature = "browser-use")]
+async fn supervise_browser_platform_loop<F, Fut>(
+    loop_name: &'static str,
+    shutdown: BrowserPlatformTaskShutdown,
+    mut loop_factory: F,
+    restart_initial: Duration,
+    restart_maximum: Duration,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use futures_util::FutureExt as _;
+
+    let mut failure_count = 0_u32;
+    loop {
+        if shutdown.is_cancelled() {
+            return;
+        }
+
+        let loop_future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            loop_factory()
+        })) {
+            Ok(loop_future) => loop_future,
+            Err(_) => {
+                let restart_delay = browser_platform_loop_restart_delay(
+                    failure_count,
+                    restart_initial,
+                    restart_maximum,
+                );
+                failure_count = failure_count.saturating_add(1);
+                tracing::error!(
+                    loop_name,
+                    restart_delay_ms = restart_delay.as_millis(),
+                    "browser platform loop factory panicked; restarting"
+                );
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(restart_delay) => {}
+                }
+                continue;
+            }
+        };
+
+        let termination = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            outcome = std::panic::AssertUnwindSafe(loop_future).catch_unwind() => outcome,
+        };
+        if shutdown.is_cancelled() {
+            return;
+        }
+
+        let restart_delay = browser_platform_loop_restart_delay(
+            failure_count,
+            restart_initial,
+            restart_maximum,
+        );
+        failure_count = failure_count.saturating_add(1);
+        match termination {
+            Ok(()) => tracing::warn!(
+                loop_name,
+                restart_delay_ms = restart_delay.as_millis(),
+                "browser platform loop returned unexpectedly; restarting"
+            ),
+            Err(_) => tracing::error!(
+                loop_name,
+                restart_delay_ms = restart_delay.as_millis(),
+                "browser platform loop panicked; restarting"
+            ),
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(restart_delay) => {}
+        }
+    }
+}
+
+#[cfg(feature = "browser-use")]
+fn spawn_supervised_browser_platform_loop<F, Fut>(
+    loop_name: &'static str,
+    shutdown: BrowserPlatformTaskShutdown,
+    loop_factory: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(supervise_browser_platform_loop(
+        loop_name,
+        shutdown,
+        loop_factory,
+        BROWSER_PLATFORM_LOOP_RESTART_INITIAL,
+        BROWSER_PLATFORM_LOOP_RESTART_MAX,
+    ))
 }
 
 #[cfg(feature = "browser-use")]
@@ -63,6 +226,7 @@ fn browser_resource_telemetry_from_measurements(
     logical_cpus: Option<usize>,
     chromium_rss_bytes: Option<u64>,
     host_rss_by_process_id: std::collections::HashMap<u32, u64>,
+    host_cpu_pressure_by_process_id: std::collections::HashMap<u32, f64>,
     cpu_usage_percent: Option<f32>,
 ) -> nomifun_browser_platform::ResourceTelemetry {
     nomifun_browser_platform::ResourceTelemetry {
@@ -77,6 +241,7 @@ fn browser_resource_telemetry_from_measurements(
         // unknown instead of deriving a misleading approximation.
         gpu_pressure: None,
         host_rss_by_process_id,
+        host_cpu_pressure_by_process_id,
     }
 }
 
@@ -87,6 +252,83 @@ fn browser_cpu_pressure_from_percent(cpu_usage_percent: f32) -> f64 {
         pressure.clamp(0.0, 1.0)
     } else {
         0.0
+    }
+}
+
+#[cfg(feature = "browser-use")]
+const BROWSER_IDLE_TELEMETRY_PERIOD: Duration = Duration::from_secs(30);
+
+#[cfg(feature = "browser-use")]
+fn browser_telemetry_needs_process_scan(
+    root_identities: &[nomifun_browser_platform::BrowserProcessIdentity],
+) -> bool {
+    !root_identities.is_empty()
+}
+
+#[cfg(feature = "browser-use")]
+fn browser_resource_sample_period(sample_period_ms: u64, has_managed_hosts: bool) -> Duration {
+    let normal_period = Duration::from_millis(sample_period_ms.max(1))
+        .max(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    if has_managed_hosts {
+        normal_period
+    } else {
+        normal_period.max(BROWSER_IDLE_TELEMETRY_PERIOD)
+    }
+}
+
+#[cfg(feature = "browser-use")]
+async fn wait_for_browser_resource_sample(
+    sample_period_ms: u64,
+    has_managed_hosts: bool,
+    events: &mut tokio::sync::broadcast::Receiver<
+        nomifun_browser_platform::BrowserInventoryEvent,
+    >,
+) {
+    let normal_period = browser_resource_sample_period(sample_period_ms, true);
+    if has_managed_hosts {
+        tokio::time::sleep(normal_period).await;
+        return;
+    }
+
+    let idle_period = browser_resource_sample_period(sample_period_ms, false);
+    tokio::select! {
+        _ = tokio::time::sleep(idle_period) => {}
+        result = events.recv() => {
+            // A Host/Lane lifecycle event wakes the idle collector
+            // immediately. A closed channel must not turn teardown into a
+            // busy loop while the owning task is being aborted.
+            if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                tokio::time::sleep(idle_period).await;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "browser-use")]
+fn browser_startup_resource_policy(
+    total_memory_bytes: u64,
+    logical_cpus: Option<usize>,
+) -> nomifun_browser_platform::ResourcePolicy {
+    match (total_memory_bytes, logical_cpus.filter(|value| *value > 0)) {
+        (total_memory_bytes, Some(logical_cpus)) if total_memory_bytes > 0 => {
+            nomifun_browser_platform::ResourcePolicy::automatic(
+                total_memory_bytes,
+                logical_cpus,
+            )
+        }
+        // Hardware discovery is expected to succeed during normal startup.
+        // Retain the validated conservative policy only when the operating
+        // system cannot provide an authoritative memory/CPU baseline.
+        _ => {
+            tracing::warn!(
+                total_memory_bytes,
+                logical_cpus = logical_cpus.unwrap_or(0),
+                fallback_total_memory_bytes = 8_u64 * 1024 * 1024 * 1024,
+                fallback_logical_cpus = 4,
+                "browser hardware capacity discovery was unavailable; using the conservative fallback policy"
+            );
+            nomifun_browser_platform::ResourcePolicy::default()
+        }
     }
 }
 
@@ -247,34 +489,62 @@ fn primary_host_is_headful(display_mode: &str) -> bool {
 
 #[cfg(feature = "browser-use")]
 fn browser_process_tree_rss<I>(
-    root_pids: &[u32],
+    root_identities: &[nomifun_browser_platform::BrowserProcessIdentity],
     processes: I,
 ) -> (
     Option<u64>,
     std::collections::HashMap<u32, u64>,
 )
 where
-    I: IntoIterator<Item = (u32, Option<u32>, u64)>,
+    I: IntoIterator<Item = (u32, Option<u32>, u64, u64)>,
 {
     use std::collections::{HashMap, HashSet};
 
-    if root_pids.is_empty() {
+    if root_identities.is_empty() {
         return (None, HashMap::new());
     }
 
-    let mut rss_by_pid = HashMap::new();
+    let mut process_by_pid = HashMap::new();
+    for (pid, parent_pid, rss_bytes, started_at_secs) in processes {
+        process_by_pid.insert(pid, (parent_pid, rss_bytes, started_at_secs));
+    }
     let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (pid, parent_pid, rss_bytes) in processes {
-        rss_by_pid.insert(pid, rss_bytes);
+    for (&pid, &(parent_pid, _, child_started_at_secs)) in &process_by_pid {
         if let Some(parent_pid) = parent_pid {
-            children_by_parent.entry(parent_pid).or_default().push(pid);
+            // Windows retains an orphan's original parent PID after the
+            // parent exits. If that numeric PID is later reused by Chromium,
+            // a parent-only walk attributes the old unrelated process (and
+            // all of its children) to Browser Use. A real child cannot start
+            // before its current parent, so reject that stale PID-reuse edge.
+            let parent_is_not_newer = process_by_pid
+                .get(&parent_pid)
+                .is_none_or(|(_, _, parent_started_at_secs)| {
+                    child_started_at_secs >= *parent_started_at_secs
+                });
+            if parent_is_not_newer {
+                children_by_parent.entry(parent_pid).or_default().push(pid);
+            }
         }
     }
 
     let mut total_visited = HashSet::new();
     let mut host_rss_by_process_id = HashMap::new();
     let mut total_rss_bytes = 0_u64;
-    for root_pid in root_pids.iter().copied().collect::<HashSet<_>>() {
+    for root_identity in root_identities.iter().copied().collect::<HashSet<_>>() {
+        let root_pid = root_identity.process_id;
+        // Legacy fakes may only expose a PID. Production drivers always carry
+        // the captured start time, and a mismatched or vanished root must not
+        // be charged to Browser Use after PID reuse.
+        let root_matches = match process_by_pid.get(&root_pid) {
+            Some((_, _, observed_start)) => {
+                root_identity.started_at_epoch_seconds == 0
+                    || *observed_start == root_identity.started_at_epoch_seconds
+            }
+            None => root_identity.started_at_epoch_seconds == 0,
+        };
+        if !root_matches {
+            continue;
+        }
         let mut pending = vec![root_pid];
         let mut host_visited = HashSet::new();
         let mut host_measured = false;
@@ -283,7 +553,7 @@ where
             if !host_visited.insert(pid) {
                 continue;
             }
-            if let Some(rss_bytes) = rss_by_pid.get(&pid) {
+            if let Some((_, rss_bytes, _)) = process_by_pid.get(&pid) {
                 host_measured = true;
                 host_rss_bytes = host_rss_bytes.saturating_add(*rss_bytes);
                 if total_visited.insert(pid) {
@@ -303,6 +573,87 @@ where
         (!total_visited.is_empty()).then_some(total_rss_bytes),
         host_rss_by_process_id,
     )
+}
+
+#[cfg(feature = "browser-use")]
+fn browser_process_tree_cpu_pressure<I>(
+    root_identities: &[nomifun_browser_platform::BrowserProcessIdentity],
+    logical_cpus: usize,
+    processes: I,
+) -> std::collections::HashMap<u32, f64>
+where
+    I: IntoIterator<Item = (u32, Option<u32>, f32, u64)>,
+{
+    use std::collections::{HashMap, HashSet};
+
+    if root_identities.is_empty() || logical_cpus == 0 {
+        return HashMap::new();
+    }
+
+    let mut process_by_pid = HashMap::new();
+    for (pid, parent_pid, cpu_usage_percent, started_at_secs) in processes {
+        process_by_pid.insert(pid, (parent_pid, cpu_usage_percent, started_at_secs));
+    }
+    let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (&pid, &(parent_pid, _, child_started_at_secs)) in &process_by_pid {
+        if let Some(parent_pid) = parent_pid {
+            // Apply the same start-time edge validation as RSS attribution.
+            // Otherwise a Chromium root PID reused after an unrelated orphan
+            // was created could make Browser Use claim that process's CPU.
+            let parent_is_not_newer = process_by_pid
+                .get(&parent_pid)
+                .is_none_or(|(_, _, parent_started_at_secs)| {
+                    child_started_at_secs >= *parent_started_at_secs
+                });
+            if parent_is_not_newer {
+                children_by_parent.entry(parent_pid).or_default().push(pid);
+            }
+        }
+    }
+
+    let machine_capacity_percent = (logical_cpus as f64) * 100.0;
+    let mut host_cpu_pressure_by_process_id = HashMap::new();
+    for root_identity in root_identities.iter().copied().collect::<HashSet<_>>() {
+        let root_pid = root_identity.process_id;
+        let root_matches = match process_by_pid.get(&root_pid) {
+            Some((_, _, observed_start)) => {
+                root_identity.started_at_epoch_seconds == 0
+                    || *observed_start == root_identity.started_at_epoch_seconds
+            }
+            None => root_identity.started_at_epoch_seconds == 0,
+        };
+        if !root_matches {
+            continue;
+        }
+
+        let mut pending = vec![root_pid];
+        let mut host_visited = HashSet::new();
+        let mut host_measured = false;
+        let mut host_cpu_percent = 0.0_f64;
+        while let Some(pid) = pending.pop() {
+            if !host_visited.insert(pid) {
+                continue;
+            }
+            if let Some((_, cpu_usage_percent, _)) = process_by_pid.get(&pid) {
+                host_measured = true;
+                let usage = f64::from(*cpu_usage_percent);
+                if usage.is_finite() && usage > 0.0 {
+                    host_cpu_percent += usage;
+                }
+            }
+            if let Some(children) = children_by_parent.get(&pid) {
+                pending.extend(children.iter().copied());
+            }
+        }
+        if host_measured {
+            host_cpu_pressure_by_process_id.insert(
+                root_pid,
+                (host_cpu_percent / machine_capacity_percent).clamp(0.0, 1.0),
+            );
+        }
+    }
+
+    host_cpu_pressure_by_process_id
 }
 
 #[cfg(feature = "browser-use")]
@@ -353,6 +704,7 @@ struct BrowserShutdownCoordinatorState {
 pub(crate) struct BrowserShutdownCoordinator {
     hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
     state: Arc<tokio::sync::Mutex<BrowserShutdownCoordinatorState>>,
+    platform_tasks_shutdown: Option<BrowserPlatformTaskShutdown>,
 }
 
 #[cfg(feature = "browser-use")]
@@ -363,10 +715,31 @@ impl BrowserShutdownCoordinator {
             state: Arc::new(tokio::sync::Mutex::new(
                 BrowserShutdownCoordinatorState::default(),
             )),
+            platform_tasks_shutdown: None,
+        }
+    }
+
+    fn with_platform_tasks(
+        hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+        platform_tasks_shutdown: BrowserPlatformTaskShutdown,
+    ) -> Self {
+        Self {
+            hub,
+            state: Arc::new(tokio::sync::Mutex::new(
+                BrowserShutdownCoordinatorState::default(),
+            )),
+            platform_tasks_shutdown: Some(platform_tasks_shutdown),
         }
     }
 
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
+        // Once ordered ingress shutdown reaches the Hub step, no telemetry,
+        // sweep, or realtime loop may be restarted against a closing Hub.
+        // Cancellation is idempotent, so concurrent shutdown callers share the
+        // same no-restart boundary before joining the Hub shutdown flight.
+        if let Some(shutdown) = &self.platform_tasks_shutdown {
+            shutdown.cancel();
+        }
         self.shutdown_with_timeout(BROWSER_SHUTDOWN_TIMEOUT).await
     }
 
@@ -840,36 +1213,157 @@ fn persisted_identity_seed_coverage() -> nomifun_browser_platform::SnapshotCover
 #[cfg(feature = "browser-use")]
 fn sample_browser_resources(
     system: &mut sysinfo::System,
-    root_pids: &[u32],
+    root_identities: &[nomifun_browser_platform::BrowserProcessIdentity],
     cpu_usage_percent: Option<f32>,
 ) -> nomifun_browser_platform::ResourceTelemetry {
     system.refresh_memory();
+    let logical_cpus = std::thread::available_parallelism()
+        .ok()
+        .map(std::num::NonZeroUsize::get);
+    if !browser_telemetry_needs_process_scan(root_identities) {
+        return browser_resource_telemetry_from_measurements(
+            system.total_memory(),
+            system.available_memory(),
+            logical_cpus,
+            None,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            cpu_usage_percent,
+        );
+    }
     system.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
         true,
-        sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_memory()
+            .with_cpu(),
     );
+    // Re-probe the platform-native creation key at sample time. The Hub may
+    // retain cleanup authority after Chromium has exited; a numeric PID can
+    // then belong to an unrelated process. Probe failures fail closed by
+    // omitting that Host from this sample rather than inventing memory use.
+    let verified_identities = root_identities
+        .iter()
+        .copied()
+        .filter(|identity| {
+            if identity.platform_start_key == 0 {
+                return identity.started_at_epoch_seconds == 0;
+            }
+            nomi_process_runtime::probe_process_identity(identity.process_id)
+                .ok()
+                .flatten()
+                .is_some_and(|live| {
+                    live.platform_start_key == identity.platform_start_key
+                })
+        })
+        .collect::<Vec<_>>();
     let (chromium_rss_bytes, host_rss_by_process_id) = browser_process_tree_rss(
-        root_pids,
+        &verified_identities,
         system.processes().values().map(|process| {
             (
                 process.pid().as_u32(),
                 process.parent().map(|pid| pid.as_u32()),
                 process.memory(),
+                process.start_time(),
+            )
+        }),
+    );
+    let host_cpu_pressure_by_process_id = browser_process_tree_cpu_pressure(
+        &verified_identities,
+        logical_cpus.unwrap_or(0),
+        system.processes().values().map(|process| {
+            (
+                process.pid().as_u32(),
+                process.parent().map(|pid| pid.as_u32()),
+                process.cpu_usage(),
+                process.start_time(),
             )
         }),
     );
     browser_resource_telemetry_from_measurements(
         system.total_memory(),
         system.available_memory(),
-        std::thread::available_parallelism()
-            .ok()
-            .map(std::num::NonZeroUsize::get),
+        logical_cpus,
         chromium_rss_bytes,
         host_rss_by_process_id,
+        host_cpu_pressure_by_process_id,
         cpu_usage_percent,
     )
+}
 
+#[cfg(feature = "browser-use")]
+async fn run_browser_lifecycle_sweep_loop(
+    hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+) {
+    loop {
+        // Read the live policy for every cycle. Resource-policy updates may
+        // change the lifecycle cadence, and a fixed application-level interval
+        // would silently ignore that setting until restart.
+        let sweep_period_ms = hub
+            .resource_policy()
+            .await
+            .lifecycle_sweep_period_ms
+            .max(1);
+        // The first sleep intentionally avoids an eager startup sweep before
+        // runtimes have finished attaching their owner leases.
+        tokio::time::sleep(Duration::from_millis(sweep_period_ms)).await;
+        if let Err(error) = hub.sweep().await {
+            tracing::warn!(
+                code = ?error.code,
+                retryable = error.retryable,
+                "browser lifecycle sweep failed"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "browser-use")]
+async fn run_browser_resource_telemetry_loop(
+    hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+    mut system: sysinfo::System,
+    mut inventory_events: tokio::sync::broadcast::Receiver<
+        nomifun_browser_platform::BrowserInventoryEvent,
+    >,
+) {
+    // CPU usage is delta-based. This first refresh establishes the baseline;
+    // the immediate startup sample deliberately leaves CPU pressure unknown
+    // while still publishing memory and process RSS.
+    system.refresh_cpu_usage();
+    let root_identities = hub.managed_host_process_identities().await;
+    let initial_sample = sample_browser_resources(&mut system, &root_identities, None);
+    hub.update_resource_telemetry(initial_sample).await;
+    let mut has_managed_hosts = !root_identities.is_empty();
+    loop {
+        let sample_period_ms = hub.resource_policy().await.sample_period_ms;
+        // Idle Browser Use does not need to scan the operating system's full
+        // process table every five seconds. Inventory changes wake this wait
+        // immediately, so the first managed Host restores the configured
+        // sampling cadence without waiting for the idle period.
+        wait_for_browser_resource_sample(
+            sample_period_ms,
+            has_managed_hosts,
+            &mut inventory_events,
+        )
+        .await;
+        system.refresh_cpu_usage();
+        let root_identities = hub.managed_host_process_identities().await;
+        let cpu_usage_percent = system.global_cpu_usage();
+        let next_has_managed_hosts = !root_identities.is_empty();
+        if has_managed_hosts && !next_has_managed_hosts {
+            // `sysinfo::System` retains its discovered process table. Once the
+            // last managed Host is gone, replace the collector so Browser Use
+            // does not retain unrelated OS process metadata while idle.
+            system = sysinfo::System::new();
+            system.refresh_cpu_usage();
+        }
+        has_managed_hosts = next_has_managed_hosts;
+        let sample = sample_browser_resources(
+            &mut system,
+            &root_identities,
+            Some(cpu_usage_percent),
+        );
+        hub.update_resource_telemetry(sample).await;
+    }
 }
 
 #[cfg(feature = "browser-use")]
@@ -1488,7 +1982,16 @@ impl AppServices {
     ) -> anyhow::Result<Self> {
         use tokio::time::Duration;
 
-        let shutdown_coordinator = BrowserShutdownCoordinator::new(Arc::clone(&hub));
+        // Subscribe before publishing the Hub to any provider or MCP entry
+        // point, so an immediate first Host launch cannot race past the idle
+        // telemetry wake-up channel or the realtime inventory forwarder.
+        let telemetry_events = hub.subscribe();
+        let realtime_events = hub.subscribe();
+        let platform_tasks_shutdown = BrowserPlatformTaskShutdown::default();
+        let shutdown_coordinator = BrowserShutdownCoordinator::with_platform_tasks(
+            Arc::clone(&hub),
+            platform_tasks_shutdown.clone(),
+        );
         self.browser_platform_shutdown
             .set_hub_coordinator(shutdown_coordinator)
             .await;
@@ -1518,75 +2021,64 @@ impl AppServices {
         }
 
         let sweep_hub = Arc::clone(&hub);
-        let sweep = tokio::spawn(async move {
-            loop {
-                // Read the live policy for every cycle. Resource-policy
-                // updates may change the lifecycle cadence, and a fixed
-                // application-level interval would silently ignore that
-                // setting until restart.
-                let sweep_period_ms = sweep_hub
-                    .resource_policy()
-                    .await
-                    .lifecycle_sweep_period_ms
-                    .max(1);
-                // The first sleep intentionally avoids an eager startup sweep
-                // before runtimes have finished attaching their owner leases.
-                tokio::time::sleep(Duration::from_millis(sweep_period_ms)).await;
-                if let Err(error) = sweep_hub.sweep().await {
-                    tracing::warn!(
-                        code = ?error.code,
-                        retryable = error.retryable,
-                        "browser lifecycle sweep failed"
-                    );
-                }
-            }
-        });
+        let sweep = spawn_supervised_browser_platform_loop(
+            "lifecycle_sweep",
+            platform_tasks_shutdown.clone(),
+            move || {
+                let hub = Arc::clone(&sweep_hub);
+                async move { run_browser_lifecycle_sweep_loop(hub).await }
+            },
+        );
 
-        let events_rx = hub.subscribe();
+        let events_hub = Arc::clone(&hub);
         let event_bus = self.event_bus.clone();
         let ws_manager = self.ws_manager.clone();
         let installation_owner = self.authoritative_user_id.clone();
-        let events = tokio::spawn(forward_browser_inventory_events(
-            events_rx,
-            event_bus,
-            ws_manager,
-            installation_owner,
-        ));
+        let mut first_realtime_events = Some(realtime_events);
+        let events = spawn_supervised_browser_platform_loop(
+            "inventory_events",
+            platform_tasks_shutdown.clone(),
+            move || {
+                let receiver = first_realtime_events
+                    .take()
+                    .unwrap_or_else(|| events_hub.subscribe());
+                let event_bus = Arc::clone(&event_bus);
+                let ws_manager = Arc::clone(&ws_manager);
+                let installation_owner = Arc::clone(&installation_owner);
+                async move {
+                    forward_browser_inventory_events(
+                        receiver,
+                        event_bus,
+                        ws_manager,
+                        installation_owner,
+                    )
+                    .await
+                }
+            },
+        );
 
         let telemetry_hub = Arc::clone(&hub);
-        let telemetry = tokio::spawn(async move {
-            let mut system = sysinfo::System::new();
-            // CPU usage is delta-based. This first refresh establishes the
-            // baseline; the immediate startup sample deliberately leaves CPU
-            // pressure unknown while still publishing memory and process RSS.
-            system.refresh_cpu_usage();
-            let root_pids = telemetry_hub.managed_host_process_ids().await;
-            let initial_sample = sample_browser_resources(&mut system, &root_pids, None);
-            telemetry_hub
-                .update_resource_telemetry(initial_sample)
-                .await;
-            loop {
-                let sample_period_ms = telemetry_hub.resource_policy().await.sample_period_ms;
-                // Honor the policy period while preserving sysinfo's minimum
-                // delta window for an accurate CPU sample.
-                tokio::time::sleep(
-                    Duration::from_millis(sample_period_ms.max(1))
-                        .max(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL),
-                )
-                .await;
-                system.refresh_cpu_usage();
-                let root_pids = telemetry_hub.managed_host_process_ids().await;
-                let cpu_usage_percent = system.global_cpu_usage();
-                let sample = sample_browser_resources(
-                    &mut system,
-                    &root_pids,
-                    Some(cpu_usage_percent),
-                );
-                telemetry_hub.update_resource_telemetry(sample).await;
-            }
-        });
+        let mut first_telemetry_events = Some(telemetry_events);
+        let telemetry = spawn_supervised_browser_platform_loop(
+            "resource_telemetry",
+            platform_tasks_shutdown.clone(),
+            move || {
+                // Collector and receiver are attempt-local. A panic cannot
+                // poison or retain sysinfo's process table; the replacement
+                // loop starts from a clean CPU baseline and a fresh receiver.
+                let system = sysinfo::System::new();
+                let inventory_events = first_telemetry_events
+                    .take()
+                    .unwrap_or_else(|| telemetry_hub.subscribe());
+                let hub = Arc::clone(&telemetry_hub);
+                async move {
+                    run_browser_resource_telemetry_loop(hub, system, inventory_events).await
+                }
+            },
+        );
 
         self._browser_platform_tasks = Some(BrowserPlatformTasks {
+            shutdown: platform_tasks_shutdown,
             sweep,
             events,
             telemetry,
@@ -2560,6 +3052,7 @@ impl AppServices {
                 &nomi_browser_engine::shared_storage_state_path(&services.data_dir),
                 &services.encryption_key,
             )
+            .map(nomi_browser_engine::StorageState::into_cookie_only)
             .and_then(|state| state.to_json().ok());
             let startup_identity_snapshot = storage_state.clone();
             let engine_config = nomi_browser_engine::EngineConfig {
@@ -2592,6 +3085,24 @@ impl AppServices {
                 headful: primary_host_is_headful(display_mode),
                 ..Default::default()
             };
+            // Derive installation-wide throughput from this machine before
+            // constructing the Hub. Resource telemetry updates pressure and
+            // RSS decisions, but deliberately do not rewrite scheduler limits;
+            // leaving HubConfig::default() here would therefore pin every
+            // machine to the fallback 8-GiB/4-CPU capacity for the lifetime of
+            // the process. Per-task limits remain preset constants and are not
+            // expanded by a larger machine or HighConcurrency.
+            let mut startup_system = sysinfo::System::new();
+            startup_system.refresh_memory();
+            let startup_total_memory_bytes = startup_system.total_memory();
+            let startup_available_memory_bytes = startup_system.available_memory();
+            let startup_logical_cpus = std::thread::available_parallelism()
+                .ok()
+                .map(std::num::NonZeroUsize::get);
+            hub_config.resource_policy = browser_startup_resource_policy(
+                startup_total_memory_bytes,
+                startup_logical_cpus,
+            );
             // Restore policy before Hub construction so admission and operation
             // limits are correct before any runtime can open its first Lane.
             let browser_preferences =
@@ -2606,6 +3117,24 @@ impl AppServices {
                 Arc::new(factory),
                 hub_config,
             ));
+            // Seed memory pressure synchronously before the Hub is published
+            // to any provider or MCP entry point. The periodic sampler starts
+            // later, so relying on its spawned first tick would leave a short
+            // admission window in which a heavily pressured machine still
+            // appeared healthy.
+            // No managed Host exists yet, so avoid an unnecessary full-system
+            // process scan on the startup critical path. Host RSS joins begin
+            // with the periodic sampler after Host authority is available.
+            let initial_resource_sample = browser_resource_telemetry_from_measurements(
+                startup_total_memory_bytes,
+                startup_available_memory_bytes,
+                startup_logical_cpus,
+                None,
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+                None,
+            );
+            hub.update_resource_telemetry(initial_resource_sample).await;
             if let Some(payload) = startup_identity_snapshot {
                 if let Err(error) = hub.publish_identity_snapshot(
                     nomifun_browser_platform::IdentitySnapshotPayload::from_json(payload),
@@ -2802,6 +3331,7 @@ mod tests {
     #[cfg(feature = "browser-use")]
     use nomifun_browser_platform::{
         BrowserErrorCode, BrowserHostDriver, BrowserHostFactory, BrowserHostId,
+        BrowserProfileFootprint,
         BrowserIdentityMode, BrowserLaneDriver, BrowserOperation,
         BrowserOperationResult, BrowserPlatformError, DriverOperationContext, HostLaunchRequest,
         HostLifecycleState, HubConfig, LaneFreezeOutcome, LaneLaunchRequest,
@@ -2809,6 +3339,44 @@ mod tests {
     };
     #[cfg(feature = "browser-use")]
     use tokio::sync::{Notify, Semaphore};
+
+    #[cfg(feature = "browser-use")]
+    struct ActiveBrowserLoopGuard {
+        active: Arc<AtomicUsize>,
+    }
+
+    #[cfg(feature = "browser-use")]
+    impl ActiveBrowserLoopGuard {
+        fn enter(active: Arc<AtomicUsize>, maximum: &AtomicUsize) -> Self {
+            let live = active.fetch_add(1, Ordering::AcqRel) + 1;
+            maximum.fetch_max(live, Ordering::AcqRel);
+            Self { active }
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    impl Drop for ActiveBrowserLoopGuard {
+        fn drop(&mut self) {
+            self.active.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    fn spawn_tracked_pending_browser_loop(
+        loop_name: &'static str,
+        shutdown: BrowserPlatformTaskShutdown,
+        active: Arc<AtomicUsize>,
+        maximum: Arc<AtomicUsize>,
+    ) -> tokio::task::JoinHandle<()> {
+        spawn_supervised_browser_platform_loop(loop_name, shutdown, move || {
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            async move {
+                let _guard = ActiveBrowserLoopGuard::enter(active, &maximum);
+                std::future::pending::<()>().await;
+            }
+        })
+    }
 
     #[cfg(feature = "browser-use")]
     #[derive(Default)]
@@ -3076,6 +3644,17 @@ mod tests {
 
         fn epoch(&self) -> u64 {
             self.epoch
+        }
+
+        // This fake manages no on-disk profile, so report a completed
+        // zero measurement. Inheriting the trait default would instead
+        // mean "could not measure", which fences Primary fail-closed.
+        async fn profile_footprint(
+            &self,
+            _stop_after_bytes: u64,
+            _stop_after_entries: u64,
+        ) -> Result<Option<BrowserProfileFootprint>, BrowserPlatformError> {
+            Ok(Some(BrowserProfileFootprint::EMPTY))
         }
 
         fn state(&self) -> HostLifecycleState {
@@ -3485,6 +4064,37 @@ mod tests {
             1,
             "successful shutdown must be cached"
         );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn ordered_hub_shutdown_cancels_platform_loops_before_waiting_for_host_cleanup() {
+        let (_unbound_coordinator, probe, hub) = shutdown_coordinator_fixture().await;
+        probe.block_shutdown.store(true, Ordering::Release);
+        let platform_tasks_shutdown = BrowserPlatformTaskShutdown::default();
+        let coordinator = BrowserShutdownCoordinator::with_platform_tasks(
+            hub,
+            platform_tasks_shutdown.clone(),
+        );
+
+        let shutdown = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move { coordinator.shutdown().await })
+        };
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            platform_tasks_shutdown.cancelled(),
+        )
+        .await
+        .expect("ordered Hub shutdown must stop loop supervisors first");
+        probe.wait_for_shutdown_calls(1).await;
+        assert!(
+            !shutdown.is_finished(),
+            "the loop cancellation boundary must not depend on Host cleanup completing"
+        );
+
+        probe.shutdown_release.add_permits(1);
+        assert!(shutdown.await.unwrap().is_ok());
     }
 
     #[cfg(feature = "browser-use")]
@@ -4064,6 +4674,180 @@ mod tests {
         assert!(require_utf8_executable_path(&path).is_err());
     }
 
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_platform_loop_restart_backoff_is_exponential_and_capped() {
+        let initial = Duration::from_millis(100);
+        let maximum = Duration::from_secs(5);
+
+        assert_eq!(
+            browser_platform_loop_restart_delay(0, initial, maximum),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            browser_platform_loop_restart_delay(1, initial, maximum),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            browser_platform_loop_restart_delay(5, initial, maximum),
+            Duration::from_millis(3_200)
+        );
+        assert_eq!(
+            browser_platform_loop_restart_delay(6, initial, maximum),
+            maximum
+        );
+        assert_eq!(
+            browser_platform_loop_restart_delay(u32::MAX, initial, maximum),
+            maximum
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_platform_shutdown_signal_has_no_cancel_wait_race() {
+        // Alternate cancel-before-subscribe with concurrent cancellation after
+        // waiter creation. Repetition makes the old AtomicBool + notify_waiters
+        // lost-wakeup window deterministic enough to catch if reintroduced;
+        // watch retains the terminal value for every later subscriber.
+        for round in 0..128 {
+            let shutdown = BrowserPlatformTaskShutdown::default();
+            if round % 2 == 0 {
+                shutdown.cancel();
+            }
+            let mut waiters = tokio::task::JoinSet::new();
+            for _ in 0..8 {
+                let shutdown = shutdown.clone();
+                waiters.spawn(async move { shutdown.cancelled().await });
+            }
+            if round % 2 != 0 {
+                let mut cancellers = tokio::task::JoinSet::new();
+                for _ in 0..8 {
+                    let shutdown = shutdown.clone();
+                    cancellers.spawn(async move { shutdown.cancel() });
+                }
+                while let Some(result) = cancellers.join_next().await {
+                    result.expect("concurrent cancellation must not panic");
+                }
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while let Some(result) = waiters.join_next().await {
+                    result.expect("shutdown waiter must not panic");
+                }
+            })
+            .await
+            .expect("every pre-existing and future shutdown waiter must wake");
+            assert!(shutdown.is_cancelled());
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_platform_supervisor_restarts_without_overlapping_loop_instances() {
+        let shutdown = BrowserPlatformTaskShutdown::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+
+        let attempts_for_loop = Arc::clone(&attempts);
+        let active_for_loop = Arc::clone(&active);
+        let maximum_for_loop = Arc::clone(&maximum);
+        let supervisor_shutdown = shutdown.clone();
+        let supervisor = tokio::spawn(supervise_browser_platform_loop(
+            "test_restart",
+            supervisor_shutdown,
+            move || {
+                let attempt = attempts_for_loop.fetch_add(1, Ordering::AcqRel);
+                let active = Arc::clone(&active_for_loop);
+                let maximum = Arc::clone(&maximum_for_loop);
+                async move {
+                    let _guard = ActiveBrowserLoopGuard::enter(active, &maximum);
+                    match attempt {
+                        0 => {}
+                        1 => panic!("injected supervised-loop panic"),
+                        _ => std::future::pending::<()>().await,
+                    }
+                }
+            },
+            Duration::ZERO,
+            Duration::ZERO,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while attempts.load(Ordering::Acquire) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the supervisor must rebuild the loop after return and panic");
+        assert_eq!(maximum.load(Ordering::Acquire), 1);
+        assert_eq!(active.load(Ordering::Acquire), 1);
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("cancellation must stop the supervisor")
+            .expect("the supervisor task must not panic");
+        assert_eq!(active.load(Ordering::Acquire), 0);
+        let settled_attempts = attempts.load(Ordering::Acquire);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            settled_attempts,
+            "shutdown must not start another loop attempt"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn dropping_browser_platform_tasks_cancels_every_inline_loop() {
+        let shutdown = BrowserPlatformTaskShutdown::default();
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let tasks = BrowserPlatformTasks {
+            shutdown: shutdown.clone(),
+            sweep: spawn_tracked_pending_browser_loop(
+                "drop_sweep",
+                shutdown.clone(),
+                Arc::clone(&active),
+                Arc::clone(&maximum),
+            ),
+            events: spawn_tracked_pending_browser_loop(
+                "drop_events",
+                shutdown.clone(),
+                Arc::clone(&active),
+                Arc::clone(&maximum),
+            ),
+            telemetry: spawn_tracked_pending_browser_loop(
+                "drop_telemetry",
+                shutdown.clone(),
+                Arc::clone(&active),
+                Arc::clone(&maximum),
+            ),
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active.load(Ordering::Acquire) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all three platform loops must start");
+        assert_eq!(active.load(Ordering::Acquire), 3);
+
+        drop(tasks);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping AppServices-owned handles must drop active loop futures");
+        assert!(shutdown.is_cancelled());
+        assert_eq!(maximum.load(Ordering::Acquire), 3);
+    }
+
 
     #[cfg(feature = "browser-use")]
     #[test]
@@ -4074,6 +4858,7 @@ mod tests {
             Some(12),
             Some(2_048),
             std::collections::HashMap::from([(4_242, 2_048)]),
+            std::collections::HashMap::from([(4_242, 0.25)]),
             Some(37.5),
         );
 
@@ -4082,6 +4867,10 @@ mod tests {
         assert_eq!(telemetry.logical_cpus, 12);
         assert_eq!(telemetry.chromium_rss_bytes, 2_048);
         assert_eq!(telemetry.host_rss_by_process_id.get(&4_242), Some(&2_048));
+        assert_eq!(
+            telemetry.host_cpu_pressure_by_process_id.get(&4_242),
+            Some(&0.25)
+        );
         assert!((telemetry.cpu_pressure - 0.375).abs() < f64::EPSILON);
         assert_eq!(telemetry.gpu_pressure, None);
 
@@ -4090,6 +4879,7 @@ mod tests {
             7_500,
             None,
             None,
+            std::collections::HashMap::new(),
             std::collections::HashMap::new(),
             None,
         );
@@ -4103,32 +4893,242 @@ mod tests {
 
     #[cfg(feature = "browser-use")]
     #[test]
+    fn browser_startup_policy_uses_machine_capacity_without_widening_task_limits() {
+        let small_machine =
+            browser_startup_resource_policy(4 * 1024 * 1024 * 1024, Some(2));
+        let large_machine = browser_startup_resource_policy(
+            64 * 1024 * 1024 * 1024,
+            Some(16),
+        );
+
+        assert_eq!(small_machine.max_active_operations, 1);
+        assert_eq!(small_machine.max_open_lanes, 4);
+        assert_eq!(large_machine.max_active_operations, 32);
+        assert_eq!(large_machine.max_open_lanes, 128);
+        assert_eq!(
+            large_machine.max_task_memory_bytes,
+            small_machine.max_task_memory_bytes
+        );
+        assert_eq!(
+            large_machine.max_task_active_operations,
+            small_machine.max_task_active_operations
+        );
+        assert_eq!(
+            large_machine.max_task_open_lanes,
+            small_machine.max_task_open_lanes
+        );
+        assert_eq!(large_machine.max_task_tabs, small_machine.max_task_tabs);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_startup_policy_falls_back_only_without_authoritative_hardware() {
+        let fallback = nomifun_browser_platform::ResourcePolicy::default();
+        assert_eq!(browser_startup_resource_policy(0, Some(8)), fallback);
+        assert_eq!(
+            browser_startup_resource_policy(16 * 1024 * 1024 * 1024, None),
+            fallback
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_telemetry_skips_process_scans_without_managed_hosts() {
+        assert!(!browser_telemetry_needs_process_scan(&[]));
+        assert!(browser_telemetry_needs_process_scan(&[
+            nomifun_browser_platform::BrowserProcessIdentity {
+                process_id: 42,
+                started_at_epoch_seconds: 7,
+                platform_start_key: 9,
+            }
+        ]));
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_telemetry_uses_idle_backoff_only_without_managed_hosts() {
+        let active = browser_resource_sample_period(5_000, true);
+        let idle = browser_resource_sample_period(5_000, false);
+
+        assert_eq!(active, Duration::from_secs(5));
+        assert_eq!(idle, BROWSER_IDLE_TELEMETRY_PERIOD);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_telemetry_inventory_event_wakes_idle_collector_immediately() {
+        let (sender, mut receiver) = tokio::sync::broadcast::channel(1);
+        sender
+            .send(nomifun_browser_platform::BrowserInventoryEvent {
+                sequence: 1,
+                change_kind: "host_started".to_owned(),
+                lane_id: None,
+                user_id: None,
+                conversation_id: None,
+                at_ms: 1,
+            })
+            .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_browser_resource_sample(5_000, false, &mut receiver),
+        )
+        .await
+        .expect("a Host inventory event must wake the idle collector");
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
     fn browser_process_tree_rss_counts_roots_and_descendants_once() {
         let (rss, hosts) = browser_process_tree_rss(
-            &[10, 20, 10],
+            &[
+                legacy_browser_process(10),
+                legacy_browser_process(20),
+                legacy_browser_process(10),
+            ],
             [
-                (10, Some(1), 100),
-                (11, Some(10), 50),
-                (12, Some(11), 25),
-                (20, Some(1), 200),
-                (99, Some(1), 9_999),
+                (10, Some(1), 100, 100),
+                (11, Some(10), 50, 101),
+                (12, Some(11), 25, 102),
+                (20, Some(1), 200, 100),
+                (99, Some(1), 9_999, 100),
             ],
         );
         assert_eq!(rss, Some(375));
         assert_eq!(hosts.get(&10), Some(&175));
         assert_eq!(hosts.get(&20), Some(&200));
         assert_eq!(
-            browser_process_tree_rss(&[10], [(11, Some(10), 50)]),
+            browser_process_tree_rss(&[legacy_browser_process(10)], [(11, Some(10), 50, 101)]),
             (Some(50), std::collections::HashMap::from([(10, 50)]))
         );
         assert_eq!(
-            browser_process_tree_rss(&[10], [(99, Some(1), 9_999)]),
+            browser_process_tree_rss(
+                &[legacy_browser_process(10)],
+                [(99, Some(1), 9_999, 100)],
+            ),
             (None, std::collections::HashMap::new())
         );
         assert_eq!(
-            browser_process_tree_rss(&[], [(10, Some(1), 100)]),
+            browser_process_tree_rss(&[], [(10, Some(1), 100, 100)]),
             (None, std::collections::HashMap::new())
         );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_process_tree_rss_rejects_stale_parent_pid_reuse_edges() {
+        let (rss, hosts) = browser_process_tree_rss(
+            &[nomifun_browser_platform::BrowserProcessIdentity {
+                process_id: 10,
+                started_at_epoch_seconds: 200,
+                platform_start_key: 10_200,
+            }],
+            [
+                // Current Chromium root reused PID 10 at t=200.
+                (10, Some(1), 100, 200),
+                (11, Some(10), 50, 201),
+                // This orphan still reports parent 10 but predates the
+                // current root, so neither it nor its real child belongs to
+                // the managed Chromium tree.
+                (90, Some(10), 9_999, 100),
+                (91, Some(90), 8_888, 101),
+            ],
+        );
+
+        assert_eq!(rss, Some(150));
+        assert_eq!(hosts, std::collections::HashMap::from([(10, 150)]));
+    }
+
+    #[cfg(feature = "browser-use")]
+    fn legacy_browser_process(
+        process_id: u32,
+    ) -> nomifun_browser_platform::BrowserProcessIdentity {
+        nomifun_browser_platform::BrowserProcessIdentity {
+            process_id,
+            started_at_epoch_seconds: 0,
+            platform_start_key: 0,
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_process_tree_rss_rejects_reused_root_pid() {
+        let expected = nomifun_browser_platform::BrowserProcessIdentity {
+            process_id: 10,
+            started_at_epoch_seconds: 100,
+            platform_start_key: 10_100,
+        };
+        assert_eq!(
+            browser_process_tree_rss(&[expected], [(10, Some(1), 500, 101)]),
+            (None, std::collections::HashMap::new())
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_process_tree_cpu_pressure_normalizes_managed_trees_only() {
+        let hosts = browser_process_tree_cpu_pressure(
+            &[
+                legacy_browser_process(10),
+                legacy_browser_process(20),
+                legacy_browser_process(10),
+            ],
+            4,
+            [
+                (10, Some(1), 100.0, 100),
+                (11, Some(10), 50.0, 101),
+                (12, Some(11), 50.0, 102),
+                (20, Some(1), 100.0, 100),
+                (21, Some(20), f32::NAN, 101),
+                (22, Some(20), -50.0, 101),
+                (99, Some(1), 900.0, 100),
+            ],
+        );
+
+        assert_eq!(hosts.get(&10), Some(&0.5));
+        assert_eq!(hosts.get(&20), Some(&0.25));
+        assert!(!hosts.contains_key(&99));
+        assert!(browser_process_tree_cpu_pressure(
+            &[legacy_browser_process(10)],
+            0,
+            [(10, Some(1), 100.0, 100)]
+        )
+        .is_empty());
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_process_tree_cpu_pressure_rejects_pid_reuse() {
+        let expected = nomifun_browser_platform::BrowserProcessIdentity {
+            process_id: 10,
+            started_at_epoch_seconds: 200,
+            platform_start_key: 10_200,
+        };
+        let hosts = browser_process_tree_cpu_pressure(
+            &[expected],
+            4,
+            [
+                (10, Some(1), 100.0, 200),
+                (11, Some(10), 100.0, 201),
+                // The stale orphan predates the current root and must not be
+                // joined to this managed Host merely through reused PID 10.
+                (90, Some(10), 400.0, 100),
+                (91, Some(90), 400.0, 101),
+            ],
+        );
+        assert_eq!(hosts, std::collections::HashMap::from([(10, 0.5)]));
+
+        let reused = nomifun_browser_platform::BrowserProcessIdentity {
+            process_id: 10,
+            started_at_epoch_seconds: 100,
+            platform_start_key: 10_100,
+        };
+        assert!(browser_process_tree_cpu_pressure(
+            &[reused],
+            4,
+            [(10, Some(1), 400.0, 101)]
+        )
+        .is_empty());
     }
 
 

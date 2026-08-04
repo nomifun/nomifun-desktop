@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -112,6 +112,10 @@ pub struct PromotionPolicy {
     pub admit_expansion_lane: bool,
     pub first_lane_denied_reason: String,
     pub expansion_lane_denied_reason: String,
+    /// Trusted task ids temporarily fenced by retained cleanup or a soft
+    /// task-memory budget. This is evaluated again on every promotion.
+    pub blocked_owners: BTreeSet<String>,
+    pub blocked_owner_reason: String,
 }
 
 impl PromotionPolicy {
@@ -121,6 +125,8 @@ impl PromotionPolicy {
             admit_expansion_lane: true,
             first_lane_denied_reason: DEFAULT_REASON_CODE.to_owned(),
             expansion_lane_denied_reason: DEFAULT_REASON_CODE.to_owned(),
+            blocked_owners: BTreeSet::new(),
+            blocked_owner_reason: "task_resource_limit".to_owned(),
         }
     }
 
@@ -137,11 +143,25 @@ impl PromotionPolicy {
             expansion_lane_denied_reason: normalize_reason_code(
                 expansion_lane_denied_reason.into(),
             ),
+            blocked_owners: BTreeSet::new(),
+            blocked_owner_reason: "task_resource_limit".to_owned(),
         }
     }
 
+    pub fn with_blocked_owners(
+        mut self,
+        blocked_owners: BTreeSet<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        self.blocked_owners = blocked_owners;
+        self.blocked_owner_reason = normalize_reason_code(reason.into());
+        self
+    }
+
     fn admits(&self, request: &QueueRequest) -> bool {
-        if request.first_lane {
+        if self.blocked_owners.contains(&request.owner_id) {
+            false
+        } else if request.first_lane {
             self.admit_first_lane
         } else {
             self.admit_expansion_lane
@@ -149,7 +169,9 @@ impl PromotionPolicy {
     }
 
     fn denied_reason(&self, request: &QueueRequest) -> &str {
-        if request.first_lane {
+        if self.blocked_owners.contains(&request.owner_id) {
+            &self.blocked_owner_reason
+        } else if request.first_lane {
             &self.first_lane_denied_reason
         } else {
             &self.expansion_lane_denied_reason
@@ -160,6 +182,8 @@ impl PromotionPolicy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchedulerConfig {
     pub max_open_lanes: usize,
+    /// Live Lane ceiling for one trusted user-visible task family.
+    pub max_owner_active: usize,
     pub max_global_queue: usize,
     pub max_owner_queue: usize,
     pub recommended_concurrency: usize,
@@ -174,6 +198,7 @@ impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             max_open_lanes: 128,
+            max_owner_active: 4,
             max_global_queue: 256,
             max_owner_queue: 32,
             recommended_concurrency: 4,
@@ -299,6 +324,7 @@ impl BrowserLaneScheduler {
         if allow_immediate
             && state.queued.is_empty()
             && state.active.len() < state.config.max_open_lanes
+            && owner_active_count(&state, &request.owner_id) < state.config.max_owner_active
         {
             state
                 .active
@@ -317,6 +343,79 @@ impl BrowserLaneScheduler {
     /// after capacity is released and before any queued Lane becomes active.
     pub fn release_without_promotion(&self, lane_id: &BrowserLaneId) -> bool {
         self.state().active.remove(lane_id).is_some()
+    }
+
+    /// Atomically removes one unpublished admission from either scheduler
+    /// state without promoting another request.
+    ///
+    /// Hub publication deliberately has no `.await` after `admit`, but this
+    /// rollback remains the panic guard for that short synchronous section.
+    /// Looking in both collections under one lock prevents a queued request
+    /// from being promoted between separate cancel/release calls.
+    pub(crate) fn discard_unpublished(&self, lane_id: &BrowserLaneId) -> bool {
+        let mut state = self.state();
+        if state.active.remove(lane_id).is_some() {
+            return true;
+        }
+        let Some(index) = state
+            .queued
+            .iter()
+            .position(|request| &request.lane_id == lane_id)
+        else {
+            return false;
+        };
+        state.queued.remove(index);
+        prune_owner_ring(&mut state);
+        true
+    }
+
+    /// Returns whether admission authority is still retained for this exact
+    /// Lane. Drop-time cleanup uses this opaque id instead of a runtime-wide
+    /// predicate, so it cannot absorb work admitted after the handoff.
+    pub(crate) fn contains_lane(&self, lane_id: &BrowserLaneId) -> bool {
+        let state = self.state();
+        state.active.contains_key(lane_id)
+            || state
+                .queued
+                .iter()
+                .any(|request| &request.lane_id == lane_id)
+    }
+
+    pub(crate) fn retained_lane_count(&self) -> usize {
+        let state = self.state();
+        state.active.len().saturating_add(state.queued.len())
+    }
+
+    pub(crate) fn retained_lane_count_for(&self, owner_id: &str) -> usize {
+        let state = self.state();
+        state
+            .active
+            .values()
+            .filter(|request| request.owner_id == owner_id)
+            .count()
+            .saturating_add(
+                state
+                    .queued
+                    .iter()
+                    .filter(|request| request.owner_id == owner_id)
+                    .count(),
+            )
+    }
+
+    /// Moves one just-promoted request back to the queue when physical
+    /// admission installs a sticky cleanup fence. The request keeps its
+    /// original enqueue timestamp and identity so fairness and cancellation
+    /// semantics remain stable across retries.
+    pub fn defer_active_to_queue(
+        &self,
+        lane_id: &BrowserLaneId,
+        reason_code: impl Into<String>,
+    ) -> Option<QueueRequest> {
+        let mut state = self.state();
+        let mut request = state.active.remove(lane_id)?;
+        request.reason_code = normalize_reason_code(reason_code.into());
+        push_queued(&mut state, request.clone());
+        Some(request)
     }
 
     /// Promotes at most one resource-eligible request while preserving the
@@ -350,15 +449,47 @@ impl BrowserLaneScheduler {
     pub fn update_policy_limits_without_promotion(
         &self,
         max_open_lanes: usize,
+        max_owner_active: usize,
         max_global_queue: usize,
         max_owner_queue: usize,
         recommended_concurrency: usize,
     ) {
         let mut state = self.state();
         state.config.max_open_lanes = max_open_lanes;
+        state.config.max_owner_active = max_owner_active;
         state.config.max_global_queue = max_global_queue;
         state.config.max_owner_queue = max_owner_queue;
         state.config.recommended_concurrency = recommended_concurrency;
+    }
+
+    /// Deterministically retains the oldest queued requests that fit both the
+    /// new global and per-owner limits, returning every removed request for
+    /// Hub-owned Lane detachment. Lowering limits must not leave an oversized
+    /// hidden queue that can later promote under the new policy.
+    pub fn trim_queued_to_limits(
+        &self,
+        max_global_queue: usize,
+        max_owner_queue: usize,
+    ) -> Vec<QueueRequest> {
+        let mut state = self.state();
+        let mut owner_counts = BTreeMap::<String, usize>::new();
+        let mut retained = Vec::with_capacity(state.queued.len().min(max_global_queue));
+        let mut removed = Vec::new();
+        for request in state.queued.drain(..) {
+            let owner_count = owner_counts
+                .get(&request.owner_id)
+                .copied()
+                .unwrap_or_default();
+            if retained.len() < max_global_queue && owner_count < max_owner_queue {
+                owner_counts.insert(request.owner_id.clone(), owner_count + 1);
+                retained.push(request);
+            } else {
+                removed.push(request);
+            }
+        }
+        state.queued = retained;
+        prune_owner_ring(&mut state);
+        removed
     }
 
     /// Refreshes the recommendation copied into queue metadata without
@@ -495,6 +626,14 @@ fn ensure_queue_capacity(
     Ok(())
 }
 
+fn owner_active_count(state: &SchedulerState, owner_id: &str) -> usize {
+    state
+        .active
+        .values()
+        .filter(|active| active.owner_id == owner_id)
+        .count()
+}
+
 fn push_queued(state: &mut SchedulerState, request: QueueRequest) {
     if !state
         .owner_ring
@@ -582,7 +721,11 @@ fn promote_one_locked(
     policy: &PromotionPolicy,
 ) -> Option<QueueRequest> {
     for request in &mut state.queued {
-        if policy.admits(request) {
+        if owner_active_count_excluding_borrow(&state.active, &request.owner_id)
+            >= state.config.max_owner_active
+        {
+            request.reason_code = "task_lane_limit".to_owned();
+        } else if policy.admits(request) {
             // Pressure may have cleared while the static Lane ceiling remains
             // full. Refresh the visible reason even when no request can move.
             request.reason_code = DEFAULT_REASON_CODE.to_owned();
@@ -665,6 +808,9 @@ fn select_owner_fair_index(
 
     for offset in 0..state.owner_ring.len() {
         let owner = &state.owner_ring[(start + offset) % state.owner_ring.len()];
+        if owner_active_count(state, owner) >= state.config.max_owner_active {
+            continue;
+        }
         if let Some(index) = state.queued.iter().position(|request| {
             let effective = effective_priority(request, now_ms, state.config.aging_interval_ms);
             let aged_expansion_fallback = priority == LanePriority::Expansion
@@ -686,6 +832,16 @@ fn select_owner_fair_index(
     None
 }
 
+fn owner_active_count_excluding_borrow(
+    active: &BTreeMap<BrowserLaneId, QueueRequest>,
+    owner_id: &str,
+) -> usize {
+    active
+        .values()
+        .filter(|request| request.owner_id == owner_id)
+        .count()
+}
+
 #[cfg(test)]
 fn queue_order(
     state: &SchedulerState,
@@ -705,6 +861,7 @@ fn queue_order(
     // Keep them visible after every eligible request, ordered by the same
     // scheduler state they would use if admission recovered.
     let allow_all = PromotionPolicy::allow_all();
+    simulated.config.max_owner_active = usize::MAX;
     while !simulated.queued.is_empty() {
         let index =
             select_next_index_with_policy(&mut simulated, now_ms, &allow_all)
@@ -744,6 +901,7 @@ fn queue_metadata_locked(
         // Deferred requests order after every promotable request, in the
         // order they would use if admission recovered.
         let allow_all = PromotionPolicy::allow_all();
+        simulated.config.max_owner_active = usize::MAX;
         while !simulated.queued.is_empty() {
             let index = select_next_index_with_policy(&mut simulated, now_ms, &allow_all)
                 .expect("allow-all policy must select a queued request");
@@ -946,6 +1104,30 @@ mod tests {
             Admission::Queued(request) => request,
             Admission::Ready => panic!("expected queued admission"),
         }
+    }
+
+    #[test]
+    fn unpublished_discard_atomically_removes_ready_or_queued_admission() {
+        let (scheduler, _) = scheduler(SchedulerConfig {
+            max_open_lanes: 1,
+            ..SchedulerConfig::default()
+        });
+
+        let ready = admit_ready(&scheduler, request("owner-a", "ready", true));
+        assert!(scheduler.discard_unpublished(&ready));
+        assert_eq!(scheduler.retained_lane_count(), 0);
+        assert!(!scheduler.discard_unpublished(&ready));
+
+        let blocker = admit_ready(&scheduler, request("owner-b", "blocker", true));
+        let queued = queued_request(
+            scheduler
+                .admit_request(request("owner-a", "queued", true))
+                .unwrap(),
+        );
+        assert!(scheduler.discard_unpublished(&queued.lane_id));
+        assert_eq!(scheduler.retained_lane_count(), 1);
+        assert!(scheduler.contains_lane(&blocker));
+        assert!(!scheduler.contains_lane(&queued.lane_id));
     }
 
     #[test]
@@ -1268,6 +1450,156 @@ mod tests {
     }
 
     #[test]
+    fn trimming_queue_limits_retains_the_oldest_requests_that_fit_both_caps() {
+        let (scheduler, clock) = scheduler(SchedulerConfig {
+            max_open_lanes: 0,
+            max_global_queue: 16,
+            max_owner_queue: 16,
+            ..SchedulerConfig::default()
+        });
+
+        let mut queued = Vec::new();
+        for (owner, name) in [
+            ("owner-a", "oldest"),
+            ("owner-a", "second"),
+            ("owner-b", "oldest"),
+            ("owner-a", "over-owner-cap"),
+            ("owner-c", "oldest"),
+            ("owner-b", "over-global-cap"),
+        ] {
+            queued.push(queued_request(
+                scheduler
+                    .admit_request(request(owner, name, true))
+                    .unwrap(),
+            ));
+            clock.advance(1);
+        }
+
+        let removed = scheduler.trim_queued_to_limits(4, 2);
+
+        assert_eq!(
+            scheduler
+                .queued_requests_unordered()
+                .into_iter()
+                .map(|request| request.request_id)
+                .collect::<Vec<_>>(),
+            vec![
+                queued[0].request_id.clone(),
+                queued[1].request_id.clone(),
+                queued[2].request_id.clone(),
+                queued[4].request_id.clone(),
+            ]
+        );
+        assert_eq!(
+            removed
+                .iter()
+                .map(|request| request.request_id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                queued[3].request_id.clone(),
+                queued[5].request_id.clone(),
+            ]
+        );
+        assert_eq!(scheduler.queued_count(), 4);
+        assert!(scheduler.metadata(&queued[3].request_id).is_err());
+        assert!(scheduler.metadata(&queued[5].request_id).is_err());
+        assert_eq!(
+            scheduler.state().owner_ring,
+            VecDeque::from([
+                "owner-a".to_owned(),
+                "owner-b".to_owned(),
+                "owner-c".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn trimming_away_the_last_served_owner_repairs_the_owner_ring_cursor() {
+        let (scheduler, _) = scheduler(SchedulerConfig {
+            max_open_lanes: 1,
+            max_global_queue: 16,
+            max_owner_queue: 16,
+            ..SchedulerConfig::default()
+        });
+        let seed = admit_ready(&scheduler, request("seed", "active", true));
+        for (owner, name) in [
+            ("owner-a", "one"),
+            ("owner-b", "one"),
+            ("owner-c", "one"),
+            ("owner-a", "two"),
+            ("owner-b", "two"),
+            ("owner-c", "two"),
+        ] {
+            scheduler
+                .admit_request(request(owner, name, true))
+                .unwrap();
+        }
+
+        let owner_a = scheduler.release(&seed).unwrap();
+        assert_eq!(owner_a.owner_id, "owner-a");
+        let owner_b = scheduler.release(&owner_a.lane_id).unwrap();
+        assert_eq!(owner_b.owner_id, "owner-b");
+
+        let removed = scheduler.trim_queued_to_limits(2, 1);
+        assert_eq!(
+            removed
+                .iter()
+                .map(|request| request.owner_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner-b", "owner-c"]
+        );
+        {
+            let state = scheduler.state();
+            assert_eq!(
+                state.owner_ring,
+                VecDeque::from(["owner-a".to_owned(), "owner-c".to_owned()])
+            );
+            assert_eq!(state.last_first_owner.as_deref(), Some("owner-a"));
+        }
+
+        let promoted = scheduler.release(&owner_b.lane_id).unwrap();
+        assert_eq!(promoted.owner_id, "owner-c");
+    }
+
+    #[test]
+    fn either_zero_queue_cap_removes_every_request_and_clears_the_owner_ring() {
+        for (max_global_queue, max_owner_queue) in [(0, 8), (8, 0)] {
+            let (scheduler, _) = scheduler(SchedulerConfig {
+                max_open_lanes: 0,
+                max_global_queue: 8,
+                max_owner_queue: 8,
+                ..SchedulerConfig::default()
+            });
+            let first = queued_request(
+                scheduler
+                    .admit_request(request("owner-a", "one", true))
+                    .unwrap(),
+            );
+            let second = queued_request(
+                scheduler
+                    .admit_request(request("owner-b", "one", true))
+                    .unwrap(),
+            );
+
+            let removed =
+                scheduler.trim_queued_to_limits(max_global_queue, max_owner_queue);
+
+            assert_eq!(
+                removed
+                    .iter()
+                    .map(|request| request.request_id.clone())
+                    .collect::<Vec<_>>(),
+                vec![first.request_id.clone(), second.request_id.clone()]
+            );
+            assert_eq!(scheduler.queued_count(), 0);
+            let state = scheduler.state();
+            assert!(state.owner_ring.is_empty());
+            assert!(state.last_first_owner.is_none());
+            assert!(state.last_expansion_owner.is_none());
+        }
+    }
+
+    #[test]
     fn pressure_can_force_a_visible_queue_with_reason() {
         let (scheduler, _) = scheduler(SchedulerConfig {
             max_open_lanes: 4,
@@ -1459,7 +1791,7 @@ mod tests {
         );
 
         assert!(scheduler.release_without_promotion(&active));
-        scheduler.update_policy_limits_without_promotion(2, 128, 16, 1);
+        scheduler.update_policy_limits_without_promotion(2, 1, 128, 16, 1);
         assert_eq!(scheduler.active_count(), 0);
         assert_eq!(scheduler.queued_count(), 1);
         assert_eq!(

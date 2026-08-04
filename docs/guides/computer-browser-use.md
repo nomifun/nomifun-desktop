@@ -47,8 +47,13 @@ Settings also provides:
   ordinary Primary work with Chromium `--headless=new`. The installation owner
   may choose **Visible window** (`external`) here or on `/browser`; the backend
   applies a confirmed change immediately and persists it;
-- resource policy: Automatic, Resource saving, or High concurrency;
-- advanced resource limits for diagnostics and explicit tuning.
+- resource policy: Automatic, Resource saving, or High concurrency. Aggregate
+  capacity scales with concurrent tasks and machine pressure instead of using a
+  fixed installation-wide RSS cap;
+- advanced resource limits for diagnostics and explicit tuning: an elastic
+  global memory-pressure ratio plus per-task attributed-memory, operation,
+  Lane, tab, and queue budgets. Shared-Host task memory is an estimate; the
+  structural limits are hard boundaries.
 
 The sidebar **Browser** page (`/browser`) lists running and queued Lanes and
 shows status, capacity, queue, identity, owner, and lifecycle data. It can close
@@ -146,8 +151,14 @@ features, the backend should warn rather than expose a non-working tool.
   and identity-changing operations require Primary. Account switching,
   sign-out tests, untrusted browsing, and explicit isolation use an
   **Isolated identity**. Crawl, replica, and isolated Hosts may run headless.
+- Anonymous profile state is bounded per shared Host: 512 MiB, 50,000 entries,
+  30 minutes, or 256 admitted navigations trigger an exact fenced rotation.
+  This prevents long-running public-page work from accumulating browser cache
+  and site data indefinitely without imposing a fixed total-memory cap across
+  unrelated tasks.
 
-Capacity is explicitly bounded. Requests beyond the safe budget enter a
+Capacity is bounded per task and remains elastic in aggregate. Requests beyond a
+task's envelope or the current machine-wide safe budget enter a
 cancellable queue and return `browser_capacity_queued` or
 `system_memory_pressure` with queue position, reason, recommended concurrency,
 and retry delay. `browser_open` successfully reports that its Lane entered the
@@ -174,6 +185,11 @@ Lane management actions are:
   caller;
 - `browser_crawl_many`: process a bounded URL batch while owning Lane reuse,
   ordering, cancellation, and cleanup.
+
+Knowledge rendering opens and closes a transaction-scoped Anonymous Lane for
+each URL. Crawl output is byte-bounded before it crosses CDP and before batch
+aggregation, so cancellation or a hostile large page cannot leave a growing
+queue of full HTML/text results.
 
 Closing a Lane gives its browser calls a typed error but does not close the
 conversation or AgentExecution. Attempt completion/cancellation, runtime

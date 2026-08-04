@@ -54,6 +54,11 @@ use serde_json::Value;
 use crate::engine::CssRect;
 use crate::transport::{Connection, TransportError};
 
+/// Maximum utility-world contexts retained by one page/OOPIF session.
+/// Normal pages stay far below this; a frame churn storm must not turn the
+/// lifecycle indexes or cached remote handles into unbounded session state.
+pub const MAX_FRAME_WORLDS: usize = 256;
+
 /// 预编译的 vendor PW InjectedScript bundle（单 IIFE，暴露
 /// `<global>.InjectedScript`）。**build 时不依赖 Node**：`injected/build.sh` 手动重生成、
 /// 产物 check-in 进仓（DESIGN §24）。bundle 头部带 Apache-2.0 attribution；NOTICE 见
@@ -87,6 +92,64 @@ pub enum InjectError {
     /// CDP 回包形状与预期不符（缺 objectId / result 等）——我方不变量问题。
     #[error("unexpected CDP shape: {0}")]
     Protocol(String),
+    /// This session produced more live utility worlds than can be represented
+    /// safely.  Existing entries are not evicted; callers must simplify or
+    /// reload the frame tree before addressing an untracked frame.
+    #[error("utility world context capacity exceeded (limit={limit})")]
+    ContextCapacityExceeded { limit: usize },
+    /// The current observe generation would retain more element refs than the
+    /// task-wide generation budget.  The just-created JavaScript snapshot map
+    /// is invalidated before this error is returned; callers must invalidate
+    /// any earlier frame maps from the same in-flight observe as well.
+    #[error(
+        "observe ref capacity exceeded (limit={limit}, current={current}, frame_refs={required})"
+    )]
+    RefCapacityExceeded {
+        limit: usize,
+        current: usize,
+        required: usize,
+    },
+    /// The current observe would return more serialized snapshot bytes than a
+    /// single task generation may retain.  The frame's JavaScript ref map is
+    /// cleared before the by-value CDP result is returned.
+    #[error(
+        "observe byte capacity exceeded (limit={limit}, current={current}, frame_bytes={frame_bytes})"
+    )]
+    ObservationCapacityExceeded {
+        limit: usize,
+        current: usize,
+        frame_bytes: usize,
+    },
+}
+
+/// A spawned task is not owned until it has been committed into its durable
+/// parent.  Dropping Tokio's `JoinHandle` detaches, so every fallible
+/// initialization seam wraps a new task in this guard and calls `into_inner`
+/// only after all later `await`s have succeeded.
+pub(crate) struct AbortOnDropTask {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl AbortOnDropTask {
+    pub(crate) fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    pub(crate) fn into_inner(mut self) -> tokio::task::JoinHandle<()> {
+        self.handle
+            .take()
+            .expect("AbortOnDropTask handle is present until committed")
+    }
+}
+
+impl Drop for AbortOnDropTask {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 /// 生成 `__nomi_<hex>__` 形态的随机名（utility world / 未来 binding 名共用此构造）。
@@ -151,15 +214,105 @@ pub struct InjectionManager {
 struct FrameWorldState {
     /// frameId → utility world 的 executionContextId（数字 id，发 evaluate/callFunctionOn 用）。
     context_ids: HashMap<String, i64>,
+    /// Numeric context id -> frameId.  Unlike `uniqueId`, this is also
+    /// available from `Page.createIsolatedWorld` during lossy-stream rebuild.
+    context_to_frame: HashMap<i64, String>,
     /// system-unique uniqueId → frameId（`executionContextDestroyed` 只给 uniqueId，
     /// 据此反查 frameId 失效该 frame 的 context + handle）。
     unique_to_frame: HashMap<String, String>,
+    /// Reverse index ensures replacing a frame context also removes its old
+    /// unique-id entry instead of accumulating one entry per navigation.
+    frame_to_unique: HashMap<String, String>,
     /// frameId → 已注入的 InjectedScript 实例 objectId（lazy 缓存）。
     injected_handles: HashMap<String, String>,
+    /// Sticky while at least one live frame could not be admitted.  Lookups for
+    /// represented frames continue to work; an unrepresented frame receives a
+    /// clear bounded-refusal error rather than a misleading transient miss.
+    capacity_exceeded: bool,
+}
+
+impl FrameWorldState {
+    fn clear(&mut self) {
+        self.context_ids.clear();
+        self.context_to_frame.clear();
+        self.unique_to_frame.clear();
+        self.frame_to_unique.clear();
+        self.injected_handles.clear();
+        self.capacity_exceeded = false;
+    }
+
+    fn remove_frame(&mut self, frame_id: &str) {
+        if let Some(context_id) = self.context_ids.remove(frame_id) {
+            self.context_to_frame.remove(&context_id);
+        }
+        if let Some(unique_id) = self.frame_to_unique.remove(frame_id) {
+            self.unique_to_frame.remove(&unique_id);
+        }
+        self.injected_handles.remove(frame_id);
+        // `capacity_exceeded` is deliberately sticky until an authoritative
+        // clear/rebuild.  Removing one represented frame does not prove that
+        // every frame rejected while the table was full has also disappeared.
+        // Clearing it here would turn a real bounded-refusal condition into a
+        // misleading transient ContextNotReady for those still-live frames.
+    }
+
+    fn register_context(
+        &mut self,
+        frame_id: String,
+        context_id: i64,
+        unique_id: Option<String>,
+    ) -> Result<(), ()> {
+        if let Some(previous_frame) = self.context_to_frame.get(&context_id).cloned()
+            && previous_frame != frame_id
+        {
+            self.remove_frame(&previous_frame);
+        }
+        if !self.context_ids.contains_key(&frame_id)
+            && self.context_ids.len() >= MAX_FRAME_WORLDS
+        {
+            self.capacity_exceeded = true;
+            return Err(());
+        }
+
+        // A new document/world for the same frame supersedes all reverse
+        // indexes and the old injected object handle.
+        let previous_context = self.context_ids.insert(frame_id.clone(), context_id);
+        if let Some(previous_context) = previous_context {
+            self.context_to_frame.remove(&previous_context);
+            if previous_context != context_id && unique_id.is_none()
+                && let Some(previous_unique) = self.frame_to_unique.remove(&frame_id)
+            {
+                self.unique_to_frame.remove(&previous_unique);
+            }
+        }
+        self.context_to_frame.insert(context_id, frame_id.clone());
+        self.injected_handles.remove(&frame_id);
+
+        if let Some(unique_id) = unique_id.filter(|id| !id.is_empty()) {
+            if let Some(previous_frame) = self.unique_to_frame.get(&unique_id).cloned()
+                && previous_frame != frame_id
+            {
+                self.remove_frame(&previous_frame);
+            }
+            if let Some(previous_unique) = self.frame_to_unique.insert(frame_id.clone(), unique_id.clone()) {
+                self.unique_to_frame.remove(&previous_unique);
+            }
+            self.unique_to_frame.insert(unique_id, frame_id);
+        }
+        Ok(())
+    }
 }
 
 /// 共享缓存的别名：本管线方法与 arm 起的 `'static` 后台登记循环共用同一份真相。
 type Shared = std::sync::Arc<Mutex<FrameWorldState>>;
+
+struct ContextLoopCleanup(Shared);
+
+impl Drop for ContextLoopCleanup {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().clear();
+    }
+}
 
 impl InjectionManager {
     /// 新建管线（**不**自动 arm）。`session_id` 是目标 page 的 CDP sessionId。
@@ -342,7 +495,9 @@ impl InjectionManager {
             .subscribe("Runtime.executionContextsCleared", Some(session));
 
         // 起后台登记循环（消费上述事件，维护 context_ids 缓存）。
-        let loop_handle = self.spawn_context_loop(created_rx, destroyed_rx, cleared_rx);
+        let loop_handle = AbortOnDropTask::new(
+            self.spawn_context_loop(created_rx, destroyed_rx, cleared_rx),
+        );
 
         // 现在才 enable（其补发的 executionContextCreated 会被上面的循环收到）。
         self.conn
@@ -366,13 +521,14 @@ impl InjectionManager {
         // 步骤②：对当前每个 frame 补建 isolated world（覆盖 arm 时已打开的页面）。
         self.create_isolated_worlds_for_existing_frames().await?;
 
-        Ok(loop_handle)
+        Ok(loop_handle.into_inner())
     }
 
     /// 枚举当前 frame tree，对每个 frame 发 `createIsolatedWorld`。
-    /// 其返回的 executionContextId 我们**不直接信任**——以监听循环按 worldName 登记为准
-    /// （createIsolatedWorld 的回包 contextId 与 executionContextCreated 的 id 一致，但
-    /// 走统一登记路径避免两份真相）。失败对单个 frame 容错（continue）。
+    /// `createIsolatedWorld` 的 executionContextId is also registered directly.
+    /// Normally the event loop has already registered the same id; the direct
+    /// path is what lets a lossy-event rebuild recover existing worlds without
+    /// waiting for Chromium to replay `executionContextCreated`.
     async fn create_isolated_worlds_for_existing_frames(&self) -> Result<(), InjectError> {
         let session = self.session_id.as_str();
         let tree = self
@@ -382,6 +538,7 @@ impl InjectionManager {
         let mut frame_ids = Vec::new();
         collect_frame_ids(tree.get("frameTree"), &mut frame_ids);
 
+        let mut capacity_exceeded = false;
         for fid in frame_ids {
             let params = CreateIsolatedWorldParams {
                 frame_id: fid.clone().into(),
@@ -390,19 +547,49 @@ impl InjectionManager {
             };
             // 单 frame 失败不致命（可能正在导航 / 已销毁）；其 world 也会在下次新文档
             // 经步骤①物化。
-            if let Err(e) = self
+            match self
                 .conn
                 .send::<CreateIsolatedWorldParams>(session, &params)
                 .await
             {
-                tracing::warn!(
-                    target: "nomi_browser_engine::injected",
-                    frame_id = %fid, error = %e,
-                    "createIsolatedWorld failed for existing frame (non-fatal)"
-                );
+                Ok(result) => {
+                    let Some(context_id) = result
+                        .get("executionContextId")
+                        .and_then(Value::as_i64)
+                    else {
+                        tracing::warn!(
+                            target: "nomi_browser_engine::injected",
+                            frame_id = %fid,
+                            "createIsolatedWorld returned no executionContextId"
+                        );
+                        continue;
+                    };
+                    if self
+                        .shared
+                        .lock()
+                        .unwrap()
+                        .register_context(fid.clone(), context_id, None)
+                        .is_err()
+                    {
+                        capacity_exceeded = true;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "nomi_browser_engine::injected",
+                        frame_id = %fid, error = %e,
+                        "createIsolatedWorld failed for existing frame (non-fatal)"
+                    );
+                }
             }
         }
-        Ok(())
+        if capacity_exceeded {
+            Err(InjectError::ContextCapacityExceeded {
+                limit: MAX_FRAME_WORLDS,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     /// 后台登记循环：消费 executionContext{Created,Destroyed,Cleared} 维护缓存。
@@ -413,29 +600,58 @@ impl InjectionManager {
         mut destroyed_rx: tokio::sync::broadcast::Receiver<crate::transport::CdpEvent>,
         mut cleared_rx: tokio::sync::broadcast::Receiver<crate::transport::CdpEvent>,
     ) -> tokio::task::JoinHandle<()> {
-        let shared = self.shared.clone();
-        let world_name = self.world_name.clone();
+        let manager = self.clone();
         tokio::spawn(async move {
+            // Aborting a JoinHandle drops this future.  The cleanup guard makes
+            // cancellation/session detach release cached ids and remote handles
+            // immediately instead of leaving stale state reachable through
+            // cloned managers.
+            let _cleanup = ContextLoopCleanup(manager.shared.clone());
             loop {
                 tokio::select! {
                     ev = created_rx.recv() => match ev {
-                        Ok(ev) => Self::on_context_created(&shared, &world_name, &ev.params),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Ok(ev) => Self::on_context_created(&manager.shared, &manager.world_name, &ev.params),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            manager.rebuild_after_context_loss("created", skipped).await;
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                     ev = destroyed_rx.recv() => match ev {
-                        Ok(ev) => Self::on_context_destroyed(&shared, &ev.params),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Ok(ev) => Self::on_context_destroyed(&manager.shared, &ev.params),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            manager.rebuild_after_context_loss("destroyed", skipped).await;
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                     ev = cleared_rx.recv() => match ev {
-                        Ok(_) => Self::on_contexts_cleared(&shared),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Ok(_) => Self::on_contexts_cleared(&manager.shared),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            manager.rebuild_after_context_loss("cleared", skipped).await;
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                 }
             }
         })
+    }
+
+    async fn rebuild_after_context_loss(&self, stream: &str, skipped: u64) {
+        Self::on_contexts_cleared(&self.shared);
+        tracing::warn!(
+            target: "nomi_browser_engine::injected",
+            session_id = %self.session_id,
+            stream,
+            skipped,
+            "context lifecycle stream lagged; rebuilding bounded frame-world state"
+        );
+        if let Err(error) = self.create_isolated_worlds_for_existing_frames().await {
+            tracing::warn!(
+                target: "nomi_browser_engine::injected",
+                session_id = %self.session_id,
+                %error,
+                "context lifecycle rebuild did not fully recover"
+            );
+        }
     }
 
     /// 登记一个新建的 execution context（仅当它是我们的 utility world）。
@@ -466,50 +682,70 @@ impl InjectionManager {
             return;
         }
         let mut g = shared.lock().unwrap();
-        g.context_ids.insert(frame_id.clone(), id);
-        if !unique_id.is_empty() {
-            g.unique_to_frame.insert(unique_id, frame_id.clone());
+        if g
+            .register_context(frame_id.clone(), id, Some(unique_id))
+            .is_err()
+        {
+            tracing::warn!(
+                target: "nomi_browser_engine::injected",
+                frame_id = %frame_id,
+                limit = MAX_FRAME_WORLDS,
+                "utility-world context rejected at hard capacity"
+            );
         }
-        // 新 context = 新文档/新 world，旧的 injected 实例句柄必然失效，清掉（下次 lazy 重注）。
-        g.injected_handles.remove(&frame_id);
     }
 
     /// 某 context 被销毁（按 system-unique uniqueId）：失效对应 frame 的 context + handle。
     fn on_context_destroyed(shared: &Mutex<FrameWorldState>, params: &Value) {
-        let Some(unique_id) = params
+        let unique_id = params
             .get("executionContextUniqueId")
             .and_then(|v| v.as_str())
-        else {
-            return;
-        };
+            .map(str::to_owned);
+        let context_id = params
+            .get("executionContextId")
+            .and_then(Value::as_i64);
         let mut g = shared.lock().unwrap();
-        if let Some(frame_id) = g.unique_to_frame.remove(unique_id) {
-            g.context_ids.remove(&frame_id);
-            g.injected_handles.remove(&frame_id);
+        let frame_id = unique_id
+            .as_deref()
+            .and_then(|id| g.unique_to_frame.get(id).cloned())
+            .or_else(|| context_id.and_then(|id| g.context_to_frame.get(&id).cloned()));
+        if let Some(frame_id) = frame_id {
+            // Ignore a delayed destroy for an older context of a frame that has
+            // already published a replacement context.
+            let unique_matches = unique_id.as_deref().is_some_and(|id| {
+                g.frame_to_unique.get(&frame_id).map(String::as_str) == Some(id)
+            });
+            let numeric_matches = context_id.is_some_and(|id| {
+                g.context_ids.get(&frame_id).copied() == Some(id)
+            });
+            if unique_matches || numeric_matches {
+                g.remove_frame(&frame_id);
+            }
         }
     }
 
     /// 所有 context 清空（多见于主 frame 跨文档导航）：整表失效，下次用时重建。
     fn on_contexts_cleared(shared: &Mutex<FrameWorldState>) {
-        let mut g = shared.lock().unwrap();
-        g.context_ids.clear();
-        g.unique_to_frame.clear();
-        g.injected_handles.clear();
+        shared.lock().unwrap().clear();
     }
 
     /// 取某 frame 的 utility-world contextId（未登记 → `ContextNotReady`，调用方可短重试）。
     /// `pub`：observe（Task 6）与契约测试需据此判 world 就绪、并在该 context 上 evaluate
     /// `document.body` 取元素句柄喂注入侧的 aria 方法。
     pub fn context_id_for(&self, frame_id: &str) -> Result<i64, InjectError> {
-        self.shared
-            .lock()
-            .unwrap()
-            .context_ids
-            .get(frame_id)
-            .copied()
-            .ok_or_else(|| InjectError::ContextNotReady {
+        let state = self.shared.lock().unwrap();
+        if let Some(context_id) = state.context_ids.get(frame_id).copied() {
+            return Ok(context_id);
+        }
+        if state.capacity_exceeded {
+            Err(InjectError::ContextCapacityExceeded {
+                limit: MAX_FRAME_WORLDS,
+            })
+        } else {
+            Err(InjectError::ContextNotReady {
                 frame_id: frame_id.to_string(),
             })
+        }
     }
 
     /// 取（必要时 lazy 创建）某 frame 的 InjectedScript 实例 objectId（生命周期步骤④）。
@@ -567,9 +803,13 @@ impl InjectionManager {
             })?
             .to_string();
 
-        self.shared
-            .lock()
-            .unwrap()
+        let mut state = self.shared.lock().unwrap();
+        if state.context_ids.get(frame_id).copied() != Some(context_id) {
+            return Err(InjectError::ContextNotReady {
+                frame_id: frame_id.to_string(),
+            });
+        }
+        state
             .injected_handles
             .insert(frame_id.to_string(), object_id.clone());
         Ok(object_id)
@@ -598,7 +838,7 @@ impl InjectionManager {
         params.arguments = Some(args);
         params.return_by_value = Some(return_by_value);
         params.await_promise = Some(true);
-        let result = self
+        let mut result = self
             .conn
             .send::<CallFunctionOnParams>(&self.session_id, &params)
             .await?;
@@ -609,9 +849,227 @@ impl InjectionManager {
         // 返回 result.result（RemoteObject）。by-value 时 .value 是真实值；by-handle 时
         // .objectId 是句柄。统一返 RemoteObject 让调用方按需取。
         result
-            .get("result")
-            .cloned()
-            .ok_or_else(|| InjectError::Protocol(format!("callFunctionOn returned no result: {result}")))
+            .get_mut("result")
+            .map(Value::take)
+            .ok_or_else(|| InjectError::Protocol("callFunctionOn returned no result".into()))
+    }
+
+    /// Run `incrementalAriaSnapshot` while enforcing the **task-wide** retained
+    /// ref budget for the in-flight observe generation.
+    ///
+    /// `already_retained` is the sum of authoritative JavaScript element maps
+    /// accepted from earlier frames in this same observe.  The capacity check
+    /// executes inside the same JavaScript call that creates the map, so an
+    /// oversized frame is invalidated before control returns to Rust.  A thrown
+    /// or rejected snapshot also invalidates its partial map; unpublished refs
+    /// can therefore never linger for a later `find_elements` call.
+    pub async fn incremental_aria_snapshot_bounded(
+        &self,
+        frame_id: &str,
+        node: CallArgument,
+        options: CallArgument,
+        already_retained: usize,
+        already_retained_bytes: usize,
+    ) -> Result<(Value, usize, usize), InjectError> {
+        let function_declaration = r#"function(node, options, maxRetained, alreadyRetained, maxBytes, alreadyBytes) {
+            const invalidate = () => {
+                const snap = this._lastAriaSnapshotForQuery;
+                if (snap && snap.elements) snap.elements.clear();
+                // Drop the InjectedScript -> Map edge as well.  Element
+                // expandos do not retain DOM nodes, and the next observe may
+                // safely overwrite/reuse them in its new Rust generation.
+                this._lastAriaSnapshotForQuery = undefined;
+            };
+            // JSON.stringify returns a UTF-16 JS string. Count the UTF-8 bytes
+            // CDP/serde will actually retain without allocating a TextEncoder
+            // buffer. Paired surrogates encode to four bytes; all other
+            // non-ASCII code units encode to two or three bytes.
+            const utf8Bytes = (text) => {
+                let bytes = 0;
+                for (let i = 0; i < text.length; i++) {
+                    const code = text.charCodeAt(i);
+                    if (code <= 0x7f) bytes += 1;
+                    else if (code <= 0x7ff) bytes += 2;
+                    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+                        const low = text.charCodeAt(i + 1);
+                        if (low >= 0xdc00 && low <= 0xdfff) {
+                            bytes += 4;
+                            i += 1;
+                        } else {
+                            bytes += 3;
+                        }
+                    } else {
+                        bytes += 3;
+                    }
+                }
+                return bytes;
+            };
+            const finish = (snapshot) => {
+                const snap = this._lastAriaSnapshotForQuery;
+                const retained = snap && snap.elements ? snap.elements.size : 0;
+                if (alreadyRetained + retained > maxRetained) {
+                    invalidate();
+                    return {
+                        ok: false,
+                        error: 'ref_capacity_exceeded',
+                        limit: maxRetained,
+                        current: alreadyRetained + retained,
+                        required: retained
+                    };
+                }
+                // This check runs in the renderer before `returnByValue` lets
+                // CDP materialize the snapshot in the Rust process. The prior
+                // frame total makes this one task-generation cap, not 4 MiB
+                // independently for every iframe.
+                let serialized;
+                try {
+                    serialized = JSON.stringify(snapshot);
+                } catch (error) {
+                    return fail(error);
+                }
+                const serializedBytes = utf8Bytes(serialized);
+                const currentBytes = alreadyBytes + serializedBytes;
+                if (!Number.isSafeInteger(currentBytes) || currentBytes > maxBytes) {
+                    invalidate();
+                    return {
+                        ok: false,
+                        error: 'observation_capacity_exceeded',
+                        limit: maxBytes,
+                        current: currentBytes,
+                        frameBytes: serializedBytes
+                    };
+                }
+                return {
+                    ok: true,
+                    snapshot: snapshot,
+                    retained: retained,
+                    serializedBytes: serializedBytes
+                };
+            };
+            const fail = (error) => {
+                invalidate();
+                throw error;
+            };
+            try {
+                const result = this.incrementalAriaSnapshot(node, options);
+                if (result && typeof result.then === 'function')
+                    return result.then(finish, fail);
+                return finish(result);
+            } catch (error) {
+                return fail(error);
+            }
+        }"#;
+        let max_arg = CallArgument {
+            value: Some(Value::from(crate::aria_ref::MAX_REFS_PER_GENERATION as u64)),
+            ..Default::default()
+        };
+        let retained_arg = CallArgument {
+            value: Some(Value::from(already_retained as u64)),
+            ..Default::default()
+        };
+        let max_bytes_arg = CallArgument {
+            value: Some(Value::from(
+                crate::observe::MAX_OBSERVATION_RETAINED_BYTES as u64,
+            )),
+            ..Default::default()
+        };
+        let retained_bytes_arg = CallArgument {
+            value: Some(Value::from(already_retained_bytes as u64)),
+            ..Default::default()
+        };
+        let mut result = self
+            .call_on_injected_handle(
+                frame_id,
+                function_declaration,
+                vec![
+                    node,
+                    options,
+                    max_arg,
+                    retained_arg,
+                    max_bytes_arg,
+                    retained_bytes_arg,
+                ],
+                None,
+                true,
+            )
+            .await?;
+        let mut value = result
+            .get_mut("value")
+            .map(Value::take)
+            .ok_or_else(|| {
+                InjectError::Protocol(
+                    "bounded incrementalAriaSnapshot returned no by-value payload".into(),
+                )
+            })?;
+        if value.get("error").and_then(Value::as_str) == Some("ref_capacity_exceeded") {
+            return Err(InjectError::RefCapacityExceeded {
+                limit: value
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(crate::aria_ref::MAX_REFS_PER_GENERATION as u64)
+                    as usize,
+                current: value.get("current").and_then(Value::as_u64).unwrap_or(0) as usize,
+                required: value.get("required").and_then(Value::as_u64).unwrap_or(0) as usize,
+            });
+        }
+        if value.get("error").and_then(Value::as_str)
+            == Some("observation_capacity_exceeded")
+        {
+            return Err(InjectError::ObservationCapacityExceeded {
+                limit: value
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(crate::observe::MAX_OBSERVATION_RETAINED_BYTES as u64)
+                    as usize,
+                current: value.get("current").and_then(Value::as_u64).unwrap_or(0) as usize,
+                frame_bytes: value
+                    .get("frameBytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize,
+            });
+        }
+        if value.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(InjectError::Protocol(
+                "bounded incrementalAriaSnapshot returned an unexpected payload shape".into(),
+            ));
+        }
+        let retained = value.get("retained").and_then(Value::as_u64).ok_or_else(|| {
+            InjectError::Protocol(
+                "bounded incrementalAriaSnapshot returned no retained count".into(),
+            )
+        })? as usize;
+        let serialized_bytes = value
+            .get("serializedBytes")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                InjectError::Protocol(
+                    "bounded incrementalAriaSnapshot returned no serialized byte count".into(),
+                )
+            })? as usize;
+        let snapshot = value
+            .get_mut("snapshot")
+            .map(Value::take)
+            .ok_or_else(|| {
+                InjectError::Protocol(
+                    "bounded incrementalAriaSnapshot returned no snapshot".into(),
+                )
+            })?;
+        Ok((snapshot, retained, serialized_bytes))
+    }
+
+    /// Invalidate the ref map retained by the latest snapshot for one frame.
+    /// Used when another frame makes the task-wide observe generation overflow:
+    /// no partially published generation remains queryable by `find_elements`.
+    pub async fn clear_snapshot_refs(&self, frame_id: &str) -> Result<(), InjectError> {
+        let function_declaration = r#"function() {
+            const snap = this._lastAriaSnapshotForQuery;
+            if (snap && snap.elements) snap.elements.clear();
+            this._lastAriaSnapshotForQuery = undefined;
+            return true;
+        }"#;
+        self.call_on_injected_handle(frame_id, function_declaration, vec![], None, true)
+            .await
+            .map(|_| ())
     }
 
     /// **callFunctionOn（自定义 function_declaration + objectGroup）** —— `call_injected`
@@ -919,7 +1377,8 @@ impl InjectionManager {
     /// `'error:notobserved'`，调用方让模型先 observe（不 panic）。selector 非法 → querySelectorAll 抛 →
     /// `exceptionDetails` → [`InjectError::JsException`]（调用方按 Fatal 处理）。
     ///
-    /// `return_by_value=true`：返 `{ ok: true, matches: [{ref, role, name}], total }` | `'error:notobserved'`
+    /// `return_by_value=true`：返 `{ ok: true, matches: [{ref, role, name}], total, removedRefs }` |
+    /// `'error:notobserved'` | `{ok:false,error:'ref_capacity_exceeded',...}`
     /// （by-value）。`total` 是命中总数（可能 > matches.len()，若 cap 截断）。**只读零写**（不点不改 DOM；
     /// 仅给元素打 `_ariaRef` expando + 写注入侧 elements 缓存，这与 observe 给元素打 ref 同性质，非页面 DOM 改动）。
     /// `cap` 限制返回条数防超大命中爆 token（0 = 不限）。**绝不 panic**。
@@ -935,7 +1394,7 @@ impl InjectionManager {
         // CSS engine（与 aria-ref engine 共享 _lastAriaSnapshotForQuery）；对每个命中登记 ref（镜像
         // computeAriaRef）。ref 计数器 _nomiFindRefCounter 从 1e6 起跳并与现有 elements key 去重，
         // 与 snapshot lastRef 互不串号。
-        let function_declaration = r#"function(selector, refPrefix, cap) {
+        let function_declaration = r#"function(selector, refPrefix, cap, maxRetained) {
             const snap = this._lastAriaSnapshotForQuery;
             if (!snap || !snap.elements) return 'error:notobserved';
             let parsed;
@@ -943,32 +1402,79 @@ impl InjectionManager {
             catch (e) { parsed = this.parseSelector(selector); }
             const hits = this.querySelectorAll(parsed, document);
             const elements = snap.elements;
+            // Dynamic pages often replace nodes without another observe.  Drop
+            // only entries proven disconnected; never evict a live ref merely
+            // to make room.  The returned keys let Rust prune the same records.
+            const removedRefs = [];
+            for (const [ref, el] of elements.entries()) {
+                // `_ariaRef` is a single current identity per element.  If it
+                // now names another ref, this map entry is superseded and can
+                // never pass the Rust role/name drift check again.
+                if (!el || !el.isConnected || !el._ariaRef || el._ariaRef.ref !== ref) {
+                    elements.delete(ref);
+                    if (removedRefs.length < maxRetained) removedRefs.push(ref);
+                }
+            }
+            // An oversized snapshot predating this guard is invalidated in one
+            // step.  Keeping it would violate the hard retention invariant;
+            // choosing arbitrary live victims would silently retarget refs.
+            if (elements.size > maxRetained) {
+                elements.clear();
+                return { ok: false, error: 'ref_capacity_exceeded', limit: maxRetained,
+                         current: 0, required: 0, reset: true, removedRefs: removedRefs };
+            }
             // 专用高位计数器：从 1e6 起跳，避免与 snapshot 的 e<n>（从小自增）撞号。
             if (typeof this._nomiFindRefCounter !== 'number' || this._nomiFindRefCounter < 1000000)
                 this._nomiFindRefCounter = 1000000;
             const total = hits.length;
-            const matches = [];
             const limit = cap > 0 ? Math.min(cap, total) : total;
+            const plans = [];
+            const plannedRefs = new Set();
+            let nextCounter = this._nomiFindRefCounter;
+            let required = 0;
             for (let i = 0; i < limit; i++) {
                 const el = hits[i];
                 let role = '';
                 let name = '';
                 try { role = this.getAriaRole(el) || ''; } catch (e) {}
                 try { name = this.getElementAccessibleName(el, false) || ''; } catch (e) {}
-                // 复用已打的 _ariaRef（若 role/name 仍匹配），否则分配新 ref（镜像 computeAriaRef）。
+                // A ref is reusable only when this generation's authoritative
+                // map still resolves it to this exact node.
                 let ariaRef = el._ariaRef;
-                if (!ariaRef || ariaRef.role !== role || ariaRef.name !== name) {
-                    let ref;
-                    do { ref = refPrefix + 'e' + (++this._nomiFindRefCounter); }
-                    while (elements.has(ref));
-                    ariaRef = { role: role, name: name, ref: ref };
+                if (ariaRef && ariaRef.role === role && ariaRef.name === name &&
+                    elements.get(ariaRef.ref) === el) {
+                    plans.push({ el: el, ariaRef: ariaRef, isNew: false });
+                    continue;
+                }
+                if (ariaRef && elements.get(ariaRef.ref) === el) {
+                    elements.delete(ariaRef.ref);
+                    if (removedRefs.length < maxRetained) removedRefs.push(ariaRef.ref);
+                }
+                let ref;
+                do { ref = refPrefix + 'e' + (++nextCounter); }
+                while (elements.has(ref) || plannedRefs.has(ref));
+                plannedRefs.add(ref);
+                plans.push({ el: el, ariaRef: { role: role, name: name, ref: ref }, isNew: true });
+                required++;
+            }
+            if (elements.size + required > maxRetained) {
+                return { ok: false, error: 'ref_capacity_exceeded', limit: maxRetained,
+                         current: elements.size, required: required, reset: false,
+                         removedRefs: removedRefs };
+            }
+            const matches = [];
+            for (const plan of plans) {
+                const el = plan.el;
+                const ariaRef = plan.ariaRef;
+                if (plan.isNew) {
                     el._ariaRef = ariaRef;
                 }
                 // 登记进 aria-ref engine 反解的同一张表（resolve_ref_to_object 层② 读它）。
                 elements.set(ariaRef.ref, el);
-                matches.push({ ref: ariaRef.ref, role: role, name: name });
+                matches.push({ ref: ariaRef.ref, role: ariaRef.role, name: ariaRef.name });
             }
-            return { ok: true, matches: matches, total: total };
+            this._nomiFindRefCounter = nextCounter;
+            return { ok: true, matches: matches, total: total, removedRefs: removedRefs };
         }"#;
         let selector_arg = CallArgument {
             value: Some(Value::String(selector.to_string())),
@@ -982,9 +1488,13 @@ impl InjectionManager {
             value: Some(Value::from(cap)),
             ..Default::default()
         };
+        let retained_arg = CallArgument {
+            value: Some(Value::from(crate::aria_ref::MAX_REFS_PER_GENERATION as u64)),
+            ..Default::default()
+        };
         let mut params = CallFunctionOnParams::new(function_declaration.to_string());
         params.object_id = Some(RemoteObjectId::new(injected));
-        params.arguments = Some(vec![selector_arg, prefix_arg, cap_arg]);
+        params.arguments = Some(vec![selector_arg, prefix_arg, cap_arg, retained_arg]);
         params.return_by_value = Some(true);
         params.await_promise = Some(true);
         let result = self
@@ -1104,6 +1614,14 @@ impl InjectionManager {
             .send::<ReleaseObjectGroupParams>(&self.session_id, &ReleaseObjectGroupParams::new(group))
             .await?;
         Ok(())
+    }
+
+    /// Cancellation/panic fallback for action cleanup. This is synchronous and
+    /// safe from `Drop`: the connection's single fixed worker owns a bounded,
+    /// coalescing queue, so no per-action Tokio task is detached.
+    pub(crate) fn defer_object_group_release(&self, group: &str) {
+        self.conn
+            .defer_object_group_release(&self.session_id, group);
     }
 }
 
@@ -1246,8 +1764,40 @@ mod tests {
         );
         let g = shared.lock().unwrap();
         assert!(g.context_ids.is_empty(), "context must be invalidated");
+        assert!(g.context_to_frame.is_empty());
         assert!(g.injected_handles.is_empty(), "handle must be dropped on destroy");
         assert!(g.unique_to_frame.is_empty());
+        assert!(g.frame_to_unique.is_empty());
+    }
+
+    #[test]
+    fn delayed_destroy_for_replaced_context_does_not_remove_current_context() {
+        let shared: Shared = std::sync::Arc::new(Mutex::new(FrameWorldState::default()));
+        let world = "__nomi_replace__";
+        for (id, unique) in [(7, "U-old"), (8, "U-current")] {
+            InjectionManager::on_context_created(
+                &shared,
+                world,
+                &serde_json::json!({"context": {
+                    "id": id, "name": world, "uniqueId": unique,
+                    "auxData": {"frameId": "F0"}
+                }}),
+            );
+        }
+        InjectionManager::on_context_destroyed(
+            &shared,
+            &serde_json::json!({
+                "executionContextId": 7,
+                "executionContextUniqueId": "U-old"
+            }),
+        );
+        let state = shared.lock().unwrap();
+        assert_eq!(state.context_ids.get("F0"), Some(&8));
+        assert_eq!(
+            state.unique_to_frame.get("U-current").map(String::as_str),
+            Some("F0")
+        );
+        assert!(!state.unique_to_frame.contains_key("U-old"));
     }
 
     #[test]
@@ -1262,7 +1812,237 @@ mod tests {
         }
         InjectionManager::on_contexts_cleared(&shared);
         let g = shared.lock().unwrap();
-        assert!(g.context_ids.is_empty() && g.unique_to_frame.is_empty() && g.injected_handles.is_empty());
+        assert!(
+            g.context_ids.is_empty()
+                && g.context_to_frame.is_empty()
+                && g.unique_to_frame.is_empty()
+                && g.frame_to_unique.is_empty()
+                && g.injected_handles.is_empty()
+        );
+    }
+
+    #[test]
+    fn repeated_context_replacement_does_not_accumulate_reverse_indexes() {
+        let shared: Shared = std::sync::Arc::new(Mutex::new(FrameWorldState::default()));
+        let world = "__nomi_churn__";
+        for id in 1..=10_000i64 {
+            InjectionManager::on_context_created(
+                &shared,
+                world,
+                &serde_json::json!({"context": {
+                    "id": id,
+                    "name": world,
+                    "uniqueId": format!("U{id}"),
+                    "auxData": {"frameId": "F0"}
+                }}),
+            );
+        }
+        let g = shared.lock().unwrap();
+        assert_eq!(g.context_ids.len(), 1);
+        assert_eq!(g.context_to_frame.len(), 1);
+        assert_eq!(g.unique_to_frame.len(), 1);
+        assert_eq!(g.frame_to_unique.len(), 1);
+        assert_eq!(g.context_ids.get("F0"), Some(&10_000));
+        assert_eq!(g.unique_to_frame.get("U10000").map(String::as_str), Some("F0"));
+    }
+
+    #[test]
+    fn context_capacity_refuses_new_frame_without_evicting_existing_frames() {
+        let shared: Shared = std::sync::Arc::new(Mutex::new(FrameWorldState::default()));
+        let world = "__nomi_capacity__";
+        for id in 0..=MAX_FRAME_WORLDS {
+            InjectionManager::on_context_created(
+                &shared,
+                world,
+                &serde_json::json!({"context": {
+                    "id": id as i64 + 1,
+                    "name": world,
+                    "uniqueId": format!("U{id}"),
+                    "auxData": {"frameId": format!("F{id}")}
+                }}),
+            );
+        }
+        let g = shared.lock().unwrap();
+        assert_eq!(g.context_ids.len(), MAX_FRAME_WORLDS);
+        assert_eq!(g.context_to_frame.len(), MAX_FRAME_WORLDS);
+        assert_eq!(g.unique_to_frame.len(), MAX_FRAME_WORLDS);
+        assert!(g.context_ids.contains_key("F0"), "capacity never evicts");
+        assert!(!g.context_ids.contains_key(&format!("F{MAX_FRAME_WORLDS}")));
+        assert!(g.capacity_exceeded);
+        drop(g);
+
+        shared.lock().unwrap().remove_frame("F0");
+        assert!(
+            shared.lock().unwrap().capacity_exceeded,
+            "one tracked-frame detach does not prove rejected live frames disappeared"
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_on_drop_task_cancels_and_runs_context_cleanup() {
+        let shared: Shared = std::sync::Arc::new(Mutex::new(FrameWorldState::default()));
+        shared
+            .lock()
+            .unwrap()
+            .register_context("F0".into(), 1, Some("U1".into()))
+            .unwrap();
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let started_in_task = started.clone();
+        let state_in_task = shared.clone();
+        let task = tokio::spawn(async move {
+            let _cleanup = ContextLoopCleanup(state_in_task);
+            started_in_task.notify_one();
+            std::future::pending::<()>().await;
+        });
+        started.notified().await;
+        drop(AbortOnDropTask::new(task));
+        for _ in 0..20 {
+            if shared.lock().unwrap().context_ids.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let g = shared.lock().unwrap();
+        assert!(g.context_ids.is_empty());
+        assert!(g.unique_to_frame.is_empty());
+    }
+
+    #[tokio::test]
+    async fn arm_failure_aborts_context_loop_and_drops_its_subscriptions() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake CDP");
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake CDP");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket handshake");
+            let request = websocket
+                .next()
+                .await
+                .expect("Runtime.enable request")
+                .expect("valid websocket message");
+            let Message::Text(request) = request else {
+                panic!("expected text request");
+            };
+            let request: Value = serde_json::from_str(request.as_ref()).unwrap();
+            assert_eq!(request["method"], "Runtime.enable");
+            websocket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "id": request["id"],
+                        "error": {"code": -32000, "message": "forced arm failure"}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send forced failure");
+            std::future::pending::<()>().await;
+        });
+
+        let conn = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect fake CDP");
+        let manager = InjectionManager::new(conn.clone(), crate::session::ROOT_SESSION);
+        let world = manager.world_name().to_string();
+        assert!(manager.arm().await.is_err(), "fault injection must fail arm");
+
+        // If the pre-commit JoinHandle had merely been dropped (detached), its
+        // three receivers would still consume this event and mutate the shared
+        // cache.  The abort guard drops all receivers and cleanup leaves no id.
+        conn.registry()
+            .dispatch_message(
+                &serde_json::json!({
+                    "method": "Runtime.executionContextCreated",
+                    "params": {"context": {
+                        "id": 77,
+                        "name": world,
+                        "uniqueId": "U77",
+                        "auxData": {"frameId": "F77"}
+                    }}
+                })
+                .to_string(),
+            )
+            .expect("dispatch post-failure event");
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(matches!(
+            manager.context_id_for("F77"),
+            Err(InjectError::ContextNotReady { .. })
+        ));
+
+        conn.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn lossy_context_stream_rebuilds_from_authoritative_frame_tree() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake CDP");
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake CDP");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket handshake");
+            while let Some(message) = websocket.next().await {
+                let Message::Text(request) = message.expect("valid websocket message") else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(request.as_ref()).unwrap();
+                let result = match request["method"].as_str().unwrap_or_default() {
+                    "Page.getFrameTree" => serde_json::json!({
+                        "frameTree": {"frame": {"id": "F-rebuilt"}}
+                    }),
+                    "Page.createIsolatedWorld" => serde_json::json!({
+                        "executionContextId": 919
+                    }),
+                    method => panic!("unexpected rebuild command {method}"),
+                };
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({"id": request["id"], "result": result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("send fake result");
+            }
+        });
+
+        let conn = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect fake CDP");
+        let manager = InjectionManager::new(conn.clone(), crate::session::ROOT_SESSION);
+        manager
+            .shared
+            .lock()
+            .unwrap()
+            .register_context("F-stale".into(), 17, Some("U-stale".into()))
+            .unwrap();
+
+        manager.rebuild_after_context_loss("created", 500).await;
+        assert!(matches!(
+            manager.context_id_for("F-stale"),
+            Err(InjectError::ContextNotReady { .. })
+        ));
+        assert_eq!(manager.context_id_for("F-rebuilt").unwrap(), 919);
+        let state = manager.shared.lock().unwrap();
+        assert_eq!(state.context_ids.len(), 1);
+        assert_eq!(state.context_to_frame.len(), 1);
+        drop(state);
+
+        conn.shutdown().await;
+        let _ = server.await;
     }
 
     // ── 端到端注入冒烟（#[ignore]，本机 Windows 实跑）─────────────────────────
@@ -1294,9 +2074,10 @@ mod tests {
         )
         .await
         .expect("resolve chrome (set NOMIFUN_CHROME_BINARY)");
+        let profile_root = tempfile::tempdir().expect("unique smoke profile root");
         let cfg = LaunchConfig {
             chrome_path: chrome,
-            user_data_dir: std::env::temp_dir().join("nomifun-inject-smoke-profile"),
+            user_data_dir: profile_root.path().join("profile"),
             headful: false,
         };
         let launched = launch_chrome(&cfg, true).await.expect("launch chrome");
@@ -1374,7 +2155,7 @@ mod tests {
 
         // node 参数走 objectId（同 utility world 的元素句柄）；opts 参数走 by-value。
         let node_arg = CallArgument {
-            object_id: Some(RemoteObjectId::new(body_obj_id)),
+            object_id: Some(RemoteObjectId::new(body_obj_id.clone())),
             ..Default::default()
         };
         let opts_arg = CallArgument {
@@ -1395,5 +2176,131 @@ mod tests {
             yaml.contains("button") || yaml.contains("Submit order"),
             "aria-snapshot should mention the button; got:\n{yaml}"
         );
+
+        // 6) Dynamic-DOM churn: every round disconnects the previous 50
+        // elements and registers 50 replacements in the same observe
+        // generation.  The injected map must prune disconnected nodes instead
+        // of growing by 50 on every call.
+        for round in 0..100u32 {
+            let script = format!(
+                "document.querySelectorAll('.churn').forEach(e => e.remove());\
+                 for (let i=0;i<50;i++) {{ const b=document.createElement('button');\
+                 b.className='churn'; b.textContent='r{round}-'+i; document.body.appendChild(b); }}"
+            );
+            let mut mutate = EvaluateParams::new(script);
+            mutate.context_id = Some(ExecutionContextId::new(ctx_id));
+            mutate.return_by_value = Some(true);
+            conn.send::<EvaluateParams>(&page_session, &mutate)
+                .await
+                .expect("mutate churn DOM");
+            let found = mgr
+                .find_elements(&frame_id, ".churn", "f0", 50)
+                .await
+                .expect("find churn elements");
+            assert_eq!(found["value"]["ok"], true, "round {round}: {found}");
+        }
+        // Accessible-name churn on still-connected nodes supersedes their old
+        // refs.  Those stale live-node entries are also reclaimable (they can
+        // no longer pass role/name drift validation) and must not accumulate.
+        for round in 0..100u32 {
+            let mut rename = EvaluateParams::new(format!(
+                "document.querySelectorAll('.churn').forEach((e,i)=>e.textContent='rename-{round}-'+i)"
+            ));
+            rename.context_id = Some(ExecutionContextId::new(ctx_id));
+            rename.return_by_value = Some(true);
+            conn.send::<EvaluateParams>(&page_session, &rename)
+                .await
+                .expect("rename connected churn DOM");
+            let found = mgr
+                .find_elements(&frame_id, ".churn", "f0", 50)
+                .await
+                .expect("find renamed elements");
+            assert_eq!(found["value"]["ok"], true, "rename round {round}: {found}");
+        }
+        let retained = mgr
+            .call_on_injected_handle(
+                &frame_id,
+                "function(){ const es=this._lastAriaSnapshotForQuery.elements; let disconnected=0; for (const e of es.values()) if (!e || !e.isConnected) disconnected++; return {size:es.size,disconnected}; }",
+                vec![],
+                None,
+                true,
+            )
+            .await
+            .expect("inspect retained ref map");
+        assert_eq!(retained["value"]["disconnected"], 0);
+        assert!(
+            retained["value"]["size"].as_u64().unwrap_or(u64::MAX)
+                <= crate::aria_ref::MAX_REFS_PER_GENERATION as u64,
+            "dynamic churn escaped the hard bound: {retained}"
+        );
+
+        // 7) Keep distinct nodes connected and address them in 50-element
+        // batches.  Repeated calls must eventually refuse the cumulative
+        // generation, with no live-ref eviction and an explicit fresh-observe
+        // error shape.
+        let mut add_capacity_nodes = EvaluateParams::new(
+            "for(let batch=0;batch<50;batch++) for(let i=0;i<50;i++){const b=document.createElement('button');b.className='capacity';b.dataset.batch=String(batch);b.textContent='c'+batch+'-'+i;document.body.appendChild(b);}".to_string(),
+        );
+        add_capacity_nodes.context_id = Some(ExecutionContextId::new(ctx_id));
+        add_capacity_nodes.return_by_value = Some(true);
+        conn.send::<EvaluateParams>(&page_session, &add_capacity_nodes)
+            .await
+            .expect("add capacity DOM");
+        let mut refused = None;
+        for batch in 0..50u32 {
+            let selector = format!(".capacity[data-batch='{batch}']");
+            let found = mgr
+                .find_elements(&frame_id, &selector, "f0", 50)
+                .await
+                .expect("find capacity batch");
+            if found["value"]["error"] == "ref_capacity_exceeded" {
+                refused = Some(found);
+                break;
+            }
+        }
+        let refused = refused.expect("cumulative calls must hit the generation bound");
+        assert_eq!(
+            refused["value"]["limit"],
+            crate::aria_ref::MAX_REFS_PER_GENERATION as u64
+        );
+        assert_eq!(refused["value"]["reset"], false);
+
+        // 8) Initial observe itself is subject to the same generation budget.
+        // The bounded wrapper must discard an oversized vendor snapshot inside
+        // the same JS call, leaving no map that a later find could reuse.
+        let oversized_error = mgr
+            .incremental_aria_snapshot_bounded(
+                &frame_id,
+                CallArgument {
+                    object_id: Some(RemoteObjectId::new(body_obj_id)),
+                    ..Default::default()
+                },
+                CallArgument {
+                    value: Some(serde_json::json!({
+                        "mode": "ai",
+                        "refPrefix": "f0",
+                        "depth": 0,
+                        "track": ""
+                    })),
+                    ..Default::default()
+                },
+                0,
+                0,
+            )
+            .await
+            .expect_err("oversized initial observe must fail closed");
+        assert!(matches!(
+            oversized_error,
+            InjectError::RefCapacityExceeded {
+                limit: crate::aria_ref::MAX_REFS_PER_GENERATION,
+                current,
+                ..
+            } if current > crate::aria_ref::MAX_REFS_PER_GENERATION
+        ));
+        let after_oversized = mgr
+            .find_elements(&frame_id, ".capacity", "f0", 1)
+            .await
+            .expect("probe snapshot map after oversized observe");
+        assert_eq!(after_oversized["value"], "error:notobserved");
     }
 }

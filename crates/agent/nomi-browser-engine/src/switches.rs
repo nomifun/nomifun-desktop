@@ -70,8 +70,10 @@ pub fn chromium_switches() -> Vec<String> {
     let mut switches: Vec<String> = vec![
         "--disable-field-trial-config".into(),
         "--disable-background-networking".into(),
-        "--disable-background-timer-throttling".into(),
-        "--disable-backgrounding-occluded-windows".into(),
+        // Keep Chromium's native timer, occluded-window and renderer
+        // throttling enabled. Playwright disables them for deterministic test
+        // timing, but a long-lived agent browser must let background targets
+        // shed CPU and memory pressure.
         // 避免 page.goBack() 时主请求绕过拦截等意外。安全红线，勿删。
         "--disable-back-forward-cache".into(),
         "--disable-breakpad".into(),
@@ -93,11 +95,8 @@ pub fn chromium_switches() -> Vec<String> {
         // 新的 CDP 截图取面，保证截图可复现（PW 默认开，除非 legacy env）。
         "--enable-features=CDPScreenshotNewSurface".into(),
         "--allow-pre-commit-input".into(),
-        "--disable-hang-monitor".into(),
-        "--disable-ipc-flooding-protection".into(),
         "--disable-popup-blocking".into(),
         "--disable-prompt-on-repost".into(),
-        "--disable-renderer-backgrounding".into(),
         "--force-color-profile=srgb".into(),
         "--metrics-recording-only".into(),
         "--no-first-run".into(),
@@ -148,7 +147,6 @@ mod tests {
             "--disable-default-apps",
             "--disable-popup-blocking",
             "--metrics-recording-only",
-            "--disable-hang-monitor",
             "--disable-sync",
         ] {
             assert!(
@@ -211,6 +209,23 @@ mod tests {
         // PW 用 .filter(Boolean) 去空串；Rust 侧不应产生空串。
         let s = chromium_switches();
         assert!(s.iter().all(|x| !x.is_empty()));
+    }
+
+    #[test]
+    fn preserves_chromium_background_resource_controls() {
+        let switches = chromium_switches();
+        for forbidden in [
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-ipc-flooding-protection",
+            "--disable-hang-monitor",
+        ] {
+            assert!(
+                !switches.iter().any(|switch| switch == forbidden),
+                "low-resource browser launches must not include {forbidden}"
+            );
+        }
     }
 
     #[cfg(not(target_os = "linux"))]

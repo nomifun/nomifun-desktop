@@ -19,6 +19,7 @@
 //! 的事件源接线在 [`crate::backend::cdp`] 的 act 入口（act 期间临时订阅）。
 
 use std::future::Future;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -31,6 +32,175 @@ use crate::progress::Progress;
 /// 重试 6 次（首次尝试 + 5 次退避后重试 = 共 6 次 `op` 调用上限）。镜像 vendored PW 的
 /// `[0,20,50,100,100,500]`（与 `[0,20,100,100,500]` 同源；我们取前者的 6 槽形态）。
 pub const BACKOFF: [u64; 6] = [0, 20, 50, 100, 100, 500];
+
+/// Raw visible-text bytes retained from one page-level read.  The renderer
+/// truncates before returning the value through CDP and Rust validates the
+/// same boundary again.  This is per operation/task, never a process-global
+/// browser-memory ceiling.
+pub const MAX_PAGE_TEXT_BYTES: usize = 1024 * 1024;
+
+/// Serialized JSON bytes accepted for one structured-extraction schema.
+pub const MAX_EXTRACT_SCHEMA_BYTES: usize = 64 * 1024;
+pub const MAX_EXTRACT_SCHEMA_DEPTH: usize = 32;
+pub const MAX_EXTRACT_SCHEMA_NODES: usize = 4096;
+
+/// Maximum retained `ActResult::message` for page text / extraction after
+/// redaction, observation stitching, schema rendering, and wrapper overhead.
+pub const MAX_PAGE_READ_RESULT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Count compact JSON bytes without materializing another copy.  The sink
+/// stops as soon as `limit` is crossed, so callers can validate a hostile
+/// schema or result before cloning it into another retained layer.
+pub fn serialized_json_bytes_at_most<T: serde::Serialize + ?Sized>(
+    value: &T,
+    limit: usize,
+) -> Result<usize, usize> {
+    struct Counter {
+        bytes: usize,
+        attempted: usize,
+        limit: usize,
+    }
+
+    impl Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let attempted = self.bytes.saturating_add(buf.len());
+            self.attempted = attempted;
+            if attempted > self.limit {
+                return Err(io::Error::other("serialized payload byte limit exceeded"));
+            }
+            self.bytes = attempted;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = Counter {
+        bytes: 0,
+        attempted: 0,
+        limit,
+    };
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) => Ok(counter.bytes),
+        Err(_) => Err(counter.attempted.max(limit.saturating_add(1))),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractSchemaCapacityError {
+    Bytes,
+    Depth,
+    Nodes,
+}
+
+/// Validate extraction-schema structure before recursive serialization or
+/// cloning.  The explicit stack makes deeply nested hostile input a normal
+/// capacity error rather than a call-stack hazard.
+pub fn validate_extract_schema_capacity(
+    schema: &serde_json::Value,
+) -> Result<(), ExtractSchemaCapacityError> {
+    let mut stack = vec![(schema, 1usize)];
+    let mut nodes = 0usize;
+    while let Some((value, depth)) = stack.pop() {
+        if depth > MAX_EXTRACT_SCHEMA_DEPTH {
+            return Err(ExtractSchemaCapacityError::Depth);
+        }
+        nodes = nodes.saturating_add(1);
+        if nodes > MAX_EXTRACT_SCHEMA_NODES {
+            return Err(ExtractSchemaCapacityError::Nodes);
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                stack.extend(values.iter().map(|value| (value, depth.saturating_add(1))));
+            }
+            serde_json::Value::Object(values) => {
+                stack.extend(
+                    values
+                        .values()
+                        .map(|value| (value, depth.saturating_add(1))),
+                );
+            }
+            _ => {}
+        }
+    }
+    serialized_json_bytes_at_most(schema, MAX_EXTRACT_SCHEMA_BYTES)
+        .map(|_| ())
+        .map_err(|_| ExtractSchemaCapacityError::Bytes)
+}
+
+/// Largest valid UTF-8 prefix no longer than `limit` bytes.
+pub fn utf8_prefix_at_most(value: &str, limit: usize) -> &str {
+    if value.len() <= limit {
+        return value;
+    }
+    let mut end = limit.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PageTextCapture {
+    text: String,
+    truncated: bool,
+}
+
+impl PageTextCapture {
+    fn from_renderer_value(value: &serde_json::Value) -> Self {
+        let text = value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let renderer_truncated = value
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let bounded = utf8_prefix_at_most(text, MAX_PAGE_TEXT_BYTES);
+        Self {
+            text: bounded.to_owned(),
+            truncated: renderer_truncated || bounded.len() < text.len(),
+        }
+    }
+}
+
+fn bounded_page_text_expression() -> String {
+    format!(
+        "(() => {{ try {{ \
+           const text = document.body ? document.body.innerText : ''; \
+           const limit = {MAX_PAGE_TEXT_BYTES}; \
+           let bytes = 0; let end = 0; \
+           while (end < text.length) {{ \
+             const cp = text.codePointAt(end); \
+             const width = cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4; \
+             const units = cp > 0xffff ? 2 : 1; \
+             if (bytes + width > limit) break; \
+             bytes += width; end += units; \
+           }} \
+           return {{ text: end === text.length ? text : text.slice(0, end), \
+                     truncated: end < text.length, retainedUtf8Bytes: bytes }}; \
+         }} catch (e) {{ return {{ text: '', truncated: false, retainedUtf8Bytes: 0 }}; }} }})()"
+    )
+}
+
+fn redact_bounded_page_text(capture: PageTextCapture) -> (String, bool) {
+    let redacted = crate::redact::redact_yaml(&capture.text);
+    let bounded = utf8_prefix_at_most(&redacted, MAX_PAGE_TEXT_BYTES);
+    (
+        bounded.to_owned(),
+        capture.truncated || bounded.len() < redacted.len(),
+    )
+}
+
+fn page_text_truncation_label(truncated: bool) -> &'static str {
+    if truncated {
+        ", truncated at the per-operation UTF-8 byte limit"
+    } else {
+        ""
+    }
+}
 
 /// 一次 `op` 尝试的结果裁决（[`run_act_with_retry`] 据此决定重试 / 立返 / 成功）。
 ///
@@ -746,9 +916,22 @@ pub enum FindOutcome {
     Found {
         matches: Vec<FoundElement>,
         total: usize,
+        /// Refs whose JavaScript nodes were proven disconnected or whose
+        /// element identity was superseded, and were removed from the
+        /// authoritative generation map.
+        removed_refs: Vec<String>,
     },
     /// `'error:notobserved'`：该帧还没 observe 过（`_lastAriaSnapshotForQuery` 未物化）→ 引导先 observe。
     NotObserved,
+    /// Adding this query would exceed the cumulative generation bound.  No
+    /// live ref was evicted; a fresh observe creates the next generation.
+    RefCapacityExceeded {
+        limit: usize,
+        current: usize,
+        required: usize,
+        reset: bool,
+        removed_refs: Vec<String>,
+    },
     /// 形状陌生（不该发生）→ 保守失败。
     Unknown,
 }
@@ -758,6 +941,15 @@ pub fn parse_find_outcome(value: Option<&serde_json::Value>) -> FindOutcome {
     match value {
         Some(serde_json::Value::String(s)) if s == "error:notobserved" => FindOutcome::NotObserved,
         Some(serde_json::Value::Object(map)) => {
+            if map.get("error").and_then(|v| v.as_str()) == Some("ref_capacity_exceeded") {
+                return FindOutcome::RefCapacityExceeded {
+                    limit: map.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    current: map.get("current").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    required: map.get("required").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    reset: map.get("reset").and_then(|v| v.as_bool()).unwrap_or(false),
+                    removed_refs: parse_removed_refs(map.get("removedRefs")),
+                };
+            }
             let matches = map
                 .get("matches")
                 .and_then(|v| v.as_array())
@@ -788,13 +980,28 @@ pub fn parse_find_outcome(value: Option<&serde_json::Value>) -> FindOutcome {
                         .and_then(|v| v.as_u64())
                         .map(|t| t as usize)
                         .unwrap_or(matches.len());
-                    FindOutcome::Found { matches, total }
+                    FindOutcome::Found {
+                        matches,
+                        total,
+                        removed_refs: parse_removed_refs(map.get("removedRefs")),
+                    }
                 }
                 None => FindOutcome::Unknown,
             }
         }
         _ => FindOutcome::Unknown,
     }
+}
+
+fn parse_removed_refs(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|value| value.as_array())
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// **[纯逻辑] 把注入侧 [`InjectError`] 分类成动作层 [`RetryDecision`]**（C1 op 内统一收口）。
@@ -977,8 +1184,8 @@ impl CdpBackend {
     }
 
     /// 公共骨架包装：定位 frame（层①）→ arm abort 子作用域 → arm group 释放 RAII guard →
-    /// run_act_with_retry。group 释放是**类型保证的 finally**（[`crate::actionability::ActGroupReleaseGuard`]
-    /// Drop，覆盖正常返回 / `?` 早返 / await 点 panic），非手动约定。
+    /// run_act_with_retry。正常返回仍在本次 operation 生命周期内 await release；取消/panic 由
+    /// [`crate::actionability::ActGroupReleaseGuard`] Drop 提交固定有界 fallback，不生成 detached task。
     /// `op` 收 (seq, frame_id) 每次 attempt 重跑（内部自行重解析 ref）；返 `Result<ActResult, RetryDecision>`。
     async fn act_with_skeleton<F, Fut>(
         &self,
@@ -1000,12 +1207,14 @@ impl CdpBackend {
         // 4) group 释放 RAII guard：arm 一个 drop-guard（类型保证 finally）。无论下面 run_act_with_retry
         //    正常返回 / `?` 早返 / await 点 panic，guard 离开作用域即释放本动作 objectGroup（act-<seq>）的
         //    全部句柄（无泄漏、只释放一次）。**必须**在 run_act_with_retry 之前 arm（覆盖整个动作）。
-        let _release_guard = self.arm_act_group_release(&rec, seq).await;
+        let mut release_guard = self.arm_act_group_release(&rec, seq).await;
         // 5) retry 包裹（irreversible=false，C1）：op 每次 attempt 重解析 ref（外层自愈）。
         let rec_for_op = rec.clone();
         let result = run_act_with_retry(&child, false, move |_attempt| op(seq, rec_for_op.clone())).await;
-        // 6) finally：_release_guard 在此（函数返回）Drop → 释放本动作 objectGroup（成功/失败/早返/panic
-        //    均然）；_abort_guard 同时 Drop 收摊 detach/crash 监听。无显式手动释放（RAII 唯一释放点）。
+        // 6) 正常 finally：在 operation permit 仍由上层持有时 await 精确释放。guard 跨 await 保持
+        //    armed；若 caller 在这里取消，Drop 会把同一 key 交给固定有界 dispatcher。成功后 disarm，
+        //    随后的 Drop 是 no-op，故正常路径恰好发一次 releaseObjectGroup。
+        release_guard.release_now().await;
         result
     }
 
@@ -1917,11 +2126,14 @@ impl CdpBackend {
                     .map_err(classify_browser_err)?;
                 // 不可信内容安全契约：先脱敏（抹凭据/高熵 token），再 <data> 包裹（防提示注入越狱）。
                 let url = this.act_current_url().await;
-                let redacted = crate::redact::redact_yaml(&raw);
+                let (redacted, truncated) = redact_bounded_page_text(raw);
                 let wrapped = crate::redact::wrap_untrusted(&redacted, url.as_deref());
                 Ok(ActResult {
                     // 只读动作不改页面：changed=false，文本在 message。
-                    message: format!("page text (untrusted, redacted):\n{wrapped}"),
+                    message: format!(
+                        "page text (untrusted, redacted{})\n{wrapped}",
+                        page_text_truncation_label(truncated)
+                    ),
                     effect: Effect {
                         changed: false,
                         before_anchor: None,
@@ -1953,7 +2165,7 @@ impl CdpBackend {
                     .map_err(classify_browser_err)?;
                 // **先脱敏再 grep**：在脱敏后的文本上匹配——命中片段绝不含明文 secret，且 query 命中
                 // `[REDACTED_SECRET]` 这类占位也无害（不泄漏）。
-                let redacted = crate::redact::redact_yaml(&raw);
+                let (redacted, truncated) = redact_bounded_page_text(raw);
                 // cap 命中条数防超大页爆 token（50 条上下文足够模型定位）。
                 let hits = grep_page_text(&redacted, &query, 50);
                 let url = this.act_current_url().await;
@@ -1961,7 +2173,8 @@ impl CdpBackend {
                     // 良性：未命中（或空 query）→ success=false 如实。
                     return Ok(ActResult {
                         message: format!(
-                            "no match for {query:?} on the page; try different wording, scroll, or re-observe"
+                            "no match for {query:?} in the retained page text{}; try different wording, scroll, or re-observe",
+                            page_text_truncation_label(truncated)
                         ),
                         effect: Effect {
                             changed: false,
@@ -1980,8 +2193,9 @@ impl CdpBackend {
                 let wrapped = crate::redact::wrap_untrusted(&body, url.as_deref());
                 Ok(ActResult {
                     message: format!(
-                        "{} match(es) for {query:?} (untrusted, redacted):\n{wrapped}",
-                        hits.len()
+                        "{} match(es) for {query:?} (untrusted, redacted{}):\n{wrapped}",
+                        hits.len(),
+                        page_text_truncation_label(truncated)
                     ),
                     effect: Effect {
                         changed: false,
@@ -2034,9 +2248,15 @@ impl CdpBackend {
                     .await
                     .map_err(classify_inject_err)?;
                 match parse_find_outcome(result.get("value")) {
-                    FindOutcome::Found { matches, total } => {
+                    FindOutcome::Found {
+                        matches,
+                        total,
+                        removed_refs,
+                    } => {
                         // 把命中的 ref 登记进**当前代际** RefTable（与 observe 同表同代际，故可被 resolve）。
-                        this.register_found_refs(&frame_id, &matches).await;
+                        this.register_found_refs(&frame_id, &matches, &removed_refs)
+                            .await
+                            .map_err(RetryDecision::Fatal)?;
                         let listing = matches
                             .iter()
                             .map(|m| {
@@ -2075,6 +2295,24 @@ impl CdpBackend {
                     FindOutcome::NotObserved => Err(RetryDecision::Retryable(BrowserError::NodeStale {
                         generation: this.current_generation().await,
                     })),
+                    FindOutcome::RefCapacityExceeded {
+                        limit,
+                        current,
+                        required,
+                        reset,
+                        removed_refs,
+                    } => {
+                        this.prune_found_refs(&removed_refs, reset)
+                            .await
+                            .map_err(RetryDecision::Fatal)?;
+                        Err(RetryDecision::Fatal(BrowserError::Blocked {
+                            reason: format!(
+                                "find_elements reached the retained-ref limit for this observe generation \
+                                 (limit={limit}, current={current}, additional={required}). Run observe again \
+                                 to start a fresh generation before calling find_elements again"
+                            ),
+                        }))
+                    }
                     FindOutcome::Unknown => Err(RetryDecision::Retryable(BrowserError::Other(
                         "find_elements returned an unexpected shape".into(),
                     ))),
@@ -2323,11 +2561,15 @@ impl CdpBackend {
     /// **[运行时] 取整页可读文本**（get_page_text/search_page 的页面文本源）：在**当前作用帧**
     /// （[`Self::active_frame_eval`]，switch_frame 后是 iframe，否则主帧）跑 `document.body.innerText`
     /// （已折叠不可见/script/style，是「人读」文本）。空 body → 空串。异常 → 上抛（Fatal）。**只读**。
-    async fn act_extract_page_text(&self) -> Result<String, BrowserError> {
-        let expression =
-            "(() => { try { return document.body ? document.body.innerText : ''; } catch (e) { return ''; } })()";
-        let value = self.active_frame_eval(expression).await?;
-        Ok(value.as_str().unwrap_or_default().to_string())
+    async fn act_extract_page_text(&self) -> Result<PageTextCapture, BrowserError> {
+        // Bound the by-value CDP product in the renderer. Walking JavaScript
+        // code points counts the exact UTF-8 width without allocating a second
+        // full-page `TextEncoder` buffer; `slice(0, end)` never splits a
+        // surrogate pair. `innerText` itself is necessarily materialized by
+        // Chromium, but only the bounded prefix crosses the process boundary.
+        let expression = bounded_page_text_expression();
+        let value = self.active_frame_eval(&expression).await?;
+        Ok(PageTextCapture::from_renderer_value(&value))
     }
 
     /// **[运行时] 判某文本是否在页面可见**（wait_for TextVisible）：在**当前作用帧**
@@ -2415,20 +2657,27 @@ impl CdpBackend {
     /// **把 find_elements 登记的 ref 写进当前代际 RefTable**（C3 复用 P1 ref 登记，与 observe 同表同代际）。
     /// 注入侧已给元素打 `_ariaRef` + 写 `_lastAriaSnapshotForQuery.elements`（层②③可反解）；这里宿主侧把
     /// 每个 ref 登记进当前代际表（[`crate::aria_ref::RefTable::insert`]），使 [`Self::resolve_ref_record`]
-    /// 的层① 也认它。表为空（还没 observe）则跳过（注入侧会先报 notobserved，不会走到这里）。
-    /// session_id/frame_id 取主帧（find_elements 只查主帧）。**D1：经 active tab 解引用；active tab 缺失静默跳过**。
-    async fn register_found_refs(&self, frame_id: &str, matches: &[FoundElement]) {
-        let Ok(session_id) = self.page_session_id().await else {
-            return;
-        };
-        let Ok(ref_table) = self.ref_table_lock().await else {
-            return;
-        };
+    /// 的层① 也认它。表为空或批量容量不足都显式失败并要求 fresh observe；绝不静默发布一半。
+    /// session_id 取 active page，frame_id 取当前页面作用帧。**D1：经 active tab 解引用；active tab
+    /// 缺失按生命周期错误上抛**。
+    async fn register_found_refs(
+        &self,
+        frame_id: &str,
+        matches: &[FoundElement],
+        removed_refs: &[String],
+    ) -> Result<(), BrowserError> {
+        let session_id = self.page_session_id().await?;
+        let ref_table = self.ref_table_lock().await?;
         let mut guard = ref_table.lock().await;
-        if let Some(table) = guard.as_mut() {
-            for m in matches {
-                table.insert(
-                    &m.r#ref,
+        let Some(table) = guard.as_mut() else {
+            return Err(BrowserError::NodeStale { generation: 0 });
+        };
+        table.remove_refs(removed_refs.iter().map(String::as_str));
+        let records = matches
+            .iter()
+            .map(|m| {
+                (
+                    m.r#ref.clone(),
                     RefRecord {
                         session_id: session_id.clone(),
                         frame_id: frame_id.to_string(),
@@ -2436,9 +2685,34 @@ impl CdpBackend {
                         role: m.role.clone(),
                         name: m.name.clone(),
                     },
-                );
+                )
+            })
+            .collect();
+        table.try_insert_batch(records).map_err(|error| BrowserError::Blocked {
+            reason: format!(
+                "find_elements exhausted the Rust ref table for this observe generation \
+                 (limit={}). Run observe again to start a fresh generation",
+                error.limit
+            ),
+        })?;
+        Ok(())
+    }
+
+    async fn prune_found_refs(
+        &self,
+        removed_refs: &[String],
+        reset: bool,
+    ) -> Result<(), BrowserError> {
+        let ref_table = self.ref_table_lock().await?;
+        let mut guard = ref_table.lock().await;
+        if let Some(table) = guard.as_mut() {
+            if reset {
+                table.clear();
+            } else {
+                table.remove_refs(removed_refs.iter().map(String::as_str));
             }
         }
+        Ok(())
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2561,6 +2835,8 @@ impl CdpBackend {
                 let before_set = download_dir
                     .as_deref()
                     .map(crate::backend::cdp::list_dir_files)
+                    .transpose()
+                    .map_err(RetryDecision::Fatal)?
                     .unwrap_or_default();
 
                 // 选项 A：注入隐藏 `<a download>` + click 触发（走 E4 downloadWillBegin/Progress 沙箱）。
@@ -2570,7 +2846,11 @@ impl CdpBackend {
 
                 // 轮询隔离 downloads 目录至出现**新增**文件（size>0）或短 deadline；无 download_dir → 不探测。
                 let landed = match download_dir.as_deref() {
-                    Some(dir) => Some(this.poll_download_landed(dir, &before_set).await),
+                    Some(dir) => Some(
+                        this.poll_download_landed(dir, &before_set)
+                            .await
+                            .map_err(RetryDecision::Fatal)?,
+                    ),
                     None => None,
                 };
 
@@ -2640,6 +2920,14 @@ impl CdpBackend {
                     }));
                 };
 
+                // Reserve the task-global active slot before asking Chrome to
+                // materialize a base64 PDF response. Cancellation/error before
+                // commit drops this permit and refunds only the active charge.
+                let reservation = this
+                    .reserve_direct_download_output("pdf")
+                    .await
+                    .map_err(RetryDecision::Fatal)?;
+
                 // Page.printToPDF（默认参数 + print_background）。headful 已实测可用；若某版本受限 → Err（Fatal）。
                 let pdf_bytes = this.print_to_pdf().await.map_err(RetryDecision::Fatal)?;
                 if pdf_bytes.is_empty() {
@@ -2648,18 +2936,41 @@ impl CdpBackend {
                     )));
                 }
 
-                // 写进隔离 downloads 目录（与 download 同落点）。文件名带时间戳防覆盖。best-effort mkdir。
+                let size = pdf_bytes.len() as u64;
+                reservation
+                    .update_progress(size, Some(size))
+                    .map_err(RetryDecision::Fatal)?;
+
+                // 两阶段补偿事务写落点：prepare 预留终身账、写唯一同卷临时文件
+                //（create_new，不覆盖）、原子发布、无 await finalize。发布失败回滚
+                // 临时文件并放弃预留；临时文件删不掉时保留计费（绝不留未计费产物）。
                 let path = crate::backend::cdp::pdf_output_path(&dir);
-                if let Some(parent_dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent_dir);
-                }
-                std::fs::write(&path, &pdf_bytes).map_err(|e| {
+                let preferred_name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("page.pdf")
+                    .to_string();
+                let unique_hint = format!("pdf-{size}-{preferred_name}");
+                let published = crate::download::publish_task_output(
+                    reservation.as_ref(),
+                    size,
+                    crate::download::TaskOutputPayload::Bytes(&pdf_bytes),
+                    std::path::Path::new(&dir),
+                    &preferred_name,
+                    &unique_hint,
+                )
+                .map_err(|failure| {
                     RetryDecision::Fatal(BrowserError::Other(format!(
-                        "failed to write the PDF to the sandboxed downloads directory: {e}"
+                        "failed to publish the PDF into the sandboxed downloads directory: {}{}",
+                        failure.message,
+                        if failure.charged {
+                            "; the task download quota for this artifact remains charged"
+                        } else {
+                            ""
+                        }
                     )))
                 })?;
-                let size = pdf_bytes.len() as u64;
-                let path_str = path.to_string_lossy().into_owned();
+                let path_str = published.to_string_lossy().into_owned();
                 Ok(ActResult {
                     message: format!(
                         "saved the current page as a PDF to {path_str:?} ({size} bytes) in the sandboxed \
@@ -2698,6 +3009,13 @@ impl CdpBackend {
         schema: &serde_json::Value,
         parent: &Progress,
     ) -> Result<ActResult, BrowserError> {
+        if let Err(error) = validate_extract_schema_capacity(schema) {
+            return Err(BrowserError::Blocked {
+                reason: format!(
+                    "extract schema exceeds the per-operation capacity ({error:?}; bytes={MAX_EXTRACT_SCHEMA_BYTES}, depth={MAX_EXTRACT_SCHEMA_DEPTH}, nodes={MAX_EXTRACT_SCHEMA_NODES})"
+                ),
+            });
+        }
         let schema_owned = schema.clone();
         self.act_page_with_skeleton(parent, move |_attempt| {
             let this = self;
@@ -2714,7 +3032,7 @@ impl CdpBackend {
                     .await
                     .map_err(classify_browser_err)?;
                 let url = this.act_current_url().await;
-                let redacted_text = crate::redact::redact_yaml(&raw_text);
+                let (redacted_text, text_truncated) = redact_bounded_page_text(raw_text);
                 let wrapped_text = crate::redact::wrap_untrusted(&redacted_text, url.as_deref());
 
                 // 回显 schema 请求字段（紧凑 JSON）作「请求字段」提示——P2 deterministic plumbing：把结构化
@@ -2724,11 +3042,12 @@ impl CdpBackend {
                     "structured page representation for extraction (untrusted, redacted). \
                      Requested schema: {schema_compact}\n\n\
                      [accessibility snapshot]\n{}\n\n\
-                     [visible text]\n{wrapped_text}\n\n\
+                     [visible text{}]\n{wrapped_text}\n\n\
                      NOTE: P2 returns a deterministic page representation; perform the field \
                      extraction against the `schema` above. (TODO(P3): LLM-driven extraction wired \
                      in the nomi-integration layer — the engine holds no LLM.)",
-                    obs.yaml
+                    obs.yaml,
+                    page_text_truncation_label(text_truncated)
                 );
                 Ok(ActResult {
                     // 只读动作：changed=false，内容在 message。
@@ -2892,6 +3211,72 @@ pub(crate) fn validate_upload_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf8_prefix_never_splits_multibyte_code_points() {
+        let value = "a😀界z";
+        assert_eq!(utf8_prefix_at_most(value, 0), "");
+        assert_eq!(utf8_prefix_at_most(value, 1), "a");
+        assert_eq!(utf8_prefix_at_most(value, 4), "a");
+        assert_eq!(utf8_prefix_at_most(value, 5), "a😀");
+        assert_eq!(utf8_prefix_at_most(value, 8), "a😀界");
+        assert_eq!(utf8_prefix_at_most(value, usize::MAX), value);
+    }
+
+    #[test]
+    fn page_text_renderer_value_is_bounded_again_in_rust() {
+        let hostile = format!("{}尾", "界".repeat(MAX_PAGE_TEXT_BYTES / 3 + 32));
+        let capture = PageTextCapture::from_renderer_value(&serde_json::json!({
+            "text": hostile,
+            "truncated": false,
+        }));
+        assert!(capture.truncated);
+        assert!(capture.text.len() <= MAX_PAGE_TEXT_BYTES);
+        assert!(std::str::from_utf8(capture.text.as_bytes()).is_ok());
+        assert!(!capture.text.ends_with('尾'));
+    }
+
+    #[test]
+    fn page_text_expression_enforces_renderer_side_byte_count() {
+        let expression = bounded_page_text_expression();
+        assert!(expression.contains(&format!("const limit = {MAX_PAGE_TEXT_BYTES}")));
+        assert!(expression.contains("codePointAt"));
+        assert!(expression.contains("retainedUtf8Bytes"));
+        assert!(!expression.contains("return document.body ? document.body.innerText"));
+    }
+
+    #[test]
+    fn serialized_schema_counter_stops_at_byte_limit() {
+        let unicode = serde_json::json!({"字段": "😀".repeat(1024)});
+        let bytes = serde_json::to_vec(&unicode).unwrap().len();
+        assert_eq!(
+            serialized_json_bytes_at_most(&unicode, bytes),
+            Ok(bytes)
+        );
+        assert!(serialized_json_bytes_at_most(&unicode, bytes - 1).is_err());
+
+        let hostile = serde_json::json!({"schema": "x".repeat(MAX_EXTRACT_SCHEMA_BYTES + 1)});
+        assert!(
+            serialized_json_bytes_at_most(&hostile, MAX_EXTRACT_SCHEMA_BYTES).is_err()
+        );
+
+        let mut deep = serde_json::Value::Null;
+        for _ in 0..MAX_EXTRACT_SCHEMA_DEPTH {
+            deep = serde_json::json!({"nested": deep});
+        }
+        assert_eq!(
+            validate_extract_schema_capacity(&deep),
+            Err(ExtractSchemaCapacityError::Depth)
+        );
+        let too_many_nodes = serde_json::Value::Array(vec![
+            serde_json::Value::Null;
+            MAX_EXTRACT_SCHEMA_NODES + 1
+        ]);
+        assert_eq!(
+            validate_extract_schema_capacity(&too_many_nodes),
+            Err(ExtractSchemaCapacityError::Nodes)
+        );
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // SD-2 上传路径沙箱纯逻辑单测（无浏览器；使用 tempdir 构造 workspace 场景）。
@@ -4007,9 +4392,14 @@ mod tests {
             "total": 5
         });
         match parse_find_outcome(Some(&v)) {
-            FindOutcome::Found { matches, total } => {
+            FindOutcome::Found {
+                matches,
+                total,
+                removed_refs,
+            } => {
                 assert_eq!(total, 5, "total may exceed matches.len() when capped");
                 assert_eq!(matches.len(), 2);
+                assert!(removed_refs.is_empty());
                 assert_eq!(matches[0], FoundElement {
                     r#ref: "f0e1000001".into(), role: "button".into(), name: "Submit".into()
                 });
@@ -4019,7 +4409,14 @@ mod tests {
         }
         // 无 total → 默认 matches.len()。
         let v2 = serde_json::json!({"matches": []});
-        assert_eq!(parse_find_outcome(Some(&v2)), FindOutcome::Found { matches: vec![], total: 0 });
+        assert_eq!(
+            parse_find_outcome(Some(&v2)),
+            FindOutcome::Found {
+                matches: vec![],
+                total: 0,
+                removed_refs: vec![]
+            }
+        );
     }
 
     #[test]
@@ -4032,6 +4429,26 @@ mod tests {
         assert_eq!(parse_find_outcome(None), FindOutcome::Unknown);
         assert_eq!(parse_find_outcome(Some(&serde_json::json!("weird"))), FindOutcome::Unknown);
         assert_eq!(parse_find_outcome(Some(&serde_json::json!(7))), FindOutcome::Unknown);
+
+        let full = serde_json::json!({
+            "ok": false,
+            "error": "ref_capacity_exceeded",
+            "limit": 2048,
+            "current": 2047,
+            "required": 2,
+            "reset": false,
+            "removedRefs": ["f0e1", "f0e2"]
+        });
+        assert_eq!(
+            parse_find_outcome(Some(&full)),
+            FindOutcome::RefCapacityExceeded {
+                limit: 2048,
+                current: 2047,
+                required: 2,
+                reset: false,
+                removed_refs: vec!["f0e1".into(), "f0e2".into()]
+            }
+        );
     }
 
     /// **wait_for 超时 → Timeout{Action}**：deadline 已过且条件未满足 → run_act_with_retry 外的

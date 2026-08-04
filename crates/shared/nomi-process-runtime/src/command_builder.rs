@@ -1,9 +1,16 @@
 use std::{
+    cell::Cell,
+    collections::VecDeque,
     ffi::{OsStr, OsString},
     io,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Condvar, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError},
+    },
     time::{Duration, Instant},
 };
 
@@ -89,35 +96,241 @@ impl ChildProcessCleanup {
 /// whole-tree termination, reaps the direct child, and proves platform tree
 /// cleanup. Failed or cancelled attempts leave the same authority available
 /// for a later retry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ManagedChildDropMode {
-    /// The caller still owns the hand-off decision.
-    Handoff,
-    /// The cleanup relay owns the value. A drop must retain it directly
-    /// instead of re-entering the hand-off path.
-    Retain,
-}
-
 pub struct ManagedChildProcess {
     child: Option<Child>,
     cleanup: Option<ChildProcessCleanup>,
     shutdown_complete: bool,
-    drop_mode: ManagedChildDropMode,
 }
 
 const MANAGED_CLEANUP_SYNC_GRACE: Duration = Duration::from_millis(500);
+const MANAGED_CLEANUP_RELAY_CAPACITY: usize = 64;
+const MANAGED_CLEANUP_RELAY_WORKERS: usize = 4;
+const MANAGED_CLEANUP_THREAD_STACK_BYTES: usize = 512 * 1024;
+const MANAGED_CLEANUP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+const MANAGED_CLEANUP_ADMISSION_WAIT: Duration = Duration::from_millis(500);
+const MANAGED_CLEANUP_MAX_ATTEMPTS: u32 = 20;
+const MANAGED_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(250);
+const MANAGED_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(30);
+const MANAGED_CLEANUP_DISPATCH_TICK: Duration = Duration::from_millis(25);
 
-/// A last-resort, process-local cleanup relay.
+/// Observable state for the process-local managed-child cleanup relay.
 ///
-/// This is intentionally a static hand-off rather than an implicit leak:
-/// ownership remains visible to the runtime and can be retried by a later
-/// cleanup hand-off when an execution path becomes available again. Statics
-/// are not destructed during Rust process teardown, so retaining an item here
-/// does not invoke [`ManagedChildProcess::drop`].
-static PENDING_MANAGED_CLEANUPS: OnceLock<Mutex<Vec<ManagedChildProcess>>> = OnceLock::new();
+/// `retained` counts exact cleanup authorities currently owned by this generic
+/// relay. The relay never admits more than `capacity`; saturation waits only a
+/// bounded interval before returning ownership to the independent platform
+/// Job/watchdog reaper registered at spawn time. Thus one failing workload
+/// cannot permanently block unrelated `ManagedChildProcess::drop` callers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ManagedChildCleanupMetrics {
+    /// Maximum number of exact cleanup authorities admitted at once.
+    pub capacity: usize,
+    /// All admitted authorities that have not completed exact cleanup.
+    pub retained: usize,
+    /// Authorities waiting for a worker, including an enqueue in progress.
+    pub queued: usize,
+    /// Cleanup attempts currently executing.
+    pub active: usize,
+    /// Failed authorities sleeping until their next automatic retry.
+    pub delayed: usize,
+    /// Live fixed cleanup workers.
+    pub workers: usize,
+    /// Whether the singleton dispatcher accepts new authorities.
+    pub running: bool,
+    /// Managed-child drops observed by this relay.
+    pub submitted: u64,
+    /// Authorities that have proved their process tree empty.
+    pub completed: u64,
+    /// Failed attempts rescheduled by the dispatcher.
+    pub retries: u64,
+    /// Handoffs that encountered the bounded admission ceiling.
+    pub saturated_handoffs: u64,
+    /// Handoffs that could not use the generic relay and invoked its bounded
+    /// fallback path. This does not claim platform proof completion.
+    pub inline_fallbacks: u64,
+    /// Authorities handed back to the already-running platform Job/watchdog
+    /// reaper after the generic relay could not make bounded progress.
+    pub platform_handoffs: u64,
+}
 
-fn pending_managed_cleanups() -> &'static Mutex<Vec<ManagedChildProcess>> {
-    PENDING_MANAGED_CLEANUPS.get_or_init(|| Mutex::new(Vec::new()))
+#[derive(Default)]
+struct ManagedCleanupRelayState {
+    retained: AtomicUsize,
+    active: AtomicUsize,
+    delayed: AtomicUsize,
+    workers: AtomicUsize,
+    submitted: AtomicU64,
+    completed: AtomicU64,
+    retries: AtomicU64,
+    saturated_handoffs: AtomicU64,
+    inline_fallbacks: AtomicU64,
+    platform_handoffs: AtomicU64,
+    running: AtomicBool,
+}
+
+struct ManagedCleanupAdmission {
+    retained: Mutex<usize>,
+    available: Condvar,
+    capacity: usize,
+    state: Arc<ManagedCleanupRelayState>,
+}
+
+impl ManagedCleanupAdmission {
+    fn new(capacity: usize, state: Arc<ManagedCleanupRelayState>) -> Self {
+        Self {
+            retained: Mutex::new(0),
+            available: Condvar::new(),
+            capacity,
+            state,
+        }
+    }
+
+    /// Reserve one of the relay's bounded ownership slots. A saturated relay
+    /// applies short fail-closed backpressure, then lets the caller transfer to
+    /// the already-registered platform reaper rather than block indefinitely.
+    fn acquire(&self) -> bool {
+        let mut retained = self
+            .retained
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut saturation_recorded = false;
+        let deadline = Instant::now() + MANAGED_CLEANUP_ADMISSION_WAIT;
+        while *retained >= self.capacity {
+            if !saturation_recorded {
+                self.state
+                    .saturated_handoffs
+                    .fetch_add(1, Ordering::Relaxed);
+                saturation_recorded = true;
+            }
+            if !self.state.running.load(Ordering::Acquire) {
+                return false;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            retained = self
+                .available
+                .wait_timeout(retained, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        if !self.state.running.load(Ordering::Acquire) {
+            return false;
+        }
+        *retained += 1;
+        self.state.retained.store(*retained, Ordering::Release);
+        true
+    }
+
+    fn release(&self) {
+        let mut retained = self
+            .retained
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *retained == 0 {
+            tracing::error!("managed child cleanup relay admission underflow");
+            return;
+        }
+        *retained -= 1;
+        self.state.retained.store(*retained, Ordering::Release);
+        self.available.notify_one();
+    }
+}
+
+struct ManagedCleanupRelay {
+    sender: Option<SyncSender<ManagedCleanupJob>>,
+    admission: Arc<ManagedCleanupAdmission>,
+    state: Arc<ManagedCleanupRelayState>,
+}
+
+struct ManagedCleanupJob {
+    process: ManagedChildProcess,
+    attempts: u32,
+    ready_at: Instant,
+    _admission: ManagedCleanupAdmissionPermit,
+}
+
+struct ManagedCleanupAdmissionPermit {
+    admission: Arc<ManagedCleanupAdmission>,
+}
+
+impl Drop for ManagedCleanupAdmissionPermit {
+    fn drop(&mut self) {
+        self.admission.release();
+    }
+}
+
+struct ManagedCleanupWorkerResult {
+    worker_id: usize,
+    job: Option<ManagedCleanupJob>,
+    error: Option<String>,
+}
+
+struct ManagedCleanupWorker {
+    sender: SyncSender<ManagedCleanupJob>,
+    busy: bool,
+    alive: bool,
+}
+
+struct ManagedCleanupDispatcherGuard {
+    admission: Arc<ManagedCleanupAdmission>,
+    state: Arc<ManagedCleanupRelayState>,
+}
+
+impl Drop for ManagedCleanupDispatcherGuard {
+    fn drop(&mut self) {
+        self.state.running.store(false, Ordering::Release);
+        self.admission.available.notify_all();
+    }
+}
+
+struct ManagedCleanupWorkerGuard {
+    state: Arc<ManagedCleanupRelayState>,
+    active: bool,
+}
+
+impl Drop for ManagedCleanupWorkerGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.state.active.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.state.workers.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+static MANAGED_CLEANUP_RELAY: OnceLock<ManagedCleanupRelay> = OnceLock::new();
+thread_local! {
+    /// Prevent a relay-thread unwind from recursively enqueueing its retained
+    /// jobs back into the dispatcher that is currently unwinding.
+    static IN_MANAGED_CLEANUP_RELAY_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Return a point-in-time cleanup-relay snapshot without starting the relay.
+pub fn managed_child_cleanup_metrics() -> ManagedChildCleanupMetrics {
+    let Some(relay) = MANAGED_CLEANUP_RELAY.get() else {
+        return ManagedChildCleanupMetrics {
+            capacity: MANAGED_CLEANUP_RELAY_CAPACITY,
+            ..ManagedChildCleanupMetrics::default()
+        };
+    };
+    let state = &relay.state;
+    let retained = state.retained.load(Ordering::Acquire);
+    let active = state.active.load(Ordering::Acquire);
+    let delayed = state.delayed.load(Ordering::Acquire);
+    ManagedChildCleanupMetrics {
+        capacity: relay.admission.capacity,
+        retained,
+        queued: retained.saturating_sub(active.saturating_add(delayed)),
+        active,
+        delayed,
+        workers: state.workers.load(Ordering::Acquire),
+        running: state.running.load(Ordering::Acquire),
+        submitted: state.submitted.load(Ordering::Acquire),
+        completed: state.completed.load(Ordering::Acquire),
+        retries: state.retries.load(Ordering::Acquire),
+        saturated_handoffs: state.saturated_handoffs.load(Ordering::Acquire),
+        inline_fallbacks: state.inline_fallbacks.load(Ordering::Acquire),
+        platform_handoffs: state.platform_handoffs.load(Ordering::Acquire),
+    }
 }
 
 impl ManagedChildProcess {
@@ -126,13 +339,7 @@ impl ManagedChildProcess {
             child: Some(child),
             cleanup: Some(cleanup),
             shutdown_complete: false,
-            drop_mode: ManagedChildDropMode::Handoff,
         }
-    }
-
-    fn into_cleanup_relay(mut self) -> Self {
-        self.drop_mode = ManagedChildDropMode::Retain;
-        self
     }
 
     pub fn child(&self) -> &Child {
@@ -205,158 +412,383 @@ impl Drop for ManagedChildProcess {
             child: Some(child),
             cleanup: Some(cleanup),
             shutdown_complete: false,
-            drop_mode: self.drop_mode,
         };
-        match self.drop_mode {
-            ManagedChildDropMode::Handoff => hand_off_managed_child_cleanup(process),
-            ManagedChildDropMode::Retain => retain_pending_managed_cleanup(process),
+        hand_off_managed_child_cleanup(process);
+    }
+}
+
+fn hand_off_managed_child_cleanup(mut process: ManagedChildProcess) {
+    if std::thread::panicking()
+        && IN_MANAGED_CLEANUP_RELAY_THREAD.with(Cell::get)
+    {
+        if let Some(relay) = MANAGED_CLEANUP_RELAY.get() {
+            relay.state.inline_fallbacks.fetch_add(1, Ordering::Relaxed);
+            hand_off_managed_child_to_platform_reaper(process);
+            relay.state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        hand_off_managed_child_to_platform_reaper(process);
+        return;
+    }
+    let relay = MANAGED_CLEANUP_RELAY.get_or_init(start_managed_cleanup_relay);
+    relay.state.submitted.fetch_add(1, Ordering::Relaxed);
+
+    if relay.state.retained.load(Ordering::Acquire) >= relay.admission.capacity {
+        // Reduce live OS resources before applying queue backpressure. The
+        // platform cleanup proof stays attached to `process` until admitted.
+        let _direct_child_reaped = best_effort_synchronous_kill_and_reap(&mut process);
+    }
+
+    let Some(sender) = relay.sender.as_ref() else {
+        relay.state.inline_fallbacks.fetch_add(1, Ordering::Relaxed);
+        hand_off_managed_child_to_platform_reaper(process);
+        relay.state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    if !relay.admission.acquire() {
+        relay.state.inline_fallbacks.fetch_add(1, Ordering::Relaxed);
+        hand_off_managed_child_to_platform_reaper(process);
+        relay.state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    let job = ManagedCleanupJob {
+        process,
+        attempts: 0,
+        ready_at: Instant::now(),
+        _admission: ManagedCleanupAdmissionPermit {
+            admission: Arc::clone(&relay.admission),
+        },
+    };
+    if let Err(error) = sender.send(job) {
+        relay.state.running.store(false, Ordering::Release);
+        relay.admission.available.notify_all();
+        relay.state.inline_fallbacks.fetch_add(1, Ordering::Relaxed);
+        tracing::error!(
+            "managed child cleanup relay disconnected; transferring to platform reaper"
+        );
+        hand_off_managed_child_to_platform_reaper(error.0.process);
+        relay.state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn start_managed_cleanup_relay() -> ManagedCleanupRelay {
+    let state = Arc::new(ManagedCleanupRelayState::default());
+    let admission = Arc::new(ManagedCleanupAdmission::new(
+        MANAGED_CLEANUP_RELAY_CAPACITY,
+        Arc::clone(&state),
+    ));
+    let (incoming_sender, incoming_receiver) =
+        mpsc::sync_channel(MANAGED_CLEANUP_RELAY_CAPACITY);
+    let (result_sender, result_receiver) = mpsc::sync_channel(MANAGED_CLEANUP_RELAY_WORKERS);
+    let mut workers = Vec::with_capacity(MANAGED_CLEANUP_RELAY_WORKERS);
+
+    for worker_id in 0..MANAGED_CLEANUP_RELAY_WORKERS {
+        let (worker_sender, worker_receiver) = mpsc::sync_channel(1);
+        let result_sender = result_sender.clone();
+        let worker_state = Arc::clone(&state);
+        let spawn = std::thread::Builder::new()
+            .name(format!("nomi-managed-cleanup-{worker_id}"))
+            .stack_size(MANAGED_CLEANUP_THREAD_STACK_BYTES)
+            .spawn(move || {
+                IN_MANAGED_CLEANUP_RELAY_THREAD.with(|inside| inside.set(true));
+                run_managed_cleanup_worker(
+                    worker_id,
+                    worker_receiver,
+                    result_sender,
+                    worker_state,
+                )
+            });
+        match spawn {
+            Ok(_worker) => workers.push(ManagedCleanupWorker {
+                sender: worker_sender,
+                busy: false,
+                alive: true,
+            }),
+            Err(error) => tracing::error!(worker_id, %error, "failed to start managed cleanup worker"),
+        }
+    }
+    drop(result_sender);
+
+    if workers.is_empty() {
+        tracing::error!(
+            "managed child cleanup relay has no worker; cleanup will use platform reapers"
+        );
+        return ManagedCleanupRelay {
+            sender: None,
+            admission,
+            state,
+        };
+    }
+
+    state.workers.store(workers.len(), Ordering::Release);
+    let dispatcher_admission = Arc::clone(&admission);
+    let dispatcher_state = Arc::clone(&state);
+    let dispatcher = std::thread::Builder::new()
+        .name("nomi-managed-cleanup-dispatch".to_owned())
+        .stack_size(MANAGED_CLEANUP_THREAD_STACK_BYTES)
+        .spawn(move || {
+            IN_MANAGED_CLEANUP_RELAY_THREAD.with(|inside| inside.set(true));
+            run_managed_cleanup_dispatcher(
+                incoming_receiver,
+                result_receiver,
+                workers,
+                dispatcher_admission,
+                dispatcher_state,
+            )
+        });
+    match dispatcher {
+        Ok(_dispatcher) => {
+            state.running.store(true, Ordering::Release);
+            ManagedCleanupRelay {
+                sender: Some(incoming_sender),
+                admission,
+                state,
+            }
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to start managed cleanup dispatcher; cleanup will use platform reapers");
+            ManagedCleanupRelay {
+                sender: None,
+                admission,
+                state,
+            }
         }
     }
 }
 
-fn hand_off_managed_child_cleanup(process: ManagedChildProcess) {
-    let mut processes = take_pending_managed_cleanups();
-    processes.push(process.into_cleanup_relay());
-
-    let retained = Arc::new(Mutex::new(Some(processes)));
-    let worker_retained = Arc::clone(&retained);
-    let worker = move || {
-        let processes = worker_retained
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        let Some(processes) = processes else {
-            return;
-        };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-        let Ok(runtime) = runtime else {
-            retain_after_runtime_failure(processes);
-            return;
-        };
-        runtime.block_on(shutdown_managed_children(processes));
+fn run_managed_cleanup_dispatcher(
+    incoming: Receiver<ManagedCleanupJob>,
+    results: Receiver<ManagedCleanupWorkerResult>,
+    mut workers: Vec<ManagedCleanupWorker>,
+    admission: Arc<ManagedCleanupAdmission>,
+    state: Arc<ManagedCleanupRelayState>,
+) {
+    let _dispatcher_guard = ManagedCleanupDispatcherGuard {
+        admission: Arc::clone(&admission),
+        state: Arc::clone(&state),
     };
+    let mut ready = VecDeque::new();
+    let mut delayed = Vec::new();
+    let mut incoming_open = true;
 
-    if std::thread::Builder::new()
-        .name("nomi-managed-child-cleanup".into())
-        .spawn(worker)
-        .is_ok()
-    {
-        return;
-    }
-
-    let process = retained
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
-    let Some(processes) = process else {
-        return;
-    };
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(shutdown_managed_children(processes));
-    } else {
-        retain_after_runtime_failure(processes);
-    }
-}
-
-fn take_pending_managed_cleanups() -> Vec<ManagedChildProcess> {
-    pending_managed_cleanups()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .drain(..)
-        .collect()
-}
-
-async fn shutdown_managed_children(processes: Vec<ManagedChildProcess>) {
-    let unfinished = shutdown_children_with_bounded_retries(
-        processes,
-        async |process: &mut ManagedChildProcess| process.shutdown().await,
-        MANAGED_CLEANUP_RETRY_DEADLINE,
-        MANAGED_CLEANUP_RETRY_WAIT,
-    )
-    .await;
-    // Exceeding the bounded window is loud but never a loss of authority: the
-    // exact process handle returns to the pending relay and is retried by the
-    // next cleanup hand-off, instead of spinning this worker thread forever
-    // (and head-of-line-blocking every process queued behind it) on a tree
-    // that never proves terminal.
-    for process in unfinished {
-        retain_pending_managed_cleanup(process);
-    }
-}
-
-/// Per-process retry window for one cleanup pass. A stuck descendant
-/// (uninterruptible I/O, an unproven platform tree) fails every attempt; the
-/// deadline turns that into a retained retry instead of an infinite loop.
-const MANAGED_CLEANUP_RETRY_DEADLINE: Duration = Duration::from_secs(30);
-const MANAGED_CLEANUP_RETRY_WAIT: Duration = Duration::from_millis(250);
-
-/// Drive each process's shutdown with retries bounded by `retry_deadline`,
-/// returning the processes whose cleanup never proved terminal so the caller
-/// can retain their exact authority for a later pass.
-async fn shutdown_children_with_bounded_retries<P>(
-    processes: Vec<P>,
-    mut shutdown: impl AsyncFnMut(&mut P) -> io::Result<()>,
-    retry_deadline: Duration,
-    retry_wait: Duration,
-) -> Vec<P> {
-    let mut unfinished = Vec::new();
-    for mut process in processes {
-        let deadline = tokio::time::Instant::now() + retry_deadline;
-        let mut exhausted = false;
+    loop {
         loop {
-            match shutdown(&mut process).await {
-                Ok(()) => break,
-                Err(error) if tokio::time::Instant::now() >= deadline => {
-                    tracing::error!(
-                        %error,
-                        deadline_secs = retry_deadline.as_secs(),
-                        "managed child cleanup exceeded its bounded retry window"
-                    );
-                    exhausted = true;
-                    break;
+            match results.try_recv() {
+                Ok(mut result) => {
+                    state.active.fetch_sub(1, Ordering::AcqRel);
+                    if let Some(worker) = workers.get_mut(result.worker_id) {
+                        worker.busy = false;
+                    }
+                    if let Some(mut job) = result.job.take() {
+                        job.attempts = job.attempts.saturating_add(1);
+                        if job.attempts >= MANAGED_CLEANUP_MAX_ATTEMPTS {
+                            tracing::error!(
+                                pid = job.process.child.as_ref().and_then(Child::id),
+                                attempts = job.attempts,
+                                "generic managed-child cleanup exhausted bounded retries; platform Job/watchdog reaper retains final authority"
+                            );
+                            hand_off_managed_child_to_platform_reaper(job.process);
+                            state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                        job.ready_at = Instant::now() + managed_cleanup_retry_delay(job.attempts);
+                        state.retries.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            pid = job.process.child.as_ref().and_then(Child::id),
+                            attempts = job.attempts,
+                            error = result.error.as_deref().unwrap_or("unknown cleanup failure"),
+                            "managed child cleanup remains retained for automatic retry"
+                        );
+                        delayed.push(job);
+                    } else {
+                        state.completed.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "managed child cleanup retry is still pending");
-                    tokio::time::sleep(retry_wait).await;
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+
+        if incoming_open {
+            loop {
+                match incoming.try_recv() {
+                    Ok(job) => ready.push_back(job),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        incoming_open = false;
+                        break;
+                    }
                 }
             }
         }
-        if exhausted {
-            unfinished.push(process);
+
+        let now = Instant::now();
+        let mut index = 0;
+        while index < delayed.len() {
+            if delayed[index].ready_at <= now {
+                ready.push_back(delayed.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+
+        for worker_id in 0..workers.len() {
+            if ready.is_empty() {
+                break;
+            }
+            if workers[worker_id].busy || !workers[worker_id].alive {
+                continue;
+            }
+            let Some(job) = ready.pop_front() else {
+                break;
+            };
+            match workers[worker_id].sender.send(job) {
+                Ok(()) => {
+                    workers[worker_id].busy = true;
+                    state.active.fetch_add(1, Ordering::AcqRel);
+                }
+                Err(error) => {
+                    workers[worker_id].alive = false;
+                    ready.push_front(error.0);
+                    tracing::error!(worker_id, "managed cleanup worker disconnected");
+                }
+            }
+        }
+        state.delayed.store(delayed.len(), Ordering::Release);
+
+        if state.workers.load(Ordering::Acquire) == 0 {
+            state.running.store(false, Ordering::Release);
+            admission.available.notify_all();
+            tracing::error!("all managed cleanup workers stopped; retained cleanup cannot continue on relay");
+            // This state is fail-closed: keep ownership in this thread rather
+            // than dropping jobs into a disconnected channel.
+            for job in ready.drain(..).chain(delayed.drain(..)) {
+                hand_off_managed_child_to_platform_reaper(job.process);
+                state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+            }
+            break;
+        }
+
+        if !incoming_open && state.retained.load(Ordering::Acquire) == 0 {
+            state.running.store(false, Ordering::Release);
+            admission.available.notify_all();
+            break;
+        }
+
+        match incoming.recv_timeout(MANAGED_CLEANUP_DISPATCH_TICK) {
+            Ok(job) => ready.push_back(job),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => incoming_open = false,
         }
     }
-    unfinished
 }
 
-fn retain_after_runtime_failure(processes: Vec<ManagedChildProcess>) {
-    for mut process in processes {
-        let reaped = best_effort_synchronous_kill_and_reap(&mut process);
-        retain_pending_managed_cleanup_with_status(process, reaped);
+fn run_managed_cleanup_worker(
+    worker_id: usize,
+    receiver: Receiver<ManagedCleanupJob>,
+    results: SyncSender<ManagedCleanupWorkerResult>,
+    state: Arc<ManagedCleanupRelayState>,
+) {
+    let mut worker_guard = ManagedCleanupWorkerGuard {
+        state: Arc::clone(&state),
+        active: false,
+    };
+    let mut runtime = build_managed_cleanup_runtime();
+    while let Ok(mut job) = receiver.recv() {
+        worker_guard.active = true;
+        if runtime.is_none() {
+            runtime = build_managed_cleanup_runtime();
+        }
+        let outcome = runtime
+            .as_ref()
+            .map_or_else(
+                || Err("Tokio cleanup runtime is unavailable".to_owned()),
+                |runtime| run_managed_cleanup_attempt(runtime, &mut job.process),
+            );
+        let result = match outcome {
+            Ok(()) => ManagedCleanupWorkerResult {
+                worker_id,
+                job: None,
+                error: None,
+            },
+            Err(error) => ManagedCleanupWorkerResult {
+                worker_id,
+                job: Some(job),
+                error: Some(error),
+            },
+        };
+
+        // From this point the result message owns the dispatcher's active
+        // accounting. `SyncSender::send` cannot unwind; on disconnection the
+        // explicit fallback below decrements it instead.
+        worker_guard.active = false;
+        if let Err(error) = results.send(result) {
+            // The dispatcher is the only path that can release an admitted
+            // slot. If it disappears, this worker finishes its current exact
+            // authority synchronously and releases that slot itself.
+            state.active.fetch_sub(1, Ordering::AcqRel);
+            if let Some(job) = error.0.job {
+                hand_off_managed_child_to_platform_reaper(job.process);
+                state.platform_handoffs.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
     }
 }
 
-fn retain_pending_managed_cleanup(process: ManagedChildProcess) {
-    retain_pending_managed_cleanup_with_status(process, false);
+fn build_managed_cleanup_runtime() -> Option<tokio::runtime::Runtime> {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            tracing::error!(%error, "failed to build managed child cleanup runtime");
+            None
+        }
+    }
 }
 
-fn retain_pending_managed_cleanup_with_status(
-    mut process: ManagedChildProcess,
-    direct_child_reaped: bool,
-) {
-    process.drop_mode = ManagedChildDropMode::Retain;
-    let pid = process.child.as_ref().and_then(Child::id);
-    let mut pending = pending_managed_cleanups()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    pending.push(process);
-    tracing::error!(
-        pid,
-        direct_child_reaped,
-        pending = pending.len(),
-        "managed child cleanup retained for a later retry"
-    );
+fn run_managed_cleanup_attempt(
+    runtime: &tokio::runtime::Runtime,
+    process: &mut ManagedChildProcess,
+) -> Result<(), String> {
+    match catch_unwind(AssertUnwindSafe(|| {
+        runtime.block_on(async {
+            tokio::time::timeout(MANAGED_CLEANUP_ATTEMPT_TIMEOUT, process.shutdown()).await
+        })
+    })) {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(error.to_string()),
+        Ok(Err(_elapsed)) => Err(format!(
+            "cleanup attempt exceeded {} seconds",
+            MANAGED_CLEANUP_ATTEMPT_TIMEOUT.as_secs()
+        )),
+        Err(_panic) => Err("cleanup attempt panicked".to_owned()),
+    }
+}
+
+fn managed_cleanup_retry_delay(attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(16);
+    MANAGED_CLEANUP_RETRY_INITIAL
+        .saturating_mul(1_u32 << shift)
+        .min(MANAGED_CLEANUP_RETRY_MAX)
+}
+
+/// Bound the generic relay without discarding platform cleanup ownership.
+///
+/// Every managed spawn has already registered an independent Windows Job or
+/// Unix watchdog reaper before this value is constructed. Dropping the Tokio
+/// child requests direct-child termination (`kill_on_drop(true)`), while the
+/// registered platform authority continues whole-tree settlement. This path
+/// intentionally does not claim proof completion; it only releases the
+/// generic relay slot so unrelated healthy cleanup can continue.
+fn hand_off_managed_child_to_platform_reaper(mut process: ManagedChildProcess) {
+    let _ = best_effort_synchronous_kill_and_reap(&mut process);
+    process.shutdown_complete = true;
+    drop(process.child.take());
+    drop(process.cleanup.take());
 }
 
 /// Try to make progress without Tokio while preserving the exact cleanup
@@ -818,42 +1250,124 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn bounded_cleanup_retries_transient_failures_until_success() {
-        let unfinished = shutdown_children_with_bounded_retries(
-            vec![3_u32],
-            async |remaining: &mut u32| {
-                if *remaining == 0 {
-                    Ok(())
-                } else {
-                    *remaining -= 1;
-                    Err(io::Error::other("transient tree-proof failure"))
-                }
-            },
-            Duration::from_secs(30),
-            Duration::from_millis(250),
-        )
-        .await;
-        assert!(unfinished.is_empty());
+    #[test]
+    fn managed_cleanup_retry_backoff_is_exponential_and_bounded() {
+        assert_eq!(
+            managed_cleanup_retry_delay(1),
+            MANAGED_CLEANUP_RETRY_INITIAL
+        );
+        assert_eq!(
+            managed_cleanup_retry_delay(2),
+            MANAGED_CLEANUP_RETRY_INITIAL * 2
+        );
+        assert_eq!(
+            managed_cleanup_retry_delay(u32::MAX),
+            MANAGED_CLEANUP_RETRY_MAX
+        );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn bounded_cleanup_stops_spinning_on_a_never_terminal_tree() {
-        // One never-terminal process must neither loop forever nor
-        // head-of-line-block the processes queued behind it.
-        let unfinished = shutdown_children_with_bounded_retries(
-            vec!["stuck", "healthy"],
-            async |process: &mut &str| {
-                if *process == "stuck" {
-                    Err(io::Error::other("descendant never proves terminal"))
-                } else {
-                    Ok(())
+    #[test]
+    fn managed_cleanup_admission_is_bounded_and_backpressures() {
+        let state = Arc::new(ManagedCleanupRelayState::default());
+        state.running.store(true, Ordering::Release);
+        let admission = Arc::new(ManagedCleanupAdmission::new(1, Arc::clone(&state)));
+        assert!(admission.acquire());
+
+        let blocked_admission = Arc::clone(&admission);
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (acquired_sender, acquired_receiver) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            started_sender.send(()).expect("start signal receiver exists");
+            let acquired = blocked_admission.acquire();
+            acquired_sender
+                .send(acquired)
+                .expect("acquire signal receiver exists");
+            if acquired {
+                blocked_admission.release();
+            }
+        });
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("waiter started");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while state.saturated_handoffs.load(Ordering::Acquire) == 0
+            && Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(state.retained.load(Ordering::Acquire), 1);
+        assert!(acquired_receiver.try_recv().is_err());
+
+        admission.release();
+        assert!(
+            acquired_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("capacity release wakes the blocked handoff")
+        );
+        waiter.join().expect("admission waiter exits");
+        assert_eq!(state.retained.load(Ordering::Acquire), 0);
+        assert_eq!(state.saturated_handoffs.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn saturated_managed_cleanup_admission_has_a_bounded_drop_wait() {
+        let state = Arc::new(ManagedCleanupRelayState::default());
+        state.running.store(true, Ordering::Release);
+        let admission = ManagedCleanupAdmission::new(1, Arc::clone(&state));
+        assert!(admission.acquire());
+
+        let started = Instant::now();
+        assert!(
+            !admission.acquire(),
+            "a saturated generic relay must hand authority to the platform reaper instead of blocking forever"
+        );
+        let elapsed = started.elapsed();
+        assert!(elapsed >= MANAGED_CLEANUP_ADMISSION_WAIT);
+        assert!(elapsed < Duration::from_secs(2));
+        assert_eq!(state.retained.load(Ordering::Acquire), 1);
+        assert_eq!(state.saturated_handoffs.load(Ordering::Acquire), 1);
+        admission.release();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(managed_cleanup_relay)]
+    async fn dropped_managed_child_completes_without_another_handoff() {
+        #[cfg(windows)]
+        let builder = {
+            let mut builder = ChildProcessBuilder::new("cmd.exe");
+            builder.args(["/D", "/S", "/C", "ping -n 120 127.0.0.1 >NUL"]);
+            builder
+        };
+        #[cfg(unix)]
+        let builder = {
+            let mut builder = ChildProcessBuilder::new("sh");
+            builder.args(["-c", "sleep 120"]);
+            builder
+        };
+        #[cfg(not(any(unix, windows)))]
+        let builder = ChildProcessBuilder::new("false");
+
+        let before = managed_child_cleanup_metrics();
+        let process = builder
+            .spawn_managed()
+            .expect("long-lived managed child should spawn");
+        assert!(process.id().is_some());
+        drop(process);
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let metrics = managed_child_cleanup_metrics();
+                if metrics.submitted >= before.submitted + 1
+                    && metrics.completed >= before.completed + 1
+                    && metrics.retained <= before.retained
+                {
+                    break;
                 }
-            },
-            Duration::from_secs(30),
-            Duration::from_millis(250),
-        )
-        .await;
-        assert_eq!(unfinished, vec!["stuck"]);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the singleton relay must progress without a future Drop trigger");
     }
 }
