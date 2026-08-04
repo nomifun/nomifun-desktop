@@ -33,4 +33,20 @@ describe('Nomi companion tab order', () => {
     expect(overview.includes('listLearnRuns')).toBe(false);
     expect(overview.includes('nomi.overview.diary')).toBe(false);
   });
+
+  test('removes learning history UI while preserving live learning and skill evolution', () => {
+    const learn = readFileSync(new URL('./tabs/LearnTab.tsx', import.meta.url), 'utf8');
+    const bridge = readFileSync(new URL('../../../common/adapter/ipcBridge.ts', import.meta.url), 'utf8');
+
+    expect(learn.includes('listLearnRuns')).toBe(false);
+    expect(learn.includes('ICompanionLearnRun')).toBe(false);
+    expect(learn.includes('<Table')).toBe(false);
+    expect(bridge.includes('/api/companion/learn/runs')).toBe(false);
+    expect(bridge.includes('listLearnRuns')).toBe(false);
+
+    expect(learn.includes('ipcBridge.companion.runLearn.invoke()')).toBe(true);
+    expect(learn.includes('sharedConfig.evolve.enabled')).toBe(true);
+    expect(bridge.includes('onLearnFinished')).toBe(true);
+    expect(bridge.includes('ICompanionLearnResult')).toBe(true);
+  });
 });

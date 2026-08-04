@@ -15,13 +15,14 @@ use serde::Deserialize;
 
 use crate::profile::{HeadBox, CompanionProfileConfig, SharedCompanionConfig};
 use crate::memory_search::MemoryStatusFilter;
+use crate::learner::CompanionLearnResult;
 use crate::service::{
     CompanionSkillContent, CompanionSkillViewPage, CompanionStatus, CompanionWeeklyDigest,
     MemoryListItem, MemoryListPage, MemoryMergeGroup, SourceStats,
 };
 use crate::state::CompanionRouterState;
 use crate::store::{
-    MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryScope, CompanionLearnRun,
+    MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryScope,
     CompanionMemory, CompanionSkill, CompanionSuggestion, SuggestionPage,
 };
 
@@ -83,7 +84,6 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
             post(gift_companion_skill),
         )
         .route("/api/companion/learn/run", post(run_learn))
-        .route("/api/companion/learn/runs", get(list_learn_runs))
         .route("/api/companion/events/stats", get(event_stats))
         .route("/api/companion/events/recent", get(recent_events))
         .route("/api/companion/events", delete(clear_events))
@@ -599,23 +599,13 @@ async fn gift_companion_skill(
 async fn run_learn(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<CompanionLearnRun>>, AppError> {
+) -> Result<Json<ApiResponse<CompanionLearnResult>>, AppError> {
     Ok(Json(ApiResponse::ok(state.service.run_learn_now().await?)))
 }
 
 #[derive(Deserialize)]
 struct LimitQuery {
     limit: Option<i64>,
-}
-
-async fn list_learn_runs(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Query(query): Query<LimitQuery>,
-) -> Result<Json<ApiResponse<Vec<CompanionLearnRun>>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state.service.list_learn_runs(query.limit.unwrap_or(30)).await?,
-    )))
 }
 
 async fn event_stats(
@@ -1145,6 +1135,49 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn learn_endpoint_returns_only_a_transient_result_and_history_route_is_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = test_app(dir.path()).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/companion/learn/run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let data = body["data"].as_object().unwrap();
+        let actual_keys: std::collections::BTreeSet<&str> =
+            data.keys().map(String::as_str).collect();
+        let expected_keys: std::collections::BTreeSet<&str> = [
+            "error",
+            "events_processed",
+            "memories_added",
+            "status",
+            "suggestions_added",
+            "summary",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual_keys, expected_keys);
+        assert_eq!(data["status"], "model_unconfigured");
+
+        let retired = app
+            .oneshot(
+                Request::get("/api/companion/learn/runs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retired.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

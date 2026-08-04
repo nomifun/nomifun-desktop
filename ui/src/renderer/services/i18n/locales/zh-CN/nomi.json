@@ -107,7 +107,6 @@
     "weeklyTitle": "我这周学到了什么",
     "weeklySkills": "新技能",
     "weeklyMemories": "新记忆",
-    "weeklyRuns": "学习次数",
     "companionSwitch": "桌面伙伴",
     "companionOn": "已显示",
     "companionOff": "已隐藏"
@@ -243,12 +242,6 @@
     "runOk": "学习完成：新增 {{memories}} 条记忆、{{suggestions}} 条建议",
     "model": "学习模型",
     "modelHint": "所有伙伴共用这个模型做定时学习",
-    "colTime": "时间",
-    "colStatus": "状态",
-    "colEvents": "事件数",
-    "colMemories": "新记忆",
-    "colSuggestions": "新建议",
-    "colNote": "备注",
     "status": {
       "ok": "成功",
       "error": "失败",

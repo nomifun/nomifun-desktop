@@ -107,7 +107,6 @@
     "weeklyTitle": "What I learned this week",
     "weeklySkills": "New skills",
     "weeklyMemories": "New memories",
-    "weeklyRuns": "Learning runs",
     "companionSwitch": "Desktop companion",
     "companionOn": "Shown",
     "companionOff": "Hidden"
@@ -243,12 +242,6 @@
     "runOk": "Done: {{memories}} new memories, {{suggestions}} suggestions",
     "model": "Learning model",
     "modelHint": "All companions share this model for scheduled learning",
-    "colTime": "Time",
-    "colStatus": "Status",
-    "colEvents": "Events",
-    "colMemories": "Memories",
-    "colSuggestions": "Suggestions",
-    "colNote": "Note",
     "status": {
       "ok": "OK",
       "error": "Error",

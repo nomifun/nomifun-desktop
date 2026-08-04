@@ -310,10 +310,6 @@ define_entity_id!(
     CompanionSuggestionId
 );
 define_entity_id!(
-    /// Globally unique companion learn-run identifier.
-    CompanionLearnRunId
-);
-define_entity_id!(
     /// Globally unique companion collected-event identifier.
     CompanionEventId
 );
