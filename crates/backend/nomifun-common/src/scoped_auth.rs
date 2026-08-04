@@ -6,7 +6,10 @@
 //! issued for one loopback service can never authorize another.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    Arc, RwLock, Weak,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -204,6 +207,7 @@ pub enum LoopbackCapabilityError {
     Expired,
     InvalidToolScope,
     InvalidToken,
+    CapacityExceeded,
 }
 
 /// Child-to-parent request for a fresh short-lived access credential. The
@@ -296,6 +300,103 @@ struct ActiveLoopbackLease {
     authorization_json: String,
     user_id: UserId,
     session: LoopbackSessionBinding,
+    request_budget: Arc<LoopbackRequestBudget>,
+}
+
+#[derive(Debug, Default)]
+struct LoopbackRequestBudget {
+    active: AtomicUsize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LoopbackRequestBudgetFamilyKey([u8; 32]);
+
+impl LoopbackRequestBudgetFamilyKey {
+    fn new(
+        domain: &str,
+        user_id: &UserId,
+        session: &LoopbackSessionBinding,
+    ) -> Self {
+        fn update_part(hash: &mut Sha256, value: &str) {
+            sha2::Digest::update(hash, (value.len() as u64).to_be_bytes());
+            sha2::Digest::update(hash, value.as_bytes());
+        }
+
+        let mut hash = <Sha256 as sha2::Digest>::new();
+        update_part(&mut hash, domain);
+        update_part(&mut hash, user_id.as_str());
+        update_part(&mut hash, session.kind.as_str());
+        update_part(&mut hash, &session.session_id);
+        match session.conversation_id.as_deref() {
+            Some(conversation_id) => {
+                sha2::Digest::update(&mut hash, [1]);
+                update_part(&mut hash, conversation_id);
+            }
+            None => sha2::Digest::update(&mut hash, [0]),
+        }
+        Self(sha2::Digest::finalize(hash).into())
+    }
+}
+
+impl LoopbackRequestBudget {
+    fn try_acquire(
+        self: &Arc<Self>,
+        lease_id: &str,
+        max_in_flight: usize,
+    ) -> Result<LoopbackRequestPermit, LoopbackCapabilityError> {
+        let mut active = self.active.load(Ordering::Acquire);
+        loop {
+            if active >= max_in_flight {
+                return Err(LoopbackCapabilityError::CapacityExceeded);
+            }
+            match self.active.compare_exchange_weak(
+                active,
+                active.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(LoopbackRequestPermit {
+                        budget: Arc::clone(self),
+                        lease_id: Arc::from(lease_id),
+                    });
+                }
+                Err(observed) => active = observed,
+            }
+        }
+    }
+}
+
+/// Non-serializable authority for one verified in-flight request.
+///
+/// The permit is tied to the active lease object kept by
+/// [`LoopbackCapabilityIssuer`]. It is intentionally non-cloneable and refunds
+/// its slot on every completion path, including future cancellation and panic
+/// unwinding.
+pub struct LoopbackRequestPermit {
+    budget: Arc<LoopbackRequestBudget>,
+    lease_id: Arc<str>,
+}
+
+impl LoopbackRequestPermit {
+    pub fn lease_id(&self) -> &str {
+        &self.lease_id
+    }
+}
+
+impl std::fmt::Debug for LoopbackRequestPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoopbackRequestPermit")
+            .field("lease_id", &self.lease_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for LoopbackRequestPermit {
+    fn drop(&mut self) {
+        let previous = self.budget.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "loopback request budget underflow");
+    }
 }
 
 /// Non-serializable process authority for all access/renew/revoke operations
@@ -304,6 +405,12 @@ struct ActiveLoopbackLease {
 pub struct LoopbackCapabilityIssuer {
     root_secret: Arc<str>,
     active_leases: RwLock<HashMap<String, ActiveLoopbackLease>>,
+    /// Weak shells keep a family discoverable across complete lease
+    /// revocation while an already-admitted request still owns the strong
+    /// authority. Dead shells are pruned on every lease mutation, so rotating
+    /// arbitrary family keys cannot grow this map permanently.
+    request_budgets:
+        RwLock<HashMap<LoopbackRequestBudgetFamilyKey, Weak<LoopbackRequestBudget>>>,
 }
 
 impl std::fmt::Debug for LoopbackCapabilityIssuer {
@@ -327,6 +434,7 @@ impl LoopbackCapabilityIssuer {
         Self {
             root_secret: root_secret.into(),
             active_leases: RwLock::new(HashMap::new()),
+            request_budgets: RwLock::new(HashMap::new()),
         }
     }
 
@@ -348,6 +456,46 @@ impl LoopbackCapabilityIssuer {
             .map_err(|_| LoopbackCapabilityError::Malformed)
     }
 
+    /// Call only while holding `active_leases` for write. This establishes the
+    /// sole lock order (`active_leases` then `request_budgets`) used by lease
+    /// mutations and makes lookup-or-insert atomic with lease publication.
+    fn request_budget_for_family_locked(
+        &self,
+        domain: &str,
+        user_id: &UserId,
+        session: &LoopbackSessionBinding,
+    ) -> Arc<LoopbackRequestBudget> {
+        let key = LoopbackRequestBudgetFamilyKey::new(domain, user_id, session);
+        let mut budgets = self
+            .request_budgets
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        budgets.retain(|_, budget| budget.upgrade().is_some());
+        if let Some(existing) = budgets.get(&key).and_then(Weak::upgrade) {
+            return existing;
+        }
+        let budget = Arc::new(LoopbackRequestBudget::default());
+        budgets.insert(key, Arc::downgrade(&budget));
+        budget
+    }
+
+    /// Call only while holding `active_leases` for write; see the lock-order
+    /// contract on [`Self::request_budget_for_family_locked`].
+    fn prune_dead_request_budgets_locked(&self) {
+        self.request_budgets
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, budget| budget.upgrade().is_some());
+    }
+
+    #[cfg(test)]
+    fn request_budget_family_count(&self) -> usize {
+        self.request_budgets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
     /// Activate one immutable authorization and return its short-lived access
     /// token plus a process-scoped renewal proof. A replacement issuance for
     /// the same domain/user/session revokes the previous lease deterministically.
@@ -359,7 +507,7 @@ impl LoopbackCapabilityIssuer {
     where
         S: Clone + Serialize + for<'de> Deserialize<'de>,
     {
-        self.activate_inner(domain, claims, true)
+        self.activate_inner(domain, claims, true, None)
     }
 
     /// Activate one immutable authorization without replacing sibling leases
@@ -377,7 +525,26 @@ impl LoopbackCapabilityIssuer {
     where
         S: Clone + Serialize + for<'de> Deserialize<'de>,
     {
-        self.activate_inner(domain, claims, false)
+        self.activate_inner(domain, claims, false, None)
+    }
+
+    /// Activate one immutable authorization without replacing sibling leases,
+    /// while enforcing an exact domain/user/session concurrency ceiling.
+    ///
+    /// Counting and insertion happen under the same registry write lock, so
+    /// racing issuers cannot exceed `max_active`. The ceiling is deliberately
+    /// scoped to one user-visible session rather than the process: unrelated
+    /// users and conversations retain independent capacity.
+    pub fn activate_concurrent_bounded<S>(
+        &self,
+        domain: &str,
+        claims: &LoopbackCapabilityClaims<S>,
+        max_active: usize,
+    ) -> Result<(String, String), LoopbackCapabilityError>
+    where
+        S: Clone + Serialize + for<'de> Deserialize<'de>,
+    {
+        self.activate_inner(domain, claims, false, Some(max_active))
     }
 
     fn activate_inner<S>(
@@ -385,6 +552,7 @@ impl LoopbackCapabilityIssuer {
         domain: &str,
         claims: &LoopbackCapabilityClaims<S>,
         replace_same_session: bool,
+        max_concurrent: Option<usize>,
     ) -> Result<(String, String), LoopbackCapabilityError>
     where
         S: Clone + Serialize + for<'de> Deserialize<'de>,
@@ -402,12 +570,35 @@ impl LoopbackCapabilityIssuer {
             .active_leases
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Every runtime lease in one trusted user-visible session shares this
+        // authority, including activate_concurrent(_bounded). A task therefore
+        // cannot multiply the request limit by rotating or fanning out runtime
+        // leases. The Weak registry also preserves continuity after all leases
+        // are revoked while an old request permit is still alive.
+        let request_budget = self.request_budget_for_family_locked(
+            domain,
+            &claims.user_id,
+            &claims.session,
+        );
         if replace_same_session {
             leases.retain(|_, lease| {
                 lease.domain != domain
                     || lease.user_id != claims.user_id
                     || lease.session != claims.session
             });
+        }
+        if max_concurrent.is_some_and(|max_active| {
+            leases
+                .values()
+                .filter(|lease| {
+                    lease.domain == domain
+                        && lease.user_id == claims.user_id
+                        && lease.session == claims.session
+                })
+                .count()
+                >= max_active
+        }) {
+            return Err(LoopbackCapabilityError::CapacityExceeded);
         }
         leases.insert(
             claims.lease_id.clone(),
@@ -416,8 +607,10 @@ impl LoopbackCapabilityIssuer {
                 authorization_json,
                 user_id: claims.user_id.clone(),
                 session: claims.session.clone(),
+                request_budget,
             },
         );
+        self.prune_dead_request_budgets_locked();
         Ok((token, renewal_proof))
     }
 
@@ -445,6 +638,40 @@ impl LoopbackCapabilityIssuer {
             return Err(LoopbackCapabilityError::InvalidToken);
         }
         claims.verify_token(self.root_secret.as_bytes(), domain, presented)
+    }
+
+    /// Verify access and acquire one request slot from the same active lease.
+    ///
+    /// Lease lookup, immutable-authorization comparison, token verification,
+    /// and the atomic budget increment all happen while the authoritative
+    /// registry read lock is held. A concurrent revoke/replacement therefore
+    /// cannot create a check/acquire gap. The returned RAII permit refunds the
+    /// slot on success, error propagation, cancellation, or panic unwinding.
+    pub fn verify_access_and_acquire<S>(
+        &self,
+        domain: &str,
+        claims: &LoopbackCapabilityClaims<S>,
+        presented: &str,
+        max_in_flight: usize,
+    ) -> Result<LoopbackRequestPermit, LoopbackCapabilityError>
+    where
+        S: Clone + Serialize + for<'de> Deserialize<'de>,
+    {
+        claims.validate_at(unix_time_secs())?;
+        let authorization_json = Self::authorization_json(claims)?;
+        let leases = self
+            .active_leases
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(lease) = leases.get(&claims.lease_id) else {
+            return Err(LoopbackCapabilityError::InvalidToken);
+        };
+        if lease.domain != domain || lease.authorization_json != authorization_json {
+            return Err(LoopbackCapabilityError::InvalidToken);
+        }
+        claims.verify_token(self.root_secret.as_bytes(), domain, presented)?;
+        lease.request_budget
+            .try_acquire(&claims.lease_id, max_in_flight)
     }
 
     pub fn renew<S>(
@@ -521,6 +748,7 @@ impl LoopbackCapabilityIssuer {
             return Err(LoopbackCapabilityError::InvalidToken);
         }
         leases.remove(&request.lease_id);
+        self.prune_dead_request_budgets_locked();
         Ok(())
     }
 
@@ -547,6 +775,7 @@ impl LoopbackCapabilityIssuer {
             .is_some_and(|lease| lease.domain == domain)
         {
             leases.remove(lease_id);
+            self.prune_dead_request_budgets_locked();
         }
     }
 }
@@ -663,6 +892,7 @@ impl std::fmt::Display for LoopbackCapabilityError {
             Self::Expired => "scoped capability expired",
             Self::InvalidToolScope => "invalid scoped capability tool scope",
             Self::InvalidToken => "invalid scoped capability token",
+            Self::CapacityExceeded => "scoped capability capacity exceeded",
         })
     }
 }
@@ -1029,6 +1259,528 @@ mod tests {
                 },
             )
             .is_err());
+    }
+
+    #[test]
+    fn bounded_concurrent_activation_is_scoped_by_domain_user_and_session() {
+        let now = unix_time_secs();
+        let issuer = LoopbackCapabilityIssuer::new("root-secret");
+        let first = claims(now);
+        issuer
+            .activate_concurrent_bounded("browser-v1", &first, 1)
+            .unwrap();
+
+        assert_eq!(
+            issuer.activate_concurrent_bounded("browser-v1", &claims(now), 1),
+            Err(LoopbackCapabilityError::CapacityExceeded)
+        );
+        issuer
+            .activate_concurrent_bounded("other-domain", &claims(now), 1)
+            .expect("a separate domain must retain independent capacity");
+
+        let other_user = LoopbackCapabilityClaims::issue_at(
+            "0190f5fe-7c00-7a00-8000-000000000003",
+            LoopbackSessionBinding::conversation(TEST_CONVERSATION_ID),
+            ["read"],
+            Scope {
+                resource: "alpha".into(),
+            },
+            now,
+            60,
+        )
+        .unwrap();
+        issuer
+            .activate_concurrent_bounded("browser-v1", &other_user, 1)
+            .expect("a separate user must retain independent capacity");
+
+        let other_session = LoopbackCapabilityClaims::issue_at(
+            TEST_USER_ID,
+            LoopbackSessionBinding::conversation(
+                "0190f5fe-7c00-7a00-8000-000000000004",
+            ),
+            ["read"],
+            Scope {
+                resource: "alpha".into(),
+            },
+            now,
+            60,
+        )
+        .unwrap();
+        issuer
+            .activate_concurrent_bounded("browser-v1", &other_session, 1)
+            .expect("a separate session must retain independent capacity");
+    }
+
+    #[test]
+    fn verified_request_budget_is_exact_and_drop_restores_capacity() {
+        const LIMIT: usize = 8;
+
+        let now = unix_time_secs();
+        let issuer = LoopbackCapabilityIssuer::new("root-secret");
+        let claims = claims(now);
+        let (token, _) = issuer.activate("gateway-v2", &claims).unwrap();
+        let mut permits = Vec::new();
+        for _ in 0..LIMIT {
+            permits.push(
+                issuer
+                    .verify_access_and_acquire(
+                        "gateway-v2",
+                        &claims,
+                        &token,
+                        LIMIT,
+                    )
+                    .expect("each slot up to the exact limit must be admitted"),
+            );
+        }
+        assert!(matches!(
+            issuer.verify_access_and_acquire(
+                "gateway-v2",
+                &claims,
+                &token,
+                LIMIT,
+            ),
+            Err(LoopbackCapabilityError::CapacityExceeded)
+        ));
+
+        let released = permits.pop().unwrap();
+        assert_eq!(released.lease_id(), claims.lease_id);
+        drop(released);
+        permits.push(
+            issuer
+                .verify_access_and_acquire(
+                    "gateway-v2",
+                    &claims,
+                    &token,
+                    LIMIT,
+                )
+                .expect("dropping a permit must immediately refund its slot"),
+        );
+        drop(permits);
+        assert!(
+            issuer
+                .verify_access_and_acquire(
+                    "gateway-v2",
+                    &claims,
+                    &token,
+                    LIMIT,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn concurrent_leases_in_one_task_share_the_request_budget() {
+        let now = unix_time_secs();
+        let issuer = LoopbackCapabilityIssuer::new("root-secret");
+        let first = claims(now);
+        let second = claims(now);
+        let (first_token, _) = issuer
+            .activate_concurrent("gateway-v2", &first)
+            .unwrap();
+        let (second_token, _) = issuer
+            .activate_concurrent("gateway-v2", &second)
+            .unwrap();
+
+        let first_permit = issuer
+            .verify_access_and_acquire(
+                "gateway-v2",
+                &first,
+                &first_token,
+                1,
+            )
+            .unwrap();
+        assert!(matches!(
+            issuer.verify_access_and_acquire(
+                "gateway-v2",
+                &first,
+                &first_token,
+                1,
+            ),
+            Err(LoopbackCapabilityError::CapacityExceeded)
+        ));
+        assert!(matches!(
+            issuer.verify_access_and_acquire(
+                "gateway-v2",
+                &second,
+                &second_token,
+                1,
+            ),
+            Err(LoopbackCapabilityError::CapacityExceeded)
+        ));
+        drop(first_permit);
+        let second_permit = issuer
+            .verify_access_and_acquire(
+                "gateway-v2",
+                &second,
+                &second_token,
+                1,
+            )
+            .expect("a sibling runtime must recover the shared task capacity");
+        assert_eq!(second_permit.lease_id(), second.lease_id);
+    }
+
+    #[test]
+    fn request_budget_families_are_isolated_by_domain_user_and_session() {
+        let now = unix_time_secs();
+        let issuer = LoopbackCapabilityIssuer::new("root-secret");
+        let first = claims(now);
+        let other_domain = claims(now);
+        let other_user = LoopbackCapabilityClaims::issue_at(
+            "0190f5fe-7c00-7a00-8000-000000000003",
+            LoopbackSessionBinding::conversation(TEST_CONVERSATION_ID),
+            ["read"],
+            Scope {
+                resource: "alpha".into(),
+            },
+            now,
+            60,
+        )
+        .unwrap();
+        let other_session = LoopbackCapabilityClaims::issue_at(
+            TEST_USER_ID,
+            LoopbackSessionBinding::conversation(
+                "0190f5fe-7c00-7a00-8000-000000000004",
+            ),
+            ["read"],
+            Scope {
+                resource: "alpha".into(),
+            },
+            now,
+            60,
+        )
+        .unwrap();
+        let (first_token, _) = issuer
+            .activate_concurrent("gateway-v2", &first)
+            .unwrap();
+        let (domain_token, _) = issuer
+            .activate_concurrent("other-domain", &other_domain)
+            .unwrap();
+        let (user_token, _) = issuer
+            .activate_concurrent("gateway-v2", &other_user)
+            .unwrap();
+        let (session_token, _) = issuer
+            .activate_concurrent("gateway-v2", &other_session)
+            .unwrap();
+
+        let _first = issuer
+            .verify_access_and_acquire(
+                "gateway-v2",
+                &first,
+                &first_token,
+                1,
+            )
+            .unwrap();
+        let _domain = issuer
+            .verify_access_and_acquire(
+                "other-domain",
+                &other_domain,
+                &domain_token,
+                1,
+            )
+            .expect("another domain must have independent capacity");
+        let _user = issuer
+            .verify_access_and_acquire(
+                "gateway-v2",
+                &other_user,
+                &user_token,
+                1,
+            )
+            .expect("another user must have independent capacity");
+        let _session = issuer
+            .verify_access_and_acquire(
+                "gateway-v2",
+                &other_session,
+                &session_token,
+                1,
+            )
+            .expect("another session must have independent capacity");
+    }
+
+    #[test]
+    fn thirty_two_runtime_leases_still_share_exactly_eight_request_slots() {
+        const LEASES: usize = 32;
+        const ATTEMPTS_PER_LEASE: usize = 8;
+        const REQUEST_LIMIT: usize = 8;
+
+        let now = unix_time_secs();
+        let issuer = Arc::new(LoopbackCapabilityIssuer::new("root-secret"));
+        let mut accesses = Vec::new();
+        for _ in 0..LEASES {
+            let claims = claims(now);
+            let (token, _) = issuer
+                .activate_concurrent_bounded("gateway-v2", &claims, LEASES)
+                .unwrap();
+            accesses.push((claims, token));
+        }
+        let start = Arc::new(std::sync::Barrier::new(LEASES + 1));
+        let mut threads = Vec::new();
+        for (claims, token) in accesses {
+            let issuer = Arc::clone(&issuer);
+            let start = Arc::clone(&start);
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                (0..ATTEMPTS_PER_LEASE)
+                    .map(|_| {
+                        issuer.verify_access_and_acquire(
+                            "gateway-v2",
+                            &claims,
+                            &token,
+                            REQUEST_LIMIT,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }));
+        }
+        start.wait();
+        let results: Vec<_> = threads
+            .into_iter()
+            .flat_map(|thread| {
+                thread
+                    .join()
+                    .expect("runtime lease request contender panicked")
+            })
+            .collect();
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            REQUEST_LIMIT
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(LoopbackCapabilityError::CapacityExceeded)))
+                .count(),
+            LEASES * ATTEMPTS_PER_LEASE - REQUEST_LIMIT
+        );
+    }
+
+    #[test]
+    fn replacement_lease_cannot_reset_a_sessions_in_flight_budget() {
+        let now = unix_time_secs();
+        let issuer = LoopbackCapabilityIssuer::new("root-secret");
+        let first = claims(now);
+        let (first_token, _) = issuer.activate("gateway-v2", &first).unwrap();
+        let first_permit = issuer
+            .verify_access_and_acquire(
+                "gateway-v2",
+                &first,
+                &first_token,
+                1,
+            )
+            .unwrap();
+
+        let replacement = claims(now);
+        let (replacement_token, _) = issuer
+            .activate("gateway-v2", &replacement)
+            .unwrap();
+        assert!(matches!(
+            issuer.verify_access_and_acquire(
+                "gateway-v2",
+                &replacement,
+                &replacement_token,
+                1,
+            ),
+            Err(LoopbackCapabilityError::CapacityExceeded)
+        ));
+        drop(first_permit);
+        assert!(
+            issuer
+                .verify_access_and_acquire(
+                    "gateway-v2",
+                    &replacement,
+                    &replacement_token,
+                    1,
+                )
+                .is_ok(),
+            "the replacement must inherit and later recover the same budget"
+        );
+    }
+
+    #[test]
+    fn full_revocation_and_reissue_cannot_reset_a_live_request_budget() {
+        let now = unix_time_secs();
+        let issuer = LoopbackCapabilityIssuer::new("root-secret");
+        let first = claims(now);
+        let (first_token, first_proof) = issuer
+            .activate_concurrent("gateway-v2", &first)
+            .unwrap();
+        let second = claims(now);
+        let (_, second_proof) = issuer
+            .activate_concurrent("gateway-v2", &second)
+            .unwrap();
+        let old_permit = issuer
+            .verify_access_and_acquire(
+                "gateway-v2",
+                &first,
+                &first_token,
+                1,
+            )
+            .unwrap();
+
+        issuer
+            .revoke(
+                "gateway-v2",
+                &LoopbackCapabilityRenewalRequest {
+                    lease_id: first.lease_id.clone(),
+                    renewal_proof: first_proof,
+                },
+            )
+            .unwrap();
+        issuer
+            .revoke(
+                "gateway-v2",
+                &LoopbackCapabilityRenewalRequest {
+                    lease_id: second.lease_id,
+                    renewal_proof: second_proof,
+                },
+            )
+            .unwrap();
+
+        let replacement = claims(now);
+        let (replacement_token, _) = issuer
+            .activate_concurrent("gateway-v2", &replacement)
+            .unwrap();
+        assert!(matches!(
+            issuer.verify_access_and_acquire(
+                "gateway-v2",
+                &replacement,
+                &replacement_token,
+                1,
+            ),
+            Err(LoopbackCapabilityError::CapacityExceeded)
+        ));
+        drop(old_permit);
+        assert!(
+            issuer
+                .verify_access_and_acquire(
+                    "gateway-v2",
+                    &replacement,
+                    &replacement_token,
+                    1,
+                )
+                .is_ok(),
+            "an old permit, not an active lease, must preserve family continuity"
+        );
+    }
+
+    #[test]
+    fn dead_weak_request_budget_families_converge_on_lease_mutation() {
+        let now = unix_time_secs();
+        let issuer = LoopbackCapabilityIssuer::new("root-secret");
+        let first = claims(now);
+        let (first_token, first_proof) = issuer
+            .activate("gateway-v2", &first)
+            .unwrap();
+        let permit = issuer
+            .verify_access_and_acquire(
+                "gateway-v2",
+                &first,
+                &first_token,
+                1,
+            )
+            .unwrap();
+        issuer
+            .revoke(
+                "gateway-v2",
+                &LoopbackCapabilityRenewalRequest {
+                    lease_id: first.lease_id,
+                    renewal_proof: first_proof,
+                },
+            )
+            .unwrap();
+        assert_eq!(issuer.request_budget_family_count(), 1);
+        drop(permit);
+        assert_eq!(
+            issuer.request_budget_family_count(),
+            1,
+            "Drop stays lock-free; the dead Weak shell is pruned by the next mutation"
+        );
+
+        let other = LoopbackCapabilityClaims::issue_at(
+            "0190f5fe-7c00-7a00-8000-000000000003",
+            LoopbackSessionBinding::conversation(
+                "0190f5fe-7c00-7a00-8000-000000000004",
+            ),
+            ["read"],
+            Scope {
+                resource: "alpha".into(),
+            },
+            now,
+            60,
+        )
+        .unwrap();
+        let (_, other_proof) = issuer.activate("gateway-v2", &other).unwrap();
+        assert_eq!(
+            issuer.request_budget_family_count(),
+            1,
+            "activation must prune the dead old key before publishing the new family"
+        );
+        issuer
+            .revoke(
+                "gateway-v2",
+                &LoopbackCapabilityRenewalRequest {
+                    lease_id: other.lease_id,
+                    renewal_proof: other_proof,
+                },
+            )
+            .unwrap();
+        assert_eq!(issuer.request_budget_family_count(), 0);
+    }
+
+    #[test]
+    fn racing_request_acquisition_cannot_exceed_the_exact_family_limit() {
+        const LIMIT: usize = 8;
+        const CONTENDERS: usize = 64;
+
+        let now = unix_time_secs();
+        let issuer = Arc::new(LoopbackCapabilityIssuer::new("root-secret"));
+        let claims = claims(now);
+        let (token, _) = issuer.activate("gateway-v2", &claims).unwrap();
+        let mut threads = Vec::new();
+        for _ in 0..CONTENDERS {
+            let issuer = Arc::clone(&issuer);
+            let claims = claims.clone();
+            let token = token.clone();
+            threads.push(std::thread::spawn(move || {
+                issuer.verify_access_and_acquire(
+                    "gateway-v2",
+                    &claims,
+                    &token,
+                    LIMIT,
+                )
+            }));
+        }
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("request contender panicked"))
+            .collect();
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            LIMIT
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    matches!(
+                        result,
+                        Err(LoopbackCapabilityError::CapacityExceeded)
+                    )
+                })
+                .count(),
+            CONTENDERS - LIMIT
+        );
+        drop(results);
+        assert!(
+            issuer
+                .verify_access_and_acquire(
+                    "gateway-v2",
+                    &claims,
+                    &token,
+                    LIMIT,
+                )
+                .is_ok(),
+            "dropping every racing result must refund every admitted slot"
+        );
     }
 
     #[test]

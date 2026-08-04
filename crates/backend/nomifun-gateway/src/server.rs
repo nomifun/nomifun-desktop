@@ -5,26 +5,32 @@
 //! it forwards each tool call back here as an authenticated `POST /tool`.
 
 use std::net::SocketAddr;
+#[cfg(feature = "browser-use")]
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
-use axum::extract::State;
+use axum::body::{Body, Bytes, to_bytes};
+use axum::extract::{DefaultBodyLimit, Extension, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+#[cfg(feature = "browser-use")]
+use futures::FutureExt;
 use nomifun_api_types::{
     GATEWAY_CALL_TOOL_OPERATION, GATEWAY_CAPABILITY_DOMAIN,
     GatewayCapabilityClaims, GatewayCapabilityScope, GatewayMcpConfig,
 };
 use nomifun_common::{
     LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_REVOKE_PATH,
-    LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest, LoopbackSessionKind,
+    LoopbackCapabilityError, LoopbackCapabilityIssuer,
+    LoopbackCapabilityRenewalRequest, LoopbackSessionKind,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::time;
-#[cfg(feature = "browser-use")]
-use tokio::time::MissedTickBehavior;
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{debug, info, warn};
 
 use crate::deps::{CallerCtx, GatewayDeps};
@@ -33,8 +39,31 @@ use crate::registry::Registry;
 #[cfg(feature = "browser-use")]
 const BROWSER_OWNER_SWEEP_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(500);
+#[cfg(feature = "browser-use")]
+const BROWSER_CLEANUP_FAILURE_BACKOFF_MAX: std::time::Duration =
+    std::time::Duration::from_secs(30);
 const BROWSER_REVOKE_WAIT: std::time::Duration =
     std::time::Duration::from_millis(750);
+/// Parsed requests are charged to the trusted domain/user/session family
+/// shared by every sibling runtime lease. This is a per-task structural
+/// ceiling, not a process-wide memory cap.
+const GATEWAY_REQUESTS_PER_TASK_FAMILY: usize = 8;
+/// Before JSON claims exist, admission must be machine-wide. Capacity scales
+/// with both CPU and physical RAM and rejects without queueing; the following
+/// hard maximum is only a structural task-count fuse.
+const GATEWAY_BODY_READS_PER_LOGICAL_CPU: usize = 8;
+const GATEWAY_BODY_READS_UNKNOWN_MEMORY_FALLBACK: usize = 16;
+const GATEWAY_BODY_READS_MAX: usize = 512;
+/// At most one sixteenth of reported physical RAM can be represented by
+/// simultaneously full request bodies. Actual aggregate capacity remains
+/// elastic with the host instead of being fixed at (for example) 1 GiB.
+const GATEWAY_BODY_READ_MEMORY_DIVISOR: u64 = 16;
+#[cfg(not(test))]
+const GATEWAY_REQUEST_BODY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(5);
+#[cfg(test)]
+const GATEWAY_REQUEST_BODY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(100);
 
 /// Late-bound handle to the gateway dependencies. Unlike the guide /
 /// requirement servers (which hold a `Weak` to a singleton that outlives
@@ -56,6 +85,8 @@ type IngressCompletion =
 struct GatewayCleanupWorker {
     shutdown: tokio::sync::watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
+    #[cfg(feature = "browser-use")]
+    cleanup_state: GatewayState,
 }
 
 struct GatewayLifecycle {
@@ -85,14 +116,79 @@ impl IngressTestGate {
 #[cfg(test)]
 type IngressTestGateSlot = Arc<RwLock<Option<Arc<IngressTestGate>>>>;
 
+#[cfg(all(test, feature = "browser-use"))]
+#[derive(Default)]
+struct BrowserCleanupTestControl {
+    sweep_attempts: std::sync::atomic::AtomicUsize,
+    sweep_panics_remaining: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Clone)]
+struct GatewayBodyReadAdmission {
+    slots: Arc<Semaphore>,
+    capacity: usize,
+}
+
+impl GatewayBodyReadAdmission {
+    fn for_machine() -> Self {
+        let logical_cpus = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        Self::for_resources(system.total_memory(), logical_cpus)
+    }
+
+    fn for_resources(total_memory_bytes: u64, logical_cpus: usize) -> Self {
+        let cpu_capacity = logical_cpus
+            .max(1)
+            .saturating_mul(GATEWAY_BODY_READS_PER_LOGICAL_CPU)
+            .min(GATEWAY_BODY_READS_MAX);
+        let memory_capacity = if total_memory_bytes == 0 {
+            GATEWAY_BODY_READS_UNKNOWN_MEMORY_FALLBACK.min(cpu_capacity)
+        } else {
+            let bytes_per_slot = (nomifun_common::constants::BODY_LIMIT as u64)
+                .saturating_mul(GATEWAY_BODY_READ_MEMORY_DIVISOR);
+            usize::try_from(total_memory_bytes / bytes_per_slot)
+                .unwrap_or(usize::MAX)
+                .max(1)
+                .min(GATEWAY_BODY_READS_MAX)
+        };
+        let capacity = cpu_capacity.min(memory_capacity).max(1);
+        Self {
+            slots: Arc::new(Semaphore::new(capacity)),
+            capacity,
+        }
+    }
+
+    fn try_acquire(&self) -> Result<OwnedSemaphorePermit, ()> {
+        Arc::clone(&self.slots)
+            .try_acquire_owned()
+            .map_err(|_| ())
+    }
+}
+
+#[derive(Clone)]
+struct VerifiedGatewayRequest {
+    lease_id: Arc<str>,
+}
+
+#[derive(serde::Deserialize)]
+struct GatewayAuthorizationEnvelope {
+    session: Option<GatewayCapabilityClaims>,
+}
+
 #[derive(Clone)]
 struct GatewayState {
     issuer: Arc<LoopbackCapabilityIssuer>,
     deps: DepsSlot,
+    body_read_admission: GatewayBodyReadAdmission,
     #[cfg(feature = "browser-use")]
     browser_registry: BrowserRegistrySlot,
     #[cfg(test)]
     ingress_test_gate: IngressTestGateSlot,
+    #[cfg(all(test, feature = "browser-use"))]
+    browser_cleanup_test_control: Arc<BrowserCleanupTestControl>,
 }
 
 /// In-process HTTP MCP server for the Platform Gateway tools.
@@ -106,6 +202,8 @@ pub struct GatewayMcpServer {
     browser_registry_slot: BrowserRegistrySlot,
     #[cfg(test)]
     ingress_test_gate_slot: IngressTestGateSlot,
+    #[cfg(all(test, feature = "browser-use"))]
+    browser_cleanup_test_control: Arc<BrowserCleanupTestControl>,
 }
 
 impl GatewayMcpServer {
@@ -130,18 +228,38 @@ impl GatewayMcpServer {
         #[cfg(test)]
         let ingress_test_gate_slot: IngressTestGateSlot =
             Arc::new(RwLock::new(None));
+        #[cfg(all(test, feature = "browser-use"))]
+        let browser_cleanup_test_control =
+            Arc::new(BrowserCleanupTestControl::default());
 
         let state = GatewayState {
             issuer: issuer.clone(),
             deps: deps_slot.clone(),
+            body_read_admission: GatewayBodyReadAdmission::for_machine(),
             #[cfg(feature = "browser-use")]
             browser_registry: browser_registry_slot.clone(),
             #[cfg(test)]
             ingress_test_gate: ingress_test_gate_slot.clone(),
+            #[cfg(all(test, feature = "browser-use"))]
+            browser_cleanup_test_control:
+                browser_cleanup_test_control.clone(),
         };
 
-        let app = axum::Router::new()
+        let tool_router = axum::Router::new()
             .route("/tool", axum::routing::post(handle_tool_request))
+            // The signed lease lives inside JSON, so only a machine-adaptive
+            // body-read fuse can run before parsing. It never queues and hands
+            // off to the exact per-lease permit before dispatch.
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                enforce_tool_request_bounds,
+            ))
+            .layer(RequestBodyLimitLayer::new(
+                nomifun_common::constants::BODY_LIMIT,
+            ))
+            .layer(DefaultBodyLimit::disable());
+        let app = axum::Router::new()
+            .merge(tool_router)
             .route(
                 LOOPBACK_CAPABILITY_RENEW_PATH,
                 axum::routing::post(handle_capability_renew),
@@ -162,26 +280,18 @@ impl GatewayMcpServer {
             let cleanup_state = state;
             let (shutdown_tx, mut shutdown_rx) =
                 tokio::sync::watch::channel(false);
+            let fallback_state = cleanup_state.clone();
             let handle = tokio::spawn(async move {
-                let mut interval = time::interval(BROWSER_OWNER_SWEEP_INTERVAL);
-                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            sweep_gateway_browser_owners(&cleanup_state).await;
-                        }
-                        changed = shutdown_rx.changed() => {
-                            if changed.is_err() || *shutdown_rx.borrow() {
-                                drain_gateway_browser_owners_until_clean(&cleanup_state).await;
-                                return;
-                            }
-                        }
-                    }
-                }
+                supervise_gateway_browser_cleanup(
+                    cleanup_state,
+                    &mut shutdown_rx,
+                )
+                .await;
             });
             Some(GatewayCleanupWorker {
                 shutdown: shutdown_tx,
                 handle,
+                cleanup_state: fallback_state,
             })
         };
         #[cfg(not(feature = "browser-use"))]
@@ -222,6 +332,8 @@ impl GatewayMcpServer {
             browser_registry_slot,
             #[cfg(test)]
             ingress_test_gate_slot,
+            #[cfg(all(test, feature = "browser-use"))]
+            browser_cleanup_test_control,
         })
     }
 
@@ -404,18 +516,38 @@ async fn finish_stop(
         Ok(())
     };
     let _ = ingress_completion_tx.send(Some(ingress_result.clone()));
-    ingress_result?;
 
-    if let Some(worker) = browser_cleanup_worker {
+    let cleanup_result = if let Some(worker) = browser_cleanup_worker {
         let _ = worker.shutdown.send(true);
         match worker.handle.await {
             Ok(()) => Ok(()),
-            Err(error) => Err(format!(
-                "Gateway MCP browser cleanup task failed while stopping: {error}"
-            )),
+            Err(error) => {
+                let join_error = format!(
+                    "Gateway MCP browser cleanup task failed while stopping: {error}"
+                );
+                warn!(error = %error, "Gateway MCP browser cleanup supervisor failed; running authoritative fallback drain");
+                // A panic/abort in the periodic supervisor may not discard the
+                // exact-owner authority retained by the server. The fallback
+                // is awaited by this same durable stop flight, so there is
+                // still at most one terminal drain and no detached retry task.
+                #[cfg(feature = "browser-use")]
+                drain_gateway_browser_owners_until_clean(
+                    &worker.cleanup_state,
+                )
+                .await;
+                Err(join_error)
+            }
         }
     } else {
         Ok(())
+    };
+
+    match (ingress_result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(ingress_error), Err(cleanup_error)) => Err(format!(
+            "{ingress_error}; {cleanup_error}"
+        )),
     }
 }
 
@@ -476,6 +608,26 @@ async fn gateway_browser_registry(
 
 #[cfg(feature = "browser-use")]
 async fn sweep_gateway_browser_owners(state: &GatewayState) {
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering;
+
+        state
+            .browser_cleanup_test_control
+            .sweep_attempts
+            .fetch_add(1, Ordering::AcqRel);
+        if state
+            .browser_cleanup_test_control
+            .sweep_panics_remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            panic!("injected gateway browser cleanup sweep panic");
+        }
+    }
+
     let Some(registry) = gateway_browser_registry(state).await else {
         return;
     };
@@ -489,31 +641,109 @@ async fn sweep_gateway_browser_owners(state: &GatewayState) {
 }
 
 #[cfg(feature = "browser-use")]
-async fn drain_gateway_browser_owners_until_clean(state: &GatewayState) {
-    let Some(registry) = gateway_browser_registry(state).await else {
-        return;
-    };
+fn next_browser_cleanup_failure_backoff(
+    current: std::time::Duration,
+) -> std::time::Duration {
+    current
+        .checked_mul(2)
+        .unwrap_or(BROWSER_CLEANUP_FAILURE_BACKOFF_MAX)
+        .min(BROWSER_CLEANUP_FAILURE_BACKOFF_MAX)
+}
 
-    // Ingress is already quiesced, so the set of SignedChild runtimes can only
-    // shrink. Keep the exact-owner authority alive until its postcondition is
-    // true; callers may time out without cancelling this task.
+#[cfg(feature = "browser-use")]
+async fn supervise_gateway_browser_cleanup(
+    state: GatewayState,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
+) {
+    let mut next_sweep_delay = std::time::Duration::ZERO;
+    let mut failure_backoff = BROWSER_OWNER_SWEEP_INTERVAL;
+
     loop {
-        match registry.drain_signed_child_browser_owners_once().await {
-            Ok(()) => return,
-            Err(error) => {
-                let status = registry.signed_child_cleanup_status();
-                warn!(
-                    code = ?error.code,
-                    retryable = error.retryable,
-                    pending_attachments = status.pending_attachments,
-                    pending_owner_leases = status.pending_owner_leases,
-                    revocation_pending_attachments =
-                        status.revocation_pending_attachments,
-                    "Gateway MCP browser owner cleanup remains pending; retrying"
-                );
-                time::sleep(BROWSER_OWNER_SWEEP_INTERVAL).await;
+        if *shutdown_rx.borrow() {
+            drain_gateway_browser_owners_until_clean(&state).await;
+            return;
+        }
+
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    drain_gateway_browser_owners_until_clean(&state).await;
+                    return;
+                }
+            }
+            _ = time::sleep(next_sweep_delay) => {
+                match AssertUnwindSafe(sweep_gateway_browser_owners(&state))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(()) => {
+                        next_sweep_delay = BROWSER_OWNER_SWEEP_INTERVAL;
+                        failure_backoff = BROWSER_OWNER_SWEEP_INTERVAL;
+                    }
+                    Err(_) => {
+                        warn!(
+                            retry_delay_ms = failure_backoff.as_millis(),
+                            "Gateway MCP browser owner sweep panicked; supervisor retained authority and will retry"
+                        );
+                        next_sweep_delay = failure_backoff;
+                        failure_backoff =
+                            next_browser_cleanup_failure_backoff(failure_backoff);
+                    }
+                }
             }
         }
+    }
+}
+
+#[cfg(feature = "browser-use")]
+async fn drain_gateway_browser_owners_once(state: &GatewayState) -> bool {
+    let Some(registry) = gateway_browser_registry(state).await else {
+        return true;
+    };
+
+    match registry.drain_signed_child_browser_owners_once().await {
+        Ok(()) => true,
+        Err(error) => {
+            let status = registry.signed_child_cleanup_status();
+            warn!(
+                code = ?error.code,
+                retryable = error.retryable,
+                pending_attachments = status.pending_attachments,
+                pending_owner_leases = status.pending_owner_leases,
+                revocation_pending_attachments =
+                    status.revocation_pending_attachments,
+                "Gateway MCP browser owner cleanup remains pending; retrying"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(feature = "browser-use")]
+async fn drain_gateway_browser_owners_until_clean(state: &GatewayState) {
+    // Ingress is already quiesced, so the set of SignedChild runtimes can only
+    // shrink. Keep one exact-owner authority alive until its postcondition is
+    // true; callers may time out without cancelling this task. Both ordinary
+    // failures and panics are retried with a capped delay to avoid a hot loop.
+    let mut failure_backoff = BROWSER_OWNER_SWEEP_INTERVAL;
+    loop {
+        match AssertUnwindSafe(drain_gateway_browser_owners_once(state))
+            .catch_unwind()
+            .await
+        {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(_) => {
+                warn!(
+                    retry_delay_ms = failure_backoff.as_millis(),
+                    "Gateway MCP browser owner final drain panicked; exact-owner authority retained for retry"
+                );
+            }
+        }
+        time::sleep(failure_backoff).await;
+        failure_backoff =
+            next_browser_cleanup_failure_backoff(failure_backoff);
     }
 }
 
@@ -521,17 +751,170 @@ async fn drain_gateway_browser_owners_until_clean(state: &GatewayState) {
 // Axum handler
 // ---------------------------------------------------------------------------
 
+async fn read_tool_body_with_deadline(
+    body: Body,
+    deadline: std::time::Duration,
+) -> Result<Bytes, Response> {
+    match time::timeout(
+        deadline,
+        to_bytes(body, nomifun_common::constants::BODY_LIMIT),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(_)) => Err(gateway_ingress_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_body_too_large",
+            "The Gateway request body exceeds the configured byte limit.",
+            false,
+        )),
+        Err(_) => Err(gateway_ingress_error(
+            StatusCode::REQUEST_TIMEOUT,
+            "request_timeout",
+            "The Gateway request body was not received before the absolute deadline.",
+            true,
+        )),
+    }
+}
+
+fn gateway_ingress_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    retryable: bool,
+) -> Response {
+    let mut response = (
+        status,
+        Json(json!({
+            "error": code,
+            "message": message,
+            "retryable": retryable,
+        })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    if matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    ) {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
+}
+
+async fn enforce_tool_request_bounds(
+    State(state): State<GatewayState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let body_read_permit = match state.body_read_admission.try_acquire() {
+        Ok(permit) => permit,
+        Err(()) => {
+            return gateway_ingress_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "gateway_ingress_saturated",
+                "Gateway request-body admission is temporarily saturated.",
+                true,
+            );
+        }
+    };
+
+    let (parts, body) = request.into_parts();
+    let bytes = match read_tool_body_with_deadline(
+        body,
+        GATEWAY_REQUEST_BODY_TIMEOUT,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    let envelope = match serde_json::from_slice::<GatewayAuthorizationEnvelope>(&bytes) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return gateway_ingress_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                "Gateway request body must be valid JSON.",
+                false,
+            );
+        }
+    };
+    let Some(claims) = envelope.session else {
+        return gateway_ingress_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Gateway request has no valid bound session authorization.",
+            false,
+        );
+    };
+    if claims.scope.validate().is_err()
+        || claims.session.kind != LoopbackSessionKind::Conversation
+    {
+        return gateway_ingress_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Gateway request has no valid bound session authorization.",
+            false,
+        );
+    }
+    let provided_token = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let request_permit = match state.issuer.verify_access_and_acquire(
+        GATEWAY_CAPABILITY_DOMAIN,
+        &claims,
+        provided_token,
+        GATEWAY_REQUESTS_PER_TASK_FAMILY,
+    ) {
+        Ok(permit) => permit,
+        Err(LoopbackCapabilityError::CapacityExceeded) => {
+            return gateway_ingress_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "lease_request_limit",
+                "This Gateway task already has the maximum number of in-flight requests.",
+                true,
+            );
+        }
+        Err(_) => {
+            warn!("Gateway MCP: invalid or unbound session authorization");
+            return gateway_ingress_error(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Gateway request has no valid bound session authorization.",
+                false,
+            );
+        }
+    };
+
+    let lease_id: Arc<str> = Arc::from(claims.lease_id.as_str());
+    debug_assert_eq!(request_permit.lease_id(), lease_id.as_ref());
+    let mut request = Request::from_parts(parts, Body::from(bytes));
+    request
+        .extensions_mut()
+        .insert(VerifiedGatewayRequest { lease_id });
+    // From here the exact active lease owns the retained request. Releasing
+    // the pre-identity permit avoids turning the adaptive body-read fuse into
+    // an aggregate dispatch/concurrency ceiling.
+    drop(body_read_permit);
+    let response = next.run(request).await;
+    drop(request_permit);
+    response
+}
+
 async fn handle_tool_request(
     State(state): State<GatewayState>,
+    Extension(request_authority): Extension<VerifiedGatewayRequest>,
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let provided_token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-
     let claims = match body
         .get("session")
         .cloned()
@@ -540,10 +923,7 @@ async fn handle_tool_request(
         Some(claims)
             if claims.scope.validate().is_ok()
                 && claims.session.kind == LoopbackSessionKind::Conversation
-                && state
-                    .issuer
-                    .verify_access(GATEWAY_CAPABILITY_DOMAIN, &claims, provided_token)
-                    .is_ok() => claims,
+                && claims.lease_id == request_authority.lease_id.as_ref() => claims,
         _ => {
             warn!("Gateway MCP: invalid or unbound session authorization");
             return (
@@ -826,6 +1206,7 @@ pub(crate) fn ok<T: serde::Serialize>(payload: T) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "browser-use")]
     use nomifun_common::UserId;
     #[cfg(feature = "browser-use")]
     use nomifun_browser_platform::{
@@ -840,6 +1221,313 @@ mod tests {
     const TEST_OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const TEST_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const OTHER_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
+
+    struct BoundedToolTestGate {
+        entered: Semaphore,
+        release: Semaphore,
+    }
+
+    impl BoundedToolTestGate {
+        fn new() -> Self {
+            Self {
+                entered: Semaphore::new(0),
+                release: Semaphore::new(0),
+            }
+        }
+    }
+
+    async fn bounded_tool_test_handler(
+        Extension(gate): Extension<Arc<BoundedToolTestGate>>,
+    ) -> StatusCode {
+        gate.entered.add_permits(1);
+        let permit = gate
+            .release
+            .acquire()
+            .await
+            .expect("bounded tool test gate must remain open");
+        permit.forget();
+        StatusCode::OK
+    }
+
+    fn bounded_tool_test_state(
+        issuer: Arc<LoopbackCapabilityIssuer>,
+        body_read_admission: GatewayBodyReadAdmission,
+    ) -> GatewayState {
+        GatewayState {
+            issuer,
+            deps: Arc::new(RwLock::new(None)),
+            body_read_admission,
+            #[cfg(feature = "browser-use")]
+            browser_registry: Arc::new(RwLock::new(None)),
+            ingress_test_gate: Arc::new(RwLock::new(None)),
+            #[cfg(feature = "browser-use")]
+            browser_cleanup_test_control: Arc::new(
+                BrowserCleanupTestControl::default(),
+            ),
+        }
+    }
+
+    fn bounded_tool_test_app(
+        state: GatewayState,
+        gate: Arc<BoundedToolTestGate>,
+    ) -> axum::Router {
+        axum::Router::new()
+            .route("/tool", axum::routing::post(bounded_tool_test_handler))
+            .layer(Extension(gate))
+            .layer(middleware::from_fn_with_state(
+                state,
+                enforce_tool_request_bounds,
+            ))
+            .layer(RequestBodyLimitLayer::new(
+                nomifun_common::constants::BODY_LIMIT,
+            ))
+            .layer(DefaultBodyLimit::disable())
+    }
+
+    fn bounded_tool_request(
+        child: &nomifun_api_types::GatewayMcpChildConfig,
+    ) -> Request {
+        let body = serde_json::to_vec(&json!({
+            "session": child.bootstrap.access.claims,
+            "tool": "test",
+            "args": {},
+        }))
+        .unwrap();
+        Request::builder()
+            .method("POST")
+            .uri("/tool")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", child.bootstrap.access.token),
+            )
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[test]
+    fn body_read_admission_scales_with_cpu_and_physical_memory() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        let constrained = GatewayBodyReadAdmission::for_resources(8 * GIB, 16);
+        let workstation = GatewayBodyReadAdmission::for_resources(64 * GIB, 16);
+        let more_cpu = GatewayBodyReadAdmission::for_resources(64 * GIB, 64);
+        let unknown_memory = GatewayBodyReadAdmission::for_resources(0, 16);
+
+        assert!(constrained.capacity > 1);
+        assert!(workstation.capacity > constrained.capacity);
+        assert!(more_cpu.capacity > workstation.capacity);
+        assert_eq!(
+            unknown_memory.capacity,
+            GATEWAY_BODY_READS_UNKNOWN_MEMORY_FALLBACK
+        );
+        assert!(more_cpu.capacity <= GATEWAY_BODY_READS_MAX);
+    }
+
+    #[test]
+    fn body_read_admission_is_exact_and_raii_refunds_capacity() {
+        let admission = GatewayBodyReadAdmission::for_resources(u64::MAX, 1);
+        let mut permits = Vec::new();
+        for _ in 0..admission.capacity {
+            permits.push(
+                admission
+                    .try_acquire()
+                    .expect("every slot up to capacity must be admitted"),
+            );
+        }
+        assert!(
+            admission.try_acquire().is_err(),
+            "capacity plus one must reject without queueing"
+        );
+        drop(permits.pop());
+        permits.push(
+            admission
+                .try_acquire()
+                .expect("dropping a body-read permit must restore capacity"),
+        );
+        drop(permits);
+        assert_eq!(
+            admission.slots.available_permits(),
+            admission.capacity,
+            "all normal/error/cancellation paths rely on the same RAII refund"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_body_hits_absolute_deadline_and_oversize_is_rejected() {
+        use std::convert::Infallible;
+
+        use futures::{StreamExt, stream};
+
+        let stalled = stream::once(async {
+            Ok::<_, Infallible>(Bytes::from_static(b"{"))
+        })
+        .chain(stream::pending::<Result<Bytes, Infallible>>());
+        let response = time::timeout(
+            std::time::Duration::from_secs(1),
+            read_tool_body_with_deadline(
+                Body::from_stream(stalled),
+                std::time::Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("absolute body deadline must wake")
+        .expect_err("a body that never terminates must time out");
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+
+        let oversized = vec![0_u8; nomifun_common::constants::BODY_LIMIT + 1];
+        let response = read_tool_body_with_deadline(
+            Body::from(oversized),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect_err("body limit plus one must be rejected");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn gateway_uses_eight_in_flight_requests_per_task_family() {
+        assert_eq!(GATEWAY_REQUESTS_PER_TASK_FAMILY, 8);
+    }
+
+    #[tokio::test]
+    async fn ninth_request_on_one_task_family_returns_429_and_completion_refunds() {
+        use tower::ServiceExt;
+
+        let issuer = Arc::new(LoopbackCapabilityIssuer::random().unwrap());
+        let config = GatewayMcpConfig::from_issuer(
+            1,
+            Arc::clone(&issuer),
+            "/bin/nomicore".into(),
+            TEST_OWNER_ID,
+        );
+        let child = config
+            .issue_for_conversation(
+                TEST_OWNER_ID,
+                TEST_CONVERSATION_ID,
+                None,
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+        let admission = GatewayBodyReadAdmission::for_resources(u64::MAX, 64);
+        let gate = Arc::new(BoundedToolTestGate::new());
+        let app = bounded_tool_test_app(
+            bounded_tool_test_state(issuer, admission),
+            Arc::clone(&gate),
+        );
+        let mut calls = tokio::task::JoinSet::new();
+        for _ in 0..GATEWAY_REQUESTS_PER_TASK_FAMILY {
+            let app = app.clone();
+            let request = bounded_tool_request(&child);
+            calls.spawn(async move { app.oneshot(request).await.unwrap() });
+        }
+        let entered = time::timeout(
+            std::time::Duration::from_secs(1),
+            gate.entered
+                .acquire_many(GATEWAY_REQUESTS_PER_TASK_FAMILY as u32),
+        )
+        .await
+        .expect("the exact admitted set must enter the handler")
+        .expect("test gate must remain open");
+        entered.forget();
+
+        let overloaded = time::timeout(
+            std::time::Duration::from_secs(1),
+            app.clone().oneshot(bounded_tool_request(&child)),
+        )
+        .await
+        .expect("the over-limit request must reject without queueing")
+        .unwrap();
+        assert_eq!(overloaded.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            overloaded.headers().get(header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("1"))
+        );
+
+        gate.release
+            .add_permits(GATEWAY_REQUESTS_PER_TASK_FAMILY);
+        while let Some(response) = calls.join_next().await {
+            assert_eq!(response.unwrap().status(), StatusCode::OK);
+        }
+        let recovered = tokio::spawn({
+            let app = app.clone();
+            let request = bounded_tool_request(&child);
+            async move { app.oneshot(request).await.unwrap() }
+        });
+        let entered = time::timeout(
+            std::time::Duration::from_secs(1),
+            gate.entered.acquire(),
+        )
+        .await
+        .expect("completion must refund one lease slot")
+        .expect("test gate must remain open");
+        entered.forget();
+        gate.release.add_permits(1);
+        assert_eq!(recovered.await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn saturated_pre_identity_body_reader_returns_503_and_timeout_refunds() {
+        use std::convert::Infallible;
+
+        use futures::stream;
+        use tower::ServiceExt;
+
+        let issuer = Arc::new(LoopbackCapabilityIssuer::random().unwrap());
+        let config = GatewayMcpConfig::from_issuer(
+            1,
+            Arc::clone(&issuer),
+            "/bin/nomicore".into(),
+            TEST_OWNER_ID,
+        );
+        let child = config
+            .issue_for_conversation(
+                TEST_OWNER_ID,
+                TEST_CONVERSATION_ID,
+                None,
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+        let admission = GatewayBodyReadAdmission {
+            slots: Arc::new(Semaphore::new(1)),
+            capacity: 1,
+        };
+        let app = bounded_tool_test_app(
+            bounded_tool_test_state(issuer, admission.clone()),
+            Arc::new(BoundedToolTestGate::new()),
+        );
+        let stalled_body = stream::pending::<Result<Bytes, Infallible>>();
+        let stalled_request = Request::builder()
+            .method("POST")
+            .uri("/tool")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(stalled_body))
+            .unwrap();
+        let stalled = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(stalled_request).await.unwrap() }
+        });
+        time::timeout(std::time::Duration::from_secs(1), async {
+            while admission.slots.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stalled request must acquire the sole body-read slot");
+
+        let saturated = app
+            .clone()
+            .oneshot(bounded_tool_request(&child))
+            .await
+            .unwrap();
+        assert_eq!(saturated.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(stalled.await.unwrap().status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(admission.slots.available_permits(), 1);
+    }
 
     #[cfg(feature = "browser-use")]
     struct BrowserCloseProbe {
@@ -1352,6 +2040,163 @@ mod tests {
         assert_eq!(close_probe.lane_closes.load(Ordering::Acquire), 1);
     }
 
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_cleanup_supervisor_recovers_after_a_sweep_panic() {
+        let server = GatewayMcpServer::start().await.unwrap();
+        let probe = Arc::new(BrowserCloseProbe {
+            lane_closes: AtomicUsize::new(0),
+        });
+        let hub = BrowserSessionHub::new(
+            Arc::new(TestBrowserFactory {
+                probe: Arc::clone(&probe),
+            }),
+            HubConfig::default(),
+        );
+        let registry =
+            crate::browser_registry::BrowserRegistry::from_hub(hub.clone());
+        *server.browser_registry_slot.write().await = Some(registry.clone());
+
+        let signed_child =
+            child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
+        let runtime_lease_id =
+            signed_child.bootstrap.access.claims.lease_id.clone();
+        let ctx = CallerCtx {
+            conversation_id: Some(
+                nomifun_common::ConversationId::parse(TEST_CONVERSATION_ID)
+                    .unwrap(),
+            ),
+            user_id: UserId::parse(TEST_OWNER_ID).unwrap(),
+            ..Default::default()
+        };
+        let ctx = attach_browser_identity(
+            registry,
+            ctx,
+            runtime_lease_id,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+        server
+            .browser_registry_slot
+            .read()
+            .await
+            .clone()
+            .expect("registry must be installed")
+            .open(&ctx, None)
+            .await
+            .unwrap();
+        assert_eq!(hub.list_lanes().await.len(), 1);
+
+        let attempts_before = server
+            .browser_cleanup_test_control
+            .sweep_attempts
+            .load(Ordering::Acquire);
+        server
+            .browser_cleanup_test_control
+            .sweep_panics_remaining
+            .store(1, Ordering::Release);
+        server
+            .issuer
+            .revoke(
+                GATEWAY_CAPABILITY_DOMAIN,
+                &signed_child.bootstrap.renewal,
+            )
+            .unwrap();
+
+        time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if hub.list_lanes().await.is_empty()
+                    && server
+                        .browser_cleanup_test_control
+                        .sweep_attempts
+                        .load(Ordering::Acquire)
+                        >= attempts_before + 2
+                {
+                    break;
+                }
+                time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the single supervisor must retry after the injected panic");
+        assert_eq!(probe.lane_closes.load(Ordering::Acquire), 1);
+        server.stop_and_wait().await.unwrap();
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn cleanup_worker_join_error_still_runs_authoritative_final_drain() {
+        let server = GatewayMcpServer::start().await.unwrap();
+        let probe = Arc::new(BrowserCloseProbe {
+            lane_closes: AtomicUsize::new(0),
+        });
+        let hub = BrowserSessionHub::new(
+            Arc::new(TestBrowserFactory {
+                probe: Arc::clone(&probe),
+            }),
+            HubConfig::default(),
+        );
+        let registry =
+            crate::browser_registry::BrowserRegistry::from_hub(hub.clone());
+        *server.browser_registry_slot.write().await = Some(registry.clone());
+
+        let signed_child =
+            child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
+        let runtime_lease_id =
+            signed_child.bootstrap.access.claims.lease_id.clone();
+        let ctx = CallerCtx {
+            conversation_id: Some(
+                nomifun_common::ConversationId::parse(TEST_CONVERSATION_ID)
+                    .unwrap(),
+            ),
+            user_id: UserId::parse(TEST_OWNER_ID).unwrap(),
+            ..Default::default()
+        };
+        let ctx = attach_browser_identity(
+            registry,
+            ctx,
+            runtime_lease_id,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+        server
+            .browser_registry_slot
+            .read()
+            .await
+            .clone()
+            .expect("registry must be installed")
+            .open(&ctx, None)
+            .await
+            .unwrap();
+        assert_eq!(hub.list_lanes().await.len(), 1);
+
+        {
+            let lifecycle = server
+                .lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            lifecycle
+                .browser_cleanup_worker
+                .as_ref()
+                .expect("browser cleanup worker must be installed")
+                .handle
+                .abort();
+        }
+
+        let error = server.stop_and_wait().await.unwrap_err();
+        assert!(
+            error.contains("browser cleanup task failed while stopping"),
+            "unexpected stop error: {error}"
+        );
+        assert!(
+            hub.list_lanes().await.is_empty(),
+            "JoinError must not bypass the fallback exact-owner drain"
+        );
+        assert_eq!(probe.lane_closes.load(Ordering::Acquire), 1);
+    }
+
     #[tokio::test]
     async fn concurrent_stop_and_wait_calls_share_one_shutdown() {
         let server = GatewayMcpServer::start().await.unwrap();
@@ -1389,10 +2234,19 @@ mod tests {
                 .lifecycle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[cfg(feature = "browser-use")]
+            let cleanup_state = lifecycle
+                .browser_cleanup_worker
+                .as_ref()
+                .expect("browser cleanup worker must be installed")
+                .cleanup_state
+                .clone();
             if let Some(existing) = lifecycle.browser_cleanup_worker.replace(
                 GatewayCleanupWorker {
                     shutdown: shutdown_tx,
                     handle: delayed_cleanup,
+                    #[cfg(feature = "browser-use")]
+                    cleanup_state,
                 },
             ) {
                 existing.handle.abort();

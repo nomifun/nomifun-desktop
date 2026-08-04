@@ -6,25 +6,1058 @@
 //! old env safely), subsequent refreshes are single-flight, and a 401 retries
 //! exactly once after forced renewal.
 
+use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::io::{self, Write};
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use nomifun_api_types::ScopedMcpChildBootstrap;
+use futures_util::{FutureExt as _, SinkExt as _, StreamExt as _};
+use nomifun_api_types::{
+    MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY, ScopedMcpChildBootstrap,
+};
 use nomifun_common::{
     LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_RENEWAL_MARGIN_SECS,
     LOOPBACK_CAPABILITY_REVOKE_PATH, LoopbackCapabilityAccess,
     LoopbackCapabilityClaims, LoopbackCapabilityError,
     LoopbackCapabilityRenewalRequest, unix_time_secs,
 };
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{
+    CallToolResult, ClientJsonRpcMessage, ClientNotification, ClientRequest, Content, ErrorCode,
+    ErrorData, GetExtensions, JsonRpcMessage, NumberOrString, RequestId, ServerInfo,
+    ServerJsonRpcMessage, ServerResult,
+};
+use rmcp::service::{NotificationContext, RequestContext, RoleServer, Service};
+use rmcp::transport::Transport;
+use rmcp::transport::async_rw::JsonRpcMessageCodec;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
+use tokio_util::bytes::BytesMut;
+use tokio_util::codec::{Decoder, Encoder, FramedRead, FramedWrite};
+use tokio_util::sync::CancellationToken;
 
 type ScopedAccess<S> = LoopbackCapabilityAccess<LoopbackCapabilityClaims<S>>;
 
 const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
+
+/// A Platform Gateway child carries broad structured platform calls, so it may
+/// retain a little more work than the browser-only bridge. This is a per-child
+/// admission bound, never a process-global concurrency cap.
+pub(crate) const MAX_GATEWAY_STDIO_ACTIVE_REQUESTS: usize = 8;
+
+/// A browser-only ACP child is deliberately serial. Concurrency for one
+/// user-visible task comes from its independently fenced sibling children and
+/// from the Browser Hub, rather than from retaining multiple large JSON values
+/// in every proxy process.
+pub(crate) const MAX_BROWSER_STDIO_ACTIVE_REQUESTS: usize = 1;
+
+/// Notifications do not receive JSON-RPC responses, so they use a separate,
+/// small control budget. This keeps cancellation available while eight browser
+/// requests are active without giving notification floods an unbounded spawn
+/// path through rmcp's per-message tasks.
+const MAX_STDIO_ACTIVE_NOTIFICATIONS: usize = 8;
+
+/// Browser requests are normally far smaller (crawl URLs are independently
+/// bounded by the Hub), but the shared Platform Gateway also carries rich
+/// structured tool arguments. The fixed wire limit is a structural safety fuse,
+/// not a process-wide or machine-wide memory target.
+pub(crate) const MAX_GATEWAY_STDIO_INPUT_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// Browser tool arguments are bounded again by the Hub (URL count, schema
+/// depth, strings, etc.). 256 KiB leaves ample protocol headroom without
+/// allowing every child in a task family to retain a multi-megabyte `Value`.
+pub(crate) const MAX_BROWSER_STDIO_INPUT_FRAME_BYTES: usize = 256 * 1024;
+
+/// Tool results can contain screenshots or a bounded crawl batch. Encoding is
+/// performed through a capped writer so an oversized result cannot first create
+/// an unbounded temporary JSON buffer.
+pub(crate) const MAX_GATEWAY_STDIO_OUTPUT_FRAME_BYTES: usize = 32 * 1024 * 1024;
+
+/// Browser crawl/screenshot results are capped before this encoder. 20 MiB
+/// preserves headroom around the 16 MiB loopback body fuse while bounding a
+/// blocked browser-family wire envelope independently of Gateway traffic.
+pub(crate) const MAX_BROWSER_STDIO_OUTPUT_FRAME_BYTES: usize = 20 * 1024 * 1024;
+
+/// Control notifications should contain only request ids/progress metadata.
+/// Keeping them small preserves cancellation without letting the reserved
+/// notification slots become another large-Value retention path.
+const MAX_STDIO_NOTIFICATION_FRAME_BYTES: usize = 64 * 1024;
+const MAX_STDIO_REQUEST_ID_BYTES: usize = 4 * 1024;
+const STDIO_CAPACITY_ERROR_CODE: ErrorCode = ErrorCode(-32001);
+const STDIO_SESSION_LIFETIME_ERROR_CODE: ErrorCode = ErrorCode(-32004);
+
+/// rmcp 1.7 retains completed response-send task entries until the transport
+/// closes. Cycling a short-lived bridge after this many admitted requests puts
+/// a hard ceiling on that third-party bookkeeping even for a perfectly behaved
+/// client. Exhaustion is intentionally fail-closed: an MCP supervisor may
+/// respawn a fresh capability-bound child, but this process does not claim that
+/// every external client supports transparent mid-session restart.
+const MAX_STDIO_ADMITTED_REQUESTS_PER_CHILD: usize = 1_024;
+
+/// The deadline covers waiting for the writer mutex *and* encoding/flushing the
+/// frame. A client that stops reading stdout can therefore never pin a child.
+const STDIO_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Covers the entire service future. Request cancellation is selected first;
+/// dropping the future also drops any in-flight reqwest body stream promptly.
+const STDIO_HANDLER_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// The HTTP stream is accumulated only up to this decompressed-byte ceiling.
+/// Browser results are independently encoded through the 20 MiB stdio cap.
+const MAX_LOOPBACK_TOOL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOOPBACK_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// Maximum browser-proxy payload simultaneously retained on blocked stdio
+/// wires for one `(user, conversation)` task family. This deliberately does
+/// not estimate allocator/serde/runtime overhead; those are separately bounded
+/// by the child count, serial admission, fixed runtime, and session fuse.
+pub(crate) const MAX_BROWSER_TASK_FAMILY_STDIO_WIRE_BYTES: usize =
+    MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY
+        * (MAX_BROWSER_STDIO_ACTIVE_REQUESTS
+            * (MAX_BROWSER_STDIO_INPUT_FRAME_BYTES
+                + 1
+                + MAX_BROWSER_STDIO_OUTPUT_FRAME_BYTES)
+            + MAX_STDIO_ACTIVE_NOTIFICATIONS * (MAX_STDIO_NOTIFICATION_FRAME_BYTES + 1));
+
+#[derive(Clone)]
+pub(crate) struct ProcessRequestBudget {
+    requests: Arc<AtomicUsize>,
+    notifications: Arc<AtomicUsize>,
+    max_requests: usize,
+    max_notifications: usize,
+    shutdown: CancellationToken,
+}
+
+impl Default for ProcessRequestBudget {
+    fn default() -> Self {
+        Self::new(
+            MAX_GATEWAY_STDIO_ACTIVE_REQUESTS,
+            MAX_STDIO_ACTIVE_NOTIFICATIONS,
+        )
+    }
+}
+
+impl ProcessRequestBudget {
+    pub(crate) fn browser() -> Self {
+        Self::new(
+            MAX_BROWSER_STDIO_ACTIVE_REQUESTS,
+            MAX_STDIO_ACTIVE_NOTIFICATIONS,
+        )
+    }
+
+    fn new(max_requests: usize, max_notifications: usize) -> Self {
+        assert!(max_requests > 0);
+        assert!(max_notifications > 0);
+        Self {
+            requests: Arc::new(AtomicUsize::new(0)),
+            notifications: Arc::new(AtomicUsize::new(0)),
+            max_requests,
+            max_notifications,
+            shutdown: CancellationToken::new(),
+        }
+    }
+
+    fn try_acquire_request(&self) -> Option<ProcessRequestPermit> {
+        try_acquire_counter(&self.requests, self.max_requests)
+    }
+
+    fn try_acquire_notification(&self) -> Option<ProcessRequestPermit> {
+        try_acquire_counter(&self.notifications, self.max_notifications)
+    }
+
+    fn max_requests(&self) -> usize {
+        self.max_requests
+    }
+
+    fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
+    #[cfg(test)]
+    fn active_requests(&self) -> usize {
+        self.requests.load(Ordering::Acquire)
+    }
+}
+
+fn try_acquire_counter(
+    counter: &Arc<AtomicUsize>,
+    limit: usize,
+) -> Option<ProcessRequestPermit> {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        if current >= limit {
+            return None;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                return Some(ProcessRequestPermit(Arc::new(RequestPermitInner {
+                    counter: counter.clone(),
+                })));
+            }
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+/// Clone is intentional: rmcp clones the initialize request/context. One
+/// reservation is refunded only when the final clone is dropped.
+#[derive(Clone)]
+pub(crate) struct ProcessRequestPermit(Arc<RequestPermitInner>);
+
+impl ProcessRequestPermit {
+    fn same_reservation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+struct RequestPermitInner {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for RequestPermitInner {
+    fn drop(&mut self) {
+        let previous = self.counter.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "stdio request admission underflow");
+    }
+}
+
+/// Proof held by a concrete handler. For transport-dispatched requests the
+/// panic/cancellation shield owns the real reservation and this is only a
+/// marker. Direct Service invocations acquire a real fallback reservation.
+pub(crate) struct StdioHandlerRequestPermit {
+    _fallback: Option<ProcessRequestPermit>,
+}
+
+#[derive(Clone, Copy)]
+struct StdioTransportAdmissionMarker;
+
+pub(crate) fn take_stdio_request_permit(
+    context: &mut RequestContext<RoleServer>,
+    budget: &ProcessRequestBudget,
+) -> Result<StdioHandlerRequestPermit, ErrorData> {
+    if context
+        .extensions
+        .remove::<StdioTransportAdmissionMarker>()
+        .is_some()
+    {
+        return Ok(StdioHandlerRequestPermit { _fallback: None });
+    }
+    budget
+        .try_acquire_request()
+        .map(|permit| StdioHandlerRequestPermit {
+            _fallback: Some(permit),
+        })
+        .ok_or_else(|| stdio_capacity_error(budget.max_requests()))
+}
+
+fn stdio_capacity_error(max_active_requests: usize) -> ErrorData {
+    ErrorData::new(
+        STDIO_CAPACITY_ERROR_CODE,
+        "stdio task request capacity is full; retry after an active request completes",
+        Some(serde_json::json!({
+            "code": "stdio_request_capacity",
+            "retryable": true,
+            "max_active_requests": max_active_requests,
+        })),
+    )
+}
+
+fn stdio_session_lifetime_error(max_requests: usize) -> ErrorData {
+    ErrorData::new(
+        STDIO_SESSION_LIFETIME_ERROR_CODE,
+        "stdio child request lifetime is exhausted; restart this capability-bound child",
+        Some(serde_json::json!({
+            "code": "stdio_session_lifetime_exhausted",
+            "retryable": true,
+            "max_admitted_requests": max_requests,
+        })),
+    )
+}
+
+#[derive(Clone)]
+struct ActiveRequestRegistry {
+    budget: ProcessRequestBudget,
+    requests: Arc<StdMutex<HashMap<RequestId, ProcessRequestPermit>>>,
+}
+
+#[derive(Debug)]
+enum RequestAdmissionError {
+    Capacity,
+    Duplicate,
+}
+
+impl ActiveRequestRegistry {
+    fn new(budget: ProcessRequestBudget) -> Self {
+        Self {
+            budget,
+            requests: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+
+    fn try_admit(
+        &self,
+        request_id: &RequestId,
+    ) -> Result<TransportRequestGuard, RequestAdmissionError> {
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if requests.contains_key(request_id) {
+            return Err(RequestAdmissionError::Duplicate);
+        }
+        let permit = self
+            .budget
+            .try_acquire_request()
+            .ok_or(RequestAdmissionError::Capacity)?;
+        requests.insert(request_id.clone(), permit.clone());
+        drop(requests);
+        Ok(TransportRequestGuard(Arc::new(
+            TransportRequestGuardInner {
+                registry: self.clone(),
+                request_id: request_id.clone(),
+                permit,
+                handed_to_response: AtomicBool::new(false),
+            },
+        )))
+    }
+
+    fn begin_completion(&self, request_id: &RequestId) -> Option<RequestCompletionGuard> {
+        let permit = self
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(request_id)
+            .cloned()?;
+        Some(RequestCompletionGuard {
+            registry: self.clone(),
+            request_id: request_id.clone(),
+            permit,
+        })
+    }
+
+    fn remove_if_same(&self, request_id: &RequestId, expected: &ProcessRequestPermit) {
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if requests
+            .get(request_id)
+            .is_some_and(|actual| actual.same_reservation(expected))
+        {
+            requests.remove(request_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, request_id: &RequestId) -> bool {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(request_id)
+    }
+}
+
+/// Lives in the rmcp request extensions until the shield takes ownership. If
+/// the handler task is dropped before it can produce a response, the final
+/// clone removes exactly its own registry entry and refunds the active slot.
+#[derive(Clone)]
+struct TransportRequestGuard(Arc<TransportRequestGuardInner>);
+
+impl TransportRequestGuard {
+    fn handoff_to_response(&self) {
+        self.0.handed_to_response.store(true, Ordering::Release);
+    }
+}
+
+struct TransportRequestGuardInner {
+    registry: ActiveRequestRegistry,
+    request_id: RequestId,
+    permit: ProcessRequestPermit,
+    handed_to_response: AtomicBool,
+}
+
+impl Drop for TransportRequestGuardInner {
+    fn drop(&mut self) {
+        if !self.handed_to_response.load(Ordering::Acquire) {
+            self.registry
+                .remove_if_same(&self.request_id, &self.permit);
+        }
+    }
+}
+
+struct RequestCompletionGuard {
+    registry: ActiveRequestRegistry,
+    request_id: RequestId,
+    permit: ProcessRequestPermit,
+}
+
+impl Drop for RequestCompletionGuard {
+    fn drop(&mut self) {
+        self.registry
+            .remove_if_same(&self.request_id, &self.permit);
+    }
+}
+
+struct InboundFrame<T> {
+    message: T,
+    encoded_len: usize,
+}
+
+struct BoundedInboundCodec<T> {
+    inner: JsonRpcMessageCodec<T>,
+}
+
+impl<T> BoundedInboundCodec<T> {
+    fn new(max_length: usize) -> Self {
+        Self {
+            inner: JsonRpcMessageCodec::new_with_max_length(max_length),
+        }
+    }
+
+    fn wrap_decoded(
+        before: usize,
+        after: usize,
+        decoded: Option<T>,
+    ) -> Option<InboundFrame<T>> {
+        decoded.map(|message| InboundFrame {
+            message,
+            encoded_len: before.saturating_sub(after),
+        })
+    }
+}
+
+impl<T: DeserializeOwned> Decoder for BoundedInboundCodec<T> {
+    type Item = InboundFrame<T>;
+    type Error = io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        let before = src.len();
+        let decoded = self.inner.decode(src).map_err(io::Error::from)?;
+        Ok(Self::wrap_decoded(before, src.len(), decoded))
+    }
+
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        let before = src.len();
+        let decoded = self.inner.decode_eof(src).map_err(io::Error::from)?;
+        Ok(Self::wrap_decoded(before, src.len(), decoded))
+    }
+}
+
+struct BoundedOutboundCodec<T> {
+    max_length: usize,
+    marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> BoundedOutboundCodec<T> {
+    fn new(max_length: usize) -> Self {
+        Self {
+            max_length,
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+struct CappedBytesWriter<'a> {
+    output: &'a mut BytesMut,
+    start: usize,
+    max_length: usize,
+}
+
+impl Write for CappedBytesWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.output.len().saturating_sub(self.start);
+        if bytes.len() > self.max_length.saturating_sub(written) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "maximum stdio output frame length exceeded",
+            ));
+        }
+        self.output.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<T: Serialize> Encoder<T> for BoundedOutboundCodec<T> {
+    type Error = io::Error;
+
+    fn encode(&mut self, item: T, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let start = dst.len();
+        let result = {
+            let mut writer = CappedBytesWriter {
+                output: dst,
+                start,
+                // Reserve the final byte for the newline frame delimiter so
+                // the configured output limit covers the entire wire frame.
+                max_length: self.max_length.saturating_sub(1),
+            };
+            serde_json::to_writer(&mut writer, &item)
+        };
+        if let Err(error) = result {
+            dst.truncate(start);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, error));
+        }
+        dst.extend_from_slice(b"\n");
+        Ok(())
+    }
+}
+
+struct TransportFailure {
+    cancellation: CancellationToken,
+}
+
+impl TransportFailure {
+    fn new(cancellation: CancellationToken) -> Self {
+        Self { cancellation }
+    }
+
+    fn fail(&self) {
+        self.cancellation.cancel();
+    }
+
+    fn is_failed(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    async fn cancelled(&self) {
+        self.cancellation.cancelled().await;
+    }
+}
+
+type StdioWriter<W> = FramedWrite<W, BoundedOutboundCodec<ServerJsonRpcMessage>>;
+
+async fn send_stdio_message<W>(
+    writer: Arc<Mutex<Option<StdioWriter<W>>>>,
+    failure: Arc<TransportFailure>,
+    write_timeout: Duration,
+    message: ServerJsonRpcMessage,
+) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    if failure.is_failed() {
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "stdio transport failed closed",
+        ));
+    }
+
+    let result = tokio::time::timeout(write_timeout, async {
+        // The timeout starts before acquiring the mutex: queued writers cannot
+        // extend their deadline by waiting behind a blocked flush.
+        let mut slot = writer.lock().await;
+        if failure.is_failed() {
+            slot.take();
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stdio transport failed closed",
+            ));
+        }
+        let result = match slot.as_mut() {
+            Some(writer) => writer.send(message).await,
+            None => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "stdio transport is closed",
+            )),
+        };
+        if result.is_err() {
+            // Discard any codec/socket buffer after an encode or flush error.
+            slot.take();
+        }
+        result
+    })
+    .await;
+
+    match result {
+        Ok(result) => {
+            if result.is_err() {
+                failure.fail();
+            }
+            result
+        }
+        Err(_) => {
+            failure.fail();
+            // Timeout cancels the lock/send future and releases its guard. A
+            // racing waiter rechecks `failure` and performs the same discard.
+            if let Ok(mut slot) = writer.try_lock() {
+                slot.take();
+            }
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "stdio output write deadline exceeded",
+            ))
+        }
+    }
+}
+
+pub(crate) struct BoundedStdioTransport<R, W> {
+    reader: FramedRead<R, BoundedInboundCodec<ClientJsonRpcMessage>>,
+    writer: Arc<Mutex<Option<StdioWriter<W>>>>,
+    admissions: ActiveRequestRegistry,
+    budget: ProcessRequestBudget,
+    output_active: Arc<AtomicUsize>,
+    output_limit: usize,
+    failure: Arc<TransportFailure>,
+    notification_frame_limit: usize,
+    admitted_requests: usize,
+    request_lifetime_limit: usize,
+    write_timeout: Duration,
+}
+
+impl<R, W> BoundedStdioTransport<R, W>
+where
+    R: AsyncRead,
+    W: AsyncWrite + Unpin,
+{
+    fn new_with_limits(
+        read: R,
+        write: W,
+        budget: ProcessRequestBudget,
+        input_frame_limit: usize,
+        output_frame_limit: usize,
+    ) -> Self {
+        Self::new_with_all_limits(
+            read,
+            write,
+            budget,
+            input_frame_limit,
+            output_frame_limit,
+            MAX_STDIO_ADMITTED_REQUESTS_PER_CHILD,
+            STDIO_WRITE_TIMEOUT,
+        )
+    }
+
+    fn new_with_all_limits(
+        read: R,
+        write: W,
+        budget: ProcessRequestBudget,
+        input_frame_limit: usize,
+        output_frame_limit: usize,
+        request_lifetime_limit: usize,
+        write_timeout: Duration,
+    ) -> Self {
+        assert!(input_frame_limit > 0);
+        assert!(output_frame_limit > 0);
+        assert!(request_lifetime_limit > 0);
+        assert!(!write_timeout.is_zero());
+        let output_limit = budget.max_requests();
+        let failure = Arc::new(TransportFailure::new(budget.shutdown_token()));
+        Self {
+            reader: FramedRead::new(read, BoundedInboundCodec::new(input_frame_limit)),
+            writer: Arc::new(Mutex::new(Some(FramedWrite::new(
+                write,
+                BoundedOutboundCodec::new(output_frame_limit),
+            )))),
+            admissions: ActiveRequestRegistry::new(budget.clone()),
+            budget,
+            output_active: Arc::new(AtomicUsize::new(0)),
+            output_limit,
+            failure,
+            notification_frame_limit: MAX_STDIO_NOTIFICATION_FRAME_BYTES.min(input_frame_limit),
+            admitted_requests: 0,
+            request_lifetime_limit,
+            write_timeout,
+        }
+    }
+
+    async fn write_direct(&self, message: ServerJsonRpcMessage) -> io::Result<()> {
+        send_stdio_message(
+            self.writer.clone(),
+            self.failure.clone(),
+            self.write_timeout,
+            message,
+        )
+        .await
+    }
+
+    async fn reject_request(
+        &self,
+        request_id: Option<RequestId>,
+        error: ErrorData,
+    ) -> io::Result<()> {
+        self.write_direct(ServerJsonRpcMessage::error(error, request_id))
+            .await
+    }
+}
+
+pub(crate) fn bounded_stdio_transport(
+    budget: ProcessRequestBudget,
+) -> BoundedStdioTransport<tokio::io::Stdin, tokio::io::Stdout> {
+    BoundedStdioTransport::new_with_limits(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+        budget,
+        MAX_GATEWAY_STDIO_INPUT_FRAME_BYTES,
+        MAX_GATEWAY_STDIO_OUTPUT_FRAME_BYTES,
+    )
+}
+
+pub(crate) fn bounded_browser_stdio_transport(
+    budget: ProcessRequestBudget,
+) -> BoundedStdioTransport<tokio::io::Stdin, tokio::io::Stdout> {
+    BoundedStdioTransport::new_with_limits(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+        budget,
+        MAX_BROWSER_STDIO_INPUT_FRAME_BYTES,
+        MAX_BROWSER_STDIO_OUTPUT_FRAME_BYTES,
+    )
+}
+
+fn request_id_is_bounded(request_id: &RequestId) -> bool {
+    match request_id {
+        NumberOrString::Number(_) => true,
+        NumberOrString::String(value) => value.len() <= MAX_STDIO_REQUEST_ID_BYTES,
+    }
+}
+
+impl<R, W> Transport<RoleServer> for BoundedStdioTransport<R, W>
+where
+    R: AsyncRead + Send + Sync + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    type Error = io::Error;
+
+    fn send(
+        &mut self,
+        item: ServerJsonRpcMessage,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let writer = self.writer.clone();
+        let failure = self.failure.clone();
+        let write_timeout = self.write_timeout;
+        let completed = match &item {
+            JsonRpcMessage::Response(response) => self.admissions.begin_completion(&response.id),
+            JsonRpcMessage::Error(error) => error
+                .id
+                .as_ref()
+                .and_then(|request_id| self.admissions.begin_completion(request_id)),
+            _ => None,
+        };
+        let output_permit = try_acquire_counter(&self.output_active, self.output_limit);
+        async move {
+            let _completed = completed;
+            let _output_permit = match output_permit {
+                Some(permit) => permit,
+                None => {
+                    failure.fail();
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "stdio output capacity is full",
+                    ));
+                }
+            };
+            send_stdio_message(writer, failure, write_timeout, item).await
+        }
+    }
+
+    async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
+        loop {
+            if self.failure.is_failed() {
+                return None;
+            }
+            let frame = tokio::select! {
+                biased;
+                _ = self.failure.cancelled() => return None,
+                frame = self.reader.next() => frame,
+            };
+            let InboundFrame {
+                mut message,
+                encoded_len,
+            } = match frame {
+                Some(Ok(frame)) => frame,
+                Some(Err(error)) => {
+                    eprintln!("[scoped-stdio] input rejected; closing session: {error}");
+                    self.failure.fail();
+                    return None;
+                }
+                None => {
+                    // rmcp does not cancel detached handlers merely because
+                    // receive returned EOF. Propagate child shutdown through
+                    // the same level-triggered token the shield selects.
+                    self.failure.fail();
+                    return None;
+                }
+            };
+
+            match &message {
+                JsonRpcMessage::Request(request) if !request_id_is_bounded(&request.id) => {
+                    drop(message);
+                    let error = ErrorData::invalid_request(
+                        "stdio JSON-RPC request id exceeds the fixed byte limit",
+                        None,
+                    );
+                    if self.reject_request(None, error).await.is_err() {
+                        return None;
+                    }
+                    continue;
+                }
+                JsonRpcMessage::Request(request) => {
+                    let request_id = request.id.clone();
+                    if self.admitted_requests >= self.request_lifetime_limit {
+                        drop(message);
+                        let result = self
+                            .reject_request(
+                                Some(request_id),
+                                stdio_session_lifetime_error(self.request_lifetime_limit),
+                            )
+                            .await;
+                        // Even a successfully written fuse response closes the
+                        // child so rmcp's completed JoinSet cannot grow again.
+                        self.failure.fail();
+                        if result.is_err() {
+                            return None;
+                        }
+                        return None;
+                    }
+                    match self.admissions.try_admit(&request_id) {
+                        Ok(guard) => {
+                            self.admitted_requests += 1;
+                            message.insert_extension(guard);
+                        }
+                        Err(RequestAdmissionError::Capacity) => {
+                            drop(message);
+                            if self
+                                .reject_request(
+                                    Some(request_id),
+                                    stdio_capacity_error(self.budget.max_requests()),
+                                )
+                                .await
+                                .is_err()
+                            {
+                                return None;
+                            }
+                            continue;
+                        }
+                        Err(RequestAdmissionError::Duplicate) => {
+                            drop(message);
+                            if self
+                                .reject_request(
+                                    Some(request_id),
+                                    ErrorData::invalid_request(
+                                        "duplicate in-flight stdio JSON-RPC request id",
+                                        None,
+                                    ),
+                                )
+                                .await
+                                .is_err()
+                            {
+                                return None;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                JsonRpcMessage::Notification(_) => {
+                    if encoded_len > self.notification_frame_limit {
+                        eprintln!(
+                            "[scoped-stdio] oversized control notification dropped: {encoded_len} bytes"
+                        );
+                        continue;
+                    }
+                    let Some(permit) = self.budget.try_acquire_notification() else {
+                        eprintln!("[scoped-stdio] control notification capacity is full; dropped");
+                        continue;
+                    };
+                    message.insert_extension(permit);
+                }
+                JsonRpcMessage::Response(_) | JsonRpcMessage::Error(_) => {}
+            }
+            return Some(message);
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.failure.fail();
+        let writer = self.writer.clone();
+        match tokio::time::timeout(self.write_timeout, async move {
+            let mut slot = writer.lock().await;
+            let Some(mut framed) = slot.take() else {
+                return Ok(());
+            };
+            drop(slot);
+            framed.close().await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                if let Ok(mut slot) = self.writer.try_lock() {
+                    slot.take();
+                }
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "stdio close deadline exceeded",
+                ))
+            }
+        }
+    }
+}
+
+pub(crate) struct PanicShieldService<S> {
+    inner: S,
+    handler_timeout: Duration,
+    child_shutdown: CancellationToken,
+}
+
+pub(crate) fn panic_shield_stdio_service<S>(
+    inner: S,
+    budget: ProcessRequestBudget,
+) -> PanicShieldService<S> {
+    PanicShieldService {
+        inner,
+        handler_timeout: STDIO_HANDLER_TIMEOUT,
+        child_shutdown: budget.shutdown_token(),
+    }
+}
+
+#[cfg(test)]
+fn panic_shield_stdio_service_with_timeout<S>(
+    inner: S,
+    budget: ProcessRequestBudget,
+    handler_timeout: Duration,
+) -> PanicShieldService<S> {
+    PanicShieldService {
+        inner,
+        handler_timeout,
+        child_shutdown: budget.shutdown_token(),
+    }
+}
+
+fn stdio_handler_cancelled_error() -> ErrorData {
+    ErrorData::internal_error(
+        "stdio request was cancelled; in-flight I/O was dropped",
+        Some(serde_json::json!({
+            "code": "stdio_request_cancelled",
+            "retryable": true,
+            "side_effects_reverted": false,
+        })),
+    )
+}
+
+fn stdio_handler_deadline_error(timeout: Duration) -> ErrorData {
+    ErrorData::internal_error(
+        "stdio request deadline exceeded; in-flight I/O was dropped",
+        Some(serde_json::json!({
+            "code": "stdio_request_deadline",
+            "retryable": true,
+            "deadline_ms": timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+            "side_effects_reverted": false,
+        })),
+    )
+}
+
+impl<S> Service<RoleServer> for PanicShieldService<S>
+where
+    S: Service<RoleServer>,
+{
+    fn handle_request(
+        &self,
+        mut request: ClientRequest,
+        mut context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ServerResult, ErrorData>> + Send + '_ {
+        let handler_timeout = self.handler_timeout;
+        let child_shutdown = self.child_shutdown.clone();
+        async move {
+            // Regular rmcp requests move extensions into the context. During
+            // initialize rmcp clones both request and context, so remove and
+            // retain both copies until one terminal outcome is chosen.
+            let mut admissions = Vec::with_capacity(2);
+            if let Some(guard) = context.extensions.remove::<TransportRequestGuard>() {
+                admissions.push(guard);
+            }
+            if let Some(guard) = request
+                .extensions_mut()
+                .remove::<TransportRequestGuard>()
+            {
+                admissions.push(guard);
+            }
+            if !admissions.is_empty() {
+                context
+                    .extensions
+                    .insert(StdioTransportAdmissionMarker);
+            }
+
+            let cancellation = context.ct.clone();
+            let handler = AssertUnwindSafe(self.inner.handle_request(request, context))
+                .catch_unwind();
+            tokio::pin!(handler);
+            let deadline = tokio::time::sleep(handler_timeout);
+            tokio::pin!(deadline);
+            let (result, handoff_to_response) = tokio::select! {
+                biased;
+                // There is no usable transport left, so do not hand the
+                // reservation to a response that cannot be written.
+                _ = child_shutdown.cancelled() => (Err(stdio_handler_cancelled_error()), false),
+                _ = cancellation.cancelled() => (Err(stdio_handler_cancelled_error()), true),
+                _ = &mut deadline => (Err(stdio_handler_deadline_error(handler_timeout)), true),
+                outcome = &mut handler => (match outcome {
+                    Ok(result) => result,
+                    Err(_) => Err(ErrorData::internal_error(
+                        "stdio request handler panicked; request authority was released",
+                        Some(serde_json::json!({"code": "stdio_request_panic"})),
+                    )),
+                }, true),
+            };
+
+            // Every selected branch returns a bounded protocol response. Keep
+            // the exact request-id fence until that response write completes.
+            if handoff_to_response {
+                for admission in &admissions {
+                    admission.handoff_to_response();
+                }
+            }
+            drop(admissions);
+            result
+        }
+    }
+
+    fn handle_notification(
+        &self,
+        notification: ClientNotification,
+        context: NotificationContext<RoleServer>,
+    ) -> impl Future<Output = Result<(), ErrorData>> + Send + '_ {
+        let handler_timeout = self.handler_timeout;
+        let child_shutdown = self.child_shutdown.clone();
+        async move {
+            let handler = AssertUnwindSafe(self.inner.handle_notification(notification, context))
+                .catch_unwind();
+            tokio::pin!(handler);
+            let deadline = tokio::time::sleep(handler_timeout);
+            tokio::pin!(deadline);
+            tokio::select! {
+                biased;
+                _ = child_shutdown.cancelled() => Err(stdio_handler_cancelled_error()),
+                _ = &mut deadline => Err(ErrorData::internal_error(
+                    "stdio notification handler deadline exceeded",
+                    Some(serde_json::json!({"code": "stdio_notification_deadline"})),
+                )),
+                outcome = &mut handler => match outcome {
+                    Ok(result) => result,
+                    Err(_) => Err(ErrorData::internal_error(
+                    "stdio notification handler panicked; notification authority was released",
+                    Some(serde_json::json!({"code": "stdio_notification_panic"})),
+                    )),
+                },
+            }
+        }
+    }
+
+    fn get_info(&self) -> ServerInfo {
+        self.inner.get_info()
+    }
+}
 
 fn valid_idempotency_key(value: &str) -> bool {
     nomifun_common::is_visible_ascii_key(value, nomifun_common::MAX_IDEMPOTENCY_KEY_LEN)
@@ -127,15 +1160,71 @@ fn call_tool_result(content: Vec<Content>, is_error: bool) -> CallToolResult {
     }
 }
 
-/// Build the HTTP client used only for process-local callback traffic.
-pub fn build_bridge_http_client() -> reqwest::Client {
+/// Build the HTTP client used only for process-local callback traffic. Failure
+/// is fatal to bridge startup: falling back to `Client::new()` would silently
+/// lose the loopback-only proxy policy and absolute request deadline.
+pub fn build_bridge_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .no_proxy()
         .pool_max_idle_per_host(0)
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(60))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .map_err(|error| format!("failed to build bounded loopback HTTP client: {error}"))
+}
+
+async fn collect_bounded_response_stream<S, B, E>(
+    declared_length: Option<u64>,
+    mut stream: S,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, String>
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    if declared_length.is_some_and(|length| length > max_bytes as u64) {
+        return Err(format!(
+            "{label} exceeds the fixed {max_bytes}-byte response limit (declared Content-Length)"
+        ));
+    }
+    let initial_capacity = declared_length
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0)
+        .min(max_bytes);
+    let mut output = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("failed to read {label}: {error}"))?;
+        let bytes = chunk.as_ref();
+        if bytes.len() > max_bytes.saturating_sub(output.len()) {
+            return Err(format!(
+                "{label} exceeds the fixed {max_bytes}-byte response limit"
+            ));
+        }
+        output.extend_from_slice(bytes);
+    }
+    Ok(output)
+}
+
+async fn read_bounded_response_text(
+    response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> Result<String, String> {
+    // With reqwest gzip decoding enabled, `bytes_stream` yields decompressed
+    // bytes. `content_length` is only an early rejection hint; the cumulative
+    // stream check remains authoritative for chunked bodies, compressed bodies,
+    // and maliciously understated metadata.
+    let declared_length = response.content_length();
+    let bytes = collect_bounded_response_stream(
+        declared_length,
+        response.bytes_stream(),
+        max_bytes,
+        label,
+    )
+    .await?;
+    String::from_utf8(bytes).map_err(|error| format!("{label} is not valid UTF-8: {error}"))
 }
 
 #[derive(Clone)]
@@ -212,7 +1301,7 @@ where
                 renewal: bootstrap.renewal,
                 immutable_claims: bootstrap.access.claims.clone(),
                 access: Mutex::new(bootstrap.access),
-                http_client: build_bridge_http_client(),
+                http_client: build_bridge_http_client()?,
                 validate_domain,
                 clock,
             }),
@@ -250,10 +1339,12 @@ where
             .await
             .map_err(|error| format!("loopback POST {path} failed: {error}"))?;
         let status = response.status();
-        let text = response
-            .text()
-            .await
-            .map_err(|error| format!("loopback POST {path} read failed: {error}"))?;
+        let text = read_bounded_response_text(
+            response,
+            MAX_LOOPBACK_CONTROL_RESPONSE_BYTES,
+            &format!("loopback POST {path} response"),
+        )
+        .await?;
         if !status.is_success() {
             return Err(format!("loopback POST {path} -> status={status}"));
         }
@@ -359,7 +1450,19 @@ where
             {
                 Ok(response) => {
                     let status = response.status();
-                    let text = response.text().await.unwrap_or_default();
+                    let text = match read_bounded_response_text(
+                        response,
+                        MAX_LOOPBACK_CONTROL_RESPONSE_BYTES,
+                        "capability renewal response",
+                    )
+                    .await
+                    {
+                        Ok(text) => text,
+                        Err(error) => {
+                            last_error = error;
+                            continue;
+                        }
+                    };
                     if status.is_success() {
                         return serde_json::from_str(&text).map_err(|error| {
                             format!(
@@ -537,7 +1640,13 @@ where
             match request.send().await {
                 Ok(response) => {
                     let status = response.status();
-                    match response.text().await {
+                    match read_bounded_response_text(
+                        response,
+                        MAX_LOOPBACK_TOOL_RESPONSE_BYTES,
+                        "loopback tool response",
+                    )
+                    .await
+                    {
                         Ok(text) => return Ok((status, text)),
                         Err(error) => {
                             // The server may already have committed the side
@@ -674,10 +1783,608 @@ mod tests {
         LoopbackSessionBinding,
     };
     use serde::{Deserialize, Serialize};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     use super::*;
 
     const DOMAIN: &str = "stdio-common-test-v2";
+
+    #[derive(Clone, Copy)]
+    enum TestServiceBehavior {
+        Pending,
+        Panic,
+        Success,
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestStdioService(TestServiceBehavior);
+
+    impl Service<RoleServer> for TestStdioService {
+        fn handle_request(
+            &self,
+            _request: ClientRequest,
+            _context: RequestContext<RoleServer>,
+        ) -> impl Future<Output = Result<ServerResult, ErrorData>> + Send + '_ {
+            let behavior = self.0;
+            async move {
+                match behavior {
+                    TestServiceBehavior::Pending => std::future::pending().await,
+                    TestServiceBehavior::Panic => panic!("synthetic service panic"),
+                    TestServiceBehavior::Success => {
+                        Ok(ServerResult::EmptyResult(rmcp::model::EmptyResult {}))
+                    }
+                }
+            }
+        }
+
+        fn handle_notification(
+            &self,
+            _notification: ClientNotification,
+            _context: NotificationContext<RoleServer>,
+        ) -> impl Future<Output = Result<(), ErrorData>> + Send + '_ {
+            std::future::ready(Ok(()))
+        }
+
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::default()
+        }
+    }
+
+    fn test_ping_request() -> ClientRequest {
+        ClientRequest::PingRequest(rmcp::model::PingRequest {
+            method: Default::default(),
+            extensions: Default::default(),
+        })
+    }
+
+    #[test]
+    fn bounded_stdio_request_budget_rejects_n_plus_one_and_refunds_drop_and_panic() {
+        let budget = ProcessRequestBudget::new(MAX_GATEWAY_STDIO_ACTIVE_REQUESTS, 2);
+        let mut permits = (0..MAX_GATEWAY_STDIO_ACTIVE_REQUESTS)
+            .map(|_| budget.try_acquire_request().expect("within limit"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            budget.active_requests(),
+            MAX_GATEWAY_STDIO_ACTIVE_REQUESTS
+        );
+        assert!(budget.try_acquire_request().is_none());
+
+        permits.pop();
+        assert_eq!(
+            budget.active_requests(),
+            MAX_GATEWAY_STDIO_ACTIVE_REQUESTS - 1
+        );
+        permits.push(budget.try_acquire_request().expect("drop refunds slot"));
+
+        let panic_permit = permits.pop().unwrap();
+        let unwind = std::panic::catch_unwind(AssertUnwindSafe(move || {
+            let _permit = panic_permit;
+            panic!("synthetic handler panic");
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(
+            budget.active_requests(),
+            MAX_GATEWAY_STDIO_ACTIVE_REQUESTS - 1
+        );
+        drop(permits);
+        assert_eq!(budget.active_requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_stdio_transport_never_yields_n_plus_one_request_task() {
+        let budget = ProcessRequestBudget::new(MAX_GATEWAY_STDIO_ACTIVE_REQUESTS, 2);
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut transport = BoundedStdioTransport::new_with_limits(
+            server_read,
+            server_write,
+            budget.clone(),
+            4 * 1024,
+            4 * 1024,
+        );
+
+        for id in 0..=MAX_GATEWAY_STDIO_ACTIVE_REQUESTS {
+            let line = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "ping",
+            })
+            .to_string();
+            client_write.write_all(line.as_bytes()).await.unwrap();
+            client_write.write_all(b"\n").await.unwrap();
+        }
+        client_write.shutdown().await.unwrap();
+
+        let mut admitted = Vec::new();
+        for _ in 0..MAX_GATEWAY_STDIO_ACTIVE_REQUESTS {
+            admitted.push(
+                Transport::<RoleServer>::receive(&mut transport)
+                    .await
+                    .expect("request within task limit"),
+            );
+        }
+        assert_eq!(
+            budget.active_requests(),
+            MAX_GATEWAY_STDIO_ACTIVE_REQUESTS
+        );
+        assert!(
+            Transport::<RoleServer>::receive(&mut transport)
+                .await
+                .is_none()
+        );
+
+        let mut response = String::new();
+        let mut response_reader = tokio::io::BufReader::new(client_read);
+        response_reader.read_line(&mut response).await.unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            response["error"]["data"]["code"],
+            "stdio_request_capacity"
+        );
+        assert_eq!(response["id"], MAX_GATEWAY_STDIO_ACTIVE_REQUESTS);
+
+        drop(admitted);
+        drop(transport);
+        assert_eq!(budget.active_requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_stdio_overlong_unterminated_frame_fails_closed_without_admission() {
+        let budget = ProcessRequestBudget::new(2, 2);
+        let (server_io, mut client_io) = tokio::io::duplex(1024);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        let mut transport = BoundedStdioTransport::new_with_limits(
+            server_read,
+            server_write,
+            budget.clone(),
+            128,
+            1024,
+        );
+
+        client_io.write_all(&vec![b'x'; 129]).await.unwrap();
+        let received = tokio::time::timeout(
+            Duration::from_secs(1),
+            Transport::<RoleServer>::receive(&mut transport),
+        )
+        .await
+        .expect("decoder must reject before EOF");
+        assert!(received.is_none());
+        assert_eq!(budget.active_requests(), 0);
+    }
+
+    #[test]
+    fn bounded_stdio_pending_response_write_keeps_same_request_id_fenced() {
+        let budget = ProcessRequestBudget::new(MAX_GATEWAY_STDIO_ACTIVE_REQUESTS, 2);
+        let mut transport = BoundedStdioTransport::new_with_limits(
+            tokio::io::empty(),
+            tokio::io::sink(),
+            budget,
+            1024,
+            1024,
+        );
+        let request_id = RequestId::Number(7);
+        let original = transport
+            .admissions
+            .try_admit(&request_id)
+            .expect("first request admitted");
+        original.handoff_to_response();
+        let pending_write = Transport::<RoleServer>::send(
+            &mut transport,
+            ServerJsonRpcMessage::error(
+                ErrorData::internal_error("synthetic", None),
+                Some(request_id.clone()),
+            ),
+        );
+
+        assert!(matches!(
+            transport.admissions.try_admit(&request_id),
+            Err(RequestAdmissionError::Duplicate)
+        ));
+        drop(pending_write);
+        let reused = transport
+            .admissions
+            .try_admit(&request_id)
+            .expect("dropping response future removes exact old fence");
+        drop(reused);
+        drop(original);
+    }
+
+    #[test]
+    fn bounded_stdio_cancelled_handler_guard_refunds_exact_registry_slot() {
+        let budget = ProcessRequestBudget::new(1, 1);
+        let admissions = ActiveRequestRegistry::new(budget.clone());
+        let request_id = RequestId::Number(73);
+        let guard = admissions
+            .try_admit(&request_id)
+            .expect("first request admitted");
+        assert_eq!(budget.active_requests(), 1);
+        assert!(admissions.contains(&request_id));
+
+        // Models the shield/handler future being dropped before it can return a
+        // protocol response. The guard removes only its own Arc reservation.
+        drop(guard);
+        assert_eq!(budget.active_requests(), 0);
+        assert!(!admissions.contains(&request_id));
+
+        let reused = admissions
+            .try_admit(&request_id)
+            .expect("same id is reusable after exact cancellation refund");
+        drop(reused);
+        assert_eq!(budget.active_requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_stdio_panic_shield_deadline_panic_and_child_shutdown_refund() {
+        // A small directly-served peer supplies the opaque RequestContext peer
+        // handle without going through initialization.
+        let (server_io, _client_io) = tokio::io::duplex(1024);
+        let peer_transport = BoundedStdioTransport::new_with_limits(
+            server_io,
+            tokio::io::sink(),
+            ProcessRequestBudget::new(1, 1),
+            1024,
+            1024,
+        );
+        let running = rmcp::service::serve_directly::<RoleServer, _, _, _, _>(
+            TestStdioService(TestServiceBehavior::Success),
+            peer_transport,
+            None,
+        );
+        let peer = running.peer().clone();
+
+        for (behavior, expected_code) in [
+            (TestServiceBehavior::Pending, "stdio_request_deadline"),
+            (TestServiceBehavior::Panic, "stdio_request_panic"),
+        ] {
+            let budget = ProcessRequestBudget::new(1, 1);
+            let admissions = ActiveRequestRegistry::new(budget.clone());
+            let request_id = RequestId::Number(if matches!(behavior, TestServiceBehavior::Pending) {
+                101
+            } else {
+                102
+            });
+            let guard = admissions.try_admit(&request_id).unwrap();
+            let mut context = RequestContext::new(request_id.clone(), peer.clone());
+            context.extensions.insert(guard);
+            let shield = panic_shield_stdio_service_with_timeout(
+                TestStdioService(behavior),
+                budget.clone(),
+                Duration::from_millis(10),
+            );
+            let error = Service::<RoleServer>::handle_request(
+                &shield,
+                test_ping_request(),
+                context,
+            )
+            .await
+            .expect_err("shield should turn deadline/panic into protocol error");
+            assert_eq!(error.data.unwrap()["code"], expected_code);
+            assert_eq!(budget.active_requests(), 1, "response fence remains active");
+            drop(admissions.begin_completion(&request_id).unwrap());
+            assert_eq!(budget.active_requests(), 0);
+        }
+
+        let budget = ProcessRequestBudget::new(1, 1);
+        let admissions = ActiveRequestRegistry::new(budget.clone());
+        let request_id = RequestId::Number(103);
+        let guard = admissions.try_admit(&request_id).unwrap();
+        let mut context = RequestContext::new(request_id.clone(), peer);
+        context.extensions.insert(guard);
+        let shield = panic_shield_stdio_service_with_timeout(
+            TestStdioService(TestServiceBehavior::Pending),
+            budget.clone(),
+            Duration::from_secs(30),
+        );
+        budget.shutdown.cancel();
+        let error = Service::<RoleServer>::handle_request(
+            &shield,
+            test_ping_request(),
+            context,
+        )
+        .await
+        .expect_err("child shutdown cancels pending handler");
+        assert_eq!(error.data.unwrap()["code"], "stdio_request_cancelled");
+        assert_eq!(budget.active_requests(), 0);
+        assert!(!admissions.contains(&request_id));
+        drop(running);
+    }
+
+    #[tokio::test]
+    async fn bounded_stdio_session_fuse_exits_after_n_and_refunds_every_permit() {
+        let budget = ProcessRequestBudget::new(1, 1);
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut transport = BoundedStdioTransport::new_with_all_limits(
+            server_read,
+            server_write,
+            budget.clone(),
+            1024,
+            1024,
+            3,
+            Duration::from_secs(1),
+        );
+        for id in 1..=4 {
+            let line = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "ping",
+            })
+            .to_string();
+            client_write.write_all(line.as_bytes()).await.unwrap();
+            client_write.write_all(b"\n").await.unwrap();
+        }
+
+        for id in 1..=3 {
+            let mut message = Transport::<RoleServer>::receive(&mut transport)
+                .await
+                .expect("request within child lifetime");
+            let guard = match &mut message {
+                JsonRpcMessage::Request(request) => request
+                    .request
+                    .extensions_mut()
+                    .remove::<TransportRequestGuard>()
+                    .expect("transport guard"),
+                other => panic!("unexpected message: {other:?}"),
+            };
+            guard.handoff_to_response();
+            drop(guard);
+            drop(message);
+            Transport::<RoleServer>::send(
+                &mut transport,
+                ServerJsonRpcMessage::error(
+                    ErrorData::internal_error("synthetic", None),
+                    Some(RequestId::Number(id)),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(budget.active_requests(), 0);
+        }
+
+        assert!(
+            Transport::<RoleServer>::receive(&mut transport)
+                .await
+                .is_none(),
+            "N+1 must fail closed instead of spawning another rmcp task"
+        );
+        assert_eq!(budget.active_requests(), 0);
+        assert!(transport.failure.is_failed());
+
+        let mut lines = tokio::io::BufReader::new(client_read).lines();
+        let mut last = serde_json::Value::Null;
+        for _ in 0..4 {
+            last = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        }
+        assert_eq!(
+            last["error"]["data"]["code"],
+            "stdio_session_lifetime_exhausted"
+        );
+        assert_eq!(last["id"], 4);
+    }
+
+    #[tokio::test]
+    async fn bounded_stdio_blocked_writer_times_out_and_refunds_response_fence() {
+        let budget = ProcessRequestBudget::new(1, 1);
+        let (server_write, _blocked_reader) = tokio::io::duplex(64);
+        let mut transport = BoundedStdioTransport::new_with_all_limits(
+            tokio::io::empty(),
+            server_write,
+            budget.clone(),
+            1024,
+            8 * 1024,
+            8,
+            Duration::from_millis(30),
+        );
+        let request_id = RequestId::Number(88);
+        let guard = transport
+            .admissions
+            .try_admit(&request_id)
+            .expect("request admitted");
+        guard.handoff_to_response();
+        drop(guard);
+
+        let error = Transport::<RoleServer>::send(
+            &mut transport,
+            ServerJsonRpcMessage::error(
+                ErrorData::internal_error(
+                    "synthetic",
+                    Some(serde_json::json!({"payload": "x".repeat(4096)})),
+                ),
+                Some(request_id.clone()),
+            ),
+        )
+        .await
+        .expect_err("peer that does not read must hit the absolute write deadline");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(budget.active_requests(), 0);
+        assert!(!transport.admissions.contains(&request_id));
+        assert!(transport.failure.is_failed());
+
+        let close = tokio::time::timeout(
+            Duration::from_millis(100),
+            Transport::<RoleServer>::close(&mut transport),
+        )
+        .await;
+        assert!(close.is_ok(), "close must remain bounded after backpressure");
+    }
+
+    #[tokio::test]
+    async fn bounded_stdio_failure_signal_is_level_triggered_before_receive_waits() {
+        let budget = ProcessRequestBudget::new(1, 1);
+        let mut transport = BoundedStdioTransport::new_with_limits(
+            tokio::io::duplex(64).0,
+            tokio::io::sink(),
+            budget,
+            1024,
+            1024,
+        );
+        transport.failure.fail();
+        let received = tokio::time::timeout(
+            Duration::from_millis(50),
+            Transport::<RoleServer>::receive(&mut transport),
+        )
+        .await
+        .expect("CancellationToken remembers cancellation before waiter registration");
+        assert!(received.is_none());
+    }
+
+    #[tokio::test]
+    async fn bounded_stdio_eof_cancels_pending_handler_guard_without_waiting_for_deadline() {
+        let budget = ProcessRequestBudget::new(1, 1);
+        let mut transport = BoundedStdioTransport::new_with_limits(
+            tokio::io::empty(),
+            tokio::io::sink(),
+            budget.clone(),
+            1024,
+            1024,
+        );
+        let request_id = RequestId::Number(91);
+        let guard = transport
+            .admissions
+            .try_admit(&request_id)
+            .expect("pending handler reservation");
+        let child_shutdown = budget.shutdown_token();
+        let detached_handler = tokio::spawn(async move {
+            child_shutdown.cancelled().await;
+            drop(guard);
+        });
+
+        assert!(
+            Transport::<RoleServer>::receive(&mut transport)
+                .await
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_millis(100), detached_handler)
+            .await
+            .expect("EOF must cancel detached handler immediately")
+            .unwrap();
+        assert_eq!(budget.active_requests(), 0);
+        assert!(!transport.admissions.contains(&request_id));
+    }
+
+    #[tokio::test]
+    async fn bounded_stdio_lifetime_fuse_cancels_already_pending_handler() {
+        let budget = ProcessRequestBudget::new(1, 1);
+        let (server_io, mut client_io) = tokio::io::duplex(4096);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        let mut transport = BoundedStdioTransport::new_with_all_limits(
+            server_read,
+            server_write,
+            budget.clone(),
+            1024,
+            1024,
+            1,
+            Duration::from_secs(1),
+        );
+        for id in 1..=2 {
+            let line = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "ping",
+            })
+            .to_string();
+            client_io.write_all(line.as_bytes()).await.unwrap();
+            client_io.write_all(b"\n").await.unwrap();
+        }
+
+        let mut first = Transport::<RoleServer>::receive(&mut transport)
+            .await
+            .expect("first request admitted");
+        let guard = match &mut first {
+            JsonRpcMessage::Request(request) => request
+                .request
+                .extensions_mut()
+                .remove::<TransportRequestGuard>()
+                .unwrap(),
+            other => panic!("unexpected message: {other:?}"),
+        };
+        drop(first);
+        let child_shutdown = budget.shutdown_token();
+        let detached_handler = tokio::spawn(async move {
+            child_shutdown.cancelled().await;
+            drop(guard);
+        });
+
+        assert!(
+            Transport::<RoleServer>::receive(&mut transport)
+                .await
+                .is_none(),
+            "N+1 lifetime request closes the child"
+        );
+        tokio::time::timeout(Duration::from_millis(100), detached_handler)
+            .await
+            .expect("lifetime fuse must cancel pending handler")
+            .unwrap();
+        assert_eq!(budget.active_requests(), 0);
+        assert!(!transport.admissions.contains(&RequestId::Number(1)));
+    }
+
+    #[test]
+    fn bounded_browser_task_family_wire_formula_stays_below_half_gibibyte() {
+        assert_eq!(MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY, 16);
+        assert_eq!(MAX_BROWSER_STDIO_ACTIVE_REQUESTS, 1);
+        assert_eq!(MAX_BROWSER_STDIO_INPUT_FRAME_BYTES, 256 * 1024);
+        assert_eq!(MAX_BROWSER_STDIO_OUTPUT_FRAME_BYTES, 20 * 1024 * 1024);
+        assert_eq!(MAX_BROWSER_TASK_FAMILY_STDIO_WIRE_BYTES, 348_127_376);
+        assert!(MAX_BROWSER_TASK_FAMILY_STDIO_WIRE_BYTES < 512 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn bounded_response_stream_rejects_declared_chunked_and_falsely_small_lengths() {
+        let oversized = vec![b'x'; 17];
+        let declared = collect_bounded_response_stream(
+            Some(17),
+            futures_util::stream::iter([Ok::<_, io::Error>(oversized.clone())]),
+            16,
+            "declared body",
+        )
+        .await
+        .expect_err("large Content-Length must fail before accumulation");
+        assert!(declared.contains("declared Content-Length"));
+
+        let chunked = collect_bounded_response_stream(
+            None,
+            futures_util::stream::iter([
+                Ok::<_, io::Error>(vec![b'a'; 8]),
+                Ok::<_, io::Error>(vec![b'b'; 9]),
+            ]),
+            16,
+            "chunked body",
+        )
+        .await
+        .expect_err("chunked cumulative bytes must be capped");
+        assert!(chunked.contains("fixed 16-byte"));
+
+        let false_small = collect_bounded_response_stream(
+            Some(1),
+            futures_util::stream::iter([
+                Ok::<_, io::Error>(vec![b'a'; 8]),
+                Ok::<_, io::Error>(vec![b'b'; 9]),
+            ]),
+            16,
+            "false-small body",
+        )
+        .await
+        .expect_err("stream count, not claimed metadata, is authoritative");
+        assert!(false_small.contains("fixed 16-byte"));
+    }
+
+    #[test]
+    fn bounded_stdio_output_encoder_aborts_without_retaining_partial_frame() {
+        let mut codec = BoundedOutboundCodec::<serde_json::Value>::new(16);
+        let mut output = BytesMut::from(&b"existing"[..]);
+        assert!(
+            codec
+                .encode(
+                    serde_json::json!({"payload": "x".repeat(64)}),
+                    &mut output
+                )
+                .is_err()
+        );
+        assert_eq!(&output[..], b"existing");
+    }
 
     #[test]
     fn response_renderer_preserves_structured_gateway_error() {
