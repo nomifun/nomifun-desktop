@@ -1820,6 +1820,291 @@ mod tests {
         assert_eq!(scope.counts(), (0, 0, 0));
     }
 
+    async fn reserve_download(
+        scope: &StandaloneResourceScope,
+        lane: &Arc<StandaloneLaneAuthority>,
+        download_key: &str,
+    ) -> Result<Arc<dyn TaskDownloadReservation>, BrowserError> {
+        TaskDownloadReservationAuthority::reserve(
+            lane.as_ref(),
+            scope.task_resource_key(),
+            &lane.lane_id,
+            download_key,
+        )
+        .await
+    }
+
+    /// Snapshot of the scope-level standalone download ledger:
+    /// `(completed bytes, completed files, live active-download slots)`.
+    fn download_ledger(scope: &StandaloneResourceScope) -> (u64, usize, usize) {
+        let state = scope
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.completed_download_bytes,
+            state.completed_download_files,
+            state.active_downloads.len(),
+        )
+    }
+
+    fn blocked_reason(error: BrowserError) -> String {
+        match error {
+            BrowserError::Blocked { reason } => reason,
+            other => panic!("standalone download admission must fail closed as Blocked: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_download_active_slots_cap_at_four_and_drop_returns_capacity() {
+        let scope = StandaloneResourceScope::new();
+        let lane = scope.reserve_lane("lane-dl".into()).expect("Lane within cap");
+
+        let mut active = Vec::new();
+        for index in 0..MAX_TASK_ACTIVE_DOWNLOADS {
+            active.push(
+                reserve_download(&scope, &lane, &format!("download-{index}"))
+                    .await
+                    .expect("active download within cap"),
+            );
+        }
+        assert_eq!(download_ledger(&scope).2, MAX_TASK_ACTIVE_DOWNLOADS);
+
+        let overflow = match reserve_download(&scope, &lane, "download-n-plus-one").await {
+            Ok(_) => panic!("active download N+1 must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            blocked_reason(overflow).contains("active download"),
+            "N+1 must be rejected by the active-slot boundary, not another gate"
+        );
+
+        drop(active.pop());
+        let replacement = reserve_download(&scope, &lane, "download-n-plus-one")
+            .await
+            .expect("dropping an unfinished reservation returns its exact active slot");
+        assert_eq!(download_ledger(&scope).2, MAX_TASK_ACTIVE_DOWNLOADS);
+
+        drop(replacement);
+        drop(active);
+        assert_eq!(
+            download_ledger(&scope),
+            (0, 0, 0),
+            "abandoned (never-finalized) downloads must not leave sticky charges"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_download_single_file_and_cumulative_byte_boundaries_fail_closed() {
+        let scope = StandaloneResourceScope::new();
+        let lane = scope.reserve_lane("lane-dl".into()).expect("Lane within cap");
+
+        let first = reserve_download(&scope, &lane, "first")
+            .await
+            .expect("first download admitted");
+        assert!(
+            first
+                .update_progress(MAX_TASK_SINGLE_DOWNLOAD_BYTES + 1, None)
+                .is_err(),
+            "received bytes past the single-file cap must fail closed"
+        );
+        assert!(
+            first
+                .update_progress(0, Some(MAX_TASK_SINGLE_DOWNLOAD_BYTES + 1))
+                .is_err(),
+            "a total-size hint past the single-file cap must fail closed before bytes arrive"
+        );
+        assert!(
+            first
+                .prepare_complete(MAX_TASK_SINGLE_DOWNLOAD_BYTES + 1)
+                .is_err(),
+            "completion past the single-file cap must fail closed"
+        );
+        first
+            .update_progress(MAX_TASK_SINGLE_DOWNLOAD_BYTES, None)
+            .expect("exactly the single-file cap is admitted");
+        first
+            .complete(MAX_TASK_SINGLE_DOWNLOAD_BYTES)
+            .expect("first completion fits the cumulative envelope");
+        assert_eq!(
+            download_ledger(&scope),
+            (MAX_TASK_SINGLE_DOWNLOAD_BYTES, 1, 0)
+        );
+
+        // In-flight bytes of *other* active downloads are charged against the
+        // cumulative envelope before anything is finalized.
+        let second = reserve_download(&scope, &lane, "second")
+            .await
+            .expect("second download admitted");
+        second
+            .update_progress(MAX_TASK_SINGLE_DOWNLOAD_BYTES, None)
+            .expect("completed + in-flight may reach exactly the cumulative cap");
+        let third = reserve_download(&scope, &lane, "third")
+            .await
+            .expect("admission gates on finalized bytes, so a third slot still opens");
+        let cross = third
+            .update_progress(1, None)
+            .expect_err("one more in-flight byte would overrun the cumulative cap");
+        assert!(blocked_reason(cross).contains("cumulative byte"));
+
+        second
+            .complete(MAX_TASK_SINGLE_DOWNLOAD_BYTES)
+            .expect("second completion reaches exactly the cumulative envelope");
+        assert_eq!(
+            download_ledger(&scope).0,
+            MAX_TASK_COMPLETED_DOWNLOAD_BYTES,
+            "two half-envelope completions saturate the task byte budget"
+        );
+        let saturated = match reserve_download(&scope, &lane, "fourth").await {
+            Ok(_) => panic!("a saturated cumulative ledger must reject new reservations"),
+            Err(error) => error,
+        };
+        assert!(blocked_reason(saturated).contains("cumulative byte"));
+        drop(third);
+    }
+
+    #[tokio::test]
+    async fn standalone_download_two_phase_prepare_finalize_and_idempotency() {
+        let scope = StandaloneResourceScope::new();
+        let lane = scope.reserve_lane("lane-dl".into()).expect("Lane within cap");
+        let download = reserve_download(&scope, &lane, "report")
+            .await
+            .expect("download admitted");
+
+        download
+            .update_progress(1_000, Some(2_048))
+            .expect("in-flight progress within caps");
+        download
+            .prepare_complete(2_048)
+            .expect("phase one reserves the final charge");
+        download
+            .prepare_complete(2_048)
+            .expect("re-preparing the same final size is idempotent");
+        assert!(
+            download.prepare_complete(1_024).is_err(),
+            "a duplicate completion with a different size is an inconsistency and must fail"
+        );
+        assert!(
+            download.update_progress(4_096, None).is_err(),
+            "progress after a prepared completion must be rejected"
+        );
+        assert_eq!(
+            download_ledger(&scope),
+            (0, 0, 1),
+            "phase one must not charge the completed ledger yet"
+        );
+
+        download.finalize_complete();
+        assert_eq!(
+            download_ledger(&scope),
+            (2_048, 1, 0),
+            "finalize charges bytes+file exactly once and frees the active slot"
+        );
+        download.finalize_complete();
+        download
+            .complete(999_999)
+            .expect("complete() on an already-completed reservation is an idempotent no-op");
+        assert_eq!(download_ledger(&scope), (2_048, 1, 0), "no double charge");
+
+        drop(download);
+        assert_eq!(
+            download_ledger(&scope),
+            (2_048, 1, 0),
+            "dropping a completed reservation must not refund the completed quota"
+        );
+        let _next = reserve_download(&scope, &lane, "next")
+            .await
+            .expect("a new key is admitted while prior completed charges stay on the ledger");
+        assert_eq!(download_ledger(&scope), (2_048, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn standalone_download_same_key_reservation_is_idempotent_and_key_length_bounded() {
+        let scope = StandaloneResourceScope::new();
+        let lane = scope.reserve_lane("lane-dl".into()).expect("Lane within cap");
+
+        let first = reserve_download(&scope, &lane, "guid-1")
+            .await
+            .expect("download admitted");
+        let duplicate = reserve_download(&scope, &lane, "guid-1")
+            .await
+            .expect("re-reserving the same (Lane, key) is idempotent");
+        assert!(
+            std::ptr::eq(
+                Arc::as_ptr(&first) as *const (),
+                Arc::as_ptr(&duplicate) as *const (),
+            ),
+            "the duplicate must reuse the same logical reservation, not a second slot"
+        );
+        assert_eq!(
+            download_ledger(&scope).2,
+            1,
+            "one logical download holds exactly one active slot"
+        );
+
+        let bounded_key = "k".repeat(4 * 1024);
+        let _bounded = reserve_download(&scope, &lane, &bounded_key)
+            .await
+            .expect("a key of exactly 4 KiB is admitted");
+        assert!(
+            reserve_download(&scope, &lane, &"k".repeat(4 * 1024 + 1))
+                .await
+                .is_err(),
+            "a key longer than 4 KiB must be rejected before touching capacity state"
+        );
+        assert!(
+            reserve_download(&scope, &lane, "").await.is_err(),
+            "an empty key must be rejected"
+        );
+        assert_eq!(
+            download_ledger(&scope).2,
+            2,
+            "rejected keys must not leak active slots"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_download_completed_charge_survives_lane_drop() {
+        // The completed-download ledger lives on the opaque task scope
+        // (`StandaloneResourceState`), not on any Lane authority, so finalized
+        // charges are sticky for the task lifetime: rotating or dropping Lanes
+        // must never mint a fresh byte budget.
+        let scope = StandaloneResourceScope::new();
+
+        let first_lane = scope
+            .reserve_lane("lane-first".into())
+            .expect("Lane within cap");
+        let download = reserve_download(&scope, &first_lane, "big-artifact")
+            .await
+            .expect("download admitted");
+        download
+            .complete(MAX_TASK_SINGLE_DOWNLOAD_BYTES)
+            .expect("first completion within the envelope");
+        drop(download);
+        drop(first_lane);
+        assert_eq!(
+            download_ledger(&scope),
+            (MAX_TASK_SINGLE_DOWNLOAD_BYTES, 1, 0),
+            "dropping the Lane authority must not refund task-level completed charges"
+        );
+
+        let second_lane = scope
+            .reserve_lane("lane-second".into())
+            .expect("replacement Lane within cap");
+        let successor = reserve_download(&scope, &second_lane, "big-artifact-2")
+            .await
+            .expect("a fresh Lane still reserves against the surviving ledger");
+        successor
+            .complete(MAX_TASK_SINGLE_DOWNLOAD_BYTES)
+            .expect("second completion saturates the task envelope");
+        let saturated = match reserve_download(&scope, &second_lane, "big-artifact-3").await {
+            Ok(_) => panic!("Lane rotation must not mint a fresh cumulative byte budget"),
+            Err(error) => error,
+        };
+        assert!(blocked_reason(saturated).contains("cumulative byte"));
+    }
+
     struct FakeLaneCleanup {
         close_calls: AtomicUsize,
         handoff_calls: AtomicUsize,
