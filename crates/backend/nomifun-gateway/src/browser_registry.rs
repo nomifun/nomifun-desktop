@@ -2671,7 +2671,7 @@ mod tests {
 
     use async_trait::async_trait;
     use nomifun_browser_platform::{
-        BrowserHostDriver, BrowserHostFactory, BrowserHostId,
+        BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserProfileFootprint,
         BrowserLaneDriver, BrowserLaneId, DriverOperationContext, HostLaunchRequest,
         HostLifecycleState, HubConfig, LaneLaunchRequest,
     };
@@ -2823,6 +2823,17 @@ mod tests {
 
         fn epoch(&self) -> u64 {
             1
+        }
+
+        // This fake manages no on-disk profile, so report a completed
+        // zero measurement. Inheriting the trait default would instead
+        // mean "could not measure", which fences Primary fail-closed.
+        async fn profile_footprint(
+            &self,
+            _stop_after_bytes: u64,
+            _stop_after_entries: u64,
+        ) -> Result<Option<BrowserProfileFootprint>, BrowserPlatformError> {
+            Ok(Some(BrowserProfileFootprint::EMPTY))
         }
 
         fn state(&self) -> HostLifecycleState {

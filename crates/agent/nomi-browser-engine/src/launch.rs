@@ -495,12 +495,15 @@ const BROWSER_CLEANUP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 const BROWSER_CLEANUP_ADMISSION_WAIT: Duration = Duration::from_millis(500);
 #[cfg(not(test))]
 const BROWSER_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(250);
+// Test backoffs must stay well above the Windows timer granularity (~15.6ms):
+// a "sleep half the backoff, assert no progress" probe with a 10ms backoff
+// legitimately oversleeps the whole window and reports a phantom spin.
 #[cfg(test)]
-const BROWSER_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(10);
+const BROWSER_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(80);
 #[cfg(not(test))]
 const BROWSER_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(30);
 #[cfg(test)]
-const BROWSER_CLEANUP_RETRY_MAX: Duration = Duration::from_millis(10);
+const BROWSER_CLEANUP_RETRY_MAX: Duration = Duration::from_millis(80);
 const BROWSER_CLEANUP_DISPATCH_TICK: Duration = Duration::from_millis(25);
 
 #[cfg(test)]
@@ -548,6 +551,7 @@ struct PendingDroppedBrowserCleanup {
     authority: DroppedBrowserCleanupAuthority,
     completion: DroppedBrowserCleanupTicket,
     runtime_tasks: std::sync::Arc<PendingRuntimeTaskCleanup>,
+    post_stop_reconcile: std::sync::Arc<PostStopReconcileCell>,
 }
 
 /// Fixed per-Host initialization tasks which must reach a terminal JoinHandle
@@ -621,6 +625,62 @@ impl Drop for PendingRuntimeTaskJoinLease {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         retained.append(&mut self.handles);
+    }
+}
+
+/// Host-scoped state that must stay owned until the exact Chromium process
+/// tree stop has been proven, then be reconciled exactly once.
+///
+/// The canonical implementor retains every pending download route and its
+/// task reservation: a dropped Rust handle is not evidence that Chromium
+/// stopped writing, so active download quota is only returned here (or on a
+/// trusted terminal `downloadProgress` event), never in a `Drop` impl.
+pub(crate) trait HostStopReconcile: Send + Sync {
+    fn reconcile_after_exact_host_stop(&self);
+}
+
+/// One-shot carrier for a [`HostStopReconcile`] authority across the dropped
+/// browser cleanup relay. The authority is retained through every retry and
+/// executed exactly once, only after an attempt proves the exact process
+/// tree (and profile artifacts) are gone.
+pub(crate) struct PostStopReconcileCell {
+    reconcile: std::sync::Mutex<Option<std::sync::Arc<dyn HostStopReconcile>>>,
+}
+
+impl PostStopReconcileCell {
+    pub(crate) fn new(
+        reconcile: Option<std::sync::Arc<dyn HostStopReconcile>>,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            reconcile: std::sync::Mutex::new(reconcile),
+        })
+    }
+
+    fn empty() -> std::sync::Arc<Self> {
+        Self::new(None)
+    }
+
+    /// Runs the retained authority exactly once. Callers must hold exact
+    /// process-tree stop proof; a panic inside the reconcile is contained so
+    /// it can never un-prove an already-proven process cleanup.
+    fn run_after_proven_stop(&self) {
+        let reconcile = self
+            .reconcile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(reconcile) = reconcile else {
+            return;
+        };
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reconcile.reconcile_after_exact_host_stop();
+        }))
+        .is_err()
+        {
+            tracing::error!(
+                "post-stop host reconcile panicked; retained download state was still released with the authority"
+            );
+        }
     }
 }
 
@@ -1150,6 +1210,7 @@ struct ReclaimableDroppedBrowserCleanup {
     >,
     authority: DroppedBrowserCleanupAuthority,
     runtime_tasks: std::sync::Arc<PendingRuntimeTaskCleanup>,
+    post_stop_reconcile: std::sync::Arc<PostStopReconcileCell>,
 }
 
 impl DroppedBrowserCleanupTicket {
@@ -1221,6 +1282,7 @@ impl DroppedBrowserCleanupTicket {
         >,
         authority: DroppedBrowserCleanupAuthority,
         runtime_tasks: std::sync::Arc<PendingRuntimeTaskCleanup>,
+        post_stop_reconcile: std::sync::Arc<PostStopReconcileCell>,
     ) {
         if self.inner.state.load(std::sync::atomic::Ordering::Acquire) == 1 {
             return;
@@ -1238,6 +1300,7 @@ impl DroppedBrowserCleanupTicket {
                 process,
                 authority,
                 runtime_tasks,
+                post_stop_reconcile,
             });
         }
         drop(recovery);
@@ -1351,6 +1414,7 @@ impl Drop for PendingDroppedBrowserCleanup {
                 self.process.clone(),
                 self.authority.clone(),
                 std::sync::Arc::clone(&self.runtime_tasks),
+                std::sync::Arc::clone(&self.post_stop_reconcile),
             );
     }
 }
@@ -1462,6 +1526,7 @@ pub(crate) fn hand_off_dropped_browser_cleanup_with_host_lease(
         cleanup_user_data_dir,
         host_cleanup_lease,
         Vec::new(),
+        PostStopReconcileCell::empty(),
     )
 }
 
@@ -1473,6 +1538,7 @@ pub(crate) fn hand_off_dropped_browser_cleanup_with_host_lease_and_tasks(
     cleanup_user_data_dir: Option<PathBuf>,
     host_cleanup_lease: Option<crate::host::HostCleanupLease>,
     runtime_tasks: Vec<tokio::task::JoinHandle<()>>,
+    post_stop_reconcile: std::sync::Arc<PostStopReconcileCell>,
 ) -> DroppedBrowserCleanupTicket {
     let completion =
         DroppedBrowserCleanupTicket::pending_with_host_lease(host_cleanup_lease);
@@ -1484,6 +1550,7 @@ pub(crate) fn hand_off_dropped_browser_cleanup_with_host_lease_and_tasks(
         },
         completion: completion.clone(),
         runtime_tasks: std::sync::Arc::new(PendingRuntimeTaskCleanup::new(runtime_tasks)),
+        post_stop_reconcile,
     }];
     hand_off_pending_browser_cleanups(batch);
     completion
@@ -1506,6 +1573,7 @@ fn hand_off_uncommitted_browser_cleanup(
         ),
         completion,
         runtime_tasks: std::sync::Arc::new(PendingRuntimeTaskCleanup::empty()),
+        post_stop_reconcile: PostStopReconcileCell::empty(),
     }]);
 }
 
@@ -1883,33 +1951,39 @@ async fn clean_dropped_browser_once(cleanup: &PendingDroppedBrowserCleanup) -> b
     if !cleanup.runtime_tasks.settle().await {
         return false;
     }
-    let mut process = cleanup.process.lock().await;
-    match &cleanup.authority {
-        DroppedBrowserCleanupAuthority::Committed {
-            ownership_token,
-            cleanup_user_data_dir,
-        } => terminate_launched_process_tree_and_cleanup_profile(
-            &mut process,
-            ownership_token,
-            cleanup_user_data_dir.as_deref(),
-        )
-        .await
-        .is_ok(),
-        DroppedBrowserCleanupAuthority::UncommittedEphemeral { cleanup_token } => {
-            let result = async {
-                terminate_launched_process_tree(&mut process).await?;
-                crate::profile::cleanup_uncommitted_ephemeral_profile_after_exact_shutdown(
-                    cleanup_token,
-                )
-                .map_err(|_| ownership_artifact_cleanup_error())
+    let proven = {
+        let mut process = cleanup.process.lock().await;
+        match &cleanup.authority {
+            DroppedBrowserCleanupAuthority::Committed {
+                ownership_token,
+                cleanup_user_data_dir,
+            } => terminate_launched_process_tree_and_cleanup_profile(
+                &mut process,
+                ownership_token,
+                cleanup_user_data_dir.as_deref(),
+            )
+            .await
+            .is_ok(),
+            DroppedBrowserCleanupAuthority::UncommittedEphemeral { cleanup_token } => {
+                let result = async {
+                    terminate_launched_process_tree(&mut process).await?;
+                    crate::profile::cleanup_uncommitted_ephemeral_profile_after_exact_shutdown(
+                        cleanup_token,
+                    )
+                    .map_err(|_| ownership_artifact_cleanup_error())
+                }
+                .await;
+                result.is_ok()
             }
-            .await;
-            result.is_ok()
+            DroppedBrowserCleanupAuthority::UncommittedStable => {
+                terminate_launched_process_tree(&mut process).await.is_ok()
+            }
         }
-        DroppedBrowserCleanupAuthority::UncommittedStable => {
-            terminate_launched_process_tree(&mut process).await.is_ok()
-        }
+    };
+    if proven {
+        cleanup.post_stop_reconcile.run_after_proven_stop();
     }
+    proven
 }
 
 async fn clean_reclaimable_dropped_browser(
@@ -1918,26 +1992,32 @@ async fn clean_reclaimable_dropped_browser(
     if !cleanup.runtime_tasks.settle().await {
         return false;
     }
-    let mut process = cleanup.process.lock().await;
-    match &cleanup.authority {
-        DroppedBrowserCleanupAuthority::Committed {
-            ownership_token,
-            cleanup_user_data_dir,
-        } => {
-            retry_dropped_browser_cleanup(
-                &mut process,
+    let proven = {
+        let mut process = cleanup.process.lock().await;
+        match &cleanup.authority {
+            DroppedBrowserCleanupAuthority::Committed {
                 ownership_token,
-                cleanup_user_data_dir.as_deref(),
-            )
-            .await
+                cleanup_user_data_dir,
+            } => {
+                retry_dropped_browser_cleanup(
+                    &mut process,
+                    ownership_token,
+                    cleanup_user_data_dir.as_deref(),
+                )
+                .await
+            }
+            DroppedBrowserCleanupAuthority::UncommittedEphemeral { cleanup_token } => {
+                retry_dropped_uncommitted_browser_cleanup(&mut process, cleanup_token).await
+            }
+            DroppedBrowserCleanupAuthority::UncommittedStable => {
+                retry_dropped_uncommitted_stable_browser_cleanup(&mut process).await
+            }
         }
-        DroppedBrowserCleanupAuthority::UncommittedEphemeral { cleanup_token } => {
-            retry_dropped_uncommitted_browser_cleanup(&mut process, cleanup_token).await
-        }
-        DroppedBrowserCleanupAuthority::UncommittedStable => {
-            retry_dropped_uncommitted_stable_browser_cleanup(&mut process).await
-        }
+    };
+    if proven {
+        cleanup.post_stop_reconcile.run_after_proven_stop();
     }
+    proven
 }
 
 /// Retry a dropped browser's exact cleanup when an authoritative shutdown
@@ -2868,6 +2948,7 @@ mod tests {
                 },
                 completion: ticket.clone(),
                 runtime_tasks: std::sync::Arc::new(PendingRuntimeTaskCleanup::empty()),
+                post_stop_reconcile: PostStopReconcileCell::empty(),
             }],
         );
         assert!(
@@ -2933,6 +3014,7 @@ mod tests {
                 },
                 completion: ticket.clone(),
                 runtime_tasks: std::sync::Arc::new(PendingRuntimeTaskCleanup::empty()),
+                post_stop_reconcile: PostStopReconcileCell::empty(),
             }],
         );
         wait_for_process_exit(pid).await;

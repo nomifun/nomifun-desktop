@@ -2166,6 +2166,7 @@ mod tests {
     use nomifun_common::LoopbackCapabilityLease;
     use nomifun_browser_platform::{
         BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserLaneDriver,
+        BrowserProfileFootprint,
         BrowserOperation, BrowserOperationResult, DriverOperationContext,
         HostLaunchRequest, HostLifecycleState, HubConfig, LaneLaunchRequest,
     };
@@ -2207,6 +2208,17 @@ mod tests {
 
         fn epoch(&self) -> u64 {
             1
+        }
+
+        // This fake manages no on-disk profile, so report a completed
+        // zero measurement. Inheriting the trait default would instead
+        // mean "could not measure", which fences Primary fail-closed.
+        async fn profile_footprint(
+            &self,
+            _stop_after_bytes: u64,
+            _stop_after_entries: u64,
+        ) -> Result<Option<BrowserProfileFootprint>, BrowserPlatformError> {
+            Ok(Some(BrowserProfileFootprint::EMPTY))
         }
 
         fn state(&self) -> HostLifecycleState {
@@ -2285,6 +2297,17 @@ mod tests {
 
         fn epoch(&self) -> u64 {
             1
+        }
+
+        // This fake manages no on-disk profile, so report a completed
+        // zero measurement. Inheriting the trait default would instead
+        // mean "could not measure", which fences Primary fail-closed.
+        async fn profile_footprint(
+            &self,
+            _stop_after_bytes: u64,
+            _stop_after_entries: u64,
+        ) -> Result<Option<BrowserProfileFootprint>, BrowserPlatformError> {
+            Ok(Some(BrowserProfileFootprint::EMPTY))
         }
 
         fn state(&self) -> HostLifecycleState {
@@ -3146,11 +3169,17 @@ mod tests {
 
         for index in 0..TASKS {
             let agent_id = format!("elastic-agent-{index}");
+            // Independent user-visible tasks means independent *conversations*:
+            // the Hub's owner-lease budget is charged per task-resource family,
+            // and sibling agents inside one conversation deliberately share it
+            // (32 active generations per family). Varying only the agent id
+            // would exercise that shared per-family cap, not MCP scaling.
+            let conversation_id = format!("0190f5fe-7c00-7a00-8000-{:012x}", index + 1);
             let child = server
                 .issuer_config("nomicore".into())
                 .issue_for_conversation(
                     USER_ID,
-                    CONVERSATION_ID,
+                    &conversation_id,
                     Some(&agent_id),
                 )
                 .unwrap();

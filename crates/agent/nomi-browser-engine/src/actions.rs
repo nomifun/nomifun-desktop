@@ -2939,20 +2939,38 @@ impl CdpBackend {
                 let size = pdf_bytes.len() as u64;
                 reservation
                     .update_progress(size, Some(size))
-                    .and_then(|_| reservation.complete(size))
                     .map_err(RetryDecision::Fatal)?;
 
-                // 写进隔离 downloads 目录（与 download 同落点）。文件名带时间戳防覆盖。best-effort mkdir。
+                // 两阶段补偿事务写落点：prepare 预留终身账、写唯一同卷临时文件
+                //（create_new，不覆盖）、原子发布、无 await finalize。发布失败回滚
+                // 临时文件并放弃预留；临时文件删不掉时保留计费（绝不留未计费产物）。
                 let path = crate::backend::cdp::pdf_output_path(&dir);
-                if let Some(parent_dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent_dir);
-                }
-                std::fs::write(&path, &pdf_bytes).map_err(|e| {
+                let preferred_name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("page.pdf")
+                    .to_string();
+                let unique_hint = format!("pdf-{size}-{preferred_name}");
+                let published = crate::download::publish_task_output(
+                    reservation.as_ref(),
+                    size,
+                    crate::download::TaskOutputPayload::Bytes(&pdf_bytes),
+                    std::path::Path::new(&dir),
+                    &preferred_name,
+                    &unique_hint,
+                )
+                .map_err(|failure| {
                     RetryDecision::Fatal(BrowserError::Other(format!(
-                        "failed to write the PDF to the sandboxed downloads directory: {e}"
+                        "failed to publish the PDF into the sandboxed downloads directory: {}{}",
+                        failure.message,
+                        if failure.charged {
+                            "; the task download quota for this artifact remains charged"
+                        } else {
+                            ""
+                        }
                     )))
                 })?;
-                let path_str = path.to_string_lossy().into_owned();
+                let path_str = published.to_string_lossy().into_owned();
                 Ok(ActResult {
                     message: format!(
                         "saved the current page as a PDF to {path_str:?} ({size} bytes) in the sandboxed \

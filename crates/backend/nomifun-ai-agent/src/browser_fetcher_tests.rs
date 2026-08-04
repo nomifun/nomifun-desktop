@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use async_trait::async_trait;
 use nomifun_browser_platform::{
     BrowserErrorCode, BrowserHostDriver, BrowserHostFactory, BrowserHostId,
+    BrowserProfileFootprint,
     BrowserIdentityMode, BrowserLaneClient, BrowserLaneDriver, BrowserLaneId,
     BrowserOperation, BrowserOperationKind, BrowserOperationResult, BrowserPlatformError,
     BrowserSessionHub, BrowserSurface, CallerIdentity, DriverOperationContext, HostLaunchRequest,
@@ -181,6 +182,17 @@ impl BrowserHostDriver for FakeHost {
 
     fn epoch(&self) -> u64 {
         1
+    }
+
+    // This fake manages no on-disk profile, so report a completed
+    // zero measurement. Inheriting the trait default would instead
+    // mean "could not measure", which fences Primary fail-closed.
+    async fn profile_footprint(
+        &self,
+        _stop_after_bytes: u64,
+        _stop_after_entries: u64,
+    ) -> Result<Option<BrowserProfileFootprint>, BrowserPlatformError> {
+        Ok(Some(BrowserProfileFootprint::EMPTY))
     }
 
     fn state(&self) -> HostLifecycleState {
