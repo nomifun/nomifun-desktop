@@ -205,6 +205,43 @@ your.domain.com {
 
 对于没有公网域名的仅局域网主机，可以使用一个内部名加上 `tls internal`，或者干脆不加 Caddy 直接发布端口 `8787` (应用内登录依然提供保护)。
 
+## 其他反向代理：必须保留原始 Host
+
+实时更新 (流式回复、工具调用、任务/队列状态) 全部走 `/ws` 上的 WebSocket。
+握手时会做浏览器来源校验：浏览器发送的 `Origin` 必须与后端看到的
+authority 一致。如果代理**把 `Host` 改写为上游地址** (nginx 的默认行为 ——
+`proxy_set_header Host $proxy_host`)，这个匹配就会失败：每次 `/ws` 握手都被
+`403` 拒绝，而普通 HTTP API 请求不受影响。表现出来的症状就是 WebUI 一直停留在
+"执行中"，只有刷新页面才能看到最新状态。
+
+握手按顺序接受以下来源：
+
+1. `Origin` 与请求 `Host` 一致；
+2. `Origin` 与 `X-Forwarded-Host` 的第一个条目一致 (由代理设置)；
+3. `Origin` 出现在 `NOMIFUN_ALLOWED_ORIGINS` 中 (逗号分隔的完整来源，例如
+   `NOMIFUN_ALLOWED_ORIGINS=https://nomi.example.com`)。
+
+Caddy 无需任何配置 (它默认保留 `Host`)。nginx 需要转发原始 authority 和升级头：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;                 # 保留浏览器侧的 authority
+    proxy_set_header X-Forwarded-Host $host;     # 多级代理链的双保险
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;      # /ws 的 WebSocket 升级
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 300s;                     # 空闲 WS 连接会超过 60s 默认值
+}
+```
+
+如果前置的代理或隧道 (某些内网穿透 / 端口转发产品) 无法配置转发这两个头，
+请把 `NOMIFUN_ALLOWED_ORIGINS` 设置为用户在浏览器里实际输入的公开来源。
+被拒绝的握手会在服务端以 `WARN` 级别记录具体的 `origin` / `host` /
+`forwarded_host` 值，`docker compose logs | grep "rejected websocket"`
+可以直接看到需要配置的内容。
+
 ## systemd (Linux 服务器，无 Docker)
 
 仓库包含 `packaging/linux/nomifun-web.service` 以及一份长篇 Linux 部署指南 `packaging/linux/README.md`。
@@ -310,6 +347,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 **`invalid --host '<value>'`。** 请传入一个 IP 字面量 (`127.0.0.1`、`0.0.0.0`、显式接口 IP)。不解析主机名。
 
 **HTTPS 下 cookie 无法保留。** 设置 `NOMIFUN_HTTPS=true` 以加上 `Secure` 标记。否则浏览器会在 HTTPS 响应中拒绝该 cookie。
+
+**回复/任务状态只有刷新页面后才更新 (WebUI 一直显示"执行中")。** `/ws` WebSocket 握手被拒绝了 —— 在服务端日志中查找 `rejected websocket upgrade` (WARN，包含具体的 `origin`/`host`/`forwarded_host` 值) 或 `GET /ws` → `403`。几乎总是因为反向代理改写了 `Host`：参见[其他反向代理：必须保留原始 Host](#其他反向代理必须保留原始-host)。
 
 **在 systemd 下 agent 命令失败并报 `bun: command not found`。** 请系统级安装 bun (参见上面的 bun-on-PATH 一节) 或使用 `NOMIFUN_EMBED_BUN=1` 重新构建。
 
