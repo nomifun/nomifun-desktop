@@ -548,21 +548,28 @@ async fn duplicate_register_replaces_old_connection() {
 async fn rate_limit_closes_connection() {
     let url = spawn_server().await;
     let mut flooder = connect_registered(&url, "flood01").await;
-    for _ in 0..40 {
-        flooder.send(WsMsg::Text(json!({"type":"ping"}).to_string().into())).await.unwrap();
-    }
-    // 40 帧/秒 > 30 帧/秒上限：期间必收到 rate_limited
-    let mut saw = false;
-    while let Some(Ok(msg)) = flooder.next().await {
-        if let WsMsg::Text(t) = msg {
-            let v: Value = serde_json::from_str(&t).unwrap();
-            if v["code"] == "rate_limited" {
-                saw = true;
-            }
-        } else if matches!(msg, WsMsg::Close(_)) {
-            break;
+    // 两轮各 40 帧：即使首轮跨越 1s 窗口边界，第二轮也必然整体落入同一窗口
+    for _ in 0..2 {
+        for _ in 0..40 {
+            let _ = flooder.send(WsMsg::Text(json!({"type":"ping"}).to_string().into())).await;
         }
     }
+    let saw = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut saw = false;
+        while let Some(Ok(msg)) = flooder.next().await {
+            if let WsMsg::Text(t) = msg {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["code"] == "rate_limited" {
+                    saw = true;
+                }
+            } else if matches!(msg, WsMsg::Close(_)) {
+                break;
+            }
+        }
+        saw
+    })
+    .await
+    .unwrap_or(false);
     assert!(saw);
 }
 
