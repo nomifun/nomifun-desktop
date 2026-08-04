@@ -2584,6 +2584,24 @@ mod tests {
         }
     }
 
+    /// Blocks until the loopback port provably refuses connections.
+    ///
+    /// Used after aborting a fixture server so a test can assert the
+    /// "provably undelivered" transport branch without racing the
+    /// asynchronous task abort.
+    async fn wait_until_connection_refused(port: u16) {
+        for _ in 0..500 {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Err(_) => return,
+                Ok(stream) => {
+                    drop(stream);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+        panic!("aborted loopback fixture server still accepts connections on {port}");
+    }
+
     async fn spawn_server(
         state: TestState,
     ) -> (u16, tokio::task::JoinHandle<()>) {
@@ -2820,10 +2838,19 @@ mod tests {
         .await
         .unwrap();
 
-        // Take the server down (connection refused: the request provably never
-        // leaves the client), then bring it back on the same port before the
+        // Take the server down, then bring it back on the same port before the
         // client's third transport attempt (delays are 0/250/750/1500 ms).
+        //
+        // `JoinHandle::abort` is asynchronous: it only cancels the task at its
+        // next await point, so the old listener can still be accepting when the
+        // client's first attempt fires. A connection that is accepted and then
+        // reset is genuinely ambiguous — the bytes may have reached the server —
+        // and at-most-once delivery must refuse to retry it. This test asserts
+        // the *other* branch (a provably undelivered connect failure is
+        // retried), so it has to establish that precondition first instead of
+        // racing the abort.
         server.abort();
+        wait_until_connection_refused(port).await;
         let restart_state = state.clone();
         let restart = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(400)).await;

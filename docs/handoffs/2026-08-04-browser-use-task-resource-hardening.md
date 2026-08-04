@@ -201,47 +201,80 @@ gateway/public/app/ai-agent 的 Primary 相关测试在检查点上成批失败�
 上限」）改为每个任务用**独立 conversation id**，即真正独立的 family，64 个即全部
 通过。生产上限未改。
 
-### 4.3 仍未通过的既有失败（非本轮引入，已在检查点上复现）
+### 4.3 两处既有红项（本轮已按正确设计修完，生产语义未放宽）
 
-1. `nomifun-app`：`commands::stdio_common::tests::at_most_once_retries_undelivered_connection_failures`。
-   该测试 abort 掉本地 server 后期望客户端把发送失败判为「**可证明未送达**」
-   （`reqwest::Error::is_connect()`）从而重试。本机（Windows）上实际错误未被归类为
-   connect 错误，于是生产逻辑按 at-most-once 语义 **fail-closed 拒绝重试**——
-   生产判断是对的（「可能已执行」的浏览器动作绝不能重投）。推测原因：
-   `ScopedBridgeClient::from_bootstrap` 的 renew 调用已经预热了 reqwest 连接池，
-   重试复用了已被关闭的 keep-alive 连接，这类失败 reqwest 不报 connect 错误。
-   **不应为此放宽 at-most-once 判据**；正确做法是让该测试确保首次尝试走全新连接
-   （例如为该测试禁用连接复用）。属平台相关的测试脆弱性，留给负责人决策。
-2. `nomi-browser-engine --test integration_managed_host --ignored` 中 3 项：
-   `managed_host_real_chromium_acceptance_matrix`、
-   `managed_host_sixteen_lane_real_chromium_acceptance`、
-   `shared_host_rss_is_materially_below_four_independent_hosts`。
-   三者同一根因：`STANDALONE_MAX_LIVE_LANES_PER_SCOPE = 4`（host.rs:31）与测试
-   要求的 16 Lane / 4 独立 Host 冲突，报
-   `standalone browser task reached its live Lane safety limit (4)`。
-   已在检查点上逐项复现，且本轮 diff 完全没有触碰该常量或 lane 记账
-   （host.rs 只有新增测试、零删除行）。要么提高 standalone scope 的 Lane 上限，
-   要么让这些验收测试改用平台 Hub 的多 Lane 路径——需要负责人先定方向。
+**(1) `at_most_once_retries_undelivered_connection_failures` — 修测试，不动生产**
 
-### 4.4 真实 Chrome ignored 集（本轮已跑）
+该测试 abort 掉本地 server 后立即（0ms 延迟）发起第一次尝试，期望被判为
+「**可证明未送达**」从而重试。但 `JoinHandle::abort()` 是异步的——它只在下一个
+await 点才真正取消任务，于是旧 listener 可能仍在 accept：连接被接受、请求写出、
+随后连接被重置。**这种失败是真正歧义的**（字节可能已到达服务端），at-most-once
+必须拒绝重试——生产判断完全正确。
+
+排查过程中先排除了「连接池复用」假说：`build_bridge_http_client` 已设
+`pool_max_idle_per_host(0)`（stdio_common.rs:1169），不存在 keep-alive 复用。
+
+修法：新增测试辅助 `wait_until_connection_refused(port)`，在 abort 之后**先证明
+端口确实拒连**，再发起调用。这样第一次尝试拿到的是真正的 connect 错误，测试断言
+的正是它声称的那条分支。连跑 5 次全绿。`error.is_connect()` 判据与 fail-closed
+语义**一字未改**——放宽它会让「可能已执行的浏览器动作」被重投。
+
+**(2) 真实 Chrome 3 项 4-Lane 冲突 — 让测试改用生产模型，不抬高配额**
+
+`managed_host_real_chromium_acceptance_matrix`（一个 Host 上 4 overlap + serial +
+primary-a/b 共 7 个 Lane）、`managed_host_sixteen_lane_real_chromium_acceptance`
+（16 Lane）、`shared_host_rss_is_materially_below_four_independent_hosts`
+（shared 4 Lane，且多 Host/多 round 共用**进程级 compatibility scope**累积）全部
+撞 `STANDALONE_MAX_LIVE_LANES_PER_SCOPE = 4`。
+
+关键判断：这个 4 **不是历史债务，而是产品的单任务 Lane 预算**（§3.1 表格里的
+「单任务 Lane 4」）。抬高它等于为了让测试变绿而削弱本专项要建立的每任务边界，
+**不能做**。真正的错配在于：standalone 路径的语义是「一个 Host 绑一个任务 scope」，
+而这三个验收测试要证明的是「**一个受管 Host 为多个独立任务复用 Lane**」——那正是
+生产里的 `PlatformManaged` 模型（Lane 容量由 Hub scheduler 拥有，见
+`TaskTabReservationAuthority::release_lane` 的 no-op 默认）。
+
+修法：三个测试改用 `ManagedBrowserHost::launch_platform_managed`，并像平台适配器
+那样为每条 Lane 传入受信任 task key + tab/download authority；测试内新增
+`HubStandInTaskAuthority` 作为 Hub 替身（每 Lane 一个独立任务族）。per-task 的
+tab/download 配额本身仍由 engine 的 standalone scope 与 Hub 的真实实现单测覆盖，
+这里不重复。**没有改动任何配额常量。**
+
+顺带纠正一个仓库既有误解：`[dev-dependencies]` 里为「外部集成测试 crate 不继承普通
+依赖」而重复列出的条目是**不必要**的——Cargo 会把普通依赖的 `--extern` 一并传给
+test target。本轮实测确认集成测试无需重复声明 `async-trait` 即可编译，因此没有新增
+dev-dependency（`chromiumoxide` 那条既有条目同理是无害的冗余，未在本轮改动）。
+
+### 4.4 真实 Chrome ignored 集（本轮已跑，6/6 全绿）
 
 ```
 NOMIFUN_CHROME_BINARY='C:\Program Files\Google\Chrome\Application\chrome.exe'
 cargo test -p nomi-browser-engine --test integration_managed_host -- --ignored --test-threads=1
 ```
 
-结果 **3 passed / 3 failed**，3 项失败全部是上述 4-Lane 既有问题。与本专项直接
-相关的三项全部通过：
+**6 passed / 0 failed**（73s）：
 
 - `managed_host_drop_reaps_full_tree_and_ephemeral_profile`：
   `residual_pids=[] profile_removed=true provisional_marker_removed=true
-  committed_record_removed=true`（Drop 收割整棵 Chromium 树并删除 ephemeral profile）；
+  committed_record_removed=true`；
 - `managed_host_shutdown_clears_only_exact_runtime_profile_artifacts`：
   **stable profile sentinel 在 exact shutdown 后保留**（第 5.1 节项 7 的物理验收）；
-- `create_engine_drop_reaps_hidden_host_runtime_and_allows_stable_relaunch`。
+- `create_engine_drop_reaps_hidden_host_runtime_and_allows_stable_relaunch`；
+- `managed_host_real_chromium_acceptance_matrix`（跨 Lane 重叠/同 Lane 串行/身份隔离）；
+- `managed_host_sixteen_lane_real_chromium_acceptance`（16 Lane 共享一个 Host 进程）；
+- `shared_host_rss_is_materially_below_four_independent_hosts`（共享 Host 对 4 独立 Host 的 RSS 对照）。
 
-运行前后按 executable path 精确统计 Chrome：**前 0、后 0**。per-Host 独占 staging
-子目录残留 **0**（只剩下可复用的空 staging 根目录，符合设计）。
+运行前后按 executable path 精确统计 Chrome：**前 0、后 0**；per-Host 独占 staging
+子目录残留 **0**（只剩可复用的空 staging 根目录，符合设计）。
+
+### 4.5 一个环境性间歇（不是代码缺陷）
+
+真实 Chrome 套件刚跑完后紧接着跑 `nomifun-app` 全量时，观察到 2 次单发失败，
+每次换一个不同测试（`revoked_binding_sweep_...`、
+`oversized_body_is_rejected_before_task_admission`），失败点都是 loopback
+`reqwest ... .send().await.unwrap()` 而**不是断言**——即 Chrome 进程刚退出留下的
+socket/handle 压力。隔离重跑 **3 次全部 445 passed / 0 failed**。跑 app 全量前先让
+Chrome 完全退出即可。
 
 ## 5. WIP 收口结果（2026-08-04 第二轮接手）
 
@@ -494,8 +527,8 @@ Get-CimInstance Win32_Process |
 
 - ~~Primary sticky fence 的 open/execute/restart/sweep/exact cleanup 全路径测试通过~~ ✅ 第 5.1 节，8 项通过；
 - ~~下载的 3 个 P1 + 1 个 P2 对抗用例通过~~ ✅ 第 5.2 节表格，全部通过；final adversarial review 仍应在推送前跑一次；
-- ~~Rust 格式、diff、关键完整 crate、UI、边界脚本全部通过~~ ✅ 第 4.1 节（engine 783 / platform 263 / nomi-browser 252 / ai-agent 867 / gateway 211 / public 41 / app 444 / process-runtime 117 / UI 1666 / `bun run check` / `cargo fmt --all --check` / `git diff --check`）；**唯一红项**是第 4.3 节 (1) 的既有 Windows 平台脆弱测试；
-- 真实 Chrome：**已跑**（第 4.4 节）。normal/error/Drop 与 stable sentinel 三项通过，exact process residue 前后均为 0、per-Host staging 残留 0；**16-Lane 与 4-Host RSS 对照仍红**，根因是第 4.3 节 (2) 的既有 4-Lane standalone 上限，需负责人定方向；
+- ~~Rust 格式、diff、关键完整 crate、UI、边界脚本全部通过~~ ✅ 第 4.1 节 + 第 4.3 节修复后：engine 783 / platform 263 / nomi-browser 252 / ai-agent 867 / gateway 211 / public 41 / **app 445（连跑 3 次 0 失败）** / process-runtime 117 / UI 1666 / `bun run check` / `cargo fmt --all --check` / `git diff --check` 全部通过，**无红项**；
+- ~~真实 Chrome normal/error/Drop/16-Lane/RSS 测试结束后 exact process/profile residue 为 0~~ ✅ 第 4.4 节：**6/6 全绿**，exact process residue 前后均为 0、per-Host staging 残留 0；
 - `.github/workflows` YAML 为 0（已确认 0）；
 - 最终提交作者/提交者是负责人类开发者，无 AI attribution；
 - 分支已经推送到 origin，另一台电脑可直接 fetch/switch；
@@ -533,3 +566,10 @@ Get-CimInstance Win32_Process |
   public ×1、ai-agent ×1 等），修掉 WIP-A 的 fail-closed 默认值成批 fence 测试的问题。
 - `crates/backend/nomifun-app/src/browser_mcp_server.rs`：
   `active_owner_bindings_scale_with_distinct_signed_tasks` 改用独立 conversation。
+- `crates/backend/nomifun-app/src/commands/stdio_common.rs`：新增测试辅助
+  `wait_until_connection_refused`，让 at-most-once 重试测试先建立「端口确实拒连」
+  的前提，不再与异步 abort 竞态（生产判据未改）。
+- `crates/agent/nomi-browser-engine/tests/integration_managed_host.rs`：新增
+  `HubStandInTaskAuthority` + `platform_lane_config`，三个多 Lane 验收测试改用
+  `launch_platform_managed`（生产的多任务共享 Host 模型），不再受 standalone
+  单任务 4-Lane 预算约束（未改动任何配额常量，也未新增 dev-dependency）。
