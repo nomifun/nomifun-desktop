@@ -174,15 +174,15 @@ SQLite cascade 或 trigger。数据库和受管 side-store 都执行 orphan audi
 
 ## 伙伴数据（`companion/` 文件域）
 
-数字伙伴的数据位于主产品数据库表之外，是一个可整体导出/清空的文件域
+数字伙伴的数据位于主产品数据库表之外，是一个可整体导出、由受管数据重置流程清理的文件域
 （详见[伙伴指南](../guides/companions.zh.md)）。它作为受管数据集的一部分参与
 v3 reset/restore，不通过历史逐行迁移导入。多伙伴布局如下：
 
 ```
 <data_dir>/companion/
 ├── shared/                      共享记忆中枢（全体伙伴一份）
-│   ├── config.json              SharedCompanionConfig：采集开关、学习间隔与学习模型、default_companion_id
-│   ├── events/YYYYMMDD.jsonl    采集链路的原始事件（隐私敏感，导出需显式勾选）
+│   ├── config.json              SharedCompanionConfig：采集开关、事件保留/容量策略、学习间隔与学习模型、default_companion_id
+│   ├── events/YYYYMMDD.jsonl    采集链路的原始事件（自动按期限/硬容量清理；隐私敏感，导出需显式勾选）
 │   └── memory.db                独立 SQLite（PRAGMA user_version 版本阶梯）：
 │                                共享记忆/建议 + 每宠运行态（companion_runtime_state：XP 等）
 └── companions/

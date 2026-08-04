@@ -165,7 +165,7 @@ const OverviewTab: React.FC<Props> = ({ companion, onGoTab }) => {
               <span className='text-12px text-t-secondary'>
                 {t('nomi.disclosure.body', {
                   defaultValue:
-                    '开启后，伙伴会从你使用平台的行为（工具调用、任务、对话）里学习，自动沉淀技能与记忆。所有数据仅保存在本地，随时可在「数据采集」里查看、清空或一键全关。',
+                    '开启后，伙伴会从你使用平台的行为（工具调用、任务、对话）里学习，自动沉淀技能与记忆。所有数据仅保存在本地，可在「数据采集」里调整自动清理策略或一键全关。',
                 })}
               </span>
               <div className='flex gap-8px'>
