@@ -625,10 +625,9 @@ impl CdpBackend {
     /// 放大，故收口）。
     ///
     /// `rec` 用来定位所属帧的注入管线（句柄归该帧 utility world）。管线找不到（OOPIF 子 session 已
-    /// detach）→ guard 为 no-op（句柄随 world 销毁自然回收，无需释放）。release 是 async 而 `Drop`
-    /// 不能 await：guard 的 Drop 用 `tokio::spawn` fire-and-forget 一次 `release_object_group`（参照
-    /// [`crate::backend::cdp::ActAbortGuard`] 的 Drop 范式——它同样在 Drop 里 `JoinHandle::abort`）。
-    /// 正常路径**只释放一次**（guard 是唯一释放点，无手动双释放）。**绝不 panic**。
+    /// detach）→ guard 为 no-op（句柄随 world 销毁自然回收，无需释放）。正常动作骨架在返回前显式
+    /// await [`ActGroupReleaseGuard::release_now`]；取消/panic 才由 guard 的 Drop 同步提交到 Connection
+    /// 固定有界清理队列。Drop 不创建 Tokio task，也不依赖当前线程仍处于 runtime。**绝不 panic**。
     pub async fn arm_act_group_release(&self, rec: &RefRecord, seq: u64) -> ActGroupReleaseGuard {
         let group = act_object_group(seq);
         // 反查所属帧注入管线（InjectionManager 克隆友好：Connection 共享传输、shared 是 Arc<Mutex>）。
@@ -641,34 +640,47 @@ impl CdpBackend {
 }
 
 /// **objectGroup 释放的 RAII drop-guard**（[`CdpBackend::arm_act_group_release`] 返回）：持所属帧的
-/// [`InjectionManager`] 句柄 + 组名（`act-<seq>`）；Drop 时 `tokio::spawn` fire-and-forget 一次
-/// `Runtime.releaseObjectGroup`，释放本动作 objectGroup 的全部元素句柄。
+/// [`InjectionManager`] 句柄 + 组名（`act-<seq>`）。正常路径显式 await
+/// [`Self::release_now`]；Drop 只作为取消/panic fallback，把释放提交给 Connection 的单一固定 worker。
 ///
-/// **为何 `tokio::spawn`**：`release_object_group` 是 async，而 `Drop` 是同步上下文（不能 await）。
-/// release 是幂等且 best-effort（组名不存在/已释放 CDP 不报错；句柄也随导航/GC 自然回收），故 detach
-/// 一个释放任务、不等其完成是安全的——失败只 warn，不影响动作语义。这与
-/// [`crate::backend::cdp::ActAbortGuard`] 在 Drop 里 `JoinHandle::abort()`（同样 fire-and-forget）
-/// 同源。`release` 为 `None` 时（管线找不到）Drop 是 no-op。**Drop 绝不 panic**。
+/// 队列按 `(session, group)` 合并且有硬上限；饱和/worker 死亡会 poison 该 Connection，由 Host
+/// 生命周期执行精确进程清理，绝不静默积累 remote handle。`release` 为 `None` 时 Drop 是 no-op。
+/// **Drop 绝不调用 `tokio::spawn`，因此在 runtime 外也不 panic。**
 pub struct ActGroupReleaseGuard {
     /// `Some((manager, group))` = arm 成功，Drop 释放该组；`None` = no-op（管线找不到 / 已 take）。
     release: Option<(InjectionManager, String)>,
+}
+
+impl ActGroupReleaseGuard {
+    /// Normal-path release. The guard remains armed across the await so caller
+    /// cancellation still falls back to the bounded dispatcher. Only a proven
+    /// successful CDP response disarms it; failed/uncertain sends are retried by
+    /// Drop (the command is idempotent).
+    pub(crate) async fn release_now(&mut self) {
+        let Some((manager, group)) = self.release.as_ref().cloned() else {
+            return;
+        };
+        match manager.release_object_group(&group).await {
+            Ok(()) => {
+                self.release.take();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "nomi_browser_engine::actionability",
+                    group = %group,
+                    error = ?error,
+                    "normal Runtime.releaseObjectGroup failed; deferring exact cleanup"
+                );
+            }
+        }
+    }
 }
 
 impl Drop for ActGroupReleaseGuard {
     fn drop(&mut self) {
         // take()：保证只释放一次（无手动 + RAII 双释放；guard 是唯一释放点）。
         if let Some((manager, group)) = self.release.take() {
-            // release_object_group 是 async；Drop 不能 await → fire-and-forget 一个释放任务。
-            // best-effort：失败只 warn（组随导航/GC 自然回收，不影响动作语义）。绝不 panic。
-            tokio::spawn(async move {
-                if let Err(e) = manager.release_object_group(&group).await {
-                    tracing::warn!(
-                        target: "nomi_browser_engine::actionability",
-                        group = %group, error = ?e,
-                        "ActGroupReleaseGuard: releaseObjectGroup failed (non-fatal)"
-                    );
-                }
-            });
+            manager.defer_object_group_release(&group);
         }
     }
 }
@@ -680,6 +692,55 @@ impl Drop for ActGroupReleaseGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::{
+        Connection, DEFERRED_OBJECT_GROUP_RELEASE_CAPACITY, ROOT_SESSION,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn recording_connection() -> (
+        Connection,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind action release fake CDP");
+        let address = listener.local_addr().expect("read fake CDP address");
+        let (method_tx, method_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake CDP client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake CDP handshake");
+            while let Some(Ok(Message::Text(text))) = websocket.next().await {
+                let request: serde_json::Value =
+                    serde_json::from_str(text.as_ref()).expect("valid CDP request");
+                let Some(id) = request.get("id").and_then(serde_json::Value::as_u64) else {
+                    continue;
+                };
+                let _ = method_tx.send(
+                    request
+                        .get("method")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({"id": id, "result": {}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("respond to fake CDP request");
+            }
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect action release fake CDP");
+        (connection, method_rx, server)
+    }
 
     fn rec(role: &str, name: &str, full_ref: &str) -> RefRecord {
         RefRecord {
@@ -705,6 +766,93 @@ mod tests {
         assert_eq!(act_object_group(7), "act-7");
         // 不同 seq 名不同（动作隔离释放）。
         assert_ne!(act_object_group(1), act_object_group(2));
+    }
+
+    #[tokio::test]
+    async fn normal_action_release_is_awaited_exactly_once() {
+        let (connection, mut methods, server) = recording_connection().await;
+        let manager = InjectionManager::new(connection.clone(), ROOT_SESSION);
+        let mut guard = ActGroupReleaseGuard {
+            release: Some((manager, "act-normal".to_owned())),
+        };
+
+        guard.release_now().await;
+        drop(guard);
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), methods.recv())
+                .await
+                .expect("normal release request arrives")
+                .expect("method stream remains live"),
+            "Runtime.releaseObjectGroup"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), methods.recv())
+                .await
+                .is_err(),
+            "disarmed guard must not enqueue a second release"
+        );
+
+        connection.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("fake server observes shutdown")
+            .expect("fake server joins");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ten_thousand_cancelled_guards_keep_fallback_queue_hard_bounded() {
+        let (connection, _methods, server) = recording_connection().await;
+        let manager = InjectionManager::new(connection.clone(), ROOT_SESSION);
+
+        // No await in this loop: the one fixed worker cannot drain concurrently
+        // on a current-thread runtime. This deterministically hits admission and
+        // proves Drop itself does not create 10,000 detached tasks.
+        for seq in 0..10_000_u64 {
+            drop(ActGroupReleaseGuard {
+                release: Some((manager.clone(), act_object_group(seq))),
+            });
+        }
+
+        let (queued, active) = connection.deferred_object_group_release_counts();
+        assert!(
+            queued + active <= DEFERRED_OBJECT_GROUP_RELEASE_CAPACITY,
+            "fallback debt must remain within the per-connection hard bound"
+        );
+        assert!(
+            connection.registry().is_connection_closed(),
+            "overflow must fail closed and hand authority to Host retirement"
+        );
+
+        connection.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("fake server observes saturated shutdown")
+            .expect("fake server joins");
+    }
+
+    #[test]
+    fn armed_guard_drop_outside_tokio_runtime_never_panics() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build temporary runtime");
+        let guard = runtime.block_on(async {
+            let (connection, _methods, server) = recording_connection().await;
+            // The temporary runtime owns both fixed transport workers and the
+            // fake server; dropping it below simulates late synchronous teardown.
+            drop(server);
+            ActGroupReleaseGuard {
+                release: Some((
+                    InjectionManager::new(connection, ROOT_SESSION),
+                    "act-outside-runtime".to_owned(),
+                )),
+            }
+        });
+        drop(runtime);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(guard)));
+        assert!(result.is_ok(), "Drop must not call tokio::spawn without a runtime");
     }
 
     #[test]

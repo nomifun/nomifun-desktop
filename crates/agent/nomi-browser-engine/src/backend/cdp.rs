@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -54,13 +54,15 @@ use chromiumoxide::cdp::js_protocol::runtime::{
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::aria_ref::{frame_prefix, RefRecord, RefTable};
+use crate::aria_ref::{
+    frame_prefix, RefRecord, RefTable, RefTableCapacityError, MAX_REFS_PER_GENERATION,
+};
 use crate::actions::{ActResult, Effect};
 use crate::engine::{
     BrowserEngine, BrowserError, BrowserTabInfo, Capabilities, ElementEntry, LoadState, NavResult,
     Observation, ObserveOpts,
 };
-use crate::injected::{InjectError, InjectionManager};
+use crate::injected::{AbortOnDropTask, InjectError, InjectionManager};
 use crate::launch::{
     BrowserHostLaunchMode, LaunchConfig, Launched,
     launch_chrome_with_cleanup_profile,
@@ -70,12 +72,20 @@ use crate::nav::{
     self, InflightCounter, LifecycleSignal, NavSettleState, NETWORK_IDLE_CAP, NETWORK_IDLE_QUIET,
     SETTLE_QUIET, SPA_SETTLE_TIMEOUT,
 };
-use crate::observe::{stitch, FrameSnapshot};
+use crate::observe::{
+    ensure_observation_bytes, serialized_json_bytes_bounded, FrameSnapshot,
+    ObservationCapacityError,
+    MAX_OBSERVATION_RETAINED_BYTES,
+};
 use crate::progress::{AbortReason, Progress};
 use crate::redact;
+use crate::session::{ReliableEventTaskBudget, TaskSessionAdmission};
 use crate::tabs::{OopifEntry, TabHandles, TabRecord};
 use crate::transport::{Connection, TransportError, ROOT_SESSION};
-use crate::host::LaneOperationGate;
+use crate::host::{
+    HostCleanupLease, LaneOperationGate, TaskDownloadReservation,
+    TaskDownloadReservationAuthority, TaskTabReservation, TaskTabReservationAuthority,
+};
 use crate::{EngineConfig, LaneEngineConfig, LaneId, TargetOwnership, TargetRoute};
 
 /// 拿到新 page 的 `attachedToTarget` 事件的上限（flatten auto-attach 通常 <1s）。
@@ -97,6 +107,96 @@ const TARGET_CLEANUP_JOB_BUDGET: Duration = Duration::from_secs(5);
 /// durable process relay/startup quarantine.
 const TARGET_PROCESS_CLEANUP_ATTEMPTS: usize = 3;
 const TARGET_PROCESS_CLEANUP_ATTEMPT_BUDGET: Duration = Duration::from_secs(5);
+/// Firewall request classification (including DNS SSRF checks) runs only on
+/// these Host-owned workers. The count is fixed for the Host lifetime.
+const FIREWALL_REQUEST_WORKERS: usize = 4;
+/// Reliable CDP delivery is intentionally lossless, so the consumer must place
+/// an explicit bound immediately after receipt. Saturation fails closed instead
+/// of accumulating events forever.
+const FIREWALL_REQUEST_QUEUE_CAPACITY: usize = 128;
+/// Slow human approvals are isolated from request classification so they do
+/// not stall ordinary allow/block decisions.
+const FIREWALL_APPROVAL_WORKERS: usize = 4;
+const FIREWALL_APPROVAL_QUEUE_CAPACITY: usize = 32;
+/// Explicit Host shutdown cancels the worker tree and joins it for this bounded
+/// interval before using abort as the final fallback.
+const FIREWALL_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Saturation rejection itself cannot become another unbounded CDP wait.
+const FIREWALL_OVERFLOW_REJECT_TIMEOUT: Duration = Duration::from_secs(1);
+/// An unclaimed top-level target gets a brief nonce/create correlation window.
+/// After that it is not useful browser state: it is closed through the same
+/// bounded executor as every other abandoned target.
+const QUARANTINED_TARGET_GRACE: Duration = Duration::from_millis(750);
+const ROUTER_STATE_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
+/// Loss tombstones only bridge attach/arm event reordering. Keeping them for a
+/// whole Host epoch makes normal tab churn an unbounded metadata leak.
+const LOST_TARGET_TOMBSTONE_GRACE: Duration = Duration::from_secs(2);
+/// These are transient, Host-global exception sets rather than useful live
+/// task state. Saturation fails closed and advances to authoritative Host
+/// teardown instead of retaining more target ids.
+const MAX_QUARANTINED_TARGETS: usize = TARGET_CLEANUP_QUEUE_CAPACITY;
+const MAX_ROUTER_CLEANUP_INFLIGHT: usize = TARGET_CLEANUP_QUEUE_CAPACITY + 1;
+const MAX_PENDING_CREATE_INTENTS: usize = TARGET_CLEANUP_QUEUE_CAPACITY;
+/// A single Lane should not accumulate an unbounded renderer set through
+/// repeated `new_tab` actions or page-created popups. Eight keeps normal
+/// multi-tab research usable while bounding the dominant per-Lane memory fanout.
+const MAX_TABS_PER_LANE: usize = 8;
+const MAX_TRACKED_TARGETS_PER_LANE: usize =
+    MAX_TABS_PER_LANE + MAX_ROUTER_CLEANUP_INFLIGHT;
+/// A retired Lane cleanup inventory is read from a Host-global
+/// `Target.getTargets` response.  The transport already owns the decoded JSON;
+/// cleanup must not clone a second, nearly transport-sized copy before it can
+/// apply the per-Lane target bound.
+const MAX_TARGET_INVENTORY_ENTRIES_PER_HOST: usize = 4_096;
+const MAX_TARGET_INVENTORY_STRING_BYTES: usize = 4 * 1024 * 1024;
+const MAX_LANE_TARGET_LINEAGE_STRING_BYTES: usize =
+    MAX_TRACKED_TARGETS_PER_LANE * crate::session::MAX_CDP_IDENTIFIER_BYTES;
+/// Debug timing is optional metadata.  Bound both cardinality and owned key
+/// bytes independently so 2,000 protocol-valid 4 KiB request ids cannot retain
+/// an otherwise surprising multi-megabyte side table per tab.
+const MAX_DEBUG_REQUEST_TIMESTAMPS: usize = 2_000;
+const MAX_DEBUG_REQUEST_TIMESTAMP_KEY_BYTES: usize = crate::session::MAX_CDP_IDENTIFIER_BYTES;
+const MAX_DEBUG_REQUEST_TIMESTAMP_TOTAL_KEY_BYTES: usize = 256 * 1024;
+/// Per-tab OOPIF tracking is deliberately finite.  A pathological frame tree
+/// must not create an unbounded number of injection tasks even while the Host
+/// itself remains healthy for sibling Lanes.
+const MAX_OOPIFS_PER_TAB: usize = 32;
+/// A Host may route only this many downloads at once.  Admission above this
+/// bound is denied and cancelled at CDP rather than retaining more state.
+const MAX_PENDING_DOWNLOADS_PER_HOST: usize = 64;
+const MAX_QUARANTINED_DOWNLOADS_PER_HOST: usize = 64;
+/// Downloads that never publish a terminal progress event are cancelled and
+/// forgotten after this deadline; their exact Host-staging artifacts are also
+/// removed.
+const DOWNLOAD_ROUTE_TTL: Duration = Duration::from_secs(5 * 60);
+/// A cancel acknowledgement is not proof that Chromium stopped writing. If no
+/// terminal event arrives within this grace, the Host is poisoned and exact
+/// process shutdown becomes the only release proof for retained reservations.
+const DOWNLOAD_CANCEL_TERMINAL_GRACE: Duration = Duration::from_secs(5);
+const DOWNLOAD_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
+/// Every admitted or cancellation-quarantined GUID can own three deterministic
+/// staging names (`GUID`, `.crdownload`, and `.tmp`). Keep enough exact retry
+/// slots for the full 64 active + 64 rejected inventory at once. If historical
+/// cleanup debt ever fills this table, authority is promoted to the dedicated
+/// staging directory and the Host is poisoned before accepting more work.
+const DOWNLOAD_STAGING_PATHS_PER_GUID: usize = 3;
+const MAX_DOWNLOAD_CLEANUP_RETRIES: usize =
+    (MAX_PENDING_DOWNLOADS_PER_HOST + MAX_QUARANTINED_DOWNLOADS_PER_HOST)
+        * DOWNLOAD_STAGING_PATHS_PER_GUID;
+const MAX_DOWNLOAD_STAGING_SCAN_ENTRIES: usize = 512;
+const MAX_DOWNLOAD_SUGGESTED_FILENAME_BYTES: usize = 1024;
+
+const fn tab_capacity_available(current_tabs: usize) -> bool {
+    current_tabs < MAX_TABS_PER_LANE
+}
+
+const fn oopif_capacity_available(current_oopifs: usize) -> bool {
+    current_oopifs < MAX_OOPIFS_PER_TAB
+}
+
+const fn download_capacity_available(current_downloads: usize) -> bool {
+    current_downloads < MAX_PENDING_DOWNLOADS_PER_HOST
+}
 
 /// observe 时等主帧 utility-world context 物化的上限（fresh navigate 后 world 创建有延迟；
 /// 通常 <500ms）。超时 → `NavFailed{kind:"context"}`（调用方可短重试）。
@@ -144,16 +244,54 @@ pub(crate) fn map_inject_err(e: InjectError) -> BrowserError {
         InjectError::ContextNotReady { .. } => BrowserError::NavFailed {
             kind: "context".into(),
         },
+        InjectError::ContextCapacityExceeded { limit } => BrowserError::Blocked {
+            reason: format!(
+                "utility-world context limit exceeded ({limit}); reload or simplify the frame tree"
+            ),
+        },
+        InjectError::RefCapacityExceeded {
+            limit,
+            current,
+            required,
+        } => BrowserError::Blocked {
+            reason: format!(
+                "observe would retain too many element refs for one task generation \
+                 (limit={limit}, attempted_total={current}, frame_refs={required}). The partial \
+                 generation was discarded; simplify the page or reduce observe depth, then run \
+                 a fresh observe"
+            ),
+        },
+        InjectError::ObservationCapacityExceeded {
+            limit,
+            current,
+            frame_bytes,
+        } => BrowserError::Blocked {
+            reason: format!(
+                "observe exceeded the per-task snapshot byte limit \
+                 (limit={limit}, attempted_total={current}, frame_bytes={frame_bytes}). The \
+                 partial generation was discarded; simplify the page or reduce observe depth, \
+                 then run a fresh observe"
+            ),
+        },
         InjectError::JsException(m) => BrowserError::Other(m),
         InjectError::Protocol(m) => BrowserError::Other(m),
+    }
+}
+
+fn map_observation_capacity_err(error: ObservationCapacityError) -> BrowserError {
+    BrowserError::Blocked {
+        reason: format!(
+            "observe exceeded the per-task retained byte limit (limit={}, attempted={}). The \
+             partial generation was discarded; simplify the page or reduce observe depth, then \
+             run a fresh observe",
+            error.limit, error.attempted
+        ),
     }
 }
 
 #[derive(Clone, Debug)]
 struct ValidatedTargetInfo {
     target_id: String,
-    target_type: String,
-    opener_id: Option<String>,
 }
 
 /// Parse the root target inventory used by cleanup proofs.
@@ -186,13 +324,222 @@ fn validated_target_inventory(
                 ),
                 None => None,
             };
+            let _ = (target_type, opener_id);
             Ok(ValidatedTargetInfo {
                 target_id: target_id.to_string(),
-                target_type: target_type.to_string(),
-                opener_id: opener_id.map(str::to_string),
             })
         })
         .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundedLaneTargetInventoryError {
+    Malformed(&'static str),
+    HostEntryLimit,
+    HostStringByteLimit,
+    IdentifierByteLimit,
+    LaneTargetLimit,
+    LaneStringByteLimit,
+}
+
+impl std::fmt::Display for BoundedLaneTargetInventoryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed(message) => formatter.write_str(message),
+            Self::HostEntryLimit => write!(
+                formatter,
+                "Target.getTargets inventory exceeds the Host entry limit ({MAX_TARGET_INVENTORY_ENTRIES_PER_HOST})"
+            ),
+            Self::HostStringByteLimit => write!(
+                formatter,
+                "Target.getTargets inventory exceeds the retained string byte limit ({MAX_TARGET_INVENTORY_STRING_BYTES})"
+            ),
+            Self::IdentifierByteLimit => write!(
+                formatter,
+                "Target.getTargets inventory contains an oversized CDP identifier"
+            ),
+            Self::LaneTargetLimit => write!(
+                formatter,
+                "Lane target lineage exceeds the target limit ({MAX_TRACKED_TARGETS_PER_LANE})"
+            ),
+            Self::LaneStringByteLimit => write!(
+                formatter,
+                "Lane target lineage exceeds the retained identifier byte limit ({MAX_LANE_TARGET_LINEAGE_STRING_BYTES})"
+            ),
+        }
+    }
+}
+
+fn accumulate_inventory_string_bytes(
+    value: &serde_json::Value,
+    retained: &mut usize,
+) -> Result<(), BoundedLaneTargetInventoryError> {
+    match value {
+        serde_json::Value::String(text) => add_inventory_string_bytes(retained, text.len()),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                accumulate_inventory_string_bytes(value, retained)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                add_inventory_string_bytes(retained, key.len())?;
+                accumulate_inventory_string_bytes(value, retained)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(())
+        }
+    }
+}
+
+fn add_inventory_string_bytes(
+    retained: &mut usize,
+    bytes: usize,
+) -> Result<(), BoundedLaneTargetInventoryError> {
+    *retained = retained
+        .checked_add(bytes)
+        .ok_or(BoundedLaneTargetInventoryError::HostStringByteLimit)?;
+    if *retained > MAX_TARGET_INVENTORY_STRING_BYTES {
+        return Err(BoundedLaneTargetInventoryError::HostStringByteLimit);
+    }
+    Ok(())
+}
+
+fn bounded_lane_seed_targets<'a>(
+    targets: impl IntoIterator<Item = &'a str>,
+) -> Result<HashSet<String>, BoundedLaneTargetInventoryError> {
+    let mut retained_bytes = 0usize;
+    let mut bounded = HashSet::new();
+    for target_id in targets {
+        if target_id.len() > crate::session::MAX_CDP_IDENTIFIER_BYTES {
+            return Err(BoundedLaneTargetInventoryError::IdentifierByteLimit);
+        }
+        if bounded.contains(target_id) {
+            continue;
+        }
+        if bounded.len() >= MAX_TRACKED_TARGETS_PER_LANE {
+            return Err(BoundedLaneTargetInventoryError::LaneTargetLimit);
+        }
+        retained_bytes = retained_bytes
+            .checked_add(target_id.len())
+            .ok_or(BoundedLaneTargetInventoryError::LaneStringByteLimit)?;
+        if retained_bytes > MAX_LANE_TARGET_LINEAGE_STRING_BYTES {
+            return Err(BoundedLaneTargetInventoryError::LaneStringByteLimit);
+        }
+        bounded.insert(target_id.to_owned());
+    }
+    Ok(bounded)
+}
+
+fn validated_target_info_ref(
+    target_info: &serde_json::Value,
+) -> Result<(&str, &str, Option<&str>), BoundedLaneTargetInventoryError> {
+    let target_id = target_info
+        .get("targetId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(BoundedLaneTargetInventoryError::Malformed(
+            "Target.getTargets targetInfo is missing a string targetId",
+        ))?;
+    let target_type = target_info
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(BoundedLaneTargetInventoryError::Malformed(
+            "Target.getTargets targetInfo is missing a string type",
+        ))?;
+    let opener_id = match target_info.get("openerId") {
+        Some(value) => Some(value.as_str().ok_or(
+            BoundedLaneTargetInventoryError::Malformed(
+                "Target.getTargets targetInfo has a non-string openerId",
+            ),
+        )?),
+        None => None,
+    };
+    if target_id.len() > crate::session::MAX_CDP_IDENTIFIER_BYTES
+        || target_type.len() > crate::session::MAX_CDP_IDENTIFIER_BYTES
+        || opener_id.is_some_and(|value| value.len() > crate::session::MAX_CDP_IDENTIFIER_BYTES)
+    {
+        return Err(BoundedLaneTargetInventoryError::IdentifierByteLimit);
+    }
+    Ok((target_id, target_type, opener_id))
+}
+
+/// Resolve one Lane's live target lineage without cloning the Host-global
+/// target inventory. All inventory and per-Lane limits are checked before the
+/// first inventory identifier is copied; the final vector takes ownership from
+/// the lineage set instead of creating a second copy.
+fn bounded_live_lane_targets(
+    result: &serde_json::Value,
+    mut lineage: HashSet<String>,
+) -> Result<Vec<String>, BoundedLaneTargetInventoryError> {
+    let target_infos = result
+        .get("targetInfos")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(BoundedLaneTargetInventoryError::Malformed(
+            "Target.getTargets response is missing targetInfos",
+        ))?;
+    if target_infos.len() > MAX_TARGET_INVENTORY_ENTRIES_PER_HOST {
+        return Err(BoundedLaneTargetInventoryError::HostEntryLimit);
+    }
+    let mut inventory_string_bytes = 0usize;
+    for target_info in target_infos {
+        accumulate_inventory_string_bytes(target_info, &mut inventory_string_bytes)?;
+        let _ = validated_target_info_ref(target_info)?;
+    }
+
+    let mut lineage_string_bytes = lineage.iter().try_fold(0usize, |total, target_id| {
+        total
+            .checked_add(target_id.len())
+            .ok_or(BoundedLaneTargetInventoryError::LaneStringByteLimit)
+    })?;
+    if lineage.len() > MAX_TRACKED_TARGETS_PER_LANE {
+        return Err(BoundedLaneTargetInventoryError::LaneTargetLimit);
+    }
+    if lineage_string_bytes > MAX_LANE_TARGET_LINEAGE_STRING_BYTES {
+        return Err(BoundedLaneTargetInventoryError::LaneStringByteLimit);
+    }
+
+    loop {
+        let mut changed = false;
+        for target_info in target_infos {
+            let (target_id, target_type, opener_id) = validated_target_info_ref(target_info)?;
+            if target_type != "page" {
+                continue;
+            }
+            let Some(opener_id) = opener_id else {
+                continue;
+            };
+            if !lineage.contains(opener_id) || lineage.contains(target_id) {
+                continue;
+            }
+            if lineage.len() >= MAX_TRACKED_TARGETS_PER_LANE {
+                return Err(BoundedLaneTargetInventoryError::LaneTargetLimit);
+            }
+            let Some(next_bytes) = lineage_string_bytes.checked_add(target_id.len()) else {
+                return Err(BoundedLaneTargetInventoryError::LaneStringByteLimit);
+            };
+            if next_bytes > MAX_LANE_TARGET_LINEAGE_STRING_BYTES {
+                return Err(BoundedLaneTargetInventoryError::LaneStringByteLimit);
+            }
+            lineage.insert(target_id.to_owned());
+            lineage_string_bytes = next_bytes;
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut live_targets = Vec::with_capacity(lineage.len());
+    for target_info in target_infos {
+        let (target_id, _, _) = validated_target_info_ref(target_info)?;
+        if let Some(owned_target_id) = lineage.take(target_id) {
+            live_targets.push(owned_target_id);
+        }
+    }
+    Ok(live_targets)
 }
 
 async fn target_is_absent_from_browser(
@@ -254,6 +601,40 @@ struct PendingPage {
     target_id: String,
     session_id: String,
     opener_target_id: Option<String>,
+    target_url: Option<String>,
+}
+
+#[derive(Clone)]
+struct QuarantinedPage {
+    pending: PendingPage,
+    /// `None` means exact cleanup is already scheduled (or the page is behind
+    /// a closing-Lane fence). `Some` is an unowned page's claim grace.
+    cleanup_after: Option<tokio::time::Instant>,
+}
+
+#[derive(Clone)]
+struct TaskTabReservationScope {
+    task_resource_key: String,
+    lane_id: LaneId,
+    authority: Arc<dyn TaskTabReservationAuthority>,
+}
+
+#[derive(Clone)]
+struct TaskDownloadReservationScope {
+    task_resource_key: String,
+    lane_id: LaneId,
+    authority: Arc<dyn TaskDownloadReservationAuthority>,
+}
+
+impl TaskDownloadReservationScope {
+    async fn reserve(
+        &self,
+        download_key: &str,
+    ) -> Result<Arc<dyn TaskDownloadReservation>, BrowserError> {
+        self.authority
+            .reserve(&self.task_resource_key, &self.lane_id, download_key)
+            .await
+    }
 }
 
 struct LaneRoute {
@@ -263,6 +644,20 @@ struct LaneRoute {
     active_frame: Weak<AsyncMutex<Option<(String, String)>>>,
     closing: Arc<AtomicBool>,
     download_dir: Option<String>,
+    task_resource_key: String,
+    max_task_tabs: usize,
+    task_tab_reservation_scope: Option<TaskTabReservationScope>,
+    task_download_reservation_scope: Option<TaskDownloadReservationScope>,
+}
+
+struct PendingCreateIntent {
+    expires_at: tokio::time::Instant,
+    reservation: Option<Arc<dyn TaskTabReservation>>,
+    /// Trusted Host-side authority captured before Target.createTarget. The
+    /// nonce URL correlates the later attach; page-controlled metadata never
+    /// participates in this assignment.
+    task_resource_key: Option<String>,
+    lane_id: Option<LaneId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,6 +675,29 @@ struct PendingDownload {
     lane_id: LaneId,
     download_dir: String,
     suggested_filename: String,
+    created_at: std::time::Instant,
+    cancel_requested_at: Option<std::time::Instant>,
+    reservation: Arc<dyn TaskDownloadReservation>,
+}
+
+#[cfg(test)]
+struct TestTaskDownloadReservation;
+
+#[cfg(test)]
+impl TaskDownloadReservation for TestTaskDownloadReservation {
+    fn update_progress(
+        &self,
+        _received_bytes: u64,
+        _total_bytes: Option<u64>,
+    ) -> Result<(), BrowserError> {
+        Ok(())
+    }
+
+    fn prepare_complete(&self, _actual_bytes: u64) -> Result<(), BrowserError> {
+        Ok(())
+    }
+
+    fn finalize_complete(&self) {}
 }
 
 struct HostRouteState {
@@ -290,12 +708,129 @@ struct HostRouteState {
     /// Lane's final empty inventory response.
     retired_target_owner: HashMap<String, LaneId>,
     lanes: HashMap<LaneId, LaneRoute>,
-    quarantined: HashMap<String, PendingPage>,
+    quarantined: HashMap<String, QuarantinedPage>,
     cleanup_inflight: HashSet<String>,
     session_targets: HashMap<String, String>,
-    lost_targets: HashSet<String>,
+    pending_create_urls: HashMap<String, PendingCreateIntent>,
+    /// A permit follows its exact top-level target from nonce-correlated
+    /// attach through TabRecord publication. Removing this entry alone does
+    /// not release the slot once the TabRecord has cloned the same Arc.
+    target_tab_reservations: HashMap<String, Arc<dyn TaskTabReservation>>,
+    lost_targets: HashMap<String, tokio::time::Instant>,
     frame_owner: HashMap<String, LaneId>,
-    downloads: HashMap<String, PendingDownload>,
+}
+
+impl HostRouteState {
+    fn release_target_bookkeeping(&mut self, target_id: &str, main_frame_id: Option<&str>) {
+        self.ownership.release(target_id);
+        self.retired_target_owner.remove(target_id);
+        self.target_tab_reservations.remove(target_id);
+        self.quarantined.remove(target_id);
+        self.cleanup_inflight.remove(target_id);
+        self.lost_targets.remove(target_id);
+        self.session_targets
+            .retain(|_, mapped_target| mapped_target != target_id);
+        if let Some(main_frame_id) = main_frame_id {
+            self.frame_owner.remove(main_frame_id);
+        }
+    }
+
+    fn quarantine(
+        &mut self,
+        pending: PendingPage,
+        cleanup_after: Option<tokio::time::Instant>,
+    ) -> Result<(), ()> {
+        if let Some(existing) = self.quarantined.get_mut(&pending.target_id) {
+            existing.pending = pending;
+            // Never turn an already-scheduled cleanup back into a claimable
+            // target because a duplicate attach was delivered.
+            if existing.cleanup_after.is_some() {
+                existing.cleanup_after = cleanup_after;
+            }
+            return Ok(());
+        }
+        // Two short-lived create/attach correlations per registered Lane are
+        // allowed in addition to the fixed exception reserve. Thus healthy
+        // multi-task concurrency scales with Lane count while one Lane cannot
+        // grow the Host staging map without bound.
+        let limit = MAX_QUARANTINED_TARGETS.saturating_add(self.lanes.len().saturating_mul(2));
+        if self.quarantined.len() >= limit {
+            return Err(());
+        }
+        self.quarantined.insert(
+            pending.target_id.clone(),
+            QuarantinedPage {
+                pending,
+                cleanup_after,
+            },
+        );
+        Ok(())
+    }
+
+    fn start_cleanup(&mut self, target_id: &str) -> Result<bool, ()> {
+        if self.cleanup_inflight.contains(target_id) {
+            return Ok(false);
+        }
+        if self.cleanup_inflight.len() >= MAX_ROUTER_CLEANUP_INFLIGHT {
+            return Err(());
+        }
+        self.cleanup_inflight.insert(target_id.to_string());
+        Ok(true)
+    }
+
+    fn mark_lost(&mut self, target_id: &str, expires_at: tokio::time::Instant) -> bool {
+        if let Some(expiry) = self.lost_targets.get_mut(target_id) {
+            *expiry = (*expiry).max(expires_at);
+            return false;
+        }
+        self.lost_targets.insert(target_id.to_string(), expires_at);
+        true
+    }
+
+    fn active_lane_target_count(&self, lane_id: &str) -> usize {
+        self.ownership.targets_for_lane(lane_id).len()
+    }
+
+    fn retired_lane_target_count(&self, lane_id: &str) -> usize {
+        self.retired_target_owner
+            .values()
+            .filter(|owner| owner.as_str() == lane_id)
+            .count()
+    }
+
+    fn effective_task_tab_limit(&self, task_resource_key: &str, candidate: usize) -> usize {
+        self.current_task_tab_limit(task_resource_key)
+            .unwrap_or(candidate)
+    }
+
+    fn current_task_tab_limit(&self, task_resource_key: &str) -> Option<usize> {
+        self.lanes
+            .values()
+            .filter(|route| route.task_resource_key == task_resource_key)
+            .map(|route| route.max_task_tabs)
+            .min()
+    }
+
+    async fn task_tab_count_excluding_lane(
+        &self,
+        task_resource_key: &str,
+        excluded_lane: &str,
+    ) -> usize {
+        let tabs = self
+            .lanes
+            .iter()
+            .filter(|(lane_id, route)| {
+                lane_id.as_str() != excluded_lane
+                    && route.task_resource_key == task_resource_key
+            })
+            .filter_map(|(_, route)| route.tabs.upgrade())
+            .collect::<Vec<_>>();
+        let mut count = 0usize;
+        for tabs in tabs {
+            count = count.saturating_add(tabs.lock().await.len());
+        }
+        count
+    }
 }
 
 impl Default for HostRouteState {
@@ -307,9 +842,32 @@ impl Default for HostRouteState {
             quarantined: HashMap::new(),
             cleanup_inflight: HashSet::new(),
             session_targets: HashMap::new(),
-            lost_targets: HashSet::new(),
+            pending_create_urls: HashMap::new(),
+            target_tab_reservations: HashMap::new(),
+            lost_targets: HashMap::new(),
             frame_owner: HashMap::new(),
-            downloads: HashMap::new(),
+        }
+    }
+}
+
+/// Bounded-progress cursor for the dedicated Host download staging directory.
+///
+/// Keeping the `ReadDir` iterator between reconciliation ticks avoids both an
+/// O(directory-size) allocation and the old `read_dir(...).take(512)` restart
+/// starvation. One tick advances at most 512 entries; reaching EOF starts a
+/// fresh pass on a later tick so newly-created artifacts are still discovered.
+struct DownloadStagingScanState {
+    entries: Option<std::fs::ReadDir>,
+    generation: u64,
+    saw_remaining_artifact: bool,
+}
+
+impl Default for DownloadStagingScanState {
+    fn default() -> Self {
+        Self {
+            entries: None,
+            generation: 0,
+            saw_remaining_artifact: false,
         }
     }
 }
@@ -326,6 +884,20 @@ struct HostTargetRouter {
         Option<tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>>,
     >,
     cleanup_changed: tokio::sync::Notify,
+    downloads: Mutex<HashMap<String, PendingDownload>>,
+    rejected_downloads: Mutex<HashMap<String, std::time::Instant>>,
+    /// The shared Host's browser-level `allowAndName` landing directory.  It
+    /// is not a user Downloads directory; exact GUID artifacts can therefore
+    /// be reconciled on cancel, timeout, lag, and shutdown.
+    download_staging_dir: Option<PathBuf>,
+    download_cleanup_retries: Mutex<HashSet<PathBuf>>,
+    download_staging_scan: Mutex<DownloadStagingScanState>,
+    /// A full exact-path table promotes cleanup authority to the dedicated
+    /// directory. Generations make completing a scan race-safe: a pass cannot
+    /// clear authority published while that pass was running.
+    download_directory_cleanup_generation: AtomicU64,
+    download_directory_cleanup_completed_generation: AtomicU64,
+    download_cleanup_poisoned: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -341,11 +913,30 @@ enum AttachedPageRoute {
         lane_id: LaneId,
         start_worker: bool,
     },
+    EscalateHost,
 }
 
 enum ProspectiveTargetOwner {
     Active(LaneId),
     Retired(LaneId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnedPagePublish {
+    Inserted,
+    AlreadyPresent,
+    RejectedCapacity,
+    RejectedState,
+}
+
+/// Atomic task-tab policy update prepared under the Host router lock.
+///
+/// Every matching LaneRoute already carries `max_task_tabs` when this value is
+/// returned. The caller owns the remaining exact close work and must preserve
+/// that stricter cap even if one of those closes fails.
+#[derive(Debug)]
+pub(crate) struct TaskTabLimitReconcilePlan {
+    pub(crate) excess_tabs: Vec<(LaneId, Vec<String>)>,
 }
 
 impl TopLevelTargetLoss {
@@ -362,7 +953,9 @@ impl HostTargetRouter {
     fn try_new(
         conn: Connection,
         process_cleanup: Option<Arc<DurableProcessCleanup>>,
+        download_staging_dir: Option<PathBuf>,
     ) -> Result<Arc<Self>, BrowserError> {
+        conn.registry().enable_task_session_quota_routing();
         let (barrier_tx, barrier_rx) = tokio::sync::mpsc::channel(16);
         let cleanup_executor =
             TargetCleanupExecutor::new(conn.clone(), process_cleanup)?;
@@ -373,12 +966,65 @@ impl HostTargetRouter {
             barrier_tx,
             barrier_rx: std::sync::Mutex::new(Some(barrier_rx)),
             cleanup_changed: tokio::sync::Notify::new(),
+            downloads: Mutex::new(HashMap::new()),
+            rejected_downloads: Mutex::new(HashMap::new()),
+            download_staging_dir,
+            download_cleanup_retries: Mutex::new(HashSet::new()),
+            download_staging_scan: Mutex::new(DownloadStagingScanState::default()),
+            download_directory_cleanup_generation: AtomicU64::new(0),
+            download_directory_cleanup_completed_generation: AtomicU64::new(0),
+            download_cleanup_poisoned: AtomicBool::new(false),
         }))
     }
 
     #[cfg(test)]
     fn new(conn: Connection) -> Arc<Self> {
-        Self::try_new(conn, None).expect("test target cleanup executor starts")
+        Self::try_new(conn, None, None).expect("test target cleanup executor starts")
+    }
+
+    #[cfg(test)]
+    fn new_with_download_staging(conn: Connection, staging: PathBuf) -> Arc<Self> {
+        Self::try_new(conn, None, Some(staging))
+            .expect("test target cleanup executor starts")
+    }
+
+    async fn register_pending_create(
+        &self,
+        pending_url: &str,
+        expires_at: tokio::time::Instant,
+        reservation: Option<Arc<dyn TaskTabReservation>>,
+        resource_scope: Option<&TaskTabReservationScope>,
+    ) -> Result<(), BrowserError> {
+        let accepted = {
+            let mut state = self.state.lock().await;
+            let limit = MAX_PENDING_CREATE_INTENTS
+                .saturating_add(state.lanes.len().saturating_mul(2));
+            if !state.pending_create_urls.contains_key(pending_url)
+                && state.pending_create_urls.len() >= limit
+            {
+                false
+            } else {
+                state
+                    .pending_create_urls
+                    .insert(
+                        pending_url.to_string(),
+                        PendingCreateIntent {
+                            expires_at,
+                            reservation,
+                            task_resource_key: resource_scope
+                                .map(|scope| scope.task_resource_key.clone()),
+                            lane_id: resource_scope.map(|scope| scope.lane_id.clone()),
+                        },
+                    );
+                true
+            }
+        };
+        if accepted {
+            Ok(())
+        } else {
+            self.cleanup_executor.poison(None, false);
+            Err(BrowserError::SessionLost { recoverable: false })
+        }
     }
 
     async fn register_lane(
@@ -390,9 +1036,98 @@ impl HostTargetRouter {
         closing: Arc<AtomicBool>,
         download_dir: Option<String>,
     ) -> Option<LaneRegistrationId> {
+        self.register_lane_with_resource_scope(
+            lane_id,
+            tabs,
+            active_target,
+            active_frame,
+            closing,
+            download_dir,
+            None,
+            usize::MAX,
+            None,
+        )
+        .await
+    }
+
+    async fn register_lane_with_resource_scope(
+        &self,
+        lane_id: LaneId,
+        tabs: &Arc<AsyncMutex<HashMap<String, TabRecord>>>,
+        active_target: &Arc<AsyncMutex<String>>,
+        active_frame: &Arc<AsyncMutex<Option<(String, String)>>>,
+        closing: Arc<AtomicBool>,
+        download_dir: Option<String>,
+        task_resource_key: Option<String>,
+        max_task_tabs: usize,
+        task_tab_reservation_authority: Option<Arc<dyn TaskTabReservationAuthority>>,
+    ) -> Option<LaneRegistrationId> {
+        self.register_lane_with_resource_and_download_scope(
+            lane_id,
+            tabs,
+            active_target,
+            active_frame,
+            closing,
+            download_dir,
+            task_resource_key,
+            max_task_tabs,
+            task_tab_reservation_authority,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register_lane_with_resource_and_download_scope(
+        &self,
+        lane_id: LaneId,
+        tabs: &Arc<AsyncMutex<HashMap<String, TabRecord>>>,
+        active_target: &Arc<AsyncMutex<String>>,
+        active_frame: &Arc<AsyncMutex<Option<(String, String)>>>,
+        closing: Arc<AtomicBool>,
+        download_dir: Option<String>,
+        task_resource_key: Option<String>,
+        max_task_tabs: usize,
+        task_tab_reservation_authority: Option<Arc<dyn TaskTabReservationAuthority>>,
+        task_download_reservation_authority: Option<
+            Arc<dyn TaskDownloadReservationAuthority>,
+        >,
+    ) -> Option<LaneRegistrationId> {
         let registration_id = LaneRegistrationId::next();
         let mut state = self.state.lock().await;
         if state.lanes.contains_key(&lane_id) {
+            return None;
+        }
+        let task_resource_key = task_resource_key.unwrap_or_else(|| lane_id.clone());
+        let task_tab_reservation_scope = task_tab_reservation_authority.map(|authority| {
+            TaskTabReservationScope {
+                task_resource_key: task_resource_key.clone(),
+                lane_id: lane_id.clone(),
+                authority,
+            }
+        });
+        let task_download_reservation_scope =
+            task_download_reservation_authority.map(|authority| TaskDownloadReservationScope {
+                task_resource_key: task_resource_key.clone(),
+                lane_id: lane_id.clone(),
+                authority,
+            });
+        let existing_task_tabs = state
+            .task_tab_count_excluding_lane(&task_resource_key, &lane_id)
+            .await;
+        let incoming_tabs = tabs.lock().await.len();
+        let effective_limit =
+            state.effective_task_tab_limit(&task_resource_key, max_task_tabs);
+        if incoming_tabs > MAX_TABS_PER_LANE
+            || existing_task_tabs.saturating_add(incoming_tabs) > effective_limit
+        {
+            tracing::warn!(
+                target: "nomi_browser_engine::host",
+                lane_id = %lane_id,
+                task_tab_count = existing_task_tabs.saturating_add(incoming_tabs),
+                task_tab_limit = effective_limit,
+                "refused to register a browser Lane beyond its task tab budget"
+            );
             return None;
         }
         state.lanes.insert(
@@ -404,23 +1139,221 @@ impl HostTargetRouter {
                 active_frame: Arc::downgrade(active_frame),
                 closing,
                 download_dir,
+                task_resource_key,
+                // Existing routes are the live Host policy authority. A Lane
+                // launch snapshot may be stale in either direction: a higher
+                // value must not undo lowering, and a lower value must not
+                // undo a completed raise. Dynamic policy changes go through
+                // prepare_task_tab_limit_reconciliation, never registration.
+                max_task_tabs: effective_limit,
+                task_tab_reservation_scope,
+                task_download_reservation_scope,
             },
         );
         Some(registration_id)
     }
 
+    /// Atomically install a task-wide tab limit on every live route in this
+    /// Host and select deterministic non-active tabs which must be closed.
+    ///
+    /// One capacity slot is reserved for every Lane, including a temporarily
+    /// empty Lane which may need to recover its final crashed target. A caller
+    /// must therefore prune whole excess Lanes before requesting a limit below
+    /// the current Lane count.
+    async fn prepare_task_tab_limit_reconciliation(
+        &self,
+        task_resource_key: &str,
+        max_task_tabs: usize,
+    ) -> Result<TaskTabLimitReconcilePlan, BrowserError> {
+        if max_task_tabs == 0 {
+            return Err(BrowserError::Blocked {
+                reason: "a browser task tab limit must retain at least one page".into(),
+            });
+        }
+
+        let mut state = self.state.lock().await;
+        let mut lane_ids = state
+            .lanes
+            .iter()
+            .filter_map(|(lane_id, route)| {
+                (route.task_resource_key == task_resource_key).then(|| lane_id.clone())
+            })
+            .collect::<Vec<_>>();
+        lane_ids.sort();
+        if lane_ids.is_empty() {
+            return Ok(TaskTabLimitReconcilePlan {
+                excess_tabs: Vec::new(),
+            });
+        }
+        if max_task_tabs < lane_ids.len() {
+            return Err(BrowserError::Blocked {
+                reason: format!(
+                    "the task tab limit {max_task_tabs} is below its {} live browser Lanes; close excess Lanes first",
+                    lane_ids.len()
+                ),
+            });
+        }
+
+        let mut lane_targets = Vec::with_capacity(lane_ids.len());
+        let mut survivors = HashSet::with_capacity(max_task_tabs);
+        let mut additional_candidates = Vec::new();
+        for lane_id in &lane_ids {
+            let Some(route) = state.lanes.get(lane_id) else {
+                return Err(BrowserError::TargetClosed);
+            };
+            if route.closing.load(Ordering::Acquire) {
+                return Err(BrowserError::TargetClosed);
+            }
+            let Some(tabs) = route.tabs.upgrade() else {
+                return Err(BrowserError::TargetClosed);
+            };
+            let Some(active_target) = route.active_target.upgrade() else {
+                return Err(BrowserError::TargetClosed);
+            };
+            let Some(active_frame) = route.active_frame.upgrade() else {
+                return Err(BrowserError::TargetClosed);
+            };
+
+            let mut target_ids = tabs.lock().await.keys().cloned().collect::<Vec<_>>();
+            target_ids.sort();
+            if target_ids.is_empty() {
+                return Err(BrowserError::Blocked {
+                    reason: format!(
+                        "browser Lane {lane_id} has no live top-level page; recover or close it before lowering the task tab limit"
+                    ),
+                });
+            }
+            let mut active_target = active_target.lock().await;
+            let current_active = active_target.clone();
+            let selected_active = target_ids
+                .binary_search(&current_active)
+                .is_ok()
+                .then_some(current_active)
+                .or_else(|| target_ids.first().cloned());
+            if let Some(selected_active) = selected_active.as_ref() {
+                survivors.insert(selected_active.clone());
+                if active_target.as_str() != selected_active {
+                    *active_target = selected_active.clone();
+                    *active_frame.lock().await = None;
+                }
+            }
+            drop(active_target);
+            for target_id in &target_ids {
+                if Some(target_id) != selected_active.as_ref() {
+                    additional_candidates.push((lane_id.clone(), target_id.clone()));
+                }
+            }
+            lane_targets.push((lane_id.clone(), target_ids));
+        }
+
+        additional_candidates.sort();
+        let additional_capacity = max_task_tabs.saturating_sub(lane_ids.len());
+        for (_, target_id) in additional_candidates.into_iter().take(additional_capacity) {
+            survivors.insert(target_id);
+        }
+
+        let mut excess_tabs = Vec::new();
+        for (lane_id, target_ids) in lane_targets {
+            let excess = target_ids
+                .into_iter()
+                .filter(|target_id| !survivors.contains(target_id))
+                .collect::<Vec<_>>();
+            if !excess.is_empty() {
+                excess_tabs.push((lane_id, excess));
+            }
+        }
+
+        // This is the policy commit point. It occurs only after every route
+        // and weak Lane handle was validated, and before any target close I/O.
+        // A failed close must leave this stricter admission limit installed.
+        for lane_id in lane_ids {
+            let Some(route) = state.lanes.get_mut(&lane_id) else {
+                return Err(BrowserError::TargetClosed);
+            };
+            route.max_task_tabs = max_task_tabs;
+        }
+        Ok(TaskTabLimitReconcilePlan { excess_tabs })
+    }
+
+    #[cfg(test)]
+    async fn task_tab_limit(&self, task_resource_key: &str) -> Option<usize> {
+        let state = self.state.lock().await;
+        state
+            .lanes
+            .values()
+            .filter(|route| route.task_resource_key == task_resource_key)
+            .map(|route| route.max_task_tabs)
+            .min()
+    }
+
+    async fn task_lane_ids(&self, task_resource_key: &str) -> Vec<LaneId> {
+        let state = self.state.lock().await;
+        let mut lane_ids = state
+            .lanes
+            .iter()
+            .filter_map(|(lane_id, route)| {
+                (route.task_resource_key == task_resource_key).then(|| lane_id.clone())
+            })
+            .collect::<Vec<_>>();
+        lane_ids.sort();
+        lane_ids
+    }
+
+    async fn task_tab_count(&self, task_resource_key: &str) -> usize {
+        let tabs = {
+            let state = self.state.lock().await;
+            state
+                .lanes
+                .values()
+                .filter(|route| route.task_resource_key == task_resource_key)
+                .filter_map(|route| route.tabs.upgrade())
+                .collect::<Vec<_>>()
+        };
+        let mut count = 0usize;
+        for tabs in tabs {
+            count = count.saturating_add(tabs.lock().await.len());
+        }
+        count
+    }
+
+    async fn has_task_tab_reservation(&self, target_id: &str) -> bool {
+        self.state
+            .lock()
+            .await
+            .target_tab_reservations
+            .contains_key(target_id)
+    }
+
     /// Claim a target for one Lane. Returns `false` when the target already
     /// crashed or belongs to another Lane.
-    async fn claim_target(&self, lane_id: &str, target_id: &str) -> bool {
-        let pending_pages = {
+    async fn claim_target(self: &Arc<Self>, lane_id: &str, target_id: &str) -> bool {
+        let (pending_pages, saturated) = {
             let mut state = self.state.lock().await;
-            if state.lost_targets.contains(target_id) {
+            if state.lost_targets.contains_key(target_id) {
+                return false;
+            }
+            if state.cleanup_inflight.contains(target_id) {
                 return false;
             }
             let Some(route) = state.lanes.get(lane_id) else {
                 return false;
             };
             if route.closing.load(Ordering::Acquire) {
+                return false;
+            }
+            let mut tracked_targets = state.ownership.targets_for_lane(lane_id).len();
+            let target_already_owned = state.ownership.owner(target_id) == Some(lane_id);
+            if !target_already_owned
+                && tracked_targets >= MAX_TRACKED_TARGETS_PER_LANE
+            {
+                tracing::error!(
+                    target: "nomi_browser_engine::host",
+                    lane_id = %lane_id,
+                    target_limit = MAX_TRACKED_TARGETS_PER_LANE,
+                    "Lane target ownership exceeded its bounded target inventory"
+                );
+                drop(state);
+                self.cleanup_executor.poison(None, false);
                 return false;
             }
             if let Err(owner) = state.ownership.claim(lane_id, target_id) {
@@ -433,31 +1366,56 @@ impl HostTargetRouter {
                 );
                 return false;
             }
+            if !target_already_owned {
+                tracked_targets += 1;
+            }
             let mut pages = Vec::new();
             let mut inherited_from = vec![target_id.to_string()];
             if let Some(page) = state.quarantined.remove(target_id) {
-                pages.push(page);
+                pages.push(page.pending);
             }
-            while let Some(opener_id) = inherited_from.pop() {
+            let mut saturated = false;
+            'inheritance: while let Some(opener_id) = inherited_from.pop() {
                 let children = state
                     .quarantined
                     .iter()
                     .filter_map(|(id, page)| {
-                        (page.opener_target_id.as_deref() == Some(opener_id.as_str()))
+                        (page.pending.opener_target_id.as_deref() == Some(opener_id.as_str()))
                             .then_some(id.clone())
                     })
                     .collect::<Vec<_>>();
                 for child_id in children {
+                    let child_already_owned =
+                        state.ownership.owner(&child_id) == Some(lane_id);
+                    if !child_already_owned
+                        && tracked_targets >= MAX_TRACKED_TARGETS_PER_LANE
+                    {
+                        saturated = true;
+                        break 'inheritance;
+                    }
                     if state.ownership.claim(lane_id, &child_id).is_ok()
                         && let Some(page) = state.quarantined.remove(&child_id)
                     {
+                        if !child_already_owned {
+                            tracked_targets += 1;
+                        }
                         inherited_from.push(child_id);
-                        pages.push(page);
+                        pages.push(page.pending);
                     }
                 }
             }
-            pages
+            (pages, saturated)
         };
+        if saturated {
+            tracing::error!(
+                target: "nomi_browser_engine::host",
+                lane_id = %lane_id,
+                target_limit = MAX_TRACKED_TARGETS_PER_LANE,
+                "popup target inheritance exceeded its bounded Lane inventory"
+            );
+            self.cleanup_executor.poison(None, false);
+            return false;
+        }
         for pending in pending_pages {
             self.arm_owned_page(lane_id.to_string(), pending).await;
         }
@@ -465,7 +1423,7 @@ impl HostTargetRouter {
     }
 
     async fn is_target_lost(&self, target_id: &str) -> bool {
-        self.state.lock().await.lost_targets.contains(target_id)
+        self.state.lock().await.lost_targets.contains_key(target_id)
     }
 
     async fn owned_targets(&self, lane_id: &str) -> Vec<String> {
@@ -492,6 +1450,27 @@ impl HostTargetRouter {
     /// already visible in Chromium are claimed here, while the Host-epoch
     /// `retired_target_owner` fence handles attaches materialized or delivered
     /// only after the Lane unregisters.
+    fn map_lane_inventory_error(
+        &self,
+        lane_id: &str,
+        error: BoundedLaneTargetInventoryError,
+    ) -> BrowserError {
+        if matches!(error, BoundedLaneTargetInventoryError::Malformed(_)) {
+            return BrowserError::Other(error.to_string());
+        }
+        tracing::error!(
+            target: "nomi_browser_engine::host",
+            lane_id = %lane_id,
+            %error,
+            "bounded Lane cleanup inventory was exceeded; escalating exact Host cleanup"
+        );
+        // The retired-Lane tombstones remain authoritative until the exact
+        // Host cleanup proof completes. Poisoning prevents this malformed Host
+        // from accumulating one indefinitely retrying finalizer per Lane.
+        self.cleanup_executor.poison(None, false);
+        BrowserError::SessionLost { recoverable: false }
+    }
+
     async fn claim_live_targets_for_closing_lane(
         &self,
         lane_id: &str,
@@ -515,36 +1494,10 @@ impl HostTargetRouter {
             .send::<GetTargetsParams>(ROOT_SESSION, &GetTargetsParams::default())
             .await
             .map_err(map_transport_err)?;
-        let target_infos = validated_target_inventory(&result)
-            .map_err(|message| BrowserError::Other(message.into()))?;
-
-        let mut lineage = seed_targets.into_iter().collect::<HashSet<_>>();
-        loop {
-            let mut changed = false;
-            for target_info in &target_infos {
-                if target_info.target_type != "page" {
-                    continue;
-                }
-                let Some(opener_id) = target_info.opener_id.as_deref() else {
-                    continue;
-                };
-                if lineage.contains(opener_id) && lineage.insert(target_info.target_id.clone()) {
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let live_targets = target_infos
-            .iter()
-            .filter_map(|target_info| {
-                lineage
-                    .contains(&target_info.target_id)
-                    .then(|| target_info.target_id.clone())
-            })
-            .collect::<Vec<_>>();
+        let lineage = bounded_lane_seed_targets(seed_targets.iter().map(String::as_str))
+            .map_err(|error| self.map_lane_inventory_error(lane_id, error))?;
+        let live_targets = bounded_live_lane_targets(&result, lineage)
+            .map_err(|error| self.map_lane_inventory_error(lane_id, error))?;
 
         let mut state = self.state.lock().await;
         for target_id in &live_targets {
@@ -585,7 +1538,33 @@ impl HostTargetRouter {
                 .retain(|_, mapped_target| mapped_target != &target_id);
         }
         state.frame_owner.retain(|_, owner| owner != lane_id);
-        state.downloads.retain(|_, route| route.lane_id != lane_id);
+        drop(state);
+        let retired_guids = {
+            let mut downloads = self
+                .downloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = std::time::Instant::now();
+            downloads
+                .iter_mut()
+                .filter_map(|(guid, route)| {
+                    if route.lane_id == lane_id && route.cancel_requested_at.is_none() {
+                        route.cancel_requested_at = Some(now);
+                        Some(guid.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        for guid in &retired_guids {
+            if !cancel_download_best_effort(&self.conn, guid, "owning browser Lane closed").await {
+                self.download_cleanup_poisoned
+                    .store(true, Ordering::Release);
+                self.conn.shutdown().await;
+                break;
+            }
+        }
         true
     }
 
@@ -610,7 +1589,12 @@ impl HostTargetRouter {
     ///
     /// The exact target id comes from the nonce-correlated create/attach
     /// transaction. Never scrub a target which another Lane managed to claim.
-    async fn scrub_unowned_pending_target(&self, target_id: &str, session_id: Option<&str>) {
+    async fn scrub_unowned_pending_target(
+        &self,
+        target_id: &str,
+        session_id: Option<&str>,
+        expected_reservation: Option<&Arc<dyn TaskTabReservation>>,
+    ) {
         let mut state = self.state.lock().await;
         if state.ownership.owner(target_id).is_some()
             || state.retired_target_owner.contains_key(target_id)
@@ -620,6 +1604,14 @@ impl HostTargetRouter {
         state.quarantined.remove(target_id);
         state.cleanup_inflight.remove(target_id);
         state.lost_targets.remove(target_id);
+        if expected_reservation.is_some_and(|expected| {
+            state
+                .target_tab_reservations
+                .get(target_id)
+                .is_some_and(|current| Arc::ptr_eq(current, expected))
+        }) {
+            state.target_tab_reservations.remove(target_id);
+        }
         state
             .session_targets
             .retain(|session, mapped_target| {
@@ -638,8 +1630,26 @@ impl HostTargetRouter {
         target_id: &str,
         session_id: &str,
         frame_id: &str,
+        exact_absence_proven: bool,
+        expected_reservation: Option<&Arc<dyn TaskTabReservation>>,
     ) {
         let mut state = self.state.lock().await;
+        // A cancelled initial-Lane launch can be closed without Chromium ever
+        // delivering Target.targetDestroyed. Release the router's permit only
+        // after the exact close/absence proof, and only when it is still the
+        // same reservation captured by this cleanup generation. A late cleanup
+        // must never remove a replacement reservation stored under the same
+        // target key.
+        if exact_absence_proven
+            && expected_reservation.is_some_and(|expected| {
+                state
+                    .target_tab_reservations
+                    .get(target_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, expected))
+            })
+        {
+            state.target_tab_reservations.remove(target_id);
+        }
         state.quarantined.remove(target_id);
         state.cleanup_inflight.remove(target_id);
         state.lost_targets.remove(target_id);
@@ -654,13 +1664,30 @@ impl HostTargetRouter {
         self.cleanup_changed.notify_waiters();
     }
 
-    async fn release_target(&self, target_id: &str) {
+    async fn release_target(&self, target_id: &str, main_frame_id: Option<&str>) {
         let mut state = self.state.lock().await;
-        // Keep the target owner as an epoch-local tombstone until lane close.
-        // A popup attach can race just behind its opener's close event; target
-        // ids are not reused within a Chromium epoch, so retaining ownership is
-        // both safe and necessary for deterministic opener inheritance.
-        state.frame_owner.remove(target_id);
+        state.release_target_bookkeeping(target_id, main_frame_id);
+        self.cleanup_changed.notify_waiters();
+    }
+
+    async fn schedule_owned_target_cleanup(
+        self: &Arc<Self>,
+        lane_id: &str,
+        target_id: &str,
+    ) {
+        let start_worker = {
+            let mut state = self.state.lock().await;
+            state.start_cleanup(target_id)
+        };
+        match start_worker {
+            Ok(true) => self.cleanup_executor.submit(TargetCleanupJob::RouterTarget {
+                router: Arc::clone(self),
+                lane_id: lane_id.to_string(),
+                target_id: target_id.to_string(),
+            }),
+            Ok(false) => {}
+            Err(()) => self.cleanup_executor.poison(None, false),
+        }
     }
 
     async fn claim_frame(&self, lane_id: &str, frame_id: &str) {
@@ -687,7 +1714,25 @@ impl HostTargetRouter {
         frame_id: &str,
         guid: &str,
         suggested_filename: &str,
-    ) {
+    ) -> bool {
+        if guid.is_empty()
+            || guid.len() > crate::session::MAX_CDP_IDENTIFIER_BYTES
+            || suggested_filename.is_empty()
+            || suggested_filename.len() > MAX_DOWNLOAD_SUGGESTED_FILENAME_BYTES
+        {
+            return false;
+        }
+        if self.download_cleanup_poisoned.load(Ordering::Acquire) {
+            return false;
+        }
+        if !download_capacity_available(self.pending_download_count()) {
+            tracing::warn!(
+                %guid,
+                limit = MAX_PENDING_DOWNLOADS_PER_HOST,
+                "download routing capacity exhausted; admission denied"
+            );
+            return false;
+        }
         let lane_id = {
             let state = self.state.lock().await;
             state
@@ -708,26 +1753,70 @@ impl HostTargetRouter {
             tracing::warn!(
                 %guid,
                 %frame_id,
-                "download has no owned frame; leaving it quarantined in host staging"
+                "download has no owned frame; admission denied"
             );
-            return;
+            return false;
         };
-        let mut state = self.state.lock().await;
-        let download_dir = state
-            .lanes
-            .get(&lane_id)
-            .and_then(|route| route.download_dir.clone());
+        let (download_dir, download_scope, registration_id) = {
+            let state = self.state.lock().await;
+            let Some(route) = state.lanes.get(&lane_id) else {
+                return false;
+            };
+            (
+                route.download_dir.clone(),
+                route.task_download_reservation_scope.clone(),
+                route.registration_id,
+            )
+        };
         let Some(download_dir) = download_dir else {
-            return;
+            return false;
         };
-        state.downloads.insert(
+        let reservation: Arc<dyn TaskDownloadReservation> = match download_scope {
+            Some(scope) => match scope.reserve(guid).await {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    tracing::warn!(%guid, lane_id = %lane_id, %error, "task download admission denied");
+                    return false;
+                }
+            },
+            #[cfg(test)]
+            None => Arc::new(TestTaskDownloadReservation),
+            #[cfg(not(test))]
+            None => return false,
+        };
+        // Reservation can await a cross-Host authority. Revalidate that the
+        // exact Lane registration still owns this route before publication.
+        {
+            let state = self.state.lock().await;
+            if !state
+                .lanes
+                .get(&lane_id)
+                .is_some_and(|route| route.registration_id == registration_id)
+            {
+                return false;
+            }
+        }
+        let mut downloads = self
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Repeated GUIDs cannot replace an existing routing authority.  A
+        // duplicate (or a race at the hard cap) is denied fail-closed.
+        if downloads.contains_key(guid) || !download_capacity_available(downloads.len()) {
+            return false;
+        }
+        downloads.insert(
             guid.to_string(),
             PendingDownload {
                 lane_id,
                 download_dir,
                 suggested_filename: suggested_filename.to_string(),
+                created_at: std::time::Instant::now(),
+                cancel_requested_at: None,
+                reservation,
             },
         );
+        true
     }
 
     /// F21：把子帧 frameId 解析到其所属 lane。遍历各 lane 的活 [`TabRecord`]，查
@@ -760,7 +1849,9 @@ impl HostTargetRouter {
                 (managers, oopif_tables)
             };
             for table in oopif_tables {
-                let table = table.lock().await;
+                let table = table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 managers.extend(table.values().map(|entry| entry.manager.clone()));
             }
             for manager in managers {
@@ -774,11 +1865,70 @@ impl HostTargetRouter {
         None
     }
 
-    async fn finish_download(&self, guid: &str, source: &std::path::Path) -> bool {
-        let route = self.state.lock().await.downloads.remove(guid);
-        let Some(route) = route else {
+    fn update_download_progress(
+        &self,
+        guid: &str,
+        received_bytes: u64,
+        total_bytes: Option<u64>,
+    ) -> bool {
+        let downloads = self
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(route) = downloads.get(guid) else {
             return false;
         };
+        match route
+            .reservation
+            .update_progress(received_bytes, total_bytes)
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    %guid,
+                    lane_id = %route.lane_id,
+                    %error,
+                    "download crossed its task byte boundary; cancelling"
+                );
+                false
+            }
+        }
+    }
+
+    async fn finish_download(&self, guid: &str, source: &std::path::Path) -> bool {
+        let route = self
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(guid);
+        let Some(route) = route else {
+            self.cancel_pending_download(guid);
+            return false;
+        };
+        let actual_bytes = match std::fs::metadata(source) {
+            Ok(metadata) if metadata.is_file() => metadata.len(),
+            Ok(_) => {
+                self.cleanup_staged_download(guid, Some(source));
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(%guid, file = %source.display(), %error, "completed download metadata is unavailable");
+                self.cleanup_staged_download(guid, Some(source));
+                return false;
+            }
+        };
+        // Commit the task-lifetime completed byte/file charge before any move
+        // or cross-volume copy can publish the output into the task workspace.
+        if let Err(error) = route.reservation.complete(actual_bytes) {
+            tracing::warn!(
+                %guid,
+                lane_id = %route.lane_id,
+                %error,
+                "completed download exceeded its task boundary; staging output removed"
+            );
+            self.cleanup_staged_download(guid, Some(source));
+            return false;
+        }
         let filename = std::path::Path::new(&route.suggested_filename)
             .file_name()
             .and_then(|name| name.to_str())
@@ -793,6 +1943,7 @@ impl HostTargetRouter {
             // Workspaces can live on another Windows volume. Fall back to
             // copy+remove when an atomic cross-volume rename is unavailable.
             if let Err(copy_error) = std::fs::copy(source, &destination) {
+                let _ = std::fs::remove_file(&destination);
                 tracing::warn!(
                     %guid,
                     lane_id = %route.lane_id,
@@ -802,6 +1953,7 @@ impl HostTargetRouter {
                     %copy_error,
                     "failed to route completed download to its owning lane"
                 );
+                self.cleanup_staged_download(guid, Some(source));
                 return false;
             }
             if let Err(error) = std::fs::remove_file(source) {
@@ -811,6 +1963,7 @@ impl HostTargetRouter {
                     %error,
                     "routed download copied successfully but staging cleanup was deferred"
                 );
+                self.cleanup_staged_download(guid, Some(source));
             }
         }
         if let Err(error) = crate::download::write_motw(&destination) {
@@ -823,15 +1976,386 @@ impl HostTargetRouter {
         true
     }
 
+    fn pending_download_count(&self) -> usize {
+        self.downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Request cancellation for timed-out routes without releasing their task
+    /// reservations. A cancel acknowledgement is not a terminal proof.
+    fn expire_pending_downloads(&self) -> Vec<String> {
+        let now = std::time::Instant::now();
+        self.downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter_mut()
+            .filter_map(|(guid, route)| {
+                if route.cancel_requested_at.is_none()
+                    && now.saturating_duration_since(route.created_at) >= DOWNLOAD_ROUTE_TTL
+                {
+                    route.cancel_requested_at = Some(now);
+                    Some(guid.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn cancel_terminal_grace_expired(&self) -> bool {
+        let now = std::time::Instant::now();
+        let active_expired = self
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|route| {
+                route.cancel_requested_at.is_some_and(|requested_at| {
+                    now.saturating_duration_since(requested_at)
+                        >= DOWNLOAD_CANCEL_TERMINAL_GRACE
+                })
+            });
+        let rejected_expired = self
+            .rejected_downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|requested_at| {
+                now.saturating_duration_since(*requested_at)
+                    >= DOWNLOAD_CANCEL_TERMINAL_GRACE
+            });
+        if active_expired || rejected_expired {
+            self.download_cleanup_poisoned
+                .store(true, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cancel_pending_download(&self, guid: &str) {
+        self.downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(guid);
+        self.rejected_downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(guid);
+        self.cleanup_staged_download(guid, None);
+    }
+
+    /// Preserve cleanup and task-reservation authority for a rejected download
+    /// until Chromium publishes a terminal event or exact Host stop is proven.
+    fn quarantine_rejected_download(&self, guid: &str) -> bool {
+        let now = std::time::Instant::now();
+        if let Some(route) = self
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(guid)
+        {
+            route.cancel_requested_at.get_or_insert(now);
+            return true;
+        }
+        let mut rejected = self
+            .rejected_downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !rejected.contains_key(guid)
+            && rejected.len() >= MAX_QUARANTINED_DOWNLOADS_PER_HOST
+        {
+            self.download_cleanup_poisoned
+                .store(true, Ordering::Release);
+            return false;
+        }
+        rejected.entry(guid.to_string()).or_insert(now);
+        true
+    }
+
+    /// Fence every retained download after progress observability is lost.
+    /// Reservations remain held until exact Host/process stop.
+    fn poison_downloads_for_host_stop(&self) -> Vec<String> {
+        self.download_cleanup_poisoned
+            .store(true, Ordering::Release);
+        let now = std::time::Instant::now();
+        let mut guids = self
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter_mut()
+            .map(|(guid, route)| {
+                route.cancel_requested_at.get_or_insert(now);
+                guid.clone()
+            })
+            .collect::<Vec<_>>();
+        guids.extend(
+            self.rejected_downloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .keys()
+                .cloned(),
+        );
+        guids.sort();
+        guids.dedup();
+        guids
+    }
+
+    /// Final bounded drain. Callers must already hold exact Host/process-stop
+    /// proof; connection closure or cancel acknowledgement is insufficient.
+    fn finalize_downloads_after_host_stop(&self) -> Vec<String> {
+        let mut guids = self
+            .downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(guid, _)| guid)
+            .collect::<Vec<_>>();
+        guids.extend(
+            self.rejected_downloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .drain()
+                .map(|(guid, _)| guid),
+        );
+        guids.sort();
+        guids.dedup();
+        self.cleanup_staged_guids(&guids);
+        guids
+    }
+
+    fn download_cancel_requested(&self, guid: &str) -> bool {
+        self.downloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(guid)
+            .is_some_and(|route| route.cancel_requested_at.is_some())
+    }
+
+    fn cleanup_staged_guids(&self, guids: &[String]) {
+        for guid in guids {
+            self.cleanup_staged_download(guid, None);
+        }
+    }
+
+    fn cleanup_staged_download(&self, guid: &str, event_path: Option<&std::path::Path>) {
+        let Some(staging_dir) = self.download_staging_dir.as_deref() else {
+            return;
+        };
+        // Never remove an arbitrary CDP-supplied path.  Only a direct child of
+        // the configured Host staging directory is cleanup-authorized.
+        if let Some(path) = event_path
+            && path.parent() == Some(staging_dir)
+        {
+            self.cleanup_or_retain_staging_path(path.to_path_buf());
+        }
+        let Some(name) = safe_download_guid_component(guid) else {
+            return;
+        };
+        self.cleanup_or_retain_staging_path(staging_dir.join(name));
+        self.cleanup_or_retain_staging_path(staging_dir.join(format!("{name}.crdownload")));
+        self.cleanup_or_retain_staging_path(staging_dir.join(format!("{name}.tmp")));
+    }
+
+    fn cleanup_or_retain_staging_path(&self, path: PathBuf) -> bool {
+        if remove_download_staging_file(&path) {
+            self.download_cleanup_retries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&path);
+            return true;
+        }
+        let mut retries = self
+            .download_cleanup_retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if retries.len() < MAX_DOWNLOAD_CLEANUP_RETRIES || retries.contains(&path) {
+            retries.insert(path);
+        } else {
+            // The staging directory is a dedicated, durable cleanup boundary,
+            // so one generation is sufficient authority for any number of
+            // direct-child paths which no longer fit the exact retry table.
+            // The rotating scanner below eventually visits every child and a
+            // future Host resumes from the same on-disk directory after crash.
+            self.download_directory_cleanup_generation
+                .fetch_add(1, Ordering::AcqRel);
+            tracing::error!(
+                limit = MAX_DOWNLOAD_CLEANUP_RETRIES,
+                file = %path.display(),
+                "download staging exact retry table exhausted; promoted cleanup to directory authority"
+            );
+            self.download_cleanup_poisoned
+                .store(true, Ordering::Release);
+        }
+        false
+    }
+
+    fn retry_staging_cleanup(&self) -> usize {
+        let paths = self
+            .download_cleanup_retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in paths {
+            if remove_download_staging_file(&path) {
+                self.download_cleanup_retries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&path);
+            }
+        }
+        let exact = self.download_cleanup_retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        exact.saturating_add(usize::from(self.directory_cleanup_pending()))
+    }
+
+    /// Startup/periodic safety net for a prior process that died after Chrome
+    /// created an `allowAndName` file but before an event route existed. This is
+    /// a dedicated Host staging directory, never a user Downloads directory, so
+    /// every old direct-child file is cleanup-authorized. That directory-level
+    /// rule also survives process death when an exact in-memory path table was
+    /// saturated.
+    fn sweep_stale_staging_files(&self) {
+        self.sweep_stale_staging_files_at(std::time::SystemTime::now());
+    }
+
+    fn directory_cleanup_pending(&self) -> bool {
+        self.download_directory_cleanup_generation
+            .load(Ordering::Acquire)
+            > self
+                .download_directory_cleanup_completed_generation
+                .load(Ordering::Acquire)
+    }
+
+    fn sweep_stale_staging_files_at(&self, now: std::time::SystemTime) {
+        let Some(staging_dir) = self.download_staging_dir.as_deref() else {
+            return;
+        };
+        let mut scan = self
+            .download_staging_scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if scan.entries.is_none() {
+            let Ok(entries) = std::fs::read_dir(staging_dir) else {
+                return;
+            };
+            scan.entries = Some(entries);
+            scan.generation = self
+                .download_directory_cleanup_generation
+                .load(Ordering::Acquire);
+            scan.saw_remaining_artifact = false;
+        }
+
+        let mut completed_pass = false;
+        for _ in 0..MAX_DOWNLOAD_STAGING_SCAN_ENTRIES {
+            let next = scan
+                .entries
+                .as_mut()
+                .expect("download staging iterator initialized")
+                .next();
+            let entry = match next {
+                Some(Ok(entry)) => entry,
+                Some(Err(_)) => {
+                    if self.directory_cleanup_pending() {
+                        scan.saw_remaining_artifact = true;
+                    }
+                    continue;
+                }
+                None => {
+                    completed_pass = true;
+                    scan.entries = None;
+                    break;
+                }
+            };
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    if self.directory_cleanup_pending() {
+                        scan.saw_remaining_artifact = true;
+                    }
+                    continue;
+                }
+            };
+            if !metadata.is_file() {
+                if self.directory_cleanup_pending() {
+                    // A direct-child directory is not a Chromium artifact and
+                    // is never deleted recursively, but it keeps promoted
+                    // directory authority visibly pending rather than letting
+                    // a synthetic or corrupted staging entry hide cleanup.
+                    scan.saw_remaining_artifact = true;
+                }
+                continue;
+            }
+            let old_enough = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age >= DOWNLOAD_ROUTE_TTL);
+            if !old_enough {
+                if self.directory_cleanup_pending() {
+                    scan.saw_remaining_artifact = true;
+                }
+                continue;
+            }
+            if !self.cleanup_or_retain_staging_path(entry.path()) {
+                scan.saw_remaining_artifact = true;
+            }
+        }
+
+        if completed_pass {
+            let current_generation = self
+                .download_directory_cleanup_generation
+                .load(Ordering::Acquire);
+            if current_generation == scan.generation && !scan.saw_remaining_artifact {
+                self.download_directory_cleanup_completed_generation
+                    .store(current_generation, Ordering::Release);
+            }
+        }
+    }
+
     async fn handle_attached(self: &Arc<Self>, pending: PendingPage) {
-        let route = {
+        if self.cleanup_executor.ensure_accepting().is_err() {
+            return;
+        }
+        let (route, session_authority) = {
             let mut state = self.state.lock().await;
-            if state.lost_targets.contains(&pending.target_id) {
+            if state.lost_targets.contains_key(&pending.target_id) {
                 return;
             }
+            state.session_targets.retain(|session_id, mapped_target| {
+                mapped_target != &pending.target_id || session_id == &pending.session_id
+            });
             state
                 .session_targets
                 .insert(pending.session_id.clone(), pending.target_id.clone());
+            let correlated_create = pending
+                .target_url
+                .as_deref()
+                .and_then(|url| state.pending_create_urls.remove(url));
+            if let Some(reservation) = correlated_create
+                .as_ref()
+                .and_then(|intent| intent.reservation.as_ref())
+            {
+                state
+                    .target_tab_reservations
+                    .entry(pending.target_id.clone())
+                    .or_insert_with(|| Arc::clone(reservation));
+            }
+            let correlated_session_authority = correlated_create.as_ref().and_then(|intent| {
+                Some((
+                    intent.task_resource_key.clone()?,
+                    intent.lane_id.clone()?,
+                ))
+            });
+            let correlated_create_deadline = correlated_create.as_ref().map(|_| {
+                tokio::time::Instant::now() + PENDING_PAGE_CREATE_RECOVERY_TIMEOUT
+            });
             let prospective_owner = state
                 .ownership
                 .owner(&pending.target_id)
@@ -860,26 +2384,59 @@ impl HostTargetRouter {
                         .cloned()
                         .map(ProspectiveTargetOwner::Retired)
                 });
-            let cleanup_owner = match prospective_owner {
+            let cleanup_owner = match prospective_owner.as_ref() {
                 Some(ProspectiveTargetOwner::Active(lane_id))
                     if state
                         .lanes
-                        .get(&lane_id)
+                        .get(lane_id)
                         .is_some_and(|lane| lane.closing.load(Ordering::Acquire)) =>
                 {
-                    Some((lane_id, false))
+                    Some((lane_id.clone(), false))
                 }
-                Some(ProspectiveTargetOwner::Retired(lane_id)) => Some((lane_id, true)),
+                Some(ProspectiveTargetOwner::Retired(lane_id)) => {
+                    Some((lane_id.clone(), true))
+                }
                 _ => None,
             };
-            if let Some((lane_id, retired)) = cleanup_owner {
+            let route = if let Some((lane_id, retired)) = cleanup_owner {
                 if retired {
-                    state
+                    let target_already_retired = state
                         .retired_target_owner
-                        .insert(pending.target_id.clone(), lane_id.clone());
-                }
-                if !retired {
-                    if let Err(established_lane) = state
+                        .get(&pending.target_id)
+                        .is_some_and(|owner| owner == &lane_id);
+                    if !target_already_retired
+                        && state.retired_lane_target_count(&lane_id)
+                            >= MAX_TRACKED_TARGETS_PER_LANE
+                    {
+                        state.session_targets.remove(&pending.session_id);
+                        AttachedPageRoute::EscalateHost
+                    } else {
+                        state
+                            .retired_target_owner
+                            .insert(pending.target_id.clone(), lane_id.clone());
+                        if state.quarantine(pending.clone(), None).is_err() {
+                            state.session_targets.remove(&pending.session_id);
+                            AttachedPageRoute::EscalateHost
+                        } else {
+                            match state.start_cleanup(&pending.target_id) {
+                                Ok(start_worker) => AttachedPageRoute::CleanupOnly {
+                                    lane_id,
+                                    start_worker,
+                                },
+                                Err(()) => AttachedPageRoute::EscalateHost,
+                            }
+                        }
+                    }
+                } else {
+                    let target_already_owned =
+                        state.ownership.owner(&pending.target_id) == Some(lane_id.as_str());
+                    if !target_already_owned
+                        && state.active_lane_target_count(&lane_id)
+                            >= MAX_TRACKED_TARGETS_PER_LANE
+                    {
+                        state.session_targets.remove(&pending.session_id);
+                        AttachedPageRoute::EscalateHost
+                    } else if let Err(established_lane) = state
                         .ownership
                         .claim(lane_id.clone(), pending.target_id.clone())
                         && established_lane != lane_id
@@ -891,33 +2448,91 @@ impl HostTargetRouter {
                             established_lane = %established_lane,
                             "late target cleanup ownership conflicts with another Lane"
                         );
-                        state
-                            .quarantined
-                            .insert(pending.target_id.clone(), pending.clone());
-                        return;
+                        state.session_targets.remove(&pending.session_id);
+                        AttachedPageRoute::EscalateHost
+                    } else if state.quarantine(pending.clone(), None).is_err() {
+                        state.session_targets.remove(&pending.session_id);
+                        AttachedPageRoute::EscalateHost
+                    } else {
+                        match state.start_cleanup(&pending.target_id) {
+                            Ok(start_worker) => AttachedPageRoute::CleanupOnly {
+                                lane_id,
+                                start_worker,
+                            },
+                            Err(()) => AttachedPageRoute::EscalateHost,
+                        }
                     }
                 }
-                state
-                    .quarantined
-                    .insert(pending.target_id.clone(), pending.clone());
-                let start_worker = state.cleanup_inflight.insert(pending.target_id.clone());
-                AttachedPageRoute::CleanupOnly {
-                    lane_id,
-                    start_worker,
-                }
             } else {
-                let route = state.ownership.route_attached(
-                    &pending.target_id,
-                    pending.opener_target_id.as_deref(),
-                );
-                if route == TargetRoute::Quarantined {
-                    state
-                        .quarantined
-                        .insert(pending.target_id.clone(), pending.clone());
+                let active_owner = match prospective_owner.as_ref() {
+                    Some(ProspectiveTargetOwner::Active(lane_id)) => Some(lane_id.clone()),
+                    _ => None,
+                };
+                let target_already_owned = active_owner.as_deref().is_some_and(|lane_id| {
+                    state.ownership.owner(&pending.target_id) == Some(lane_id)
+                });
+                if let Some(lane_id) = active_owner.as_deref()
+                    && !target_already_owned
+                    && state.active_lane_target_count(lane_id) >= MAX_TRACKED_TARGETS_PER_LANE
+                {
+                    state.session_targets.remove(&pending.session_id);
+                    AttachedPageRoute::EscalateHost
+                } else {
+                    let route = state.ownership.route_attached(
+                        &pending.target_id,
+                        pending.opener_target_id.as_deref(),
+                    );
+                    if route == TargetRoute::Quarantined {
+                        let cleanup_after = correlated_create_deadline.unwrap_or_else(|| {
+                            tokio::time::Instant::now() + QUARANTINED_TARGET_GRACE
+                        });
+                        if state
+                            .quarantine(pending.clone(), Some(cleanup_after))
+                            .is_err()
+                        {
+                            state.session_targets.remove(&pending.session_id);
+                            AttachedPageRoute::EscalateHost
+                        } else {
+                            AttachedPageRoute::Routed(route)
+                        }
+                    } else {
+                        AttachedPageRoute::Routed(route)
+                    }
                 }
-                AttachedPageRoute::Routed(route)
-            }
+            };
+            let routed_session_authority = match &route {
+                AttachedPageRoute::Routed(
+                    TargetRoute::Owned(lane_id) | TargetRoute::Inherited { lane_id, .. },
+                )
+                | AttachedPageRoute::CleanupOnly { lane_id, .. } => state
+                    .lanes
+                    .get(lane_id)
+                    .map(|lane| (lane.task_resource_key.clone(), lane_id.clone())),
+                AttachedPageRoute::Routed(TargetRoute::Quarantined)
+                | AttachedPageRoute::EscalateHost => None,
+            };
+            (
+                route,
+                correlated_session_authority.or(routed_session_authority),
+            )
         };
+        if let Some((task_resource_key, lane_id)) = session_authority
+            && let Err(error) = self.conn.registry().claim_task_session_authority(
+                &pending.session_id,
+                &task_resource_key,
+                &lane_id,
+            )
+        {
+            tracing::error!(
+                target: "nomi_browser_engine::host",
+                lane_id = %lane_id,
+                target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                %error,
+                "trusted page-session authority conflicted; escalating exact Host cleanup"
+            );
+            self.cleanup_executor.poison(None, false);
+            return;
+        }
         match route {
             AttachedPageRoute::Routed(
                 TargetRoute::Owned(lane_id) | TargetRoute::Inherited { lane_id, .. },
@@ -953,23 +2568,48 @@ impl HostTargetRouter {
                     });
                 }
             }
+            AttachedPageRoute::EscalateHost => {
+                tracing::error!(
+                    target: "nomi_browser_engine::host",
+                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                    quarantine_base_limit = MAX_QUARANTINED_TARGETS,
+                    cleanup_limit = MAX_ROUTER_CLEANUP_INFLIGHT,
+                    "Host target router state saturated or ownership conflicted; escalating to authoritative Host cleanup"
+                );
+                self.cleanup_executor.poison(None, false);
+            }
         }
     }
 
-    async fn retry_cleanup_only_target(&self, lane_id: LaneId, target_id: String) {
+    async fn retry_cleanup_only_target(&self, lane_id: Option<LaneId>, target_id: String) {
         let mut attempt = 0usize;
         loop {
             attempt += 1;
             match close_target_or_confirm_absent(&self.conn, &target_id).await {
                 Ok(()) => {
+                    let active_owned = {
+                        let state = self.state.lock().await;
+                        lane_id.as_deref().is_some_and(|lane_id| {
+                            state.ownership.owner(&target_id) == Some(lane_id)
+                                && state.lanes.contains_key(lane_id)
+                        })
+                    };
+                    if active_owned {
+                        self.handle_top_level_target_loss(
+                            Some(target_id.clone()),
+                            None,
+                            TopLevelTargetLoss::Destroyed,
+                        )
+                        .await;
+                    }
                     let mut state = self.state.lock().await;
-                    if state.ownership.owner(&target_id) == Some(lane_id.as_str())
-                        && state.lanes.contains_key(&lane_id)
-                    {
-                        state.lost_targets.insert(target_id.clone());
+                    if !state.retired_target_owner.contains_key(&target_id) {
+                        state.ownership.release(&target_id);
+                        state.lost_targets.remove(&target_id);
                     }
                     state.quarantined.remove(&target_id);
                     state.cleanup_inflight.remove(&target_id);
+                    state.target_tab_reservations.remove(&target_id);
                     state
                         .session_targets
                         .retain(|_, mapped_target| mapped_target != &target_id);
@@ -988,7 +2628,7 @@ impl HostTargetRouter {
                     self.cleanup_changed.notify_waiters();
                     tracing::warn!(
                         target: "nomi_browser_engine::host",
-                        lane_id = %lane_id,
+                        lane_id = ?lane_id,
                         target_id_suffix = %cdp_id_suffix(&target_id),
                         %error,
                         attempts = attempt,
@@ -1000,7 +2640,7 @@ impl HostTargetRouter {
                     if attempt == 20 || attempt % 60 == 0 {
                         tracing::warn!(
                             target: "nomi_browser_engine::host",
-                            lane_id = %lane_id,
+                            lane_id = ?lane_id,
                             target_id_suffix = %cdp_id_suffix(&target_id),
                             %error,
                             attempts = attempt,
@@ -1010,6 +2650,77 @@ impl HostTargetRouter {
                     tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             }
+        }
+    }
+
+    async fn sweep_transient_target_state(self: &Arc<Self>) {
+        if self.cleanup_executor.ensure_accepting().is_err() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let (expired_quarantine, saturated) = {
+            let mut state = self.state.lock().await;
+
+            state
+                .pending_create_urls
+                .retain(|_, intent| intent.expires_at > now);
+
+            let expired_lost = state
+                .lost_targets
+                .iter()
+                .filter_map(|(target_id, expires_at)| {
+                    (*expires_at <= now).then(|| target_id.clone())
+                })
+                .collect::<Vec<_>>();
+            for target_id in expired_lost {
+                state.lost_targets.remove(&target_id);
+                if !state.retired_target_owner.contains_key(&target_id) {
+                    state.ownership.release(&target_id);
+                }
+            }
+
+            let expired = state
+                .quarantined
+                .iter()
+                .filter_map(|(target_id, page)| {
+                    page.cleanup_after
+                        .is_some_and(|deadline| deadline <= now)
+                        .then(|| target_id.clone())
+                })
+                .collect::<Vec<_>>();
+            let mut workers = Vec::with_capacity(expired.len());
+            let mut saturated = false;
+            for target_id in expired {
+                if let Some(page) = state.quarantined.get_mut(&target_id) {
+                    page.cleanup_after = None;
+                }
+                match state.start_cleanup(&target_id) {
+                    Ok(true) => workers.push(target_id),
+                    Ok(false) => {}
+                    Err(()) => {
+                        saturated = true;
+                        break;
+                    }
+                }
+            }
+            (workers, saturated)
+        };
+
+        if saturated {
+            tracing::error!(
+                target: "nomi_browser_engine::host",
+                cleanup_limit = MAX_ROUTER_CLEANUP_INFLIGHT,
+                "expired target quarantine saturated cleanup bookkeeping; escalating Host cleanup"
+            );
+            self.cleanup_executor.poison(None, false);
+            return;
+        }
+        for target_id in expired_quarantine {
+            self.cleanup_executor
+                .submit(TargetCleanupJob::QuarantinedTarget {
+                    router: Arc::clone(self),
+                    target_id,
+                });
         }
     }
 
@@ -1043,52 +2754,22 @@ impl HostTargetRouter {
     ) -> Result<Vec<String>, BrowserError> {
         let seed_targets = {
             let state = self.state.lock().await;
-            state
-                .retired_target_owner
-                .iter()
-                .filter_map(|(target_id, owner)| {
-                    (owner == lane_id).then_some(target_id.clone())
-                })
-                .collect::<HashSet<_>>()
-        };
+            bounded_lane_seed_targets(state.retired_target_owner.iter().filter_map(
+                |(target_id, owner)| (owner == lane_id).then_some(target_id.as_str()),
+            ))
+        }
+        .map_err(|error| self.map_lane_inventory_error(lane_id, error))?;
         let result = self
             .conn
             .send::<GetTargetsParams>(ROOT_SESSION, &GetTargetsParams::default())
             .await
             .map_err(map_transport_err)?;
-        let target_infos = validated_target_inventory(&result)
-            .map_err(|message| BrowserError::Other(message.into()))?;
-
-        let mut lineage = seed_targets;
-        loop {
-            let mut changed = false;
-            for target_info in &target_infos {
-                if target_info.target_type != "page" {
-                    continue;
-                }
-                let Some(opener_id) = target_info.opener_id.as_deref() else {
-                    continue;
-                };
-                if lineage.contains(opener_id) && lineage.insert(target_info.target_id.clone()) {
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let live_targets = target_infos
-            .iter()
-            .filter_map(|target_info| {
-                lineage
-                    .contains(&target_info.target_id)
-                    .then(|| target_info.target_id.clone())
-            })
-            .collect::<Vec<_>>();
-        let workers = {
+        let live_targets = bounded_live_lane_targets(&result, seed_targets)
+            .map_err(|error| self.map_lane_inventory_error(lane_id, error))?;
+        let (workers, saturated) = {
             let mut state = self.state.lock().await;
             let mut workers = Vec::new();
+            let mut saturated = false;
             for target_id in &live_targets {
                 if let Some(active_owner) = state.ownership.owner(target_id)
                     && active_owner != lane_id
@@ -1100,12 +2781,21 @@ impl HostTargetRouter {
                 state
                     .retired_target_owner
                     .insert(target_id.clone(), lane_id.to_string());
-                if state.cleanup_inflight.insert(target_id.clone()) {
-                    workers.push(target_id.clone());
+                match state.start_cleanup(target_id) {
+                    Ok(true) => workers.push(target_id.clone()),
+                    Ok(false) => {}
+                    Err(()) => {
+                        saturated = true;
+                        break;
+                    }
                 }
             }
-            workers
+            (workers, saturated)
         };
+        if saturated {
+            self.cleanup_executor.poison(None, false);
+            return Err(BrowserError::SessionLost { recoverable: false });
+        }
         for target_id in workers {
             self.cleanup_executor.submit(TargetCleanupJob::RouterTarget {
                 router: Arc::clone(self),
@@ -1160,6 +2850,7 @@ impl HostTargetRouter {
             if live_targets.is_empty() {
                 consecutive_empty += 1;
                 if consecutive_empty == 2 {
+                    self.clear_retired_lane_bookkeeping(lane_id).await;
                     return Ok(());
                 }
             } else {
@@ -1171,22 +2862,184 @@ impl HostTargetRouter {
         ))
     }
 
-    async fn arm_owned_page(&self, lane_id: LaneId, pending: PendingPage) {
+    async fn clear_retired_lane_bookkeeping(&self, lane_id: &str) {
+        let mut state = self.state.lock().await;
+        let targets = state
+            .retired_target_owner
+            .iter()
+            .filter_map(|(target_id, owner)| (owner == lane_id).then(|| target_id.clone()))
+            .collect::<Vec<_>>();
+        for target_id in &targets {
+            state.retired_target_owner.remove(target_id);
+            state.ownership.release(target_id);
+            state.quarantined.remove(target_id);
+            state.cleanup_inflight.remove(target_id);
+            state.lost_targets.remove(target_id);
+            state.target_tab_reservations.remove(target_id);
+        }
+        state
+            .session_targets
+            .retain(|_, target_id| !targets.contains(target_id));
+        drop(state);
+        self.cleanup_changed.notify_waiters();
+    }
+
+    /// Publish a fully armed page under the Host router lock. This is the one
+    /// atomic admission point for both popup discovery and caller-created tabs:
+    /// sibling Lanes with the same task key are counted before the record is
+    /// inserted, so concurrent Lanes cannot each pass a stale pre-check.
+    async fn publish_armed_page(
+        self: &Arc<Self>,
+        lane_id: &str,
+        pending: PendingPage,
+        record: TabRecord,
+    ) -> OwnedPagePublish {
+        let mut state = self.state.lock().await;
+        if state.cleanup_inflight.contains(&pending.target_id) {
+            abort_tab_record(&record);
+            return OwnedPagePublish::RejectedCapacity;
+        }
+        if state.lost_targets.contains_key(&pending.target_id)
+            || state.ownership.owner(&pending.target_id) != Some(lane_id)
+        {
+            abort_tab_record(&record);
+            return OwnedPagePublish::RejectedState;
+        }
+        let Some((tabs, closing, task_resource_key, max_task_tabs)) = state
+            .lanes
+            .get(lane_id)
+            .map(|route| {
+                (
+                    route.tabs.clone(),
+                    route.closing.clone(),
+                    route.task_resource_key.clone(),
+                    route.max_task_tabs,
+                )
+            })
+        else {
+            abort_tab_record(&record);
+            return OwnedPagePublish::RejectedState;
+        };
+        if closing.load(Ordering::Acquire) {
+            abort_tab_record(&record);
+            return OwnedPagePublish::RejectedState;
+        }
+        let Some(tabs) = tabs.upgrade() else {
+            abort_tab_record(&record);
+            return OwnedPagePublish::RejectedState;
+        };
+
+        let sibling_task_tabs = state
+            .task_tab_count_excluding_lane(&task_resource_key, lane_id)
+            .await;
+        let effective_task_limit =
+            state.effective_task_tab_limit(&task_resource_key, max_task_tabs);
+        let mut tabs = tabs.lock().await;
+        if tabs.contains_key(&pending.target_id) {
+            abort_tab_record(&record);
+            return OwnedPagePublish::AlreadyPresent;
+        }
+        let task_tabs_after_insert = sibling_task_tabs
+            .saturating_add(tabs.len())
+            .saturating_add(1);
+        if !tab_capacity_available(tabs.len())
+            || task_tabs_after_insert > effective_task_limit
+        {
+            abort_tab_record(&record);
+            let quarantined = state.quarantine(pending.clone(), None);
+            let start_worker = quarantined
+                .as_ref()
+                .map(|()| state.start_cleanup(&pending.target_id))
+                .unwrap_or(Err(()));
+            drop(tabs);
+            drop(state);
+
+            tracing::warn!(
+                target: "nomi_browser_engine::host",
+                lane_id = %lane_id,
+                lane_tab_limit = MAX_TABS_PER_LANE,
+                task_tab_count = task_tabs_after_insert,
+                task_tab_limit = effective_task_limit,
+                target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                "closed excess top-level target to preserve Lane and task tab bounds"
+            );
+            match start_worker {
+                Ok(true) => self.cleanup_executor.submit(TargetCleanupJob::RouterTarget {
+                    router: Arc::clone(self),
+                    lane_id: lane_id.to_string(),
+                    target_id: pending.target_id,
+                }),
+                Ok(false) => {}
+                Err(()) => self.cleanup_executor.poison(None, false),
+            }
+            return OwnedPagePublish::RejectedCapacity;
+        }
+
+        let main_frame_id = record.main_frame_id.clone();
+        tabs.insert(pending.target_id.clone(), record);
+        drop(tabs);
+        drop(state);
+        self.claim_frame(lane_id, &main_frame_id).await;
+        OwnedPagePublish::Inserted
+    }
+
+    async fn arm_owned_page(self: &Arc<Self>, lane_id: LaneId, pending: PendingPage) {
         let route = {
             let state = self.state.lock().await;
-            if state.lost_targets.contains(&pending.target_id) {
+            if state.lost_targets.contains_key(&pending.target_id) {
                 return;
             }
             state
                 .lanes
                 .get(&lane_id)
-                .map(|route| (route.tabs.clone(), route.closing.clone()))
+                .map(|route| {
+                    (
+                        route.tabs.clone(),
+                        route.closing.clone(),
+                        route.task_resource_key.clone(),
+                        route.task_tab_reservation_scope.clone(),
+                        state
+                            .target_tab_reservations
+                            .get(&pending.target_id)
+                            .cloned(),
+                    )
+                })
         };
-        let Some((tabs, closing)) = route else {
+        let Some((
+            tabs,
+            closing,
+            task_resource_key,
+            reservation_scope,
+            existing_reservation,
+        )) = route
+        else {
             return;
         };
         if closing.load(Ordering::Acquire) {
             return;
+        }
+        match self.conn.registry().claim_task_session_authority(
+            &pending.session_id,
+            &task_resource_key,
+            &lane_id,
+        ) {
+            Ok(TaskSessionAdmission::Admitted) => {}
+            Ok(TaskSessionAdmission::PendingAuthority | TaskSessionAdmission::Rejected) => {
+                self.schedule_owned_target_cleanup(&lane_id, &pending.target_id)
+                    .await;
+                return;
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "nomi_browser_engine::host",
+                    lane_id = %lane_id,
+                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                    %error,
+                    "owned page session could not acquire trusted task/Lane authority"
+                );
+                self.cleanup_executor.poison(None, false);
+                return;
+            }
         }
         let Some(tabs) = tabs.upgrade() else {
             return;
@@ -1195,6 +3048,57 @@ impl HostTargetRouter {
             return;
         }
 
+        let reservation = match (existing_reservation, reservation_scope) {
+            (Some(reservation), _) => Some(reservation),
+            (None, Some(scope)) => {
+                let reservation = match scope
+                    .authority
+                    .reserve(
+                        &scope.task_resource_key,
+                        &scope.lane_id,
+                        &pending.target_id,
+                    )
+                    .await
+                {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "nomi_browser_engine::host",
+                            lane_id = %lane_id,
+                            target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                            %error,
+                            "task-wide tab reservation rejected a top-level target"
+                        );
+                        self.schedule_owned_target_cleanup(&lane_id, &pending.target_id)
+                            .await;
+                        return;
+                    }
+                };
+                let mut state = self.state.lock().await;
+                let route_is_current = state
+                    .lanes
+                    .get(&lane_id)
+                    .is_some_and(|route| {
+                        !route.closing.load(Ordering::Acquire)
+                            && state.ownership.owner(&pending.target_id) == Some(lane_id.as_str())
+                    });
+                if !route_is_current || state.lost_targets.contains_key(&pending.target_id) {
+                    drop(state);
+                    self.schedule_owned_target_cleanup(&lane_id, &pending.target_id)
+                        .await;
+                    return;
+                }
+                Some(
+                    state
+                        .target_tab_reservations
+                        .entry(pending.target_id.clone())
+                        .or_insert(reservation)
+                        .clone(),
+                )
+            }
+            (None, None) => None,
+        };
+
         let deadline = tokio::time::Instant::now() + OOPIF_SESSION_REGISTER_TIMEOUT;
         while !self.conn.registry().has_session(&pending.session_id) {
             if closing.load(Ordering::Acquire) || tokio::time::Instant::now() >= deadline {
@@ -1202,32 +3106,27 @@ impl HostTargetRouter {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        match arm_tab(&self.conn, &pending.target_id, &pending.session_id).await {
+        match arm_tab(
+            &self.conn,
+            &pending.target_id,
+            &pending.session_id,
+            reservation,
+        )
+        .await
+        {
             Ok(record) => {
-                // Serialize the final insert with crash marking. If the target
-                // crashed while `arm_tab` awaited CDP, the crash path wins and
-                // this dead record is never published into the Lane.
-                let state = self.state.lock().await;
-                if state.lost_targets.contains(&pending.target_id) {
-                    abort_tab_record(&record);
-                    return;
+                if self
+                    .publish_armed_page(&lane_id, pending.clone(), record)
+                    .await
+                    == OwnedPagePublish::Inserted
+                {
+                    tracing::info!(
+                        target: "nomi_browser_engine::host",
+                        lane_id = %lane_id,
+                        target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                        "top-level target assigned to browser lane"
+                    );
                 }
-                let mut tabs = tabs.lock().await;
-                if closing.load(Ordering::Acquire) || tabs.contains_key(&pending.target_id) {
-                    abort_tab_record(&record);
-                    return;
-                }
-                let main_frame_id = record.main_frame_id.clone();
-                tabs.insert(pending.target_id.clone(), record);
-                drop(tabs);
-                drop(state);
-                self.claim_frame(&lane_id, &main_frame_id).await;
-                tracing::info!(
-                    target: "nomi_browser_engine::host",
-                    lane_id = %lane_id,
-                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
-                    "top-level target assigned to browser lane"
-                );
             }
             Err(error) => {
                 tracing::warn!(
@@ -1237,6 +3136,8 @@ impl HostTargetRouter {
                     %error,
                     "failed to arm lane-owned target"
                 );
+                self.schedule_owned_target_cleanup(&lane_id, &pending.target_id)
+                    .await;
             }
         }
     }
@@ -1245,8 +3146,8 @@ impl HostTargetRouter {
     ///
     /// Ownership is resolved before touching Lane state, so a renderer crash
     /// or detach can never fan out into another Lane. The target id remains an
-    /// epoch-local tombstone in `TargetOwnership` so a late popup attach cannot
-    /// escape its original owner. Only sessions recorded by this router are
+    /// short reorder tombstone in `TargetOwnership` so an in-flight arm cannot
+    /// resurrect the dead target. Only sessions recorded by this router are
     /// eligible for session-based loss, which excludes worker and OOPIF
     /// sessions from the top-level Lane registry.
     async fn handle_top_level_target_loss(
@@ -1276,10 +3177,18 @@ impl HostTargetRouter {
             if !tracked_top_level {
                 return;
             }
-            if active_owner.is_some() && !state.lost_targets.insert(target_id.clone()) {
-                return;
+            if active_owner.is_some() {
+                let expires_at =
+                    tokio::time::Instant::now() + LOST_TARGET_TOMBSTONE_GRACE;
+                if !state.mark_lost(&target_id, expires_at) {
+                    return;
+                }
             }
             state.quarantined.remove(&target_id);
+            // Only Target.targetDestroyed is a physical-page terminal proof.
+            // Session detach/crash events are routed through exact target
+            // cleanup and never reach this release point directly.
+            state.target_tab_reservations.remove(&target_id);
             if state.cleanup_inflight.remove(&target_id) {
                 self.cleanup_changed.notify_waiters();
             }
@@ -1341,6 +3250,84 @@ impl HostTargetRouter {
         );
     }
 
+    /// A renderer/session loss is not proof that its top-level Target ceased
+    /// to exist. Preserve the TabRecord, ownership and task reservation, then
+    /// submit exactly one bounded close/absence job. Repeated detach/crash
+    /// events coalesce through `cleanup_inflight`.
+    async fn handle_top_level_session_loss(
+        self: &Arc<Self>,
+        target_id: Option<String>,
+        session_id: Option<String>,
+        loss: TopLevelTargetLoss,
+    ) {
+        let cleanup = {
+            let mut state = self.state.lock().await;
+            let target_id = target_id.or_else(|| {
+                session_id
+                    .as_deref()
+                    .and_then(|session_id| state.session_targets.get(session_id).cloned())
+            });
+            let Some(target_id) = target_id else {
+                return;
+            };
+            // `Target.targetDestroyed` is stronger, physical terminal proof.
+            // Its short-lived tombstone must suppress a later queued
+            // detach/crash event; otherwise the stale event could mint a new
+            // cleanup job for an already absent target until ownership's
+            // grace-period sweep runs.
+            if state.lost_targets.contains_key(&target_id) {
+                return;
+            }
+            let lane_id = state
+                .ownership
+                .owner(&target_id)
+                .map(str::to_owned)
+                .or_else(|| state.retired_target_owner.get(&target_id).cloned());
+            let tracked_top_level = lane_id.is_some()
+                || state.quarantined.contains_key(&target_id)
+                || state.target_tab_reservations.contains_key(&target_id)
+                || state
+                    .session_targets
+                    .values()
+                    .any(|mapped_target| mapped_target == &target_id);
+            if !tracked_top_level {
+                return;
+            }
+            match state.start_cleanup(&target_id) {
+                Ok(true) => Some((target_id, lane_id)),
+                Ok(false) => None,
+                Err(()) => {
+                    drop(state);
+                    self.cleanup_executor.poison(None, false);
+                    return;
+                }
+            }
+        };
+
+        if let Some((target_id, lane_id)) = cleanup {
+            tracing::warn!(
+                target: "nomi_browser_engine::host",
+                lane_id = ?lane_id,
+                target_id_suffix = %cdp_id_suffix(&target_id),
+                loss = loss.event_name(),
+                "top-level target session was lost; retaining its task slot until exact target cleanup"
+            );
+            match lane_id {
+                Some(lane_id) => self.cleanup_executor.submit(TargetCleanupJob::RouterTarget {
+                    router: Arc::clone(self),
+                    lane_id,
+                    target_id,
+                }),
+                None => self
+                    .cleanup_executor
+                    .submit(TargetCleanupJob::QuarantinedTarget {
+                        router: Arc::clone(self),
+                        target_id,
+                    }),
+            }
+        }
+    }
+
     fn spawn(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let router = self.clone();
         let mut barrier_rx = self
@@ -1361,10 +3348,18 @@ impl HostTargetRouter {
         let mut crashed_rx = router
             .conn
             .subscribe_reliable(EventTargetCrashed::IDENTIFIER, None);
+        let mut inspector_detached_rx = router
+            .conn
+            .subscribe_reliable("Inspector.detached", None);
         tokio::spawn(async move {
+            let mut state_sweep = tokio::time::interval(ROUTER_STATE_SWEEP_INTERVAL);
+            state_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     biased;
+                    _ = state_sweep.tick() => {
+                        router.sweep_transient_target_state().await;
+                    }
                     event = attached_rx.recv() => {
                         let Some(event) = event else {
                             break;
@@ -1383,6 +3378,7 @@ impl HostTargetRouter {
                                         .target_info
                                         .opener_id
                                         .map(String::from),
+                                    target_url: Some(String::from(attached.target_info.url)),
                                 })
                                 .await;
                         }
@@ -1397,7 +3393,7 @@ impl HostTargetRouter {
                             continue;
                         };
                         router
-                            .handle_top_level_target_loss(
+                            .handle_top_level_session_loss(
                                 None,
                                 Some(String::from(detached.session_id)),
                                 TopLevelTargetLoss::Detached,
@@ -1431,10 +3427,25 @@ impl HostTargetRouter {
                             continue;
                         };
                         router
-                            .handle_top_level_target_loss(
+                            .handle_top_level_session_loss(
                                 Some(String::from(crashed.target_id)),
                                 None,
                                 TopLevelTargetLoss::Crashed,
+                            )
+                            .await;
+                    }
+                    event = inspector_detached_rx.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        if event.session_id.is_empty() {
+                            continue;
+                        }
+                        router
+                            .handle_top_level_session_loss(
+                                None,
+                                Some(event.session_id),
+                                TopLevelTargetLoss::Detached,
                             )
                             .await;
                     }
@@ -1450,10 +3461,66 @@ impl HostTargetRouter {
     }
 }
 
+fn safe_download_guid_component(guid: &str) -> Option<&str> {
+    let mut components = std::path::Path::new(guid).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None)
+            if !guid.is_empty()
+                && guid.len() <= 128
+                && !guid.contains('/')
+                && !guid.contains('\\')
+                && name.to_str() == Some(guid) =>
+        {
+            Some(guid)
+        }
+        _ => None,
+    }
+}
+
+fn is_chromium_download_guid_name(name: &str) -> bool {
+    let guid = name
+        .strip_suffix(".crdownload")
+        .or_else(|| name.strip_suffix(".tmp"))
+        .unwrap_or(name);
+    if guid.len() != 36 {
+        return false;
+    }
+    guid.bytes().enumerate().all(|(index, byte)| match index {
+        8 | 13 | 18 | 23 => byte == b'-',
+        _ => byte.is_ascii_hexdigit(),
+    })
+}
+
+fn remove_download_staging_file(path: &std::path::Path) -> bool {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            tracing::debug!(
+                file = %path.display(),
+                "removed browser download staging artifact"
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            tracing::warn!(
+                file = %path.display(),
+                %error,
+                "failed to remove browser download staging artifact; retained for retry"
+            );
+            false
+        }
+    }
+}
+
 fn abort_tab_record(record: &TabRecord) {
     record._inject_loop.abort();
     record._oopif_loop.abort();
     record._debug_loop.abort();
+    record
+        .oopif_managers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
 }
 
 /// Return a short diagnostic suffix without ever emitting a short CDP id in full.
@@ -1519,6 +3586,86 @@ fn tab_handles(record: &TabRecord) -> TabHandles {
     }
 }
 
+/// RAII authority for Host initialization after the process has launched but
+/// before all spawned runtime loops have been committed into `CdpHostRuntime`.
+///
+/// Tokio detaches a task when its JoinHandle is dropped. Cancellation of
+/// `from_launched` therefore transfers every fixed per-Host handle together
+/// with the exact process/profile cleanup authority into the existing bounded
+/// cleanup relay. The relay aborts and joins the tasks before publishing exact
+/// cleanup completion.
+struct PendingCdpHostRuntime {
+    cleanup: Arc<DurableProcessCleanup>,
+    attach_loop: Option<tokio::task::JoinHandle<()>>,
+    target_router_loop: Option<tokio::task::JoinHandle<()>>,
+    download_loop: Option<tokio::task::JoinHandle<()>>,
+    firewall_runtime: Option<FirewallLoopRuntime>,
+    armed: bool,
+}
+
+impl PendingCdpHostRuntime {
+    fn new(cleanup: Arc<DurableProcessCleanup>) -> Self {
+        Self {
+            cleanup,
+            attach_loop: None,
+            target_router_loop: None,
+            download_loop: None,
+            firewall_runtime: None,
+            armed: true,
+        }
+    }
+
+    fn commit(
+        mut self,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+        Option<tokio::task::JoinHandle<()>>,
+        FirewallLoopRuntime,
+    ) {
+        self.armed = false;
+        (
+            self.attach_loop
+                .take()
+                .expect("published CDP Host owns an attach loop"),
+            self.target_router_loop
+                .take()
+                .expect("published CDP Host owns a target-router loop"),
+            self.download_loop.take(),
+            self.firewall_runtime
+                .take()
+                .expect("published CDP Host owns a firewall runtime"),
+        )
+    }
+}
+
+impl Drop for PendingCdpHostRuntime {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut tasks = Vec::with_capacity(4);
+        if let Some(handle) = self.attach_loop.take() {
+            tasks.push(handle);
+        }
+        if let Some(handle) = self.target_router_loop.take() {
+            tasks.push(handle);
+        }
+        if let Some(handle) = self.download_loop.take() {
+            tasks.push(handle);
+        }
+        if let Some(runtime) = self.firewall_runtime.take()
+            && let Some(handle) = runtime.into_pending_cleanup_handle()
+        {
+            tasks.push(handle);
+        }
+        for task in &tasks {
+            task.abort();
+        }
+        self.cleanup.hand_off_with_runtime_tasks(tasks);
+    }
+}
+
 /// Process/transport lifetime shared by all lanes on one managed host.
 pub(crate) struct CdpHostRuntime {
     conn: Connection,
@@ -1531,15 +3678,20 @@ pub(crate) struct CdpHostRuntime {
     /// It is process-local telemetry only and never enters browser APIs,
     /// capability payloads, CDP routing, or profile metadata.
     root_process_id: Option<u32>,
+    /// Start time captured from the exact managed-child ownership marker.
+    /// Pairing it with the pid prevents telemetry from charging an unrelated
+    /// process after operating-system pid reuse.
+    root_process_started_at_epoch_seconds: u64,
+    root_process_platform_start_key: u64,
+    /// Watches the sticky transport-fatal signal and authoritatively retires
+    /// the Chromium tree even when no caller issues another operation.
+    fatal_supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     attach_loop: tokio::task::JoinHandle<()>,
     target_router_loop: tokio::task::JoinHandle<()>,
     download_loop: Option<tokio::task::JoinHandle<()>>,
-    /// 出口防火墙循环的 abort 句柄（`JoinHandle` 本体归 `firewall_watchdog` 所有，
-    /// 供其监视非 abort 死亡）。shutdown/Drop 经此主动 abort 循环。
-    firewall_loop: tokio::task::AbortHandle,
-    /// 防火墙 watchdog（[`spawn_firewall_watchdog`]）：防火墙任务意外死亡（panic
-    /// 逃出循环）→ fail 整条 CDP 连接（fail-closed，恢复 = 重启 host）。
-    firewall_watchdog: tokio::task::JoinHandle<()>,
+    /// Host-owned firewall cancellation, registered fixed worker tree, and
+    /// watchdog. Explicit shutdown cancels and bounded-joins it; Drop aborts it.
+    firewall_runtime: FirewallLoopRuntime,
     router: Arc<HostTargetRouter>,
     download_dir: Option<String>,
     firewall_config: crate::firewall::FirewallConfig,
@@ -1556,6 +3708,7 @@ impl CdpHostRuntime {
     pub(crate) async fn launch_in_mode(
         mut config: EngineConfig,
         requested_mode: BrowserHostLaunchMode,
+        host_cleanup_lease: HostCleanupLease,
     ) -> Result<Arc<Self>, BrowserError> {
         config.headful = requested_mode.is_headful();
         let chrome_path = crate::acquire::resolve_chrome_path_with_source(
@@ -1592,6 +3745,7 @@ impl CdpHostRuntime {
             &launch_config,
             effective_mode == BrowserHostLaunchMode::Headless,
             cleanup_user_data_dir,
+            Some(host_cleanup_lease),
         )
         .await?;
         // `Launched` now carries the only profile-cleanup authority. Do not
@@ -1626,56 +3780,66 @@ impl CdpHostRuntime {
             transport,
             ownership_token,
             launched_cleanup_user_data_dir,
+            host_cleanup_lease,
         ) = launched.into_managed();
+        let root_process_started_at_epoch_seconds =
+            ownership_token.browser_start_time_epoch_seconds();
+        let root_process_platform_start_key =
+            ownership_token.browser_platform_start_key();
         let cleanup = Arc::new(DurableProcessCleanup::new(
             process,
             LaunchedProfileCleanupAuthority::new(launched_cleanup_user_data_dir),
             ownership_token.clone(),
+            host_cleanup_lease,
         ));
+        let mut pending_runtime = PendingCdpHostRuntime::new(Arc::clone(&cleanup));
         let root_process_id = cleanup.process_id();
         let conn = match Connection::connect_launched(transport).await {
             Ok(conn) => conn,
             Err(error) => {
-                let primary = map_transport_err(error);
-                return Err(cleanup_failed_host_launch(primary, cleanup).await);
+                return Err(map_transport_err(error));
             }
         };
         // F1：防火墙的可靠订阅必须在 attach loop 之前注册——handle_attached 的
         // Fetch.enable arming gate 依赖它；早于防火墙循环 spawn 的事件在 unbounded
         // 通道里缓存不丢。
         let firewall_subscriptions = FetchFirewallSubscriptions::subscribe(&conn);
-        let attach_loop = conn.run_attach_loop();
-        if let Err(error) = conn.enable_auto_attach().await {
-            attach_loop.abort();
-            conn.shutdown().await;
-            let primary = map_transport_err(error);
-            return Err(cleanup_failed_host_launch(primary, cleanup).await);
-        }
-        let router =
-            match HostTargetRouter::try_new(conn.clone(), Some(Arc::clone(&cleanup))) {
+        // Install the trusted task/Lane session authority before auto-attach.
+        // Otherwise startup service workers can be released through the
+        // historical unscoped double-registration window before the router
+        // exists, permanently bypassing per-family admission.
+        let router = match HostTargetRouter::try_new(
+            conn.clone(),
+            Some(Arc::clone(&cleanup)),
+            download_dir.as_deref().map(PathBuf::from),
+        ) {
             Ok(router) => router,
             Err(error) => {
-                attach_loop.abort();
                 conn.shutdown().await;
-                return Err(cleanup_failed_host_launch(error, cleanup).await);
+                return Err(error);
             }
         };
+        pending_runtime.target_router_loop = Some(router.spawn());
+        pending_runtime.attach_loop = Some(conn.run_attach_loop());
+        if let Err(error) = conn.enable_auto_attach().await {
+            conn.shutdown().await;
+            return Err(map_transport_err(error));
+        }
 
-        let download_loop = if let Some(ref dir) = download_dir {
+        if let Some(ref dir) = download_dir {
             let handle = spawn_download_loop(conn.clone(), Some(router.clone()));
+            pending_runtime.download_loop = Some(handle);
             if let Err(error) = set_download_behavior_sandbox(&conn, dir).await {
-                tracing::warn!(%error, dir = %dir, "shared host download sandbox setup failed");
+                conn.shutdown().await;
+                return Err(error);
             }
-            Some(handle)
-        } else {
-            None
-        };
+        }
 
         let firewall_config = firewall.clone();
         let approved_domains = crate::firewall::ApprovedDomains::new();
         let dns_resolver = dns_resolver
             .unwrap_or_else(|| Arc::new(crate::firewall::TokioResolver::default()));
-        let firewall_loop = spawn_fetch_firewall_loop(
+        pending_runtime.firewall_runtime = Some(spawn_fetch_firewall_loop(
             conn.clone(),
             firewall_subscriptions,
             firewall,
@@ -1683,24 +3847,24 @@ impl CdpHostRuntime {
             approved_domains.clone(),
             dns_resolver,
             crate::firewall::DnsResolverCache::default(),
-        );
-        // watchdog 拿走 JoinHandle 监视意外死亡；shutdown/Drop 用 AbortHandle 主动停。
-        let firewall_abort = firewall_loop.abort_handle();
-        let firewall_watchdog = spawn_firewall_watchdog(conn.clone(), firewall_loop);
+        ));
         if let Err(error) = enable_fetch_on_session(&conn, ROOT_SESSION).await {
             tracing::warn!(%error, "Fetch.enable on shared browser session failed");
         }
 
-        let target_router_loop = router.spawn();
-        Ok(Arc::new(Self {
+        let (attach_loop, target_router_loop, download_loop, firewall_runtime) =
+            pending_runtime.commit();
+        let runtime = Arc::new(Self {
             conn,
             cleanup,
             root_process_id,
+            root_process_started_at_epoch_seconds,
+            root_process_platform_start_key,
+            fatal_supervisor: Mutex::new(None),
             attach_loop,
             target_router_loop,
             download_loop,
-            firewall_loop: firewall_abort,
-            firewall_watchdog,
+            firewall_runtime,
             router,
             download_dir,
             firewall_config,
@@ -1711,7 +3875,36 @@ impl CdpHostRuntime {
             shutdown: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             shutdown_gate: AsyncMutex::new(()),
-        }))
+        });
+        let mut fatal = runtime.conn.subscribe_fatal();
+        let weak_runtime = Arc::downgrade(&runtime);
+        let supervisor = tokio::spawn(async move {
+            loop {
+                if fatal.borrow().is_some() {
+                    break;
+                }
+                if fatal.changed().await.is_err() {
+                    return;
+                }
+            }
+            let Some(runtime) = weak_runtime.upgrade() else {
+                return;
+            };
+            tracing::error!(
+                "browser transport terminated abnormally; retiring exact Chromium process tree"
+            );
+            if let Err(error) = runtime.shutdown().await {
+                tracing::error!(%error, "synchronous transport-fatal cleanup did not converge; handing exact authority to cleanup relay");
+                runtime.cleanup.hand_off();
+                runtime.stopped.store(true, Ordering::Release);
+            }
+        });
+        runtime
+            .fatal_supervisor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(supervisor);
+        Ok(runtime)
     }
 
     pub(crate) fn is_stopped(&self) -> bool {
@@ -1726,8 +3919,36 @@ impl CdpHostRuntime {
         }
     }
 
+    pub(crate) fn process_identity(&self) -> Option<(u32, u64, u64)> {
+        self.process_id().map(|process_id| {
+            (
+                process_id,
+                self.root_process_started_at_epoch_seconds,
+                self.root_process_platform_start_key,
+            )
+        })
+    }
+
     pub(crate) fn is_headful(&self) -> bool {
         self.headful && self.display_available
+    }
+
+    pub(crate) async fn task_lane_ids(&self, task_resource_key: &str) -> Vec<LaneId> {
+        self.router.task_lane_ids(task_resource_key).await
+    }
+
+    pub(crate) async fn prepare_task_tab_limit_reconciliation(
+        &self,
+        task_resource_key: &str,
+        max_task_tabs: usize,
+    ) -> Result<TaskTabLimitReconcilePlan, BrowserError> {
+        self.router
+            .prepare_task_tab_limit_reconciliation(task_resource_key, max_task_tabs)
+            .await
+    }
+
+    pub(crate) async fn task_tab_count(&self, task_resource_key: &str) -> usize {
+        self.router.task_tab_count(task_resource_key).await
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), BrowserError> {
@@ -1737,10 +3958,7 @@ impl CdpHostRuntime {
         }
         self.shutdown.store(true, Ordering::Release);
         self.target_router_loop.abort();
-        // 先停 watchdog 再 abort 防火墙循环：主动关停绝不能被误判为意外死亡
-        // （watchdog 对 is_cancelled 本就免疫，此顺序是双保险）。
-        self.firewall_watchdog.abort();
-        self.firewall_loop.abort();
+        self.firewall_runtime.shutdown().await;
         self.attach_loop.abort();
         if let Some(loop_handle) = &self.download_loop {
             loop_handle.abort();
@@ -1753,21 +3971,16 @@ impl CdpHostRuntime {
         .await;
         self.conn.shutdown().await;
         self.cleanup.finish().await?;
+        self.router.finalize_downloads_after_host_stop();
+        let residual_cleanup = self.router.retry_staging_cleanup();
         self.stopped.store(true, Ordering::Release);
-        Ok(())
-    }
-}
-
-async fn cleanup_failed_host_launch(
-    primary: BrowserError,
-    cleanup: Arc<DurableProcessCleanup>,
-) -> BrowserError {
-    match cleanup.finish().await {
-        Ok(()) => primary,
-        Err(_) => BrowserError::Other(
-            "browser host initialization failed and process-tree cleanup could not be proven"
-                .into(),
-        ),
+        if residual_cleanup == 0 {
+            Ok(())
+        } else {
+            Err(BrowserError::Other(format!(
+                "browser stopped but {residual_cleanup} exact download staging artifact(s) remain cleanup-pending"
+            )))
+        }
     }
 }
 
@@ -1807,6 +4020,10 @@ struct DurableProcessCleanup {
     state: AtomicU64,
     cleanup_user_data_dir: Option<PathBuf>,
     ownership_token: crate::profile::BrowserOwnershipToken,
+    /// Opaque structural Host authority. Direct cleanup retains it here;
+    /// `hand_off` moves it into the durable completion ticket so asynchronous
+    /// cleanup debt cannot be used to mint another live Host.
+    host_cleanup_lease: std::sync::Mutex<Option<HostCleanupLease>>,
     #[cfg(test)]
     test_hooks: Option<Arc<DurableProcessCleanupTestHooks>>,
 }
@@ -1825,6 +4042,7 @@ impl DurableProcessCleanup {
         process: nomi_process_runtime::ManagedChildProcess,
         cleanup_authority: LaunchedProfileCleanupAuthority,
         ownership_token: crate::profile::BrowserOwnershipToken,
+        host_cleanup_lease: Option<HostCleanupLease>,
     ) -> Self {
         let (handoff_ticket, _) = tokio::sync::watch::channel(None);
         Self {
@@ -1834,6 +4052,7 @@ impl DurableProcessCleanup {
             state: AtomicU64::new(0),
             cleanup_user_data_dir: cleanup_authority.into_profile_dir(),
             ownership_token,
+            host_cleanup_lease: std::sync::Mutex::new(host_cleanup_lease),
             #[cfg(test)]
             test_hooks: None,
         }
@@ -1853,11 +4072,18 @@ impl DurableProcessCleanup {
     }
 
     fn hand_off(&self) {
+        self.hand_off_with_runtime_tasks(Vec::new());
+    }
+
+    fn hand_off_with_runtime_tasks(&self, runtime_tasks: Vec<tokio::task::JoinHandle<()>>) {
         if self
             .state
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
+            for task in runtime_tasks {
+                task.abort();
+            }
             return;
         }
         #[cfg(test)]
@@ -1876,12 +4102,22 @@ impl DurableProcessCleanup {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         let Some(process) = process else {
+            for task in runtime_tasks {
+                task.abort();
+            }
             return;
         };
-        let ticket = crate::launch::hand_off_dropped_browser_cleanup(
+        let host_cleanup_lease = self
+            .host_cleanup_lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let ticket = crate::launch::hand_off_dropped_browser_cleanup_with_host_lease_and_tasks(
             process,
             self.ownership_token.clone(),
             self.cleanup_user_data_dir.clone(),
+            host_cleanup_lease,
+            runtime_tasks,
         );
         self.handoff_ticket.send_replace(Some(ticket));
     }
@@ -1955,6 +4191,10 @@ impl DurableProcessCleanup {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
+            self.host_cleanup_lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
         }
         result
     }
@@ -1971,14 +4211,22 @@ impl Drop for DurableProcessCleanup {
 
 impl Drop for CdpHostRuntime {
     fn drop(&mut self) {
+        if let Some(supervisor) = self
+            .fatal_supervisor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            supervisor.abort();
+        }
         self.target_router_loop.abort();
-        // 顺序同 shutdown：先停 watchdog，主动关停绝不误判为防火墙意外死亡。
-        self.firewall_watchdog.abort();
-        self.firewall_loop.abort();
+        self.firewall_runtime.abort();
         self.attach_loop.abort();
         if let Some(loop_handle) = &self.download_loop {
             loop_handle.abort();
         }
+        self.router.poison_downloads_for_host_stop();
+        self.router.retry_staging_cleanup();
         // The bounded cleanup executor can still be retained by a queued
         // target authority. Explicit handoff prevents that bounded cycle from
         // postponing whole-tree teardown after the Host itself is gone.
@@ -1993,6 +4241,10 @@ enum TargetCleanupJob {
     RouterTarget {
         router: Arc<HostTargetRouter>,
         lane_id: LaneId,
+        target_id: String,
+    },
+    QuarantinedTarget {
+        router: Arc<HostTargetRouter>,
         target_id: String,
     },
 }
@@ -2018,6 +4270,7 @@ impl TargetCleanupJob {
             Self::PendingPage(cleanup) => cleanup.conn.clone(),
             Self::Lane(cleanup) => cleanup.conn.clone(),
             Self::RouterTarget { router, .. } => router.conn.clone(),
+            Self::QuarantinedTarget { router, .. } => router.conn.clone(),
         };
         match tokio::time::timeout(TARGET_CLEANUP_JOB_BUDGET, async {
             match self {
@@ -2029,7 +4282,12 @@ impl TargetCleanupJob {
                     target_id,
                 } => {
                     router
-                        .retry_cleanup_only_target(lane_id, target_id)
+                        .retry_cleanup_only_target(Some(lane_id), target_id)
+                        .await;
+                }
+                Self::QuarantinedTarget { router, target_id } => {
+                    router
+                        .retry_cleanup_only_target(None, target_id)
                         .await;
                 }
             }
@@ -2068,15 +4326,15 @@ impl TargetCleanupJob {
                     Ordering::Acquire,
                 );
             }
-            Self::RouterTarget { .. } => {}
+            Self::RouterTarget { .. } | Self::QuarantinedTarget { .. } => {}
         }
     }
 
     fn mark_host_cleanup_finished(&self) {
         match self {
-            Self::PendingPage(cleanup) => cleanup.state.store(2, Ordering::Release),
-            Self::Lane(cleanup) => cleanup.state.store(2, Ordering::Release),
-            Self::RouterTarget { .. } => {}
+            Self::PendingPage(cleanup) => cleanup.mark_finished(),
+            Self::Lane(cleanup) => cleanup.mark_finished(),
+            Self::RouterTarget { .. } | Self::QuarantinedTarget { .. } => {}
         }
     }
 }
@@ -2261,6 +4519,29 @@ impl TargetCleanupExecutor {
         }))
     }
 
+    /// A closed CDP transport proves only that per-target commands are no
+    /// longer possible. Standalone Lane structural capacity remains charged
+    /// until the containing Host's exact process/profile authority proves
+    /// completion. Test-only routers have no process authority and treat the
+    /// closed connection as their terminal boundary.
+    async fn await_host_cleanup_proof(&self) {
+        let Some(cleanup) = self.process_cleanup.as_ref() else {
+            return;
+        };
+        loop {
+            match cleanup.finish().await {
+                Ok(()) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Lane cleanup is retaining structural capacity while Host cleanup remains pending"
+                    );
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+    }
+
     fn ensure_accepting(&self) -> Result<(), BrowserError> {
         if self.poisoned.load(Ordering::Acquire) {
             return Err(BrowserError::SessionLost { recoverable: false });
@@ -2430,6 +4711,25 @@ async fn finish_poisoned_target_cleanup_host(
             // the exact process/token/profile bundle to its process-local
             // relay and leaves the marker for startup quarantine if needed.
             cleanup.hand_off();
+            // The subsumed target/Lane jobs below still own structural task
+            // reservations. Keep this fixed Host cleanup worker and those jobs
+            // alive until the durable ticket proves process/profile absence;
+            // permanent cleanup debt must remain charged, not reopen capacity.
+            loop {
+                match cleanup.finish().await {
+                    Ok(()) => {
+                        proven = true;
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "poisoned Host cleanup debt still retains structural capacity"
+                        );
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
         }
         proven
     } else {
@@ -2460,6 +4760,13 @@ struct PendingCreatedPageCleanup {
     target_id: Option<String>,
     session_id: Option<String>,
     pending_url: Option<String>,
+    /// Retained until exact close/absence proof (or authoritative Host
+    /// teardown), so cleanup-pending targets continue consuming task quota.
+    _task_tab_reservation: Option<Arc<dyn TaskTabReservation>>,
+    /// Retains the structural Lane slot from admission until this pending
+    /// target is either transferred into LaneCleanupAuthority or exact cleanup
+    /// (including a delegated Host teardown) completes.
+    _lane_resource_authority: Option<Arc<dyn TaskTabReservationAuthority>>,
     state: AtomicU64,
 }
 
@@ -2471,6 +4778,8 @@ impl PendingCreatedPageCleanup {
         target_id: Option<String>,
         session_id: Option<String>,
         pending_url: Option<String>,
+        task_tab_reservation: Option<Arc<dyn TaskTabReservation>>,
+        lane_resource_authority: Option<Arc<dyn TaskTabReservationAuthority>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             conn,
@@ -2479,6 +4788,8 @@ impl PendingCreatedPageCleanup {
             target_id,
             session_id,
             pending_url,
+            _task_tab_reservation: task_tab_reservation,
+            _lane_resource_authority: lane_resource_authority,
             state: AtomicU64::new(0),
         })
     }
@@ -2495,6 +4806,13 @@ impl PendingCreatedPageCleanup {
             .submit(TargetCleanupJob::PendingPage(Arc::clone(self)));
     }
 
+    fn mark_finished(&self) {
+        self.state.store(2, Ordering::Release);
+        if let Some(authority) = &self._lane_resource_authority {
+            authority.release_lane();
+        }
+    }
+
     async fn finish(self: Arc<Self>) {
         let target_id = match self.target_id.clone() {
             Some(target_id) => target_id,
@@ -2504,16 +4822,16 @@ impl PendingCreatedPageCleanup {
                 return;
             }
         };
-        loop {
+        let exact_absence_proven = loop {
             match close_target_or_confirm_absent(&self.conn, &target_id).await {
-                Ok(()) => break,
+                Ok(()) => break true,
                 Err(error) if self.conn.registry().is_connection_closed() => {
                     tracing::debug!(
                         target_id_suffix = %cdp_id_suffix(&target_id),
                         %error,
                         "pending-page cleanup delegated to closed Host transport"
                     );
-                    break;
+                    break false;
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -2524,13 +4842,20 @@ impl PendingCreatedPageCleanup {
                     tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             }
-        }
-        if let Some(router) = self.router.as_ref() {
+        };
+        if exact_absence_proven && let Some(router) = self.router.as_ref() {
             router
-                .scrub_unowned_pending_target(&target_id, self.session_id.as_deref())
+                .scrub_unowned_pending_target(
+                    &target_id,
+                    self.session_id.as_deref(),
+                    self._task_tab_reservation.as_ref(),
+                )
                 .await;
         }
-        self.state.store(2, Ordering::Release);
+        if !exact_absence_proven {
+            self.executor.await_host_cleanup_proof().await;
+        }
+        self.mark_finished();
     }
 }
 
@@ -2538,6 +4863,7 @@ struct PendingCreatedPage {
     target_id: String,
     session_id: String,
     cleanup: Arc<PendingCreatedPageCleanup>,
+    task_tab_reservation: Option<Arc<dyn TaskTabReservation>>,
     transferred: bool,
 }
 
@@ -2591,12 +4917,21 @@ async fn create_pending_page_session_owned(
     executor: Arc<TargetCleanupExecutor>,
     router: Option<Arc<HostTargetRouter>>,
     background: bool,
+    task_tab_reservation_scope: Option<TaskTabReservationScope>,
 ) -> Result<PendingCreatedPage, BrowserError> {
     executor.ensure_accepting()?;
     let mut wait_guard = PendingPageCreateWaitGuard::new();
     let caller_cancelled = wait_guard.token();
     let result = tokio::spawn(async move {
-        create_pending_lane_page_session(conn, executor, router, background, caller_cancelled).await
+        create_pending_lane_page_session(
+            conn,
+            executor,
+            router,
+            background,
+            caller_cancelled,
+            task_tab_reservation_scope,
+        )
+        .await
     })
     .await
     .map_err(|error| {
@@ -2621,6 +4956,11 @@ struct LaneCleanupAuthority {
     target_id: String,
     session_id: String,
     frame_id: String,
+    initial_task_tab_reservation: Option<std::sync::Weak<dyn TaskTabReservation>>,
+    /// Structural Lane authority is retained through Drop handoff and cleanup
+    /// retries. Releasing it before exact target absence would let repeated
+    /// open/drop cycles evade the per-task Lane cap.
+    lane_resource_authority: Option<Arc<dyn TaskTabReservationAuthority>>,
     state: AtomicU64,
 }
 
@@ -2635,6 +4975,8 @@ impl LaneCleanupAuthority {
         target_id: String,
         session_id: String,
         frame_id: String,
+        initial_task_tab_reservation: Option<&Arc<dyn TaskTabReservation>>,
+        lane_resource_authority: Option<Arc<dyn TaskTabReservationAuthority>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             conn,
@@ -2647,6 +4989,8 @@ impl LaneCleanupAuthority {
             target_id,
             session_id,
             frame_id,
+            initial_task_tab_reservation: initial_task_tab_reservation.map(Arc::downgrade),
+            lane_resource_authority,
             state: AtomicU64::new(0),
         })
     }
@@ -2673,6 +5017,9 @@ impl LaneCleanupAuthority {
 
     fn mark_finished(&self) {
         self.state.store(2, Ordering::Release);
+        if let Some(authority) = &self.lane_resource_authority {
+            authority.release_lane();
+        }
     }
 
     fn hand_off(self: &Arc<Self>) {
@@ -2690,6 +5037,10 @@ impl LaneCleanupAuthority {
 
     async fn finish(self: Arc<Self>) {
         let registration = self.registration();
+        let expected_initial_reservation = self
+            .initial_task_tab_reservation
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
         let is_current = match registration {
             Some(registration_id) => {
                 self.router
@@ -2699,17 +5050,26 @@ impl LaneCleanupAuthority {
             None => false,
         };
         let mut target_ids = vec![self.target_id.clone()];
+        // The tab registry is generation-local even if a replacement Lane
+        // with the same public id has already been registered. Always retain
+        // exact cleanup authority for those old-generation targets.
+        target_ids.extend(self.tabs.lock().await.keys().cloned());
         if is_current {
             target_ids.extend(self.router.owned_targets(&self.lane_id).await);
-            target_ids.extend(self.tabs.lock().await.keys().cloned());
         }
         target_ids.sort();
         target_ids.dedup();
 
+        let mut initial_target_absence_proven = false;
         for target_id in target_ids {
             loop {
                 match close_target_or_confirm_absent(&self.conn, &target_id).await {
-                    Ok(()) => break,
+                    Ok(()) => {
+                        if target_id == self.target_id {
+                            initial_target_absence_proven = true;
+                        }
+                        break;
+                    }
                     Err(error) if self.conn.registry().is_connection_closed() => {
                         tracing::debug!(
                             lane_id = %self.lane_id,
@@ -2779,9 +5139,14 @@ impl LaneCleanupAuthority {
                 &self.target_id,
                 &self.session_id,
                 &self.frame_id,
+                initial_target_absence_proven,
+                expected_initial_reservation.as_ref(),
             )
             .await;
-        self.state.store(2, Ordering::Release);
+        if self.conn.registry().is_connection_closed() {
+            self.executor.await_host_cleanup_proof().await;
+        }
+        self.mark_finished();
     }
 }
 
@@ -2830,6 +5195,12 @@ pub struct CdpBackend {
     #[cfg(test)]
     test_router: Option<Arc<HostTargetRouter>>,
     lane_id: LaneId,
+    task_tab_reservation_scope: Option<TaskTabReservationScope>,
+    task_download_reservation_scope: Option<TaskDownloadReservationScope>,
+    /// Opaque authority shared by every Lane/Host of the same trusted task.
+    /// Only temporary act subscriptions charge it; Host router/firewall/
+    /// download subscribers remain Host-owned.
+    reliable_event_task_budget: Arc<ReliableEventTaskBudget>,
     /// Final-Drop cleanup fallback for a shared Host Lane. This remains armed
     /// across the `from_host` -> coordinator publication gap.
     lane_cleanup: Option<Arc<LaneCleanupAuthority>>,
@@ -2898,15 +5269,14 @@ pub struct CdpBackend {
     /// `BrowserError::Blocked`（fail-closed）。`None`（无 per-pet 上下文，如纯引擎冒烟）⇒
     /// **一律拒绝上传**（fail-closed，default-deny）。
     workspace_dir: Option<PathBuf>,
-    /// **出口防火墙后台循环的 watchdog 句柄**（E5 + fail-closed 加固）——保活。防火墙循环对
+    /// **出口防火墙 Host-owned runtime**（E5 + fail-closed 加固）——保活。防火墙循环对
     /// **每个** session（根 browser / page / OOPIF / **service_worker**）挂 `Fetch.enable` 全流量
     /// 拦截，订阅 `Fetch.requestPaused`，经 [`crate::firewall::decide`] 判定后 `continueRequest`
     /// 放行 / `failRequest` 阻断（IP 封禁硬阻）/（F1）升审批（跨域 POST-body）。**SW 必须也拦**
     /// （裁决⑪/不变量⑬）——P0 保持 SW attach，本循环对其 session 也 Fetch.enable。
-    /// 本字段持的是 [`spawn_firewall_watchdog`] 的句柄（循环自身的 `JoinHandle` 归 watchdog 所有）：
-    /// 循环意外死亡（panic 逃出）→ watchdog fail 整条连接（fail-closed）。连接关闭时循环自然退出、
-    /// watchdog 随之收尾。
-    _firewall_watchdog: Option<tokio::task::JoinHandle<()>>,
+    /// 固定 worker、两级有界队列、取消令牌与 watchdog 由本值统一所有；循环意外死亡时 fail
+    /// 整条连接，backend Drop 时取消并 abort 整棵已登记任务树。
+    _firewall_runtime: Option<FirewallLoopRuntime>,
     /// **P3-G1：注入的出口防火墙配置快照**（裁决①）。= `EngineConfig.firewall`（经
     /// from_launched / from_host 透传），**与防火墙循环持有的同一份配置**。仅供测试 accessor
     /// [`Self::firewall_config_for_test`] 读回断言「注入值真的到达引擎」（loop 在另一线程内消费，
@@ -2953,6 +5323,22 @@ pub struct CdpBackend {
 
 impl Drop for CdpBackend {
     fn drop(&mut self) {
+        if let Some(runtime) = self._firewall_runtime.as_ref() {
+            runtime.abort();
+        }
+        // Dropping a Tokio JoinHandle detaches its task. Standalone backends
+        // own these loops, and every loop retains a Connection clone (the tab
+        // discovery loop also retains the tab registry), so they must be
+        // explicitly aborted before cleanup authority is handed off.
+        if let Some(loop_handle) = self._tab_discovery_loop.take() {
+            loop_handle.abort();
+        }
+        if let Some(loop_handle) = self._download_loop.take() {
+            loop_handle.abort();
+        }
+        if let Some(loop_handle) = self._attach_loop.take() {
+            loop_handle.abort();
+        }
         if let Some(cleanup) = self.lane_cleanup.as_ref()
             && !self.lane_closed.load(Ordering::Acquire)
         {
@@ -2964,6 +5350,38 @@ impl Drop for CdpBackend {
             // cannot postpone standalone Chromium teardown.
             process.hand_off();
         }
+    }
+}
+
+fn validate_storage_state_for_restore(
+    state: &crate::storage_state::StorageState,
+) -> Result<(), BrowserError> {
+    state.validate_bounds().map_err(|error| BrowserError::Blocked {
+        reason: format!("storage_state restore exceeds its per-task hard boundary: {error}"),
+    })
+}
+
+#[cfg(test)]
+mod storage_state_restore_bound_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_state_is_rejected_before_any_browser_session_or_serialization() {
+        let origin = crate::storage_state::OriginStorage::new_local_storage(
+            "https://oversized.example",
+            std::iter::empty::<(String, String)>(),
+        );
+        let state = crate::storage_state::StorageState {
+            cookies: vec![],
+            local_storage: vec![
+                origin;
+                crate::storage_state::MAX_STORAGE_STATE_ORIGINS + 1
+            ],
+        };
+        assert!(matches!(
+            validate_storage_state_for_restore(&state),
+            Err(BrowserError::Blocked { .. })
+        ));
     }
 }
 
@@ -2990,265 +5408,42 @@ impl CdpBackend {
         egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
         storage_state: Option<serde_json::Value>,
         known_secret_values: crate::KnownSecretValues,
-        // SD-1: DNS→IP SSRF guard 的可注入 resolver。`None` → 生产默认 [`TokioResolver`]（真实 DNS）;
-        // 测试注入 fake 映射(host→固定 IP)以完全隔离真实网络、并能精确验「公网域放行→抵 approver /
-        // 私网域先于 approver 被 SSRF 守卫 Block」这一关键交互(seam 此前硬编码,测试无从覆盖)。
         dns_resolver: Option<Arc<dyn crate::firewall::HostResolver>>,
     ) -> Result<Self, BrowserError> {
-        let (
-            process,
-            transport,
-            ownership_token,
-            cleanup_user_data_dir,
-        ) = launched.into_managed();
-        let cleanup = Arc::new(DurableProcessCleanup::new(
-            process,
-            LaunchedProfileCleanupAuthority::new(cleanup_user_data_dir),
-            ownership_token,
-        ));
-
-        let conn = match Connection::connect_launched(transport).await {
-            Ok(conn) => conn,
-            Err(error) => {
-                let primary = map_transport_err(error);
-                return Err(cleanup_failed_host_launch(primary, cleanup).await);
-            }
-        };
-
-        // F1：防火墙的可靠订阅必须在 attach loop 之前注册——handle_attached 的
-        // Fetch.enable arming gate 依赖它；早于防火墙循环 spawn 的事件在 unbounded
-        // 通道里缓存不丢。
-        let firewall_subscriptions = FetchFirewallSubscriptions::subscribe(&conn);
-        // 先装 attach loop（订阅在循环内部），再放行自动附着。顺序勿换。
-        let attach_loop = conn.run_attach_loop();
-        if let Err(error) = conn.enable_auto_attach().await {
-            attach_loop.abort();
-            conn.shutdown().await;
-            let primary = map_transport_err(error);
-            return Err(cleanup_failed_host_launch(primary, cleanup).await);
-        }
-        let cleanup_executor = match TargetCleanupExecutor::new(
-            conn.clone(),
-            Some(Arc::clone(&cleanup)),
-        ) {
-            Ok(executor) => executor,
-            Err(error) => {
-                attach_loop.abort();
-                conn.shutdown().await;
-                return Err(cleanup_failed_host_launch(error, cleanup).await);
-            }
-        };
-
-        // 取一个 page session（createTarget + 等其 attachedToTarget）。D1：需要 targetId（tabs 的 key
-        // + active_target 指针），故 create_page_session 返 (target_id, session_id)。
-        let initial_target_background =
-            page_target_should_start_in_background(headful, display_available);
-        let (page_target_id, page_session) =
-            match create_page_session(&conn, initial_target_background).await {
-            Ok(page) => page,
-            Err(error) => {
-                attach_loop.abort();
-                conn.shutdown().await;
-                return Err(cleanup_failed_host_launch(error, cleanup).await);
-            }
-        };
-
-        // E4 下载沙箱：在**根 browser session** 挂 setDownloadBehavior（browser-level，作用全 context）
-        // + 起下载事件循环（完成后打 MOTW）。仅当传入了隔离 download_dir。先订阅事件再放行行为不是
-        // 必须（downloadProgress 在下载真正发生时才来，启动期挂好即可），但本循环在 setDownloadBehavior
-        // 之前 spawn，确保不漏首个下载事件。失败 best-effort（warn 不致命）——沙箱缺失只降级到无 MOTW，
-        // 不应阻断引擎创建；但若上层要求严格隔离，缺失即风险，故 warn 留痕。
-        let download_loop = if let Some(ref dir) = download_dir {
-            let h = spawn_download_loop(conn.clone(), None);
-            if let Err(e) = set_download_behavior_sandbox(&conn, dir).await {
-                tracing::warn!(error = %e, dir = %dir, "setDownloadBehavior sandbox failed; downloads may fall back to chrome default");
-            }
-            Some(h)
-        } else {
-            None
-        };
-
-        // 取一个 page session（createTarget + 等其 attachedToTarget）。D1：需要 targetId（tabs 的 key
-        // + active_target 指针），故 create_page_session 返 (target_id, session_id)。
-        // D3：捕获初始主 page session，供发现循环与之区分（主 page 已单独 arm，勿重 arm）。
-        let main_page_session_for_discovery = page_session.clone();
-
-        // D3：把「为一个 (target_id, session_id) arm injection + inject loop + oopif loop + 建 TabRecord」
-        // 抽成可复用的 arm_tab helper。初始 tab 与发现循环里的新 tab 都用它（同一套 arm 逻辑，零分叉）。
-        let initial_tab = match arm_tab(&conn, &page_target_id, &page_session).await {
-            Ok(tab) => tab,
-            Err(error) => {
-                if let Some(loop_handle) = &download_loop {
-                    loop_handle.abort();
-                }
-                attach_loop.abort();
-                conn.shutdown().await;
-                return Err(cleanup_failed_host_launch(error, cleanup).await);
-            }
-        };
-
-        // D1/D3：把初始 page 作为**唯一一个 TabRecord** 插入 tabs，active_target 指向它。
-        // 单 tab 场景：tabs 永远只 1 项、active 指向它——行为与改造前完全一致。
-        let mut tabs_map = HashMap::new();
-        tabs_map.insert(page_target_id.clone(), initial_tab);
-        let tabs = Arc::new(AsyncMutex::new(tabs_map));
-        let active_target = Arc::new(AsyncMutex::new(page_target_id));
-
-        // D3：起 tab 发现后台循环——订阅新顶层 page 的 attachedToTarget，arm 成 TabRecord 入 tabs
-        // （**不抢焦点、不改 active**）。捕获初始主 page session 以与之区分（主 page 已单独 arm，勿重 arm）。
-        let tab_discovery_loop = spawn_tab_discovery_loop(
-            conn.clone(),
-            main_page_session_for_discovery,
-            tabs.clone(),
-        );
-
-        // E5 出口防火墙：对**每个** session（根 browser / page / OOPIF / **service_worker**）挂
-        // `Fetch.enable` 全流量拦截 + 订阅 `Fetch.requestPaused` 判定放行/阻断。**SW 必须也拦**
-        // （裁决⑪/不变量⑬）——P0 保持 SW attach（transport.rs handle_attached 不 detach），本循环
-        // 对其 session 也 Fetch.enable。**P3-G1（裁决①）**：firewall 配置从硬编码 `FirewallConfig::default()`
-        // 改为**接收注入值**（`EngineConfig.firewall` 经 from_launched 透传）——默认仍是
-        // default（IP 封禁开 + 跨域 POST 门控检测开），但上层（D1）可注入 per-pet 域名 allowlist 真值。
-        // 先 spawn 循环（订阅 attachedToTarget + requestPaused），再对**已附着**的根 + 初始 page session
-        // 补挂 Fetch.enable（新 session 由循环里的 attachedToTarget 处理）。
-        // **P3-D1**：`FirewallConfig` 加 `Vec` 域名策略字段后**不再 Copy（改 Clone）**——故存快照用
-        // `.clone()`，再把配置 move 进 loop（loop 拿走的与快照同值）。快照供测试 accessor 读回断言注入生效。
-        let firewall_config = firewall.clone();
-        // P3-D2：per-session「记住此域」已批准出口域集合（决策3 always_allow）。backend 持一份（engine
-        // 生命周期内有效），loop 拿一份克隆（共享同一 Arc<Mutex<…>>）——审批批准并「记住」后，同域后续
-        // 出口直接放行。
-        let approved_domains = crate::firewall::ApprovedDomains::new();
-        // SD-1: DNS→IP SSRF guard — resolver（注入式：`None`=生产默认 TokioResolver 走真实 DNS；
-        // 测试注入 fake 映射,完全隔离真实网络）+ 缓存（注入防火墙循环）。
-        let dns_resolver: Arc<dyn crate::firewall::HostResolver> =
-            dns_resolver.unwrap_or_else(|| Arc::new(crate::firewall::TokioResolver::default()));
-        let dns_cache = crate::firewall::DnsResolverCache::default();
-        let firewall_loop = spawn_fetch_firewall_loop(
-            conn.clone(),
-            firewall_subscriptions,
-            firewall,
-            egress_approver,
-            approved_domains.clone(),
-            dns_resolver,
-            dns_cache,
-        );
-        // fail-closed 加固：watchdog 拿走循环句柄，任务意外死亡（panic 逃出）即 fail
-        // 整条连接（见 spawn_firewall_watchdog doc）。
-        let firewall_watchdog = spawn_firewall_watchdog(conn.clone(), firewall_loop);
-        // 已附着 session 补挂（循环只覆盖**之后**新 attach 的；启动时已在的根 + 初始 page 在此补）。
-        if let Err(e) = enable_fetch_on_session(&conn, ROOT_SESSION).await {
-            tracing::warn!(error = %e, "Fetch.enable on root browser session failed; egress firewall degraded");
-        }
-        if let Err(e) = enable_fetch_on_session(&conn, &page_session).await {
-            tracing::warn!(error = %e, "Fetch.enable on initial page session failed; egress firewall degraded");
-        }
-        // F1-sec (I1 启动竞态收口)：历史上防火墙循环在 `enable_auto_attach` **之后**才 subscribe
-        // `attachedToTarget`，启动瞬间已 attach 的 **service_worker** 可能漏挂 Fetch.enable。F1 重构后
-        // 可靠订阅已提前到 attach loop 之前（结构上无窗口），本补挂保留为 belt-and-braces：据
-        // target_type 枚举已登记的 service_worker session 补挂 Fetch.enable（幂等，绝不多余拦截）。
-        for sw_session in conn.registry().session_ids_of_type("service_worker") {
-            if let Err(e) = enable_fetch_on_session(&conn, &sw_session).await {
-                tracing::warn!(
-                    error = %e, session_id = %sw_session,
-                    "Fetch.enable on a pre-existing service_worker session failed; egress firewall has a gap for that SW"
-                );
-            } else {
-                tracing::debug!(
-                    session_id = %sw_session,
-                    "Fetch.enable armed on a pre-existing service_worker session (startup-race close)"
-                );
-            }
-        }
-
-        let backend = Self {
-            conn,
-            host: None,
-            #[cfg(test)]
-            test_router: None,
-            lane_id: "standalone".to_string(),
-            lane_cleanup: None,
-            cleanup_executor,
-            lane_closing: Arc::new(AtomicBool::new(false)),
-            lane_closed: Arc::new(AtomicBool::new(false)),
-            lane_retired: AtomicBool::new(false),
-            lane_shutdown_gate: AsyncMutex::new(()),
-            lane_close_confirmed: AsyncMutex::new(HashSet::new()),
-            lane_cancel: CancellationToken::new(),
-            tabs,
-            active_target,
-            active_frame: Arc::new(AsyncMutex::new(None)),
-            act_seq: std::sync::atomic::AtomicU64::new(0),
-            _process: Some(cleanup),
-            _attach_loop: Some(attach_loop),
-            _tab_discovery_loop: Some(tab_discovery_loop),
-            _download_loop: download_loop,
-            // F-actions：保留隔离下载目录绝对路径，供 download（触发落点验证）/ save_as_pdf（printToPDF
-            // 写入）复用 E4 沙箱的同一目录。与 _download_loop 同生（仅当沙箱已挂）。
-            download_dir,
-            // SD-2：上传路径沙箱根（per-pet workspace）。act_upload_file 逐路径 canonicalize + 包含判定。
-            workspace_dir,
-            _firewall_watchdog: Some(firewall_watchdog),
-            // P3-G1：保留注入的 firewall 快照（与 loop 同值）供测试读回断言注入生效。
-            firewall_config,
-            // P3-D2：保留 always_allow 已批准域集合（与 loop 同 Arc）。
-            approved_domains,
-            // E3 evaluate 门控：full_power 由上层 LIVE 读（client_preferences）经 EngineConfig 灌入
-            // （默认 false = default-deny）。SD-6: persistent_login 同范式 LIVE 灌入（默认 false = default-deny
-            // 基线；产品 ON 由 factory host_default=true 实现）。
-            evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate {
-                full_power: evaluate_full_power,
-                persistent_login: evaluate_persistent_login,
-            }),
+        // The historical direct constructor owned a separate lossy tab-discovery
+        // broadcast loop. A popup burst could overrun that receiver and leave
+        // untracked physical targets/renderers alive. Build the exact same
+        // Host/router + Lane protocol used by production instead: one reliable
+        // attach authority, one trusted task tab budget, and durable exact
+        // target/process cleanup on every failure or cancellation seam.
+        let host = CdpHostRuntime::from_launched(
+            launched,
             headful,
             display_available,
-            // 引擎级 observe⊥act 串行门（见字段 doc）。每引擎一把,初始空闲。
-            op_mutex: LaneOperationGate::default(),
-            target_recovery_gate: AsyncMutex::new(()),
-            // Known-secret blackout: store the shared Arc for debug serializers to read.
-            known_secret_values,
+            download_dir,
+            firewall,
+            egress_approver,
+            storage_state,
+            dns_resolver,
+        )
+        .await?;
+
+        let lane_id = "standalone".to_string();
+        let resource_scope = crate::host::StandaloneResourceScope::new();
+        let lane_authority = resource_scope.reserve_lane(lane_id.clone())?;
+        let task_resource_key = resource_scope.task_resource_key().to_owned();
+        let config = LaneEngineConfig {
+            workspace_dir,
+            evaluate_full_power,
+            evaluate_persistent_login,
+            known_secret_values: Some(known_secret_values),
+            task_resource_key: Some(task_resource_key),
+            max_task_tabs: crate::host::STANDALONE_MAX_LIVE_TABS_PER_SCOPE,
+            task_tab_reservation_authority: Some(lane_authority.clone()),
+            task_download_reservation_authority: Some(lane_authority),
         };
 
-        // ── W4d 持久登录：启动注入 storage_state（灌登录态）──────────────────────────
-        // `EngineConfig.storage_state`（G1 预留的 `Option<Value>`，经构造器透传）= 上层从
-        // per-pet vault（[`crate::vault::load_storage_state`]）解密读出的跨会话登录态。`Some` → 解析成
-        // [`crate::storage_state::StorageState`] → **此刻 page/tab/context 已建好**，把 cookie 灌进本引擎
-        // 的默认 browser context（`restore_cookies`，**context-bound：无需先 navigate 即生效**——这是持久登录
-        // 在「navigate 之前」就恢复会话身份的关键）+ 把当前页面 origin 的 localStorage 灌回
-        // （`restore_local_storage`，**origin-bound**：启动时 active tab 停在 about:blank，无 origin 匹配
-        // → no-op，待 caller navigate 到目标 origin 后由上层再调 restore_local_storage 补灌——见方法 doc）。
-        // **`None`（默认）→ 完全不碰（现行为零回归）**。注入失败 best-effort（warn 不致命）：登录态恢复是
-        // 增强，灌失败应降级到「未登录」起点（用户重登）而非阻断引擎启动。
-        if let Some(value) = storage_state {
-            match crate::storage_state::StorageState::from_json(value) {
-                Ok(state) => {
-                    if let Err(e) = backend.restore_cookies(&state).await {
-                        tracing::warn!(
-                            target: "nomi_browser_engine::backend::cdp",
-                            error = %e,
-                            "W4d persistent-login: restore_cookies on startup failed (degrading to no persisted login)"
-                        );
-                    }
-                    // localStorage origin-bound：启动时 about:blank 无匹配 origin → 多为 no-op；仍调一次以
-                    // 覆盖「引擎构造前已 navigate」的边角（当前 from_launched 不预导航，故实际 no-op）。
-                    if let Err(e) = backend.restore_local_storage(&state).await {
-                        tracing::warn!(
-                            target: "nomi_browser_engine::backend::cdp",
-                            error = %e,
-                            "W4d persistent-login: restore_local_storage on startup failed (degrading)"
-                        );
-                    }
-                }
-                Err(e) => {
-                    // storage_state Value 形态不对（不是合法 StorageState JSON）→ 优雅跳过（不阻断启动）。
-                    tracing::warn!(
-                        target: "nomi_browser_engine::backend::cdp",
-                        error = %e,
-                        "W4d persistent-login: EngineConfig.storage_state is not a valid StorageState (skipping inject)"
-                    );
-                }
-            }
-        }
-
-        Ok(backend)
+        Self::from_host(host, lane_id, config).await
     }
 }
 
@@ -3264,6 +5459,28 @@ impl CdpBackend {
         }
         host.router.cleanup_executor.ensure_accepting()?;
         let conn = host.conn.clone();
+        let task_resource_key = config
+            .task_resource_key
+            .clone()
+            .unwrap_or_else(|| lane_id.clone());
+        let reliable_event_task_budget =
+            ReliableEventTaskBudget::for_trusted_task(&task_resource_key);
+        let task_tab_reservation_scope = config
+            .task_tab_reservation_authority
+            .clone()
+            .map(|authority| TaskTabReservationScope {
+                task_resource_key: task_resource_key.clone(),
+                lane_id: lane_id.clone(),
+                authority,
+            });
+        let task_download_reservation_scope = config
+            .task_download_reservation_authority
+            .clone()
+            .map(|authority| TaskDownloadReservationScope {
+                task_resource_key: task_resource_key.clone(),
+                lane_id: lane_id.clone(),
+                authority,
+            });
         let initial_target_background =
             page_target_should_start_in_background(host.headful, host.display_available);
         // The CDP command and its nonce-correlated attach live in their own
@@ -3274,12 +5491,21 @@ impl CdpBackend {
             Arc::clone(&host.router.cleanup_executor),
             Some(Arc::clone(&host.router)),
             initial_target_background,
+            task_tab_reservation_scope.clone(),
         )
         .await?;
         let page_target_id = pending_page.target_id.clone();
         let page_session = pending_page.session_id.clone();
-        let initial_tab = arm_tab(&conn, &page_target_id, &page_session).await?;
+        let initial_tab = arm_tab(
+            &conn,
+            &page_target_id,
+            &page_session,
+            pending_page.task_tab_reservation.clone(),
+        )
+        .await?;
         let initial_frame_id = initial_tab.main_frame_id.clone();
+        let initial_task_tab_reservation = initial_tab._task_tab_reservation.clone();
+        let max_task_tabs = config.max_task_tabs;
         let download_dir = config
             .workspace_dir
             .as_deref()
@@ -3302,6 +5528,10 @@ impl CdpBackend {
             page_target_id.clone(),
             page_session.clone(),
             initial_frame_id.clone(),
+            initial_task_tab_reservation.as_ref(),
+            task_tab_reservation_scope
+                .as_ref()
+                .map(|scope| Arc::clone(&scope.authority)),
         );
         let launch_guard = PendingLaneLaunchGuard::new(Arc::clone(&lane_cleanup));
         // From this synchronous transfer onward the Lane guard/backend is the
@@ -3310,13 +5540,17 @@ impl CdpBackend {
 
         let registration_id = host
             .router
-            .register_lane(
+            .register_lane_with_resource_and_download_scope(
                 lane_id.clone(),
                 &tabs,
                 &active_target,
                 &active_frame,
                 lane_closing.clone(),
                 download_dir.clone(),
+                Some(task_resource_key),
+                max_task_tabs,
+                config.task_tab_reservation_authority.clone(),
+                config.task_download_reservation_authority.clone(),
             )
             .await
             .ok_or_else(|| {
@@ -3347,6 +5581,9 @@ impl CdpBackend {
             #[cfg(test)]
             test_router: None,
             lane_id,
+            task_tab_reservation_scope,
+            task_download_reservation_scope,
+            reliable_event_task_budget,
             lane_cleanup: Some(lane_cleanup),
             cleanup_executor: Arc::clone(&host.router.cleanup_executor),
             lane_closing,
@@ -3365,7 +5602,7 @@ impl CdpBackend {
             _download_loop: None,
             download_dir,
             workspace_dir: config.workspace_dir,
-            _firewall_watchdog: None,
+            _firewall_runtime: None,
             firewall_config: host.firewall_config.clone(),
             approved_domains: host.approved_domains.clone(),
             evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate {
@@ -3411,6 +5648,59 @@ impl CdpBackend {
         #[cfg(not(test))]
         {
             None
+        }
+    }
+
+    pub(crate) async fn lock_operations_for_task_policy(
+        &self,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.op_mutex.lock_owned().await
+    }
+
+    /// Close one exact top-level target selected by the router's committed
+    /// task policy. Missing records mean an asynchronous target-loss event
+    /// already converged that exact page. All other failures retain exact
+    /// ownership and are handed to the bounded target cleanup executor by
+    /// `close_tab_impl`.
+    pub(crate) async fn close_tab_for_task_policy(
+        &self,
+        target_id: &str,
+    ) -> Result<(), BrowserError> {
+        if self.lane_closing.load(Ordering::Acquire) {
+            return Err(BrowserError::TargetClosed);
+        }
+        if !self.tabs.lock().await.contains_key(target_id) {
+            if let Some(router) = self.target_router()
+                && router.has_task_tab_reservation(target_id).await
+            {
+                router
+                    .schedule_owned_target_cleanup(&self.lane_id, target_id)
+                    .await;
+                return Err(BrowserError::Other(
+                    "browser target is absent from its Lane registry but remains cleanup-pending"
+                        .into(),
+                ));
+            }
+            return Ok(());
+        }
+        let progress = Progress::new(TARGET_CLEANUP_JOB_BUDGET);
+        self.close_tab_impl(target_id, &progress).await.map(|_| ())
+    }
+
+    /// Transfer a failed coordinator close to the Host's bounded cleanup
+    /// executor. The authority is single-use, so a later backend Drop cannot
+    /// enqueue the same Lane twice. A managed Lane should always carry this
+    /// authority; violating that invariant poisons the Host instead of
+    /// silently abandoning its targets.
+    pub(crate) fn hand_off_lane_cleanup(&self) {
+        if let Some(cleanup) = self.lane_cleanup.as_ref() {
+            cleanup.hand_off();
+        } else {
+            tracing::error!(
+                lane_id = %self.lane_id,
+                "managed Lane lost its cleanup authority; escalating Host cleanup"
+            );
+            self.cleanup_executor.poison(None, false);
         }
     }
 
@@ -3608,6 +5898,7 @@ impl CdpBackend {
             Arc::clone(&self.cleanup_executor),
             self.target_router().cloned(),
             replacement_target_background,
+            self.task_tab_reservation_scope.clone(),
         )
         .await?;
         let target_id = pending_page.target_id.clone();
@@ -3633,8 +5924,13 @@ impl CdpBackend {
             return Ok(handles);
         }
 
-        let record = arm_tab(&self.conn, &target_id, &session_id).await?;
-        let main_frame_id = record.main_frame_id.clone();
+        let record = arm_tab(
+            &self.conn,
+            &target_id,
+            &session_id,
+            pending_page.task_tab_reservation.clone(),
+        )
+        .await?;
         let handles = tab_handles(&record);
 
         if self.conn.registry().is_session_crashed(&session_id) {
@@ -3648,24 +5944,17 @@ impl CdpBackend {
             return Err(BrowserError::TargetCrashed);
         }
 
-        let mut pending_record = Some(record);
-        let survivor = {
-            let mut tabs = self.tabs.lock().await;
-            let survivor =
-                deterministic_survivor(tabs.keys().map(String::as_str), &target_id);
-            if survivor.is_none() {
-                if let Some(record) = pending_record.take() {
-                    tabs.insert(target_id.clone(), record);
-                }
-            }
-            survivor
-        };
+        let survivor = deterministic_survivor(
+            self.tabs.lock().await.keys().map(String::as_str),
+            &target_id,
+        );
 
         if let Some(survivor) = survivor {
-            if let Some(record) = pending_record.as_ref() {
-                abort_tab_record(record);
-            }
+            abort_tab_record(&record);
             close_target_or_confirm_absent(&self.conn, &target_id).await?;
+            if let Some(router) = self.target_router() {
+                router.release_target(&target_id, None).await;
+            }
             let _ = pending_page.transfer_to_lane();
             *self.active_target.lock().await = survivor;
             *self.active_frame.lock().await = None;
@@ -3675,12 +5964,44 @@ impl CdpBackend {
                 .ok_or(BrowserError::TargetClosed);
         }
 
+        if let Some(host) = &self.host {
+            match host
+                .router
+                .publish_armed_page(
+                    &self.lane_id,
+                    PendingPage {
+                        target_id: target_id.clone(),
+                        session_id: session_id.clone(),
+                        opener_target_id: None,
+                        target_url: None,
+                    },
+                    record,
+                )
+                .await
+            {
+                OwnedPagePublish::Inserted => {}
+                OwnedPagePublish::AlreadyPresent => {
+                    let _ = pending_page.transfer_to_lane();
+                    return self
+                        .select_live_active_tab()
+                        .await
+                        .ok_or(BrowserError::TargetClosed);
+                }
+                OwnedPagePublish::RejectedCapacity => {
+                    let _ = pending_page.transfer_to_lane();
+                    return Err(BrowserError::Blocked {
+                        reason: "this task reached its browser tab limit; close another task tab before recovering this Lane".into(),
+                    });
+                }
+                OwnedPagePublish::RejectedState => return Err(BrowserError::TargetClosed),
+            }
+        } else {
+            self.tabs.lock().await.insert(target_id.clone(), record);
+        }
+
         let _ = pending_page.transfer_to_lane();
         *self.active_target.lock().await = target_id.clone();
         *self.active_frame.lock().await = None;
-        if let Some(host) = &self.host {
-            host.router.claim_frame(&self.lane_id, &main_frame_id).await;
-        }
         if let Err(error) = enable_fetch_on_session(&self.conn, &session_id).await {
             tracing::warn!(
                 lane_id = %self.lane_id,
@@ -3785,8 +6106,8 @@ impl CdpBackend {
 /// **arm 一个 tab（D3 复用核心）**：为给定 `(target_id, session_id)` 物化注入管线（utility world +
 /// 现存帧补建 + context 登记循环）、读权威主帧 id、接 OOPIF arm 循环，建好一个完整的 [`TabRecord`]。
 ///
-/// 初始 tab（[`CdpBackend::from_launched`]）与发现循环里的新顶层 page（[`spawn_tab_discovery_loop`]）
-/// **共用本 helper**——同一套 arm 逻辑，零分叉。返回的 [`TabRecord`] 持有 `_inject_loop`/`_oopif_loop`
+/// 初始 tab 与 Host 路由器发现的新顶层 page **共用本 helper**——同一套 arm 逻辑，零分叉。
+/// 返回的 [`TabRecord`] 持有 `_inject_loop`/`_oopif_loop`
 /// 两个后台 `JoinHandle`：它们订阅**全局共享连接**的 broadcast，靠 `RecvError::Closed` 退出——但**连接
 /// 关单个 tab 时仍存活**，故关 tab 仅从 `tabs` 移除 TabRecord（drop 这俩 handle）**不会**让循环退出
 /// （drop 是 detach 非 abort）。**close_tab 必须显式 `.abort()` 这俩 handle**（见 [`CdpBackend::close_tab_impl`]）。
@@ -3796,11 +6117,12 @@ async fn arm_tab(
     conn: &Connection,
     target_id: &str,
     session_id: &str,
+    task_tab_reservation: Option<Arc<dyn TaskTabReservation>>,
 ) -> Result<TabRecord, BrowserError> {
     // page session 注入管线：new + arm（物化 utility world + 现存帧补建 + 起 context 登记循环）。
     // 保活其 loop 句柄，否则 world 创建事件不再被收下。
     let injection = InjectionManager::new(conn.clone(), session_id.to_string());
-    let inject_loop = injection.arm().await.map_err(map_inject_err)?;
+    let inject_loop = AbortOnDropTask::new(injection.arm().await.map_err(map_inject_err)?);
 
     // 主 frameId = page target 的 targetId（CDP 约定）。从 page session 的 frameTree 读权威主帧 id
     // （与 targetId 一致，但不依赖外部传入）。
@@ -3809,8 +6131,8 @@ async fn arm_tab(
     // OOPIF 子 session arm 接线骨架：后台订阅 attachedToTarget，对 iframe 类型的子 session（非本 page
     // session）arm 一个 InjectionManager 入 oopif_managers。真跨源 OOPIF 须 http fixture 后续验
     // （见 `TODO(verify-oopif)`）。每 tab 自有一份 oopif_managers + 一条 arm 循环（per-tab 隔离）。
-    let oopif_managers: std::sync::Arc<AsyncMutex<HashMap<String, OopifEntry>>> =
-        std::sync::Arc::new(AsyncMutex::new(HashMap::new()));
+    let oopif_managers: std::sync::Arc<Mutex<HashMap<String, OopifEntry>>> =
+        std::sync::Arc::new(Mutex::new(HashMap::new()));
     let oopif_loop =
         spawn_oopif_arm_loop(conn.clone(), session_id.to_string(), oopif_managers.clone());
 
@@ -3826,10 +6148,11 @@ async fn arm_tab(
     );
 
     Ok(TabRecord {
+        _task_tab_reservation: task_tab_reservation,
         target_id: target_id.to_string(),
         session_id: session_id.to_string(),
         injection,
-        _inject_loop: inject_loop,
+        _inject_loop: inject_loop.into_inner(),
         main_frame_id,
         oopif_managers,
         _oopif_loop: oopif_loop,
@@ -3900,7 +6223,7 @@ fn spawn_tab_discovery_loop(
                     }
 
                     // arm 成 TabRecord（复用 arm_tab）。失败 best-effort：warn 后继续（不影响已有 tab）。
-                    match arm_tab(&conn, &tid, &sid).await {
+                    match arm_tab(&conn, &tid, &sid, None).await {
                         Ok(record) => {
                             // 再次确认未被并发插入（双查，避免两条 attach 事件窗口竞态重 arm）。
                             let mut guard = tabs.lock().await;
@@ -3999,6 +6322,8 @@ async fn hand_off_pending_page_error(
     router: &Option<Arc<HostTargetRouter>>,
     identity: Option<(String, Option<String>)>,
     pending_url: &str,
+    task_tab_reservation: Option<Arc<dyn TaskTabReservation>>,
+    lane_resource_authority: Option<Arc<dyn TaskTabReservationAuthority>>,
     error: BrowserError,
 ) -> BrowserError {
     // An absent inventory after a timed-out create command is not an ordering
@@ -4013,6 +6338,8 @@ async fn hand_off_pending_page_error(
             Some(target_id),
             session_id,
             Some(pending_url.to_string()),
+            task_tab_reservation,
+            lane_resource_authority,
         )
         .hand_off();
     } else {
@@ -4023,6 +6350,8 @@ async fn hand_off_pending_page_error(
             None,
             None,
             Some(pending_url.to_string()),
+            task_tab_reservation,
+            lane_resource_authority,
         )
         .hand_off();
     }
@@ -4041,14 +6370,39 @@ async fn create_pending_lane_page_session(
     router: Option<Arc<HostTargetRouter>>,
     background: bool,
     caller_cancelled: CancellationToken,
+    task_tab_reservation_scope: Option<TaskTabReservationScope>,
 ) -> Result<PendingCreatedPage, BrowserError> {
     let pending_url = pending_page_url();
+    // The cross-Host slot is acquired before Target.createTarget. Its stable
+    // nonce key makes retransmitted/duplicate attach handling idempotent.
+    let lane_resource_authority = task_tab_reservation_scope
+        .as_ref()
+        .map(|scope| Arc::clone(&scope.authority));
+    let task_tab_reservation = match task_tab_reservation_scope.as_ref() {
+        Some(scope) => Some(
+            scope
+                .authority
+                .reserve(&scope.task_resource_key, &scope.lane_id, &pending_url)
+                .await?,
+        ),
+        None => None,
+    };
     let mut attached_rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
+    let deadline = tokio::time::Instant::now() + PENDING_PAGE_CREATE_RECOVERY_TIMEOUT;
+    if let Some(router) = router.as_ref() {
+        router
+            .register_pending_create(
+                &pending_url,
+                deadline,
+                task_tab_reservation.clone(),
+                task_tab_reservation_scope.as_ref(),
+            )
+            .await?;
+    }
     let params = pending_page_target_params(&pending_url, background);
     let create = conn.send::<CreateTargetParams>(ROOT_SESSION, &params);
     tokio::pin!(create);
 
-    let deadline = tokio::time::Instant::now() + PENDING_PAGE_CREATE_RECOVERY_TIMEOUT;
     let mut response_target_id: Option<String> = None;
     let mut response_error: Option<BrowserError> = None;
     let mut attached_identity: Option<(String, String)> = None;
@@ -4072,6 +6426,8 @@ async fn create_pending_lane_page_session(
                         &router,
                         Some((target_id.clone(), Some(session_id.clone()))),
                         &pending_url,
+                        task_tab_reservation.clone(),
+                        lane_resource_authority.clone(),
                         error,
                     )
                     .await,
@@ -4084,11 +6440,14 @@ async fn create_pending_lane_page_session(
                 Some(target_id.clone()),
                 Some(session_id.clone()),
                 Some(pending_url.clone()),
+                task_tab_reservation.clone(),
+                lane_resource_authority.clone(),
             );
             return Ok(PendingCreatedPage {
                 target_id: target_id.clone(),
                 session_id: session_id.clone(),
                 cleanup,
+                task_tab_reservation: task_tab_reservation.clone(),
                 transferred: false,
             });
         }
@@ -4109,6 +6468,8 @@ async fn create_pending_lane_page_session(
                     &router,
                     identity,
                     &pending_url,
+                    task_tab_reservation.clone(),
+                    lane_resource_authority.clone(),
                     error,
                 )
                 .await,
@@ -4137,6 +6498,8 @@ async fn create_pending_lane_page_session(
                     &router,
                     identity,
                     &pending_url,
+                    task_tab_reservation.clone(),
+                    lane_resource_authority.clone(),
                     error,
                 )
                 .await,
@@ -4271,30 +6634,71 @@ const LATE_TARGET_DRAIN_MAX_PASSES: usize = 4;
 fn spawn_oopif_arm_loop(
     conn: Connection,
     page_session: String,
-    oopif_managers: std::sync::Arc<AsyncMutex<HashMap<String, OopifEntry>>>,
+    oopif_managers: std::sync::Arc<Mutex<HashMap<String, OopifEntry>>>,
 ) -> tokio::task::JoinHandle<()> {
-    use chromiumoxide::cdp::browser_protocol::target::EventAttachedToTarget;
-    let mut rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
+    // OOPIF attach/detach is lifecycle authority, not telemetry. Reliable
+    // subscribers are bounded by entry + byte budgets in SessionRegistry; any
+    // overflow poisons the connection, whose Host fatal supervisor owns exact
+    // process-tree cleanup. A lossy broadcast receiver could silently miss the
+    // one target which bypasses MAX_OOPIFS_PER_TAB.
+    let mut attached_rx = conn.subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None);
+    let mut detached_rx = conn.subscribe_reliable(EventDetachedFromTarget::IDENTIFIER, None);
+    let mut destroyed_rx = conn.subscribe_reliable(EventTargetDestroyed::IDENTIFIER, None);
+    let mut crashed_rx = conn.subscribe_reliable(EventTargetCrashed::IDENTIFIER, None);
     tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    let event_parent_session = ev.session_id.clone();
-                    let Ok(att) =
-                        serde_json::from_value::<EventAttachedToTarget>(ev.params.clone())
-                    else {
-                        continue;
+        'events: loop {
+            tokio::select! {
+                event = attached_rx.recv() => {
+                    let Some(ev) = event else {
+                        break 'events;
                     };
-                    let sid: String = att.session_id.clone().into();
-                    let ttype = att.target_info.r#type.clone();
-                    // 裁决⑥：**只 arm `type=="iframe"` 的子 session**（跨进程 OOPIF 子帧）；跳过本 page
-                    // session（已单独 arm）+ **`page`（兄弟顶层 tab，否则跨标签污染）** + service_worker/
-                    // 其它。已 arm 过则跳过（CDP 可能对同 target 多次 attach）。type 分流经纯逻辑 helper
-                    // [`crate::tabs::should_arm_as_oopif`]（与 should_arm_as_page 严格互补）。
+                    let event_parent_session = ev.session_id;
+                    let Ok(attached) = serde_json::from_value::<EventAttachedToTarget>(ev.params)
+                    else {
+                        poison_host_control_stream(
+                            &conn,
+                            "malformed Target.attachedToTarget event in OOPIF authority",
+                        );
+                        break 'events;
+                    };
+                    let sid: String = attached.session_id.into();
+                    let target_id: String = attached.target_info.target_id.into();
+                    let target_type = attached.target_info.r#type;
+                    let identifiers_valid =
+                        crate::session::validate_cdp_identifier("OOPIF session id", &sid)
+                            .and_then(|()| {
+                                crate::session::validate_cdp_identifier(
+                                    "OOPIF target id",
+                                    &target_id,
+                                )
+                            })
+                            .and_then(|()| {
+                                (!event_parent_session.is_empty())
+                                    .then_some(event_parent_session.as_str())
+                                    .map_or(Ok(()), |parent| {
+                                        crate::session::validate_cdp_identifier(
+                                            "OOPIF parent session id",
+                                            parent,
+                                        )
+                                    })
+                            });
+                    if let Err(error) = identifiers_valid {
+                        conn.registry().poison_connection(error);
+                        break 'events;
+                    }
+
                     let is_own_page_session = sid == page_session;
-                    let already_armed = oopif_managers.lock().await.contains_key(&sid);
+                    let (already_armed, at_capacity) = {
+                        let managers = oopif_managers
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        (
+                            managers.contains_key(&sid),
+                            !oopif_capacity_available(managers.len()),
+                        )
+                    };
                     if !crate::tabs::should_arm_as_oopif_for_parent(
-                        &ttype,
+                        &target_type,
                         &event_parent_session,
                         &page_session,
                         is_own_page_session,
@@ -4302,7 +6706,25 @@ fn spawn_oopif_arm_loop(
                     ) {
                         continue;
                     }
-                    // 等子 session 在注册表登记（run_attach_loop 的 handle_attached 负责登记）。
+                    if at_capacity {
+                        tracing::warn!(
+                            target: "nomi_browser_engine::backend::cdp",
+                            target_id_suffix = %cdp_id_suffix(&target_id),
+                            limit = MAX_OOPIFS_PER_TAB,
+                            "per-tab OOPIF capacity exhausted; closing excess target"
+                        );
+                        if let Err(error) = close_target_or_confirm_absent(&conn, &target_id).await {
+                            poison_host_control_stream(
+                                &conn,
+                                format!(
+                                    "excess OOPIF exact cleanup failed; Host cleanup required: {error}"
+                                ),
+                            );
+                            break 'events;
+                        }
+                        continue;
+                    }
+
                     let deadline =
                         tokio::time::Instant::now() + OOPIF_SESSION_REGISTER_TIMEOUT;
                     let registry = conn.registry().clone();
@@ -4313,44 +6735,213 @@ fn spawn_oopif_arm_loop(
                         tokio::time::sleep(Duration::from_millis(20)).await;
                     }
                     if !registry.has_session(&sid) {
-                        tracing::warn!(
-                            target: "nomi_browser_engine::backend::cdp",
-                            session_id = %sid,
-                            "OOPIF child session never registered; skip arm (TODO(verify-oopif))"
-                        );
+                        // An unregistered but live renderer cannot be omitted
+                        // from the structural count. Close its exact target or
+                        // escalate to whole-Host cleanup.
+                        if let Err(error) = close_target_or_confirm_absent(&conn, &target_id).await {
+                            poison_host_control_stream(
+                                &conn,
+                                format!(
+                                    "unregistered OOPIF exact cleanup failed; Host cleanup required: {error}"
+                                ),
+                            );
+                            break 'events;
+                        }
                         continue;
                     }
-                    // arm 该子 session 的注入管线。失败 best-effort：warn 后继续。
+
                     let manager = InjectionManager::new(conn.clone(), sid.clone());
                     match manager.arm().await {
                         Ok(loop_handle) => {
-                            oopif_managers.lock().await.insert(
-                                sid.clone(),
-                                OopifEntry {
-                                    manager,
-                                    _loop: loop_handle,
-                                },
-                            );
+                            oopif_managers
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .insert(
+                                    sid.clone(),
+                                    OopifEntry {
+                                        target_id,
+                                        manager,
+                                        _loop: loop_handle,
+                                    },
+                                );
                             tracing::debug!(
                                 target: "nomi_browser_engine::backend::cdp",
-                                session_id = %sid, target_type = %ttype,
+                                session_id = %sid, target_type = %target_type,
                                 "armed OOPIF child session injection (TODO(verify-oopif))"
                             );
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "nomi_browser_engine::backend::cdp",
-                                session_id = %sid, error = %e,
-                                "arm OOPIF child session failed (non-fatal)"
-                            );
+                        Err(error) => {
+                            // Failed arming must not leave an uncharged renderer
+                            // which a later attach burst can use to bypass the
+                            // manager cap.
+                            if let Err(cleanup_error) =
+                                close_target_or_confirm_absent(&conn, &target_id).await
+                            {
+                                poison_host_control_stream(
+                                    &conn,
+                                    format!(
+                                        "failed OOPIF arm ({error}) and exact cleanup ({cleanup_error})"
+                                    ),
+                                );
+                                break 'events;
+                            }
                         }
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                event = detached_rx.recv() => {
+                    let Some(ev) = event else {
+                        break 'events;
+                    };
+                    let Ok(detached) =
+                        serde_json::from_value::<EventDetachedFromTarget>(ev.params)
+                    else {
+                        poison_host_control_stream(
+                            &conn,
+                            "malformed Target.detachedFromTarget event in OOPIF authority",
+                        );
+                        break 'events;
+                    };
+                    let sid: String = detached.session_id.into();
+                    if let Err(error) =
+                        crate::session::validate_cdp_identifier("detached OOPIF session id", &sid)
+                    {
+                        conn.registry().poison_connection(error);
+                        break 'events;
+                    }
+                    remove_oopif_session(&oopif_managers, &sid);
+                }
+                event = destroyed_rx.recv() => {
+                    let Some(ev) = event else {
+                        break 'events;
+                    };
+                    let Ok(destroyed) =
+                        serde_json::from_value::<EventTargetDestroyed>(ev.params)
+                    else {
+                        poison_host_control_stream(
+                            &conn,
+                            "malformed Target.targetDestroyed event in OOPIF authority",
+                        );
+                        break 'events;
+                    };
+                    let target_id: String = destroyed.target_id.into();
+                    if let Err(error) =
+                        crate::session::validate_cdp_identifier("destroyed OOPIF target id", &target_id)
+                    {
+                        conn.registry().poison_connection(error);
+                        break 'events;
+                    }
+                    remove_oopif_target(&oopif_managers, &target_id);
+                }
+                event = crashed_rx.recv() => {
+                    let Some(ev) = event else {
+                        break 'events;
+                    };
+                    let Ok(crashed) = serde_json::from_value::<EventTargetCrashed>(ev.params)
+                    else {
+                        poison_host_control_stream(
+                            &conn,
+                            "malformed Target.targetCrashed event in OOPIF authority",
+                        );
+                        break 'events;
+                    };
+                    let target_id: String = crashed.target_id.into();
+                    if let Err(error) =
+                        crate::session::validate_cdp_identifier("crashed OOPIF target id", &target_id)
+                    {
+                        conn.registry().poison_connection(error);
+                        break 'events;
+                    }
+                    remove_oopif_target(&oopif_managers, &target_id);
+                }
             }
         }
+        drain_oopif_entries(&oopif_managers);
     })
+}
+
+fn poison_host_control_stream(conn: &Connection, reason: impl Into<String>) {
+    conn.registry()
+        .poison_connection(TransportError::Protocol(reason.into()));
+}
+
+fn drain_oopif_entries(managers: &Arc<Mutex<HashMap<String, OopifEntry>>>) -> usize {
+    let mut managers = managers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let count = managers.len();
+    // `OopifEntry::drop` aborts every injection loop.
+    managers.clear();
+    count
+}
+
+fn remove_oopif_session(
+    managers: &Arc<Mutex<HashMap<String, OopifEntry>>>,
+    session_id: &str,
+) -> bool {
+    managers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(session_id)
+        .is_some()
+}
+
+fn remove_oopif_target(
+    managers: &Arc<Mutex<HashMap<String, OopifEntry>>>,
+    target_id: &str,
+) -> usize {
+    let mut managers = managers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = managers.len();
+    managers.retain(|_, entry| entry.target_id != target_id);
+    before - managers.len()
+}
+
+/// Optional per-tab request timing metadata with exact byte accounting.
+///
+/// Saturation drops only the new timing sample: the bounded network debug ring
+/// still records the request, and page/network behavior is never affected.
+/// Terminal events remove the exact request id so completed traffic cannot
+/// occupy all slots indefinitely.
+#[derive(Default)]
+struct DebugRequestTimestamps {
+    entries: HashMap<String, f64>,
+    retained_key_bytes: usize,
+}
+
+impl DebugRequestTimestamps {
+    fn insert(&mut self, request_id: String, timestamp: f64) -> bool {
+        let key_bytes = request_id.len();
+        if key_bytes > MAX_DEBUG_REQUEST_TIMESTAMP_KEY_BYTES {
+            return false;
+        }
+        if let Some(existing) = self.entries.get_mut(&request_id) {
+            *existing = timestamp;
+            return true;
+        }
+        let Some(next_key_bytes) = self.retained_key_bytes.checked_add(key_bytes) else {
+            return false;
+        };
+        if self.entries.len() >= MAX_DEBUG_REQUEST_TIMESTAMPS
+            || next_key_bytes > MAX_DEBUG_REQUEST_TIMESTAMP_TOTAL_KEY_BYTES
+        {
+            return false;
+        }
+        self.entries.insert(request_id, timestamp);
+        self.retained_key_bytes = next_key_bytes;
+        true
+    }
+
+    fn remove(&mut self, request_id: &str) -> Option<f64> {
+        let removed = self.entries.remove(request_id)?;
+        self.retained_key_bytes = self.retained_key_bytes.saturating_sub(request_id.len());
+        Some(removed)
+    }
+
+    #[cfg(test)]
+    fn retained_counts(&self) -> (usize, usize) {
+        (self.entries.len(), self.retained_key_bytes)
+    }
 }
 
 /// **调试捕获后台循环**：启用 `Runtime.enable` + `Log.enable`（`Network.enable` 由 navigate 幂等
@@ -4389,9 +6980,8 @@ fn spawn_debug_capture_loop(
         let mut fin_rx = conn.subscribe("Network.loadingFinished", Some(&session_id));
         let mut fail_rx = conn.subscribe("Network.loadingFailed", Some(&session_id));
 
-        // 内部 requestId → 时间戳映射（用于算 duration_ms），有界。
-        let mut request_timestamps: HashMap<String, f64> = HashMap::new();
-        const TS_MAP_CAP: usize = 2000;
+        // 内部 requestId → 时间戳映射（用于算 duration_ms），按条数和 key bytes 双重有界。
+        let mut request_timestamps = DebugRequestTimestamps::default();
 
         loop {
             tokio::select! {
@@ -4441,11 +7031,9 @@ fn spawn_debug_capture_loop(
                             if let Some((id, entry)) = crate::debug_capture::map_request_will_be_sent(&e.params) {
                                 // 记录 requestId 时间戳用于后续算 duration。
                                 let ts = e.params.get("timestamp").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                if request_timestamps.len() >= TS_MAP_CAP {
-                                    // 粗暴清理：超出上限清空（防无界增长，网络请求可能非常多）。
-                                    request_timestamps.clear();
-                                }
-                                request_timestamps.insert(id.clone(), ts);
+                                // Timing is optional debug metadata. Saturation drops this
+                                // sample without clearing unrelated in-flight requests.
+                                let _ = request_timestamps.insert(id, ts);
                                 if let Ok(mut b) = buffers.lock() {
                                     b.network.push(entry);
                                 }
@@ -4481,7 +7069,7 @@ fn spawn_debug_capture_loop(
                     match ev {
                         Ok(e) => {
                             let req_id = e.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
-                            let req_ts = request_timestamps.get(req_id).copied().unwrap_or(0.0);
+                            let req_ts = request_timestamps.remove(req_id).unwrap_or(0.0);
                             if let Ok(mut b) = buffers.lock() {
                                 if let Some(entry) = b.network.iter_mut().rev().find(|e| e.duration_ms.is_none() && !e.failed && e.status.is_some()) {
                                     crate::debug_capture::patch_loading_finished(entry, &e.params, req_ts);
@@ -4495,6 +7083,9 @@ fn spawn_debug_capture_loop(
                 ev = fail_rx.recv() => {
                     match ev {
                         Ok(e) => {
+                            if let Some(req_id) = e.params.get("requestId").and_then(|v| v.as_str()) {
+                                let _ = request_timestamps.remove(req_id);
+                            }
                             if let Ok(mut b) = buffers.lock() {
                                 if let Some(entry) = b.network.iter_mut().rev().find(|e| !e.failed && e.status.is_none()) {
                                     crate::debug_capture::patch_loading_failed(entry, &e.params);
@@ -4508,6 +7099,53 @@ fn spawn_debug_capture_loop(
             }
         }
     })
+}
+
+fn bounded_rendered_html_expression() -> String {
+    let content_limit = crate::engine::MAX_RENDERED_HTML_BYTES
+        .saturating_sub(crate::engine::RENDERED_HTML_TRUNCATION_MARKER.len());
+    format!(
+        "(() => {{ try {{ \
+           const text = document.documentElement ? document.documentElement.outerHTML : ''; \
+           const limit = {content_limit}; \
+           let bytes = 0; let end = 0; \
+           while (end < text.length) {{ \
+             const cp = text.codePointAt(end); \
+             const width = cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4; \
+             const units = cp > 0xffff ? 2 : 1; \
+             if (bytes + width > limit) break; \
+             bytes += width; end += units; \
+           }} \
+           return {{ text: end === text.length ? text : text.slice(0, end), \
+                     truncated: end < text.length, retainedUtf8Bytes: bytes }}; \
+         }} catch (e) {{ return {{ text: '', truncated: false, retainedUtf8Bytes: 0 }}; }} }})()"
+    )
+}
+
+fn rendered_html_from_renderer_value(value: &serde_json::Value) -> String {
+    let raw = value
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| value.as_str())
+        .unwrap_or_default();
+    let renderer_truncated = value
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let marker = crate::engine::RENDERED_HTML_TRUNCATION_MARKER;
+    let content_limit = crate::engine::MAX_RENDERED_HTML_BYTES.saturating_sub(marker.len());
+    let bounded = crate::actions::utf8_prefix_at_most(raw, content_limit);
+    let truncated = renderer_truncated || bounded.len() < raw.len();
+    let mut html = String::with_capacity(
+        bounded
+            .len()
+            .saturating_add(if truncated { marker.len() } else { 0 }),
+    );
+    html.push_str(bounded);
+    if truncated {
+        html.push_str(marker);
+    }
+    html
 }
 
 #[async_trait]
@@ -4585,14 +7223,13 @@ impl BrowserEngine for CdpBackend {
         // Read the **post-JS** DOM as raw HTML on the active frame. Read-only
         // (no redaction / no `<data>` wrap — see the trait doc): the knowledge
         // layer runs this through its own HTML→markdown pipeline, so it must get
-        // un-transformed markup. `documentElement.outerHTML` is a plain string
-        // returned by-value; empty document → empty string (best-effort guard so a
-        // page with no documentElement never throws). `active_frame_eval` maps a JS
-        // exception / transport failure into a `BrowserError` we surface as-is.
-        let expression =
-            "(() => { try { return document.documentElement ? document.documentElement.outerHTML : ''; } catch (e) { return ''; } })()";
-        let value = self.active_frame_eval(expression).await?;
-        Ok(value.as_str().unwrap_or_default().to_string())
+        // un-transformed markup. The renderer returns only a bounded UTF-8
+        // prefix rather than letting `outerHTML` inflate a by-value CDP message
+        // up to the transport's 64 MiB emergency limit. Rust validates the
+        // boundary again before retaining the string.
+        let expression = bounded_rendered_html_expression();
+        let value = self.active_frame_eval(&expression).await?;
+        Ok(rendered_html_from_renderer_value(&value))
     }
 
     async fn act(
@@ -4621,6 +7258,12 @@ impl BrowserEngine for CdpBackend {
 
     async fn bring_to_front(&self) -> Result<(), BrowserError> {
         CdpBackend::bring_to_front(self).await
+    }
+
+    async fn capture_cookie_state(
+        &self,
+    ) -> Result<crate::storage_state::StorageState, BrowserError> {
+        CdpBackend::capture_cookies(self).await
     }
 
     async fn capture_storage_state(
@@ -4705,10 +7348,20 @@ impl CdpBackend {
         // 三路临时订阅（act 期间有效，guard drop 后监听任务被 abort，订阅 Receiver 随任务 drop 收摊）。
         let mut detached_rx = self
             .conn
-            .subscribe_reliable("Target.detachedFromTarget", None);
+            .subscribe_reliable_for_task(
+                "Target.detachedFromTarget",
+                None,
+                &self.reliable_event_task_budget,
+            )
+            .map_err(map_transport_err)?;
         let mut crashed_rx = self
             .conn
-            .subscribe_reliable("Target.targetCrashed", None);
+            .subscribe_reliable_for_task(
+                "Target.targetCrashed",
+                None,
+                &self.reliable_event_task_budget,
+            )
+            .map_err(map_transport_err)?;
         let mut frame_detached_rx = self
             .conn
             .subscribe("Page.frameDetached", Some(&page_session));
@@ -5159,7 +7812,7 @@ impl CdpBackend {
     /// 2. `DOM.enable`（getFrameOwner/resolveNode 的前置）。
     /// 3. 列同进程帧（frameTree）+ 续编 OOPIF 子 session，逐帧产 [`FrameSnapshot`]（seq → prefix `f<seq>`）。
     /// 4. 建 `child_frame → (parent_frame, parent_iframe_ref)` 路由（getFrameOwner→resolveNode→`_ariaRef.ref`）。
-    /// 5. 自主帧起递归 [`stitch`] 成一棵树。
+    /// 5. 自主帧起递归写入一个有硬字节上限的缓冲区，缝合成一棵树。
     /// 6. 脱敏（[`redact::redact_yaml`]）+ 不可信包裹（[`redact::wrap_untrusted`]，origin=current_url）。
     /// 7. 代际翻新：锁 active tab 的 `ref_table`，`new_generation(prev)`，解析每行 `[ref=...]` 填 entries + 表，存回。
     ///
@@ -5180,6 +7833,17 @@ impl CdpBackend {
 
         // 3) 逐帧产 FrameSnapshot。frames: (seq, frame_id, session_id, snapshot)。
         let mut frames: Vec<ObservedFrame> = Vec::new();
+        // Every successful frame snapshot retains one authoritative JS
+        // `elements` map. Track their task-wide total while snapshotting, and
+        // retain exact owners so a later-frame/parser overflow can invalidate
+        // the entire unpublished generation before returning.
+        let mut retained_ref_count = 0usize;
+        // Distinct counters defend both sides of the trust boundary: the JS
+        // counter is exact UTF-8 JSON returned by CDP; the Rust counter is the
+        // heap capacity retained by deserialized FrameSnapshots.
+        let mut retained_snapshot_json_bytes = 0usize;
+        let mut retained_frame_bytes = 0usize;
+        let mut snapshot_ref_owners: Vec<(InjectionManager, String)> = Vec::new();
         let mut next_seq: u32 = 0;
         let mut truncated = false;
         // D5：跨帧累积 password 输入的 aria ref（同帧 utility world 收集），缝合后宿主侧抹其 value。
@@ -5196,10 +7860,23 @@ impl CdpBackend {
         let same_proc_frames = handles.injection.frame_ids().await.map_err(map_inject_err)?;
         for fid in &same_proc_frames {
             match self
-                .snapshot_one_frame(&handles.injection, fid, next_seq, opts)
+                .snapshot_one_frame(
+                    &handles.injection,
+                    fid,
+                    next_seq,
+                    opts,
+                    retained_ref_count,
+                    retained_snapshot_json_bytes,
+                    retained_frame_bytes,
+                )
                 .await
             {
-                Ok(Some(snap)) => {
+                Ok(Some((snap, frame_ref_count, frame_json_bytes, frame_heap_bytes))) => {
+                    retained_ref_count = retained_ref_count.saturating_add(frame_ref_count);
+                    retained_snapshot_json_bytes = retained_snapshot_json_bytes
+                        .saturating_add(frame_json_bytes);
+                    retained_frame_bytes = retained_frame_bytes.saturating_add(frame_heap_bytes);
+                    snapshot_ref_owners.push((handles.injection.clone(), fid.clone()));
                     if frame_hit_depth_limit(&snap, opts.max_depth) {
                         truncated = true;
                     }
@@ -5230,6 +7907,22 @@ impl CdpBackend {
                 }
                 // context 没就绪 / body 取不到 / 单帧 JS 异常：跳过该帧（best-effort，不致命）。
                 Ok(None) => {}
+                Err(error @ InjectError::RefCapacityExceeded { .. }) => {
+                    Self::invalidate_observe_ref_state(
+                        &handles.ref_table,
+                        &snapshot_ref_owners,
+                    )
+                    .await;
+                    return Err(map_inject_err(error));
+                }
+                Err(error @ InjectError::ObservationCapacityExceeded { .. }) => {
+                    Self::invalidate_observe_ref_state(
+                        &handles.ref_table,
+                        &snapshot_ref_owners,
+                    )
+                    .await;
+                    return Err(map_inject_err(error));
+                }
                 Err(e) => {
                     tracing::warn!(
                         target: "nomi_browser_engine::backend::cdp",
@@ -5246,7 +7939,10 @@ impl CdpBackend {
         // 持锁」（避免阻塞 spawn_oopif_arm_loop 的插入）。manager 克隆不复制后台循环，但经共享 Arc
         // 读同一份 context 真相。D1：用 active tab 的 oopif_managers（克隆出的 Arc）。
         let oopif_managers: Vec<(String, InjectionManager)> = {
-            let guard = handles.oopif_managers.lock().await;
+            let guard = handles
+                .oopif_managers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .iter()
                 .map(|(sid, entry)| (sid.clone(), entry.manager.clone()))
@@ -5258,8 +7954,25 @@ impl CdpBackend {
                 continue;
             };
             for fid in &fids {
-                match self.snapshot_one_frame(&manager, fid, next_seq, opts).await {
-                    Ok(Some(snap)) => {
+                match self
+                    .snapshot_one_frame(
+                        &manager,
+                        fid,
+                        next_seq,
+                        opts,
+                        retained_ref_count,
+                        retained_snapshot_json_bytes,
+                        retained_frame_bytes,
+                    )
+                    .await
+                {
+                    Ok(Some((snap, frame_ref_count, frame_json_bytes, frame_heap_bytes))) => {
+                        retained_ref_count = retained_ref_count.saturating_add(frame_ref_count);
+                        retained_snapshot_json_bytes = retained_snapshot_json_bytes
+                            .saturating_add(frame_json_bytes);
+                        retained_frame_bytes =
+                            retained_frame_bytes.saturating_add(frame_heap_bytes);
+                        snapshot_ref_owners.push((manager.clone(), fid.clone()));
                         if frame_hit_depth_limit(&snap, opts.max_depth) {
                             truncated = true;
                         }
@@ -5276,6 +7989,22 @@ impl CdpBackend {
                         next_seq += 1;
                     }
                     Ok(None) => {}
+                    Err(error @ InjectError::RefCapacityExceeded { .. }) => {
+                        Self::invalidate_observe_ref_state(
+                            &handles.ref_table,
+                            &snapshot_ref_owners,
+                        )
+                        .await;
+                        return Err(map_inject_err(error));
+                    }
+                    Err(error @ InjectError::ObservationCapacityExceeded { .. }) => {
+                        Self::invalidate_observe_ref_state(
+                            &handles.ref_table,
+                            &snapshot_ref_owners,
+                        )
+                        .await;
+                        return Err(map_inject_err(error));
+                    }
                     Err(e) => {
                         tracing::warn!(
                             target: "nomi_browser_engine::backend::cdp",
@@ -5302,7 +8031,17 @@ impl CdpBackend {
             .iter()
             .position(|f| f.frame_id == handles.main_frame_id)
             .unwrap_or(0);
-        let stitched = render_frame_recursive(&frames, main_idx, &parent_of);
+        let stitched = match render_frame_recursive_bounded(&frames, main_idx, &parent_of) {
+            Ok(stitched) => stitched,
+            Err(error) => {
+                Self::invalidate_observe_ref_state(
+                    &handles.ref_table,
+                    &snapshot_ref_owners,
+                )
+                .await;
+                return Err(map_observation_capacity_err(error));
+            }
+        };
 
         // 6) D5 password value 置空 → 脱敏 → 不可信包裹（origin = 当前 url）。
         //    正常路径：按 utility world 收集到的 password ref 精确抹掉内联 value（DOM type=password
@@ -5312,7 +8051,17 @@ impl CdpBackend {
         //
         // SD-4：同一次 nav-history 查询同时取 url + POST 标志（避免额外 CDP round-trip）。
         let (url, current_page_is_post) = self.url_and_post_flag(&page_session).await;
+        if let Some(url) = &url
+            && let Err(error) = ensure_observation_bytes(url.len())
+        {
+            Self::invalidate_observe_ref_state(&handles.ref_table, &snapshot_ref_owners).await;
+            return Err(map_observation_capacity_err(error));
+        }
         let blanked = redact::blank_secret_values(&stitched, &password_refs);
+        if let Err(error) = ensure_observation_bytes(blanked.len()) {
+            Self::invalidate_observe_ref_state(&handles.ref_table, &snapshot_ref_owners).await;
+            return Err(map_observation_capacity_err(error));
+        }
         let blanked = if any_password_query_failed {
             tracing::warn!(
                 target: "nomi_browser_engine::backend::cdp",
@@ -5322,22 +8071,57 @@ impl CdpBackend {
         } else {
             blanked
         };
+        if let Err(error) = ensure_observation_bytes(blanked.len()) {
+            Self::invalidate_observe_ref_state(&handles.ref_table, &snapshot_ref_owners).await;
+            return Err(map_observation_capacity_err(error));
+        }
         let redacted = redact::redact_yaml(&blanked);
+        if let Err(error) = ensure_observation_bytes(redacted.len()) {
+            Self::invalidate_observe_ref_state(&handles.ref_table, &snapshot_ref_owners).await;
+            return Err(map_observation_capacity_err(error));
+        }
         let yaml = redact::wrap_untrusted(&redacted, url.as_deref());
+        if let Err(error) = ensure_observation_bytes(yaml.len()) {
+            Self::invalidate_observe_ref_state(&handles.ref_table, &snapshot_ref_owners).await;
+            return Err(map_observation_capacity_err(error));
+        }
 
         // 7) 代际翻新 + entries/ref 表。注意：ref 表与 entries 用**脱敏前**的 stitched 解析
         //    （脱敏只动 secret 文本，不动 role/ref；但用 stitched 保证 ref 行完整不被 <data> 包裹干扰）。
         //    D1：锁 active tab 的 ref_table（克隆出的 Arc，per-tab 隔离）。
-        let (generation, entries) = {
-            let mut guard = handles.ref_table.lock().await;
+        // Build the candidate table off to the side.  It becomes authoritative
+        // only after the complete Observation (yaml/entries/url/boxes) passes
+        // its retained-byte validation.
+        let parsed_generation = {
+            let guard = handles.ref_table.lock().await;
             let mut table = RefTable::new_generation(guard.as_ref());
+            drop(guard);
             let generation_id = table.generation();
-            let entries = self.parse_refs_into_table(&frames, &stitched, &mut table);
-            *guard = Some(table);
-            (generation_id, entries)
+            match Self::parse_refs_into_table(&frames, &stitched, &mut table) {
+                Ok(entries) => Ok((generation_id, entries, table)),
+                Err(error) => Err(error),
+            }
+        };
+        let (generation, entries, table) = match parsed_generation {
+            Ok(generation) => generation,
+            Err(error) => {
+                Self::invalidate_observe_ref_state(
+                    &handles.ref_table,
+                    &snapshot_ref_owners,
+                )
+                .await;
+                return Err(BrowserError::Blocked {
+                    reason: format!(
+                        "observe ref parsing exceeded the task generation limit (limit={}). \
+                         The partial generation was discarded; simplify the page or reduce \
+                         observe depth, then run a fresh observe",
+                        error.limit
+                    ),
+                });
+            }
         };
 
-        Ok(Observation {
+        let observation = Observation {
             generation,
             yaml,
             entries,
@@ -5345,7 +8129,38 @@ impl CdpBackend {
             truncated,
             current_page_is_post,
             boxes: ref_boxes,
-        })
+        };
+        if let Err(error) = observation.validate_retained_bytes() {
+            Self::invalidate_observe_ref_state(&handles.ref_table, &snapshot_ref_owners).await;
+            return Err(map_observation_capacity_err(error));
+        }
+        *handles.ref_table.lock().await = Some(table);
+        Ok(observation)
+    }
+
+    /// Invalidate both halves of an observe generation that cannot be
+    /// published safely.  The Rust generation is advanced to an empty table
+    /// first, so old refs become stale immediately; every already-accepted
+    /// frame map is then cleared best-effort.  The frame whose bounded snapshot
+    /// detected overflow has already cleared itself inside that same JS call.
+    async fn invalidate_observe_ref_state(
+        ref_table: &std::sync::Arc<AsyncMutex<Option<RefTable>>>,
+        owners: &[(InjectionManager, String)],
+    ) {
+        {
+            let mut guard = ref_table.lock().await;
+            *guard = Some(RefTable::new_generation(guard.as_ref()));
+        }
+        for (manager, frame_id) in owners {
+            if let Err(error) = manager.clear_snapshot_refs(frame_id).await {
+                tracing::warn!(
+                    target: "nomi_browser_engine::backend::cdp",
+                    frame_id = %frame_id,
+                    %error,
+                    "failed to clear a discarded observe ref map"
+                );
+            }
+        }
     }
 
     /// 短轮询等主帧的 utility-world context 就绪（fresh navigate 后 world 物化有延迟）。
@@ -5371,15 +8186,19 @@ impl CdpBackend {
     }
 
     /// 拍单帧：取 body objectId → `incrementalAriaSnapshot(body, {mode:ai, refPrefix:f<seq>, depth, track})`
-    /// → 反序列化成 [`FrameSnapshot`]。context 未就绪 / body 取不到 → `Ok(None)`（best-effort 跳过）；
-    /// JS 异常 / 协议错误 → `Err`（调用方 warn 后跳过单帧）。
+    /// → 在注入调用内校验 task-wide retained-ref budget → 反序列化成
+    /// `(FrameSnapshot, retained_ref_count)`。context 未就绪 / body 取不到 → `Ok(None)`
+    /// （best-effort 跳过）；容量超限会先清掉本帧 map 再显式返回错误。
     async fn snapshot_one_frame(
         &self,
         manager: &InjectionManager,
         frame_id: &str,
         seq: u32,
         opts: &ObserveOpts,
-    ) -> Result<Option<FrameSnapshot>, InjectError> {
+        already_retained: usize,
+        already_retained_json_bytes: usize,
+        already_retained_frame_bytes: usize,
+    ) -> Result<Option<(FrameSnapshot, usize, usize, usize)>, InjectError> {
         // context 未就绪 / body null → 视为该帧暂不可观测，跳过（不报错）。
         let body_obj_id = match manager.body_object_id(frame_id).await {
             Ok(id) => id,
@@ -5403,22 +8222,69 @@ impl CdpBackend {
             })),
             ..Default::default()
         };
-        let raw = manager
-            .call_injected(
+        let (value, retained, reported_serialized_bytes) = manager
+            .incremental_aria_snapshot_bounded(
                 frame_id,
-                "incrementalAriaSnapshot",
-                vec![node_arg, opts_arg],
-                true,
+                node_arg,
+                opts_arg,
+                already_retained,
+                already_retained_json_bytes,
             )
             .await?;
-        // by-value → result.value 是 {full, incremental?, iframeRefs, iframeDepths}。
-        let value = raw.get("value").cloned().ok_or_else(|| {
-            InjectError::Protocol(format!("incrementalAriaSnapshot result missing value: {raw}"))
-        })?;
-        let snap: FrameSnapshot = serde_json::from_value(value).map_err(|e| {
-            InjectError::Protocol(format!("parse FrameSnapshot: {e}"))
-        })?;
-        Ok(Some(snap))
+        let serialized_bytes = match serialized_json_bytes_bounded(&value) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = manager.clear_snapshot_refs(frame_id).await;
+                return Err(InjectError::ObservationCapacityExceeded {
+                    limit: error.limit,
+                    current: already_retained_json_bytes.saturating_add(error.attempted),
+                    frame_bytes: error.attempted,
+                });
+            }
+        };
+        let attempted_json_bytes = already_retained_json_bytes.saturating_add(serialized_bytes);
+        if attempted_json_bytes > MAX_OBSERVATION_RETAINED_BYTES
+            || reported_serialized_bytes != serialized_bytes
+        {
+            let _ = manager.clear_snapshot_refs(frame_id).await;
+            return Err(InjectError::ObservationCapacityExceeded {
+                limit: MAX_OBSERVATION_RETAINED_BYTES,
+                current: attempted_json_bytes.max(
+                    already_retained_json_bytes.saturating_add(reported_serialized_bytes),
+                ),
+                frame_bytes: serialized_bytes.max(reported_serialized_bytes),
+            });
+        }
+        let snap: FrameSnapshot = match serde_json::from_value(value) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                let _ = manager.clear_snapshot_refs(frame_id).await;
+                return Err(InjectError::Protocol(
+                    "bounded FrameSnapshot payload had an invalid shape".into(),
+                ));
+            }
+        };
+        let frame_heap_bytes = match snap.retained_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = manager.clear_snapshot_refs(frame_id).await;
+                return Err(InjectError::ObservationCapacityExceeded {
+                    limit: error.limit,
+                    current: already_retained_frame_bytes.saturating_add(error.attempted),
+                    frame_bytes: error.attempted,
+                });
+            }
+        };
+        let attempted = already_retained_frame_bytes.saturating_add(frame_heap_bytes);
+        if attempted > MAX_OBSERVATION_RETAINED_BYTES {
+            let _ = manager.clear_snapshot_refs(frame_id).await;
+            return Err(InjectError::ObservationCapacityExceeded {
+                limit: MAX_OBSERVATION_RETAINED_BYTES,
+                current: attempted,
+                frame_bytes: frame_heap_bytes,
+            });
+        }
+        Ok(Some((snap, retained, serialized_bytes, frame_heap_bytes)))
     }
 
     /// 建 iframe→子帧 路由表：`child_frame_id → (parent_frame_id, parent_iframe_ref)`。
@@ -5553,17 +8419,18 @@ impl CdpBackend {
     /// 解析缝合后 YAML 里每行的 `[ref=...]`，填 [`RefTable`] + 产出 [`ElementEntry`] 列表。
     /// ref 的归属帧（session_id/frame_id/frame_seq）按 ref 的 `f<seq>` 前缀回查 frames。
     fn parse_refs_into_table(
-        &self,
         frames: &[ObservedFrame],
         stitched: &str,
         table: &mut RefTable,
-    ) -> Vec<ElementEntry> {
+    ) -> Result<Vec<ElementEntry>, RefTableCapacityError> {
         // seq → (session_id, frame_id)。
         let by_seq: HashMap<u32, (&str, &str)> = frames
             .iter()
             .map(|f| (f.seq, (f.session_id.as_str(), f.frame_id.as_str())))
             .collect();
         let mut entries = Vec::new();
+        let mut records = Vec::new();
+        let mut seen = HashSet::new();
         for line in stitched.lines() {
             let Some(reff) = parse_ref_token(line) else {
                 continue;
@@ -5572,21 +8439,36 @@ impl CdpBackend {
             let Some(seq) = parse_seq_from_ref(&reff) else {
                 continue;
             };
+            let Some((session_id, frame_id)) = by_seq.get(&seq).copied() else {
+                // Never publish a syntactically plausible ref whose frame was
+                // not part of this authoritative observe.  It cannot resolve
+                // and may originate from untrusted text inside the YAML.
+                continue;
+            };
+            // Snapshot refs are expected to be unique.  Dedup defensively so
+            // repeated YAML lines cannot inflate Observation.entries, and
+            // stop before allocating any record beyond the hard generation
+            // bound.  The RefTable itself is untouched until the full batch is
+            // known to fit, so failure never publishes a partial generation.
+            if !seen.insert(reff.clone()) {
+                continue;
+            }
+            if seen.len() > MAX_REFS_PER_GENERATION {
+                return Err(RefTableCapacityError {
+                    limit: MAX_REFS_PER_GENERATION,
+                });
+            }
             let (role, name) = parse_role_name(line);
-            let (session_id, frame_id) = by_seq
-                .get(&seq)
-                .map(|(s, f)| (s.to_string(), f.to_string()))
-                .unwrap_or_default();
-            table.insert(
-                &reff,
+            records.push((
+                reff.clone(),
                 RefRecord {
-                    session_id,
-                    frame_id,
+                    session_id: session_id.to_string(),
+                    frame_id: frame_id.to_string(),
                     full_ref: reff.clone(),
                     role: role.clone(),
                     name: name.clone(),
                 },
-            );
+            ));
             entries.push(ElementEntry {
                 r#ref: reff,
                 role,
@@ -5594,7 +8476,8 @@ impl CdpBackend {
                 frame_seq: seq,
             });
         }
-        entries
+        table.try_insert_batch(records)?;
+        Ok(entries)
     }
 
     // ── act 反查（P2 命脉，actionability.rs）需要的内部访问器 ──────────────────────
@@ -5639,7 +8522,7 @@ impl CdpBackend {
         handles
             .oopif_managers
             .lock()
-            .await
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session_id)
             .map(|entry| entry.manager.clone())
     }
@@ -5784,7 +8667,11 @@ impl CdpBackend {
     /// arm」（`spawn_oopif_arm_loop` 接线在真 http 多源页才走得到,离线 file:// 触发不到）。
     pub async fn oopif_session_count_for_test(&self) -> usize {
         match self.active_tab_handles().await {
-            Ok(handles) => handles.oopif_managers.lock().await.len(),
+            Ok(handles) => handles
+                .oopif_managers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
             Err(_) => 0,
         }
     }
@@ -5813,7 +8700,11 @@ impl CdpBackend {
                 BrowserError::Other(format!("Storage.getCookies response parse failed: {e}"))
             })?
             .unwrap_or_default();
-        Ok(crate::storage_state::StorageState::from_cdp_cookies(cookies))
+        let state = crate::storage_state::StorageState::from_cdp_cookies(cookies);
+        state.validate_bounds().map_err(|error| BrowserError::Blocked {
+            reason: format!("cookie identity exceeds its per-task hard boundary: {error}"),
+        })?;
+        Ok(state)
     }
 
     /// **持久登录：组合捕获当前登录态**（[`Self::capture_cookies`] 全域 cookie +
@@ -5825,11 +8716,14 @@ impl CdpBackend {
         &self,
     ) -> Result<crate::storage_state::StorageState, BrowserError> {
         let mut state = self.capture_cookies().await?;
-        if let Some(mut origin_storage) = self.capture_local_storage().await? {
-            // best-effort IndexedDB for the same origin; a failure must not sink the capture.
-            origin_storage.index_db = self.capture_index_db().await.ok().flatten();
+        if let Some(origin_storage) = self.capture_local_storage().await? {
+            // IndexedDB is deliberately omitted. A page-side `getAll()` can materialize an
+            // arbitrarily large object before CDP or Rust can enforce any byte limit.
             state.local_storage.push(origin_storage);
         }
+        state.validate_bounds().map_err(|error| BrowserError::Blocked {
+            reason: format!("captured identity exceeds its per-task hard boundary: {error}"),
+        })?;
         Ok(state)
     }
 
@@ -5847,6 +8741,7 @@ impl CdpBackend {
         &self,
         state: &crate::storage_state::StorageState,
     ) -> Result<(), BrowserError> {
+        validate_storage_state_for_restore(state)?;
         let cookies = state.to_cookie_params();
         // 空 → no-op（setCookies 灌空数组无意义，且 cookies 字段 skip_serializing_if Vec::is_empty）。
         if cookies.is_empty() {
@@ -5882,17 +8777,25 @@ impl CdpBackend {
     ) -> Result<Option<crate::storage_state::OriginStorage>, BrowserError> {
         // 采当前页面 origin + localStorage 全键值（默认 page world；try/catch 兜底 storage 不可用）。
         // 返回 by-value `{origin, items:[[k,v],...]}`；无 location → origin 为空串。
-        let script = "(() => { try { \
-            const origin = (location && location.origin) ? location.origin : ''; \
-            const items = []; \
-            for (let i = 0; i < localStorage.length; i++) { \
-                const k = localStorage.key(i); \
-                items.push([k, localStorage.getItem(k)]); \
-            } \
-            return { origin, items }; \
-        } catch (e) { return { origin: (location && location.origin) || '', items: [] }; } })()";
+        let script = format!(
+            "(() => {{ try {{ \
+                const origin = (location && location.origin) ? location.origin : ''; \
+                const items = []; let retainedUtf16Bytes = 0; \
+                for (let i = 0; i < localStorage.length; i++) {{ \
+                    if (items.length >= {max_items}) return {{ origin, items: [], overflow: true }}; \
+                    const k = localStorage.key(i); const v = localStorage.getItem(k); \
+                    const itemBytes = ((k || '').length + (v || '').length) * 2; \
+                    if (itemBytes > {max_bytes} - retainedUtf16Bytes) \
+                        return {{ origin, items: [], overflow: true }}; \
+                    retainedUtf16Bytes += itemBytes; items.push([k, v]); \
+                }} \
+                return {{ origin, items, overflow: false }}; \
+            }} catch (e) {{ return {{ origin: (location && location.origin) || '', items: [], overflow: false }}; }} }})()",
+            max_items = crate::storage_state::MAX_STORAGE_STATE_LOCAL_ITEMS_PER_ORIGIN,
+            max_bytes = crate::storage_state::MAX_CAPTURED_LOCAL_STORAGE_UTF16_BYTES,
+        );
         let session = self.active_tab_handles().await?.session_id;
-        let mut params = EvaluateParams::new(script.to_string());
+        let mut params = EvaluateParams::new(script);
         params.return_by_value = Some(true);
         params.await_promise = Some(false);
         let result = self
@@ -5919,6 +8822,18 @@ impl CdpBackend {
         if origin.is_empty() {
             return Ok(None);
         }
+        if value
+            .get("overflow")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            tracing::warn!(
+                target: "nomi_browser_engine::storage_state",
+                %origin,
+                "localStorage capture exceeded its per-task hard boundary; omitting this origin"
+            );
+            return Ok(None);
+        }
         let mut items = Vec::new();
         if let Some(arr) = value.get("items").and_then(|v| v.as_array()) {
             for pair in arr {
@@ -5930,9 +8845,15 @@ impl CdpBackend {
                 }
             }
         }
-        Ok(Some(crate::storage_state::OriginStorage::new_local_storage(
-            origin, items,
-        )))
+        let origin_storage = crate::storage_state::OriginStorage::new_local_storage(origin, items);
+        let probe = crate::storage_state::StorageState {
+            cookies: Vec::new(),
+            local_storage: vec![origin_storage.clone()],
+        };
+        probe.validate_bounds().map_err(|error| BrowserError::Blocked {
+            reason: format!("captured localStorage exceeds its per-task hard boundary: {error}"),
+        })?;
+        Ok(Some(origin_storage))
     }
 
     /// **IndexedDB capture**：采集当前页面 origin 的所有 IndexedDB 数据库 →
@@ -5952,158 +8873,11 @@ impl CdpBackend {
     pub async fn capture_index_db(
         &self,
     ) -> Result<Option<crate::storage_state::IndexedDbDump>, BrowserError> {
-        // Collector JS: enumerate databases, open each, read all object stores + records.
-        // Binary values (ArrayBuffer, typed arrays) are encoded as {"__b64__":"<base64>"}.
-        let script = r#"(async () => {
-            if (!indexedDB || !indexedDB.databases) return null;
-            let dbs;
-            try { dbs = await indexedDB.databases(); } catch(e) { return null; }
-            if (!dbs || dbs.length === 0) return { databases: [] };
-
-            function toBase64(buffer) {
-                const bytes = new Uint8Array(buffer);
-                let binary = '';
-                for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-                return btoa(binary);
-            }
-
-            function encodeValue(val) {
-                if (val === null || val === undefined) return val;
-                if (val instanceof ArrayBuffer) return {"__b64__": toBase64(val)};
-                if (ArrayBuffer.isView(val)) return {"__b64__": toBase64(val.buffer)};
-                if (val instanceof Blob) return {"__b64__": ""};
-                if (Array.isArray(val)) return val.map(encodeValue);
-                if (typeof val === 'object' && val !== null) {
-                    const out = {};
-                    for (const [k, v] of Object.entries(val)) out[k] = encodeValue(v);
-                    return out;
-                }
-                return val;
-            }
-
-            const result = [];
-            for (const dbInfo of dbs) {
-                try {
-                    const db = await new Promise((resolve, reject) => {
-                        const req = indexedDB.open(dbInfo.name, dbInfo.version);
-                        req.onsuccess = () => resolve(req.result);
-                        req.onerror = () => reject(req.error);
-                        req.onupgradeneeded = () => {};
-                    });
-                    const stores = [];
-                    for (const storeName of db.objectStoreNames) {
-                        try {
-                            const tx = db.transaction(storeName, "readonly");
-                            const store = tx.objectStore(storeName);
-                            const keyPath = store.keyPath;
-                            const autoIncrement = store.autoIncrement;
-                            const records = await new Promise((resolve, reject) => {
-                                const req = store.getAll();
-                                req.onsuccess = () => resolve(req.result);
-                                req.onerror = () => reject(req.error);
-                            });
-                            stores.push({
-                                name: storeName,
-                                keyPath: typeof keyPath === 'string' ? keyPath : null,
-                                autoIncrement: !!autoIncrement,
-                                records: records.map(encodeValue)
-                            });
-                        } catch(e) { /* skip unreadable store */ }
-                    }
-                    db.close();
-                    result.push({ name: dbInfo.name, version: dbInfo.version, stores });
-                } catch(e) { /* skip unopenable db */ }
-            }
-            return { databases: result };
-        })()"#;
-
-        let session = self.active_tab_handles().await?.session_id;
-        let mut params = EvaluateParams::new(script.to_string());
-        params.return_by_value = Some(true);
-        params.await_promise = Some(true);
-        let result = self
-            .conn
-            .send::<EvaluateParams>(&session, &params)
-            .await
-            .map_err(map_transport_err)?;
-        if let Some(ex) = result.get("exceptionDetails") {
-            // JS 异常 → 不可捕获的 origin / 不支持 indexedDB.databases()。优雅降级。
-            tracing::debug!(
-                target: "nomi_browser_engine::storage_state",
-                "capture_index_db eval exception (graceful degradation): {ex}"
-            );
-            return Ok(None);
-        }
-        let value = result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-
-        // null / undefined → 无 IndexedDB（或 databases() 不可用）。
-        if value.is_null() {
-            return Ok(None);
-        }
-
-        // 解析 JS 返回的 { databases: [...] } 结构。
-        let databases_val = value.get("databases").cloned().unwrap_or(serde_json::Value::Null);
-        let databases_arr = match databases_val.as_array() {
-            Some(arr) => arr,
-            None => return Ok(None),
-        };
-
-        let mut databases = Vec::new();
-        for db_val in databases_arr {
-            let name = db_val
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let version = db_val
-                .get("version")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1);
-            let stores_arr = db_val.get("stores").and_then(|v| v.as_array());
-            let mut stores = Vec::new();
-            if let Some(arr) = stores_arr {
-                for store_val in arr {
-                    let store_name = store_val
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let key_path = store_val
-                        .get("keyPath")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let auto_increment = store_val
-                        .get("autoIncrement")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let records = store_val
-                        .get("records")
-                        .and_then(|v| v.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    stores.push(crate::storage_state::IdbStore {
-                        name: store_name,
-                        key_path,
-                        auto_increment,
-                        records,
-                    });
-                }
-            }
-            databases.push(crate::storage_state::IdbDatabase {
-                name,
-                version,
-                stores,
-            });
-        }
-
-        if databases.is_empty() {
-            return Ok(Some(crate::storage_state::IndexedDbDump::default()));
-        }
-        Ok(Some(crate::storage_state::IndexedDbDump { databases }))
+        // Full IndexedDB capture is intentionally disabled. The previous implementation used
+        // one `getAll()` per object store, so cancellation could detach an unbounded renderer
+        // allocation and a retry could stack another one. A future implementation must use a
+        // cursor with byte/record/deadline budgets; until then omission is the only hard bound.
+        Ok(None)
     }
 
     /// **W4c：恢复 localStorage（origin-bound 注入）**——把 [`crate::storage_state::StorageState`] 里
@@ -6136,6 +8910,7 @@ impl CdpBackend {
         &self,
         state: &crate::storage_state::StorageState,
     ) -> Result<(), BrowserError> {
+        validate_storage_state_for_restore(state)?;
         // 无 localStorage 可恢复 → no-op。
         if state.local_storage.is_empty() {
             return Ok(());
@@ -6216,6 +8991,7 @@ impl CdpBackend {
         &self,
         state: &crate::storage_state::StorageState,
     ) -> Result<(), BrowserError> {
+        validate_storage_state_for_restore(state)?;
         if state.local_storage.is_empty() {
             return Ok(());
         }
@@ -6331,129 +9107,49 @@ impl CdpBackend {
     /// 一次调用自动遍历 [`crate::storage_state::StorageState`] 中所有 origin 的 localStorage
     /// （+ IndexedDB）并恢复到对应 origin。
     ///
-    /// # 为什么用 `Page.addScriptToEvaluateOnNewDocument` 而不是 `Fetch` 拦截
-    ///
-    /// 本引擎的出口防火墙 loop（[`super::cdp::spawn_fetch_firewall_loop`]）**独占** CDP 的
-    /// `Fetch.requestPaused` 事件通道——任何 `Fetch.enable` / 对 `requestPaused` 的第二个监听
-    /// 都会与防火墙 loop 竞争事件分发，导致合法请求被意外 fail / 安全策略被绕过。
-    ///
-    /// 因此，多 origin 恢复采用以下 Fetch-free 方案：
-    /// 1. 对每个 origin，用 `Page.addScriptToEvaluateOnNewDocument` 注册一段 origin-guard 脚本：
-    ///    脚本内部检查 `location.origin === targetOrigin`，仅匹配时执行 `setItem` 注入。
-    ///    该 CDP 方法**不拦截网络请求**——它只在**新文档创建时**（before scripts）在页面上下文注入
-    ///    一段 JS，完全不碰 Fetch 通道，与防火墙 loop 零冲突。
-    /// 2. 然后 `Page.navigate` 到该 origin（Chrome 发起真实网络请求——正常走防火墙审批），
-    ///    navigate 完成后注入的脚本已在页面 load 前执行完毕（localStorage 就位）。
-    /// 3. 对有 IndexedDB 的 origin，在 navigate 完成后再 `Runtime.evaluate`（async）恢复 IDB。
-    /// 4. 全部 origin 恢复完毕后，`RemoveScriptToEvaluateOnNewDocument` 清理注册的脚本。
-    ///
-    /// **关键**：`addScriptToEvaluateOnNewDocument` 是 origin-agnostic 注册（全 origin 都会触发），
-    /// 所以脚本内部必须做 `location.origin === xxx` 守卫，防止 navigate 到其他页面时误触。
+    /// Each bounded origin is restored with `Page.navigate`, followed by the ordinary
+    /// origin-matching `Runtime.evaluate` paths for localStorage and legacy IndexedDB state.
+    /// No new-document script is registered: cancellation or an early error therefore cannot
+    /// leave browser-side scripts (and their embedded identity payloads) alive on the session.
+    /// This remains Fetch-free and does not compete with the engine's firewall event loop.
     pub async fn restore_all_origins(
         &self,
         state: &crate::storage_state::StorageState,
     ) -> Result<(), BrowserError> {
-        use chromiumoxide::cdp::browser_protocol::page::{
-            AddScriptToEvaluateOnNewDocumentParams, RemoveScriptToEvaluateOnNewDocumentParams,
-        };
-
+        validate_storage_state_for_restore(state)?;
         if state.local_storage.is_empty() {
             return Ok(());
         }
 
         let session = self.active_tab_handles().await?.session_id;
-        let mut script_ids: Vec<String> = Vec::new();
-
         for origin_storage in &state.local_storage {
             if origin_storage.local_storage.is_empty() && origin_storage.index_db.is_none() {
                 continue;
             }
 
-            let target_origin = &origin_storage.origin;
-
-            // ── 1. Register addScriptToEvaluateOnNewDocument for localStorage ──
-            // Only register if there are localStorage items to restore.
-            let mut script_id_for_this_origin: Option<String> = None;
-            if !origin_storage.local_storage.is_empty() {
-                let pairs: Vec<[&str; 2]> = origin_storage
-                    .local_storage
-                    .iter()
-                    .map(|i| [i.name.as_str(), i.value.as_str()])
-                    .collect();
-                let pairs_json = serde_json::to_string(&pairs).map_err(|e| {
-                    BrowserError::Other(format!("serialize localStorage pairs: {e}"))
-                })?;
-                let origin_json = serde_json::to_string(target_origin).map_err(|e| {
-                    BrowserError::Other(format!("serialize origin: {e}"))
-                })?;
-
-                // Origin-guarded script: only runs if location.origin matches.
-                let inject_script = format!(
-                    "(() => {{ \
-                        if (location.origin !== {origin_json}) return; \
-                        try {{ \
-                            const pairs = {pairs_json}; \
-                            for (const [k, v] of pairs) localStorage.setItem(k, v); \
-                        }} catch(e) {{}} \
-                    }})()"
-                );
-
-                let add_params = AddScriptToEvaluateOnNewDocumentParams {
-                    source: inject_script,
-                    world_name: None,
-                    include_command_line_api: None,
-                    run_immediately: None,
-                };
-                let resp = self
-                    .conn
-                    .send::<AddScriptToEvaluateOnNewDocumentParams>(&session, &add_params)
-                    .await
-                    .map_err(map_transport_err)?;
-                // Extract the script identifier for cleanup.
-                if let Some(id) = resp.get("identifier").and_then(|v| v.as_str()) {
-                    script_ids.push(id.to_string());
-                    script_id_for_this_origin = Some(id.to_string());
-                }
-            }
-
-            // ── 2. Navigate to origin (triggers the registered script on load) ──
-            let nav_params = NavigateParams::new(target_origin.clone());
+            // Navigate first, then inject into the now matching origin. The previous
+            // addScriptToEvaluateOnNewDocument approach leaked registered scripts whenever
+            // this future was cancelled or a later `?` returned early.
+            let nav_params = NavigateParams::new(origin_storage.origin.clone());
             let _ = self
                 .conn
                 .send::<NavigateParams>(&session, &nav_params)
                 .await
                 .map_err(map_transport_err)?;
 
-            // Wait briefly for the page to load (give localStorage script time to run).
-            // The addScriptToEvaluateOnNewDocument runs before page scripts, so by the time
-            // navigate resolves, localStorage is already set. But we want to ensure the
-            // page actually loaded. A simple wait for loadEventFired or just a short delay.
+            // Keep the legacy bounded settle delay, but no persistent browser-side registration
+            // now exists if the future is cancelled during it.
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            // ── 3. Restore IndexedDB for this origin (if any) ──
-            if origin_storage.index_db.is_some() {
-                // Build a mini state with just this origin for restore_index_db.
-                let mini_state = crate::storage_state::StorageState {
-                    cookies: vec![],
-                    local_storage: vec![origin_storage.clone()],
-                };
-                // restore_index_db reads the current page origin and matches — we just navigated there.
-                self.restore_index_db(&mini_state).await?;
+            let mini_state = crate::storage_state::StorageState {
+                cookies: vec![],
+                local_storage: vec![origin_storage.clone()],
+            };
+            if !origin_storage.local_storage.is_empty() {
+                self.restore_local_storage(&mini_state).await?;
             }
-
-            // ── 4. Remove the localStorage script for this origin (no longer needed) ──
-            if let Some(id) = script_id_for_this_origin {
-                use chromiumoxide::cdp::browser_protocol::page::ScriptIdentifier;
-                let remove_params =
-                    RemoveScriptToEvaluateOnNewDocumentParams::new(ScriptIdentifier::new(id));
-                // Best-effort removal — failure doesn't break correctness.
-                let _ = self
-                    .conn
-                    .send_may_fail::<RemoveScriptToEvaluateOnNewDocumentParams>(
-                        &session,
-                        &remove_params,
-                    )
-                    .await;
+            if origin_storage.index_db.is_some() {
+                self.restore_index_db(&mini_state).await?;
             }
         }
 
@@ -6597,8 +9293,9 @@ impl CdpBackend {
     pub async fn act_get_console_logs(&self) -> Result<ActResult, BrowserError> {
         let handles = self.active_tab_handles().await?;
         let snap = crate::debug_capture::DebugSnapshot::from_buffers(&handles.debug);
-        let secrets = self.known_secret_values.lock().unwrap_or_else(|e| e.into_inner());
-        let message = crate::debug_capture::serialize_console_for_llm(&snap.console, &secrets);
+        let message = self.known_secret_values.with_values(|secrets| {
+            crate::debug_capture::serialize_console_for_llm(&snap.console, secrets)
+        });
         Ok(ActResult {
             message,
             effect: Effect { changed: false, before_anchor: None, after_anchor: None },
@@ -6610,8 +9307,9 @@ impl CdpBackend {
     pub async fn act_get_page_errors(&self) -> Result<ActResult, BrowserError> {
         let handles = self.active_tab_handles().await?;
         let snap = crate::debug_capture::DebugSnapshot::from_buffers(&handles.debug);
-        let secrets = self.known_secret_values.lock().unwrap_or_else(|e| e.into_inner());
-        let message = crate::debug_capture::serialize_errors_for_llm(&snap.errors, &secrets);
+        let message = self.known_secret_values.with_values(|secrets| {
+            crate::debug_capture::serialize_errors_for_llm(&snap.errors, secrets)
+        });
         Ok(ActResult {
             message,
             effect: Effect { changed: false, before_anchor: None, after_anchor: None },
@@ -6623,8 +9321,9 @@ impl CdpBackend {
     pub async fn act_get_network_log(&self, include_bodies: bool) -> Result<ActResult, BrowserError> {
         let handles = self.active_tab_handles().await?;
         let snap = crate::debug_capture::DebugSnapshot::from_buffers(&handles.debug);
-        let secrets = self.known_secret_values.lock().unwrap_or_else(|e| e.into_inner());
-        let message = crate::debug_capture::serialize_network_for_llm(&snap.network, include_bodies, &secrets);
+        let message = self.known_secret_values.with_values(|secrets| {
+            crate::debug_capture::serialize_network_for_llm(&snap.network, include_bodies, secrets)
+        });
         Ok(ActResult {
             message,
             effect: Effect { changed: false, before_anchor: None, after_anchor: None },
@@ -6678,23 +9377,42 @@ impl CdpBackend {
         parent: &Progress,
     ) -> Result<ActResult, BrowserError> {
         use crate::tabs::last4;
-        use chromiumoxide::cdp::browser_protocol::target::CloseTargetParams;
 
         let target_id = self.resolve_tab_id(tab_id).await?;
         let l4 = last4(&target_id);
 
-        // 1) closeTarget（发到根 browser session）。CDP 随之发 detachedFromTarget。
-        self.conn
-            .send::<CloseTargetParams>(ROOT_SESSION, &CloseTargetParams::new(target_id.clone()))
-            .await
-            .map_err(map_transport_err)?;
+        // A successful command response is not assumed to mean the renderer
+        // disappeared: closeTarget success=false/malformed/error is accepted
+        // only after a root inventory proves exact absence.
+        if let Err(error) = close_target_or_confirm_absent(&self.conn, &target_id).await {
+            if let Some(host) = &self.host {
+                host.router
+                    .schedule_owned_target_cleanup(&self.lane_id, &target_id)
+                    .await;
+            } else {
+                PendingCreatedPageCleanup::new(
+                    self.conn.clone(),
+                    Arc::clone(&self.cleanup_executor),
+                    None,
+                    Some(target_id.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .hand_off();
+            }
+            return Err(error);
+        }
 
         // 2) 从 tabs 移除 TabRecord + **显式 abort 其两个后台循环**（防泄漏空转）。短临界区。
         let was_active;
         let reselected: Option<String>;
+        let mut removed_main_frame = None;
         {
             let mut tabs = self.tabs.lock().await;
             if let Some(record) = tabs.remove(&target_id) {
+                removed_main_frame = Some(record.main_frame_id.clone());
                 // D1 评审要点：drop(record) 只 detach JoinHandle，全局连接仍存活时循环不退出 → 必须显式 abort。
                 record._inject_loop.abort();
                 record._oopif_loop.abort();
@@ -6708,13 +9426,17 @@ impl CdpBackend {
                 reselected = tabs.keys().min().cloned();
                 if let Some(ref new_active) = reselected {
                     *active = new_active.clone();
+                } else {
+                    active.clear();
                 }
             } else {
                 reselected = None;
             }
         }
         if let Some(host) = &self.host {
-            host.router.release_target(&target_id).await;
+            host.router
+                .release_target(&target_id, removed_main_frame.as_deref())
+                .await;
         }
 
         if was_active {
@@ -6760,6 +9482,15 @@ impl CdpBackend {
     pub async fn act_open_link_new_tab(&self, url: &str) -> Result<ActResult, BrowserError> {
         use crate::tabs::last4;
 
+        let tab_count = self.tabs.lock().await.len();
+        if !tab_capacity_available(tab_count) {
+            return Err(BrowserError::Blocked {
+                reason: format!(
+                    "this browser Lane already has {MAX_TABS_PER_LANE} tabs; close an existing tab before opening another"
+                ),
+            });
+        }
+
         // Create an inert nonce-correlated page first. This makes cancellation
         // and a lost createTarget response exactly recoverable; only after the
         // target is lane-owned/armed do we navigate it to the requested URL.
@@ -6768,6 +9499,7 @@ impl CdpBackend {
             Arc::clone(&self.cleanup_executor),
             self.target_router().cloned(),
             true,
+            self.task_tab_reservation_scope.clone(),
         )
         .await?;
         let new_tid = pending_page.target_id.clone();
@@ -6778,17 +9510,43 @@ impl CdpBackend {
             }
         }
         if !self.tabs.lock().await.contains_key(&new_tid) {
-            let record = arm_tab(&self.conn, &new_tid, &new_session).await?;
-            let main_frame_id = record.main_frame_id.clone();
-            let mut tabs = self.tabs.lock().await;
-            if !tabs.contains_key(&new_tid) {
-                tabs.insert(new_tid.clone(), record);
-            } else {
-                abort_tab_record(&record);
-            }
-            drop(tabs);
+            let record = arm_tab(
+                &self.conn,
+                &new_tid,
+                &new_session,
+                pending_page.task_tab_reservation.clone(),
+            )
+            .await?;
             if let Some(host) = &self.host {
-                host.router.claim_frame(&self.lane_id, &main_frame_id).await;
+                let outcome = host
+                    .router
+                    .publish_armed_page(
+                        &self.lane_id,
+                        PendingPage {
+                            target_id: new_tid.clone(),
+                            session_id: new_session.clone(),
+                            opener_target_id: None,
+                            target_url: None,
+                        },
+                        record,
+                    )
+                    .await;
+                if outcome == OwnedPagePublish::RejectedCapacity {
+                    let _ = pending_page.transfer_to_lane();
+                    return Err(BrowserError::Blocked {
+                        reason: "this task reached its browser tab limit; close an existing tab before opening another".into(),
+                    });
+                }
+                if outcome == OwnedPagePublish::RejectedState {
+                    return Err(BrowserError::TargetClosed);
+                }
+            } else {
+                let mut tabs = self.tabs.lock().await;
+                if !tabs.contains_key(&new_tid) && tab_capacity_available(tabs.len()) {
+                    tabs.insert(new_tid.clone(), record);
+                } else {
+                    abort_tab_record(&record);
+                }
             }
         }
         if let Err(error) = self
@@ -7155,7 +9913,12 @@ impl CdpBackend {
                 return Ok((session, frame_id));
             }
             // 也可能是 active tab 的 OOPIF 子 session（跨进程子帧；离线测不到，接线就位）。
-            if handles.oopif_managers.lock().await.contains_key(&session) {
+            if handles
+                .oopif_managers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&session)
+            {
                 return Ok((session, frame_id));
             }
             // 否则（切了 tab / 帧 detach）→ 退主帧（保守）。
@@ -7261,6 +10024,21 @@ impl CdpBackend {
         self.download_dir.as_deref()
     }
 
+    pub(crate) async fn reserve_direct_download_output(
+        &self,
+        kind: &str,
+    ) -> Result<Arc<dyn TaskDownloadReservation>, BrowserError> {
+        static NEXT_DIRECT_DOWNLOAD_ID: AtomicU64 = AtomicU64::new(1);
+        let scope = self
+            .task_download_reservation_scope
+            .as_ref()
+            .ok_or_else(|| BrowserError::Blocked {
+                reason: "this browser Lane has no task-lifetime download authority".into(),
+            })?;
+        let nonce = NEXT_DIRECT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed);
+        scope.reserve(&format!("direct-{kind}-{nonce}")).await
+    }
+
     /// **SD-2 上传路径沙箱根访问器**。`Some` = per-pet workspace（upload 必须 in-sandbox）；
     /// `None` = 无 workspace（fail-closed：一律拒绝上传）。
     pub(crate) fn workspace_dir(&self) -> Option<&std::path::Path> {
@@ -7353,14 +10131,14 @@ impl CdpBackend {
         &self,
         dir: &str,
         before: &std::collections::HashSet<String>,
-    ) -> Option<(String, u64)> {
+    ) -> Result<Option<(String, u64)>, BrowserError> {
         let deadline = tokio::time::Instant::now() + DOWNLOAD_SETTLE_TIMEOUT;
         loop {
-            if let Some(found) = newest_completed_download(dir, before) {
-                return Some(found);
+            if let Some(found) = newest_completed_download(dir, before)? {
+                return Ok(Some(found));
             }
             if tokio::time::Instant::now() >= deadline {
-                return None;
+                return Ok(None);
             }
             tokio::time::sleep(DOWNLOAD_POLL_INTERVAL).await;
         }
@@ -7533,25 +10311,151 @@ async fn collect_password_refs(
     }
 }
 
-/// 自 `frames[idx]` 起递归缝合：把每个「父=本帧」的子帧的（递归缝合后）full 内联进来。
-/// `parent_of`: child_frame_id → (parent_frame_id, parent_iframe_ref)。无环（frameTree 是树）。
-fn render_frame_recursive(
+/// Append to one bounded output buffer.  Capacity is checked before every
+/// write, so indentation amplification cannot allocate past the task limit.
+fn push_observation_bytes(
+    out: &mut String,
+    value: &str,
+) -> Result<(), ObservationCapacityError> {
+    let attempted = out.len().saturating_add(value.len());
+    ensure_observation_bytes(attempted)?;
+    out.push_str(value);
+    Ok(())
+}
+
+fn push_observation_spaces(
+    out: &mut String,
+    count: usize,
+) -> Result<(), ObservationCapacityError> {
+    let attempted = out.len().saturating_add(count);
+    ensure_observation_bytes(attempted)?;
+    const SPACES: &str = "                                                                ";
+    let mut remaining = count;
+    while remaining != 0 {
+        let chunk = remaining.min(SPACES.len());
+        out.push_str(&SPACES[..chunk]);
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
+fn iframe_ref_slice(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("- iframe") && !trimmed.contains("iframe ") {
+        return None;
+    }
+    let start = line.find("[ref=")? + 5;
+    let end = line[start..].find(']')? + start;
+    Some(&line[start..end])
+}
+
+/// Render an iframe tree directly into one bounded String.  The former
+/// implementation recursively materialized every child subtree and cloned it
+/// again into every ancestor, producing O(depth * payload) retained copies on
+/// deep frame trees.  This emitter visits each rendered line once and never
+/// owns an intermediate subtree String.
+fn render_frame_recursive_bounded(
     frames: &[ObservedFrame],
     idx: usize,
     parent_of: &HashMap<String, (String, String)>,
-) -> String {
-    let me = &frames[idx];
-    // 找所有「父帧 == 本帧」的子帧，递归渲染其 full，按 (iframe_ref, child_full) 收集。
-    let mut children: Vec<(String, String)> = Vec::new();
+) -> Result<String, ObservationCapacityError> {
+    let mut children: HashMap<&str, HashMap<&str, usize>> = HashMap::new();
     for (cidx, cf) in frames.iter().enumerate() {
         if let Some((pfid, iref)) = parent_of.get(&cf.frame_id)
-            && *pfid == me.frame_id
         {
-            let child_full = render_frame_recursive(frames, cidx, parent_of);
-            children.push((iref.clone(), child_full));
+            children
+                .entry(pfid.as_str())
+                .or_default()
+                .insert(iref.as_str(), cidx);
         }
     }
-    stitch(&me.snapshot, &children)
+
+    fn render_into(
+        frames: &[ObservedFrame],
+        idx: usize,
+        children: &HashMap<&str, HashMap<&str, usize>>,
+        base_indent: usize,
+        visiting: &mut HashSet<usize>,
+        out: &mut String,
+        first_line: &mut bool,
+    ) -> Result<(), ObservationCapacityError> {
+        if !visiting.insert(idx) {
+            return Err(ObservationCapacityError::new(
+                MAX_OBSERVATION_RETAINED_BYTES.saturating_add(1),
+            ));
+        }
+        let frame = &frames[idx];
+        for line in frame.snapshot.full.lines() {
+            if !*first_line {
+                push_observation_bytes(out, "\n")?;
+            }
+            *first_line = false;
+            push_observation_spaces(out, base_indent)?;
+
+            let child = iframe_ref_slice(line).and_then(|reference| {
+                children
+                    .get(frame.frame_id.as_str())
+                    .and_then(|by_ref| by_ref.get(reference))
+                    .copied()
+                    .map(|child_idx| (reference, child_idx))
+            });
+            if let Some((reference, child_idx)) = child {
+                let head = line.trim_end();
+                push_observation_bytes(out, head)?;
+                if !head.ends_with(':') {
+                    push_observation_bytes(out, ":")?;
+                }
+                let depth = frame
+                    .snapshot
+                    .iframe_depths
+                    .get(reference)
+                    .copied()
+                    .unwrap_or(0);
+                let relative_indent = usize::try_from(depth)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .and_then(|value| value.checked_mul(2))
+                    .ok_or_else(|| {
+                        ObservationCapacityError::new(
+                            MAX_OBSERVATION_RETAINED_BYTES.saturating_add(1),
+                        )
+                    })?;
+                let child_indent = base_indent.checked_add(relative_indent).ok_or_else(|| {
+                    ObservationCapacityError::new(
+                        MAX_OBSERVATION_RETAINED_BYTES.saturating_add(1),
+                    )
+                })?;
+                ensure_observation_bytes(child_indent)?;
+                render_into(
+                    frames,
+                    child_idx,
+                    children,
+                    child_indent,
+                    visiting,
+                    out,
+                    first_line,
+                )?;
+            } else {
+                push_observation_bytes(out, line)?;
+            }
+        }
+        visiting.remove(&idx);
+        Ok(())
+    }
+
+    let mut out = String::new();
+    let mut visiting = HashSet::new();
+    let mut first_line = true;
+    render_into(
+        frames,
+        idx,
+        &children,
+        0,
+        &mut visiting,
+        &mut out,
+        &mut first_line,
+    )?;
+    Ok(out)
 }
 
 /// 单帧是否触及 depth 封顶（粗判：full 里出现缩进达 `(max_depth)*2` 空格的行——
@@ -7634,23 +10538,41 @@ const DOWNLOAD_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// download 落盘探测的轮询间隔（每隔这么久扫一次目录）。
 const DOWNLOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Before/after download verification snapshots must not scale with an
+/// attacker-populated workspace directory. Entry count bounds filesystem work;
+/// the separate byte bound covers many long names below that count.
+const MAX_DOWNLOAD_DIRECTORY_SNAPSHOT_ENTRIES: usize = 4_096;
+const MAX_DOWNLOAD_DIRECTORY_NAME_BYTES: usize = 256 * 1024;
+const MAX_DOWNLOAD_DIRECTORY_SINGLE_NAME_BYTES: usize = 1_024;
 
 /// **[纯逻辑] 列一个目录下的「文件名」集合**（download 落盘探测的触发前基线）。目录不存在 / 读不了 →
 /// 空集（best-effort，绝不 panic）。只收**文件**（非子目录）的文件名（`file_name()` 的 lossy 串）。
 /// `pub(crate)`：actions.rs 的 act_download 取触发前基线用。
-pub(crate) fn list_dir_files(dir: &str) -> std::collections::HashSet<String> {
+pub(crate) fn list_dir_files(
+    dir: &str,
+) -> Result<std::collections::HashSet<String>, BrowserError> {
     let mut set = std::collections::HashSet::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return set;
+        return Ok(set);
     };
-    for entry in entries.flatten() {
-        if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
-            && let Some(name) = entry.file_name().to_str()
-        {
-            set.insert(name.to_string());
+    let mut name_bytes = 0usize;
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_DOWNLOAD_DIRECTORY_SNAPSHOT_ENTRIES {
+            return Err(download_directory_snapshot_capacity_error(
+                "entry count",
+            ));
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        account_download_directory_name(&mut name_bytes, name.len())?;
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            set.insert(name.into_owned());
         }
     }
-    set
+    Ok(set)
 }
 
 /// **[纯逻辑] 在 downloads 目录里找一个「新增的、已完成的」下载文件**（download verify 单步探测）。
@@ -7660,15 +10582,28 @@ pub(crate) fn list_dir_files(dir: &str) -> std::collections::HashSet<String> {
 fn newest_completed_download(
     dir: &str,
     before: &std::collections::HashSet<String>,
-) -> Option<(String, u64)> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
+) -> Result<Option<(String, u64)>, BrowserError> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(None);
+    };
+    let mut name_bytes = 0usize;
+    let mut found = None;
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_DOWNLOAD_DIRECTORY_SNAPSHOT_ENTRIES {
+            return Err(download_directory_snapshot_capacity_error(
+                "entry count",
+            ));
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        account_download_directory_name(&mut name_bytes, name.len())?;
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
-        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
-            continue;
-        };
+        let name = name.into_owned();
         // 已存在（触发前就在）→ 非本次下载，跳过。
         if before.contains(&name) {
             continue;
@@ -7680,11 +10615,37 @@ fn newest_completed_download(
         }
         // size>0 才算落盘完成（0 字节多是刚创建占位）。
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        if size > 0 {
-            return Some((name, size));
+        if size > 0 && found.is_none() {
+            found = Some((name, size));
         }
     }
-    None
+    Ok(found)
+}
+
+fn account_download_directory_name(
+    total_name_bytes: &mut usize,
+    name_bytes: usize,
+) -> Result<(), BrowserError> {
+    if name_bytes > MAX_DOWNLOAD_DIRECTORY_SINGLE_NAME_BYTES {
+        return Err(download_directory_snapshot_capacity_error(
+            "single filename bytes",
+        ));
+    }
+    *total_name_bytes = total_name_bytes.saturating_add(name_bytes);
+    if *total_name_bytes > MAX_DOWNLOAD_DIRECTORY_NAME_BYTES {
+        return Err(download_directory_snapshot_capacity_error(
+            "total filename bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn download_directory_snapshot_capacity_error(limit: &str) -> BrowserError {
+    BrowserError::Blocked {
+        reason: format!(
+            "sandboxed download directory exceeds its bounded {limit}; clean the task workspace before retrying"
+        ),
+    }
 }
 
 /// **[纯逻辑] save_as_pdf 的输出文件路径**：`<downloads_dir>/page-<unix_ts_ms>.pdf`。时间戳（毫秒）
@@ -7759,14 +10720,35 @@ fn spawn_download_loop(
     let mut begin_rx = conn.subscribe_reliable(EventDownloadWillBegin::IDENTIFIER, None);
     let mut progress_rx = conn.subscribe(EventDownloadProgress::IDENTIFIER, None);
     tokio::spawn(async move {
+        let mut reconcile_tick = tokio::time::interval(DOWNLOAD_RECONCILE_INTERVAL);
+        reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 // ① 下载发起 → 可执行 denylist 红线（命中即 cancelDownload，fail-closed/yolo 也取消）。
                 ev = begin_rx.recv() => {
                     match ev {
                         Some(ev) => {
-                            let Ok(b) = serde_json::from_value::<EventDownloadWillBegin>(ev.params.clone())
-                            else { continue };
+                            let b = match serde_json::from_value::<EventDownloadWillBegin>(ev.params.clone()) {
+                                Ok(begin) => begin,
+                                Err(error) => {
+                                    if let Some(guid) = ev.params.get("guid").and_then(serde_json::Value::as_str) {
+                                        if let Some(router) = &router {
+                                            if !router.quarantine_rejected_download(guid) {
+                                                conn.shutdown().await;
+                                                break;
+                                            }
+                                        }
+                                        cancel_download_best_effort(
+                                            &conn,
+                                            guid,
+                                            "unparseable download begin event",
+                                        )
+                                        .await;
+                                    }
+                                    tracing::warn!(%error, "unparseable download begin event denied");
+                                    continue;
+                                }
+                            };
                             // SD-3: Two complementary checks — filename extension denylist OR
                             // data: URL content sniffing. Either triggers the red-line cancel.
                             let filename_blocked = crate::download::reject_executable_download(&b.suggested_filename).is_err();
@@ -7787,31 +10769,41 @@ fn spawn_download_loop(
                                     reason = %reason,
                                     "download blocked (red-line, denied even under yolo/companion); cancelling"
                                 );
-                                // 红线 enforcement：取消该下载（发到根 browser session）。失败只 warn。
-                                if let Err(e) = conn
-                                    .send_may_fail::<CancelDownloadParams>(
-                                        ROOT_SESSION,
-                                        &CancelDownloadParams::new(b.guid.clone()),
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        target: "nomi_browser_engine::backend::cdp",
-                                        guid = %b.guid, error = %e,
-                                        "cancelDownload for a blocked download failed; the file may still land in the isolated downloads dir (block already logged)"
-                                    );
+                                if let Some(router) = &router {
+                                    if !router.quarantine_rejected_download(&b.guid) {
+                                        conn.shutdown().await;
+                                        break;
+                                    }
                                 }
+                                cancel_download_best_effort(&conn, &b.guid, "blocked red-line download").await;
                             } else if let Some(router) = &router {
-                                router
+                                let admitted = router
                                     .begin_download(
                                         b.frame_id.as_ref(),
                                         &b.guid,
                                         &b.suggested_filename,
                                     )
                                     .await;
+                                if !admitted {
+                                    if !router.quarantine_rejected_download(&b.guid) {
+                                        conn.shutdown().await;
+                                        break;
+                                    }
+                                    cancel_download_best_effort(
+                                        &conn,
+                                        &b.guid,
+                                        "unowned, duplicate, or over-capacity download",
+                                    )
+                                    .await;
+                                }
                             }
                         }
-                        None => break,
+                        None => {
+                            if let Some(router) = &router {
+                                router.poison_downloads_for_host_stop();
+                            }
+                            break;
+                        }
                     }
                 }
                 // ② 下载完成 → 对放行的非可执行下载打 MOTW（被取消的可执行不会到这里）。
@@ -7819,20 +10811,89 @@ fn spawn_download_loop(
                     match ev {
                         Ok(ev) => {
                             let Ok(p) = serde_json::from_value::<EventDownloadProgress>(ev.params.clone())
-                            else { continue };
+                            else {
+                                if let Some(router) = &router {
+                                    for guid in router.poison_downloads_for_host_stop() {
+                                        cancel_download_best_effort(
+                                            &conn,
+                                            &guid,
+                                            "unparseable download progress",
+                                        )
+                                        .await;
+                                    }
+                                }
+                                continue;
+                            };
                             use chromiumoxide::cdp::browser_protocol::browser::DownloadProgressState;
-                            if p.state != DownloadProgressState::Completed {
-                                continue; // 只在完成时打 MOTW。
+                            if p.state == DownloadProgressState::Canceled {
+                                if let Some(router) = &router {
+                                    router.cancel_pending_download(&p.guid);
+                                }
+                                continue;
                             }
-                            // 完成且有落盘路径 → 打 MOTW。无 filePath（某些平台不保证给）→ 跳过（无法定位文件）。
+                            if let Some(router) = &router {
+                                let received_bytes = download_progress_bytes(p.received_bytes);
+                                let total_bytes = if p.total_bytes == 0.0 {
+                                    Some(None)
+                                } else {
+                                    download_progress_bytes(p.total_bytes).map(Some)
+                                };
+                                let within_task_boundary = match (received_bytes, total_bytes) {
+                                    (Some(received_bytes), Some(total_bytes)) => router
+                                        .update_download_progress(
+                                            &p.guid,
+                                            received_bytes,
+                                            total_bytes,
+                                        ),
+                                    _ => false,
+                                };
+                                if !within_task_boundary {
+                                    if !router.quarantine_rejected_download(&p.guid) {
+                                        conn.shutdown().await;
+                                        break;
+                                    }
+                                    cancel_download_best_effort(
+                                        &conn,
+                                        &p.guid,
+                                        "invalid or over-capacity download progress",
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            }
+                            if p.state == DownloadProgressState::InProgress {
+                                continue;
+                            }
+                            // A completed event without filePath is still a
+                            // terminal state.  Forget its route and remove the
+                            // deterministic GUID staging paths.
                             let Some(file_path) = p.file_path.as_deref() else {
-                                tracing::debug!(guid = %p.guid, "download completed without filePath; skip MOTW");
+                                if let Some(router) = &router {
+                                    router.cancel_pending_download(&p.guid);
+                                }
+                                tracing::debug!(guid = %p.guid, "download completed without filePath; route reconciled");
                                 continue;
                             };
                             let path = std::path::Path::new(file_path);
-                            if let Some(router) = &router
-                                && router.finish_download(&p.guid, path).await
-                            {
+                            if let Some(router) = &router {
+                                if router.download_cancel_requested(&p.guid) {
+                                    router.cancel_pending_download(&p.guid);
+                                    router.cleanup_staged_download(&p.guid, Some(path));
+                                    continue;
+                                }
+                                if router.finish_download(&p.guid, path).await {
+                                    continue;
+                                }
+                                // Unknown/blocked/failed routes must never be
+                                // promoted out of Host staging.  Exact staging
+                                // children are deleted; arbitrary paths from a
+                                // malformed event are left untouched.
+                                router.cleanup_staged_download(&p.guid, Some(path));
+                                if router.download_cleanup_poisoned.load(Ordering::Acquire) {
+                                    router.poison_downloads_for_host_stop();
+                                    conn.shutdown().await;
+                                    break;
+                                }
                                 continue;
                             }
                             match crate::download::write_motw(path) {
@@ -7844,13 +10905,92 @@ fn spawn_download_loop(
                                 }
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            if let Some(router) = &router {
+                                router.poison_downloads_for_host_stop();
+                            }
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            if let Some(router) = &router {
+                                let guids = router.poison_downloads_for_host_stop();
+                                tracing::warn!(
+                                    skipped,
+                                    reconciled = guids.len(),
+                                    "download progress stream lagged; cancelling all tracked downloads fail-closed"
+                                );
+                                for guid in guids {
+                                    cancel_download_best_effort(
+                                        &conn,
+                                        &guid,
+                                        "lagged download progress stream",
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ = reconcile_tick.tick() => {
+                    if let Some(router) = &router {
+                        for guid in router.expire_pending_downloads() {
+                            cancel_download_best_effort(
+                                &conn,
+                                &guid,
+                                "download routing TTL expired",
+                            )
+                            .await;
+                        }
+                        router.sweep_stale_staging_files();
+                        router.retry_staging_cleanup();
+                        if router.cancel_terminal_grace_expired()
+                            || router.download_cleanup_poisoned.load(Ordering::Acquire)
+                        {
+                            router.poison_downloads_for_host_stop();
+                            conn.shutdown().await;
+                            break;
+                        }
                     }
                 }
             }
         }
+        if let Some(router) = &router {
+            router.poison_downloads_for_host_stop();
+        }
     })
+}
+
+fn download_progress_bytes(value: f64) -> Option<u64> {
+    if !value.is_finite() || value < 0.0 || value > u64::MAX as f64 {
+        return None;
+    }
+    Some(value.ceil() as u64)
+}
+
+async fn cancel_download_best_effort(
+    conn: &Connection,
+    guid: &str,
+    reason: &'static str,
+) -> bool {
+    if let Err(error) = conn
+        .send_may_fail::<CancelDownloadParams>(
+            ROOT_SESSION,
+            &CancelDownloadParams::new(guid.to_string()),
+        )
+        .await
+    {
+        tracing::warn!(
+            target: "nomi_browser_engine::backend::cdp",
+            %guid,
+            %error,
+            reason,
+            "Browser.cancelDownload failed; terminal/staging reconciliation remains armed"
+        );
+        conn.shutdown().await;
+        false
+    } else {
+        true
+    }
 }
 
 /// 取 URL 的 scheme（含冒号，如 `"https:"`）供**阻断日志**使用。**绝不 panic**（F46）：
@@ -7888,12 +11028,114 @@ async fn enable_fetch_on_session(conn: &Connection, session_id: &str) -> Result<
 ///
 /// `Connection::handle_attached` 只在存在 `Fetch.requestPaused` 可靠订阅者时才对
 /// attach 的 session 挂 `Fetch.enable`（无消费者的 requestPaused 事件被静默丢弃且
-/// CDP 不重发——请求会永久卡死）。构造器先建本订阅（unbounded，事件在循环 spawn 前
-/// 缓存不丢）、再 `run_attach_loop()`、最后把它交给 [`spawn_fetch_firewall_loop`]，
+/// CDP 不重发——请求会永久卡死）。构造器先建本订阅（底层 receiver 保持可靠语义，同时由 transport
+/// 的条数/字节额度做逻辑硬边界，事件在循环 spawn 前缓存不丢）、再 `run_attach_loop()`、最后把它交给
+/// [`spawn_fetch_firewall_loop`]，
 /// 保证「先有消费者、后开拦截」在结构上恒成立。
 struct FetchFirewallSubscriptions {
     attached_rx: tokio::sync::mpsc::UnboundedReceiver<crate::transport::CdpEvent>,
     paused_rx: tokio::sync::mpsc::UnboundedReceiver<crate::transport::CdpEvent>,
+}
+
+#[derive(Clone, Copy)]
+struct FirewallExecutorLimits {
+    request_workers: usize,
+    request_queue_capacity: usize,
+    approval_workers: usize,
+    approval_queue_capacity: usize,
+    approval_timeout: Duration,
+    shutdown_join_timeout: Duration,
+}
+
+impl Default for FirewallExecutorLimits {
+    fn default() -> Self {
+        Self {
+            request_workers: FIREWALL_REQUEST_WORKERS,
+            request_queue_capacity: FIREWALL_REQUEST_QUEUE_CAPACITY,
+            approval_workers: FIREWALL_APPROVAL_WORKERS,
+            approval_queue_capacity: FIREWALL_APPROVAL_QUEUE_CAPACITY,
+            approval_timeout: crate::firewall::EGRESS_APPROVAL_TIMEOUT,
+            shutdown_join_timeout: FIREWALL_SHUTDOWN_JOIN_TIMEOUT,
+        }
+    }
+}
+
+enum FirewallRequestJob {
+    EnableSession(crate::transport::CdpEvent),
+    Paused(crate::transport::CdpEvent),
+}
+
+struct FirewallApprovalJob {
+    conn: Connection,
+    session_id: String,
+    request_id: chromiumoxide::cdp::browser_protocol::fetch::RequestId,
+    /// Normalized host only; never retain the potentially very large request
+    /// URL/body in the slow approval queue.
+    target: String,
+    preview: crate::firewall::PostPreview,
+    approver: Arc<dyn crate::firewall::EgressApprover>,
+    approved_domains: crate::firewall::ApprovedDomains,
+}
+
+/// Host-owned firewall task tree. The watchdog owns the loop `JoinHandle`,
+/// while this value retains exact cancellation/abort authority and joins the
+/// whole registered worker tree during explicit shutdown.
+struct FirewallLoopRuntime {
+    cancel: CancellationToken,
+    loop_abort: tokio::task::AbortHandle,
+    watchdog: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    shutdown_join_timeout: Duration,
+}
+
+impl FirewallLoopRuntime {
+    fn take_watchdog(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.watchdog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    async fn shutdown(&self) {
+        self.cancel.cancel();
+        let Some(mut watchdog) = self.take_watchdog() else {
+            return;
+        };
+        if tokio::time::timeout(self.shutdown_join_timeout, &mut watchdog)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                target: "nomi_browser_engine::backend::cdp",
+                "firewall worker tree exceeded its shutdown join budget; aborting the bounded task tree"
+            );
+            self.loop_abort.abort();
+            watchdog.abort();
+            let _ = watchdog.await;
+        }
+    }
+
+    fn abort(&self) {
+        self.cancel.cancel();
+        self.loop_abort.abort();
+        if let Some(watchdog) = self.take_watchdog() {
+            watchdog.abort();
+        }
+    }
+
+    /// Convert a not-yet-published firewall tree into one bounded supervisor
+    /// handle. The watchdog owns the loop JoinHandle and registered workers;
+    /// the shared cleanup relay will retain and join this handle to terminal.
+    fn into_pending_cleanup_handle(self) -> Option<tokio::task::JoinHandle<()>> {
+        self.cancel.cancel();
+        self.loop_abort.abort();
+        self.take_watchdog()
+    }
+}
+
+impl Drop for FirewallLoopRuntime {
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 impl FetchFirewallSubscriptions {
@@ -7912,16 +11154,16 @@ impl FetchFirewallSubscriptions {
 ///
 /// **订阅先于循环（F1）**：两路可靠订阅由调用方经 [`FetchFirewallSubscriptions::subscribe`]
 /// 在 attach loop 启动**之前**注册后传入——`handle_attached` 的 Fetch.enable arming gate
-/// 依赖该订阅已存在；订阅与循环 spawn 之间的事件在 unbounded 通道里缓存，循环启动后补处理。
+/// 依赖该订阅已存在；订阅与循环 spawn 之间的事件由 transport 的可靠有界额度保留，循环启动后补处理。
 ///
 /// **SW 链路（裁决⑪/不变量⑬）**：本循环消费的 `attachedToTarget` 含 service_worker（P0 保持其
 /// attach、不 detach），故 SW session 同样被挂 `Fetch.enable`、其出口请求同样经本循环判定——SW 无法
 /// 绕过防火墙。
 ///
-/// **跨域 POST 门控的 enforcement 边界（E5 范围）**：[`FirewallDecision::GatePost`] 当前**放行 + 构造
-/// 预览留痕**（`info` 日志记 host/size/字段名——**绝不**记字段值）；实际升 Exec 审批的人在回路路由由
-/// **F1** 接线，见 `TODO(E5->F1-egress-approval)`。[`FirewallDecision::Block`]（IP 封禁）是**硬阻断**，
-/// E5 即 enforce（SSRF 防护无审批语义）。
+/// **跨域 POST 门控的 enforcement 边界（E5 范围）**：[`FirewallDecision::GatePost`] 构造严格有界且
+/// 不含字段值的预览；有审批器时交给 Host-owned 固定 worker 与有界队列，队列饱和或审批超时均
+/// fail-closed，绝不为每条请求派生 detached task。无审批器的托管上下文维持既有“放行 + 审计”产品
+/// 语义。[`FirewallDecision::Block`]（IP 封禁）是硬阻断，E5 即 enforce（SSRF 防护无审批语义）。
 ///
 /// 所有错误 best-effort：单条请求判定/dispatch 失败只 `debug`/`warn`，**绝不 panic**，且**绝不**让一条
 /// 请求悬挂（任何分支都对它 continue 或 fail——否则 Fetch.enable 下未应答的请求会卡住页面）。连接关闭
@@ -7934,71 +11176,379 @@ fn spawn_fetch_firewall_loop(
     approved_domains: crate::firewall::ApprovedDomains,
     dns_resolver: Arc<dyn crate::firewall::HostResolver>,
     dns_cache: crate::firewall::DnsResolverCache,
-) -> tokio::task::JoinHandle<()> {
+) -> FirewallLoopRuntime {
+    spawn_fetch_firewall_loop_with_limits(
+        conn,
+        subscriptions,
+        config,
+        egress_approver,
+        approved_domains,
+        dns_resolver,
+        dns_cache,
+        FirewallExecutorLimits::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_fetch_firewall_loop_with_limits(
+    conn: Connection,
+    subscriptions: FetchFirewallSubscriptions,
+    config: crate::firewall::FirewallConfig,
+    egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
+    approved_domains: crate::firewall::ApprovedDomains,
+    dns_resolver: Arc<dyn crate::firewall::HostResolver>,
+    dns_cache: crate::firewall::DnsResolverCache,
+    limits: FirewallExecutorLimits,
+) -> FirewallLoopRuntime {
+    let cancel = CancellationToken::new();
+    let loop_cancel = cancel.clone();
+    let loop_conn = conn.clone();
+    let firewall_loop = tokio::spawn(async move {
+        run_fetch_firewall_loop(
+            loop_conn,
+            subscriptions,
+            config,
+            egress_approver,
+            approved_domains,
+            dns_resolver,
+            dns_cache,
+            limits,
+            loop_cancel,
+        )
+        .await;
+    });
+    let loop_abort = firewall_loop.abort_handle();
+    let watchdog = spawn_firewall_watchdog(conn, firewall_loop);
+    FirewallLoopRuntime {
+        cancel,
+        loop_abort,
+        watchdog: std::sync::Mutex::new(Some(watchdog)),
+        shutdown_join_timeout: limits.shutdown_join_timeout,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_fetch_firewall_loop(
+    conn: Connection,
+    subscriptions: FetchFirewallSubscriptions,
+    config: crate::firewall::FirewallConfig,
+    egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
+    approved_domains: crate::firewall::ApprovedDomains,
+    dns_resolver: Arc<dyn crate::firewall::HostResolver>,
+    dns_cache: crate::firewall::DnsResolverCache,
+    limits: FirewallExecutorLimits,
+    cancel: CancellationToken,
+) {
     let FetchFirewallSubscriptions {
         mut attached_rx,
         mut paused_rx,
     } = subscriptions;
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                // ① 新 session（含 SW）→ 挂 Fetch.enable。
-                ev = attached_rx.recv() => {
-                    match ev {
-                        Some(ev) => {
-                            let Ok(att) = serde_json::from_value::<EventAttachedToTarget>(ev.params.clone())
-                            else { continue };
-                            let sid: String = att.session_id.clone().into();
-                            let ttype = att.target_info.r#type.clone();
-                            // 对所有子 target（page/iframe/service_worker/worker…）一视同仁挂 Fetch.enable。
-                            // SW 在此被覆盖（裁决⑪/不变量⑬）。失败只 warn（best-effort）。
-                            if let Err(e) = enable_fetch_on_session(&conn, &sid).await {
-                                tracing::warn!(
-                                    target: "nomi_browser_engine::backend::cdp",
-                                    error = %e, session_id = %sid, target_type = %ttype,
-                                    "Fetch.enable on attached session failed; egress firewall has a gap for this target"
-                                );
-                            } else {
-                                tracing::debug!(
-                                    target: "nomi_browser_engine::backend::cdp",
-                                    session_id = %sid, target_type = %ttype,
-                                    "Fetch.enable armed on attached session (egress firewall)"
-                                );
-                            }
-                        }
-                        None => break,
-                    }
+    let (request_tx, request_rx) = tokio::sync::mpsc::channel(
+        limits.request_queue_capacity.max(1),
+    );
+    let request_rx = Arc::new(AsyncMutex::new(request_rx));
+
+    let approvals_enabled = egress_approver.is_some();
+    let (approval_tx, approval_rx) = if approvals_enabled {
+        let (tx, rx) = tokio::sync::mpsc::channel(limits.approval_queue_capacity.max(1));
+        (Some(tx), Some(Arc::new(AsyncMutex::new(rx))))
+    } else {
+        (None, None)
+    };
+
+    let mut workers = tokio::task::JoinSet::new();
+    let config = Arc::new(config);
+    for _ in 0..limits.request_workers.max(1) {
+        workers.spawn(run_firewall_request_worker(
+            conn.clone(),
+            Arc::clone(&request_rx),
+            Arc::clone(&config),
+            egress_approver.clone(),
+            approved_domains.clone(),
+            Arc::clone(&dns_resolver),
+            dns_cache.clone(),
+            approval_tx.clone(),
+            cancel.clone(),
+        ));
+    }
+    if let Some(approval_rx) = approval_rx {
+        for _ in 0..limits.approval_workers.max(1) {
+            workers.spawn(run_firewall_approval_worker(
+                Arc::clone(&approval_rx),
+                cancel.clone(),
+                limits.approval_timeout,
+            ));
+        }
+    }
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            joined = workers.join_next(), if !workers.is_empty() => {
+                if cancel.is_cancelled() {
+                    break;
                 }
-                // ② 被拦请求 → 判定 → continue/fail/（D2）悬挂等审批。
-                ev = paused_rx.recv() => {
-                    match ev {
-                        Some(ev) => {
-                            let session_id = ev.session_id.clone();
-                            let Ok(paused) = serde_json::from_value::<EventRequestPaused>(ev.params.clone())
-                            else {
-                                // 解析失败：仍尽力放行该请求（无法判定但不能让它悬挂）。但我们没有
-                                // request_id 就无法 continue——解析失败时 request_id 也拿不到，只能跳过
-                                // （CDP 会因超时自己处理；这是极端边角）。
-                                continue;
-                            };
-                            handle_paused_request(
-                                &conn,
-                                &config,
-                                egress_approver.as_ref(),
-                                &approved_domains,
-                                &session_id,
-                                paused,
-                                dns_resolver.as_ref(),
-                                &dns_cache,
-                            )
-                            .await;
-                        }
-                        None => break,
-                    }
+                match joined {
+                    Some(Ok(())) => panic!("egress firewall worker exited while its Host was live"),
+                    Some(Err(error)) => panic!("egress firewall worker died: {error}"),
+                    None => panic!("egress firewall worker registry became empty"),
+                }
+            }
+            ev = attached_rx.recv() => {
+                let Some(ev) = ev else { break };
+                // Keep the reliable subscription's byte/count token attached
+                // while this event waits in our bounded queue. Deserializing
+                // here would transfer its heap into an unaccounted job.
+                let job = FirewallRequestJob::EnableSession(ev);
+                if let Err(error) = request_tx.try_send(job) {
+                    reject_saturated_firewall_job(&conn, &cancel, error.into_inner()).await;
+                    break;
+                }
+            }
+            ev = paused_rx.recv() => {
+                let Some(ev) = ev else { break };
+                let job = FirewallRequestJob::Paused(ev);
+                if let Err(error) = request_tx.try_send(job) {
+                    reject_saturated_firewall_job(&conn, &cancel, error.into_inner()).await;
+                    break;
                 }
             }
         }
-    })
+    }
+
+    cancel.cancel();
+    drop(request_tx);
+    drop(approval_tx);
+    workers.abort_all();
+    while workers.join_next().await.is_some() {}
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_firewall_request_worker(
+    conn: Connection,
+    request_rx: Arc<AsyncMutex<tokio::sync::mpsc::Receiver<FirewallRequestJob>>>,
+    config: Arc<crate::firewall::FirewallConfig>,
+    egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
+    approved_domains: crate::firewall::ApprovedDomains,
+    dns_resolver: Arc<dyn crate::firewall::HostResolver>,
+    dns_cache: crate::firewall::DnsResolverCache,
+    approval_tx: Option<tokio::sync::mpsc::Sender<FirewallApprovalJob>>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let mut receiver = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            receiver = request_rx.lock() => receiver,
+        };
+        let job = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            job = receiver.recv() => job,
+        };
+        drop(receiver);
+        let Some(job) = job else { return };
+
+        match job {
+            FirewallRequestJob::EnableSession(event) => {
+                let Ok(attached) =
+                    serde_json::from_value::<EventAttachedToTarget>(event.params)
+                else {
+                    tracing::error!(
+                        target: "nomi_browser_engine::backend::cdp",
+                        "malformed attachedToTarget event reached the armed firewall; closing connection fail-closed"
+                    );
+                    conn.shutdown().await;
+                    return;
+                };
+                let session_id: String = attached.session_id.into();
+                let target_type = attached.target_info.r#type;
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    result = enable_fetch_on_session(&conn, &session_id) => result,
+                };
+                if let Err(error) = result {
+                    tracing::warn!(
+                        target: "nomi_browser_engine::backend::cdp",
+                        %error, %session_id, %target_type,
+                        "Fetch.enable on attached session failed; egress firewall has a gap for this target"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "nomi_browser_engine::backend::cdp",
+                        %session_id, %target_type,
+                        "Fetch.enable armed on attached session (egress firewall)"
+                    );
+                }
+            }
+            FirewallRequestJob::Paused(event) => {
+                let session_id = event.session_id;
+                let Ok(paused) = serde_json::from_value::<EventRequestPaused>(event.params) else {
+                    tracing::error!(
+                        target: "nomi_browser_engine::backend::cdp",
+                        "malformed requestPaused event cannot be safely released; closing connection fail-closed"
+                    );
+                    conn.shutdown().await;
+                    return;
+                };
+                let approval = handle_paused_request(
+                    &conn,
+                    config.as_ref(),
+                    egress_approver.as_ref(),
+                    &approved_domains,
+                    &session_id,
+                    paused,
+                    dns_resolver.as_ref(),
+                    &dns_cache,
+                    &cancel,
+                )
+                .await;
+                let Some(approval) = approval else { continue };
+                let Some(approval_tx) = approval_tx.as_ref() else {
+                    reject_saturated_approval(approval, &cancel, "approval executor unavailable")
+                        .await;
+                    continue;
+                };
+                if let Err(error) = approval_tx.try_send(approval) {
+                    reject_saturated_approval(
+                        error.into_inner(),
+                        &cancel,
+                        "approval executor saturated",
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+}
+
+async fn run_firewall_approval_worker(
+    approval_rx: Arc<AsyncMutex<tokio::sync::mpsc::Receiver<FirewallApprovalJob>>>,
+    cancel: CancellationToken,
+    approval_timeout: Duration,
+) {
+    loop {
+        let mut receiver = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            receiver = approval_rx.lock() => receiver,
+        };
+        let job = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            job = receiver.recv() => job,
+        };
+        drop(receiver);
+        let Some(job) = job else { return };
+        resolve_firewall_approval(job, &cancel, approval_timeout).await;
+    }
+}
+
+async fn reject_saturated_firewall_job(
+    conn: &Connection,
+    cancel: &CancellationToken,
+    job: FirewallRequestJob,
+) {
+    tracing::error!(
+        target: "nomi_browser_engine::backend::cdp",
+        request_queue_capacity = FIREWALL_REQUEST_QUEUE_CAPACITY,
+        "egress firewall request executor saturated; failing closed and closing the Host connection"
+    );
+    if let FirewallRequestJob::Paused(event) = job {
+        let session_id = event.session_id;
+        let Ok(paused) = serde_json::from_value::<EventRequestPaused>(event.params) else {
+            conn.shutdown().await;
+            return;
+        };
+        let rejected = tokio::time::timeout(
+            FIREWALL_OVERFLOW_REJECT_TIMEOUT,
+            fetch_fail(conn, &session_id, paused.request_id, cancel),
+        )
+        .await;
+        if !matches!(rejected, Ok(true)) {
+            tracing::warn!(
+                target: "nomi_browser_engine::backend::cdp",
+                "could not prove the saturated request was rejected within budget; closing connection"
+            );
+        }
+    }
+    conn.shutdown().await;
+}
+
+async fn reject_saturated_approval(
+    job: FirewallApprovalJob,
+    cancel: &CancellationToken,
+    reason: &'static str,
+) {
+    let FirewallApprovalJob {
+        conn,
+        session_id,
+        request_id,
+        preview,
+        ..
+    } = job;
+    tracing::warn!(
+        target: "nomi_browser_engine::backend::cdp",
+        target_host = %preview.host,
+        approval_queue_capacity = FIREWALL_APPROVAL_QUEUE_CAPACITY,
+        %reason,
+        "egress approval admission rejected; failing the gated request closed"
+    );
+    if !matches!(
+        tokio::time::timeout(
+        FIREWALL_OVERFLOW_REJECT_TIMEOUT,
+        fetch_fail(&conn, &session_id, request_id, cancel),
+    )
+        .await,
+        Ok(true)
+    )
+        && !cancel.is_cancelled()
+    {
+        conn.shutdown().await;
+    }
+}
+
+async fn resolve_firewall_approval(
+    job: FirewallApprovalJob,
+    cancel: &CancellationToken,
+    approval_timeout: Duration,
+) {
+    let FirewallApprovalJob {
+        conn,
+        session_id,
+        request_id,
+        target,
+        preview,
+        approver,
+        approved_domains,
+    } = job;
+    let verdict = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return,
+        result = tokio::time::timeout(approval_timeout, approver.approve_egress(&preview)) => {
+            match result {
+                Ok(verdict) => verdict,
+                Err(_) => {
+                    tracing::warn!(
+                        target: "nomi_browser_engine::backend::cdp",
+                        target_host = %preview.host,
+                        "egress approval timed out — failing closed (rejecting the gated request)"
+                    );
+                    crate::firewall::EgressVerdict::Fail
+                }
+            }
+        }
+    };
+    if verdict.is_continue() {
+        if verdict.remembers_domain() {
+            approved_domains.record(&target);
+        }
+        fetch_continue(&conn, &session_id, request_id, cancel).await;
+    } else {
+        fetch_fail(&conn, &session_id, request_id, cancel).await;
+    }
 }
 
 /// **防火墙 watchdog（fail-closed）**：监视出口防火墙循环的 `JoinHandle`，任务
@@ -8050,8 +11600,9 @@ fn spawn_firewall_watchdog(
 ///    出口打成 BlockedByClient 白屏（F6 回归）。审计记 host/size/字段名（绝不含值）。**硬 Block
 ///    （SSRF IP 封禁 / DNS 守卫 / deny_etld1）不经 GatePost，仍 failRequest fail-closed**；
 /// 3. **有审批通道（standalone/桌面接管路径）→ 悬挂**该请求（保留 `request_id`，**不**立即
-///    continue/fail）+ `tokio::spawn` 一个 detached 任务（事件循环立即回到 `select!` 继续 pump，
-///    **绝不**在此同步阻塞）；该任务 `await` [`crate::firewall::EgressApprover`]（带
+///    continue/fail）+ 移交 Host 所有的固定并发、有界队列审批执行器（事件循环立即回到
+///    `select!` 继续 pump，**绝不**在此同步阻塞）；已登记 worker `await`
+///    [`crate::firewall::EgressApprover`]（带
 ///    [`crate::firewall::EGRESS_APPROVAL_TIMEOUT`] 超时）取裁决 → 批准 `continueRequest`（可选记住域）/
 ///    拒绝/超时 `failRequest`（**fail-closed**，闭合 P2 泄漏窗口）。
 // egress firewall 上下文参数较多（config/approver/approved_domains/resolver/cache）；SD-5 接入真实
@@ -8066,7 +11617,8 @@ async fn handle_paused_request(
     paused: EventRequestPaused,
     dns_resolver: &dyn crate::firewall::HostResolver,
     dns_cache: &crate::firewall::DnsResolverCache,
-) {
+    cancel: &CancellationToken,
+) -> Option<FirewallApprovalJob> {
     let request_id = paused.request_id.clone();
     let url = paused.request.url.clone();
     let method = paused.request.method.clone();
@@ -8107,16 +11659,24 @@ async fn handle_paused_request(
     // 但 IP 字面量的同步判定对 top-nav 仍生效，见 decide 的 IP 封禁档）。
     if config.block_private_ips && !is_top_level_navigation && resolved_ip.is_none() {
         // resolved_ip==None 意味 host 不是 IP 字面量（是域名）→ 需 DNS 解析。
-        if let Some(host) = target_host.as_deref()
-            && crate::firewall::check_dns_ssrf(host, dns_resolver, dns_cache).await
-        {
+        let blocked = if let Some(host) = target_host.as_deref() {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return None,
+                blocked = crate::firewall::check_dns_ssrf(host, dns_resolver, dns_cache) => blocked,
+            }
+        } else {
+            false
+        };
+        if blocked {
+            let host = target_host.as_deref().unwrap_or_default();
             tracing::warn!(
                 target: "nomi_browser_engine::backend::cdp",
                 url = %url, host = %host,
                 "egress firewall BLOCKED request: domain resolves to private/metadata IP (DNS→IP SSRF guard)"
             );
-            fetch_fail(conn, session_id, request_id).await;
-            return;
+            fetch_fail(conn, session_id, request_id, cancel).await;
+            return None;
         }
     }
 
@@ -8136,7 +11696,8 @@ async fn handle_paused_request(
 
     match decision {
         crate::firewall::FirewallDecision::Allow => {
-            fetch_continue(conn, session_id, request_id).await;
+            fetch_continue(conn, session_id, request_id, cancel).await;
+            None
         }
         crate::firewall::FirewallDecision::Block { reason } => {
             // 硬阻断（IP 封禁，SSRF 防护）。failRequest{BlockedByClient}。
@@ -8145,7 +11706,8 @@ async fn handle_paused_request(
                 url = %url, reason = %reason,
                 "egress firewall BLOCKED request (failRequest)"
             );
-            fetch_fail(conn, session_id, request_id).await;
+            fetch_fail(conn, session_id, request_id, cancel).await;
+            None
         }
         crate::firewall::FirewallDecision::GatePost { preview } => {
             // P3-D2（裁决④/决策3）：闭合 P2 跨域 POST 泄漏窗口——不再 detect-but-continue。
@@ -8158,8 +11720,8 @@ async fn handle_paused_request(
                     target_host = %preview.host,
                     "egress firewall: gated request to an already-approved domain (always_allow) — continuing"
                 );
-                fetch_continue(conn, session_id, request_id).await;
-                return;
+                fetch_continue(conn, session_id, request_id, cancel).await;
+                return None;
             }
 
             // ② **无审批通道（托管上下文）→ 检测 + 留痕后放行（E5 pre-approval 姿态；F6 白屏回归修）**。
@@ -8179,14 +11741,14 @@ async fn handle_paused_request(
                     "egress firewall gated egress but no approval channel is wired (managed context) — \
                      allowing with audit trail (E5 pre-approval posture; SSRF/denylist hard blocks unaffected)"
                 );
-                fetch_continue(conn, session_id, request_id).await;
-                return;
+                fetch_continue(conn, session_id, request_id, cancel).await;
+                return None;
             };
 
             // ③ 有审批通道（standalone/桌面接管路径）：悬挂该请求等人在回路裁决。**绝不**在此 CDP 事件
             //    handler 里同步阻塞（会卡死整个防火墙事件循环——所有 session 的 requestPaused/
-            //    attachedToTarget 都经它）。故把 request_id 保留（不 continue/不 fail），spawn 一个
-            //    detached 任务去 await 审批 → 据裁决 continue/fail。审批超时 / 拒绝 → **fail-closed**
+            //    attachedToTarget 都经它）。故把 request_id 保留（不 continue/不 fail），交给 Host
+            //    的有界审批 worker 去 await 审批 → 据裁决 continue/fail。审批超时 / 拒绝 → **fail-closed**
             //    （failRequest）。预览只 host/size/字段名（绝不含值，复用 E5 build_post_preview）。
             tracing::info!(
                 target: "nomi_browser_engine::backend::cdp",
@@ -8195,46 +11757,17 @@ async fn handle_paused_request(
                 "egress firewall gated cross-origin POST / off-allowlist egress — suspending for out-of-band approval (fail-closed on timeout/deny)"
             );
 
-            // 句柄 + 上下文克隆进 detached 任务（Connection 内部 Arc，克隆廉价；request_id/session_id/url
-            // owned；approver Arc 克隆；approved_domains 克隆共享同一份 Arc<Mutex<…>>）。
-            let conn = conn.clone();
-            let session_id = session_id.to_string();
-            let url = url.clone();
-            let approver = Arc::clone(approver);
-            let approved_domains = approved_domains.clone();
-            tokio::spawn(async move {
-                // await 裁决（带超时——绝不无限悬挂）。
-                let verdict = match tokio::time::timeout(
-                    crate::firewall::EGRESS_APPROVAL_TIMEOUT,
-                    approver.approve_egress(&preview),
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(_elapsed) => {
-                        tracing::warn!(
-                            target: "nomi_browser_engine::backend::cdp",
-                            target_host = %preview.host,
-                            "egress approval timed out — failing closed (rejecting the gated request)"
-                        );
-                        crate::firewall::EgressVerdict::Fail
-                    }
-                };
-                match verdict {
-                    v if v.is_continue() => {
-                        // 批准放行。决策3 always_allow：仅当裁决是 ContinueAndRemember 才把目标域记进
-                        // 本会话已批准集合（同域后续不再问）；一次性 Continue 不记。IP 字面量 / 无 eTLD+1
-                        // 的目标不会被记入（registrable_domain_for_trust fail-closed）。
-                        if v.remembers_domain() {
-                            approved_domains.record(&url);
-                        }
-                        fetch_continue(&conn, &session_id, request_id).await;
-                    }
-                    _ => {
-                        fetch_fail(&conn, &session_id, request_id).await;
-                    }
-                }
-            });
+            // 把请求移交给 Host 所有的固定审批 worker 池。调用者用 `try_send` 做有界
+            // admission；饱和时立即 failRequest，绝不创建 detached per-request task。
+            Some(FirewallApprovalJob {
+                conn: conn.clone(),
+                session_id: session_id.to_string(),
+                request_id,
+                target: preview.host.clone(),
+                preview,
+                approver: Arc::clone(approver),
+                approved_domains: approved_domains.clone(),
+            })
         }
     }
 }
@@ -8279,12 +11812,15 @@ async fn fetch_continue(
     conn: &Connection,
     session_id: &str,
     request_id: chromiumoxide::cdp::browser_protocol::fetch::RequestId,
+    cancel: &CancellationToken,
 ) {
     let params = ContinueRequestParams::new(request_id);
-    if let Err(e) = conn
-        .send_may_fail::<ContinueRequestParams>(session_id, &params)
-        .await
-    {
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return,
+        result = conn.send_may_fail::<ContinueRequestParams>(session_id, &params) => result,
+    };
+    if let Err(e) = result {
         tracing::debug!(
             target: "nomi_browser_engine::backend::cdp",
             error = %e, "Fetch.continueRequest failed (benign; request may have already resolved)"
@@ -8297,22 +11833,186 @@ async fn fetch_fail(
     conn: &Connection,
     session_id: &str,
     request_id: chromiumoxide::cdp::browser_protocol::fetch::RequestId,
-) {
+    cancel: &CancellationToken,
+) -> bool {
     let params = FailRequestParams::new(request_id, NetworkErrorReason::BlockedByClient);
-    if let Err(e) = conn
-        .send_may_fail::<FailRequestParams>(session_id, &params)
-        .await
-    {
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return false,
+        result = conn.send_may_fail::<FailRequestParams>(session_id, &params) => result,
+    };
+    if let Err(e) = result {
         tracing::debug!(
             target: "nomi_browser_engine::backend::cdp",
             error = %e, "Fetch.failRequest failed (benign; request may have already resolved)"
         );
+        false
+    } else {
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rendered_html_renderer_and_rust_guards_share_one_utf8_limit() {
+        let expression = bounded_rendered_html_expression();
+        let content_limit = crate::engine::MAX_RENDERED_HTML_BYTES
+            - crate::engine::RENDERED_HTML_TRUNCATION_MARKER.len();
+        assert!(expression.contains(&format!("const limit = {content_limit}")));
+        assert!(expression.contains("codePointAt"));
+
+        let hostile = format!("<html>{}</html>", "😀".repeat(content_limit / 4 + 64));
+        let html = rendered_html_from_renderer_value(&serde_json::json!({
+            "text": hostile,
+            "truncated": false,
+        }));
+        assert!(html.len() <= crate::engine::MAX_RENDERED_HTML_BYTES);
+        assert!(html.ends_with(crate::engine::RENDERED_HTML_TRUNCATION_MARKER));
+        assert!(std::str::from_utf8(html.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn rendered_html_preserves_small_unicode_documents_without_marker() {
+        let html = rendered_html_from_renderer_value(&serde_json::json!({
+            "text": "<html><body>你好😀</body></html>",
+            "truncated": false,
+        }));
+        assert_eq!(html, "<html><body>你好😀</body></html>");
+        assert!(!html.ends_with(crate::engine::RENDERED_HTML_TRUNCATION_MARKER));
+    }
+
+    struct CountingTaskTabReservation {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl TaskTabReservation for CountingTaskTabReservation {}
+
+    impl Drop for CountingTaskTabReservation {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct RejectingTaskTabAuthority;
+
+    #[async_trait]
+    impl TaskTabReservationAuthority for RejectingTaskTabAuthority {
+        async fn reserve(
+            &self,
+            _task_resource_key: &str,
+            _lane_id: &str,
+            _reservation_key: &str,
+        ) -> Result<Arc<dyn TaskTabReservation>, BrowserError> {
+            Err(BrowserError::Blocked {
+                reason: "test task tab capacity reached".into(),
+            })
+        }
+    }
+
+    struct BoundedTaskTabAuthority {
+        live: Arc<AtomicUsize>,
+        max: usize,
+    }
+
+    struct BoundedTaskTabReservation {
+        live: Arc<AtomicUsize>,
+    }
+
+    impl TaskTabReservation for BoundedTaskTabReservation {}
+
+    impl Drop for BoundedTaskTabReservation {
+        fn drop(&mut self) {
+            let previous = self.live.fetch_sub(1, Ordering::SeqCst);
+            debug_assert!(previous > 0, "task tab reservation count underflow");
+        }
+    }
+
+    #[async_trait]
+    impl TaskTabReservationAuthority for BoundedTaskTabAuthority {
+        async fn reserve(
+            &self,
+            _task_resource_key: &str,
+            _lane_id: &str,
+            _reservation_key: &str,
+        ) -> Result<Arc<dyn TaskTabReservation>, BrowserError> {
+            self.live
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |live| {
+                    (live < self.max).then_some(live + 1)
+                })
+                .map_err(|_| BrowserError::Blocked {
+                    reason: "test task tab capacity reached".into(),
+                })?;
+            Ok(Arc::new(BoundedTaskTabReservation {
+                live: Arc::clone(&self.live),
+            }))
+        }
+    }
+
+    #[test]
+    fn per_lane_tab_capacity_is_bounded() {
+        assert!(tab_capacity_available(0));
+        assert!(tab_capacity_available(MAX_TABS_PER_LANE - 1));
+        assert!(!tab_capacity_available(MAX_TABS_PER_LANE));
+        assert!(!tab_capacity_available(MAX_TABS_PER_LANE + 1));
+    }
+
+    #[test]
+    fn closed_target_bookkeeping_stays_constant_under_one_hundred_thousand_tab_churn() {
+        let mut state = HostRouteState::default();
+        for index in 0..100_000usize {
+            let target_id = format!("target-{index}");
+            let frame_id = format!("frame-{index}");
+            let session_id = format!("session-{index}");
+            state.ownership.claim("long-lived-lane", &target_id).unwrap();
+            state
+                .retired_target_owner
+                .insert(target_id.clone(), "long-lived-lane".into());
+            state.cleanup_inflight.insert(target_id.clone());
+            state
+                .lost_targets
+                .insert(target_id.clone(), tokio::time::Instant::now());
+            state
+                .session_targets
+                .insert(session_id, target_id.clone());
+            state
+                .frame_owner
+                .insert(frame_id.clone(), "long-lived-lane".into());
+
+            state.release_target_bookkeeping(&target_id, Some(&frame_id));
+        }
+
+        assert!(state.ownership.targets_for_lane("long-lived-lane").is_empty());
+        assert!(state.retired_target_owner.is_empty());
+        assert!(state.cleanup_inflight.is_empty());
+        assert!(state.lost_targets.is_empty());
+        assert!(state.session_targets.is_empty());
+        assert!(state.frame_owner.is_empty());
+    }
+
+    #[test]
+    fn per_tab_oopif_capacity_is_bounded() {
+        assert!(oopif_capacity_available(0));
+        assert!(oopif_capacity_available(MAX_OOPIFS_PER_TAB - 1));
+        assert!(!oopif_capacity_available(MAX_OOPIFS_PER_TAB));
+        assert!(!oopif_capacity_available(MAX_OOPIFS_PER_TAB + 1));
+    }
+
+    #[test]
+    fn per_host_download_route_capacity_is_bounded() {
+        assert!(download_capacity_available(0));
+        assert!(download_capacity_available(
+            MAX_PENDING_DOWNLOADS_PER_HOST - 1
+        ));
+        assert!(!download_capacity_available(
+            MAX_PENDING_DOWNLOADS_PER_HOST
+        ));
+        assert!(!download_capacity_available(
+            MAX_PENDING_DOWNLOADS_PER_HOST + 1
+        ));
+    }
 
     #[cfg(any(windows, unix))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8522,6 +12222,7 @@ mod tests {
             process,
             LaunchedProfileCleanupAuthority::new(Some(profile.clone())),
             token,
+            None,
         );
         cleanup.test_hooks = test_hooks;
         (temp, profile, Arc::new(cleanup), pid)
@@ -8701,6 +12402,138 @@ mod tests {
         );
     }
 
+    #[test]
+    fn debug_request_timestamps_bound_count_bytes_and_release_terminal_ids() {
+        let mut timestamps = DebugRequestTimestamps::default();
+        for index in 0..MAX_DEBUG_REQUEST_TIMESTAMPS {
+            assert!(timestamps.insert(format!("request-{index}"), index as f64));
+        }
+        assert!(!timestamps.insert("count-overflow".into(), 1.0));
+        let (_, retained_before) = timestamps.retained_counts();
+        assert_eq!(timestamps.remove("request-7"), Some(7.0));
+        let (count_after_terminal, retained_after_terminal) = timestamps.retained_counts();
+        assert_eq!(count_after_terminal, MAX_DEBUG_REQUEST_TIMESTAMPS - 1);
+        assert_eq!(
+            retained_before - retained_after_terminal,
+            "request-7".len(),
+            "terminal removal refunds the exact owned key bytes"
+        );
+        assert!(timestamps.insert("replacement".into(), 2.0));
+
+        let mut byte_bounded = DebugRequestTimestamps::default();
+        let key_count = MAX_DEBUG_REQUEST_TIMESTAMP_TOTAL_KEY_BYTES
+            / MAX_DEBUG_REQUEST_TIMESTAMP_KEY_BYTES;
+        for index in 0..key_count {
+            let prefix = format!("{index:04}");
+            let key = format!(
+                "{prefix}{}",
+                "x".repeat(MAX_DEBUG_REQUEST_TIMESTAMP_KEY_BYTES - prefix.len())
+            );
+            assert!(byte_bounded.insert(key, index as f64));
+        }
+        assert_eq!(
+            byte_bounded.retained_counts(),
+            (key_count, MAX_DEBUG_REQUEST_TIMESTAMP_TOTAL_KEY_BYTES)
+        );
+        assert!(!byte_bounded.insert("one-byte-over-total".into(), 0.0));
+        assert!(!byte_bounded.insert(
+            "x".repeat(MAX_DEBUG_REQUEST_TIMESTAMP_KEY_BYTES + 1),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn bounded_lane_inventory_rejects_lineage_count_before_collecting_live_targets() {
+        let mut opener = "seed".to_string();
+        let mut target_infos = Vec::new();
+        for index in 0..MAX_TRACKED_TARGETS_PER_LANE {
+            let target_id = format!("descendant-{index}");
+            target_infos.push(serde_json::json!({
+                "targetId": target_id,
+                "type": "page",
+                "openerId": opener,
+            }));
+            opener = format!("descendant-{index}");
+        }
+        let seed = bounded_lane_seed_targets(["seed"]).expect("one seed is bounded");
+        assert_eq!(
+            bounded_live_lane_targets(
+                &serde_json::json!({"targetInfos": target_infos}),
+                seed,
+            ),
+            Err(BoundedLaneTargetInventoryError::LaneTargetLimit)
+        );
+    }
+
+    #[test]
+    fn bounded_lane_inventory_rejects_host_entries_and_strings_before_id_clones() {
+        let too_many = (0..=MAX_TARGET_INVENTORY_ENTRIES_PER_HOST)
+            .map(|index| serde_json::json!({"targetId": format!("sibling-{index}"), "type": "page"}))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bounded_live_lane_targets(
+                &serde_json::json!({"targetInfos": too_many}),
+                bounded_lane_seed_targets(["seed"]).unwrap(),
+            ),
+            Err(BoundedLaneTargetInventoryError::HostEntryLimit)
+        );
+
+        let oversized_strings = serde_json::json!({
+            "targetInfos": [{
+                "targetId": "unrelated",
+                "type": "page",
+                "title": "x".repeat(MAX_TARGET_INVENTORY_STRING_BYTES + 1),
+            }]
+        });
+        assert_eq!(
+            bounded_live_lane_targets(
+                &oversized_strings,
+                bounded_lane_seed_targets(["seed"]).unwrap(),
+            ),
+            Err(BoundedLaneTargetInventoryError::HostStringByteLimit)
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_retired_inventory_failure_keeps_exact_tombstone_until_host_cleanup() {
+        let (connection, mut requests, server) = generic_recording_fake_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        router
+            .state
+            .lock()
+            .await
+            .retired_target_owner
+            .insert("retired-target".into(), "retired-lane".into());
+
+        assert!(matches!(
+            router.map_lane_inventory_error(
+                "retired-lane",
+                BoundedLaneTargetInventoryError::HostStringByteLimit,
+            ),
+            BrowserError::SessionLost { recoverable: false }
+        ));
+        assert_eq!(
+            router
+                .state
+                .lock()
+                .await
+                .retired_target_owner
+                .get("retired-target")
+                .map(String::as_str),
+            Some("retired-lane"),
+            "capacity rejection must not manufacture an absence proof or drop exact cleanup authority"
+        );
+        let process_cleanup = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .expect("capacity failure promptly escalates bounded process cleanup")
+            .expect("fake transport remains available");
+        assert_eq!(process_cleanup["method"], "Browser.close");
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
     async fn router_test_connection() -> (Connection, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -8763,6 +12596,42 @@ mod tests {
             .await
             .expect("connect generic recording fake websocket");
         (connection, request_rx, server)
+    }
+
+    #[tokio::test]
+    async fn task_tab_reservation_rejection_happens_before_create_target() {
+        let (connection, mut requests, server) = generic_recording_fake_connection().await;
+        let executor = TargetCleanupExecutor::new(connection.clone(), None)
+            .expect("bounded cleanup executor starts");
+        let error = match create_pending_page_session_owned(
+            connection.clone(),
+            executor,
+            None,
+            true,
+            Some(TaskTabReservationScope {
+                task_resource_key: "task-a".into(),
+                lane_id: "lane-a".into(),
+                authority: Arc::new(RejectingTaskTabAuthority),
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("reservation rejection must stop target creation"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, BrowserError::Blocked { .. }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), requests.recv())
+                .await
+                .is_err(),
+            "no CDP command may run after the cross-Host reservation rejects"
+        );
+
+        connection.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("fake transport closes after reservation rollback")
+            .expect("fake transport task joins");
     }
 
     /// **F1 回归**：在防火墙循环 spawn **之前**到达的 `Fetch.requestPaused`（早期
@@ -8891,6 +12760,30 @@ mod tests {
         }
     }
 
+    struct ResolverCallGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for ResolverCallGuard {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct BlockingResolver {
+        started: Arc<std::sync::atomic::AtomicUsize>,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+        release: CancellationToken,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::firewall::HostResolver for BlockingResolver {
+        async fn resolve(&self, _host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let _guard = ResolverCallGuard(Arc::clone(&self.dropped));
+            self.release.cancelled().await;
+            Ok(vec!["93.184.216.34".parse().unwrap()])
+        }
+    }
+
     /// 测试用审批者：记录是否被调用 + 返回固定裁决（验「有审批通道时 GatePost 仍路由到审批者」）。
     struct RecordingApprover {
         invoked: Arc<std::sync::atomic::AtomicBool>,
@@ -8905,6 +12798,119 @@ mod tests {
         ) -> crate::firewall::EgressVerdict {
             self.invoked.store(true, Ordering::SeqCst);
             self.verdict
+        }
+    }
+
+    struct ApprovalCallGuard {
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for ApprovalCallGuard {
+        fn drop(&mut self) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct BlockingApprover {
+        started: Arc<std::sync::atomic::AtomicUsize>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        max_active: Arc<std::sync::atomic::AtomicUsize>,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+        release: CancellationToken,
+        verdict: crate::firewall::EgressVerdict,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::firewall::EgressApprover for BlockingApprover {
+        async fn approve_egress(
+            &self,
+            _preview: &crate::firewall::PostPreview,
+        ) -> crate::firewall::EgressVerdict {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            let _guard = ApprovalCallGuard {
+                active: Arc::clone(&self.active),
+                dropped: Arc::clone(&self.dropped),
+            };
+            self.release.cancelled().await;
+            self.verdict
+        }
+    }
+
+    fn blocking_approver(
+        verdict: crate::firewall::EgressVerdict,
+    ) -> (
+        Arc<dyn crate::firewall::EgressApprover>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        CancellationToken,
+    ) {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = CancellationToken::new();
+        (
+            Arc::new(BlockingApprover {
+                started: Arc::clone(&started),
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+                dropped: Arc::clone(&dropped),
+                release: release.clone(),
+                verdict,
+            }),
+            started,
+            active,
+            max_active,
+            dropped,
+            release,
+        )
+    }
+
+    fn dispatch_gatepost_fixture(connection: &Connection, index: usize) {
+        connection
+            .registry()
+            .dispatch_message(
+                &serde_json::json!({
+                    "method": "Fetch.requestPaused",
+                    "sessionId": "S-egress",
+                    "params": {
+                        "requestId": format!("REQ-burst-{index}"),
+                        "request": {
+                            "url": format!("https://egress-{index}.example.com/collect"),
+                            "method": "POST",
+                            "headers": {
+                                "Origin": "https://source.example.net",
+                                "Content-Type": "application/x-www-form-urlencoded"
+                            },
+                            "initialPriority": "High",
+                            "referrerPolicy": "no-referrer",
+                            "hasPostData": true
+                        },
+                        "frameId": "F-egress",
+                        "resourceType": "XHR"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("dispatch GatePost fixture");
+    }
+
+    async fn next_fetch_disposition(
+        requests: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    ) -> serde_json::Value {
+        loop {
+            let request = requests.recv().await.expect("fake server stays alive");
+            if request["method"] == "Fetch.continueRequest"
+                || request["method"] == "Fetch.failRequest"
+            {
+                return request;
+            }
         }
     }
 
@@ -8943,7 +12949,8 @@ mod tests {
     ) -> serde_json::Value {
         let (connection, mut requests, server) = generic_recording_fake_connection().await;
         connection.registry().register_session("S-egress", "page");
-        handle_paused_request(
+        let cancel = CancellationToken::new();
+        let approval = handle_paused_request(
             &connection,
             &config,
             approver.as_ref(),
@@ -8952,8 +12959,17 @@ mod tests {
             paused,
             resolver,
             &crate::firewall::DnsResolverCache::default(),
+            &cancel,
         )
         .await;
+        if let Some(approval) = approval {
+            resolve_firewall_approval(
+                approval,
+                &cancel,
+                crate::firewall::EGRESS_APPROVAL_TIMEOUT,
+            )
+            .await;
+        }
         let released = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let request = requests.recv().await.expect("fake server stays alive");
@@ -9124,18 +13140,273 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_gatepost_burst_has_fixed_approval_concurrency_and_bounded_overflow() {
+        const REQUESTS: usize = 24;
+        const APPROVAL_WORKERS: usize = 2;
+        const APPROVAL_QUEUE: usize = 3;
+
+        let (connection, mut wire, server) = generic_recording_fake_connection().await;
+        let subscriptions = FetchFirewallSubscriptions::subscribe(&connection);
+        connection.registry().register_session("S-egress", "page");
+        let (approver, _started, active, max_active, _dropped, release) =
+            blocking_approver(crate::firewall::EgressVerdict::Continue);
+        let runtime = spawn_fetch_firewall_loop_with_limits(
+            connection.clone(),
+            subscriptions,
+            crate::firewall::FirewallConfig::default(),
+            Some(approver),
+            crate::firewall::ApprovedDomains::new(),
+            Arc::new(PublicIpResolver),
+            crate::firewall::DnsResolverCache::default(),
+            FirewallExecutorLimits {
+                request_workers: 4,
+                request_queue_capacity: 64,
+                approval_workers: APPROVAL_WORKERS,
+                approval_queue_capacity: APPROVAL_QUEUE,
+                approval_timeout: Duration::from_secs(5),
+                shutdown_join_timeout: Duration::from_millis(500),
+            },
+        );
+
+        for index in 0..REQUESTS {
+            dispatch_gatepost_fixture(&connection, index);
+        }
+
+        let first_overflow = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let disposition = next_fetch_disposition(&mut wire).await;
+                if disposition["method"] == "Fetch.failRequest" {
+                    break disposition;
+                }
+            }
+        })
+        .await
+        .expect("approval queue saturation rejects promptly");
+        assert_eq!(first_overflow["method"], "Fetch.failRequest");
+        assert!(
+            max_active.load(Ordering::SeqCst) <= APPROVAL_WORKERS,
+            "approval concurrency must never exceed the fixed worker count"
+        );
+
+        release.cancel();
+        let mut disposed = HashSet::from([
+            first_overflow["params"]["requestId"]
+                .as_str()
+                .expect("overflow request id")
+                .to_string(),
+        ]);
+        let mut failed = 1usize;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while disposed.len() < REQUESTS {
+                let disposition = next_fetch_disposition(&mut wire).await;
+                if disposition["method"] == "Fetch.failRequest" {
+                    failed += 1;
+                }
+                assert!(
+                    disposed.insert(
+                        disposition["params"]["requestId"]
+                            .as_str()
+                            .expect("disposition request id")
+                            .to_string(),
+                    ),
+                    "each paused request must receive exactly one disposition"
+                );
+            }
+        })
+        .await
+        .expect("all admitted and rejected requests finish");
+        assert!(failed > 0, "the bounded approval queue must reject overflow");
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+
+        runtime.shutdown().await;
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_approval_timeout_fails_closed_and_drops_the_approval_future() {
+        let (connection, mut wire, server) = generic_recording_fake_connection().await;
+        let subscriptions = FetchFirewallSubscriptions::subscribe(&connection);
+        connection.registry().register_session("S-egress", "page");
+        let (approver, started, active, _max_active, dropped, _release) =
+            blocking_approver(crate::firewall::EgressVerdict::Continue);
+        let runtime = spawn_fetch_firewall_loop_with_limits(
+            connection.clone(),
+            subscriptions,
+            crate::firewall::FirewallConfig::default(),
+            Some(approver),
+            crate::firewall::ApprovedDomains::new(),
+            Arc::new(PublicIpResolver),
+            crate::firewall::DnsResolverCache::default(),
+            FirewallExecutorLimits {
+                request_workers: 1,
+                request_queue_capacity: 4,
+                approval_workers: 1,
+                approval_queue_capacity: 1,
+                approval_timeout: Duration::from_millis(30),
+                shutdown_join_timeout: Duration::from_millis(500),
+            },
+        );
+        dispatch_gatepost_fixture(&connection, 0);
+
+        let disposition = tokio::time::timeout(
+            Duration::from_secs(2),
+            next_fetch_disposition(&mut wire),
+        )
+        .await
+        .expect("slow approval reaches its bounded timeout");
+        assert_eq!(disposition["method"], "Fetch.failRequest");
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "timeout must drop, not detach, the approval future"
+        );
+
+        runtime.shutdown().await;
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn firewall_shutdown_cancels_and_joins_a_pending_approval() {
+        let (connection, _wire, server) = generic_recording_fake_connection().await;
+        let subscriptions = FetchFirewallSubscriptions::subscribe(&connection);
+        connection.registry().register_session("S-egress", "page");
+        let (approver, started, active, _max_active, dropped, _release) =
+            blocking_approver(crate::firewall::EgressVerdict::Continue);
+        let runtime = spawn_fetch_firewall_loop_with_limits(
+            connection.clone(),
+            subscriptions,
+            crate::firewall::FirewallConfig::default(),
+            Some(approver),
+            crate::firewall::ApprovedDomains::new(),
+            Arc::new(PublicIpResolver),
+            crate::firewall::DnsResolverCache::default(),
+            FirewallExecutorLimits {
+                request_workers: 1,
+                request_queue_capacity: 4,
+                approval_workers: 1,
+                approval_queue_capacity: 1,
+                approval_timeout: Duration::from_secs(60),
+                shutdown_join_timeout: Duration::from_millis(500),
+            },
+        );
+        dispatch_gatepost_fixture(&connection, 0);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while started.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("approval starts");
+
+        tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+            .await
+            .expect("firewall shutdown is bounded");
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "Host cancellation must drop the pending approval future before returning"
+        );
+
+        connection
+            .send::<FetchEnableParams>(ROOT_SESSION, &FetchEnableParams::default())
+            .await
+            .expect("deliberate firewall cancellation must not trip the death watchdog");
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saturated_firewall_request_queue_rejects_and_closes_fail_closed() {
+        let (connection, mut wire, server) = generic_recording_fake_connection().await;
+        let subscriptions = FetchFirewallSubscriptions::subscribe(&connection);
+        connection.registry().register_session("S-egress", "page");
+        let resolver_started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver_dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = spawn_fetch_firewall_loop_with_limits(
+            connection.clone(),
+            subscriptions,
+            crate::firewall::FirewallConfig::default(),
+            None,
+            crate::firewall::ApprovedDomains::new(),
+            Arc::new(BlockingResolver {
+                started: Arc::clone(&resolver_started),
+                dropped: Arc::clone(&resolver_dropped),
+                release: CancellationToken::new(),
+            }),
+            crate::firewall::DnsResolverCache::default(),
+            FirewallExecutorLimits {
+                request_workers: 1,
+                request_queue_capacity: 1,
+                approval_workers: 1,
+                approval_queue_capacity: 1,
+                approval_timeout: Duration::from_secs(5),
+                shutdown_join_timeout: Duration::from_millis(500),
+            },
+        );
+
+        dispatch_gatepost_fixture(&connection, 0);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while resolver_started.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the sole request worker is occupied by slow DNS");
+        dispatch_gatepost_fixture(&connection, 1);
+        dispatch_gatepost_fixture(&connection, 2);
+
+        let rejected = tokio::time::timeout(
+            Duration::from_secs(2),
+            next_fetch_disposition(&mut wire),
+        )
+        .await
+        .expect("queue overflow is rejected promptly");
+        assert_eq!(rejected["method"], "Fetch.failRequest");
+        assert_eq!(rejected["params"]["requestId"], "REQ-burst-2");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !connection.registry().is_connection_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("overflow poisons the connection after dispatching the rejection");
+        let error = connection
+            .send::<FetchEnableParams>(ROOT_SESSION, &FetchEnableParams::default())
+            .await
+            .expect_err("an overflowed reliable firewall queue poisons the Host connection");
+        assert!(matches!(error, TransportError::Closed));
+
+        runtime.shutdown().await;
+        assert_eq!(
+            resolver_dropped.load(Ordering::SeqCst),
+            1,
+            "overflow teardown must drop the occupied resolver future"
+        );
+        server.abort();
+        let _ = server.await;
+    }
+
     /// `downloadWillBegin` 突发，**每一条**被阻断的下载都必须发出 cancelDownload。
     /// 旧实现（lossy `subscribe` + `Lagged → continue`）在突发下静默丢事件，
     /// 丢掉的 .exe 下载不再被取消——红线被时序绕过。
     #[tokio::test]
     async fn executable_download_burst_never_drops_red_line_cancels() {
-        const BURST: usize = 600; // > EVENT_CHANNEL_CAPACITY (256)
+        const BURST: usize = crate::session::RELIABLE_EVENT_CAPACITY;
 
         let (connection, mut requests, server) = generic_recording_fake_connection().await;
         let download_loop = spawn_download_loop(connection.clone(), None);
 
         // 紧凑同步派发（无 await 点）：当前线程 runtime 下循环任务无机会消费，
-        // lossy broadcast 必然溢出丢事件；可靠通道则全量缓存。
+        // lossy broadcast 必然溢出丢事件；有界可靠通道在其硬容量内全量缓存。
         for index in 0..BURST {
             connection
                 .registry()
@@ -9171,6 +13442,34 @@ mod tests {
         let _ = server.await;
     }
 
+    #[tokio::test]
+    async fn executable_download_burst_above_reliable_bound_poison_closes_fail_closed() {
+        let (connection, _requests, server) = generic_recording_fake_connection().await;
+        let download_loop = spawn_download_loop(connection.clone(), None);
+
+        for index in 0..crate::session::RELIABLE_EVENT_CAPACITY {
+            connection
+                .registry()
+                .dispatch_message(&format!(
+                    r#"{{"method":"Browser.downloadWillBegin","params":{{"frameId":"F1","guid":"guid-{index}","url":"https://example.com/evil.exe","suggestedFilename":"evil-{index}.exe"}}}}"#
+                ))
+                .expect("events through the exact reliable bound are admitted");
+        }
+        let overflow = connection.registry().dispatch_message(
+            r#"{"method":"Browser.downloadWillBegin","params":{"frameId":"F1","guid":"guid-overflow","url":"https://example.com/evil.exe","suggestedFilename":"evil-overflow.exe"}}"#,
+        );
+        assert!(overflow.is_err(), "the first event above the hard bound is rejected");
+        assert!(
+            connection.registry().is_connection_closed(),
+            "reliable red-line overflow poisons the CDP connection instead of dropping an executable download silently"
+        );
+
+        download_loop.abort();
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
     /// **F46 回归**：阻断日志的 url scheme 提取绝不 panic——空 URL、无冒号、冒号
     /// 过深、冒号前多字节字符统统安全（旧裸切片对空串越界 panic，杀死下载循环）。
     #[test]
@@ -9188,6 +13487,16 @@ mod tests {
         assert_eq!(blocked_download_url_scheme("приложение:x"), "[odd-scheme]");
         // 多字节但冒号 ≤10 字节：切片边界紧跟单字节 ':' 之后，恒安全。
         assert_eq!(blocked_download_url_scheme("网页:x"), "网页:");
+    }
+
+    #[test]
+    fn download_progress_numeric_conversion_fails_closed() {
+        assert_eq!(download_progress_bytes(0.0), Some(0));
+        assert_eq!(download_progress_bytes(1.01), Some(2));
+        assert_eq!(download_progress_bytes(-0.01), None);
+        assert_eq!(download_progress_bytes(f64::NAN), None);
+        assert_eq!(download_progress_bytes(f64::INFINITY), None);
+        assert_eq!(download_progress_bytes(f64::NEG_INFINITY), None);
     }
 
     /// 清理/下载路由测试用 fake：`Target.closeTarget` → `success:true`；
@@ -9301,6 +13610,8 @@ mod tests {
             "old-target".into(),
             "old-session".into(),
             "old-frame".into(),
+            None,
+            None,
         );
         cleanup.set_registration(registration);
 
@@ -9350,7 +13661,10 @@ mod tests {
         .await;
         connection.registry().register_session("session-tab-1", "page");
 
-        let router = HostTargetRouter::new(connection.clone());
+        let router = HostTargetRouter::new_with_download_staging(
+            connection.clone(),
+            staging.clone(),
+        );
         let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
         tabs.lock().await.insert(
             "tab-1".to_string(),
@@ -9373,9 +13687,11 @@ mod tests {
         router.claim_frame("lane-a", "tab-1").await;
 
         // 子帧下载：frameId 是 iframe 的，不在 frame_owner（主帧表）/ownership（target 表）。
-        router
-            .begin_download("sub-frame-9", "guid-sub", "report.pdf")
-            .await;
+        assert!(
+            router
+                .begin_download("sub-frame-9", "guid-sub", "report.pdf")
+                .await
+        );
 
         let staged = staging.join("guid-sub");
         std::fs::write(&staged, b"pdf-bytes").expect("stage downloaded file");
@@ -9388,20 +13704,268 @@ mod tests {
             b"pdf-bytes"
         );
 
-        // 真正不属于任何 lane 的帧仍然检疫（fail-closed 不误配）。
-        router
-            .begin_download("frame-of-no-lane", "guid-alien", "alien.bin")
-            .await;
+        // 真正不属于任何 lane 的帧拒绝 admission；若取消竞态下文件仍落到
+        // Host staging，terminal reconciliation 精确删除而不误配 lane。
+        assert!(
+            !router
+                .begin_download("frame-of-no-lane", "guid-alien", "alien.bin")
+                .await
+        );
         let alien = staging.join("guid-alien");
         std::fs::write(&alien, b"alien").expect("stage alien file");
         assert!(
             !router.finish_download("guid-alien", &alien).await,
-            "an unowned frame's download must stay quarantined in host staging"
+            "an unowned frame cannot acquire a lane route"
+        );
+        router.cleanup_staged_download("guid-alien", Some(&alien));
+        assert!(!alien.exists(), "unowned staging artifact is removed");
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn download_terminal_ttl_and_shutdown_reconciliation_clear_state_and_staging() {
+        let temp = tempfile::tempdir().expect("create download reconciliation root");
+        let staging = temp.path().join("host-staging");
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        std::fs::create_dir_all(&lane_dir).expect("create lane dir");
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new_with_download_staging(
+            connection.clone(),
+            staging.clone(),
+        );
+
+        let insert_route = |guid: &str, created_at: std::time::Instant| {
+            router
+                .downloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    guid.into(),
+                    PendingDownload {
+                        lane_id: "lane-a".into(),
+                        download_dir: lane_dir.to_string_lossy().into_owned(),
+                        suggested_filename: format!("{guid}.pdf"),
+                        created_at,
+                        cancel_requested_at: None,
+                        reservation: Arc::new(TestTaskDownloadReservation),
+                    },
+                );
+            std::fs::write(staging.join(guid), b"partial").expect("stage route artifact");
+        };
+
+        insert_route("guid-cancel", std::time::Instant::now());
+        router.cancel_pending_download("guid-cancel");
+        assert!(!staging.join("guid-cancel").exists());
+
+        assert!(router.quarantine_rejected_download("guid-rejected"));
+        std::fs::write(staging.join("guid-rejected"), b"late-after-cancel")
+            .expect("late rejected artifact lands");
+        router.cancel_pending_download("guid-rejected");
+        assert!(!staging.join("guid-rejected").exists());
+
+        insert_route(
+            "guid-expired",
+            std::time::Instant::now() - DOWNLOAD_ROUTE_TTL - Duration::from_secs(1),
+        );
+        assert_eq!(router.expire_pending_downloads(), vec!["guid-expired"]);
+        assert!(staging.join("guid-expired").exists());
+        assert_eq!(router.pending_download_count(), 1);
+
+        insert_route("guid-lagged", std::time::Instant::now());
+        insert_route("guid-shutdown", std::time::Instant::now());
+        let mut reconciled = router.finalize_downloads_after_host_stop();
+        reconciled.sort();
+        assert_eq!(
+            reconciled,
+            vec!["guid-expired", "guid-lagged", "guid-shutdown"]
+        );
+        assert_eq!(router.pending_download_count(), 0);
+        assert!(!staging.join("guid-lagged").exists());
+        assert!(!staging.join("guid-shutdown").exists());
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn failed_staging_delete_retains_exact_bounded_retry_authority() {
+        let temp = tempfile::tempdir().expect("create download retry root");
+        let staging = temp.path().join("host-staging");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new_with_download_staging(
+            connection.clone(),
+            staging.clone(),
+        );
+
+        // A directory at the exact file path makes remove_file fail on every
+        // platform without relying on Windows-only sharing semantics.
+        let blocked_path = staging.join("guid-retry");
+        std::fs::create_dir(&blocked_path).expect("create undeletable-as-file fixture");
+        router.cleanup_staged_download("guid-retry", Some(&blocked_path));
+        assert_eq!(
+            router
+                .download_cleanup_retries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1,
+            "failed deletion retains one exact retry path"
+        );
+        std::fs::remove_dir(&blocked_path).expect("release cleanup fixture");
+        assert_eq!(router.retry_staging_cleanup(), 0);
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn full_active_and_rejected_download_inventory_retains_every_cleanup_path() {
+        let temp = tempfile::tempdir().expect("create full download retry root");
+        let staging = temp.path().join("host-staging");
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        std::fs::create_dir_all(&lane_dir).expect("create lane dir");
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new_with_download_staging(
+            connection.clone(),
+            staging.clone(),
+        );
+
+        let mut expected_paths = HashSet::new();
+        let make_failed_paths = |guid: &str, expected_paths: &mut HashSet<PathBuf>| {
+            for name in [
+                guid.to_string(),
+                format!("{guid}.crdownload"),
+                format!("{guid}.tmp"),
+            ] {
+                let path = staging.join(name);
+                std::fs::create_dir(&path)
+                    .expect("directory fixture makes remove_file fail on every platform");
+                expected_paths.insert(path);
+            }
+        };
+
+        {
+            let mut downloads = router
+                .downloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for index in 0..MAX_PENDING_DOWNLOADS_PER_HOST {
+                let guid = format!("active-{index:03}");
+                make_failed_paths(&guid, &mut expected_paths);
+                downloads.insert(
+                    guid.clone(),
+                    PendingDownload {
+                        lane_id: "lane-a".into(),
+                        download_dir: lane_dir.to_string_lossy().into_owned(),
+                        suggested_filename: format!("{guid}.pdf"),
+                        created_at: std::time::Instant::now(),
+                        cancel_requested_at: None,
+                        reservation: Arc::new(TestTaskDownloadReservation),
+                    },
+                );
+            }
+        }
+        {
+            let mut rejected = router
+                .rejected_downloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for index in 0..MAX_QUARANTINED_DOWNLOADS_PER_HOST {
+                let guid = format!("rejected-{index:03}");
+                make_failed_paths(&guid, &mut expected_paths);
+                rejected.insert(guid, std::time::Instant::now());
+            }
+        }
+
+        let reconciled = router.finalize_downloads_after_host_stop();
+        assert_eq!(
+            reconciled.len(),
+            MAX_PENDING_DOWNLOADS_PER_HOST + MAX_QUARANTINED_DOWNLOADS_PER_HOST
+        );
+        let retained = router
+            .download_cleanup_retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(retained.len(), MAX_DOWNLOAD_CLEANUP_RETRIES);
+        assert_eq!(retained, expected_paths, "no exact cleanup path may be lost");
+        assert!(
+            !router.download_cleanup_poisoned.load(Ordering::Acquire),
+            "the complete admitted 64+64 inventory must fit its exact retry authority"
+        );
+        assert!(!router.directory_cleanup_pending());
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn staging_scan_cursor_eventually_reaches_old_tail_past_undeletable_prefix() {
+        let temp = tempfile::tempdir().expect("create staging scan root");
+        let staging = temp.path().join("host-staging");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new_with_download_staging(
+            connection.clone(),
+            staging.clone(),
+        );
+
+        // More than one scan batch of directories models a permanently
+        // ineligible/undeletable prefix without platform-specific file locks.
+        for index in 0..MAX_DOWNLOAD_STAGING_SCAN_ENTRIES {
+            std::fs::create_dir(staging.join(format!("0000-blocked-{index:04}")))
+                .expect("create blocked prefix entry");
+        }
+        let old_tail = staging.join("ffff-tail-artifact");
+        std::fs::write(&old_tail, b"stale").expect("create old tail artifact");
+        let future = std::time::SystemTime::now()
+            .checked_add(DOWNLOAD_ROUTE_TTL + Duration::from_secs(1))
+            .expect("test clock remains representable");
+
+        // A retained ReadDir cursor advances rather than restarting at the
+        // same 512 entries. Allow a few passes because directory enumeration
+        // order is platform-defined; convergence, not first-pass order, is the
+        // contract.
+        for _ in 0..4 {
+            router.sweep_stale_staging_files_at(future);
+            if !old_tail.exists() {
+                break;
+            }
+        }
+        assert!(
+            !old_tail.exists(),
+            "an old artifact beyond a full blocked batch must not starve forever"
         );
 
         connection.shutdown().await;
         server.abort();
         let _ = server.await;
+    }
+
+    #[test]
+    fn staging_cleanup_rejects_path_components_and_traversal() {
+        assert_eq!(safe_download_guid_component("guid-123"), Some("guid-123"));
+        assert_eq!(safe_download_guid_component(""), None);
+        assert_eq!(safe_download_guid_component("../escape"), None);
+        assert_eq!(safe_download_guid_component("nested/file"), None);
+        assert_eq!(safe_download_guid_component("..\\escape"), None);
+        assert!(is_chromium_download_guid_name(
+            "550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(is_chromium_download_guid_name(
+            "550e8400-e29b-41d4-a716-446655440000.crdownload"
+        ));
+        assert!(!is_chromium_download_guid_name("report.pdf"));
+        assert!(!is_chromium_download_guid_name("guid-rejected"));
     }
 
     /// **F52**：`abort_tab_record` 契约——三个后台循环（inject/oopif/**debug**）
@@ -9410,27 +13974,101 @@ mod tests {
     #[tokio::test]
     async fn abort_tab_record_aborts_all_three_tab_loops() {
         let (connection, server) = router_test_connection().await;
-        let record = test_tab_record(&connection, "tab-x", "session-x");
+        let mut record = test_tab_record(&connection, "tab-x", "session-x");
+        let child_loop = tokio::spawn(std::future::pending::<()>());
+        let child_abort = child_loop.abort_handle();
+        record
+            .oopif_managers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "oopif-session".into(),
+                OopifEntry {
+                    target_id: "oopif-target".into(),
+                    manager: InjectionManager::new(
+                        connection.clone(),
+                        "oopif-session",
+                    ),
+                    _loop: child_loop,
+                },
+            );
 
         abort_tab_record(&record);
 
-        let TabRecord {
-            _inject_loop,
-            _oopif_loop,
-            _debug_loop,
-            ..
-        } = record;
-        for (name, handle) in [
-            ("inject", _inject_loop),
-            ("oopif", _oopif_loop),
-            ("debug", _debug_loop),
-        ] {
+        async fn assert_cancelled(
+            name: &str,
+            handle: &mut tokio::task::JoinHandle<()>,
+        ) {
             let error = tokio::time::timeout(Duration::from_secs(2), handle)
                 .await
                 .expect("aborted loop settles promptly")
                 .expect_err("loop task must not complete normally");
             assert!(error.is_cancelled(), "{name} loop must be aborted, not leaked");
         }
+        assert_cancelled("inject", &mut record._inject_loop).await;
+        assert_cancelled("oopif", &mut record._oopif_loop).await;
+        assert_cancelled("debug", &mut record._debug_loop).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !child_abort.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tab teardown aborts every retained OOPIF child loop");
+        assert!(
+            record
+                .oopif_managers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "tab teardown drains its OOPIF map"
+        );
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn oopif_detach_and_destroy_remove_and_abort_exact_entries() {
+        let (connection, server) = router_test_connection().await;
+        let managers = Arc::new(Mutex::new(HashMap::new()));
+        let mut aborts = Vec::new();
+        for (session, target) in [
+            ("session-a", "target-a"),
+            ("session-b", "target-b"),
+            ("session-c", "target-b"),
+        ] {
+            let loop_handle = tokio::spawn(std::future::pending::<()>());
+            aborts.push(loop_handle.abort_handle());
+            managers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    session.into(),
+                    OopifEntry {
+                        target_id: target.into(),
+                        manager: InjectionManager::new(connection.clone(), session),
+                        _loop: loop_handle,
+                    },
+                );
+        }
+
+        assert!(remove_oopif_session(&managers, "session-a"));
+        assert_eq!(remove_oopif_target(&managers, "target-b"), 2);
+        assert!(
+            managers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while aborts.iter().any(|abort| !abort.is_finished()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("removed OOPIF entries abort their injection loops");
 
         connection.shutdown().await;
         server.abort();
@@ -9757,7 +14395,8 @@ mod tests {
             let router = Arc::clone(&router);
             let executor = Arc::clone(&router.cleanup_executor);
             tokio::spawn(async move {
-                create_pending_page_session_owned(connection, executor, Some(router), true).await
+                create_pending_page_session_owned(connection, executor, Some(router), true, None)
+                    .await
             })
         };
 
@@ -9826,7 +14465,8 @@ mod tests {
             let router = Arc::clone(&router);
             let executor = Arc::clone(&router.cleanup_executor);
             tokio::spawn(async move {
-                create_pending_page_session_owned(connection, executor, Some(router), true).await
+                create_pending_page_session_owned(connection, executor, Some(router), true, None)
+                    .await
             })
         };
         assert_eq!(
@@ -9924,6 +14564,8 @@ mod tests {
             "old-target".into(),
             "old-session".into(),
             "old-frame".into(),
+            None,
+            None,
         );
         cleanup.set_registration(old_registration);
         let mut unpublished_backend = test_backend_with_tabs(connection.clone(), &[]);
@@ -10062,6 +14704,17 @@ mod tests {
         let (connection, mut methods, server) = saturated_cleanup_fake_connection().await;
         let executor = TargetCleanupExecutor::new(connection.clone(), None)
             .expect("bounded cleanup executor starts");
+        let scope = crate::host::StandaloneResourceScope::new();
+        let lane_authority = scope
+            .reserve_lane("pending-page-cleanup".into())
+            .expect("pending Lane structural slot");
+        let sibling_lanes = (1..crate::host::STANDALONE_MAX_LIVE_LANES_PER_SCOPE)
+            .map(|index| {
+                scope
+                    .reserve_lane(format!("sibling-{index}"))
+                    .expect("sibling Lane within cap")
+            })
+            .collect::<Vec<_>>();
         let cleanup = PendingCreatedPageCleanup::new(
             connection.clone(),
             Arc::clone(&executor),
@@ -10069,8 +14722,14 @@ mod tests {
             Some("only-stuck-target".into()),
             Some("only-stuck-session".into()),
             None,
+            None,
+            Some(lane_authority),
         );
         cleanup.hand_off();
+        assert!(
+            scope.reserve_lane("n-plus-one-before-cleanup".into()).is_err(),
+            "caller cancellation must not return the Lane slot while its target cleanup is pending"
+        );
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), methods.recv())
                 .await
@@ -10093,11 +14752,17 @@ mod tests {
         })
         .await
         .expect("Host-close proof completes the single exact intent");
+        let replacement = scope
+            .reserve_lane("replacement-after-host-proof".into())
+            .expect("authoritative Host-close proof returns the pending Lane slot");
         assert!(executor.is_poisoned());
         assert_eq!(executor.max_active_jobs(), 1);
         assert!(executor.max_queued_jobs() <= 1);
         assert!(executor.ensure_accepting().is_err());
 
+        drop(replacement);
+        drop(sibling_lanes);
+        assert_eq!(scope.counts(), (0, 0, 0));
         drop(executor);
         connection.shutdown().await;
         let methods = server.await.expect("single stuck-cleanup fake joins");
@@ -10154,6 +14819,8 @@ mod tests {
             Some("stuck-target".into()),
             Some("stuck-session".into()),
             None,
+            None,
+            None,
         );
         active.hand_off();
         cleanups.push(active);
@@ -10173,6 +14840,8 @@ mod tests {
                 None,
                 Some(format!("queued-target-{index}")),
                 Some(format!("queued-session-{index}")),
+                None,
+                None,
                 None,
             );
             cleanup.hand_off();
@@ -10227,6 +14896,88 @@ mod tests {
             vec!["Target.closeTarget", "Browser.close"],
             "overflow must replace unbounded retry/concurrency with one Host close"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lane_cleanup_handoff_queue_overflow_escalates_to_host_close() {
+        let (connection, mut methods, server) = saturated_cleanup_fake_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        let executor = Arc::clone(&router.cleanup_executor);
+
+        let active = PendingCreatedPageCleanup::new(
+            connection.clone(),
+            Arc::clone(&executor),
+            None,
+            Some("stuck-before-lane-handoff".into()),
+            Some("stuck-before-lane-session".into()),
+            None,
+            None,
+            None,
+        );
+        active.hand_off();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("active exact-target cleanup reaches fake server"),
+            Some("Target.closeTarget".into())
+        );
+
+        let mut queued = Vec::with_capacity(TARGET_CLEANUP_QUEUE_CAPACITY);
+        for index in 0..TARGET_CLEANUP_QUEUE_CAPACITY {
+            let cleanup = PendingCreatedPageCleanup::new(
+                connection.clone(),
+                Arc::clone(&executor),
+                None,
+                Some(format!("queued-before-lane-{index}")),
+                Some(format!("queued-before-lane-session-{index}")),
+                None,
+                None,
+                None,
+            );
+            cleanup.hand_off();
+            queued.push(cleanup);
+        }
+
+        let lane_cleanup = LaneCleanupAuthority::new(
+            connection.clone(),
+            Arc::clone(&executor),
+            Arc::clone(&router),
+            "failed-coordinator-lane".into(),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AsyncMutex::new(HashMap::new())),
+            "failed-lane-target".into(),
+            "failed-lane-session".into(),
+            "failed-lane-frame".into(),
+            None,
+            None,
+        );
+        lane_cleanup.hand_off();
+
+        assert!(executor.is_poisoned());
+        assert_eq!(
+            executor.max_queued_jobs(),
+            TARGET_CLEANUP_QUEUE_CAPACITY
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("Lane handoff overflow reaches browser-wide shutdown"),
+            Some("Browser.close".into())
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while lane_cleanup.state.load(Ordering::Acquire) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Host-close proof finishes the overflowed Lane authority");
+
+        drop(queued);
+        drop(active);
+        connection.shutdown().await;
+        drop(router);
+        let methods = server.await.expect("Lane-overflow fake joins");
+        assert_eq!(methods, vec!["Target.closeTarget", "Browser.close"]);
     }
 
     async fn close_target_fake_connection(
@@ -10487,6 +15238,110 @@ mod tests {
         (connection, server)
     }
 
+    async fn detached_target_cleanup_fake_connection() -> (
+        Connection,
+        tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        Arc<tokio::sync::Notify>,
+        tokio::task::JoinHandle<Vec<String>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind detached-target fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let (event_tx, mut event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+        let (method_tx, method_rx) = tokio::sync::mpsc::unbounded_channel();
+        let allow_exact_close = Arc::new(tokio::sync::Notify::new());
+        let allow_exact_close_for_server = Arc::clone(&allow_exact_close);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut methods = Vec::new();
+            let mut close_attempt = 0usize;
+            let mut events_open = true;
+            loop {
+                tokio::select! {
+                    biased;
+                    event = event_rx.recv(), if events_open => {
+                        let Some(event) = event else {
+                            events_open = false;
+                            continue;
+                        };
+                        futures_util::SinkExt::send(
+                            &mut websocket,
+                            tokio_tungstenite::tungstenite::Message::Text(
+                                event.to_string().into(),
+                            ),
+                        )
+                        .await
+                        .expect("fake sends target event");
+                    }
+                    message = futures_util::StreamExt::next(&mut websocket) => {
+                        let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) = message else {
+                            break;
+                        };
+                        let request: serde_json::Value =
+                            serde_json::from_str(&text).expect("fake received valid json");
+                        let id = request["id"].as_u64().expect("fake request has id");
+                        let method = request["method"]
+                            .as_str()
+                            .expect("fake request has method")
+                            .to_string();
+                        methods.push(method.clone());
+                        let _ = method_tx.send(method.clone());
+                        let response = match method.as_str() {
+                            "Target.closeTarget" => {
+                                close_attempt += 1;
+                                if close_attempt == 1 {
+                                    serde_json::json!({ "id": id, "result": { "success": false } })
+                                } else {
+                                    allow_exact_close_for_server.notified().await;
+                                    serde_json::json!({ "id": id, "result": { "success": true } })
+                                }
+                            }
+                            "Target.getTargets" => serde_json::json!({
+                                "id": id,
+                                "result": {
+                                    "targetInfos": [{
+                                        "targetId": "detached-target",
+                                        "type": "page",
+                                        "title": "still live",
+                                        "url": "about:blank",
+                                        "attached": false,
+                                        "canAccessOpener": false
+                                    }]
+                                }
+                            }),
+                            other => panic!("unexpected detached-target fake CDP method {other}"),
+                        };
+                        futures_util::SinkExt::send(
+                            &mut websocket,
+                            tokio_tungstenite::tungstenite::Message::Text(
+                                response.to_string().into(),
+                            ),
+                        )
+                        .await
+                        .expect("fake sends response");
+                    }
+                }
+            }
+            methods
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect detached-target fake websocket");
+        (
+            connection,
+            event_tx,
+            method_rx,
+            allow_exact_close,
+            server,
+        )
+    }
+
     async fn foreground_fake_connection() -> (
         Connection,
         tokio::task::JoinHandle<Vec<serde_json::Value>>,
@@ -10559,12 +15414,13 @@ mod tests {
 
     fn test_tab_record(conn: &Connection, target_id: &str, session_id: &str) -> TabRecord {
         TabRecord {
+            _task_tab_reservation: None,
             target_id: target_id.to_string(),
             session_id: session_id.to_string(),
             injection: InjectionManager::new(conn.clone(), session_id.to_string()),
             _inject_loop: inert_loop(),
             main_frame_id: target_id.to_string(),
-            oopif_managers: Arc::new(AsyncMutex::new(HashMap::new())),
+            oopif_managers: Arc::new(Mutex::new(HashMap::new())),
             _oopif_loop: inert_loop(),
             ref_table: Arc::new(AsyncMutex::new(None)),
             debug: Arc::new(std::sync::Mutex::new(
@@ -10591,6 +15447,9 @@ mod tests {
             host: None,
             test_router: None,
             lane_id: "test-lane".to_string(),
+            task_tab_reservation_scope: None,
+            task_download_reservation_scope: None,
+            reliable_event_task_budget: ReliableEventTaskBudget::new_opaque(),
             lane_cleanup: None,
             cleanup_executor,
             lane_closing: Arc::new(AtomicBool::new(false)),
@@ -10611,7 +15470,7 @@ mod tests {
             _download_loop: None,
             download_dir: None,
             workspace_dir: None,
-            _firewall_watchdog: None,
+            _firewall_runtime: None,
             firewall_config: crate::firewall::FirewallConfig::default(),
             approved_domains: crate::firewall::ApprovedDomains::new(),
             evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate::default()),
@@ -10621,6 +15480,39 @@ mod tests {
             target_recovery_gate: AsyncMutex::new(()),
             known_secret_values: crate::KnownSecretValues::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_standalone_backend_aborts_owned_loops_and_closes_transport() {
+        let (connection, requests, server) = generic_recording_fake_connection().await;
+        let mut backend = test_backend_with_tabs(connection, &[]);
+        let attach_loop = backend.conn.run_attach_loop();
+        let attach_abort = attach_loop.abort_handle();
+        let discovery_loop = tokio::spawn(std::future::pending::<()>());
+        let discovery_abort = discovery_loop.abort_handle();
+        let download_loop = spawn_download_loop(backend.conn.clone(), None);
+        let download_abort = download_loop.abort_handle();
+        backend._attach_loop = Some(attach_loop);
+        backend._tab_discovery_loop = Some(discovery_loop);
+        backend._download_loop = Some(download_loop);
+
+        drop(backend);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !attach_abort.is_finished()
+                || !discovery_abort.is_finished()
+                || !download_abort.is_finished()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("standalone Drop explicitly aborts every owned loop");
+
+        drop(requests);
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("all retained Connection clones converge after backend Drop")
+            .expect("fake transport task joins");
     }
 
     #[tokio::test]
@@ -10668,6 +15560,72 @@ mod tests {
         );
         // F37：Page.bringToFront 必须发在 page session 上（文档焦点属于 renderer）。
         assert_eq!(requests[3]["sessionId"], "session-target-active");
+    }
+
+    #[tokio::test]
+    async fn close_tab_keeps_visible_state_until_absence_is_proven_and_hands_off_cleanup() {
+        let visible = vec![serde_json::json!({
+            "targetId": "target-a",
+            "type": "page"
+        })];
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![
+                FakeCloseReply::Error(TransportError::Cdp {
+                    code: -32000,
+                    message: "transient close failure".into(),
+                }),
+                FakeCloseReply::Success(true),
+            ],
+            vec![visible],
+        )
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+        let progress = Progress::new(Duration::from_secs(5));
+
+        assert!(backend.close_tab_impl("target-a", &progress).await.is_err());
+        assert!(
+            backend.tabs.lock().await.contains_key("target-a"),
+            "a failed close without absence proof must not create a hidden renderer"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while backend.cleanup_executor.queued_jobs.load(Ordering::Acquire) != 0
+                || backend.cleanup_executor.active_jobs.load(Ordering::Acquire) != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("exact cleanup handoff completes through the bounded executor");
+
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("scripted close fake joins"),
+            vec!["Target.closeTarget", "Target.getTargets", "Target.closeTarget"]
+        );
+    }
+
+    #[tokio::test]
+    async fn close_tab_accepts_non_success_response_only_after_exact_absence_inventory() {
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![FakeCloseReply::Success(false)],
+            vec![Vec::new()],
+        )
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a", "target-b"]);
+        let progress = Progress::new(Duration::from_secs(5));
+
+        backend
+            .close_tab_impl("target-b", &progress)
+            .await
+            .expect("root inventory proves idempotent close");
+        assert!(!backend.tabs.lock().await.contains_key("target-b"));
+        assert!(backend.tabs.lock().await.contains_key("target-a"));
+
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("scripted close fake joins"),
+            vec!["Target.closeTarget", "Target.getTargets"]
+        );
     }
 
     #[tokio::test]
@@ -11070,6 +16028,7 @@ mod tests {
                     target_id: "popup".to_string(),
                     session_id: "popup-session".to_string(),
                     opener_target_id: Some("opener".to_string()),
+                    target_url: None,
                 })
                 .await;
         });
@@ -11235,6 +16194,7 @@ mod tests {
                 target_id: "late-popup".into(),
                 session_id: "late-popup-session".into(),
                 opener_target_id: Some("retired-opener".into()),
+                target_url: None,
             })
             .await;
 
@@ -11269,7 +16229,7 @@ mod tests {
             );
             assert_eq!(state.ownership.owner("late-popup"), None);
             assert_eq!(state.ownership.owner("sibling-target"), Some("lane-b"));
-            assert!(!state.lost_targets.contains("late-popup"));
+            assert!(!state.lost_targets.contains_key("late-popup"));
         }
         assert!(tabs_b.lock().await.contains_key("sibling-target"));
         assert_eq!(active_b.lock().await.as_str(), "sibling-target");
@@ -11350,6 +16310,7 @@ mod tests {
                 target_id: "late-popup".into(),
                 session_id: "late-popup-session".into(),
                 opener_target_id: Some("retired-opener".into()),
+                target_url: None,
             })
             .await;
 
@@ -11394,6 +16355,823 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nonce_correlated_create_uses_operation_deadline_not_short_unknown_grace() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        let pending_url = "data:text/html,nomi-pending-test";
+        let operation_deadline =
+            tokio::time::Instant::now() + PENDING_PAGE_CREATE_RECOVERY_TIMEOUT;
+        router
+            .register_pending_create(pending_url, operation_deadline, None, None)
+            .await
+            .expect("pending create intent registers");
+
+        let attached_at = tokio::time::Instant::now();
+        router
+            .handle_attached(PendingPage {
+                target_id: "slow-legitimate-create".into(),
+                session_id: "slow-legitimate-session".into(),
+                opener_target_id: None,
+                target_url: Some(pending_url.into()),
+            })
+            .await;
+        let state = router.state.lock().await;
+        let cleanup_after = state
+            .quarantined
+            .get("slow-legitimate-create")
+            .and_then(|page| page.cleanup_after)
+            .expect("correlated target stays reserved");
+        assert!(
+            cleanup_after >= attached_at + PENDING_PAGE_CREATE_RECOVERY_TIMEOUT,
+            "a valid nonce create gets a fresh full arm deadline after attach"
+        );
+        assert!(!state
+            .pending_create_urls
+            .contains_key(pending_url));
+        drop(state);
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn nonce_correlated_page_binds_trusted_family_and_worker_inherits_lane() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        let pending_url = "about:blank#trusted-family-correlation";
+        let scope = TaskTabReservationScope {
+            task_resource_key: "trusted-family-a".into(),
+            lane_id: "trusted-lane-a".into(),
+            authority: Arc::new(RejectingTaskTabAuthority),
+        };
+        router
+            .register_pending_create(
+                pending_url,
+                tokio::time::Instant::now() + PENDING_PAGE_CREATE_RECOVERY_TIMEOUT,
+                None,
+                Some(&scope),
+            )
+            .await
+            .expect("trusted pending create intent registers");
+        assert_eq!(
+            connection.registry().register_attached(
+                ROOT_SESSION,
+                "trusted-page-session",
+                "trusted-page-target",
+                "page",
+                None,
+            ),
+            TaskSessionAdmission::PendingAuthority
+        );
+
+        router
+            .handle_attached(PendingPage {
+                target_id: "trusted-page-target".into(),
+                session_id: "trusted-page-session".into(),
+                opener_target_id: None,
+                target_url: Some(pending_url.into()),
+            })
+            .await;
+        assert_eq!(
+            connection
+                .registry()
+                .task_session_authority("trusted-page-session"),
+            Some(crate::session::TaskSessionAuthority {
+                task_resource_family_key: "trusted-family-a".into(),
+                lane_id: "trusted-lane-a".into(),
+            })
+        );
+        assert_eq!(
+            connection.registry().register_attached(
+                "trusted-page-session",
+                "trusted-worker-session",
+                "trusted-worker-target",
+                "worker",
+                None,
+            ),
+            TaskSessionAdmission::Admitted
+        );
+        assert_eq!(
+            connection
+                .registry()
+                .task_session_authority("trusted-worker-session"),
+            Some(crate::session::TaskSessionAuthority {
+                task_resource_family_key: "trusted-family-a".into(),
+                lane_id: "trusted-lane-a".into(),
+            })
+        );
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unknown_top_level_target_gets_short_grace_then_bounded_exact_cleanup() {
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![FakeCloseReply::Success(true)],
+            Vec::new(),
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let router_loop = router.spawn();
+
+        router
+            .handle_attached(PendingPage {
+                target_id: "noopener-popup".into(),
+                session_id: "noopener-session".into(),
+                opener_target_id: None,
+                target_url: None,
+            })
+            .await;
+        {
+            let state = router.state.lock().await;
+            assert!(state.quarantined.contains_key("noopener-popup"));
+            assert!(!state.cleanup_inflight.contains("noopener-popup"));
+        }
+
+        tokio::time::timeout(QUARANTINED_TARGET_GRACE + Duration::from_secs(2), async {
+            loop {
+                let state = router.state.lock().await;
+                let cleaned = !state.quarantined.contains_key("noopener-popup")
+                    && !state.cleanup_inflight.contains("noopener-popup")
+                    && !state
+                        .session_targets
+                        .values()
+                        .any(|target_id| target_id == "noopener-popup");
+                drop(state);
+                if cleaned {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unowned target is closed after its bounded claim grace");
+
+        router_loop.abort();
+        let _ = router_loop.await;
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("scripted fake joins"),
+            vec!["Target.closeTarget"]
+        );
+    }
+
+    #[tokio::test]
+    async fn lowering_sixteen_to_one_requires_sibling_lane_prune_and_isolates_other_task() {
+        let (connection, server) =
+            scripted_close_target_fake_connection(Vec::new(), Vec::new()).await;
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs_a = Arc::new(AsyncMutex::new(
+            (0..8)
+                .map(|index| {
+                    let target = format!("task-a-{index:02}");
+                    let session = format!("task-a-session-{index:02}");
+                    (target.clone(), test_tab_record(&connection, &target, &session))
+                })
+                .collect::<HashMap<_, _>>(),
+        ));
+        let tabs_b = Arc::new(AsyncMutex::new(
+            (0..8)
+                .map(|index| {
+                    let target = format!("task-b-{index:02}");
+                    let session = format!("task-b-session-{index:02}");
+                    (target.clone(), test_tab_record(&connection, &target, &session))
+                })
+                .collect::<HashMap<_, _>>(),
+        ));
+        let tabs_other = Arc::new(AsyncMutex::new(HashMap::from([(
+            "other-active".to_string(),
+            test_tab_record(&connection, "other-active", "other-session"),
+        )])));
+        let active_a = Arc::new(AsyncMutex::new("task-a-03".to_string()));
+        let active_b = Arc::new(AsyncMutex::new("task-b-04".to_string()));
+        let active_other = Arc::new(AsyncMutex::new("other-active".to_string()));
+        let frame_a = Arc::new(AsyncMutex::new(None));
+        let frame_b = Arc::new(AsyncMutex::new(None));
+        let frame_other = Arc::new(AsyncMutex::new(None));
+
+        for (lane_id, tabs, active, frame, task) in [
+            ("lane-a", &tabs_a, &active_a, &frame_a, "shared-task"),
+            ("lane-b", &tabs_b, &active_b, &frame_b, "shared-task"),
+            (
+                "other-lane",
+                &tabs_other,
+                &active_other,
+                &frame_other,
+                "other-task",
+            ),
+        ] {
+            router
+                .register_lane_with_resource_scope(
+                    lane_id.into(),
+                    tabs,
+                    active,
+                    frame,
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                    Some(task.into()),
+                    16,
+                    None,
+                )
+                .await
+                .expect("test Lane registers");
+        }
+
+        let error = router
+            .prepare_task_tab_limit_reconciliation("shared-task", 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BrowserError::Blocked { .. }));
+        assert_eq!(router.task_tab_limit("shared-task").await, Some(16));
+        assert_eq!(router.task_tab_limit("other-task").await, Some(16));
+
+        // Hub policy reconciliation first closes the deterministic excess
+        // Lane. The Host can then preserve the remaining Lane's active page
+        // and select every other target for exact close.
+        router.unregister_lane("lane-b").await;
+        let plan = router
+            .prepare_task_tab_limit_reconciliation("shared-task", 1)
+            .await
+            .expect("one surviving Lane can be reconciled to one page");
+        assert_eq!(plan.excess_tabs.len(), 1);
+        assert_eq!(plan.excess_tabs[0].0, "lane-a");
+        assert_eq!(plan.excess_tabs[0].1.len(), 7);
+        assert!(!plan.excess_tabs[0].1.iter().any(|id| id == "task-a-03"));
+        assert_eq!(router.task_tab_limit("shared-task").await, Some(1));
+        assert_eq!(router.task_tab_limit("other-task").await, Some(16));
+        assert_eq!(tabs_other.lock().await.len(), 1);
+
+        connection.shutdown().await;
+        assert!(server.await.expect("scripted fake joins").is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_raise_is_not_relowered_by_a_stale_starting_lane() {
+        let (connection, server) = scripted_close_target_fake_connection(Vec::new(), Vec::new()).await;
+        let router = HostTargetRouter::new(connection.clone());
+        let running_tabs = Arc::new(AsyncMutex::new(HashMap::from([(
+            "running-target".to_string(),
+            test_tab_record(&connection, "running-target", "running-session"),
+        )])));
+        let running_active = Arc::new(AsyncMutex::new("running-target".to_string()));
+        let running_frame = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane_with_resource_scope(
+                "running-lane".into(),
+                &running_tabs,
+                &running_active,
+                &running_frame,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Some("raised-task".into()),
+                4,
+                None,
+            )
+            .await
+            .expect("running Lane registers under the old cap");
+
+        router
+            .prepare_task_tab_limit_reconciliation("raised-task", 8)
+            .await
+            .expect("Host route commits the raised cap");
+        assert_eq!(router.task_tab_limit("raised-task").await, Some(8));
+
+        let stale_tabs = Arc::new(AsyncMutex::new(HashMap::from([(
+            "stale-target".to_string(),
+            test_tab_record(&connection, "stale-target", "stale-session"),
+        )])));
+        let stale_active = Arc::new(AsyncMutex::new("stale-target".to_string()));
+        let stale_frame = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane_with_resource_scope(
+                "stale-starting-lane".into(),
+                &stale_tabs,
+                &stale_active,
+                &stale_frame,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Some("raised-task".into()),
+                4,
+                None,
+            )
+            .await
+            .expect("a Lane already started under the old cap may still publish");
+
+        assert_eq!(
+            router.task_tab_limit("raised-task").await,
+            Some(8),
+            "the stale Lane snapshot must inherit the committed Host policy instead of lowering every sibling route back to four"
+        );
+
+        connection.shutdown().await;
+        assert!(server.await.expect("scripted fake joins").is_empty());
+    }
+
+    #[tokio::test]
+    async fn lowering_rejects_a_create_claimed_under_the_old_cap_before_publish() {
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![FakeCloseReply::Success(true)],
+            Vec::new(),
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs = Arc::new(AsyncMutex::new(HashMap::from([(
+            "existing-active".to_string(),
+            test_tab_record(&connection, "existing-active", "existing-session"),
+        )])));
+        let active = Arc::new(AsyncMutex::new("existing-active".to_string()));
+        let frame = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane_with_resource_scope(
+                "race-lane".into(),
+                &tabs,
+                &active,
+                &frame,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Some("race-task".into()),
+                16,
+                None,
+            )
+            .await
+            .expect("race Lane registers");
+        assert!(router.claim_target("race-lane", "inflight-create").await);
+
+        let plan = router
+            .prepare_task_tab_limit_reconciliation("race-task", 1)
+            .await
+            .expect("existing active page already fits new cap");
+        assert!(plan.excess_tabs.is_empty());
+        let outcome = router
+            .publish_armed_page(
+                "race-lane",
+                PendingPage {
+                    target_id: "inflight-create".into(),
+                    session_id: "inflight-session".into(),
+                    opener_target_id: None,
+                    target_url: None,
+                },
+                test_tab_record(&connection, "inflight-create", "inflight-session"),
+            )
+            .await;
+        assert_eq!(outcome, OwnedPagePublish::RejectedCapacity);
+        assert_eq!(tabs.lock().await.len(), 1);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while router
+                .state
+                .lock()
+                .await
+                .cleanup_inflight
+                .contains("inflight-create")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("old-cap create is closed by bounded exact cleanup");
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("scripted fake joins"),
+            vec!["Target.closeTarget"]
+        );
+    }
+
+    #[tokio::test]
+    async fn task_tab_limit_is_atomic_across_sibling_lanes_and_rejects_popup() {
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![FakeCloseReply::Success(true)],
+            Vec::new(),
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs_a = Arc::new(AsyncMutex::new(HashMap::from([(
+            "task-tab-a".to_string(),
+            test_tab_record(&connection, "task-tab-a", "task-session-a"),
+        )])));
+        let tabs_b = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_a = Arc::new(AsyncMutex::new("task-tab-a".to_string()));
+        let active_b = Arc::new(AsyncMutex::new(String::new()));
+        let frame_a = Arc::new(AsyncMutex::new(None));
+        let frame_b = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane_with_resource_scope(
+                "task-lane-a".into(),
+                &tabs_a,
+                &active_a,
+                &frame_a,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Some("shared-task".into()),
+                1,
+                None,
+            )
+            .await
+            .expect("first task Lane registers");
+        router
+            .register_lane_with_resource_scope(
+                "task-lane-b".into(),
+                &tabs_b,
+                &active_b,
+                &frame_b,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Some("shared-task".into()),
+                16,
+                None,
+            )
+            .await
+            .expect("empty sibling Lane registers at the same task cap");
+        assert_eq!(
+            router
+                .state
+                .lock()
+                .await
+                .lanes
+                .get("task-lane-b")
+                .expect("sibling route exists")
+                .max_task_tabs,
+            1,
+            "a stale higher Lane launch snapshot must persist the live stricter task cap"
+        );
+        assert!(router.claim_target("task-lane-a", "task-tab-a").await);
+        assert!(router.claim_target("task-lane-b", "task-popup-b").await);
+
+        let outcome = router
+            .publish_armed_page(
+                "task-lane-b",
+                PendingPage {
+                    target_id: "task-popup-b".into(),
+                    session_id: "task-popup-session-b".into(),
+                    opener_target_id: Some("task-tab-a".into()),
+                    target_url: None,
+                },
+                test_tab_record(&connection, "task-popup-b", "task-popup-session-b"),
+            )
+            .await;
+        assert_eq!(outcome, OwnedPagePublish::RejectedCapacity);
+        assert!(tabs_b.lock().await.is_empty());
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while router
+                .state
+                .lock()
+                .await
+                .cleanup_inflight
+                .contains("task-popup-b")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("rejected task popup cleanup completes");
+        assert_eq!(tabs_a.lock().await.len() + tabs_b.lock().await.len(), 1);
+
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("scripted fake joins"),
+            vec!["Target.closeTarget"]
+        );
+    }
+
+    #[tokio::test]
+    async fn task_tab_permit_outlives_ui_record_until_exact_absence_proof() {
+        let (connection, server) = scripted_close_target_fake_connection(Vec::new(), Vec::new()).await;
+        let router = HostTargetRouter::new(connection.clone());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let reservation: Arc<dyn TaskTabReservation> = Arc::new(CountingTaskTabReservation {
+            drops: Arc::clone(&drops),
+        });
+        let mut record = test_tab_record(&connection, "permit-target", "permit-session");
+        record._task_tab_reservation = Some(Arc::clone(&reservation));
+        let tabs = Arc::new(AsyncMutex::new(HashMap::from([(
+            "permit-target".to_string(),
+            record,
+        )])));
+        router
+            .state
+            .lock()
+            .await
+            .target_tab_reservations
+            .insert("permit-target".into(), Arc::clone(&reservation));
+        drop(reservation);
+
+        let record = tabs
+            .lock()
+            .await
+            .remove("permit-target")
+            .expect("UI registry owns the test target");
+        abort_tab_record(&record);
+        drop(record);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "removing a UI TabRecord must not release physical task capacity"
+        );
+
+        router.release_target("permit-target", None).await;
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "the final permit releases only after exact target absence proof"
+        );
+
+        connection.shutdown().await;
+        assert!(server.await.expect("scripted fake joins").is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_initial_lane_releases_exact_permit_without_destroyed_event() {
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![FakeCloseReply::Success(true)],
+            Vec::new(),
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let reservation: Arc<dyn TaskTabReservation> = Arc::new(CountingTaskTabReservation {
+            drops: Arc::clone(&drops),
+        });
+        let mut record = test_tab_record(&connection, "cancelled-target", "cancelled-session");
+        record._task_tab_reservation = Some(Arc::clone(&reservation));
+        let tabs = Arc::new(AsyncMutex::new(HashMap::from([(
+            "cancelled-target".to_string(),
+            record,
+        )])));
+        {
+            let mut state = router.state.lock().await;
+            state
+                .target_tab_reservations
+                .insert("cancelled-target".into(), Arc::clone(&reservation));
+            state
+                .session_targets
+                .insert("cancelled-session".into(), "cancelled-target".into());
+        }
+        let cleanup = LaneCleanupAuthority::new(
+            connection.clone(),
+            Arc::clone(&router.cleanup_executor),
+            Arc::clone(&router),
+            "cancelled-lane".into(),
+            Arc::new(AtomicBool::new(true)),
+            Arc::clone(&tabs),
+            "cancelled-target".into(),
+            "cancelled-session".into(),
+            "cancelled-frame".into(),
+            Some(&reservation),
+            None,
+        );
+        drop(reservation);
+
+        Arc::clone(&cleanup).finish().await;
+
+        assert_eq!(cleanup.state.load(Ordering::Acquire), 2);
+        assert!(tabs.lock().await.is_empty());
+        assert!(!router
+            .state
+            .lock()
+            .await
+            .target_tab_reservations
+            .contains_key("cancelled-target"));
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "a successful exact close releases the router permit even when Chromium emits no targetDestroyed event"
+        );
+
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("scripted fake joins"),
+            vec!["Target.closeTarget"]
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_cancelled_initial_lanes_converge_single_slot_task_capacity() {
+        const ITERATIONS: usize = 32;
+        let (connection, server) = scripted_close_target_fake_connection(
+            (0..ITERATIONS)
+                .map(|_| FakeCloseReply::Success(true))
+                .collect(),
+            Vec::new(),
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let live = Arc::new(AtomicUsize::new(0));
+        let authority = BoundedTaskTabAuthority {
+            live: Arc::clone(&live),
+            max: 1,
+        };
+
+        for index in 0..ITERATIONS {
+            let target_id = format!("cancelled-target-{index}");
+            let session_id = format!("cancelled-session-{index}");
+            let frame_id = format!("cancelled-frame-{index}");
+            let lane_id = format!("cancelled-lane-{index}");
+            let reservation = authority
+                .reserve("one-slot-task", &lane_id, &target_id)
+                .await
+                .expect("the previous cancelled Lane returned its sole task slot");
+            assert_eq!(live.load(Ordering::SeqCst), 1);
+
+            let mut record = test_tab_record(&connection, &target_id, &session_id);
+            record._task_tab_reservation = Some(Arc::clone(&reservation));
+            let tabs = Arc::new(AsyncMutex::new(HashMap::from([(
+                target_id.clone(),
+                record,
+            )])));
+            router
+                .state
+                .lock()
+                .await
+                .target_tab_reservations
+                .insert(target_id.clone(), Arc::clone(&reservation));
+            let cleanup = LaneCleanupAuthority::new(
+                connection.clone(),
+                Arc::clone(&router.cleanup_executor),
+                Arc::clone(&router),
+                lane_id,
+                Arc::new(AtomicBool::new(true)),
+                tabs,
+                target_id.clone(),
+                session_id,
+                frame_id,
+                Some(&reservation),
+                None,
+            );
+            drop(reservation);
+
+            cleanup.finish().await;
+
+            assert_eq!(
+                live.load(Ordering::SeqCst),
+                0,
+                "cancelled initial Lane {index} leaked the sole task tab slot"
+            );
+            assert!(!router
+                .state
+                .lock()
+                .await
+                .target_tab_reservations
+                .contains_key(&target_id));
+        }
+
+        connection.shutdown().await;
+        let methods = server.await.expect("scripted fake joins");
+        assert_eq!(methods.len(), ITERATIONS);
+        assert!(methods.iter().all(|method| method == "Target.closeTarget"));
+    }
+
+    #[tokio::test]
+    async fn late_cancelled_lane_scrub_preserves_replacement_reservation() {
+        let (connection, server) = scripted_close_target_fake_connection(Vec::new(), Vec::new()).await;
+        let router = HostTargetRouter::new(connection.clone());
+        let old_drops = Arc::new(AtomicUsize::new(0));
+        let new_drops = Arc::new(AtomicUsize::new(0));
+        let old_reservation: Arc<dyn TaskTabReservation> = Arc::new(CountingTaskTabReservation {
+            drops: Arc::clone(&old_drops),
+        });
+        let new_reservation: Arc<dyn TaskTabReservation> = Arc::new(CountingTaskTabReservation {
+            drops: Arc::clone(&new_drops),
+        });
+        router
+            .state
+            .lock()
+            .await
+            .target_tab_reservations
+            .insert("reused-key".into(), Arc::clone(&new_reservation));
+
+        router
+            .scrub_cancelled_lane_target(
+                "old-lane",
+                "reused-key",
+                "old-session",
+                "old-frame",
+                true,
+                Some(&old_reservation),
+            )
+            .await;
+
+        let retained = router
+            .state
+            .lock()
+            .await
+            .target_tab_reservations
+            .get("reused-key")
+            .cloned()
+            .expect("late old-generation cleanup preserves the replacement permit");
+        assert!(Arc::ptr_eq(&retained, &new_reservation));
+        drop(retained);
+        drop(old_reservation);
+        assert_eq!(old_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(new_drops.load(Ordering::SeqCst), 0);
+
+        router.release_target("reused-key", None).await;
+        drop(new_reservation);
+        assert_eq!(new_drops.load(Ordering::SeqCst), 1);
+        connection.shutdown().await;
+        assert!(server.await.expect("scripted fake joins").is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quarantine_overflow_is_bounded_and_escalates_whole_host_cleanup() {
+        let (connection, mut methods, server) = saturated_cleanup_fake_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+
+        for index in 0..=MAX_QUARANTINED_TARGETS {
+            router
+                .handle_attached(PendingPage {
+                    target_id: format!("unowned-{index}"),
+                    session_id: format!("unowned-session-{index}"),
+                    opener_target_id: None,
+                    target_url: None,
+                })
+                .await;
+        }
+        {
+            let state = router.state.lock().await;
+            assert_eq!(state.quarantined.len(), MAX_QUARANTINED_TARGETS);
+            assert!(state.session_targets.len() <= MAX_QUARANTINED_TARGETS);
+            assert!(state.cleanup_inflight.len() <= MAX_ROUTER_CLEANUP_INFLIGHT);
+        }
+        assert!(router.cleanup_executor.is_poisoned());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("overflow escalates promptly"),
+            Some("Browser.close".into())
+        );
+
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("overflow fake joins"),
+            vec!["Browser.close"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn popup_attach_overflow_is_bounded_per_lane_and_escalates_host_cleanup() {
+        let (connection, mut methods, server) = saturated_cleanup_fake_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active = Arc::new(AsyncMutex::new("owned-0".to_string()));
+        let frame = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane(
+                "bounded-lane".into(),
+                &tabs,
+                &active,
+                &frame,
+                Arc::new(AtomicBool::new(false)),
+                None,
+            )
+            .await;
+        {
+            let mut state = router.state.lock().await;
+            for index in 0..MAX_TRACKED_TARGETS_PER_LANE {
+                state
+                    .ownership
+                    .claim("bounded-lane", format!("owned-{index}"))
+                    .unwrap();
+            }
+        }
+
+        router
+            .handle_attached(PendingPage {
+                target_id: "excess-popup".into(),
+                session_id: "excess-popup-session".into(),
+                opener_target_id: Some("owned-0".into()),
+                target_url: None,
+            })
+            .await;
+
+        {
+            let state = router.state.lock().await;
+            assert_eq!(
+                state.active_lane_target_count("bounded-lane"),
+                MAX_TRACKED_TARGETS_PER_LANE
+            );
+            assert_eq!(state.ownership.owner("excess-popup"), None);
+            assert!(!state.session_targets.contains_key("excess-popup-session"));
+        }
+        assert!(router.cleanup_executor.is_poisoned());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("per-Lane overflow escalates promptly"),
+            Some("Browser.close".into())
+        );
+
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("per-Lane overflow fake joins"),
+            vec!["Browser.close"]
+        );
+    }
+
+    #[tokio::test]
     async fn active_lane_loss_tombstones_are_reclaimed_on_every_unregister() {
         let (connection, server) = router_test_connection().await;
         let router = HostTargetRouter::new(connection.clone());
@@ -11422,7 +17200,12 @@ mod tests {
                     TopLevelTargetLoss::Destroyed,
                 )
                 .await;
-            assert!(router.state.lock().await.lost_targets.contains(&target_id));
+            assert!(router
+                .state
+                .lock()
+                .await
+                .lost_targets
+                .contains_key(&target_id));
             router.unregister_lane(&lane_id).await;
             assert!(
                 router.state.lock().await.lost_targets.is_empty(),
@@ -11435,8 +17218,174 @@ mod tests {
         connection.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn destroyed_target_tombstone_suppresses_late_session_loss_cleanup() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        {
+            let mut state = router.state.lock().await;
+            state
+                .ownership
+                .claim("late-event-lane", "already-destroyed")
+                .expect("test target has one owner");
+            state.lost_targets.insert(
+                "already-destroyed".into(),
+                tokio::time::Instant::now() + LOST_TARGET_TOMBSTONE_GRACE,
+            );
+        }
+
+        router
+            .handle_top_level_session_loss(
+                Some("already-destroyed".into()),
+                None,
+                TopLevelTargetLoss::Detached,
+            )
+            .await;
+
+        assert!(
+            router.state.lock().await.cleanup_inflight.is_empty(),
+            "a queued detach after physical destruction must not mint a cleanup worker"
+        );
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detached_target_retains_task_slot_until_exact_cleanup_and_coalesces_repeats() {
+        let (connection, events, mut methods, allow_exact_close, server) =
+            detached_target_cleanup_fake_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        let router_loop = router.spawn();
+        let live = Arc::new(AtomicUsize::new(0));
+        let authority = BoundedTaskTabAuthority {
+            live: Arc::clone(&live),
+            max: 1,
+        };
+        let reservation = authority
+            .reserve("detach-task", "detach-lane", "detached-target")
+            .await
+            .expect("initial target reserves the sole task slot");
+        let mut record = test_tab_record(&connection, "detached-target", "detached-session");
+        record._task_tab_reservation = Some(Arc::clone(&reservation));
+        let tabs = Arc::new(AsyncMutex::new(HashMap::from([(
+            "detached-target".to_string(),
+            record,
+        )])));
+        let active = Arc::new(AsyncMutex::new("detached-target".to_string()));
+        let frame = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane_with_resource_scope(
+                "detach-lane".into(),
+                &tabs,
+                &active,
+                &frame,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Some("detach-task".into()),
+                1,
+                None,
+            )
+            .await
+            .expect("detach test Lane registers");
+        assert!(router.claim_target("detach-lane", "detached-target").await);
+        {
+            let mut state = router.state.lock().await;
+            state
+                .session_targets
+                .insert("detached-session".into(), "detached-target".into());
+            state
+                .target_tab_reservations
+                .insert("detached-target".into(), Arc::clone(&reservation));
+        }
+        drop(reservation);
+
+        let detach_event = serde_json::json!({
+            "method": "Target.detachedFromTarget",
+            "params": {
+                "sessionId": "detached-session",
+                "targetId": "detached-target"
+            }
+        });
+        events
+            .send(detach_event.clone())
+            .expect("fake sends first detach");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("detach starts exact target close"),
+            Some("Target.closeTarget".into())
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("failed close checks root inventory"),
+            Some("Target.getTargets".into())
+        );
+
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        assert!(tabs.lock().await.contains_key("detached-target"));
+        assert!(router
+            .state
+            .lock()
+            .await
+            .target_tab_reservations
+            .contains_key("detached-target"));
+        assert!(matches!(
+            authority
+                .reserve("detach-task", "second-lane", "must-be-rejected")
+                .await,
+            Err(BrowserError::Blocked { .. })
+        ));
+
+        events
+            .send(detach_event)
+            .expect("fake sends repeated detach");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("the single cleanup worker retries"),
+            Some("Target.closeTarget".into())
+        );
+        allow_exact_close.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let converged = live.load(Ordering::SeqCst) == 0
+                    && tabs.lock().await.is_empty()
+                    && !router
+                        .state
+                        .lock()
+                        .await
+                        .target_tab_reservations
+                        .contains_key("detached-target");
+                if converged {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("exact close releases the physical task slot");
+        let replacement = authority
+            .reserve("detach-task", "replacement-lane", "replacement-target")
+            .await
+            .expect("capacity is reusable only after exact target cleanup");
+        drop(replacement);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+
+        connection.shutdown().await;
+        router_loop.abort();
+        drop(events);
+        assert_eq!(
+            server.await.expect("detached-target fake joins"),
+            vec!["Target.closeTarget", "Target.getTargets", "Target.closeTarget"]
+        );
+    }
+
     #[tokio::test]
-    async fn top_level_detach_and_destroy_update_only_the_owning_lane() {
+    async fn top_level_destroyed_updates_only_the_owning_lane() {
         let (connection, server) = router_test_connection().await;
         let router = HostTargetRouter::new(connection.clone());
         let tabs_a = Arc::new(AsyncMutex::new(HashMap::from([(
@@ -11491,9 +17440,9 @@ mod tests {
 
         router
             .handle_top_level_target_loss(
+                Some("target-a".into()),
                 None,
-                Some("page-session-a".into()),
-                TopLevelTargetLoss::Detached,
+                TopLevelTargetLoss::Destroyed,
             )
             .await;
         assert!(tabs_a.lock().await.is_empty());
@@ -11551,7 +17500,7 @@ mod tests {
             .insert("page-session".into(), "page-target".into());
 
         router
-            .handle_top_level_target_loss(
+            .handle_top_level_session_loss(
                 None,
                 Some("worker-session".into()),
                 TopLevelTargetLoss::Detached,
@@ -11711,6 +17660,24 @@ mod tests {
             BrowserError::NavFailed { kind } => assert_eq!(kind, "context"),
             other => panic!("expected NavFailed, got {other:?}"),
         }
+        match map_inject_err(InjectError::ContextCapacityExceeded { limit: 256 }) {
+            BrowserError::Blocked { reason } => {
+                assert!(reason.contains("256"));
+                assert!(reason.contains("frame tree"));
+            }
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+        match map_inject_err(InjectError::RefCapacityExceeded {
+            limit: 2048,
+            current: 2050,
+            required: 25,
+        }) {
+            BrowserError::Blocked { reason } => {
+                assert!(reason.contains("2048"));
+                assert!(reason.contains("fresh observe"));
+            }
+            other => panic!("expected Blocked, got {other:?}"),
+        }
         // Transport(Timeout) 经 map_transport_err 复用 → NavFailed。
         assert!(matches!(
             map_inject_err(InjectError::Transport(TransportError::Timeout)),
@@ -11793,6 +17760,64 @@ mod tests {
     }
 
     #[test]
+    fn observe_ref_parser_rejects_oversized_generation_atomically() {
+        let frames = vec![ObservedFrame {
+            seq: 0,
+            frame_id: "MAIN".into(),
+            session_id: "SESSION".into(),
+            snapshot: FrameSnapshot {
+                full: String::new(),
+                incremental: None,
+                iframe_refs: vec![],
+                iframe_depths: HashMap::new(),
+            },
+        }];
+        let stitched = (0..=MAX_REFS_PER_GENERATION)
+            .map(|index| format!("- button \"{index}\" [ref=f0e{index}]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut table = RefTable::new_generation(None);
+        let error = CdpBackend::parse_refs_into_table(&frames, &stitched, &mut table)
+            .expect_err("one observe generation may not publish more than the hard bound");
+        assert_eq!(
+            error,
+            RefTableCapacityError {
+                limit: MAX_REFS_PER_GENERATION
+            }
+        );
+        assert!(
+            table.is_empty(),
+            "parser overflow must not leave a partially resolvable generation"
+        );
+    }
+
+    #[test]
+    fn observe_ref_parser_never_publishes_unknown_frame_refs() {
+        let frames = vec![ObservedFrame {
+            seq: 0,
+            frame_id: "MAIN".into(),
+            session_id: "SESSION".into(),
+            snapshot: FrameSnapshot {
+                full: String::new(),
+                incremental: None,
+                iframe_refs: vec![],
+                iframe_depths: HashMap::new(),
+            },
+        }];
+        let mut table = RefTable::new_generation(None);
+        let entries = CdpBackend::parse_refs_into_table(
+            &frames,
+            "- button \"real\" [ref=f0e1]\n- button \"spoof\" [ref=f99e1]",
+            &mut table,
+        )
+        .expect("small generation fits");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].r#ref, "f0e1");
+        assert!(table.resolve("f0e1").is_some());
+        assert!(table.resolve("f99e1").is_none());
+    }
+
+    #[test]
     fn extract_quoted_respects_escapes() {
         assert_eq!(extract_quoted(r#"a "he said \"hi\"" b"#).as_deref(), Some("he said \"hi\""));
         assert_eq!(extract_quoted("no quotes here"), None);
@@ -11861,7 +17886,8 @@ mod tests {
             ("CHILD".to_string(), ("MAIN".to_string(), "f0e5".to_string())),
             ("GRAND".to_string(), ("CHILD".to_string(), "f1e3".to_string())),
         ]);
-        let out = render_frame_recursive(&frames, 0, &parent_of);
+        let out = render_frame_recursive_bounded(&frames, 0, &parent_of)
+            .expect("small nested frame tree fits the observation budget");
         // 主帧 iframe 行内联子帧，子帧 iframe 行再内联孙帧。
         assert!(out.contains("- iframe [ref=f0e5]:"), "out:\n{out}");
         assert!(out.contains("f1e3]:"), "child iframe should be opened:\n{out}");
@@ -11872,6 +17898,83 @@ mod tests {
         let deep_indent = deep_line.len() - deep_line.trim_start().len();
         let child_indent = child_line.len() - child_line.trim_start().len();
         assert!(deep_indent > child_indent, "grandchild not deeper than child");
+    }
+
+    #[test]
+    fn render_frame_recursive_rejects_deep_iframe_indentation_at_byte_cap() {
+        // A hostile frame can claim a giant aria depth.  The renderer must
+        // reject before allocating the corresponding indentation String.
+        let frames = vec![
+            ObservedFrame {
+                seq: 0,
+                frame_id: "MAIN".into(),
+                session_id: "S".into(),
+                snapshot: FrameSnapshot {
+                    full: "- iframe [ref=f0e1]".into(),
+                    incremental: None,
+                    iframe_refs: vec!["f0e1".into()],
+                    iframe_depths: HashMap::from([(
+                        "f0e1".to_string(),
+                        (MAX_OBSERVATION_RETAINED_BYTES as u32),
+                    )]),
+                },
+            },
+            ObservedFrame {
+                seq: 1,
+                frame_id: "CHILD".into(),
+                session_id: "S".into(),
+                snapshot: FrameSnapshot {
+                    full: "- button \"child\" [ref=f1e1]".into(),
+                    incremental: None,
+                    iframe_refs: vec![],
+                    iframe_depths: HashMap::new(),
+                },
+            },
+        ];
+        let parent_of = HashMap::from([(
+            "CHILD".to_string(),
+            ("MAIN".to_string(), "f0e1".to_string()),
+        )]);
+        let error = render_frame_recursive_bounded(&frames, 0, &parent_of)
+            .expect_err("indentation expansion beyond 4 MiB must fail closed");
+        assert_eq!(error.limit, MAX_OBSERVATION_RETAINED_BYTES);
+    }
+
+    #[test]
+    fn render_frame_recursive_rejects_multi_frame_aggregate_at_byte_cap() {
+        let half = MAX_OBSERVATION_RETAINED_BYTES / 2;
+        let frames = vec![
+            ObservedFrame {
+                seq: 0,
+                frame_id: "MAIN".into(),
+                session_id: "S".into(),
+                snapshot: FrameSnapshot {
+                    full: format!("- iframe [ref=f0e1]\n{}", "a".repeat(half)),
+                    incremental: None,
+                    iframe_refs: vec!["f0e1".into()],
+                    iframe_depths: HashMap::from([("f0e1".to_string(), 0)]),
+                },
+            },
+            ObservedFrame {
+                seq: 1,
+                frame_id: "CHILD".into(),
+                session_id: "S".into(),
+                snapshot: FrameSnapshot {
+                    full: "b".repeat(half),
+                    incremental: None,
+                    iframe_refs: vec![],
+                    iframe_depths: HashMap::new(),
+                },
+            },
+        ];
+        let parent_of = HashMap::from([(
+            "CHILD".to_string(),
+            ("MAIN".to_string(), "f0e1".to_string()),
+        )]);
+        assert!(
+            render_frame_recursive_bounded(&frames, 0, &parent_of).is_err(),
+            "the aggregate iframe output, not each frame independently, owns the 4 MiB cap"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -11895,12 +17998,16 @@ mod tests {
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         std::fs::write(dir.join("b.pdf"), b"y").unwrap();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        let set = list_dir_files(dir.to_str().unwrap());
+        let set = list_dir_files(dir.to_str().unwrap()).expect("small directory snapshot");
         assert!(set.contains("a.txt"));
         assert!(set.contains("b.pdf"));
         assert!(!set.contains("sub"), "subdirectories must not be listed");
         // 不存在的目录 → 空集（best-effort，不 panic）。
-        assert!(list_dir_files("/no/such/dir/zzz-nonexistent").is_empty());
+        assert!(
+            list_dir_files("/no/such/dir/zzz-nonexistent")
+                .expect("missing directory remains best-effort empty")
+                .is_empty()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -11913,12 +18020,13 @@ mod tests {
         let dir_s = dir.to_str().unwrap();
         // 基线：触发前已有 old.txt（不应被当作本次下载）。
         std::fs::write(dir.join("old.txt"), b"old").unwrap();
-        let before = list_dir_files(dir_s);
+        let before = list_dir_files(dir_s).expect("small baseline snapshot");
         assert!(before.contains("old.txt"));
 
         // 新增一个非空、非临时的文件 → 命中。
         std::fs::write(dir.join("report.pdf"), b"%PDF-1.4 some bytes").unwrap();
-        let found = newest_completed_download(dir_s, &before);
+        let found = newest_completed_download(dir_s, &before)
+            .expect("small completion snapshot");
         assert!(found.is_some(), "a new non-empty file must be detected");
         let (name, size) = found.unwrap();
         assert_eq!(name, "report.pdf");
@@ -11934,28 +18042,76 @@ mod tests {
             let _ = std::fs::remove_file(e.path());
         }
         let dir_s = dir.to_str().unwrap();
-        let before = list_dir_files(dir_s); // 空基线
+        let before = list_dir_files(dir_s).expect("empty baseline snapshot");
 
         // chrome 下载中间态（仍在传）→ 不算完成，跳过。
         std::fs::write(dir.join("inflight.crdownload"), b"partial").unwrap();
         // 0 字节（刚创建占位）→ 跳过。
         std::fs::write(dir.join("placeholder.bin"), b"").unwrap();
         assert!(
-            newest_completed_download(dir_s, &before).is_none(),
+            newest_completed_download(dir_s, &before)
+                .expect("small completion snapshot")
+                .is_none(),
             "only .crdownload + empty files present → no completed download"
         );
 
         // 触发前已存在的文件（即便非空）→ 不算本次（在 before 集里）。
         let before2 = {
             std::fs::write(dir.join("preexisting.pdf"), b"old-but-nonempty").unwrap();
-            list_dir_files(dir_s)
+            list_dir_files(dir_s).expect("small baseline snapshot")
         };
         assert!(
-            newest_completed_download(dir_s, &before2).is_none(),
+            newest_completed_download(dir_s, &before2)
+                .expect("small completion snapshot")
+                .is_none(),
             "a file already in the baseline must not be counted as this download"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_directory_snapshot_rejects_n_plus_one_entries_before_allocating_more() {
+        let dir = unique_tmp_dir("download-dir-n-plus-one");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create bounded snapshot fixture");
+        for index in 0..=MAX_DOWNLOAD_DIRECTORY_SNAPSHOT_ENTRIES {
+            std::fs::write(dir.join(format!("entry-{index:04}")), b"x")
+                .expect("create bounded snapshot entry");
+        }
+        let dir_s = dir.to_str().expect("test path is UTF-8");
+        assert!(
+            matches!(list_dir_files(dir_s), Err(BrowserError::Blocked { .. })),
+            "the before snapshot must fail closed at N+1"
+        );
+        assert!(
+            matches!(
+                newest_completed_download(dir_s, &HashSet::new()),
+                Err(BrowserError::Blocked { .. })
+            ),
+            "the after snapshot must scan the bounded inventory before returning a match"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_directory_snapshot_accounts_single_and_total_name_bytes() {
+        let mut total = 0;
+        account_download_directory_name(&mut total, MAX_DOWNLOAD_DIRECTORY_SINGLE_NAME_BYTES)
+            .expect("single name at the limit is accepted");
+        assert!(matches!(
+            account_download_directory_name(
+                &mut total,
+                MAX_DOWNLOAD_DIRECTORY_SINGLE_NAME_BYTES + 1
+            ),
+            Err(BrowserError::Blocked { .. })
+        ));
+
+        let mut total = MAX_DOWNLOAD_DIRECTORY_NAME_BYTES;
+        assert!(matches!(
+            account_download_directory_name(&mut total, 1),
+            Err(BrowserError::Blocked { .. })
+        ));
     }
 
     #[test]

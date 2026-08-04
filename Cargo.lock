@@ -271,6 +271,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-compression"
+version = "0.4.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3976abdc8fe7d1133d43d304afd42abdf5bc3e1319d263d223bde07b5efc4be8"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "async-executor"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1684,6 +1696,23 @@ dependencies = [
  "bytes",
  "memchr",
 ]
+
+[[package]]
+name = "compression-codecs"
+version = "0.4.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
+dependencies = [
+ "compression-core",
+ "flate2",
+ "memchr",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "concurrent-queue"
@@ -5515,6 +5544,7 @@ dependencies = [
  "nomi-browser-engine",
  "nomi-computer",
  "nomi-config",
+ "nomi-process-runtime",
  "nomi-tools",
  "nomi-types",
  "nomifun-agent-execution",
@@ -5562,6 +5592,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "toml 0.8.2",
  "tower",
  "tower-http",
@@ -5618,6 +5649,7 @@ name = "nomifun-browser-platform"
 version = "0.3.7"
 dependencies = [
  "async-trait",
+ "futures-util",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5976,7 +6008,10 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "sysinfo",
  "tokio",
+ "tower",
+ "tower-http",
  "tracing",
 ]
 
@@ -6151,6 +6186,7 @@ version = "0.3.7"
 dependencies = [
  "axum",
  "futures",
+ "http-body-util",
  "nomifun-auth",
  "nomifun-browser-platform",
  "nomifun-common",
@@ -6159,9 +6195,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sysinfo",
  "thiserror 2.0.18",
  "tokio",
  "tower",
+ "tower-http",
  "tracing",
 ]
 
@@ -10395,6 +10433,7 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
+ "async-compression",
  "bitflags 2.13.0",
  "bytes",
  "futures-core",

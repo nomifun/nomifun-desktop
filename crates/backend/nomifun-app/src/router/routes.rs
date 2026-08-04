@@ -442,22 +442,28 @@ pub async fn create_router(services: &AppServices) -> Router {
     // app), not in `create_router_with_states`, so test harnesses that call that
     // directly are unaffected. The LAN listener's host_guard (DNS-rebind) still
     // wraps it at the listener level.
+    let remote_mcp_admission =
+        nomifun_public::RemoteMcpSessionAdmissionAuthority::for_gateway(
+            gateway_deps.as_ref(),
+        );
     let router = router.nest(
         "/mcp",
-        nomifun_public::public_mcp_router(
+        nomifun_public::public_mcp_router_with_admission(
             gateway_deps.clone(),
             services.companion_token_validator.clone(),
             None,
+            remote_mcp_admission.clone(),
         ),
     );
     // Curated "agent" profile endpoint — a tight do-work tool list for external
     // task-delegation agents (sibling of /mcp to avoid the catch-all conflict).
     let router = router.nest(
         "/mcp-agent",
-        nomifun_public::public_mcp_router(
+        nomifun_public::public_mcp_router_with_admission(
             gateway_deps.clone(),
             services.companion_token_validator.clone(),
             Some(nomifun_public::AGENT_PROFILE_DOMAINS),
+            remote_mcp_admission,
         ),
     );
     // REST /v1 adapter (human/script-facing), same registry + instance token,

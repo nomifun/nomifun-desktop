@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     ffi::OsString,
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
@@ -29,6 +29,9 @@ use super::unix_pty::{PreparedPty, PtyPair};
 
 use super::{
     ExitFact, PlatformProcess, SpawnedPlatformProcess,
+    poller::{
+        LifecyclePoll, LifecyclePollJob, PlatformLifecyclePermit, platform_lifecycle_poller,
+    },
     unix_protocol::{
         Deadline, Frame, FrameKind, Nonce, ProtocolError, SeqPacketPair, recv_expected, recv_frame,
         send_frame,
@@ -60,7 +63,7 @@ use super::macos_watchdog::{
 };
 use crate::{
     CleanupReport, CommandSpec, ProcessError, NormalizedProcessRequest, OutputBuffer,
-    OutputStream, SandboxPolicy, ShellKind, SpawnFailure,
+    OutputStream, ProcessSnapshot, ProcessState, SandboxPolicy, ShellKind, SpawnFailure,
 };
 
 const READ_BUFFER_BYTES: usize = 8 * 1024;
@@ -72,9 +75,7 @@ const LEGACY_SPAWN_FAILURE_FRAME_DRAIN: Duration = Duration::from_millis(10);
 const CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(10);
 const CLEANUP_RETRY_MAX: Duration = Duration::from_secs(1);
 const CLEANUP_ERROR_RETRY_MAX: Duration = Duration::from_secs(30);
-const CLEANUP_RELAY_BATCH: usize = 64;
 static UNIX_SPAWN_GATE: Mutex<()> = Mutex::new(());
-static CLEANUP_RELAY: OnceLock<mpsc::Sender<CleanupJob>> = OnceLock::new();
 static LEGACY_WATCHDOGS: OnceLock<Mutex<HashMap<u32, Arc<ChildProcessWatchdog>>>> =
     OnceLock::new();
 
@@ -421,15 +422,18 @@ pub(crate) fn spawn_child_process(
             "child process exited before ownership commit",
         )));
     };
-    let watchdog = match transaction.commit(pid) {
-        Ok(watchdog) => watchdog,
+    let (watchdog, platform_permit) = match transaction.commit(pid) {
+        Ok(committed) => committed,
         Err(error) => {
             wait_tokio_child_reaped(&mut child, Instant::now() + SETUP_TIMEOUT)?;
             let _ = prove_group_absent(pid as libc::pid_t);
             return Err(error);
         }
     };
-    if let Err(error) = register_child_process_watchdog(Arc::clone(&watchdog)) {
+    if let Err(error) = register_child_process_watchdog(
+        Arc::clone(&watchdog),
+        platform_permit.clone(),
+    ) {
         watchdog.close_control();
         let mut cleanup_errors = Vec::new();
         let deadline = Deadline::after(SETUP_TIMEOUT).map_err(protocol_io_error)?;
@@ -467,6 +471,7 @@ pub(crate) fn spawn_child_process(
                 Some(pid as libc::pid_t),
                 true,
                 group_sealed,
+                platform_permit.clone(),
             );
         }
         if let Err(cleanup_error) =
@@ -539,11 +544,13 @@ struct ChildProcessSpawnTransaction {
     registration: Option<OwnedFd>,
     nonce: Nonce,
     deadline: Deadline,
+    platform_permit: PlatformLifecyclePermit,
     committed: bool,
 }
 
 impl ChildProcessSpawnTransaction {
     fn begin() -> io::Result<Self> {
+        let platform_permit = platform_lifecycle_poller()?.reserve()?;
         let deadline = Deadline::after(SETUP_TIMEOUT).map_err(protocol_io_error)?;
         let spawn_gate = lock_child_process_spawn_gate(deadline)?;
         let nonce = Nonce::new(uuid::Uuid::now_v7().into_bytes());
@@ -604,6 +611,7 @@ impl ChildProcessSpawnTransaction {
                         None,
                         false,
                         false,
+                        platform_permit.clone(),
                     );
                     return Err(io::Error::other(format!(
                             "{}; watchdog cleanup transferred to durable relay: {cleanup_error}",
@@ -620,6 +628,7 @@ impl ChildProcessSpawnTransaction {
             registration: Some(registration_child),
             nonce,
             deadline,
+            platform_permit,
             committed: false,
         })
     }
@@ -654,7 +663,10 @@ impl ChildProcessSpawnTransaction {
         }
     }
 
-    fn commit(mut self, pid: u32) -> io::Result<Arc<ChildProcessWatchdog>> {
+    fn commit(
+        mut self,
+        pid: u32,
+    ) -> io::Result<(Arc<ChildProcessWatchdog>, PlatformLifecyclePermit)> {
         let pid = pid as libc::pid_t;
         self.registration.take();
         let control_fd = self
@@ -708,13 +720,16 @@ impl ChildProcessSpawnTransaction {
             .expect("child-process control is initialized");
         self.spawn_gate.take();
         self.committed = true;
-        Ok(Arc::new(ChildProcessWatchdog::new(
-            pid as u32,
-            watchdog_pid,
-            control,
-            pid,
-            self.nonce,
-        )))
+        Ok((
+            Arc::new(ChildProcessWatchdog::new(
+                pid as u32,
+                watchdog_pid,
+                control,
+                pid,
+                self.nonce,
+            )),
+            self.platform_permit.clone(),
+        ))
     }
 
     fn abort(&mut self, error: io::Error) -> io::Error {
@@ -735,6 +750,7 @@ impl ChildProcessSpawnTransaction {
                 None,
                 false,
                 false,
+                self.platform_permit.clone(),
             );
             self.spawn_gate.take();
             return io::Error::new(
@@ -827,6 +843,7 @@ impl ChildProcessSpawnTransaction {
                 Some(pid),
                 watchdog_anchors_group,
                 group_sealed,
+                self.platform_permit.clone(),
             );
         }
         self.spawn_gate.take();
@@ -868,7 +885,16 @@ impl ChildProcessSpawnTransaction {
                     cleanup_errors.push(format!(
                         "prove child process group absent after spawn reaped child: {absence_error}"
                     ));
-                    defer_child_process_cleanup(None, None, None, None, Some(pid), false, true);
+                    defer_child_process_cleanup(
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(pid),
+                        false,
+                        true,
+                        self.platform_permit.clone(),
+                    );
                 }
             }
             Err(cleanup_error) => {
@@ -881,6 +907,7 @@ impl ChildProcessSpawnTransaction {
                     Some(pid),
                     false,
                     true,
+                    self.platform_permit.clone(),
                 );
             }
         }
@@ -902,6 +929,7 @@ fn defer_child_process_cleanup(
     pgid: Option<libc::pid_t>,
     watchdog_anchors_group: bool,
     group_sealed: bool,
+    permit: PlatformLifecyclePermit,
 ) {
     let cleanup = CleanupJob {
         child,
@@ -930,60 +958,30 @@ fn defer_child_process_cleanup(
         #[cfg(test)]
         hold: None,
     };
-    defer_cleanup_job(cleanup);
+    defer_cleanup_job(cleanup, permit);
 }
 
-fn defer_cleanup_job(job: CleanupJob) {
-    match cleanup_relay_sender() {
-        Ok(relay) => {
-            if let Err(error) = relay.send(job) {
-                let cleanup = Arc::new(Mutex::new(Some(error.0)));
-                let worker_cleanup = Arc::clone(&cleanup);
-                let spawned = std::thread::Builder::new()
-                    .name("nomifun-child-process-unix-emergency-cleanup".to_owned())
-                    .spawn(move || {
-                        let job = match worker_cleanup.lock() {
-                            Ok(mut job) => job.take(),
-                            Err(poisoned) => poisoned.into_inner().take(),
-                        };
-                        if let Some(job) = job {
-                            let _ = job.run_to_completion();
-                        }
-                    });
-                if spawned.is_err() {
-                    let job = match cleanup.lock() {
-                        Ok(mut job) => job.take(),
-                        Err(poisoned) => poisoned.into_inner().take(),
-                    };
-                    if let Some(job) = job {
-                        let _ = job.run_to_completion();
-                    }
-                }
+fn defer_cleanup_job(job: CleanupJob, permit: PlatformLifecyclePermit) {
+    let wrapped: Box<dyn LifecyclePollJob> = Box::new(CleanupPollerJob {
+        job: Some(job),
+        _permit: permit,
+    });
+    match platform_lifecycle_poller() {
+        Ok(poller) => {
+            if let Err(job) = poller.submit(wrapped) {
+                poller.quarantine_unscheduled(
+                    job,
+                    "Unix cleanup job submission failed after admission",
+                );
             }
         }
-        Err(_) => {
-            let cleanup = Arc::new(Mutex::new(Some(job)));
-            let worker_cleanup = Arc::clone(&cleanup);
-            let spawned = std::thread::Builder::new()
-                .name("nomifun-child-process-unix-emergency-cleanup".to_owned())
-                .spawn(move || {
-                    let job = match worker_cleanup.lock() {
-                        Ok(mut job) => job.take(),
-                        Err(poisoned) => poisoned.into_inner().take(),
-                    };
-                    if let Some(job) = job {
-                        let _ = job.run_to_completion();
-                    }
-                });
-            if spawned.is_err() {
-                let job = match cleanup.lock() {
-                    Ok(mut job) => job.take(),
-                    Err(poisoned) => poisoned.into_inner().take(),
-                };
-                if let Some(job) = job {
-                    let _ = job.run_to_completion();
-                }
-            }
+        Err(error) => {
+            // `permit` could only have been obtained from this same singleton,
+            // so this path indicates terminal infrastructure corruption. Keep
+            // the entire authority alive rather than performing an unbounded
+            // synchronous retry from Drop.
+            tracing::error!(%error, "Unix platform cleanup poller became unavailable");
+            std::mem::forget(wrapped);
         }
     }
 }
@@ -1132,7 +1130,10 @@ fn child_process_watchdogs() -> &'static Mutex<HashMap<u32, Arc<ChildProcessWatc
     LEGACY_WATCHDOGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn register_child_process_watchdog(watchdog: Arc<ChildProcessWatchdog>) -> io::Result<()> {
+fn register_child_process_watchdog(
+    watchdog: Arc<ChildProcessWatchdog>,
+    permit: PlatformLifecyclePermit,
+) -> io::Result<()> {
     use std::collections::hash_map::Entry;
 
     {
@@ -1151,15 +1152,20 @@ fn register_child_process_watchdog(watchdog: Arc<ChildProcessWatchdog>) -> io::R
             }
         }
     }
-    if let Err(error) = std::thread::Builder::new()
-        .name(format!("nomi-child-process-unix-{}", watchdog.pid))
-        .spawn({
-            let worker = Arc::clone(&watchdog);
-            move || run_child_process_watchdog(worker)
-        })
-    {
+    let job: Box<dyn LifecyclePollJob> = Box::new(ChildProcessWatchdogPoller {
+        watchdog: Arc::clone(&watchdog),
+        _permit: permit,
+    });
+    let poller = platform_lifecycle_poller()?;
+    if let Err(job) = poller.submit(job) {
         remove_child_process_watchdog(watchdog.pid, &watchdog);
-        return Err(error);
+        poller.quarantine_unscheduled(
+            job,
+            "Unix child watchdog poller rejected an already-admitted authority",
+        );
+        return Err(io::Error::other(
+            "Unix child watchdog poller rejected registration",
+        ));
     }
     Ok(())
 }
@@ -1183,7 +1189,85 @@ fn remove_child_process_watchdog(pid: u32, expected: &ChildProcessWatchdog) {
     }
 }
 
-fn run_child_process_watchdog(watchdog: Arc<ChildProcessWatchdog>) {
+struct ChildProcessWatchdogPoller {
+    watchdog: Arc<ChildProcessWatchdog>,
+    _permit: PlatformLifecyclePermit,
+}
+
+impl ChildProcessWatchdogPoller {
+    fn publish(&self, result: io::Result<()>) {
+        retire_child_process_signal_gate(&self.watchdog);
+        self.watchdog.close_control();
+        remove_child_process_watchdog(self.watchdog.pid, &self.watchdog);
+        self.watchdog.completion.publish(result);
+    }
+}
+
+impl LifecyclePollJob for ChildProcessWatchdogPoller {
+    fn poll(&mut self, now: Instant) -> LifecyclePoll {
+        match leader_exit_observed(self.watchdog.watchdog_pid) {
+            Ok(true) => LifecyclePoll::Blocking,
+            Ok(false) => {
+                let control_fd = self
+                    .watchdog
+                    .control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .map(AsRawFd::as_raw_fd);
+                if let Some(control_fd) = control_fd
+                    && let Ok(events) = poll_control(control_fd, 0)
+                    && events & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+                {
+                    // Closing the authenticated control endpoint makes the
+                    // already-running watchdog seal the group. No numeric PID
+                    // is signalled from this branch.
+                    self.watchdog.close_control();
+                }
+                LifecyclePoll::Pending {
+                    next_poll: now + Duration::from_millis(25),
+                }
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                LifecyclePoll::Quarantine {
+                    reason: "Unix watchdog exact ownership was lost before host reap".to_owned(),
+                }
+            }
+            Err(error) => LifecyclePoll::Pending {
+                next_poll: now
+                    + if error.kind() == io::ErrorKind::Interrupted {
+                        Duration::from_millis(10)
+                    } else {
+                        Duration::from_millis(100)
+                    },
+            },
+        }
+    }
+
+    fn poll_blocking(&mut self) -> LifecyclePoll {
+        match settle_child_process_watchdog(&self.watchdog) {
+            Ok(()) => {
+                self.publish(Ok(()));
+                LifecyclePoll::ExactComplete
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                self.publish(Err(io::Error::new(error.kind(), reason.clone())));
+                LifecyclePoll::Quarantine { reason }
+            }
+        }
+    }
+
+    fn poller_failed(&mut self, reason: &str) {
+        self.publish(Err(io::Error::other(reason.to_owned())));
+    }
+
+    fn label(&self) -> &'static str {
+        "unix-child-process-watchdog"
+    }
+}
+
+fn settle_child_process_watchdog(watchdog: &Arc<ChildProcessWatchdog>) -> io::Result<()> {
     let mut outcome = run_child_process_watchdog_inner(&watchdog);
     if outcome.result.is_err() && outcome.anchor == ChildProcessWatchdogAnchor::Held {
         watchdog.close_control();
@@ -1197,10 +1281,7 @@ fn run_child_process_watchdog(watchdog: Arc<ChildProcessWatchdog>) {
             )));
         }
     }
-    retire_child_process_signal_gate(&watchdog);
-    watchdog.close_control();
-    remove_child_process_watchdog(watchdog.pid, &watchdog);
-    watchdog.completion.publish(outcome.result);
+    outcome.result
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1232,6 +1313,9 @@ impl ChildProcessWatchdogOutcome {
 }
 
 fn run_child_process_watchdog_inner(watchdog: &ChildProcessWatchdog) -> ChildProcessWatchdogOutcome {
+    let cleanup_deadline = Instant::now()
+        .checked_add(CLEANUP_RETRY_MAX)
+        .unwrap_or_else(Instant::now);
     let control = match watchdog.control.lock() {
         Ok(control) => control,
         Err(_) => {
@@ -1252,12 +1336,23 @@ fn run_child_process_watchdog_inner(watchdog: &ChildProcessWatchdog) -> ChildPro
     let mut quiescing_seen = false;
     let mut lifecycle_error = None;
     loop {
+        if Instant::now() >= cleanup_deadline {
+            return ChildProcessWatchdogOutcome::held(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "bounded child-process watchdog settlement timed out",
+            ));
+        }
         match leader_exit_observed(watchdog.watchdog_pid) {
             Ok(true) => {
                 if let Err(error) = seal_child_process_group(watchdog) {
                     return ChildProcessWatchdogOutcome::held(error);
                 }
-                let status = match waitpid_exact_blocking(watchdog.watchdog_pid) {
+                let status = match Deadline::after(
+                    cleanup_deadline.saturating_duration_since(Instant::now()),
+                )
+                .map_err(protocol_io_error)
+                .and_then(|deadline| waitpid_exact_setup(watchdog.watchdog_pid, deadline))
+                {
                     Ok(status) => status,
                     Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
                         retire_child_process_signal_gate(watchdog);
@@ -1362,7 +1457,8 @@ fn recover_child_process_watchdog(watchdog: &ChildProcessWatchdog) -> io::Result
             *open = false;
         }
     }
-    match waitpid_exact_blocking(watchdog.watchdog_pid) {
+    let deadline = Deadline::after(CLEANUP_RETRY_MAX).map_err(protocol_io_error)?;
+    match waitpid_exact_setup(watchdog.watchdog_pid, deadline) {
         Ok(_) => Ok(()),
         Err(error) if error.raw_os_error() == Some(libc::ECHILD) => Err(io::Error::other(
             "child-process Unix watchdog exact ownership was lost during fallback reap",
@@ -1678,7 +1774,7 @@ struct SpawnTransaction {
     control: Option<OwnedFd>,
     pgid: Option<libc::pid_t>,
     nonce: Nonce,
-    cleanup_relay: mpsc::Sender<CleanupJob>,
+    platform_permit: Option<PlatformLifecyclePermit>,
     #[cfg(test)]
     lifecycle_start_delay: Option<Duration>,
     #[cfg(test)]
@@ -1742,15 +1838,15 @@ impl SpawnTransaction {
             #[cfg(test)]
             hold: self.cleanup_hold.clone(),
         };
-        if let Err(error) = self.cleanup_relay.send(job) {
+        if let Some(permit) = self.platform_permit.take() {
+            defer_cleanup_job(job, permit);
             cleanup
                 .errors
-                .push("cleanup relay unavailable; cleanup ran synchronously".to_owned());
-            cleanup.reaped = error.0.run_to_completion();
+                .push("exact cleanup transferred to bounded platform poller".to_owned());
         } else {
-            cleanup
-                .errors
-                .push("exact cleanup transferred to durable relay".to_owned());
+            cleanup.errors.push(
+                "platform cleanup admission was missing; physical spawn is fenced".to_owned(),
+            );
         }
         self.disarmed = true;
         cleanup
@@ -1881,7 +1977,8 @@ impl SpawnTransaction {
             signal_gate: Arc::clone(&signal_gate),
             completion: Some(completion_sender),
             failure_context: None,
-            cleanup_relay: self.cleanup_relay.clone(),
+            pre_lifecycle_error: None,
+            platform_permit: self.platform_permit.take(),
             #[cfg(test)]
             start_delay: self.lifecycle_start_delay,
             #[cfg(test)]
@@ -1895,31 +1992,52 @@ impl SpawnTransaction {
             #[cfg(test)]
             audit: self.audit.clone(),
         };
-        let launch_cell = Arc::new(Mutex::new(Some(job)));
-        let worker_cell = Arc::clone(&launch_cell);
-        let spawned = std::thread::Builder::new()
-            .name(format!("nomifun-unix-lifecycle-{pid}"))
-            .spawn(move || {
-                let job = match worker_cell.lock() {
-                    Ok(mut cell) => cell.take(),
-                    Err(poisoned) => poisoned.into_inner().take(),
-                };
-                if let Some(job) = job {
-                    job.run();
+        let not_before = Instant::now()
+            .checked_add({
+                #[cfg(test)]
+                {
+                    job.start_delay.unwrap_or(Duration::ZERO)
                 }
+                #[cfg(not(test))]
+                {
+                    Duration::ZERO
+                }
+            })
+            .unwrap_or_else(Instant::now);
+        let wrapped: Box<dyn LifecyclePollJob> = Box::new(UnixLifecyclePollerJob {
+            job: Some(job),
+            not_before,
+        });
+        let poller = platform_lifecycle_poller().map_err(|error| {
+            self.post_exec_failure("lifecycle_poller_unavailable", error)
+        })?;
+        if let Err(job) = poller.submit(wrapped) {
+            poller.quarantine_unscheduled(
+                job,
+                "Unix lifecycle poller rejected an already-admitted process",
+            );
+            self.disarmed = true;
+            return Err(ProcessError::StartLost {
+                failure: SpawnFailure {
+                    code: "lifecycle_poller_rejected".to_owned(),
+                    message: "Unix lifecycle authority was quarantined before publication"
+                        .to_owned(),
+                },
+                last_known: Some(ProcessSnapshot {
+                    pid,
+                    state: ProcessState::Lost,
+                    started_at: Instant::now(),
+                    last_activity_at: Instant::now(),
+                }),
+                cleanup: CleanupReport {
+                    force_kill_attempted: true,
+                    reaped: false,
+                    errors: vec![
+                        "platform poller retained exact Unix cleanup authority".to_owned(),
+                    ],
+                    ..CleanupReport::default()
+                },
             });
-        if let Err(error) = spawned {
-            let job = match launch_cell.lock() {
-                Ok(mut cell) => cell.take(),
-                Err(poisoned) => poisoned.into_inner().take(),
-            };
-            if let Some(mut job) = job {
-                self.child = job.child.take();
-                self.watchdog_pid = job.watchdog_pid.take();
-                self.control = job.control.take();
-                self.pgid = Some(job.pgid);
-            }
-            return Err(self.post_exec_failure("lifecycle_worker_spawn_failed", error));
         }
         self.disarmed = true;
         Ok(CommittedSpawn {
@@ -1971,6 +2089,178 @@ struct CleanupJob {
     hold: Option<TestCleanupHold>,
 }
 
+struct UnixLifecyclePollerJob {
+    job: Option<LifecycleJob>,
+    not_before: Instant,
+}
+
+impl LifecyclePollJob for UnixLifecyclePollerJob {
+    fn poll(&mut self, now: Instant) -> LifecyclePoll {
+        if now < self.not_before {
+            return LifecyclePoll::Pending {
+                next_poll: self.not_before,
+            };
+        }
+        let Some(job) = self.job.as_mut() else {
+            return LifecyclePoll::Quarantine {
+                reason: "Unix lifecycle poller lost the process authority".to_owned(),
+            };
+        };
+        #[cfg(test)]
+        if job.fail_before_cleanup {
+            return LifecyclePoll::Blocking;
+        }
+        match leader_exit_observed(job.pgid) {
+            Ok(true) => LifecyclePoll::Blocking,
+            Ok(false) => {
+                let events = job
+                    .control
+                    .as_ref()
+                    .map(|control| poll_control(control.as_raw_fd(), 0))
+                    .transpose();
+                match events {
+                    Ok(Some(events)) => {
+                        if events & libc::POLLIN != 0 {
+                            let frame = job
+                                .control
+                                .as_ref()
+                                .map(|control| {
+                                    recv_lifecycle_frame(
+                                        control.as_raw_fd(),
+                                        job.nonce,
+                                        job.pgid,
+                                    )
+                                })
+                                .transpose();
+                            match frame {
+                                Ok(Some(FrameKind::Quiescing)) => {
+                                    let _ = job.close_signal_gate(false);
+                                }
+                                Ok(Some(FrameKind::Failure)) => {
+                                    job.pre_lifecycle_error = Some((
+                                        io::ErrorKind::Other,
+                                        Arc::<str>::from(
+                                            "watchdog reported failure before terminal cleanup",
+                                        ),
+                                    ));
+                                    let mut attempted = false;
+                                    let _ = job.host_fallback_kill(&mut attempted);
+                                }
+                                Ok(Some(kind)) => {
+                                    job.pre_lifecycle_error = Some((
+                                        io::ErrorKind::InvalidData,
+                                        Arc::<str>::from(format!(
+                                            "unexpected Unix lifecycle frame: {kind:?}"
+                                        )),
+                                    ));
+                                    let mut attempted = false;
+                                    let _ = job.host_fallback_kill(&mut attempted);
+                                }
+                                Ok(None) => {}
+                                Err(ProtocolError::PeerClosed) => {
+                                    job.pre_lifecycle_error = Some((
+                                        io::ErrorKind::BrokenPipe,
+                                        Arc::<str>::from(
+                                            "Unix lifecycle control closed before terminal proof",
+                                        ),
+                                    ));
+                                    let mut attempted = false;
+                                    let _ = job.host_fallback_kill(&mut attempted);
+                                }
+                                Err(error) => {
+                                    job.pre_lifecycle_error = Some((
+                                        io::ErrorKind::InvalidData,
+                                        Arc::<str>::from(format!(
+                                            "read Unix lifecycle frame: {error:?}"
+                                        )),
+                                    ));
+                                    let mut attempted = false;
+                                    let _ = job.host_fallback_kill(&mut attempted);
+                                }
+                            }
+                        }
+                        if events & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                        let mut attempted = false;
+                        if let Err(error) = job.host_fallback_kill(&mut attempted) {
+                            job.pre_lifecycle_error = Some((
+                                error.kind(),
+                                Arc::<str>::from(format!(
+                                    "Unix lifecycle control failed and group sealing failed: {error}"
+                                )),
+                            ));
+                        } else if job.pre_lifecycle_error.is_none() {
+                            job.pre_lifecycle_error = Some((
+                                io::ErrorKind::BrokenPipe,
+                                Arc::<str>::from(
+                                    "Unix lifecycle control closed before terminal proof",
+                                ),
+                            ));
+                        }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        job.pre_lifecycle_error = Some((
+                            error.kind(),
+                            Arc::<str>::from(format!(
+                                "poll Unix lifecycle control: {error}"
+                            )),
+                        ));
+                        let mut attempted = false;
+                        let _ = job.host_fallback_kill(&mut attempted);
+                    }
+                }
+                LifecyclePoll::Pending {
+                    next_poll: now + Duration::from_millis(25),
+                }
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                LifecyclePoll::Quarantine {
+                    reason: "Unix lifecycle lost exact leader ownership before reap".to_owned(),
+                }
+            }
+            Err(error) => {
+                job.pre_lifecycle_error = Some((
+                    error.kind(),
+                    Arc::<str>::from(format!("probe Unix lifecycle leader: {error}")),
+                ));
+                let mut attempted = false;
+                let _ = job.host_fallback_kill(&mut attempted);
+                LifecyclePoll::Pending {
+                    next_poll: now + Duration::from_millis(50),
+                }
+            }
+        }
+    }
+
+    fn poll_blocking(&mut self) -> LifecyclePoll {
+        let Some(job) = self.job.take() else {
+            return LifecyclePoll::Quarantine {
+                reason: "Unix terminal lifecycle job was missing".to_owned(),
+            };
+        };
+        job.run();
+        LifecyclePoll::ExactComplete
+    }
+
+    fn poller_failed(&mut self, reason: &str) {
+        if let Some(job) = self.job.as_mut() {
+            let mut attempted = false;
+            let _ = job.host_fallback_kill(&mut attempted);
+            if let Some(completion) = job.completion.as_ref() {
+                completion.send_replace(LifecycleCompletion::Failed {
+                    kind: io::ErrorKind::Other,
+                    message: Arc::<str>::from(reason.to_owned()),
+                });
+            }
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        "unix-process-lifecycle"
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CleanupGroupState {
     NotRequired,
@@ -1984,6 +2274,53 @@ enum CleanupStep {
     Finished { exact: bool },
 }
 
+struct CleanupPollerJob {
+    job: Option<CleanupJob>,
+    _permit: PlatformLifecyclePermit,
+}
+
+impl LifecyclePollJob for CleanupPollerJob {
+    fn poll(&mut self, now: Instant) -> LifecyclePoll {
+        let Some(job) = self.job.take() else {
+            return LifecyclePoll::Quarantine {
+                reason: "Unix cleanup poller lost its cleanup job".to_owned(),
+            };
+        };
+        if !job.is_due(now) {
+            let next_poll = job.next_attempt;
+            self.job = Some(job);
+            return LifecyclePoll::Pending { next_poll };
+        }
+        match job.run_once() {
+            CleanupStep::Retry(job) => {
+                let next_poll = job.next_attempt;
+                self.job = Some(*job);
+                LifecyclePoll::Pending { next_poll }
+            }
+            CleanupStep::Finished { exact: true } => LifecyclePoll::ExactComplete,
+            CleanupStep::Finished { exact: false } => LifecyclePoll::Quarantine {
+                reason: "Unix cleanup reached a terminal state without exact process-group proof"
+                    .to_owned(),
+            },
+        }
+    }
+
+    fn poller_failed(&mut self, reason: &str) {
+        if let Some(job) = self.job.as_mut()
+            && let Some(completion) = job.completion.as_ref()
+        {
+            completion.send_replace(LifecycleCompletion::Failed {
+                kind: io::ErrorKind::Other,
+                message: Arc::<str>::from(reason.to_owned()),
+            });
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        "unix-process-cleanup"
+    }
+}
+
 impl CleanupGroupState {
     fn new(required: bool) -> Self {
         if required {
@@ -1995,6 +2332,7 @@ impl CleanupGroupState {
 }
 
 impl CleanupJob {
+    #[cfg(test)]
     fn run_to_completion(mut self) -> bool {
         loop {
             let wait = self.next_attempt.saturating_duration_since(Instant::now());
@@ -2359,91 +2697,6 @@ impl CleanupJob {
     }
 }
 
-fn cleanup_relay_sender() -> io::Result<mpsc::Sender<CleanupJob>> {
-    if let Some(sender) = CLEANUP_RELAY.get() {
-        return Ok(sender.clone());
-    }
-    let (sender, receiver) = mpsc::channel::<CleanupJob>();
-    std::thread::Builder::new()
-        .name("nomifun-unix-cleanup-relay".to_owned())
-        .spawn(move || run_cleanup_relay(receiver))?;
-    if CLEANUP_RELAY.set(sender.clone()).is_ok() {
-        Ok(sender)
-    } else {
-        CLEANUP_RELAY
-            .get()
-            .cloned()
-            .ok_or_else(|| io::Error::other("cleanup relay initialization raced"))
-    }
-}
-
-fn run_cleanup_relay(receiver: mpsc::Receiver<CleanupJob>) {
-    let mut pending = VecDeque::new();
-    let mut disconnected = false;
-    loop {
-        if pending.is_empty() && !disconnected {
-            match receiver.recv() {
-                Ok(job) => pending.push_back(job),
-                Err(_) => return,
-            }
-        }
-        let now = Instant::now();
-        let round_len = pending.len().min(CLEANUP_RELAY_BATCH);
-        for _ in 0..round_len {
-            let job = pending
-                .pop_front()
-                .expect("cleanup relay round length matches its queue");
-            if !job.is_due(now) {
-                pending.push_back(job);
-            } else {
-                match job.run_once() {
-                    CleanupStep::Retry(job) => pending.push_back(*job),
-                    CleanupStep::Finished { .. } => {}
-                }
-            }
-        }
-        for _ in 0..CLEANUP_RELAY_BATCH {
-            if disconnected {
-                break;
-            }
-            match receiver.try_recv() {
-                Ok(job) => pending.push_back(job),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
-            }
-        }
-        if pending.is_empty() {
-            if disconnected {
-                return;
-            }
-            continue;
-        }
-
-        let wait = pending
-            .iter()
-            .map(|job| job.next_attempt)
-            .min()
-            .unwrap_or_else(Instant::now)
-            .saturating_duration_since(Instant::now());
-        if wait.is_zero() {
-            continue;
-        }
-        if disconnected {
-            let milliseconds = wait.as_millis().clamp(1, libc::c_int::MAX as u128);
-            let _ = poll_delay(milliseconds as libc::c_int);
-        } else {
-            match receiver.recv_timeout(wait) {
-                Ok(job) => pending.push_back(job),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
-            }
-        }
-    }
-}
-
 struct WatchdogNullGuard {
     descriptors: Vec<OwnedFd>,
 }
@@ -2534,7 +2787,10 @@ fn spawn_transaction(
     output: Arc<OutputBuffer>,
 ) -> Result<SpawnTransaction, ProcessError> {
     let _gate = lock_spawn_gate(deadline, cancelled)?;
-    let cleanup_relay = cleanup_relay_sender().map_err(spawn_failed)?;
+    let platform_permit = platform_lifecycle_poller()
+        .map_err(spawn_failed)?
+        .reserve()
+        .map_err(spawn_failed)?;
     let nonce = Nonce::new(uuid::Uuid::now_v7().into_bytes());
     let parent_pid = std::process::id() as libc::pid_t;
     #[cfg(target_os = "linux")]
@@ -2635,7 +2891,7 @@ fn spawn_transaction(
         control: Some(control_host),
         pgid: None,
         nonce,
-        cleanup_relay,
+        platform_permit: Some(platform_permit),
         #[cfg(test)]
         lifecycle_start_delay: options.lifecycle_start_delay,
         #[cfg(test)]
@@ -2907,21 +3163,6 @@ fn waitpid_exact_setup(pid: libc::pid_t, deadline: Deadline) -> io::Result<libc:
             ));
         }
         std::thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn waitpid_exact_blocking(pid: libc::pid_t) -> io::Result<libc::c_int> {
-    loop {
-        let mut status = 0;
-        // SAFETY: pid names one exact direct child and status is writable.
-        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
-        if waited == pid {
-            return Ok(status);
-        }
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EINTR) {
-            return Err(error);
-        }
     }
 }
 
@@ -3309,7 +3550,8 @@ struct LifecycleJob {
     signal_gate: Arc<Mutex<SignalGate>>,
     completion: Option<watch::Sender<LifecycleCompletion>>,
     failure_context: Option<(io::ErrorKind, Arc<str>)>,
-    cleanup_relay: mpsc::Sender<CleanupJob>,
+    pre_lifecycle_error: Option<(io::ErrorKind, Arc<str>)>,
+    platform_permit: Option<PlatformLifecyclePermit>,
     #[cfg(test)]
     start_delay: Option<Duration>,
     #[cfg(test)]
@@ -3342,6 +3584,13 @@ impl LifecycleJob {
         #[cfg(not(test))]
         let lifecycle_result = self.run_inner();
         let completion = match lifecycle_result {
+            Ok(_fact) if self.pre_lifecycle_error.is_some() => {
+                let (kind, message) = self
+                    .pre_lifecycle_error
+                    .take()
+                    .expect("pre-lifecycle error was checked");
+                LifecycleCompletion::Failed { kind, message }
+            }
             Ok(fact) => LifecycleCompletion::Reaped(fact),
             Err(error) => LifecycleCompletion::Failed {
                 kind: error.kind(),
@@ -3495,7 +3744,11 @@ impl LifecycleJob {
             {
                 return Err(error);
             }
-            watchdog_status = Some(self.reap_watchdog_blocking()?);
+            watchdog_status = Some(self.reap_watchdog_until(
+                Instant::now()
+                    .checked_add(CLEANUP_RETRY_MAX)
+                    .unwrap_or_else(Instant::now),
+            )?);
         }
         self.drain_terminal_frames(
             control_fd,
@@ -3656,11 +3909,13 @@ impl LifecycleJob {
         Err(error)
     }
 
-    fn reap_watchdog_blocking(&mut self) -> io::Result<libc::c_int> {
+    fn reap_watchdog_until(&mut self, deadline: Instant) -> io::Result<libc::c_int> {
         let pid = self
             .watchdog_pid
             .ok_or_else(|| io::Error::other("watchdog wait already completed"))?;
-        let status = waitpid_exact_blocking(pid)?;
+        let deadline = Deadline::after(deadline.saturating_duration_since(Instant::now()))
+            .map_err(protocol_io_error)?;
+        let status = waitpid_exact_setup(pid, deadline)?;
         self.watchdog_pid = None;
         #[cfg(test)]
         self.audit.record_watchdog_reap(status);
@@ -3756,8 +4011,10 @@ impl Drop for LifecycleJob {
             #[cfg(test)]
             hold: self.cleanup_hold.clone(),
         };
-        if let Err(error) = self.cleanup_relay.send(job) {
-            let _ = error.0.run_to_completion();
+        if let Some(permit) = self.platform_permit.take() {
+            defer_cleanup_job(job, permit);
+        } else {
+            tracing::error!("Unix lifecycle job lost platform cleanup admission");
         }
     }
 }
@@ -4238,6 +4495,31 @@ mod tests {
         CapabilityPolicy, CommandSpec, ProcessError, ProcessOwner, ProcessPolicy,
         NormalizedProcessRequest, OutputBuffer, SandboxPolicy, Transport,
     };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn child_watchdog_registry_removes_the_exact_entry_at_terminal_cleanup() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, cleanup) = super::spawn_child_process(command, false)
+            .expect("managed child with watchdog authority should start");
+        let pid = child.id().expect("managed child should expose its PID");
+        child.wait().await.expect("direct child should reap");
+        cleanup
+            .wait()
+            .await
+            .expect("watchdog should publish exact group cleanup");
+
+        assert!(
+            super::child_process_watchdog(pid)
+                .expect("watchdog registry lookup should remain healthy")
+                .is_none(),
+            "terminal child-process watchdog entry was not retired"
+        );
+    }
 
     #[test]
     fn dangerous_environment_overrides_are_rejected_at_the_spawn_boundary() {

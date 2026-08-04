@@ -124,6 +124,12 @@ pub struct PostPreview {
     pub field_names: Vec<String>,
 }
 
+/// Approval jobs retain only bounded metadata even when a hostile request body
+/// contains an extreme number of form fields or very long field names.
+const POST_PREVIEW_BODY_SCAN_BYTES: usize = 64 * 1024;
+const POST_PREVIEW_FIELD_NAMES_CAPACITY: usize = 64;
+const POST_PREVIEW_FIELD_NAME_BYTES: usize = 128;
+
 /// **IP 封禁判定（纯逻辑，本模块重点）**：`true` = 该 IP 属于内网 / loopback / link-local（含
 /// 云元数据 `169.254.169.254`）/ CGNAT / IPv6 ULA / link-local / 其它非公网 → 应封禁。`false` =
 /// 公网 IP → 放行。
@@ -279,9 +285,13 @@ fn is_form_urlencoded(content_type: &str) -> bool {
 /// percent-decode（best-effort：解失败原样保留——字段名通常 ASCII，无需完美解码）。无 `=` 的裸
 /// token（`flag&...`）按字段名（值为空）记入 key。去重保序。
 pub fn parse_form_field_names(body: &[u8]) -> Vec<String> {
-    let s = String::from_utf8_lossy(body);
+    let inspected = &body[..body.len().min(POST_PREVIEW_BODY_SCAN_BYTES)];
+    let s = String::from_utf8_lossy(inspected);
     let mut names: Vec<String> = Vec::new();
     for pair in s.split('&') {
+        if names.len() >= POST_PREVIEW_FIELD_NAMES_CAPACITY {
+            break;
+        }
         if pair.is_empty() {
             continue;
         }
@@ -290,7 +300,8 @@ pub fn parse_form_field_names(body: &[u8]) -> Vec<String> {
         if key_raw.is_empty() {
             continue;
         }
-        let key = percent_decode_key(key_raw);
+        let key = percent_decode_key(truncate_utf8_bytes(key_raw, POST_PREVIEW_FIELD_NAME_BYTES));
+        let key = truncate_utf8_bytes(&key, POST_PREVIEW_FIELD_NAME_BYTES).to_string();
         if key.is_empty() {
             continue;
         }
@@ -299,6 +310,17 @@ pub fn parse_form_field_names(body: &[u8]) -> Vec<String> {
         }
     }
     names
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 /// best-effort percent-decode 表单字段名（`%20`→空格，`+`→空格）。字段名几乎恒 ASCII；解码失败
@@ -573,8 +595,10 @@ impl EgressVerdict {
 /// requestPaused/attachedToTarget 都经它）。故 D2 的设计是：
 ///
 /// 1. handler 命中 GatePost → **悬挂**请求（保留 `requestId`，不 continue/不 fail）；
-/// 2. `tokio::spawn` 一个 detached 任务（事件循环立即回到 `select!` 继续 pump，**不阻塞**）；
-/// 3. 该任务 `await` 本 trait 的 [`Self::approve_egress`]（带超时）取裁决；
+/// 2. 把请求交给 Host 所有的**固定并发、有界队列**审批执行器（事件循环立即回到
+///    `select!` 继续 pump，**不阻塞**；队列饱和则立即 fail-closed）；
+/// 3. 已登记的固定 worker `await` 本 trait 的 [`Self::approve_egress`]（带超时与 Host
+///    cancellation）取裁决；
 /// 4. 据裁决发 `continueRequest`（批准）/ `failRequest`（拒绝/超时/无通道——**fail-closed**）。
 ///
 /// **实现侧（facade / 网关）**：把本 trait 接到 GW2 的同一 pending 审批通道（`nomi_browser_confirm`
@@ -598,6 +622,12 @@ pub trait EgressApprover: Send + Sync {
 /// POST 比放行安全，泄漏窗口闭合）。120s 给真人审批留足窗口，又不至于让一次卡住的提交永久挂起。
 pub const EGRESS_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// 单个 Host 会话内可记住的临时批准域上限。
+///
+/// 这是易受不可信页面 URL 驱动的集合，必须有硬边界；到达上限后仍可放行当前已经明确批准的
+/// 请求，但不会继续扩大 `always_allow` 信任集合。
+pub const APPROVED_DOMAINS_CAPACITY: usize = 256;
+
 /// **P3-D2：per-session「记住此域」已批准出口域集合**（决策3 `always_allow`）。
 ///
 /// 用户在审批一条被门控的出口请求时可选「记住此域」→ 把目标 eTLD+1 记进本集合 → **同 eTLD+1 的
@@ -605,17 +635,25 @@ pub const EGRESS_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 /// 软放行（进程内、随引擎生命周期；非持久——持久域策略走 `FirewallConfig.allow_etld1` 的 secret 真值，
 /// X2 的活），避免同一会话内对同一已信任域反复弹审批。
 ///
-/// 线程安全（`Arc<Mutex<HashSet>>`）：接线层后台任务（spawn 的 detached 审批任务）与可能的并发
-/// requestPaused 共享同一份；锁临界区极短（一次 `insert`/`contains`，不跨 await）。
+/// 线程安全（`Arc<Mutex<HashSet>>`）：Host 固定审批 worker 与并发 requestPaused 共享同一份；
+/// 锁临界区极短（一次 `insert`/`contains`，不跨 await），且集合受
+/// [`APPROVED_DOMAINS_CAPACITY`] 硬限制。
 ///
 /// **eTLD+1 归一**：`record`/`is_approved` 都经 [`registrable_domain_for_trust`] 归一目标 URL/host
 /// （与 [`domain_policy`] / `FirewallConfig.allow_etld1` 同款 PSL 机器，但额外排除 IP 字面量）——故记住
 /// `https://pay.com/x` 后，`api.pay.com` 的后续请求也命中（同 registrable domain）。无法解析出 eTLD+1
 /// 的目标（IP/localhost/畸形）**绝不**记入 / 命中（fail-closed：无可信 registrable domain 无从「记住一个
 /// 域」）。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ApprovedDomains {
     inner: Arc<Mutex<HashSet<String>>>,
+    capacity: usize,
+}
+
+impl Default for ApprovedDomains {
+    fn default() -> Self {
+        Self::with_capacity(APPROVED_DOMAINS_CAPACITY)
+    }
 }
 
 /// **P3-D2 [纯逻辑]：取一个目标 URL 用于「域信任」（always_allow）的 registrable domain**。
@@ -641,6 +679,13 @@ impl ApprovedDomains {
         Self::default()
     }
 
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashSet::new())),
+            capacity,
+        }
+    }
+
     /// **记住一个域**（`always_allow`）：把 `target` 的 eTLD+1 记进集合。无法解析出 eTLD+1
     /// （localhost/畸形）或 host 是 **IP 字面量**（IP 出口归 IP 封禁档管，不是「域信任」语义；且
     /// `psl` 对 IP 会吐出无意义的伪 registrable domain 如 `10.0.0.5`→`0.5`，绝不能据此「记住一个
@@ -649,10 +694,11 @@ impl ApprovedDomains {
         let Some(e1) = registrable_domain_for_trust(target) else {
             return false;
         };
-        self.inner
-            .lock()
-            .expect("approved domains poisoned")
-            .insert(e1)
+        let mut domains = self.inner.lock().expect("approved domains poisoned");
+        if domains.contains(&e1) || domains.len() >= self.capacity {
+            return false;
+        }
+        domains.insert(e1)
     }
 
     /// **是否已批准**：`target` 的 eTLD+1 在集合内 → `true`（后续同域出口直接放行，不再悬挂审批）。
@@ -742,39 +788,68 @@ impl HostResolver for TokioResolver {
 /// 发大量 GET/Fetch）。缓存 key=host，value=(是否被阻断, 写入时刻)。
 ///
 /// TTL 过期 → 重新解析（DNS 可能变化，不应永久缓存一个「安全」结论）。
-/// 线程安全（`Arc<Mutex<…>>`）：防火墙循环是单线程 select，但 detached 审批任务可能并发查询。
+/// 线程安全（`Arc<Mutex<…>>`）：防火墙固定 request worker 会并发查询。随机 host 不能令缓存无界
+/// 增长：容量受 [`DNS_CACHE_CAPACITY`] 限制，饱和时逐出最旧条目。
 #[derive(Clone)]
 pub struct DnsResolverCache {
     /// 缓存条目：host → (is_blocked, insertion_time)。
     inner: Arc<Mutex<HashMap<String, (bool, Instant)>>>,
     /// 条目生存时间。
     ttl: Duration,
+    /// 不可信 host 可驱动的缓存条目硬上限。
+    capacity: usize,
 }
 
 impl DnsResolverCache {
     /// 创建一个新的 DNS 解析缓存。
     pub fn new(ttl: Duration) -> Self {
+        Self::with_capacity(ttl, DNS_CACHE_CAPACITY)
+    }
+
+    fn with_capacity(ttl: Duration, capacity: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             ttl,
+            capacity,
         }
     }
 
     /// 查询缓存：host 是否有未过期的条目。返回 `Some(is_blocked)` 命中或 `None` 未命中/已过期。
     pub fn get(&self, host: &str) -> Option<bool> {
-        let map = self.inner.lock().expect("dns cache poisoned");
+        if host.len() > DNS_CACHE_MAX_HOST_BYTES {
+            return None;
+        }
+        let mut map = self.inner.lock().expect("dns cache poisoned");
         if let Some(&(blocked, ts)) = map.get(host)
             && ts.elapsed() < self.ttl
         {
             return Some(blocked);
         }
+        map.remove(host);
         None
     }
 
     /// 写入/更新缓存条目。
     pub fn insert(&self, host: &str, blocked: bool) {
+        if host.len() > DNS_CACHE_MAX_HOST_BYTES {
+            return;
+        }
         let mut map = self.inner.lock().expect("dns cache poisoned");
-        map.insert(host.to_string(), (blocked, Instant::now()));
+        let now = Instant::now();
+        map.retain(|_, (_, inserted)| now.duration_since(*inserted) < self.ttl);
+        if self.capacity == 0 {
+            return;
+        }
+        if !map.contains_key(host)
+            && map.len() >= self.capacity
+            && let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, (_, inserted))| *inserted)
+                .map(|(cached_host, _)| cached_host.clone())
+        {
+            map.remove(&oldest);
+        }
+        map.insert(host.to_string(), (blocked, now));
     }
 }
 
@@ -787,6 +862,13 @@ impl Default for DnsResolverCache {
 
 /// DNS 解析缓存的默认 TTL。
 pub const DNS_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// 单个 Host 的 DNS→IP 判定缓存上限。到达上限后逐出最旧条目；安全结论会在下次访问时重新解析。
+pub const DNS_CACHE_CAPACITY: usize = 1_024;
+
+/// RFC DNS host names cannot exceed 253 presentation bytes. Refusing larger
+/// cache keys makes the entry-count limit a meaningful byte bound as well.
+const DNS_CACHE_MAX_HOST_BYTES: usize = 253;
 
 /// **SD-1 核心逻辑：对域名 host 做 DNS→IP SSRF 检查**（异步，仅 egress 子资源使用）。
 ///
@@ -1044,6 +1126,23 @@ mod tests {
         assert_eq!(parse_form_field_names(b"flag&x=1&"), vec!["flag", "x"]);
         assert_eq!(parse_form_field_names(b""), Vec::<String>::new());
         assert_eq!(parse_form_field_names(b"&&"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_form_field_names_retained_preview_is_strictly_bounded() {
+        let body = (0..1_000)
+            .map(|index| format!("field-{index}=value"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let names = parse_form_field_names(body.as_bytes());
+        assert_eq!(names.len(), POST_PREVIEW_FIELD_NAMES_CAPACITY);
+
+        let long_unicode_key = "界".repeat(1_000);
+        let long_body = format!("{long_unicode_key}=value");
+        let names = parse_form_field_names(long_body.as_bytes());
+        assert_eq!(names.len(), 1);
+        assert!(names[0].len() <= POST_PREVIEW_FIELD_NAME_BYTES);
+        assert!(names[0].is_char_boundary(names[0].len()));
     }
 
     // ── [纯逻辑] 预览构造（只 host/size/字段名，绝不含值）──────────────────────
@@ -1666,6 +1765,20 @@ mod tests {
         assert!(a.is_approved("https://pay.com/y"), "clone shares the inner set");
     }
 
+    #[test]
+    fn approved_domains_never_grows_past_its_session_capacity() {
+        let approved = ApprovedDomains::with_capacity(2);
+        assert!(approved.record("https://a.com/x"));
+        assert!(approved.record("https://b.net/x"));
+        assert!(
+            !approved.record("https://c.org/x"),
+            "trust expansion must stop at the hard capacity"
+        );
+        assert_eq!(approved.len(), 2);
+        assert!(!approved.is_approved("https://c.org/y"));
+        assert!(approved.is_approved("https://a.com/y"));
+    }
+
     // ── [纯逻辑] P3-D2：EgressVerdict + EgressApprover fail-closed 语义 ────────────────
 
     #[test]
@@ -1845,5 +1958,37 @@ mod tests {
         let blocked = check_dns_ssrf("cached.example.com", &resolver, &cache).await;
         assert!(!blocked);
         assert_eq!(resolver.count.load(Ordering::SeqCst), 1, "cache must prevent repeated DNS resolution");
+    }
+
+    #[test]
+    fn dns_cache_evicts_instead_of_growing_with_random_hosts() {
+        let cache = DnsResolverCache::with_capacity(Duration::from_secs(60), 2);
+        cache.insert("a.attacker.invalid", false);
+        cache.insert("b.attacker.invalid", true);
+        cache.insert("c.attacker.invalid", false);
+
+        assert_eq!(
+            cache.inner.lock().expect("dns cache poisoned").len(),
+            2,
+            "untrusted host cardinality must have a hard bound"
+        );
+        assert_eq!(cache.get("c.attacker.invalid"), Some(false));
+    }
+
+    #[test]
+    fn zero_capacity_dns_cache_retains_nothing() {
+        let cache = DnsResolverCache::with_capacity(Duration::from_secs(60), 0);
+        cache.insert("a.attacker.invalid", false);
+        assert_eq!(cache.get("a.attacker.invalid"), None);
+        assert!(cache.inner.lock().expect("dns cache poisoned").is_empty());
+    }
+
+    #[test]
+    fn dns_cache_rejects_oversized_host_keys() {
+        let cache = DnsResolverCache::new(Duration::from_secs(60));
+        let oversized = "x".repeat(DNS_CACHE_MAX_HOST_BYTES + 1);
+        cache.insert(&oversized, false);
+        assert_eq!(cache.get(&oversized), None);
+        assert!(cache.inner.lock().expect("dns cache poisoned").is_empty());
     }
 }

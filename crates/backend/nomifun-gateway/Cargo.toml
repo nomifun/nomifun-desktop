@@ -70,7 +70,11 @@ serde_json.workspace = true
 # straight through to `rmcp::model::Tool`, so only the gateway needs schemars.
 schemars = "1"
 tracing.workspace = true
+sysinfo.workspace = true
+tower-http.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
 jsonschema.workspace = true
+futures.workspace = true
+tower = { version = "0.5", features = ["util"] }

@@ -104,6 +104,10 @@ describe('buildBrowserResourcePolicyPresetRequest', () => {
     preset: 'automatic' as const,
     advanced: {
       max_memory_ratio: 0.5,
+      max_task_memory_bytes: 1536 * 1024 * 1024,
+      max_task_active_operations: 2,
+      max_task_open_lanes: 4,
+      max_task_tabs: 16,
       reserved_memory_bytes: 512 * 1024 * 1024,
       max_active_operations: 4,
       max_open_lanes: 16,
@@ -128,14 +132,14 @@ describe('buildBrowserResourcePolicyPresetRequest', () => {
     ).toEqual({ preset: 'resource_saving' });
   });
 
-  test('keeps user-edited advanced values as intentional overrides', () => {
+  test('moves user-edited advanced values to the custom policy', () => {
     const edited = {
       ...persisted,
       advanced: { ...persisted.advanced, max_open_lanes: 24 },
     };
     expect(
       buildBrowserResourcePolicyPresetRequest('high_concurrency', edited, persisted)
-    ).toEqual({ preset: 'high_concurrency', advanced: edited.advanced });
+    ).toEqual({ preset: 'custom', advanced: edited.advanced });
 
     const cleared = {
       ...persisted,
@@ -143,7 +147,7 @@ describe('buildBrowserResourcePolicyPresetRequest', () => {
     };
     expect(
       buildBrowserResourcePolicyPresetRequest('resource_saving', cleared, persisted)
-    ).toEqual({ preset: 'resource_saving', advanced: cleared.advanced });
+    ).toEqual({ preset: 'custom', advanced: cleared.advanced });
   });
 
   test('treats both-absent advanced as untouched', () => {
@@ -162,6 +166,10 @@ describe('buildBrowserResourcePolicyAdvancedSaveRequest', () => {
     preset: 'automatic' as const,
     advanced: {
       max_memory_ratio: 0.5,
+      max_task_memory_bytes: 1536 * 1024 * 1024,
+      max_task_active_operations: 2,
+      max_task_open_lanes: 4,
+      max_task_tabs: 16,
       reserved_memory_bytes: 512 * 1024 * 1024,
       max_active_operations: 4,
       max_open_lanes: 16,
@@ -197,14 +205,13 @@ describe('buildBrowserResourcePolicyAdvancedSaveRequest', () => {
   test('keeps the current preset when advanced values merely echo the server state', () => {
     expect(buildBrowserResourcePolicyAdvancedSaveRequest(persisted, persisted)).toEqual({
       preset: 'automatic',
-      advanced: persisted.advanced,
     });
     expect(
       buildBrowserResourcePolicyAdvancedSaveRequest(
         { ...persisted, preset: 'custom', advanced: { ...persisted.advanced } },
         { ...persisted, preset: 'custom' }
       )
-    ).toEqual({ preset: 'custom', advanced: persisted.advanced });
+    ).toEqual({ preset: 'custom' });
   });
 });
 
@@ -229,6 +236,8 @@ describe('normalizeBrowserResourcePolicy', () => {
         preset: 'resource_saving',
         advanced: {
           max_memory_ratio: 0.3,
+          max_task_memory_bytes: 768 * 1024 * 1024,
+          max_task_tabs: 8,
           max_open_lanes: 24,
         },
       })
@@ -236,8 +245,25 @@ describe('normalizeBrowserResourcePolicy', () => {
       preset: 'resource_saving',
       advanced: {
         max_memory_ratio: 0.3,
+        max_task_memory_bytes: 768 * 1024 * 1024,
+        max_task_tabs: 8,
         max_open_lanes: 24,
       },
+    });
+  });
+
+  test('ignores the obsolete installation-wide absolute memory field', () => {
+    expect(
+      normalizeBrowserResourcePolicy({
+        preset: 'automatic',
+        advanced: {
+          max_memory_bytes: 8 * 1024 * 1024 * 1024,
+          max_task_memory_bytes: 1024 * 1024 * 1024,
+        },
+      })
+    ).toEqual({
+      preset: 'automatic',
+      advanced: { max_task_memory_bytes: 1024 * 1024 * 1024 },
     });
   });
 

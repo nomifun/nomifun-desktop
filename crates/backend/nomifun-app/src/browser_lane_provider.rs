@@ -865,8 +865,10 @@ mod tests {
             let runtime = format!("runtime-{index:02}");
             let attempt = format!("attempt-{index:02}");
             opening.push(tokio::spawn(async move {
+                let mut runtime_context = context(&runtime, &attempt);
+                runtime_context.conversation_id = Some(format!("conversation-{index:02}"));
                 let binding = provider
-                    .issue(context(&runtime, &attempt))
+                    .issue(runtime_context)
                     .await
                     .expect("trusted runtime binding is issued");
                 start.wait().await;
@@ -917,9 +919,10 @@ mod tests {
             assert_eq!(lane.lane_key.runtime_instance_id, *runtime);
             assert_eq!(lane.lane_key.lane_name, "default");
             assert_eq!(lane.caller.user_id, "owner");
+            let expected_conversation = runtime.replacen("runtime-", "conversation-", 1);
             assert_eq!(
                 lane.caller.conversation_id.as_deref(),
-                Some("conversation")
+                Some(expected_conversation.as_str())
             );
             assert_eq!(lane.caller.runtime_instance_id, *runtime);
             assert_eq!(lane.caller.agent_id.as_deref(), Some("nomi"));
@@ -1584,8 +1587,11 @@ mod tests {
             Arc::from("owner"),
         );
 
+        let mut unrelated_context =
+            context("runtime-unrelated-failure", "attempt-unrelated");
+        unrelated_context.conversation_id = Some("conversation-unrelated".to_owned());
         let unrelated = provider
-            .issue(context("runtime-unrelated-failure", "attempt-unrelated"))
+            .issue(unrelated_context)
             .await
             .unwrap();
         unrelated
@@ -1610,8 +1616,10 @@ mod tests {
         assert_eq!(factory.lane_closes.load(Ordering::Acquire), 1);
         assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 1);
 
+        let mut exact_context = context("runtime-exact-retry", "attempt-exact");
+        exact_context.conversation_id = Some("conversation-exact".to_owned());
         let exact = provider
-            .issue(context("runtime-exact-retry", "attempt-exact"))
+            .issue(exact_context)
             .await
             .unwrap();
         factory
