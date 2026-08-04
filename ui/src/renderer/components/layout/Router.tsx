@@ -36,7 +36,6 @@ const WorkshopListPage = React.lazy(() => import('@renderer/pages/workshop'));
 const WorkshopCanvasPage = React.lazy(() => import('@renderer/pages/workshop/CanvasPage'));
 const AssetLibraryPage = React.lazy(() => import('@renderer/pages/assets'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
-const MemoryPanelPage = React.lazy(() => import('@renderer/pages/memoryPanel'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
 const RouteFallback: React.FC<{ Component: React.LazyExoticComponent<React.ComponentType> }> = ({ Component }) => {
@@ -149,7 +148,7 @@ const TrayLabelsMount: React.FC = () => {
 };
 
 // Listens for "companion-navigate" Tauri events emitted by the companion window (a click
-// on a suggestion bubble / its context menu) and routes the main window.
+// on the companion bubble / its context menu) and routes the main window.
 // Inert outside the Tauri desktop shell.
 const CompanionNavigateListener: React.FC = () => {
   const navigate = useNavigate();
@@ -193,7 +192,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
         />
         {/* The desktop-companion window route: fullscreen transparent, no app layout/sidebar. */}
         <Route path='/companion' element={withRouteFallback(CompanionPage)} />
-        <Route path='/nomi-memory-panel' element={withRouteFallback(MemoryPanelPage)} />
         <Route element={<ProtectedLayout layout={layout} />}>
           <Route index element={<Navigate to='/guid' replace />} />
           {/* Models, presets, skills, and MCP are independent top-level capabilities. */}

@@ -1,6 +1,6 @@
 //! In-session companion summon support (spec §设计 B2/B3, plan Task 2).
 //!
-//! Three pieces the summoned work session consumes, all read-only towards the
+//! Two pieces the summoned work session consumes, both read-only towards the
 //! companion's memory store:
 //!
 //! 1. [`resolve_summon_context`] — resolves the summon's hand-picked
@@ -14,28 +14,23 @@
 //!    the summoned companion (shared + its own private memories). `save` and
 //!    `recent_events` refuse: `save_memory` is never registered in a summoned
 //!    session, and this sink fails closed even if it were.
-//! 3. [`SummonSuggestionSink`] — the `propose_companion_memory` handler:
-//!    writes a `companion_suggestions` card (kind
-//!    [`SUMMON_MEMORY_SUGGESTION_KIND`], provenance `source="summon"` + the
-//!    originating conversation id inside `action`), never touching
-//!    `companion_memories`. The memory only materializes when the owner
-//!    accepts the card (`CompanionService::decide_suggestion`).
+//!
+//! Confirmation-style write-back (`propose_companion_memory`) was removed with
+//! the 建议 feature: suggestion cards were its only storage and its only
+//! review surface, so a summoned session is now purely read-only towards
+//! memory.
 
 use async_trait::async_trait;
-use nomifun_ai_agent::{CompanionMemorySink, SummonContextSink, SummonProposalSink};
+use nomifun_ai_agent::{CompanionMemorySink, SummonContextSink};
 use nomifun_api_types::SummonConfig;
 use nomifun_common::{AppError, CompanionId};
 
 use crate::companion::format_date;
-use crate::events::CompanionEventEmitter;
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
-use crate::store::{CompanionStore, MEMORY_KINDS};
+use crate::store::CompanionStore;
 
 /// Character budget for the injected memory-snapshot section (spec §B2).
 pub const SUMMON_CONTEXT_BUDGET: usize = 8000;
-
-/// `companion_suggestions.kind` for memories proposed from a summoned session.
-pub const SUMMON_MEMORY_SUGGESTION_KIND: &str = "companion_memory";
 
 /// Resolve the summon's selected memory ids into the injectable snapshot
 /// section. Live per-turn resolution: archived memories still resolve (tagged
@@ -68,8 +63,7 @@ pub async fn resolve_summon_context(
 
     let header = "## 召唤的伙伴记忆（只读参考）\n\
                   以下记忆由主人为本次任务挑选，实时读取自伙伴的记忆库，仅供参考，不可直接修改。\
-                  需要补查时用 recall_memories；发现长期有价值的新事实时用 propose_companion_memory \
-                  提议（主人确认后才入库）。\n";
+                  需要补查时用 recall_memories。\n";
     let mut out = String::from(header);
     let mut used = header.chars().count();
     let mut omitted = 0usize;
@@ -181,7 +175,7 @@ impl CompanionMemorySink for SummonMemorySink {
         _content: &str,
         _tags: &[String],
     ) -> Result<String, String> {
-        Err("召唤会话对伙伴记忆只读：请改用 propose_companion_memory 提议，由主人确认后入库。".into())
+        Err("召唤会话对伙伴记忆只读：请在伙伴自己的会话里记忆，或由主人在管理中心录入。".into())
     }
 
     async fn recent_events(&self, _limit: usize) -> Result<String, String> {
@@ -189,90 +183,10 @@ impl CompanionMemorySink for SummonMemorySink {
     }
 }
 
-/// `propose_companion_memory` backend: candidate memories become suggestion
-/// cards, never direct memory writes (spec §B3 确认式回写).
-pub struct SummonSuggestionSink {
-    store: CompanionStore,
-    emitter: CompanionEventEmitter,
-    companion_id: CompanionId,
-}
-
-impl SummonSuggestionSink {
-    pub fn new(
-        store: CompanionStore,
-        emitter: CompanionEventEmitter,
-        companion_id: CompanionId,
-    ) -> Self {
-        Self { store, emitter, companion_id }
-    }
-}
-
-#[async_trait]
-impl SummonProposalSink for SummonSuggestionSink {
-    async fn propose(
-        &self,
-        conversation_id: &str,
-        kind: &str,
-        content: &str,
-        reason: &str,
-    ) -> Result<String, String> {
-        if !MEMORY_KINDS.contains(&kind) {
-            return Err(format!("kind 必须是 {MEMORY_KINDS:?} 之一"));
-        }
-        let content = content.trim();
-        if content.is_empty() {
-            return Err("content 不能为空".into());
-        }
-        let reason = reason.trim();
-        // Already an active memory → no card needed.
-        match self.store.find_similar_active(kind, content).await {
-            Ok(Some(_)) => return Ok("伙伴已有相似的活跃记忆，无需重复提议。".into()),
-            Ok(None) => {}
-            Err(e) => return Err(e.to_string()),
-        }
-        let title = format!("伙伴记忆提议（{kind}）");
-        let body = format!("{content}\n\n提议理由：{reason}");
-        // Pending-card dedup backstop (same pattern as the learner): touch the
-        // existing card so repeated evidence re-floats it instead of stacking.
-        match self
-            .store
-            .find_similar_suggestion(SUMMON_MEMORY_SUGGESTION_KIND, &title, &body)
-            .await
-        {
-            Ok(Some(existing_id)) => {
-                if let Err(e) = self.store.touch_suggestion(&existing_id).await {
-                    tracing::warn!(target: "nomifun_companion", error = %e, suggestion_id = %existing_id, "touch duplicate summon memory proposal failed");
-                }
-                return Ok("已有相同提议等待主人确认，无需重复提交。".into());
-            }
-            Ok(None) => {}
-            Err(e) => return Err(e.to_string()),
-        }
-        let action = serde_json::json!({
-            "type": SUMMON_MEMORY_SUGGESTION_KIND,
-            "companion_id": self.companion_id.as_str(),
-            "memory_kind": kind,
-            "content": content,
-            "reason": reason,
-            "source": "summon",
-            "source_conversation_id": conversation_id,
-        });
-        let created = self
-            .store
-            .insert_suggestion(SUMMON_MEMORY_SUGGESTION_KIND, &title, &body, Some(&action))
-            .await
-            .map_err(|e| e.to_string())?;
-        self.emitter.emit_suggestion_created(self.companion_id.as_str(), &created);
-        Ok(format!("已生成建议卡（{kind}），等待主人确认后写入伙伴记忆：{content}"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::MemoryScope;
-    use nomifun_realtime::BroadcastEventBus;
-    use std::sync::Arc;
 
     fn companion_fixture(sequence: u64) -> CompanionId {
         CompanionId::try_from(format!("0190f5fe-7c00-7a00-8abc-{sequence:012}").as_str()).unwrap()
@@ -285,10 +199,6 @@ mod tests {
             skill_exclusions: vec![],
             summoned_at: 1,
         }
-    }
-
-    fn emitter() -> CompanionEventEmitter {
-        CompanionEventEmitter::new(Arc::new(BroadcastEventBus::new(16)), "owner-a")
     }
 
     #[tokio::test]
@@ -399,45 +309,7 @@ mod tests {
         );
 
         let err = sink.save("conv_w", "preference", "x", &[]).await.unwrap_err();
-        assert!(err.contains("propose_companion_memory"), "{err}");
+        assert!(err.contains("只读"), "{err}");
         assert!(sink.recent_events(5).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn propose_writes_suggestion_card_not_memories() {
-        let store = CompanionStore::open_memory().await.unwrap();
-        let companion = companion_fixture(1);
-        let sink = SummonSuggestionSink::new(store.clone(), emitter(), companion.clone());
-
-        let out = sink
-            .propose("conv_w", "preference", "主人喜欢 TDD 流程", "多次强调")
-            .await
-            .unwrap();
-        assert!(out.contains("建议卡"), "{out}");
-
-        let suggestions = store.list_suggestions(Some("new"), 10).await.unwrap();
-        assert_eq!(suggestions.len(), 1);
-        let card = &suggestions[0];
-        assert_eq!(card.kind, SUMMON_MEMORY_SUGGESTION_KIND);
-        let action = card.action.as_ref().unwrap();
-        assert_eq!(action["source"], "summon");
-        assert_eq!(action["source_conversation_id"], "conv_w");
-        assert_eq!(action["memory_kind"], "preference");
-        assert_eq!(action["companion_id"], companion.as_str());
-
-        // The proposal must NOT touch companion_memories.
-        assert_eq!(store.count_memories("active").await.unwrap(), 0);
-
-        // Duplicate proposal dedups onto the pending card.
-        let again = sink
-            .propose("conv_w", "preference", "主人喜欢 TDD 流程", "多次强调")
-            .await
-            .unwrap();
-        assert!(again.contains("无需重复"), "{again}");
-        assert_eq!(store.list_suggestions(Some("new"), 10).await.unwrap().len(), 1);
-
-        // Invalid kind refuses.
-        assert!(sink.propose("conv_w", "bogus", "x", "y").await.is_err());
-        assert!(sink.propose("conv_w", "task", "  ", "y").await.is_err());
     }
 }

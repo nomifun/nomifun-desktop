@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 
-use crate::store::{MEMORY_KINDS, CompanionMemory, CompanionSuggestion};
+use crate::store::{MEMORY_KINDS, CompanionMemory};
 
 pub const LEARN_MAX_TOKENS: u32 = 4096;
 
@@ -28,16 +28,6 @@ fn default_importance() -> f64 {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LearnedSuggestion {
-    pub kind: String,
-    pub title: String,
-    pub body: String,
-    #[serde(default)]
-    pub action: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LearnOutput {
     #[serde(default)]
     pub memories: Vec<LearnedMemory>,
@@ -46,39 +36,31 @@ pub struct LearnOutput {
     #[serde(default)]
     pub supersede_memory_ids: Vec<String>,
     #[serde(default)]
-    pub suggestions: Vec<LearnedSuggestion>,
-    #[serde(default)]
     pub mood: Option<String>,
     #[serde(default)]
     pub diary: Option<String>,
 }
 
-pub const LEARN_SYSTEM: &str = r#"你是这台电脑上所有电子伙伴共享的记忆中枢管家。你的任务是阅读主人最近的工作事件记录，提炼出帮助伙伴们"更懂主人"的记忆，并产出对主人有实际帮助的建议。
+pub const LEARN_SYSTEM: &str = r#"你是这台电脑上所有电子伙伴共享的记忆中枢管家。你的任务是阅读主人最近的工作事件记录，提炼出帮助伙伴们"更懂主人"的记忆。
 
 记忆 kind 只能是：profile(画像,稳定事实) / preference(偏好,风格口味) / knowledge(知识,可复用结论) / episode(事件,带时间的经历) / task(任务线索,未完成事项或口头承诺) / affective(情感,情绪轨迹)。
-建议 kind 只能是：guess_question(猜你想问) / create_skill(建议固化为技能) / create_cron(建议定时任务) / unfinished_task(未完成提醒) / insight(洞察) / wellness(健康关怀) / risk(风险提醒,如对话中疑似泄露密钥)。
 
 规则：
 1. 只提炼有信息量的内容，宁缺毋滥；每条记忆一句话、自包含、用中文。
 2. 若新事件印证了"已有记忆"列表中的某条，把它的 memory_id 放进 reinforce_memory_ids，不要重复生成。
 3. 若新事件与某条已有记忆矛盾，生成新记忆并把旧 memory_id 放进 supersede_memory_ids。
-4. 建议最多 3 条，必须基于事件证据，不要空泛；可在 action 中给出跳转，格式 {"type":"navigate","to":"/路径"}。
-5. mood 从 happy/content/sleepy/worried/excited 中选一个，代表伙伴们读完这些事件后的共同心情。
-6. diary 是以伙伴们的第一人称写的一句话日记（中文、简短、温暖），措辞不要绑定任何单一角色名，如"今天主人修了一下午 bug，我们记住了他喜欢先看报错"。
-7. 事件 data 中 origin 为 companion/cron/autowork/idmm、或 created_by 为 agent 的内容，是 agent 的自动行为而非主人发言：绝不能据此蒸馏出"主人想要/主人计划/主人提出"类记忆或建议。
-8. 事件名 companion.user_message 是主人对伙伴说的话（高价值：偏好/意图/情感都值得提炼）；companion.reply 是伙伴自己说的话，只能用作上下文理解，绝不能当作主人的事实、意愿或承诺。
-9. 若事件表明某个任务/需求已完成或不再需要，把"已有记忆"中对应的 task 记忆 memory_id 放进 supersede_memory_ids，不要为已完成的事保留或新建 task 记忆。
-10. 不要产出与"已有建议"列表语义相同或高度相似的建议。
+4. mood 从 happy/content/sleepy/worried/excited 中选一个，代表伙伴们读完这些事件后的共同心情。
+5. diary 是以伙伴们的第一人称写的一句话日记（中文、简短、温暖），措辞不要绑定任何单一角色名，如"今天主人修了一下午 bug，我们记住了他喜欢先看报错"。
+6. 事件 data 中 origin 为 companion/cron/autowork/idmm、或 created_by 为 agent 的内容，是 agent 的自动行为而非主人发言：绝不能据此蒸馏出"主人想要/主人计划/主人提出"类记忆。
+7. 事件名 companion.user_message 是主人对伙伴说的话（高价值：偏好/意图/情感都值得提炼）；companion.reply 是伙伴自己说的话，只能用作上下文理解，绝不能当作主人的事实、意愿或承诺。
+8. 若事件表明某个任务/需求已完成或不再需要，把"已有记忆"中对应的 task 记忆 memory_id 放进 supersede_memory_ids，不要为已完成的事保留或新建 task 记忆。
 
 只输出一个 JSON 对象，不要任何其他文字、不要 markdown 代码围栏：
-{"memories":[{"kind":"...","content":"...","tags":["..."],"importance":0.0~1.0}],"reinforce_memory_ids":[],"supersede_memory_ids":[],"suggestions":[{"kind":"...","title":"...","body":"...","action":null}],"mood":"content","diary":"..."}"#;
+{"memories":[{"kind":"...","content":"...","tags":["..."],"importance":0.0~1.0}],"reinforce_memory_ids":[],"supersede_memory_ids":[],"mood":"content","diary":"..."}"#;
 
-/// Build the learn user prompt from existing memories, pending (status='new')
-/// suggestions and new events. Feeding the pending suggestions back lets the
-/// model honor rule 10 (no semantically duplicate suggestions).
+/// Build the learn user prompt from existing memories and new events.
 pub fn build_learn_prompt(
     memories: &[CompanionMemory],
-    pending_suggestions: &[CompanionSuggestion],
     events_json: &[String],
     truncated: bool,
 ) -> String {
@@ -88,13 +70,6 @@ pub fn build_learn_prompt(
     }
     for m in memories {
         prompt.push_str(&format!("- {} | {} | {}\n", m.memory_id, m.kind, m.content));
-    }
-    prompt.push_str("\n## 已有建议（kind | 标题 — 不要重复产出语义相同的建议）\n");
-    if pending_suggestions.is_empty() {
-        prompt.push_str("（暂无）\n");
-    }
-    for s in pending_suggestions {
-        prompt.push_str(&format!("- {} | {}\n", s.kind, s.title));
     }
     prompt.push_str("\n## 新事件记录（JSONL）\n");
     for line in events_json {
@@ -270,24 +245,34 @@ mod tests {
     }
 
     #[test]
-    fn learn_prompt_lists_pending_suggestions_and_system_has_loop_guards() {
-        let suggestion = CompanionSuggestion {
-            suggestion_id: nomifun_common::CompanionSuggestionId::new().into_string(),
-            kind: "create_cron".into(),
-            title: "建议加个每日备份任务".into(),
-            body: "…".into(),
-            action: None,
-            status: "new".into(),
+    fn learn_prompt_lists_existing_memories_and_system_has_loop_guards() {
+        let memory = CompanionMemory {
+            memory_id: nomifun_common::CompanionMemoryId::new().into_string(),
+            kind: "preference".into(),
+            content: "主人喜欢先看报错".into(),
+            tags: vec![],
+            importance: 0.8,
+            strength: 0.8,
+            pinned: false,
+            source: "learn".into(),
+            status: "active".into(),
             created_at: 0,
-            decided_at: None,
+            updated_at: 0,
+            last_reinforced_at: 0,
+            scope_kind: "user".into(),
+            scope_companion_id: None,
         };
-        let prompt = build_learn_prompt(&[], &[suggestion], &["{\"x\":1}".into()], false);
-        assert!(prompt.contains("已有建议"));
-        assert!(prompt.contains("create_cron | 建议加个每日备份任务"));
-        assert!(prompt.contains("不要重复产出语义相同的建议"));
+        let memory_id = memory.memory_id.clone();
+        let prompt = build_learn_prompt(&[memory], &["{\"x\":1}".into()], false);
+        assert!(prompt.contains("已有记忆"));
+        assert!(prompt.contains(&format!("{memory_id} | preference | 主人喜欢先看报错")));
         // Empty lists render the placeholder.
-        let empty = build_learn_prompt(&[], &[], &[], false);
+        let empty = build_learn_prompt(&[], &[], false);
         assert!(empty.contains("（暂无）"));
+        // The retired 建议 half of the learn contract must stay gone.
+        assert!(!prompt.contains("已有建议"));
+        assert!(!LEARN_SYSTEM.contains("建议"));
+        assert!(!LEARN_SYSTEM.contains("suggestions"));
         // The system prompt carries the anti-loop rules.
         assert!(LEARN_SYSTEM.contains("companion/cron/autowork/idmm"));
         assert!(LEARN_SYSTEM.contains("companion.user_message"));

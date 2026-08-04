@@ -26,8 +26,8 @@ use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::skill_sink::CompanionSkillStoreSink;
 use crate::store::{
     CompanionThread, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage, MemoryScope,
-    CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion,
-    SuggestionPage, memory_contents_similar,
+    CompanionMemory, CompanionSkill, CompanionStore,
+    memory_contents_similar,
 };
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
 use nomifun_extension::constants::SKILL_MANIFEST_FILE;
@@ -92,7 +92,6 @@ pub struct CompanionStatus {
     pub mood: String,
     pub memories_active: i64,
     pub memories_archived: i64,
-    pub suggestions_new: i64,
     /// This companion's active (usable) skills — drives the "专精 N 技能" expertise badge.
     pub skills_active: i64,
     pub model_configured: bool,
@@ -843,7 +842,7 @@ impl CompanionService {
         Ok(())
     }
 
-    /// One companion's status: per-companion xp/level, shared mood + memory/suggestion
+    /// One companion's status: per-companion xp/level, shared mood + memory
     /// counters, that companion's companion model flag.
     pub async fn companion_status(&self, id: &str) -> Result<CompanionStatus, AppError> {
         let profile = self.get_companion(id).await?;
@@ -856,7 +855,6 @@ impl CompanionService {
             mood: self.store.get_state("mood").await?.unwrap_or_else(|| "content".into()),
             memories_active: self.store.count_memories("active").await?,
             memories_archived: self.store.count_memories("archived").await?,
-            suggestions_new: self.store.count_suggestions("new").await?,
             skills_active: self.store.count_active_skills(id).await?,
             model_configured: profile.model.is_some(),
             collect_any_enabled: cfg.collect.any_enabled(),
@@ -1226,7 +1224,6 @@ impl CompanionService {
             mood: self.store.get_state("mood").await?.unwrap_or_else(|| "content".into()),
             memories_active: self.store.count_memories("active").await?,
             memories_archived: self.store.count_memories("archived").await?,
-            suggestions_new: self.store.count_suggestions("new").await?,
             skills_active: 0,
             model_configured: false,
             collect_any_enabled: cfg.collect.any_enabled(),
@@ -1429,173 +1426,6 @@ impl CompanionService {
         self.store.delete_memory(memory_id).await?;
         self.emitter.emit_memory_deleted(memory_id);
         Ok(())
-    }
-
-    // ----- suggestions -----
-
-    pub async fn list_suggestions(&self, status: Option<&str>, limit: i64) -> Result<Vec<CompanionSuggestion>, AppError> {
-        self.store.list_suggestions(status, limit).await
-    }
-
-    pub async fn list_suggestion_page(
-        &self,
-        status: Option<&str>,
-        limit: i64,
-        offset: i64,
-    ) -> Result<SuggestionPage, AppError> {
-        self.store.list_suggestion_page(status, limit, offset).await
-    }
-
-    pub async fn decide_suggestion(
-        &self,
-        suggestion_id: &str,
-        accept: bool,
-    ) -> Result<CompanionSuggestion, AppError> {
-        let (decided, newly) = self
-            .store
-            .decide_suggestion(suggestion_id, accept)
-            .await?;
-        // Gate side effects on `newly`: deciding is idempotent, so a stale
-        // card / double-click / cross-surface repeat returns Ok without
-        // re-awarding xp or re-broadcasting.
-        if accept && newly {
-            // Shared achievement: every companion grows when the owner accepts a
-            // suggestion (spec ruling 2).
-            let _ = self.store.add_xp_all(&self.registry.ids().await, 20).await;
-            // create_skill suggestions materialize on accept: promote the reviewed
-            // draft SKILL.md to the active dir + flip the registry row to active
-            // (design §6). Inside the `newly` gate → re-accept never re-materializes.
-            // A materialize failure must not fail the decide (idempotency / UX): log it.
-            if decided.kind == "create_skill" {
-                if let Some(action) = &decided.action {
-                    if let Err(e) = self.materialize_create_skill(action).await {
-                        tracing::warn!(error = %e, suggestion_id, "failed to materialize accepted skill");
-                    }
-                }
-            }
-            // Summon write-back (spec §B3 确认式回写): a memory proposed from a
-            // summoned work session only enters companion_memories on accept.
-            // Inside the `newly` gate → re-accept never duplicates the memory.
-            if decided.kind == crate::summon_support::SUMMON_MEMORY_SUGGESTION_KIND {
-                if let Some(action) = &decided.action {
-                    if let Err(e) = self.materialize_proposed_memory(action).await {
-                        tracing::warn!(error = %e, suggestion_id, "failed to materialize accepted memory proposal");
-                    }
-                }
-            }
-        }
-        // Rejecting a create_skill suggestion records correction feedback so the
-        // originating mined pattern is suppressed from re-proposal (纠偏回流), and
-        // archives the draft row. Inside `newly` → idempotent.
-        if !accept && newly && decided.kind == "create_skill" {
-            if let Some(action) = &decided.action {
-                if let Err(e) = self.reject_create_skill(action).await {
-                    tracing::warn!(error = %e, suggestion_id, "failed to record skill rejection");
-                }
-            }
-        }
-        if newly {
-            // Let every open surface (panel, desktop bubble, console) drop the
-            // now-decided card live instead of 404ing on a stale snapshot.
-            self.emitter.emit_suggestion_decided(&decided);
-        }
-        Ok(decided)
-    }
-
-    /// Promote a reviewed skill draft to active on suggestion-accept (design §6).
-    /// Reads the draft SKILL.md and rewrites it into the companion's active dir,
-    /// then flips the registry row to `active` and emits `skill-learned`.
-    /// Caller gates this inside the `newly` branch so it never runs twice.
-    async fn materialize_create_skill(&self, action: &serde_json::Value) -> Result<(), AppError> {
-        let Some(companion_skill_id) = action
-            .get("companion_skill_id")
-            .and_then(|value| value.as_str())
-            .filter(|value| nomifun_common::validate_uuidv7(value).is_ok())
-        else {
-            return Ok(());
-        };
-        let Some(companion_id) = action
-            .get("companion_id")
-            .and_then(|v| v.as_str())
-            .and_then(|id| CompanionId::try_from(id).ok())
-        else {
-            return Ok(());
-        };
-        // Delegate to the single idempotent skill-decide path (also used by the
-        // Skills-tab review UI). draft→active promote + emit happen there.
-        self.decide_companion_skill(
-            companion_id.as_str(),
-            companion_skill_id,
-            true,
-            None,
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// Materialize an accepted summon memory proposal (spec §B3): parse the
-    /// suggestion card's action payload and insert the memory as the summoned
-    /// companion's PRIVATE memory (`source="summon"`). Store-level insert
-    /// redacts secrets and dedup is checked first so a re-proposed accepted
-    /// fact never duplicates. Caller gates this inside the `newly` branch.
-    async fn materialize_proposed_memory(&self, action: &serde_json::Value) -> Result<(), AppError> {
-        let Some(kind) = action
-            .get("memory_kind")
-            .and_then(|v| v.as_str())
-            .filter(|kind| crate::store::MEMORY_KINDS.contains(kind))
-        else {
-            return Ok(());
-        };
-        let Some(content) = action
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|content| !content.is_empty())
-        else {
-            return Ok(());
-        };
-        let scope = action
-            .get("companion_id")
-            .and_then(|v| v.as_str())
-            .and_then(|id| CompanionId::try_from(id).ok())
-            .map(|id| crate::store::MemoryScope::Companion(id.into_string()))
-            .unwrap_or(crate::store::MemoryScope::Shared);
-        if self.store.find_similar_active(kind, content).await?.is_some() {
-            return Ok(());
-        }
-        let memory = self
-            .store
-            .insert_memory_scoped(kind, content, &[], 0.8, "summon", scope)
-            .await?;
-        self.emitter.emit_memory_created(&memory);
-        Ok(())
-    }
-
-    /// Rejecting a create_skill suggestion → delegate to the single idempotent skill-decide
-    /// path (accept=false), which archives the draft + records signature feedback (纠偏回流).
-    async fn reject_create_skill(&self, action: &serde_json::Value) -> Result<(), AppError> {
-        let Some(companion_skill_id) = action
-            .get("companion_skill_id")
-            .and_then(|value| value.as_str())
-            .filter(|value| nomifun_common::validate_uuidv7(value).is_ok())
-        else {
-            return Ok(());
-        };
-        let Some(companion_id) = action
-            .get("companion_id")
-            .and_then(|v| v.as_str())
-            .and_then(|id| CompanionId::try_from(id).ok())
-        else {
-            return Ok(());
-        };
-        self.decide_companion_skill(
-            companion_id.as_str(),
-            companion_skill_id,
-            false,
-            None,
-        )
-        .await
-        .map(|_| ())
     }
 
     /// List one page of companion skills for the UI. Only skills on the selected page
@@ -2022,16 +1852,6 @@ impl nomifun_ai_agent::CompanionSummonProvider for CompanionService {
         )))
     }
 
-    fn summon_proposal_sink(
-        &self,
-        companion_id: &str,
-    ) -> Result<Arc<dyn nomifun_ai_agent::SummonProposalSink>, AppError> {
-        Ok(Arc::new(crate::summon_support::SummonSuggestionSink::new(
-            self.store.clone(),
-            self.emitter.clone(),
-            Self::parse_summon_companion_id(companion_id)?,
-        )))
-    }
 
     fn summon_context_sink(
         &self,
@@ -2236,23 +2056,18 @@ mod tests {
             .await
             .unwrap();
         let demo_skill_id = svc.store.find_owned_skill_by_name(&cid, "demo").await.unwrap().unwrap().companion_skill_id;
-        let action = serde_json::json!({"type": "create_skill", "companion_skill_id": demo_skill_id, "companion_id": cid});
-        let sug = svc.store.insert_suggestion("create_skill", "学会 demo", "body", Some(&action)).await.unwrap();
 
-        // Accept → promote draft to active.
-        svc.decide_suggestion(&sug.suggestion_id, true).await.unwrap();
+        // Accept → promote draft to active. Reviewed on the 技能 surface: the
+        // 建议 card that used to wrap this decision was retired.
+        svc.decide_companion_skill(&cid, &demo_skill_id, true, None).await.unwrap();
         let active_md = svc.skill_paths.user_skills_dir.join("companion").join(&cid).join("demo").join("SKILL.md");
         let draft_dir = svc.skill_paths.user_skills_dir.join("_drafts").join(&cid).join("demo");
         assert!(active_md.exists(), "active SKILL.md missing at {}", active_md.display());
         assert!(!draft_dir.exists(), "promoted draft must be removed");
         assert_eq!(svc.store.find_owned_skill_by_name(&cid, "demo").await.unwrap().unwrap().status, "active");
-        let xp1 = svc.store.get_companion_state_i64(&cid, "xp").await.unwrap();
-        assert!(xp1 >= 20, "accept should grant shared XP");
 
-        // Re-accept → idempotent: no re-award, status unchanged.
-        svc.decide_suggestion(&sug.suggestion_id, true).await.unwrap();
-        let xp2 = svc.store.get_companion_state_i64(&cid, "xp").await.unwrap();
-        assert_eq!(xp1, xp2, "re-accept must not re-award xp");
+        // Re-accept → idempotent: status unchanged.
+        svc.decide_companion_skill(&cid, &demo_skill_id, true, None).await.unwrap();
         assert_eq!(svc.store.find_owned_skill_by_name(&cid, "demo").await.unwrap().unwrap().status, "active");
     }
 
@@ -2826,83 +2641,6 @@ mod tests {
         // A failed delete (unknown id) must not fire the hooks again.
         assert!(matches!(svc.delete_companion(&p.companion_id).await, Err(AppError::NotFound(_))));
         assert_eq!(hook.0.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn decide_suggestion_awards_every_companion() {
-        let dir = tempfile::tempdir().unwrap();
-        let svc = service(dir.path()).await;
-        let a = svc.create_companion("甲", "ink").await.unwrap();
-        let b = svc.create_companion("乙", "boo").await.unwrap();
-
-        let s = svc
-            .store
-            .insert_suggestion("insight", "洞察", "试试看", None)
-            .await
-            .unwrap();
-        let decided = svc.decide_suggestion(&s.suggestion_id, true).await.unwrap();
-        assert_eq!(decided.status, "accepted");
-        assert_eq!(svc.store.get_companion_state_i64(&a.companion_id, "xp").await.unwrap(), 20);
-        assert_eq!(svc.store.get_companion_state_i64(&b.companion_id, "xp").await.unwrap(), 20);
-        // Shared/global xp stays untouched.
-        assert_eq!(svc.store.get_state_i64("xp").await.unwrap(), 0);
-
-        // Idempotent: re-accepting the same suggestion (stale card / double
-        // click / cross-surface repeat) must NOT re-award xp.
-        let again = svc.decide_suggestion(&s.suggestion_id, true).await.unwrap();
-        assert_eq!(again.status, "accepted");
-        assert_eq!(svc.store.get_companion_state_i64(&a.companion_id, "xp").await.unwrap(), 20);
-        assert_eq!(svc.store.get_companion_state_i64(&b.companion_id, "xp").await.unwrap(), 20);
-
-        // Dismissals award nothing.
-        let s2 = svc
-            .store
-            .insert_suggestion("insight", "再来", "不要", None)
-            .await
-            .unwrap();
-        svc.decide_suggestion(&s2.suggestion_id, false).await.unwrap();
-        assert_eq!(svc.store.get_companion_state_i64(&a.companion_id, "xp").await.unwrap(), 20);
-    }
-
-    #[tokio::test]
-    async fn accepting_memory_proposal_materializes_private_memory() {
-        let dir = tempfile::tempdir().unwrap();
-        let svc = service(dir.path()).await;
-        let companion = svc.create_companion("甲", "ink").await.unwrap();
-
-        let sink = crate::summon_support::SummonSuggestionSink::new(
-            svc.store.clone(),
-            svc.emitter.clone(),
-            nomifun_common::CompanionId::try_from(companion.companion_id.as_str()).unwrap(),
-        );
-        use nomifun_ai_agent::SummonProposalSink as _;
-        sink.propose(&conversation_fixture(9), "preference", "主人喜欢 TDD 流程", "多次强调")
-            .await
-            .unwrap();
-        // Proposal alone must not create the memory.
-        assert_eq!(svc.store.count_memories("active").await.unwrap(), 0);
-
-        let card = &svc.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
-        let decided = svc.decide_suggestion(&card.suggestion_id, true).await.unwrap();
-        assert_eq!(decided.status, "accepted");
-        let memories = svc.store.list_memories(&crate::store::MemoryFilter::default()).await.unwrap();
-        assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].content, "主人喜欢 TDD 流程");
-        assert_eq!(memories[0].source, "summon");
-        assert_eq!(memories[0].scope_kind, "companion");
-        assert_eq!(memories[0].scope_companion_id.as_deref(), Some(companion.companion_id.as_str()));
-
-        // Idempotent: re-accepting must not duplicate.
-        svc.decide_suggestion(&card.suggestion_id, true).await.unwrap();
-        assert_eq!(svc.store.count_memories("active").await.unwrap(), 1);
-
-        // Dismissal of a second proposal never materializes.
-        sink.propose(&conversation_fixture(9), "task", "帮主人调研咖啡豆", "任务线索")
-            .await
-            .unwrap();
-        let card2 = &svc.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
-        svc.decide_suggestion(&card2.suggestion_id, false).await.unwrap();
-        assert_eq!(svc.store.count_memories("active").await.unwrap(), 1);
     }
 
     #[tokio::test]

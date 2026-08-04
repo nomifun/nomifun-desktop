@@ -297,7 +297,7 @@ historical row migrations. The multi-companion layout:
 │   ├── config.json              SharedCompanionConfig: collect switches, event retention/capacity, learn interval & model, default_companion_id
 │   ├── events/YYYYMMDD.jsonl    raw events (automatic age/hard-cap cleanup; privacy-sensitive; export is opt-in)
 │   └── memory.db                standalone SQLite (PRAGMA user_version ladder):
-│                                shared memories/suggestions + per-companion runtime
+│                                shared memories + per-companion runtime
 │                                state (companion_runtime_state: XP, …)
 └── companions/
     └── {companion_id}/                bare UUIDv7 companion ID; the directory is the source of truth

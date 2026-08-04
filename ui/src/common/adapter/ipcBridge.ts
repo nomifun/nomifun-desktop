@@ -180,7 +180,6 @@ import {
   parseCompanionMemoryId,
   parseCompanionSessionWindowId,
   parseCompanionSkillId,
-  parseCompanionSuggestionId,
   parseConversationId,
   parseCronJobId,
   parseCronJobRunId,
@@ -217,7 +216,6 @@ import {
   type CompanionMemoryId,
   type CompanionSessionWindowId,
   type CompanionSkillId,
-  type CompanionSuggestionId,
   type FigureId,
   type IdmmInterventionId,
   type ExecutionAttemptId,
@@ -4304,22 +4302,6 @@ export interface ICompanionMemoryMergeGroup {
   memories: ICompanionMemory[];
 }
 
-export interface ICompanionSuggestion {
-  suggestion_id: CompanionSuggestionId;
-  kind: string;
-  title: string;
-  body: string;
-  action?: { type: string; to?: string } | null;
-  status: 'new' | 'accepted' | 'dismissed';
-  created_at: number;
-  decided_at?: number | null;
-}
-
-export interface ICompanionSuggestionPage {
-  items: ICompanionSuggestion[];
-  total: number;
-}
-
 /** A companion's self-evolved skill (registry row + SKILL.md description). snake_case = Rust JSON 1:1. */
 export interface ICompanionSkill {
   companion_skill_id: CompanionSkillId;
@@ -4361,7 +4343,6 @@ export interface ICompanionLearnResult {
   status: string;
   events_processed: number;
   memories_added: number;
-  suggestions_added: number;
   error?: string | null;
   summary?: string | null;
 }
@@ -4374,7 +4355,6 @@ export interface ICompanionStatus {
   mood: string;
   memories_active: number;
   memories_archived: number;
-  suggestions_new: number;
   skills_active: number;
   model_configured: boolean;
   collect_any_enabled: boolean;
@@ -4630,14 +4610,6 @@ const fromApiCompanionMemory = (raw: unknown): ICompanionMemory => {
   };
 };
 
-const fromApiCompanionSuggestion = (raw: unknown): ICompanionSuggestion => {
-  const value = asWireObject(raw, 'companion suggestion');
-  return {
-    ...(value as unknown as ICompanionSuggestion),
-    suggestion_id: parseCompanionSuggestionId(value.suggestion_id),
-  };
-};
-
 const fromApiCompanionSkill = (raw: unknown): ICompanionSkill => {
   const value = asWireObject(raw, 'companion skill');
   if (
@@ -4671,7 +4643,7 @@ const fromApiCompanionLearnResult = (raw: unknown): ICompanionLearnResult => {
   if (typeof value.status !== 'string') {
     throw new TypeError('companion learn result status must be a string');
   }
-  for (const countField of ['events_processed', 'memories_added', 'suggestions_added'] as const) {
+  for (const countField of ['events_processed', 'memories_added'] as const) {
     if (typeof value[countField] !== 'number' || !Number.isSafeInteger(value[countField])) {
       throw new TypeError(`companion learn result ${countField} must be a safe integer`);
     }
@@ -4685,7 +4657,6 @@ const fromApiCompanionLearnResult = (raw: unknown): ICompanionLearnResult => {
     status: value.status,
     events_processed: value.events_processed as number,
     memories_added: value.memories_added as number,
-    suggestions_added: value.suggestions_added as number,
     error: value.error as string | null | undefined,
     summary: value.summary as string | null | undefined,
   };
@@ -4839,24 +4810,6 @@ export const companion = {
       '/api/companion/memories/merge'
     ),
     fromApiCompanionMemory
-  ),
-  listSuggestions: withResponseMap(
-    httpGet<{ items: unknown[]; total: number }, { status?: string; limit?: number; offset?: number }>((p) => {
-      const params = new URLSearchParams();
-      if (p?.status) params.set('status', p.status);
-      if (p?.limit) params.set('limit', String(p.limit));
-      if (p?.offset) params.set('offset', String(p.offset));
-      const qs = params.toString();
-      return `/api/companion/suggestions${qs ? `?${qs}` : ''}`;
-    }),
-    (raw): ICompanionSuggestionPage => ({ ...raw, items: raw.items.map(fromApiCompanionSuggestion) })
-  ),
-  decideSuggestion: withResponseMap(
-    httpPost<unknown, { suggestion_id: CompanionSuggestionId; accept: boolean }>(
-      (p) => `/api/companion/suggestions/${p.suggestion_id}/decide`,
-      (p) => ({ accept: p.accept })
-    ),
-    fromApiCompanionSuggestion
   ),
   // ── Self-evolved skills (P2: see + edit). Addressed by companion_id + companion_skill_id. ──
   listSkills: withResponseMap(
@@ -5083,23 +5036,6 @@ export const companion = {
   ),
   /** Import a memory/companion bundle; the backend dispatches on manifest.kind. */
   importCompanionBundle: httpPost<Record<string, unknown>, { src_path: string }>('/api/companion/import'),
-  onSuggestionCreated: wsMappedEmitter<ICompanionSuggestion & { companion_id?: CompanionId }>(
-    'companion.suggestion-created',
-    (raw) => {
-      const value = asWireObject(raw, 'companion suggestion-created event');
-      return {
-        ...fromApiCompanionSuggestion(value),
-        ...(value.companion_id == null ? {} : { companion_id: parseCompanionId(value.companion_id) }),
-      };
-    }
-  ),
-  /** A suggestion was accepted/dismissed (any surface) — drop the now-decided
-   *  card live so other open surfaces don't keep a stale `new` snapshot that
-   *  404s on the next decide. Payload carries the decided suggestion. */
-  onSuggestionDecided: wsMappedEmitter<ICompanionSuggestion>(
-    'companion.suggestion-decided',
-    fromApiCompanionSuggestion
-  ),
   onLearnStarted: wsMappedEmitter<{ companion_id?: CompanionId }>('companion.learn-started', (raw) => {
     const value = asWireObject(raw, 'companion learn-started event');
     return value.companion_id == null ? {} : { companion_id: parseCompanionId(value.companion_id) };

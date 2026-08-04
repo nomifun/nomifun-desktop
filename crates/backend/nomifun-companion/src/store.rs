@@ -1,5 +1,5 @@
 //! The companion's dedicated sqlite store (`{companion_dir}/memory.db`): memories,
-//! suggestions, companion-chat history, and a small
+//! companion-chat history, and a small
 //! key-value state table (xp/mood/cursor/rolling chat summary).
 //!
 //! Deliberately a separate db file from the main app database so "clear all
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use nomifun_common::{
     AppError, CompanionId, CompanionMemoryId,
-    CompanionSessionWindowId, CompanionSkillPatternId, CompanionSuggestionId, ConversationId,
+    CompanionSessionWindowId, CompanionSkillPatternId, ConversationId,
     TimestampMs, now_ms, validate_uuidv7,
 };
 use serde::{Deserialize, Serialize};
@@ -79,28 +79,6 @@ pub struct CompanionMemory {
     /// Owning canonical companion id when private; `None` when shared.
     pub scope_companion_id: Option<String>,
 }
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompanionSuggestion {
-    pub suggestion_id: String,
-    pub kind: String,
-    pub title: String,
-    pub body: String,
-    /// Optional UI action, e.g. `{"type":"navigate","to":"/scheduled"}`.
-    pub action: Option<serde_json::Value>,
-    pub status: String,
-    pub created_at: TimestampMs,
-    pub decided_at: Option<TimestampMs>,
-}
-
-/// One suggestion page and the number of rows matching the same status filter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SuggestionPage {
-    pub items: Vec<CompanionSuggestion>,
-    pub total: i64,
-}
-
 
 /// One registered companion chat thread (a real `type='nomi'` conversation
 /// owned by the main conversation domain; the companion only tracks membership).
@@ -455,24 +433,6 @@ CREATE TABLE IF NOT EXISTS companion_memories (
 );
 CREATE INDEX IF NOT EXISTS idx_companion_memories_kind ON companion_memories(kind, status, strength DESC);
 
-CREATE TABLE IF NOT EXISTS companion_suggestions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  suggestion_id TEXT NOT NULL UNIQUE CHECK (
-    length(suggestion_id) = 36
-    AND lower(suggestion_id) = suggestion_id
-    AND suggestion_id GLOB '????????-????-7???-[89ab]???-????????????'
-    AND replace(suggestion_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-  ),
-  kind TEXT NOT NULL,
-  title TEXT NOT NULL,
-  body TEXT NOT NULL,
-  action TEXT,
-  status TEXT NOT NULL DEFAULT 'new',
-  created_at INTEGER NOT NULL,
-  decided_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_companion_suggestions_status ON companion_suggestions(status, created_at DESC);
-
 CREATE TABLE IF NOT EXISTS companion_state (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   state_key TEXT NOT NULL UNIQUE,
@@ -790,23 +750,6 @@ const BASELINE_TABLES: &[TableContract] = &[
         ],
     },
     TableContract {
-        name: "companion_suggestions",
-        columns: &[
-            ColumnContract { name: "id", declared_type: "INTEGER", not_null: false, primary_key_position: 1 },
-            ColumnContract { name: "suggestion_id", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "kind", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "title", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "body", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "action", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
-            ColumnContract { name: "status", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "created_at", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "decided_at", declared_type: "INTEGER", not_null: false, primary_key_position: 0 },
-        ],
-        uuidv7_columns: &["suggestion_id"],
-        unique_indexes: &[UniqueIndexContract { columns: &["suggestion_id"], origin: "u", partial: false }],
-        required_sql_fragments: &[],
-    },
-    TableContract {
         name: "companion_state",
         columns: &[
             ColumnContract { name: "id", declared_type: "INTEGER", not_null: false, primary_key_position: 1 },
@@ -946,17 +889,6 @@ const BASELINE_INDEXES: &[NamedIndexContract] = &[
             IndexColumnContract { name: "kind", descending: false },
             IndexColumnContract { name: "status", descending: false },
             IndexColumnContract { name: "strength", descending: true },
-        ],
-        where_fragment: None,
-    },
-    NamedIndexContract {
-        name: "idx_companion_suggestions_status",
-        table: "companion_suggestions",
-        unique: false,
-        partial: false,
-        columns: &[
-            IndexColumnContract { name: "status", descending: false },
-            IndexColumnContract { name: "created_at", descending: true },
         ],
         where_fragment: None,
     },
@@ -1461,6 +1393,12 @@ async fn upgrade_schema_in_place(pool: &SqlitePool) -> Result<(), AppError> {
         .execute(pool)
         .await
         .map_err(db_err)?;
+    // The 建议 (suggestion) feature was removed end to end; its card table is
+    // presentation-only state with no remaining reader or writer.
+    sqlx::raw_sql("DROP TABLE IF EXISTS companion_suggestions")
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
     Ok(())
 }
 
@@ -1569,74 +1507,6 @@ fn row_to_companion_thread(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionThr
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
-}
-
-fn row_to_suggestion(
-    row: &sqlx::sqlite::SqliteRow,
-) -> Result<CompanionSuggestion, AppError> {
-    let suggestion_id: String = row.get("suggestion_id");
-    CompanionSuggestionId::try_from(suggestion_id.as_str())
-        .map_err(|error| invalid_disk_id("suggestion id", &suggestion_id, error))?;
-    let action: Option<String> = row.get("action");
-    let kind: String = row.get("kind");
-    let action = action
-        .map(|raw| -> Result<serde_json::Value, AppError> {
-            let action: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
-                AppError::Internal(format!(
-                    "companion store suggestion '{}' contains invalid action JSON: {error}",
-                    suggestion_id
-                ))
-            })?;
-            validate_suggestion_action(&kind, &action).map_err(|error| {
-                AppError::Internal(format!(
-                    "companion store suggestion '{}' contains invalid action: {error}",
-                    suggestion_id
-                ))
-            })?;
-            Ok(action)
-        })
-        .transpose()?;
-    Ok(CompanionSuggestion {
-        suggestion_id,
-        kind,
-        title: row.get("title"),
-        body: row.get("body"),
-        action,
-        status: row.get("status"),
-        created_at: row.get("created_at"),
-        decided_at: row.get("decided_at"),
-    })
-}
-
-fn validate_suggestion_action(
-    kind: &str,
-    action: &serde_json::Value,
-) -> Result<(), AppError> {
-    if kind != "create_skill" {
-        return Ok(());
-    }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct CreateSkillAction {
-        #[serde(rename = "type")]
-        action_type: String,
-        companion_id: String,
-        companion_skill_id: String,
-    }
-    let action: CreateSkillAction = serde_json::from_value(action.clone())
-        .map_err(|error| AppError::BadRequest(format!("invalid create_skill action: {error}")))?;
-    if action.action_type != "create_skill" {
-        return Err(AppError::BadRequest(
-            "create_skill action type must be 'create_skill'".into(),
-        ));
-    }
-    validate_companion_id(&action.companion_id, "create_skill action companion_id")?;
-    validate_uuidv7(&action.companion_skill_id).map_err(|error| {
-        AppError::BadRequest(format!(
-            "invalid create_skill action companion_skill_id: {error}"
-        ))
-    })?;
-    Ok(())
 }
 
 impl CompanionStore {
@@ -1818,7 +1688,7 @@ impl CompanionStore {
     }
 
     /// Grant the same XP delta to every listed companion (shared achievements like
-    /// successful learning passes and accepted suggestions).
+    /// successful learning passes).
     pub async fn add_xp_all(&self, companion_ids: &[String], delta: i64) -> Result<(), AppError> {
         for companion_id in companion_ids {
             self.add_companion_xp(companion_id, delta).await?;
@@ -2655,219 +2525,6 @@ impl CompanionStore {
         .await
         .map_err(db_err)?;
         rows.iter().map(row_to_window).collect()
-    }
-
-    // ----- suggestions -----
-
-    pub async fn insert_suggestion(
-        &self,
-        kind: &str,
-        title: &str,
-        body: &str,
-        action: Option<&serde_json::Value>,
-    ) -> Result<CompanionSuggestion, AppError> {
-        if let Some(action) = action {
-            validate_suggestion_action(kind, action)?;
-        }
-        let now = now_ms();
-        let s = CompanionSuggestion {
-            suggestion_id: CompanionSuggestionId::new().into_string(),
-            kind: kind.to_owned(),
-            title: title.to_owned(),
-            body: body.to_owned(),
-            action: action.cloned(),
-            status: "new".into(),
-            created_at: now,
-            decided_at: None,
-        };
-        sqlx::query("INSERT INTO companion_suggestions(suggestion_id, kind, title, body, action, status, created_at) VALUES(?,?,?,?,?,?,?)")
-            .bind(&s.suggestion_id)
-            .bind(&s.kind)
-            .bind(&s.title)
-            .bind(&s.body)
-            .bind(s.action.as_ref().map(|a| a.to_string()))
-            .bind(&s.status)
-            .bind(s.created_at)
-            .execute(&self.pool)
-            .await
-            .map_err(db_err)?;
-        Ok(s)
-    }
-
-    /// Crude dedup guard for suggestions, mirroring [`find_similar_active`]:
-    /// a pending (status='new') suggestion of the same kind whose normalized
-    /// title equals the candidate's — or contains it (either direction) when
-    /// the two are close in length — or whose normalized body equals the
-    /// candidate's. Decided suggestions never block a fresh one: the owner
-    /// may legitimately want a dismissed idea re-raised later.
-    pub async fn find_similar_suggestion(&self, kind: &str, title: &str, body: &str) -> Result<Option<String>, AppError> {
-        const CONTAINMENT_MIN_RATIO: f64 = 0.6;
-        let norm_title = title.trim().to_lowercase();
-        let norm_body = body.trim().to_lowercase();
-        let rows = sqlx::query("SELECT suggestion_id, title, body FROM companion_suggestions WHERE kind = ? AND status = 'new'")
-            .bind(kind)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_err)?;
-        for row in rows {
-            let existing_title: String = row.get("title");
-            let existing_title = existing_title.trim().to_lowercase();
-            if !norm_title.is_empty() && existing_title == norm_title {
-                let id: String = row.get("suggestion_id");
-                CompanionSuggestionId::try_from(id.as_str())
-                    .map_err(|error| invalid_disk_id("suggestion id", &id, error))?;
-                return Ok(Some(id));
-            }
-            let (short_len, long_len) = {
-                let a = norm_title.chars().count();
-                let b = existing_title.chars().count();
-                (a.min(b), a.max(b))
-            };
-            let close_in_length = long_len > 0 && (short_len as f64 / long_len as f64) >= CONTAINMENT_MIN_RATIO;
-            if close_in_length
-                && !norm_title.is_empty()
-                && (existing_title.contains(&norm_title) || norm_title.contains(&existing_title))
-            {
-                let id: String = row.get("suggestion_id");
-                CompanionSuggestionId::try_from(id.as_str())
-                    .map_err(|error| invalid_disk_id("suggestion id", &id, error))?;
-                return Ok(Some(id));
-            }
-            if !norm_body.is_empty() {
-                let existing_body: String = row.get("body");
-                if existing_body.trim().to_lowercase() == norm_body {
-                    let id: String = row.get("suggestion_id");
-                    CompanionSuggestionId::try_from(id.as_str())
-                        .map_err(|error| invalid_disk_id("suggestion id", &id, error))?;
-                    return Ok(Some(id));
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    /// "Touch" a still-pending suggestion the learner just re-derived: bump
-    /// `created_at` so it re-floats to the top of the (created_at DESC)
-    /// list as freshly reinforced evidence. The table has no updated_at or
-    /// hit-count column — re-stamping the only timestamp is the minimal
-    /// signal that the suggestion keeps coming up. Decided suggestions are
-    /// never touched (their lifecycle is over).
-    pub async fn touch_suggestion(&self, suggestion_id: &str) -> Result<(), AppError> {
-        CompanionSuggestionId::try_from(suggestion_id)
-            .map_err(|error| AppError::BadRequest(format!("invalid suggestion id: {error}")))?;
-        sqlx::query("UPDATE companion_suggestions SET created_at = ? WHERE suggestion_id = ? AND status = 'new'")
-            .bind(now_ms())
-            .bind(suggestion_id)
-            .execute(&self.pool)
-            .await
-            .map_err(db_err)?;
-        Ok(())
-    }
-
-    pub async fn list_suggestions(&self, status: Option<&str>, limit: i64) -> Result<Vec<CompanionSuggestion>, AppError> {
-        let rows = if let Some(status) = status {
-            sqlx::query("SELECT * FROM companion_suggestions WHERE status = ? ORDER BY created_at DESC LIMIT ?")
-                .bind(status)
-                .bind(limit.clamp(1, 500))
-                .fetch_all(&self.pool)
-                .await
-        } else {
-            sqlx::query("SELECT * FROM companion_suggestions ORDER BY created_at DESC LIMIT ?")
-                .bind(limit.clamp(1, 500))
-                .fetch_all(&self.pool)
-                .await
-        }
-        .map_err(db_err)?;
-        rows.iter().map(row_to_suggestion).collect()
-    }
-
-    pub async fn list_suggestion_page(
-        &self,
-        status: Option<&str>,
-        limit: i64,
-        offset: i64,
-    ) -> Result<SuggestionPage, AppError> {
-        let limit = limit.clamp(1, 500);
-        let offset = offset.max(0);
-        let (rows, total) = if let Some(status) = status {
-            let rows = sqlx::query(
-                "SELECT * FROM companion_suggestions WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            )
-            .bind(status)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_err)?;
-            let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM companion_suggestions WHERE status = ?")
-                .bind(status)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(db_err)?
-                .get("n");
-            (rows, total)
-        } else {
-            let rows = sqlx::query("SELECT * FROM companion_suggestions ORDER BY created_at DESC LIMIT ? OFFSET ?")
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(db_err)?;
-            let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM companion_suggestions")
-                .fetch_one(&self.pool)
-                .await
-                .map_err(db_err)?
-                .get("n");
-            (rows, total)
-        };
-
-        Ok(SuggestionPage {
-            items: rows.iter().map(row_to_suggestion).collect::<Result<Vec<_>, _>>()?,
-            total,
-        })
-    }
-
-    pub async fn count_suggestions(&self, status: &str) -> Result<i64, AppError> {
-        let row = sqlx::query("SELECT COUNT(*) AS n FROM companion_suggestions WHERE status = ?")
-            .bind(status)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(db_err)?;
-        Ok(row.get("n"))
-    }
-
-    /// Decide a suggestion. **Idempotent**: deciding an already-decided
-    /// suggestion is a no-op that returns its current state (first decision
-    /// wins) rather than an error — two surfaces (panel + desktop bubble) and
-    /// double-clicks would otherwise race the `status = 'new'` guard and 404.
-    /// Only a genuinely missing row is `NotFound`. The returned bool is
-    /// `newly_decided`: true only when THIS call performed the new->decided
-    /// transition, so callers can gate side effects (xp award, events) on it.
-    pub async fn decide_suggestion(&self, suggestion_id: &str, accept: bool) -> Result<(CompanionSuggestion, bool), AppError> {
-        CompanionSuggestionId::try_from(suggestion_id)
-            .map_err(|error| AppError::BadRequest(format!("invalid suggestion id: {error}")))?;
-        let status = if accept { "accepted" } else { "dismissed" };
-        let result = sqlx::query("UPDATE companion_suggestions SET status = ?, decided_at = ? WHERE suggestion_id = ? AND status = 'new'")
-            .bind(status)
-            .bind(now_ms())
-            .bind(suggestion_id)
-            .execute(&self.pool)
-            .await
-            .map_err(db_err)?;
-        let newly_decided = result.rows_affected() >= 1;
-        // Always read back: rows_affected == 0 means either the row is gone
-        // (true 404) or it was already decided (idempotent success).
-        let row = sqlx::query("SELECT * FROM companion_suggestions WHERE suggestion_id = ?")
-            .bind(suggestion_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(db_err)?;
-        match row {
-            Some(row) => Ok((row_to_suggestion(&row)?, newly_decided)),
-            None => Err(AppError::NotFound(format!(
-                "suggestion '{suggestion_id}' not found"
-            ))),
-        }
     }
 
     // ----- export/import support (spec §4.8) -----
@@ -3917,48 +3574,48 @@ mod tests {
     async fn v3_baseline_rejects_missing_columns_uuid_checks_uniques_and_indexes() {
         let malformed = [
             (
-                SCHEMA.replacen("  action TEXT,\n", "", 1),
-                "all tables exist but companion_suggestions.action is missing",
+                SCHEMA.replacen("  embedding_model TEXT,\n", "", 1),
+                "all tables exist but companion_memories.embedding_model is missing",
             ),
             (
-                SCHEMA.replacen("  action TEXT,\n", "  action INTEGER,\n", 1),
-                "companion_suggestions.action has the wrong declared type",
+                SCHEMA.replacen("  embedding_model TEXT,\n", "  embedding_model INTEGER,\n", 1),
+                "companion_memories.embedding_model has the wrong declared type",
             ),
             (
-                SCHEMA.replacen("  action TEXT,\n", "  action TEXT NOT NULL,\n", 1),
-                "companion_suggestions.action has the wrong nullability",
+                SCHEMA.replacen("  embedding_model TEXT,\n", "  embedding_model TEXT NOT NULL,\n", 1),
+                "companion_memories.embedding_model has the wrong nullability",
             ),
             (
                 SCHEMA.replacen(
-                    "  decided_at INTEGER\n);",
-                    "  decided_at INTEGER,\n  unexpected TEXT\n);",
+                    "  embedding_model TEXT,\n  CHECK(",
+                    "  embedding_model TEXT,\n  unexpected TEXT,\n  CHECK(",
                     1,
                 ),
-                "companion_suggestions has an extra column",
+                "companion_memories has an extra column",
             ),
             (
                 SCHEMA.replacen(
-                    "suggestion_id TEXT NOT NULL UNIQUE CHECK (\n    length(suggestion_id) = 36\n    AND lower(suggestion_id) = suggestion_id\n    AND suggestion_id GLOB '????????-????-7???-[89ab]???-????????????'\n    AND replace(suggestion_id, '-', '') NOT GLOB '*[^0-9a-f]*'\n  )",
-                    "suggestion_id TEXT NOT NULL UNIQUE",
+                    "memory_id TEXT NOT NULL UNIQUE CHECK (\n    length(memory_id) = 36\n    AND lower(memory_id) = memory_id\n    AND memory_id GLOB '????????-????-7???-[89ab]???-????????????'\n    AND replace(memory_id, '-', '') NOT GLOB '*[^0-9a-f]*'\n  )",
+                    "memory_id TEXT NOT NULL UNIQUE",
                     1,
                 ),
-                "suggestion_id has no UUIDv7 CHECK",
+                "memory_id has no UUIDv7 CHECK",
             ),
             (
                 SCHEMA.replacen(
-                    "suggestion_id TEXT NOT NULL UNIQUE CHECK",
-                    "suggestion_id TEXT NOT NULL CHECK",
+                    "memory_id TEXT NOT NULL UNIQUE CHECK",
+                    "memory_id TEXT NOT NULL CHECK",
                     1,
                 ),
-                "suggestion_id has no UNIQUE constraint",
+                "memory_id has no UNIQUE constraint",
             ),
             (
                 SCHEMA.replacen(
-                    "CREATE INDEX IF NOT EXISTS idx_companion_suggestions_status ON companion_suggestions(status, created_at DESC);\n",
+                    "CREATE INDEX IF NOT EXISTS idx_companion_memories_kind ON companion_memories(kind, status, strength DESC);\n",
                     "",
                     1,
                 ),
-                "required suggestion status index is missing",
+                "required memory kind index is missing",
             ),
             (
                 SCHEMA.replacen(
@@ -3970,7 +3627,7 @@ mod tests {
             ),
             (
                 format!(
-                    "{SCHEMA}\nCREATE INDEX unexpected_v3_index ON companion_suggestions(kind);"
+                    "{SCHEMA}\nCREATE INDEX unexpected_v3_index ON companion_memories(kind);"
                 ),
                 "an extra user-defined index is present",
             ),
@@ -4051,7 +3708,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_and_suggestion_use_named_unique_ids() {
+    async fn memory_uses_a_named_unique_id() {
         let store = CompanionStore::open_memory().await.unwrap();
         let memory = store
             .insert_memory("knowledge", "Rust", &[], 0.8, "manual")
@@ -4061,15 +3718,6 @@ mod tests {
             store.get_memory(&memory.memory_id).await.unwrap().unwrap().memory_id,
             memory.memory_id
         );
-
-        let suggestion = store.insert_suggestion("insight", "标题", "正文", None).await.unwrap();
-        let (decided, newly_decided) = store
-            .decide_suggestion(&suggestion.suggestion_id, true)
-            .await
-            .unwrap();
-        assert!(newly_decided);
-        assert_eq!(decided.suggestion_id, suggestion.suggestion_id);
-
     }
 
     #[tokio::test]
@@ -4209,7 +3857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v3_upgrade_drops_learn_history_and_preserves_learning_and_evolution_state() {
+    async fn v3_upgrade_drops_retired_tables_and_preserves_learning_and_evolution_state() {
         let root = tempfile::tempdir().unwrap();
         let database_path = root.path().join("memory.db");
         let memory_id = CompanionMemoryId::new().into_string();
@@ -4227,6 +3875,8 @@ mod tests {
                 .unwrap();
             sqlx::raw_sql(SCHEMA).execute(&pool).await.unwrap();
             sqlx::raw_sql(FTS_SCHEMA).execute(&pool).await.unwrap();
+            // Both retired tables are re-created by hand: they are gone from
+            // SCHEMA, so only an explicit legacy stanza can prove the drop.
             sqlx::raw_sql(
                 r#"
 CREATE TABLE companion_learn_runs (
@@ -4241,6 +3891,18 @@ CREATE TABLE companion_learn_runs (
   error TEXT,
   summary TEXT
 );
+CREATE TABLE companion_suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  suggestion_id TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  action TEXT,
+  status TEXT NOT NULL DEFAULT 'new',
+  created_at INTEGER NOT NULL,
+  decided_at INTEGER
+);
+CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, created_at DESC);
 "#,
             )
             .execute(&pool)
@@ -4296,17 +3958,28 @@ CREATE TABLE companion_learn_runs (
             .execute(&pool)
             .await
             .unwrap();
+            sqlx::query(
+                "INSERT INTO companion_suggestions(suggestion_id, kind, title, body, status, created_at)
+                 VALUES(?, 'insight', '旧建议', '正文', 'new', 1)",
+            )
+            .bind(nomifun_common::generate_id())
+            .execute(&pool)
+            .await
+            .unwrap();
             pool.close().await;
         }
 
         let store = CompanionStore::open(root.path()).await.unwrap();
-        let retired_table_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'companion_learn_runs'",
-        )
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
-        assert_eq!(retired_table_count, 0);
+        for retired in ["companion_learn_runs", "companion_suggestions"] {
+            let retired_table_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(retired)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+            assert_eq!(retired_table_count, 0, "{retired} must be dropped in place");
+        }
         assert_eq!(
             store.get_memory(&memory_id).await.unwrap().unwrap().content,
             "保留的学习记忆"

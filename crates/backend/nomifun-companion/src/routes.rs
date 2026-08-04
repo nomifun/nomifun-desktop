@@ -23,7 +23,7 @@ use crate::service::{
 use crate::state::CompanionRouterState;
 use crate::store::{
     MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryScope,
-    CompanionMemory, CompanionSkill, CompanionSuggestion, SuggestionPage,
+    CompanionMemory, CompanionSkill,
 };
 
 pub fn companion_routes(state: CompanionRouterState) -> Router {
@@ -59,11 +59,6 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
         .route("/api/companion/memories/batch", post(batch_memories))
         .route("/api/companion/memories/merge-suggestions", post(memory_merge_suggestions))
         .route("/api/companion/memories/merge", post(merge_memories))
-        .route("/api/companion/suggestions", get(list_suggestions))
-        .route(
-            "/api/companion/suggestions/{suggestion_id}/decide",
-            post(decide_suggestion),
-        )
         .route("/api/companion/companions/{companion_id}/skills", get(list_companion_skills))
         .route("/api/companion/companions/{companion_id}/weekly-digest", get(weekly_digest))
         .route("/api/companion/companions/{companion_id}/digests", get(list_day_digests))
@@ -370,47 +365,6 @@ async fn merge_memories(
         state
             .service
             .merge_memories(&req.group, &req.merged_content, &req.kind)
-            .await?,
-    )))
-}
-
-#[derive(Deserialize)]
-struct ListSuggestionsQuery {
-    status: Option<String>,
-    limit: Option<i64>,
-    offset: Option<i64>,
-}
-
-async fn list_suggestions(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Query(query): Query<ListSuggestionsQuery>,
-) -> Result<Json<ApiResponse<SuggestionPage>>, AppError> {
-    let status = query.status.filter(|s| !s.is_empty());
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .list_suggestion_page(status.as_deref(), query.limit.unwrap_or(100), query.offset.unwrap_or(0))
-            .await?,
-    )))
-}
-
-#[derive(Deserialize)]
-struct DecideSuggestionRequest {
-    accept: bool,
-}
-
-async fn decide_suggestion(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(suggestion_id): Path<String>,
-    body: Result<Json<DecideSuggestionRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<CompanionSuggestion>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .decide_suggestion(&suggestion_id, req.accept)
             .await?,
     )))
 }
@@ -1137,7 +1091,6 @@ mod tests {
             "events_processed",
             "memories_added",
             "status",
-            "suggestions_added",
             "summary",
         ]
         .into_iter()

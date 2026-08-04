@@ -29,7 +29,7 @@ global lives in the **shared-domain** tabs:
 | | Model & Knowledge | Chat model picker / **knowledge bindings** |
 | | Remote | That companion's IM bots (bound per companion — see the [channels guide](./channels.md)) |
 | | Settings | Name / character / persona / quiet hours / delete companion |
-| Shared domain (one per install) | Memories · Collect · Learn · Suggestions | The shared memory hub (one copy for all companions) |
+| Shared domain (one per install) | Memories · Collect · Learn | The shared memory hub (one copy for all companions) |
 | | Migrate | Export / import migration bundles (see below) |
 
 ## Creating and managing companions
@@ -93,7 +93,6 @@ All companions share one set of memory facilities under
 | Source | Credited to |
 | --- | --- |
 | Learning-run output (scored by events processed + new memories) | **All companions** (the family grows together) |
-| Suggestion adopted (+20) | **All companions** |
 | Companion chat turn (+2) | Only the companion in that conversation |
 | Memory saved during chat (+5) | Only that companion |
 

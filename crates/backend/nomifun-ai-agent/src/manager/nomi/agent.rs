@@ -8,7 +8,7 @@ use nomi_agent::companion_tools::{
     RecallMemoriesTool, SaveMemoryTool,
 };
 use nomi_agent::summon_tools::{
-    ProposeCompanionMemoryTool, SummonContextContributor, SummonContextSink, SummonProposalSink,
+    SummonContextContributor, SummonContextSink,
 };
 use nomi_agent::engine::AgentEngine;
 use nomi_agent::knowledge_tools::{KnowledgeReadTool, KnowledgeSearchTool, KnowledgeWriteTool};
@@ -343,13 +343,13 @@ impl Default for NomiHostWiring {
 }
 
 /// Wiring for a summoned-companion work session (spec §设计 B2/B3):
-/// read-only recall over the summoned companion's memories, confirmation-style
-/// `propose_companion_memory`, and the per-turn live memory-snapshot
-/// contributor. `save_memory` is deliberately absent from this bundle — it is
-/// never registered under summon, and the memory sink refuses writes anyway.
+/// read-only recall over the summoned companion's memories plus the per-turn
+/// live memory-snapshot contributor. Every write path is deliberately absent:
+/// `save_memory` is never registered under summon, the memory sink refuses
+/// writes, and the confirmation-style `propose_companion_memory` tool retired
+/// with the 建议 feature.
 pub struct NomiSummonWiring {
     pub memory_sink: Arc<dyn CompanionMemorySink>,
-    pub proposal_sink: Arc<dyn SummonProposalSink>,
     pub context_sink: Arc<dyn SummonContextSink>,
 }
 
@@ -544,16 +544,12 @@ impl NomiAgentManager {
             ]);
         }
         // Summoned-companion work session (spec §设计 B): the read-only recall
-        // and the confirmation-style propose tool touch only the companion's
-        // own memory.db / suggestion box — never user files — so they skip the
-        // approval gate like the companion tools above. `save_memory` is
-        // intentionally NOT allow-listed and never registered under summon.
+        // touches only the companion's own memory.db — never user files — so it
+        // skips the approval gate like the companion tools above. `save_memory`
+        // is intentionally NOT allow-listed and never registered under summon.
         // Must be set BEFORE bootstrap; registration happens after build().
         if summon_wiring.is_some() {
-            config.tools.allow_list.extend([
-                "recall_memories".to_owned(),
-                "propose_companion_memory".to_owned(),
-            ]);
+            config.tools.allow_list.push("recall_memories".to_owned());
         }
         // Companion self-evolved skill invocation (yolo, no approval UI) — must be
         // allow-listed BEFORE bootstrap or the call parks forever. Registration of
@@ -695,12 +691,6 @@ impl NomiAgentManager {
             engine
                 .registry_mut()
                 .register(Box::new(RecallMemoriesTool::new(summon.memory_sink, conversation_id.clone())));
-            engine
-                .registry_mut()
-                .register(Box::new(ProposeCompanionMemoryTool::new(
-                    summon.proposal_sink,
-                    conversation_id.clone(),
-                )));
             engine.register_context_contributor(Arc::new(SummonContextContributor::new(
                 summon.context_sink,
             )));
@@ -4087,15 +4077,6 @@ mod tests {
 
     // -- summoned-companion sessions (spec §设计 B) ----------------------------
 
-    struct StubSummonProposalSink;
-
-    #[async_trait::async_trait]
-    impl SummonProposalSink for StubSummonProposalSink {
-        async fn propose(&self, _conv: &str, _kind: &str, _content: &str, _reason: &str) -> Result<String, String> {
-            Ok(String::new())
-        }
-    }
-
     struct StubSummonContextSink;
 
     #[async_trait::async_trait]
@@ -4108,16 +4089,15 @@ mod tests {
     fn stub_summon_wiring() -> NomiSummonWiring {
         NomiSummonWiring {
             memory_sink: Arc::new(StubCompanionSink),
-            proposal_sink: Arc::new(StubSummonProposalSink),
             context_sink: Arc::new(StubSummonContextSink),
         }
     }
 
     #[tokio::test]
     async fn summon_session_registers_readonly_tools_never_save_memory() {
-        // Read-only boundary (spec §B3): a summoned work session gets recall +
-        // propose, and must NEVER see the direct-write save_memory or the
-        // companion-only list_recent_events.
+        // Read-only boundary (spec §B3): a summoned work session gets recall
+        // only, and must NEVER see the direct-write save_memory, the retired
+        // propose_companion_memory, or the companion-only list_recent_events.
         let agent = NomiAgentManager::new_with_host_wiring(
             "conv-summon".into(),
             "/project".into(),
@@ -4139,7 +4119,10 @@ mod tests {
         .unwrap();
         let names = agent.engine.lock().await.tool_names();
         assert!(names.iter().any(|n| n == "recall_memories"), "{names:?}");
-        assert!(names.iter().any(|n| n == "propose_companion_memory"), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n == "propose_companion_memory"),
+            "the retired propose tool must never come back: {names:?}"
+        );
         assert!(
             !names.iter().any(|n| n == "save_memory"),
             "save_memory must never be registered under summon: {names:?}"

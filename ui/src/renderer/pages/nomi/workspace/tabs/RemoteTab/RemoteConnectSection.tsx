@@ -146,7 +146,7 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
           if (!result.success) {
             throw new Error(
               result.error ||
-                t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' })
+                t('nomi.settings.remoteEnableFailed', { defaultValue: '启用渠道失败' })
             );
           }
           Message.success(t(PLUGIN_ENABLED_KEY[platform]));

@@ -7,7 +7,7 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Message, Modal, Spin } from '@arco-design/web-react';
-import { IconDelete, IconEdit, IconPlus } from '@arco-design/web-react/icon';
+import { Delete, Edit, Plus } from '@icon-park/react';
 import { getBaseUrl, isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IFigureMeta } from '@/common/adapter/ipcBridge';
 import { figureImageUrlOf } from '@renderer/pages/companion/characters/customMeta';
@@ -48,7 +48,7 @@ const FigureTile: React.FC<{
             ariaLabel={t('nomi.customFigure.editFigure')}
             onClick={() => setEditOpen(true)}
           >
-            <IconEdit className='text-13px' />
+            <Edit theme='outline' size='13' fill='currentColor' />
           </FigureActionButton>
           <FigureActionButton
             tone='danger'
@@ -57,7 +57,7 @@ const FigureTile: React.FC<{
             ariaLabel={inUse ? t('nomi.customFigure.inUseCannotDelete') : t('nomi.customFigure.delete')}
             onClick={() => { if (!inUse) onDelete(fig); }}
           >
-            <IconDelete className='text-13px' />
+            <Delete theme='outline' size='13' fill='currentColor' />
           </FigureActionButton>
         </FigureActionSurface>
 
@@ -125,7 +125,7 @@ const FigureLibraryPage: React.FC = () => {
           <h2 className='m-0 text-17px font-700 text-t-primary'>{t('nomi.customFigure.libraryTitle')}</h2>
           <span className='text-12px text-t-tertiary'>{t('nomi.customFigure.homeEntryHint')}</span>
         </div>
-        <Button type='primary' icon={<IconPlus />} onClick={() => setWizardOpen(true)}>
+        <Button type='primary' icon={<Plus theme='outline' size='14' fill='currentColor' />} onClick={() => setWizardOpen(true)}>
           {t('nomi.customFigure.createNew')}
         </Button>
       </div>
@@ -137,13 +137,13 @@ const FigureLibraryPage: React.FC = () => {
       ) : isEmpty ? (
         <div className='flex flex-col items-center justify-center gap-14px py-56px rd-16px bg-fill-1 border border-dashed border-[var(--color-border-2)]'>
           <div className='flex items-center justify-center w-72px h-72px rd-full bg-primary-1 text-32px text-primary-6'>
-            <IconPlus />
+            <Plus theme='outline' size='14' fill='currentColor' />
           </div>
           <div className='flex flex-col items-center gap-4px'>
             <span className='text-14px font-600 text-t-primary'>{t('nomi.customFigure.libraryEmpty')}</span>
             <span className='text-12px text-t-tertiary'>{t('nomi.customFigure.copyrightHint')}</span>
           </div>
-          <Button type='primary' icon={<IconPlus />} onClick={() => setWizardOpen(true)}>
+          <Button type='primary' icon={<Plus theme='outline' size='14' fill='currentColor' />} onClick={() => setWizardOpen(true)}>
             {t('nomi.customFigure.createNew')}
           </Button>
         </div>
@@ -167,7 +167,7 @@ const FigureLibraryPage: React.FC = () => {
           >
             <span className='figure-library-create-content flex flex-col items-center gap-8px'>
               <span className='flex items-center justify-center w-44px h-44px rd-full bg-fill-3 text-26px'>
-                <IconPlus />
+                <Plus theme='outline' size='14' fill='currentColor' />
               </span>
               <span className='text-12px font-600'>{t('nomi.customFigure.createNew')}</span>
             </span>
