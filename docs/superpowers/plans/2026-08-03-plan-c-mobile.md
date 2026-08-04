@@ -37,9 +37,11 @@ git init -b main && git config user.name "NomiFun Contributor" && git config use
 - [ ] **Step 2: 加依赖与 vitest**
 
 ```bash
-npm i tweetnacl @noble/hashes pinia
+npm i tweetnacl @noble/hashes@^1.8 pinia
 npm i -D vitest
 ```
+
+（`@noble/hashes` 必须锁 1.x：v2 移除了 `sha256` 子路径导出且所有子路径 import 需 `.js` 扩展名，会破坏 C3 的导入写法。）
 
 `vitest.config.ts`:
 
@@ -69,7 +71,7 @@ import { b64decode, b64encode, b64urlDecode, b64urlEncode, bytesToHex, utf8decod
 
 describe('base64', () => {
   it('roundtrips arbitrary bytes with std alphabet and padding', () => {
-    const b = new Uint8Array([0, 1, 2, 250, 251, 252, 253, 254, 255]);
+    const b = new Uint8Array([0, 1, 2, 250, 251, 252, 253, 254]); // 8 字节：8 % 3 == 2 → 必有 '=' padding
     const s = b64encode(b);
     expect(s.endsWith('=')).toBe(true);
     expect(b64decode(s)).toEqual(b);
@@ -295,18 +297,21 @@ export class BridgeClient {
   onCtrChange(cb: (lastCtrIn: number, lastCtrOut: number) => void): void; // 供存储层持久化
   call<T = unknown>(method: string, params?: object): Promise<T>;
   close(): void;
-  static async pair(payload: BridgePayload, code: string, deps: ClientDeps, viaLan: boolean): Promise<PairedDesktop>; // 完整配对流程，mac 校验失败抛错
+  static async pair(payload: BridgePayload, code: string, deps: ClientDeps, viaLan: boolean): Promise<PairedDesktop>;
+  // 完整配对流程，mac 校验失败抛错。返回值必须为 lastCtrOut=1（pair_request 已用 ctr=1）、
+  // lastCtrIn=1（pair_ok 已用 ctr=1）——配对后第一条 RPC 必须用 ctr=2，否则桌面按重放丢弃。
 }
 ```
 
 - [ ] **Step 1: 失败测试**（`tests/core/client.test.ts`，FakeWs 直接扮演桌面端：用 vectors/固定密钥在测试内实现"桌面侧" seal/open：
-  1. `pair()`：断言发出的帧含 pk 且 inner 为 pair_request(code)；桌面回 pair_ok(mac 正确) → resolve PairedDesktop（pk/name 正确）；mac 错误 → reject
-  2. `call('device.info')`：inner.kind=rpc、ctr 递增、id 为 uuid；桌面回 rpc_result → promise 兑现
+  1. `pair()`：断言发出的帧含 pk 且 inner 为 pair_request(code, ctr=1)；桌面回 pair_ok(mac 正确) → resolve PairedDesktop（pk/name 正确，`lastCtrOut === 1 && lastCtrIn === 1`）；mac 错误 → reject
+  2. `call('device.info')`：inner.kind=rpc、**配对后首个 RPC 的 ctr === 2** 且后续严格递增、id 为 uuid；桌面回 rpc_result → promise 兑现
   3. 桌面推 event → onEvent 回调
   4. 重放 event（同 ctr）→ 不触发第二次回调
-  5. LAN 连接失败（FakeWs 立即 onclose）→ 自动用 relay 工厂重连（断言第二次 wsFactory 调用的 url 是 relay url））
+  5. LAN 连接失败（FakeWs 立即 onclose）→ 自动用 relay 工厂重连（断言第二次 wsFactory 调用的 url 是 relay url）
+  6. 连续 10 个无法解密的帧（随机 c）→ client 主动 close transport 且 onState 收到 `('offline','decrypt_failures')`；第 9 个后收到一帧合法帧则计数清零）
 - [ ] **Step 2: 验证失败** — `npm test`
-- [ ] **Step 3: 实现**（组合各模块；收帧流程：JSON.parse → open(帧, desktopPk, selfSk)（null → 计数丢弃）→ CtrGuard.accept(inner.ctr)（false → 丢弃）→ 按 kind 分发 rpc_result/event；发送：ctrOut.next() 填 ctr → seal → transport.send；每次 ctr 变化触发 onCtrChange）
+- [ ] **Step 3: 实现**（组合各模块；收帧流程：JSON.parse → open(帧, desktopPk, selfSk)（null → 失败计数 +1，连续 10 次 → close + onState('offline','decrypt_failures')；成功则清零）→ CtrGuard.accept(inner.ctr)（false → 同样计数丢弃）→ 按 kind 分发 rpc_result/event；发送：ctrOut.next() 填 ctr → seal → transport.send；每次 ctr 变化触发 onCtrChange；`pair()` 成功时以 lastCtrOut=1/lastCtrIn=1 初始化返回值）
 - [ ] **Step 4: 验证通过** — `npm test`
 - [ ] **Step 5: Commit** — `git commit -am "feat(core): bridge client with pairing, fallback and replay guard"`
 
@@ -339,7 +344,7 @@ export async function probeLan(selfIpHint: string | null, probe: HttpProbe, port
 **Interfaces:**
 - Produces: `useDevicesStore`（`list: PairedDesktop[]`、`add/remove/updateCtrs(id, ctrIn, ctrOut)`，持久化 key `nf.devices`）；`useSettingsStore`（`relayUrl/relayKey`，key `nf.settings`）；`useEventsStore`（`push(evt: {ts, deviceId, name, summary})` 环形 ≤50 条、summary 截断 8KB，key `nf.events`；`clear()`）
 
-- [ ] **Step 1: 失败测试**（`tests/stores/events.test.ts` 用 `createPinia()` + `MemoryStorage`：push 60 条 → 只留最近 50；超长 summary 截断为 8192 字符并带 `…`；`tests/stores/devices.test.ts`：add/updateCtrs/remove 后重建 store 从 storage 恢复）
+- [ ] **Step 1: 失败测试**（`tests/stores/events.test.ts` 用 `createPinia()` + `MemoryStorage`：push 60 条 → 只留最近 50；超长 summary 按 UTF-8 编码字节数截断至 ≤8192 字节（用 `utf8encode(s).length` 校验，CJK 每字 3 字节）；`tests/stores/devices.test.ts`：add/updateCtrs/remove 后重建 store 从 storage 恢复）
 - [ ] **Step 2: 验证失败** — `npm test`
 - [ ] **Step 3: 实现**（stores 通过参数/依赖注入接收 StorageLike，默认取 uni 包装；测试注入 MemoryStorage）
 - [ ] **Step 4: 验证通过** — `npm test`
