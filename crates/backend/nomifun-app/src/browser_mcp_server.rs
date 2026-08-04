@@ -9,15 +9,26 @@
 //! claims.
 
 use std::collections::{BTreeSet, HashMap};
-use std::net::SocketAddr;
+use std::io;
+use std::net::{Shutdown, SocketAddr};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use nomi_browser::{ManagedBrowserFacade, managed_result_envelope};
+use axum::serve::Listener;
+use axum::Extension;
+use nomi_browser::{
+    ManagedBrowserFacade, TRUSTED_OWNER_INPUT_FIELDS, managed_result_envelope,
+};
 use nomifun_api_types::{
     BROWSER_CAPABILITY_DOMAIN, BROWSER_MCP_TOOL_NAMES, BrowserCapabilityClaims,
     BrowserCapabilityOperation, BrowserCapabilityScope, BrowserCapabilitySurface,
@@ -25,20 +36,55 @@ use nomifun_api_types::{
 };
 use nomifun_browser_platform::{
     BrowserErrorCode, BrowserOperationKind, BrowserPlatformError, BrowserSessionHub,
-    BrowserSurface, CallerIdentity, OwnerLeaseId,
+    BrowserSurface, CallerIdentity, OwnerLeaseId, TaskResourceFamilyKey,
 };
 use nomifun_common::{
     LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_REVOKE_PATH,
     LoopbackCapabilityError, LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest,
     LoopbackSessionKind,
 };
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{debug, warn};
 
 const REVOKED_LEASE_SWEEP_INTERVAL: Duration = Duration::from_millis(500);
 const CLEANUP_RETRY_WAIT: Duration = Duration::from_millis(50);
+const CLEANUP_RETRY_MAX_WAIT: Duration = Duration::from_secs(2);
+const REVOKED_BINDING_CLEANUP_CONCURRENCY: usize = 16;
+/// Accepted requests get a bounded grace period during App shutdown. Both the
+/// complete-body deadline and normal task-admission wait fit inside it. A
+/// request that still has not returned is cancelled by the outer middleware;
+/// this timeout is the final supervisor failsafe, not an operation/RSS cap.
+const BROWSER_MCP_INGRESS_SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
+const BROWSER_MCP_PERIODIC_CLEANUP_STOP_GRACE: Duration = Duration::from_millis(250);
+/// Bounds the bytes retained by one request before its signed task identity can
+/// be verified. Browser tool inputs are paths, selectors, text, and small JSON
+/// options; screenshots and downloads flow in the response direction.
+const BROWSER_MCP_REQUEST_BODY_LIMIT_BYTES: usize = 128 * 1024;
+/// Absolute, not idle, deadline for producing the complete signed JSON
+/// envelope. This prevents a slow chunked sender from keeping one pre-identity
+/// Hyper task alive forever by dripping a byte before each idle timeout.
+const BROWSER_MCP_REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(5);
+const BROWSER_MCP_PRE_AUTH_MIN_INGRESS: usize = 64;
+const BROWSER_MCP_PRE_AUTH_PER_CPU: usize = 8;
+const BROWSER_MCP_PRE_AUTH_MAX_INGRESS: usize = 512;
+const BROWSER_MCP_PRE_AUTH_MIN_CONNECTIONS: usize = 64;
+const BROWSER_MCP_PRE_AUTH_CONNECTIONS_PER_CPU: usize = 8;
+const BROWSER_MCP_PRE_AUTH_MAX_CONNECTIONS: usize = 512;
+/// The MCP ingress budget is per trusted user-visible task family, never
+/// process-global. Sibling runtimes in one conversation share this boundary.
+/// Four active calls leave room for normal parallel observation while the
+/// platform's deeper weighted-operation scheduler remains authoritative.
+const BROWSER_MCP_TASK_ACTIVE_REQUESTS: usize = 4;
+/// Waiting requests retain a parsed body and HTTP task, so bound them
+/// separately from active calls. Total retained calls per task are therefore
+/// `ACTIVE + QUEUED`.
+const BROWSER_MCP_TASK_QUEUED_REQUESTS: usize = 12;
+const BROWSER_MCP_TASK_QUEUE_WAIT: Duration = Duration::from_secs(5);
 const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
     "identity",
     "identity_mode",
@@ -48,6 +94,544 @@ const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
     "account",
 ];
 type HubSlot = Arc<RwLock<Weak<BrowserSessionHub>>>;
+
+#[derive(Default)]
+struct AcceptedConnectionRegistry {
+    next_id: u64,
+    shutdown_handles: HashMap<u64, std::net::TcpStream>,
+}
+
+#[derive(Clone)]
+struct PreAuthConnectionIngress {
+    slots: Arc<Semaphore>,
+    stopping: Arc<AtomicBool>,
+    accepted: Arc<StdMutex<AcceptedConnectionRegistry>>,
+    #[cfg(test)]
+    capacity: usize,
+}
+
+impl PreAuthConnectionIngress {
+    fn new() -> Self {
+        let logical_cpus = std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(4);
+        let capacity = logical_cpus
+            .saturating_mul(BROWSER_MCP_PRE_AUTH_CONNECTIONS_PER_CPU)
+            .clamp(
+                BROWSER_MCP_PRE_AUTH_MIN_CONNECTIONS,
+                BROWSER_MCP_PRE_AUTH_MAX_CONNECTIONS,
+            );
+        Self::with_capacity(capacity)
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        assert!(capacity > 0);
+        Self {
+            slots: Arc::new(Semaphore::new(capacity)),
+            stopping: Arc::new(AtomicBool::new(false)),
+            accepted: Arc::new(StdMutex::new(AcceptedConnectionRegistry::default())),
+            #[cfg(test)]
+            capacity,
+        }
+    }
+
+    fn register(&self, shutdown_handle: std::net::TcpStream) -> Option<u64> {
+        let mut accepted = self
+            .accepted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.stopping.load(Ordering::Acquire) {
+            let _ = shutdown_handle.shutdown(Shutdown::Both);
+            return None;
+        }
+        let mut connection_id = accepted.next_id.wrapping_add(1).max(1);
+        while accepted.shutdown_handles.contains_key(&connection_id) {
+            connection_id = connection_id.wrapping_add(1).max(1);
+        }
+        accepted.next_id = connection_id;
+        accepted
+            .shutdown_handles
+            .insert(connection_id, shutdown_handle);
+        Some(connection_id)
+    }
+
+    fn unregister(&self, connection_id: u64) {
+        self.accepted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .shutdown_handles
+            .remove(&connection_id);
+    }
+
+    fn stop_and_close_all(&self) {
+        // Store before taking the registry lock. An accept racing before the
+        // store is drained below; one racing after it self-closes in register.
+        self.stopping.store(true, Ordering::Release);
+        let shutdown_handles = {
+            let mut accepted = self
+                .accepted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut accepted.shutdown_handles)
+        };
+        for (_, stream) in shutdown_handles {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+struct BoundedTcpListener {
+    listener: TcpListener,
+    ingress: PreAuthConnectionIngress,
+}
+
+impl BoundedTcpListener {
+    fn new(listener: TcpListener, ingress: PreAuthConnectionIngress) -> Self {
+        Self { listener, ingress }
+    }
+}
+
+struct BoundedTcpStream {
+    stream: TcpStream,
+    ingress: PreAuthConnectionIngress,
+    connection_id: Option<u64>,
+    /// Socket-lifetime transport authority. Unlike request admission this is
+    /// deliberately not released after auth: keep-alive/pipelined traffic must
+    /// never leave an unaccounted idle FD or Hyper connection task behind.
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for BoundedTcpStream {
+    fn drop(&mut self) {
+        if let Some(connection_id) = self.connection_id.take() {
+            self.ingress.unregister(connection_id);
+        }
+    }
+}
+
+impl AsyncRead for BoundedTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for BoundedTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.stream).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.stream).poll_shutdown(context)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.stream).poll_write_vectored(context, buffers)
+    }
+}
+
+impl Listener for BoundedTcpListener {
+    type Io = BoundedTcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let permit = Arc::clone(&self.ingress.slots)
+                .acquire_owned()
+                .await
+                .expect("browser MCP connection semaphore remains open");
+            let (stream, address) = Listener::accept(&mut self.listener).await;
+            let std_stream = match stream.into_std() {
+                Ok(stream) => stream,
+                Err(error) => {
+                    warn!(%error, "Browser MCP could not register an accepted socket");
+                    continue;
+                }
+            };
+            let shutdown_handle = match std_stream.try_clone() {
+                Ok(stream) => stream,
+                Err(error) => {
+                    warn!(%error, "Browser MCP could not clone an accepted socket shutdown handle");
+                    continue;
+                }
+            };
+            let stream = match TcpStream::from_std(std_stream) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    warn!(%error, "Browser MCP could not restore an accepted async socket");
+                    continue;
+                }
+            };
+            let connection_id = self.ingress.register(shutdown_handle);
+            return (
+                BoundedTcpStream {
+                    stream,
+                    ingress: self.ingress.clone(),
+                    connection_id,
+                    _permit: permit,
+                },
+                address,
+            );
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+#[derive(Clone)]
+struct BrowserMcpRequestShutdown {
+    signal: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for BrowserMcpRequestShutdown {
+    fn default() -> Self {
+        let (signal, _) = tokio::sync::watch::channel(false);
+        Self {
+            signal: Arc::new(signal),
+        }
+    }
+}
+
+impl BrowserMcpRequestShutdown {
+    fn cancel(&self) {
+        self.signal.send_replace(true);
+    }
+
+    async fn cancelled(&self) {
+        let mut signal = self.signal.subscribe();
+        if *signal.borrow() {
+            return;
+        }
+        loop {
+            if signal.changed().await.is_err() || *signal.borrow_and_update() {
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PreAuthIngress {
+    slots: Arc<Semaphore>,
+    capacity: usize,
+    accepting_requests: Arc<AtomicBool>,
+    request_shutdown: BrowserMcpRequestShutdown,
+}
+
+impl PreAuthIngress {
+    fn new(
+        accepting_requests: Arc<AtomicBool>,
+        request_shutdown: BrowserMcpRequestShutdown,
+    ) -> Self {
+        let logical_cpus = std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(4);
+        let capacity = logical_cpus
+            .saturating_mul(BROWSER_MCP_PRE_AUTH_PER_CPU)
+            .clamp(
+                BROWSER_MCP_PRE_AUTH_MIN_INGRESS,
+                BROWSER_MCP_PRE_AUTH_MAX_INGRESS,
+            );
+        Self {
+            slots: Arc::new(Semaphore::new(capacity)),
+            capacity,
+            accepting_requests,
+            request_shutdown,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_capacity(capacity: usize) -> Self {
+        assert!(capacity > 0);
+        Self {
+            slots: Arc::new(Semaphore::new(capacity)),
+            capacity,
+            accepting_requests: Arc::new(AtomicBool::new(true)),
+            request_shutdown: BrowserMcpRequestShutdown::default(),
+        }
+    }
+}
+
+/// Cloneable only because Axum request extensions clone values. `release`
+/// clears the shared permit through every clone, making the handoff to the
+/// verified per-task quota immediate instead of retaining a process-wide slot
+/// for the browser operation itself.
+#[derive(Clone)]
+struct PreAuthIngressGuard {
+    permit: Arc<StdMutex<Option<OwnedSemaphorePermit>>>,
+}
+
+impl PreAuthIngressGuard {
+    fn new(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            permit: Arc::new(StdMutex::new(Some(permit))),
+        }
+    }
+
+    fn release(&self) {
+        self.permit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
+async fn enforce_pre_auth_ingress(
+    State(ingress): State<PreAuthIngress>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    if !ingress.accepting_requests.load(Ordering::Acquire) {
+        return browser_mcp_ingress_stopped();
+    }
+    let permit = match Arc::clone(&ingress.slots).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return pre_auth_ingress_saturated(ingress.capacity),
+    };
+    if !ingress.accepting_requests.load(Ordering::Acquire) {
+        drop(permit);
+        return browser_mcp_ingress_stopped();
+    }
+    request
+        .extensions_mut()
+        .insert(PreAuthIngressGuard::new(permit));
+    let mut response = tokio::select! {
+        biased;
+        _ = ingress.request_shutdown.cancelled() => browser_mcp_ingress_stopped(),
+        response = next.run(request) => response,
+    };
+    // This bridge never benefits from keep-alive: one stdio call maps to one
+    // authenticated HTTP request. Closing every response promptly minimizes
+    // socket-lifetime occupancy while the bounded Listener remains the final
+    // defence against clients that never send request headers.
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    response
+}
+
+struct TimedJson<T>(T);
+
+impl<S, T> FromRequest<S> for TimedJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = Response;
+
+    async fn from_request(
+        request: Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        extract_json_with_deadline(
+            request,
+            state,
+            BROWSER_MCP_REQUEST_BODY_TIMEOUT,
+        )
+        .await
+        .map(Self)
+    }
+}
+
+async fn extract_json_with_deadline<S, T>(
+    request: Request,
+    state: &S,
+    deadline: Duration,
+) -> Result<T, Response>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    match tokio::time::timeout(deadline, Json::<T>::from_request(request, state)).await {
+        Ok(Ok(Json(value))) => Ok(value),
+        Ok(Err(rejection)) => Err(rejection.into_response()),
+        Err(_) => Err(request_body_timeout()),
+    }
+}
+
+#[derive(Clone, Default)]
+struct TaskRequestAdmissions {
+    /// Weak values make completed tasks disappear without an explicit task-end
+    /// callback. Lazy and periodic pruning remove the small key shells too.
+    entries: Arc<StdMutex<HashMap<String, Weak<TaskRequestAdmission>>>>,
+}
+
+struct TaskRequestAdmission {
+    active: Arc<Semaphore>,
+    outstanding: Arc<Semaphore>,
+}
+
+impl Default for TaskRequestAdmission {
+    fn default() -> Self {
+        Self {
+            active: Arc::new(Semaphore::new(BROWSER_MCP_TASK_ACTIVE_REQUESTS)),
+            outstanding: Arc::new(Semaphore::new(
+                BROWSER_MCP_TASK_ACTIVE_REQUESTS + BROWSER_MCP_TASK_QUEUED_REQUESTS,
+            )),
+        }
+    }
+}
+
+/// Owns both permits and a strong limiter reference. Keeping the limiter alive
+/// is important: otherwise a task whose map entry is only `Weak` could create a
+/// second limiter while an accepted request still holds semaphore permits.
+struct TaskRequestPermit {
+    entries: Arc<StdMutex<HashMap<String, Weak<TaskRequestAdmission>>>>,
+    task_resource_family_key: String,
+    limiter: Option<Arc<TaskRequestAdmission>>,
+    outstanding: Option<OwnedSemaphorePermit>,
+    active: Option<OwnedSemaphorePermit>,
+}
+
+impl Drop for TaskRequestPermit {
+    fn drop(&mut self) {
+        // Release capacity before inspecting strong references so a waiter
+        // that is already bound to this limiter can advance normally.
+        self.active.take();
+        self.outstanding.take();
+        let Some(limiter) = self.limiter.take() else {
+            return;
+        };
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_current = entries
+            .get(&self.task_resource_family_key)
+            .is_some_and(|entry| entry.ptr_eq(&Arc::downgrade(&limiter)));
+        if is_current && Arc::strong_count(&limiter) == 1 {
+            entries.remove(&self.task_resource_family_key);
+        }
+        // Drop the final strong reference while map lookup/replacement is
+        // serialized, preventing a transient second limiter for this task.
+        drop(limiter);
+    }
+}
+
+impl TaskRequestPermit {
+    async fn activate(
+        mut self,
+        queue_wait: Duration,
+    ) -> Result<Self, TaskRequestAdmissionError> {
+        let active_semaphore = Arc::clone(
+            &self
+                .limiter
+                .as_ref()
+                .expect("task request limiter remains owned while acquiring")
+                .active,
+        );
+        let deadline = tokio::time::Instant::now() + queue_wait;
+        let active = tokio::time::timeout_at(deadline, active_semaphore.acquire_owned())
+            .await
+            .map_err(|_| TaskRequestAdmissionError::QueueTimeout)?
+            .map_err(|_| TaskRequestAdmissionError::OutstandingLimit)?;
+        self.active = Some(active);
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskRequestAdmissionError {
+    OutstandingLimit,
+    QueueTimeout,
+}
+
+impl TaskRequestAdmissions {
+    fn admission_for(&self, task_resource_family_key: &str) -> Arc<TaskRequestAdmission> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(admission) = entries
+            .get(task_resource_family_key)
+            .and_then(Weak::upgrade)
+        {
+            return admission;
+        }
+        let admission = Arc::new(TaskRequestAdmission::default());
+        entries.insert(
+            task_resource_family_key.to_owned(),
+            Arc::downgrade(&admission),
+        );
+        admission
+    }
+
+    fn reserve(
+        &self,
+        task_resource_family_key: &str,
+    ) -> Result<TaskRequestPermit, TaskRequestAdmissionError> {
+        let limiter = self.admission_for(task_resource_family_key);
+        let outstanding = Arc::clone(&limiter.outstanding)
+            .try_acquire_owned()
+            .map_err(|_| TaskRequestAdmissionError::OutstandingLimit)?;
+        Ok(TaskRequestPermit {
+            entries: Arc::clone(&self.entries),
+            task_resource_family_key: task_resource_family_key.to_owned(),
+            limiter: Some(limiter),
+            outstanding: Some(outstanding),
+            active: None,
+        })
+    }
+
+    async fn acquire(
+        &self,
+        task_resource_family_key: &str,
+        queue_wait: Duration,
+    ) -> Result<TaskRequestPermit, TaskRequestAdmissionError> {
+        self.reserve(task_resource_family_key)?.activate(queue_wait).await
+    }
+
+    fn prune(&self) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, admission| admission.strong_count() > 0);
+    }
+
+    #[cfg(test)]
+    fn get(&self, task_resource_family_key: &str) -> Option<Arc<TaskRequestAdmission>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(task_resource_family_key)
+            .and_then(Weak::upgrade)
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 enum BrowserMcpShutdownStage {
@@ -277,10 +861,17 @@ struct BrowserMcpLifecycle {
     completion: tokio::sync::watch::Sender<BrowserMcpShutdownStatus>,
     runtime: tokio::runtime::Handle,
     cleanup_state: BrowserMcpState,
+    request_shutdown: BrowserMcpRequestShutdown,
+    connection_ingress: PreAuthConnectionIngress,
 }
 
 impl BrowserMcpLifecycle {
     fn begin_stop(&self) {
+        // Request cancellation covers parsed/active handlers, while explicit
+        // socket shutdown covers connections that have not produced headers
+        // and therefore never entered Axum middleware.
+        self.request_shutdown.cancel();
+        self.connection_ingress.stop_and_close_all();
         let flight = {
             let mut state = self
                 .state
@@ -310,8 +901,8 @@ impl BrowserMcpLifecycle {
         };
         // Signal graceful shutdown synchronously so the listener stops
         // accepting new connections as soon as the shared stop flight starts.
-        // The supervisor below then joins the server, which waits for every
-        // already accepted request before the final binding drain begins.
+        // The request-level cancellation and socket registry make accepted
+        // work quiesce before the final binding drain begins.
         let serve_shutdown_result = match serve_shutdown {
             Some(shutdown) => shutdown.send(()).map_err(|_| {
                 Arc::from(
@@ -331,9 +922,22 @@ impl BrowserMcpLifecycle {
             let _worker_guard =
                 BrowserMcpShutdownWorkerGuard::new(completion.clone());
             let serve_task_result = match serve_task {
-                Some(task) => {
-                    browser_mcp_task_result(task.await, "HTTP ingress")
-                }
+                Some(mut task) => match tokio::time::timeout(
+                    BROWSER_MCP_INGRESS_SHUTDOWN_GRACE,
+                    &mut task,
+                )
+                .await
+                {
+                    Ok(result) => browser_mcp_task_result(result, "HTTP ingress"),
+                    Err(_) => {
+                        task.abort();
+                        let _ = task.await;
+                        Err(Arc::from(format!(
+                            "Browser MCP HTTP ingress shutdown exceeded {} ms; the supervisor aborted the listener task and continued authoritative owner cleanup",
+                            BROWSER_MCP_INGRESS_SHUTDOWN_GRACE.as_millis()
+                        )))
+                    }
+                },
                 None => Err(Arc::from(
                     "Browser MCP HTTP ingress task was missing at shutdown",
                 )),
@@ -361,11 +965,26 @@ impl BrowserMcpLifecycle {
                 ),
             };
             let cleanup_task_error = match cleanup_task {
-                Some(task) => task.await.err().map(|error| {
-                    format!(
-                        "Browser MCP periodic cleanup task failed while stopping: {error}"
-                    )
-                }),
+                Some(mut task) => match tokio::time::timeout(
+                    BROWSER_MCP_PERIODIC_CLEANUP_STOP_GRACE,
+                    &mut task,
+                )
+                .await
+                {
+                    Ok(result) => result.err().map(|error| {
+                        format!(
+                            "Browser MCP periodic cleanup task failed while stopping: {error}"
+                        )
+                    }),
+                    Err(_) => {
+                        task.abort();
+                        let _ = task.await;
+                        Some(format!(
+                            "Browser MCP periodic cleanup task exceeded {} ms and was cancelled before the authoritative drain",
+                            BROWSER_MCP_PERIODIC_CLEANUP_STOP_GRACE.as_millis()
+                        ))
+                    }
+                },
                 None => Some(
                     "Browser MCP periodic cleanup task was missing at shutdown".to_owned(),
                 ),
@@ -441,10 +1060,11 @@ struct OwnerBindingPolicy {
 #[derive(Default)]
 struct OwnerBindingState {
     binding: Option<OwnerBinding>,
-    /// Owner leases superseded after a Hub renewal/close failure remain here
-    /// until their exact lease cleanup succeeds. The current binding and these
-    /// entries are deliberately separate so a replacement cannot make an old
-    /// owner unreachable.
+    /// Owner leases whose exact Hub cleanup failed remain here until retry
+    /// succeeds. New transitions maintain the fail-closed invariant that a
+    /// non-empty pending inventory has no current binding and cannot mint a
+    /// replacement. The Vec remains able to drain legacy/interrupted states
+    /// which may already contain more than one exact authority.
     pending_owner_cleanup: Vec<OwnerLeaseId>,
     /// A tombstone prevents a request which already captured an `Arc` to an
     /// entry from recreating a Hub lease after capability cleanup detached the
@@ -471,6 +1091,13 @@ struct BrowserMcpState {
     issuer: Arc<LoopbackCapabilityIssuer>,
     hub: HubSlot,
     bindings: Arc<Mutex<HashMap<String, Arc<OwnerBindingEntry>>>>,
+    request_admissions: TaskRequestAdmissions,
+    #[cfg(test)]
+    owner_lease_issues: Arc<AtomicUsize>,
+    #[cfg(test)]
+    revoked_cleanup_active: Arc<AtomicUsize>,
+    #[cfg(test)]
+    revoked_cleanup_peak: Arc<AtomicUsize>,
     #[cfg(test)]
     request_started: Arc<tokio::sync::Notify>,
 }
@@ -480,7 +1107,12 @@ pub(crate) struct BrowserMcpServer {
     http_addr: SocketAddr,
     issuer: Arc<LoopbackCapabilityIssuer>,
     hub: HubSlot,
+    accepting_requests: Arc<AtomicBool>,
     lifecycle: BrowserMcpLifecycle,
+    #[cfg(test)]
+    pre_auth_ingress: PreAuthIngress,
+    #[cfg(test)]
+    pre_auth_connections: PreAuthConnectionIngress,
     #[cfg(test)]
     state: BrowserMcpState,
 }
@@ -501,9 +1133,27 @@ impl BrowserMcpServer {
             issuer: Arc::clone(&issuer),
             hub: Arc::clone(&hub),
             bindings: Arc::new(Mutex::new(HashMap::new())),
+            request_admissions: TaskRequestAdmissions::default(),
+            #[cfg(test)]
+            owner_lease_issues: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            revoked_cleanup_active: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            revoked_cleanup_peak: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             request_started: Arc::new(tokio::sync::Notify::new()),
         };
+        let accepting_requests = Arc::new(AtomicBool::new(true));
+        let request_shutdown = BrowserMcpRequestShutdown::default();
+        let pre_auth_ingress = PreAuthIngress::new(
+            Arc::clone(&accepting_requests),
+            request_shutdown.clone(),
+        );
+        let pre_auth_connections = PreAuthConnectionIngress::new();
+        let bounded_listener = BoundedTcpListener::new(
+            listener,
+            pre_auth_connections.clone(),
+        );
 
         let app = axum::Router::new()
             .route("/tool", axum::routing::post(handle_tool_request))
@@ -515,12 +1165,28 @@ impl BrowserMcpServer {
                 LOOPBACK_CAPABILITY_REVOKE_PATH,
                 axum::routing::post(handle_capability_revoke),
             )
-            .with_state(state.clone());
+            .with_state(state.clone())
+            // The task identity lives in the signed JSON envelope, so the
+            // only safe pre-parse defence is a strict per-request byte cap.
+            // This layer rejects an oversized declared Content-Length before
+            // buffering and also enforces the same cap on chunked bodies.
+            .layer(DefaultBodyLimit::disable())
+            .layer(RequestBodyLimitLayer::new(
+                BROWSER_MCP_REQUEST_BODY_LIMIT_BYTES,
+            ))
+            // This is a bounded pre-auth transport failsafe, not a browser
+            // resource/RSS cap. It covers only body read + claim verification,
+            // rejects without queueing, and hands off immediately to the
+            // verified per-task limiter before any browser work begins.
+            .layer(middleware::from_fn_with_state(
+                pre_auth_ingress.clone(),
+                enforce_pre_auth_ingress,
+            ));
 
         let (serve_shutdown, serve_shutdown_rx) =
             tokio::sync::oneshot::channel();
         let serve_task = tokio::spawn(async move {
-            axum::serve(listener, app)
+            axum::serve(bounded_listener, app)
                 .with_graceful_shutdown(async move {
                     let _ = serve_shutdown_rx.await;
                 })
@@ -538,6 +1204,7 @@ impl BrowserMcpServer {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
+                        cleanup_state.request_admissions.prune();
                         retry_pending_owner_cleanups(&cleanup_state).await;
                         cleanup_revoked_bindings(&cleanup_state).await;
                     }
@@ -556,6 +1223,7 @@ impl BrowserMcpServer {
             http_addr,
             issuer,
             hub,
+            accepting_requests,
             lifecycle: BrowserMcpLifecycle {
                 state: StdMutex::new(BrowserMcpLifecycleState {
                     serve_task: Some(serve_task),
@@ -567,7 +1235,13 @@ impl BrowserMcpServer {
                 completion,
                 runtime,
                 cleanup_state: state.clone(),
+                request_shutdown,
+                connection_ingress: pre_auth_connections.clone(),
             },
+            #[cfg(test)]
+            pre_auth_ingress,
+            #[cfg(test)]
+            pre_auth_connections,
             #[cfg(test)]
             state,
         })
@@ -590,6 +1264,11 @@ impl BrowserMcpServer {
     }
 
     fn begin_stop(&self) {
+        // Close admission synchronously before the async graceful-shutdown
+        // signal is polled. A fresh request can still complete a TCP handshake
+        // during that scheduling window, but it is rejected before body read,
+        // task admission, owner binding, or browser dispatch.
+        self.accepting_requests.store(false, Ordering::Release);
         self.lifecycle.begin_stop();
     }
 
@@ -600,6 +1279,7 @@ impl BrowserMcpServer {
     /// shutdown. Transient cleanup failures are retried by the durable worker
     /// until the binding inventory reaches its empty postcondition.
     pub(crate) async fn stop_and_wait(&self) -> Result<(), String> {
+        self.begin_stop();
         let result = self.lifecycle.wait_for_stop().await;
         if let Err(error) = &result {
             warn!(%error, "Browser MCP async shutdown did not finish cleanly");
@@ -616,6 +1296,7 @@ impl BrowserMcpServer {
 
     #[cfg(test)]
     async fn stop_and_wait_for(&self, wait: Duration) -> Result<(), String> {
+        self.begin_stop();
         let result = self.lifecycle.wait_for_stop_for(wait).await;
         if let Err(error) = &result {
             warn!(%error, "Browser MCP async shutdown did not finish cleanly");
@@ -660,7 +1341,8 @@ fn validate_browser_claims(
 async fn handle_tool_request(
     State(state): State<BrowserMcpState>,
     headers: axum::http::HeaderMap,
-    Json(body): Json<Value>,
+    Extension(pre_auth_guard): Extension<PreAuthIngressGuard>,
+    TimedJson(body): TimedJson<Value>,
 ) -> Response {
     #[cfg(test)]
     state.request_started.notify_one();
@@ -693,6 +1375,36 @@ async fn handle_tool_request(
         warn!(tool, "Browser MCP tool is outside the signed capability scope");
         return forbidden();
     }
+    // Only verified, immutable claims may select an accounting bucket. The
+    // Owner lease and runtime are intentionally excluded when a signed
+    // conversation exists: sibling runtimes are one user-visible task family.
+    let task_resource_family_key = task_resource_family_key_from_claims(&claims);
+    let reservation = match state
+        .request_admissions
+        .reserve(&task_resource_family_key)
+    {
+        Ok(reservation) => reservation,
+        Err(TaskRequestAdmissionError::OutstandingLimit) => {
+            return resource_exhausted("mcp_task_request_limit");
+        }
+        Err(TaskRequestAdmissionError::QueueTimeout) => unreachable!(
+            "reserving a total task slot never waits for an active slot"
+        ),
+    };
+    // Atomic resource-accounting handoff: after a verified task owns one of
+    // its total slots, the process-wide pre-auth transport slot is no longer
+    // retained. Long browser operations therefore do not consume a global
+    // ingress budget or impose an aggregate browser-memory ceiling.
+    pre_auth_guard.release();
+    let _request_permit = match reservation.activate(BROWSER_MCP_TASK_QUEUE_WAIT).await {
+        Ok(permit) => permit,
+        Err(TaskRequestAdmissionError::QueueTimeout) => {
+            return resource_exhausted("mcp_task_queue_timeout");
+        }
+        Err(TaskRequestAdmissionError::OutstandingLimit) => {
+            return resource_exhausted("mcp_task_request_limit");
+        }
+    };
     let input = body
         .get("args")
         .cloned()
@@ -729,13 +1441,15 @@ async fn handle_tool_request(
 
 async fn handle_capability_renew(
     State(state): State<BrowserMcpState>,
-    Json(request): Json<LoopbackCapabilityRenewalRequest>,
+    Extension(pre_auth_guard): Extension<PreAuthIngressGuard>,
+    TimedJson(request): TimedJson<LoopbackCapabilityRenewalRequest>,
 ) -> Response {
     match state
         .issuer
         .renew::<BrowserCapabilityScope>(BROWSER_CAPABILITY_DOMAIN, &request)
     {
         Ok(access) if validate_browser_claims(&access.claims).is_ok() => {
+            pre_auth_guard.release();
             Json(access).into_response()
         }
         _ => unauthorized(),
@@ -744,13 +1458,15 @@ async fn handle_capability_renew(
 
 async fn handle_capability_revoke(
     State(state): State<BrowserMcpState>,
-    Json(request): Json<LoopbackCapabilityRenewalRequest>,
+    Extension(pre_auth_guard): Extension<PreAuthIngressGuard>,
+    TimedJson(request): TimedJson<LoopbackCapabilityRenewalRequest>,
 ) -> Response {
     match state
         .issuer
         .revoke(BROWSER_CAPABILITY_DOMAIN, &request)
     {
         Ok(()) => {
+            pre_auth_guard.release();
             cleanup_binding(&state, &request.lease_id).await;
             StatusCode::NO_CONTENT.into_response()
         }
@@ -832,26 +1548,31 @@ async fn ensure_owner_binding(
         }
         // Close any lanes whose owner lease expired before replacing it. This
         // also prevents an old LaneKey from being mistaken for the new owner.
-        let mut pending_owner_cleanup = {
-            let state_guard = entry.state.lock().await;
-            state_guard.pending_owner_cleanup.clone()
-        };
         if let Err(error) = hub.revoke_owner_lease(&existing.owner_lease_id).await {
-            if !pending_owner_cleanup
+            let mut state_guard = entry.state.lock().await;
+            if !state_guard
+                .pending_owner_cleanup
                 .iter()
                 .any(|lease_id| lease_id == &existing.owner_lease_id)
             {
-                pending_owner_cleanup.push(existing.owner_lease_id.clone());
+                state_guard
+                    .pending_owner_cleanup
+                    .push(existing.owner_lease_id.clone());
             }
-            let mut state_guard = entry.state.lock().await;
-            state_guard.pending_owner_cleanup = pending_owner_cleanup.clone();
+            // Fail closed: once the current lease has been revoked in the Hub,
+            // only the exact pending-cleanup authority may remain reachable.
+            // Publishing a replacement before that cleanup succeeds would let
+            // one capability accumulate unbounded owner generations.
+            state_guard.binding = None;
+            drop(state_guard);
             warn!(
                 code = ?error.code,
-                "Browser MCP could not close an expired owner before replacement; retaining exact owner for retry"
+                "Browser MCP could not close an expired owner; blocking replacement until exact cleanup succeeds"
             );
+            return Err(error);
         }
-        // The replacement below publishes the new current owner while the old
-        // lease remains in `pending_owner_cleanup` when its close failed.
+        // Cleanup completed, so this capability may publish exactly one new
+        // current owner below.
         let mut state_guard = entry.state.lock().await;
         state_guard.binding = None;
         drop(state_guard);
@@ -893,6 +1614,8 @@ async fn ensure_owner_binding(
         trusted_policy.conversation_id.clone(),
         trusted_policy.runtime_instance_id.clone(),
     )?;
+    #[cfg(test)]
+    state.owner_lease_issues.fetch_add(1, Ordering::AcqRel);
     let owner_lease_id = lease.lease_id.clone();
     state_guard.binding = Some(OwnerBinding {
         owner_lease_id: owner_lease_id.clone(),
@@ -968,6 +1691,21 @@ fn owner_binding_policy_from_claims(
     }
 }
 
+/// Mirrors [`CallerIdentity::task_resource_family_key`] before an owner lease
+/// exists. Every input is immutable and server-verified capability state.
+fn task_resource_family_key_from_claims(claims: &BrowserCapabilityClaims) -> String {
+    let user_id = claims.user_id.to_string();
+    TaskResourceFamilyKey::from_trusted_parts(
+        &user_id,
+        claims.session.conversation_id.as_deref(),
+        &claims.scope.runtime_instance_id,
+        None,
+        None,
+        BrowserSurface::Acp,
+    )
+    .into_string()
+}
+
 fn caller_from_claims(
     claims: &BrowserCapabilityClaims,
     owner_lease_id: OwnerLeaseId,
@@ -1010,17 +1748,16 @@ fn reject_model_identity_fields(input: &Value) -> Result<(), BrowserPlatformErro
     };
     let Some(field) = MODEL_IDENTITY_INPUT_FIELDS
         .iter()
+        .chain(TRUSTED_OWNER_INPUT_FIELDS.iter())
         .find(|field| object.contains_key(**field))
     else {
         return Ok(());
     };
     Err(BrowserPlatformError::new(
         BrowserErrorCode::InvalidCallerIdentity,
-        format!(
-            "Browser identity field `{field}` is selected by trusted host policy."
-        ),
+        format!("Browser field `{field}` is selected by trusted host policy."),
         false,
-        "Remove identity-selection fields from Browser tool arguments.",
+        "Remove trusted owner and identity-selection fields from Browser tool arguments.",
     ))
 }
 
@@ -1042,6 +1779,97 @@ fn forbidden() -> Response {
         Json(json!({ "error": "forbidden" })),
     )
         .into_response()
+}
+
+fn resource_exhausted(reason_code: &'static str) -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": {
+                "code": "resource_exhausted",
+                "message": "This browser task has too many requests in flight.",
+                "retryable": true,
+                "next_action": "Retry after an earlier browser request completes.",
+                "metadata": {
+                    "reason_code": reason_code,
+                    "active_limit": BROWSER_MCP_TASK_ACTIVE_REQUESTS,
+                    "queued_limit": BROWSER_MCP_TASK_QUEUED_REQUESTS,
+                }
+            }
+        })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
+fn pre_auth_ingress_saturated(capacity: usize) -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": {
+                "code": "resource_exhausted",
+                "message": "The local browser request ingress is temporarily saturated.",
+                "retryable": true,
+                "next_action": "Retry after an earlier request body has been verified.",
+                "metadata": {
+                    "reason_code": "mcp_pre_auth_ingress_limit",
+                    "transport_capacity": capacity,
+                }
+            }
+        })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
+fn browser_mcp_ingress_stopped() -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": {
+                "code": "browser_shutting_down",
+                "message": "The browser request bridge is shutting down.",
+                "retryable": true,
+                "next_action": "Retry after the application is ready."
+            }
+        })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    response
+}
+
+fn request_body_timeout() -> Response {
+    let mut response = (
+        StatusCode::REQUEST_TIMEOUT,
+        Json(json!({
+            "error": {
+                "code": "request_timeout",
+                "message": "The browser request body was not received before the deadline.",
+                "retryable": true,
+                "next_action": "Retry the browser request on a healthy local connection."
+            }
+        })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    response
 }
 
 fn finish(body: Value) -> Response {
@@ -1167,17 +1995,54 @@ async fn cleanup_revoked_bindings(state: &BrowserMcpState) {
         })
         .cloned()
         .collect();
+    let mut revoked = revoked.into_iter();
     let mut cleanups = tokio::task::JoinSet::new();
-    for lease_id in revoked {
-        let state = state.clone();
-        cleanups.spawn(async move {
-            cleanup_binding(&state, &lease_id).await;
-        });
-    }
-    while let Some(result) = cleanups.join_next().await {
+    loop {
+        while cleanups.len() < REVOKED_BINDING_CLEANUP_CONCURRENCY {
+            let Some(lease_id) = revoked.next() else {
+                break;
+            };
+            let state = state.clone();
+            cleanups.spawn(async move {
+                #[cfg(test)]
+                let _task_guard = RevokedCleanupTaskGuard::enter(&state);
+                cleanup_binding(&state, &lease_id).await;
+            });
+        }
+        let Some(result) = cleanups.join_next().await else {
+            break;
+        };
         if let Err(error) = result {
             warn!(%error, "Browser MCP revoked-binding cleanup task failed");
         }
+    }
+}
+
+#[cfg(test)]
+struct RevokedCleanupTaskGuard {
+    active: Arc<AtomicUsize>,
+}
+
+#[cfg(test)]
+impl RevokedCleanupTaskGuard {
+    fn enter(state: &BrowserMcpState) -> Self {
+        let active = state
+            .revoked_cleanup_active
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        state
+            .revoked_cleanup_peak
+            .fetch_max(active, Ordering::AcqRel);
+        Self {
+            active: Arc::clone(&state.revoked_cleanup_active),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RevokedCleanupTaskGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -1227,6 +2092,13 @@ async fn retry_pending_owner_cleanups(state: &BrowserMcpState) {
         return;
     };
     for entry in entries {
+        // Do not acquire every active capability's lifecycle gate on every
+        // 500 ms sweep. Entries without exact pending debt need no retry, and
+        // waiting behind an ordinary in-flight request here would head-of-line
+        // block revoked cleanup for the whole server.
+        if entry.state.lock().await.pending_owner_cleanup.is_empty() {
+            continue;
+        }
         if let Err(error) = retry_pending_owner_cleanup_for_entry(&entry, &hub).await {
             warn!(
                 code = ?error.code,
@@ -1237,6 +2109,7 @@ async fn retry_pending_owner_cleanups(state: &BrowserMcpState) {
 }
 
 async fn drain_all_bindings(state: &BrowserMcpState) {
+    let mut retry_wait = CLEANUP_RETRY_WAIT;
     loop {
         let capability_lease_ids: Vec<String> = {
             let bindings = state.bindings.lock().await;
@@ -1245,6 +2118,7 @@ async fn drain_all_bindings(state: &BrowserMcpState) {
         if capability_lease_ids.is_empty() {
             return;
         }
+        let attempted = capability_lease_ids.len();
 
         // The server is going away. Revoke the process-local capability lease
         // directly (the server is the issuer authority), then clean the exact
@@ -1260,12 +2134,27 @@ async fn drain_all_bindings(state: &BrowserMcpState) {
             .revoke();
             cleanup_binding(state, &capability_lease_id).await;
         }
-        retry_pending_owner_cleanups(state).await;
-        cleanup_revoked_bindings(state).await;
-        if state.bindings.lock().await.is_empty() {
+        let remaining = state.bindings.lock().await.len();
+        if remaining == 0 {
             return;
         }
-        tokio::time::sleep(CLEANUP_RETRY_WAIT).await;
+        // Permanent Hub/driver failure retains exact cleanup authority, but it
+        // must not turn one detached shutdown worker into a 20 Hz hot loop.
+        // Any progress resets latency; an unchanged inventory backs off to a
+        // small fixed ceiling while continuing forever under worker ownership.
+        tokio::time::sleep(retry_wait).await;
+        retry_wait = next_cleanup_retry_wait(retry_wait, remaining < attempted);
+    }
+}
+
+fn next_cleanup_retry_wait(current: Duration, made_progress: bool) -> Duration {
+    if made_progress {
+        CLEANUP_RETRY_WAIT
+    } else {
+        current
+            .checked_mul(2)
+            .unwrap_or(CLEANUP_RETRY_MAX_WAIT)
+            .min(CLEANUP_RETRY_MAX_WAIT)
     }
 }
 
@@ -1353,6 +2242,94 @@ mod tests {
         }
     }
 
+    struct CleanupFailingLane {
+        cleanup_blocked: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl BrowserLaneDriver for CleanupFailingLane {
+        async fn execute(
+            &self,
+            operation: BrowserOperation,
+            _context: DriverOperationContext,
+        ) -> Result<BrowserOperationResult, BrowserPlatformError> {
+            Ok(BrowserOperationResult {
+                output: json!({ "action": operation.action, "input": operation.input }),
+                ..Default::default()
+            })
+        }
+
+        async fn close(&self) -> Result<(), BrowserPlatformError> {
+            if self.cleanup_blocked.load(Ordering::Acquire) {
+                return Err(BrowserPlatformError::new(
+                    BrowserErrorCode::BrowserUnavailable,
+                    "Synthetic owner cleanup failure.",
+                    true,
+                    "Release the synthetic cleanup fault and retry.",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    struct CleanupFailingHost {
+        host_id: BrowserHostId,
+        cleanup_blocked: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl BrowserHostDriver for CleanupFailingHost {
+        fn host_id(&self) -> BrowserHostId {
+            self.host_id.clone()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
+        }
+
+        fn state(&self) -> HostLifecycleState {
+            HostLifecycleState::Running
+        }
+
+        async fn open_lane(
+            &self,
+            _request: LaneLaunchRequest,
+        ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
+            Ok(Arc::new(CleanupFailingLane {
+                cleanup_blocked: Arc::clone(&self.cleanup_blocked),
+            }))
+        }
+
+        async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
+            if self.cleanup_blocked.load(Ordering::Acquire) {
+                return Err(BrowserPlatformError::new(
+                    BrowserErrorCode::BrowserUnavailable,
+                    "Synthetic owner host retirement failure.",
+                    true,
+                    "Release the synthetic cleanup fault and retry.",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    struct CleanupFailingFactory {
+        cleanup_blocked: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl BrowserHostFactory for CleanupFailingFactory {
+        async fn launch(
+            &self,
+            request: HostLaunchRequest,
+        ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
+            Ok(Arc::new(CleanupFailingHost {
+                host_id: request.host_id,
+                cleanup_blocked: Arc::clone(&self.cleanup_blocked),
+            }))
+        }
+    }
+
     async fn setup() -> (
         BrowserMcpServer,
         Arc<BrowserSessionHub>,
@@ -1415,6 +2392,694 @@ mod tests {
             .await
     }
 
+    async fn wait_for_admission_saturation(
+        admission: &TaskRequestAdmission,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while admission.outstanding.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("task request admission did not saturate");
+    }
+
+    #[tokio::test]
+    async fn one_signed_task_keeps_a_hard_boundary_under_one_thousand_attempts() {
+        let (server, _hub, child) = setup().await;
+        let task_resource_key =
+            task_resource_family_key_from_claims(&child.bootstrap.access.claims);
+        let admissions = server.state.request_admissions.clone();
+        let admission = admissions.admission_for(&task_resource_key);
+
+        let mut active = Vec::new();
+        for _ in 0..BROWSER_MCP_TASK_ACTIVE_REQUESTS {
+            active.push(
+                admissions
+                    .acquire(&task_resource_key, Duration::from_secs(1))
+                    .await
+                    .expect("active request must be admitted"),
+            );
+        }
+        assert_eq!(admission.active.available_permits(), 0);
+
+        let mut queued = Vec::new();
+        for _ in 0..BROWSER_MCP_TASK_QUEUED_REQUESTS {
+            let admissions = admissions.clone();
+            let task_resource_key = task_resource_key.clone();
+            queued.push(tokio::spawn(async move {
+                admissions
+                    .acquire(&task_resource_key, Duration::from_secs(30))
+                    .await
+            }));
+        }
+        wait_for_admission_saturation(&admission).await;
+
+        let mut flood = tokio::task::JoinSet::new();
+        for _ in 0..1_000 {
+            let admissions = admissions.clone();
+            let task_resource_key = task_resource_key.clone();
+            flood.spawn(async move {
+                admissions
+                    .acquire(&task_resource_key, Duration::from_secs(1))
+                    .await
+            });
+        }
+        while let Some(result) = flood.join_next().await {
+            match result.expect("flood task must not panic") {
+                Err(TaskRequestAdmissionError::OutstandingLimit) => {}
+                Err(other) => panic!("unexpected admission error: {other:?}"),
+                Ok(_) => panic!("a saturated task exceeded its hard request boundary"),
+            }
+        }
+        assert_eq!(admissions.entry_count(), 1);
+        assert_eq!(admission.outstanding.available_permits(), 0);
+
+        for queued_request in queued {
+            queued_request.abort();
+            let _ = queued_request.await;
+        }
+        assert_eq!(
+            admission.outstanding.available_permits(),
+            BROWSER_MCP_TASK_QUEUED_REQUESTS,
+            "cancelled queue waiters must release every outstanding slot"
+        );
+        drop(active);
+        assert_eq!(
+            admission.outstanding.available_permits(),
+            BROWSER_MCP_TASK_ACTIVE_REQUESTS + BROWSER_MCP_TASK_QUEUED_REQUESTS
+        );
+
+        drop(admission);
+        admissions.prune();
+        assert_eq!(
+            admissions.entry_count(),
+            0,
+            "weak admission entries must not retain completed task keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn sibling_runtimes_share_conversation_ingress_but_other_conversations_do_not() {
+        let (server, _hub, first) = setup().await;
+        let sibling = server
+            .issuer_config("nomicore".into())
+            .issue_for_conversation(USER_ID, CONVERSATION_ID, Some("agent-sibling"))
+            .unwrap();
+        let other = server
+            .issuer_config("nomicore".into())
+            .issue_for_conversation(
+                USER_ID,
+                "0190f5fe-7c00-7a00-8000-000000000003",
+                Some("agent-other"),
+            )
+            .unwrap();
+        let first_family =
+            task_resource_family_key_from_claims(&first.bootstrap.access.claims);
+        let sibling_family =
+            task_resource_family_key_from_claims(&sibling.bootstrap.access.claims);
+        let other_family =
+            task_resource_family_key_from_claims(&other.bootstrap.access.claims);
+        assert_eq!(first_family, sibling_family);
+        assert_ne!(first_family, other_family);
+
+        let admissions = server.state.request_admissions.clone();
+        let mut active = Vec::new();
+        for _ in 0..BROWSER_MCP_TASK_ACTIVE_REQUESTS {
+            active.push(
+                admissions
+                    .acquire(&first_family, Duration::from_secs(1))
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert!(matches!(
+            admissions
+                .acquire(&sibling_family, Duration::from_millis(1))
+                .await,
+            Err(TaskRequestAdmissionError::QueueTimeout)
+        ));
+        let independent = admissions
+            .acquire(&other_family, Duration::from_millis(1))
+            .await
+            .expect("another conversation must retain independent capacity");
+        drop(independent);
+        drop(active);
+    }
+
+    #[tokio::test]
+    async fn queue_timeout_and_cancellation_storm_restore_all_task_slots() {
+        let admissions = TaskRequestAdmissions::default();
+        let task_resource_key = "verified-user:verified-runtime";
+        let admission = admissions.admission_for(task_resource_key);
+        let mut active = Vec::new();
+        for _ in 0..BROWSER_MCP_TASK_ACTIVE_REQUESTS {
+            active.push(
+                admissions
+                    .acquire(task_resource_key, Duration::from_secs(1))
+                    .await
+                    .expect("active request must be admitted"),
+            );
+        }
+
+        for _ in 0..64 {
+            let mut queued = Vec::new();
+            for _ in 0..BROWSER_MCP_TASK_QUEUED_REQUESTS {
+                let admissions = admissions.clone();
+                queued.push(tokio::spawn(async move {
+                    admissions
+                        .acquire(task_resource_key, Duration::from_secs(30))
+                        .await
+                }));
+            }
+            wait_for_admission_saturation(&admission).await;
+            for queued_request in queued {
+                queued_request.abort();
+                let _ = queued_request.await;
+            }
+            assert_eq!(
+                admission.outstanding.available_permits(),
+                BROWSER_MCP_TASK_QUEUED_REQUESTS
+            );
+        }
+
+        let timeout = admissions
+            .acquire(task_resource_key, Duration::from_millis(1))
+            .await;
+        assert!(matches!(
+            timeout,
+            Err(TaskRequestAdmissionError::QueueTimeout)
+        ));
+        assert_eq!(
+            admission.outstanding.available_permits(),
+            BROWSER_MCP_TASK_QUEUED_REQUESTS,
+            "a timed-out queue waiter must release its total slot"
+        );
+        drop(active);
+        drop(admission);
+        admissions.prune();
+        assert_eq!(admissions.entry_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn saturated_task_does_not_reduce_another_tasks_capacity() {
+        let admissions = TaskRequestAdmissions::default();
+        let first_key = "verified-user:first-runtime";
+        let second_key = "verified-user:second-runtime";
+        let first = admissions.admission_for(first_key);
+        let mut first_active = Vec::new();
+        for _ in 0..BROWSER_MCP_TASK_ACTIVE_REQUESTS {
+            first_active.push(
+                admissions
+                    .acquire(first_key, Duration::from_secs(1))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let mut first_queued = Vec::new();
+        for _ in 0..BROWSER_MCP_TASK_QUEUED_REQUESTS {
+            let admissions = admissions.clone();
+            first_queued.push(tokio::spawn(async move {
+                admissions
+                    .acquire(first_key, Duration::from_secs(30))
+                    .await
+            }));
+        }
+        wait_for_admission_saturation(&first).await;
+
+        let second = admissions
+            .acquire(second_key, Duration::from_millis(50))
+            .await
+            .expect("there must be no process-global request semaphore");
+        let second_admission = admissions.get(second_key).unwrap();
+        assert_eq!(
+            second_admission.active.available_permits(),
+            BROWSER_MCP_TASK_ACTIVE_REQUESTS - 1
+        );
+        drop(second);
+
+        for queued_request in first_queued {
+            queued_request.abort();
+            let _ = queued_request.await;
+        }
+        drop(first_active);
+        drop(first);
+        drop(second_admission);
+        admissions.prune();
+        assert_eq!(admissions.entry_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_http_calls_from_one_token_are_bounded_before_owner_waits() {
+        const REQUESTS: usize = 64;
+        const RETAINED: usize =
+            BROWSER_MCP_TASK_ACTIVE_REQUESTS + BROWSER_MCP_TASK_QUEUED_REQUESTS;
+
+        let (server, _hub, child) = setup().await;
+        let claims = child.bootstrap.access.claims.clone();
+        let task_resource_key = task_resource_family_key_from_claims(&claims);
+        let entry = Arc::new(OwnerBindingEntry::default());
+        server
+            .state
+            .bindings
+            .lock()
+            .await
+            .insert(claims.lease_id.clone(), Arc::clone(&entry));
+        let owner_gate = entry.operation.lock().await;
+
+        let mut calls = tokio::task::JoinSet::new();
+        for index in 0..REQUESTS {
+            let child = child.clone();
+            calls.spawn(async move {
+                try_call_tool_with_args(
+                    &child,
+                    "navigate",
+                    json!({ "url": format!("https://example.test/{index}") }),
+                )
+                .await
+            });
+        }
+
+        let admission = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(admission) =
+                    server.state.request_admissions.get(&task_resource_key)
+                    && admission.outstanding.available_permits() == 0
+                {
+                    break admission;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("HTTP requests did not reach the per-task boundary");
+        assert_eq!(admission.active.available_permits(), 0);
+
+        for _ in 0..(REQUESTS - RETAINED) {
+            let response = tokio::time::timeout(Duration::from_secs(2), calls.join_next())
+                .await
+                .expect("over-limit HTTP request did not fail promptly")
+                .expect("request set ended before every overload response")
+                .expect("request task panicked")
+                .expect("request transport failed");
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(
+                body.pointer("/error/code").and_then(Value::as_str),
+                Some("resource_exhausted")
+            );
+        }
+        assert_eq!(admission.outstanding.available_permits(), 0);
+
+        drop(owner_gate);
+        let mut completed = 0;
+        while let Some(response) = calls.join_next().await {
+            let response = response
+                .expect("request task panicked")
+                .expect("request transport failed");
+            assert_eq!(response.status(), StatusCode::OK);
+            completed += 1;
+        }
+        assert_eq!(completed, RETAINED);
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_rejected_before_task_admission() {
+        let (server, _hub, child) = setup().await;
+        let raw = serde_json::to_vec(&json!({
+            "session": child.bootstrap.access.claims.clone(),
+            "tool": "type",
+            "args": {
+                "text": "x".repeat(BROWSER_MCP_REQUEST_BODY_LIMIT_BYTES),
+            },
+        }))
+        .unwrap();
+        assert!(raw.len() > BROWSER_MCP_REQUEST_BODY_LIMIT_BYTES);
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/tool",
+                child.bootstrap.port
+            ))
+            .bearer_auth(&child.bootstrap.access.token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(raw)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        server.state.request_admissions.prune();
+        assert_eq!(server.state.request_admissions.entry_count(), 0);
+        assert!(server.state.bindings.lock().await.is_empty());
+        assert_eq!(
+            server.pre_auth_ingress.slots.available_permits(),
+            server.pre_auth_ingress.capacity,
+            "body rejection must return the pre-auth ingress permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_chunked_body_hits_an_absolute_read_deadline() {
+        use std::convert::Infallible;
+
+        use axum::body::{Body, Bytes};
+        use futures_util::{StreamExt, stream};
+
+        // Yield one syntactically incomplete frame, then remain pending
+        // forever. This models a chunked sender that never terminates its JSON
+        // envelope; an idle-reset timeout could be defeated by periodically
+        // adding frames, while this absolute extraction deadline cannot.
+        let body = stream::once(async {
+            Ok::<_, Infallible>(Bytes::from_static(b"{"))
+        })
+        .chain(stream::pending::<Result<Bytes, Infallible>>());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/tool")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::TRANSFER_ENCODING, "chunked")
+            .body(Body::from_stream(body))
+            .unwrap();
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            extract_json_with_deadline::<_, Value>(
+                request,
+                &(),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("the absolute body deadline did not wake")
+        .unwrap_err();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn one_thousand_stalled_bodies_are_bounded_by_pre_auth_ingress() {
+        use std::convert::Infallible;
+
+        use axum::body::{Body, Bytes};
+        use futures_util::{StreamExt, stream};
+        use tower::ServiceExt;
+
+        const CAPACITY: usize = 16;
+        const REQUESTS: usize = 1_000;
+
+        async fn stalled_handler(
+            Extension(_guard): Extension<PreAuthIngressGuard>,
+            request: Request,
+        ) -> Response {
+            match extract_json_with_deadline::<_, Value>(
+                request,
+                &(),
+                Duration::from_secs(30),
+            )
+            .await
+            {
+                Ok(_) => StatusCode::OK.into_response(),
+                Err(response) => response,
+            }
+        }
+
+        let ingress = PreAuthIngress::with_capacity(CAPACITY);
+        let app = axum::Router::new()
+            .route("/tool", axum::routing::post(stalled_handler))
+            .layer(DefaultBodyLimit::disable())
+            .layer(RequestBodyLimitLayer::new(
+                BROWSER_MCP_REQUEST_BODY_LIMIT_BYTES,
+            ))
+            .layer(middleware::from_fn_with_state(
+                ingress.clone(),
+                enforce_pre_auth_ingress,
+            ));
+        let mut calls = tokio::task::JoinSet::new();
+        for _ in 0..REQUESTS {
+            let app = app.clone();
+            calls.spawn(async move {
+                let body = stream::once(async {
+                    Ok::<_, Infallible>(Bytes::from_static(b"{"))
+                })
+                .chain(stream::pending::<Result<Bytes, Infallible>>());
+                let request = Request::builder()
+                    .method("POST")
+                    .uri("/tool")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::TRANSFER_ENCODING, "chunked")
+                    .body(Body::from_stream(body))
+                    .unwrap();
+                app.oneshot(request).await.unwrap()
+            });
+        }
+
+        for _ in 0..(REQUESTS - CAPACITY) {
+            let response = tokio::time::timeout(Duration::from_secs(3), calls.join_next())
+                .await
+                .expect("pre-auth overload was queued instead of rejected")
+                .expect("request set ended before every overload response")
+                .expect("pre-auth request task panicked");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        assert_eq!(
+            ingress.slots.available_permits(),
+            0,
+            "only the fixed pre-auth capacity may retain stalled bodies"
+        );
+
+        calls.abort_all();
+        while calls.join_next().await.is_some() {}
+        assert_eq!(
+            ingress.slots.available_permits(),
+            CAPACITY,
+            "cancelling every stalled body must restore every transport slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_listener_caps_idle_pre_header_connections_and_recovers() {
+        const CAPACITY: usize = 4;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let ingress = PreAuthConnectionIngress::with_capacity(CAPACITY);
+        let mut bounded = BoundedTcpListener::new(listener, ingress.clone());
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
+        let accepter = tokio::spawn(async move {
+            for _ in 0..=CAPACITY {
+                let (stream, _) = bounded.accept().await;
+                if accepted_tx.send(stream).is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut clients = Vec::new();
+        let mut accepted = Vec::new();
+        for _ in 0..CAPACITY {
+            clients.push(TcpStream::connect(address).await.unwrap());
+            accepted.push(
+                tokio::time::timeout(Duration::from_secs(1), accepted_rx.recv())
+                    .await
+                    .expect("bounded listener did not accept an available slot")
+                    .unwrap(),
+            );
+        }
+        assert_eq!(ingress.slots.available_permits(), 0);
+
+        // The TCP handshake may sit in the OS backlog, but Axum must not own a
+        // fifth FD/Hyper task while all four socket-lifetime permits are held.
+        clients.push(
+            tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(address))
+                .await
+                .expect("backlogged loopback connect stalled")
+                .unwrap(),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), accepted_rx.recv())
+                .await
+                .is_err(),
+            "the listener accepted beyond its connection high-water mark"
+        );
+
+        drop(accepted.remove(0));
+        accepted.push(
+            tokio::time::timeout(Duration::from_secs(1), accepted_rx.recv())
+                .await
+                .expect("dropping an idle socket did not restore acceptance")
+                .unwrap(),
+        );
+        accepter.await.unwrap();
+        assert_eq!(ingress.slots.available_permits(), 0);
+        drop(accepted);
+        drop(clients);
+        assert_eq!(
+            ingress.slots.available_permits(),
+            CAPACITY,
+            "socket Drop must return every connection-lifetime permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_idle_pre_header_connection_authority() {
+        use tokio::io::AsyncReadExt;
+
+        let (server, _hub, _child) = setup().await;
+        let mut idle_client = TcpStream::connect(server.http_addr).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                // One permit belongs to the accepted idle socket and Axum may
+                // reserve another while its next accept is pending.
+                if server
+                    .pre_auth_connections
+                    .slots
+                    .available_permits()
+                    <= server.pre_auth_connections.capacity.saturating_sub(1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the idle socket was never accepted");
+
+        tokio::time::timeout(Duration::from_secs(1), server.stop_and_wait())
+            .await
+            .expect("shutdown retained an idle pre-header socket")
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(1), idle_client.read(&mut byte))
+            .await
+            .expect("the accepted raw socket remained readable forever");
+        assert!(
+            matches!(read, Ok(0) | Err(_)),
+            "shutdown must close, not merely stop accepting, the raw socket"
+        );
+        drop(idle_client);
+        assert_eq!(
+            server
+                .pre_auth_connections
+                .slots
+                .available_permits(),
+            server.pre_auth_connections.capacity,
+            "serve shutdown must drop both accepted and pending-accept permits"
+        );
+        assert!(
+            server
+                .pre_auth_connections
+                .accepted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .shutdown_handles
+                .is_empty(),
+            "shutdown must not retain duplicate socket-close handles"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_auth_cap_is_released_before_long_post_auth_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        const CAPACITY: usize = 8;
+        const VERIFIED_TASKS: usize = CAPACITY * 3;
+
+        #[derive(Clone)]
+        struct PostAuthHold {
+            entered: Arc<AtomicUsize>,
+            release: Arc<tokio::sync::Notify>,
+        }
+
+        async fn post_auth_handler(
+            State(state): State<PostAuthHold>,
+            Extension(guard): Extension<PreAuthIngressGuard>,
+            TimedJson(_body): TimedJson<Value>,
+        ) -> StatusCode {
+            // Model the real handler's verified-task handoff. Work after this
+            // point may be long lived without owning a global transport slot.
+            guard.release();
+            state.entered.fetch_add(1, Ordering::AcqRel);
+            state.release.notified().await;
+            StatusCode::OK
+        }
+
+        let ingress = PreAuthIngress::with_capacity(CAPACITY);
+        let hold = PostAuthHold {
+            entered: Arc::new(AtomicUsize::new(0)),
+            release: Arc::new(tokio::sync::Notify::new()),
+        };
+        let app = axum::Router::new()
+            .route("/tool", axum::routing::post(post_auth_handler))
+            .with_state(hold.clone())
+            .layer(DefaultBodyLimit::disable())
+            .layer(RequestBodyLimitLayer::new(
+                BROWSER_MCP_REQUEST_BODY_LIMIT_BYTES,
+            ))
+            .layer(middleware::from_fn_with_state(
+                ingress.clone(),
+                enforce_pre_auth_ingress,
+            ));
+        let mut calls = tokio::task::JoinSet::new();
+        for batch in 1..=VERIFIED_TASKS / CAPACITY {
+            for _ in 0..CAPACITY {
+                let app = app.clone();
+                calls.spawn(async move {
+                    let request = Request::builder()
+                        .method("POST")
+                        .uri("/tool")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap();
+                    app.oneshot(request).await.unwrap()
+                });
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while hold.entered.load(Ordering::Acquire) != batch * CAPACITY {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the transport cap leaked into post-auth task work");
+        }
+        assert_eq!(
+            ingress.slots.available_permits(),
+            CAPACITY,
+            "verified long-lived work must not retain pre-auth slots"
+        );
+        hold.release.notify_waiters();
+        while let Some(response) = calls.join_next().await {
+            assert_eq!(response.unwrap().status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn forged_task_identity_cannot_allocate_an_admission_bucket() {
+        let (server, _hub, child) = setup().await;
+        let mut forged = child.bootstrap.access.claims.clone();
+        forged.scope.runtime_instance_id =
+            "0190f5fe-7c00-7a00-8000-000000000099".to_owned();
+        assert!(validate_browser_claims(&forged).is_ok());
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/tool",
+                child.bootstrap.port
+            ))
+            .bearer_auth(&child.bootstrap.access.token)
+            .json(&json!({
+                "session": forged,
+                "tool": "navigate",
+                "args": { "url": "https://example.test/forged" },
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        server.state.request_admissions.prune();
+        assert_eq!(server.state.request_admissions.entry_count(), 0);
+        assert!(server.state.bindings.lock().await.is_empty());
+    }
+
     #[tokio::test]
     async fn valid_acp_capability_enters_the_shared_hub() {
         let (_server, hub, child) = setup().await;
@@ -1435,6 +3100,11 @@ mod tests {
             lanes[0].caller.runtime_instance_id,
             child.bootstrap.access.claims.scope.runtime_instance_id
         );
+        assert_eq!(
+            lanes[0].caller.task_resource_family_key().into_string(),
+            task_resource_family_key_from_claims(&child.bootstrap.access.claims),
+            "MCP admission and Hub accounting must share the exact stable task key"
+        );
         assert!(
             lanes[0]
                 .caller
@@ -1451,6 +3121,52 @@ mod tests {
                 "read-only diagnostic tool {tool} must be granted"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_hub_cannot_create_an_owner_binding() {
+        let (server, hub, child) = setup().await;
+        server.set_hub(Weak::<BrowserSessionHub>::new());
+
+        let response = call_tool(&child, "navigate").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        assert!(body.get("error").is_some(), "unexpected response: {body}");
+        assert!(server.state.bindings.lock().await.is_empty());
+        assert_eq!(server.state.owner_lease_issues.load(Ordering::Acquire), 0);
+
+        server.set_hub(Arc::downgrade(&hub));
+        server.stop_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_owner_bindings_scale_with_distinct_signed_tasks() {
+        const TASKS: usize = 64;
+        let (server, hub, _unused_child) = setup().await;
+
+        for index in 0..TASKS {
+            let agent_id = format!("elastic-agent-{index}");
+            let child = server
+                .issuer_config("nomicore".into())
+                .issue_for_conversation(
+                    USER_ID,
+                    CONVERSATION_ID,
+                    Some(&agent_id),
+                )
+                .unwrap();
+            ensure_owner_binding(&server.state, &hub, &child.bootstrap.access.claims)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(server.state.bindings.lock().await.len(), TASKS);
+        assert_eq!(
+            server.state.owner_lease_issues.load(Ordering::Acquire),
+            TASKS,
+            "MCP must not impose a process-wide cap on independent active tasks"
+        );
+        server.stop_and_wait().await.unwrap();
+        assert!(server.state.bindings.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -1567,6 +3283,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_cleanup_failure_blocks_unbounded_replacement_generations() {
+        let cleanup_blocked = Arc::new(AtomicBool::new(true));
+        let mut config = HubConfig::default();
+        config.owner_lease_ttl_ms = 10;
+        let hub = Arc::new(BrowserSessionHub::new(
+            Arc::new(CleanupFailingFactory {
+                cleanup_blocked: Arc::clone(&cleanup_blocked),
+            }),
+            config,
+        ));
+        let server = BrowserMcpServer::start().await.unwrap();
+        server.set_hub(Arc::downgrade(&hub));
+        let child = server
+            .issuer_config("nomicore".into())
+            .issue_for_conversation(USER_ID, CONVERSATION_ID, Some("agent-test"))
+            .unwrap();
+        let claims = child.bootstrap.access.claims.clone();
+        // Keep this binding outside the live server state's periodic sweeper so
+        // the test controls every failed cleanup/replacement transition.
+        let state = BrowserMcpState {
+            issuer: Arc::clone(&server.issuer),
+            hub: Arc::clone(&server.hub),
+            bindings: Arc::new(Mutex::new(HashMap::new())),
+            request_admissions: TaskRequestAdmissions::default(),
+            owner_lease_issues: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_active: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_peak: Arc::new(AtomicUsize::new(0)),
+            request_started: Arc::new(tokio::sync::Notify::new()),
+        };
+
+        let old_owner = ensure_owner_binding(&state, &hub, &claims)
+            .await
+            .unwrap();
+        let old_client = hub
+            .bind(caller_from_claims(&claims, old_owner.clone()))
+            .unwrap();
+        old_client
+            .open(
+                None,
+                nomifun_browser_platform::BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.owner_lease_issues.load(Ordering::Acquire), 1);
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        for _ in 0..64 {
+            let error = ensure_owner_binding(&state, &hub, &claims)
+                .await
+                .expect_err("an uncleared exact owner must block every replacement");
+            assert_eq!(
+                error
+                    .metadata
+                    .get("cleanup_pending")
+                    .and_then(Value::as_bool),
+                Some(true),
+                "every retained MCP owner must correspond to Hub-owned cleanup debt"
+            );
+        }
+
+        let entry = state
+            .bindings
+            .lock()
+            .await
+            .get(&claims.lease_id)
+            .cloned()
+            .expect("failed cleanup must retain its binding entry");
+        {
+            let binding_state = entry.state.lock().await;
+            assert!(
+                binding_state.binding.is_none(),
+                "a revoked current owner must not remain publishable"
+            );
+            assert_eq!(
+                binding_state.pending_owner_cleanup,
+                vec![old_owner.clone()],
+                "retries must deduplicate the exact pending owner"
+            );
+        }
+        assert_eq!(
+            state.owner_lease_issues.load(Ordering::Acquire),
+            1,
+            "permanent cleanup failure must not mint owner generations"
+        );
+
+        cleanup_blocked.store(false, Ordering::Release);
+        let replacement = ensure_owner_binding(&state, &hub, &claims)
+            .await
+            .expect("replacement may be issued after exact cleanup recovers");
+        assert_ne!(replacement, old_owner);
+        assert_eq!(state.owner_lease_issues.load(Ordering::Acquire), 2);
+        assert!(entry.state.lock().await.pending_owner_cleanup.is_empty());
+
+        let renewed = ensure_owner_binding(&state, &hub, &claims)
+            .await
+            .expect("the single replacement should renew normally");
+        assert_eq!(renewed, replacement);
+        assert_eq!(
+            state.owner_lease_issues.load(Ordering::Acquire),
+            2,
+            "recovery may publish exactly one replacement"
+        );
+
+        cleanup_binding(&state, &claims.lease_id).await;
+        server.stop_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn pending_owner_cleanup_completes_before_replacement_without_deadlock() {
         let (server, hub, child) = setup().await;
         let claims = child.bootstrap.access.claims.clone();
@@ -1576,6 +3401,10 @@ mod tests {
             issuer: Arc::clone(&server.issuer),
             hub: Arc::clone(&server.hub),
             bindings: Arc::new(Mutex::new(HashMap::new())),
+            request_admissions: TaskRequestAdmissions::default(),
+            owner_lease_issues: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_active: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_peak: Arc::new(AtomicUsize::new(0)),
             request_started: Arc::new(tokio::sync::Notify::new()),
         };
 
@@ -1674,6 +3503,84 @@ mod tests {
         assert!(state.bindings.lock().await.is_empty());
         assert!(hub.list_lanes().await.is_empty());
         server.stop_and_wait().await.unwrap();
+    }
+
+    async fn assert_revoked_cleanup_window(binding_count: usize) {
+        let (server, _hub, _child) = setup().await;
+        let state = BrowserMcpState {
+            issuer: Arc::clone(&server.issuer),
+            hub: Arc::clone(&server.hub),
+            bindings: Arc::new(Mutex::new(HashMap::new())),
+            request_admissions: TaskRequestAdmissions::default(),
+            owner_lease_issues: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_active: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_peak: Arc::new(AtomicUsize::new(0)),
+            request_started: Arc::new(tokio::sync::Notify::new()),
+        };
+        let entries = (0..binding_count)
+            .map(|_| Arc::new(OwnerBindingEntry::default()))
+            .collect::<Vec<_>>();
+        {
+            let mut bindings = state.bindings.lock().await;
+            for (index, entry) in entries.iter().enumerate() {
+                bindings.insert(
+                    format!("already-revoked-capability-{binding_count}-{index}"),
+                    Arc::clone(entry),
+                );
+            }
+        }
+        let mut operation_guards = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            operation_guards.push(entry.operation.lock().await);
+        }
+
+        let sweep_state = state.clone();
+        let sweep = tokio::spawn(async move {
+            cleanup_revoked_bindings(&sweep_state).await;
+        });
+        let expected_window = binding_count.min(REVOKED_BINDING_CLEANUP_CONCURRENCY);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.revoked_cleanup_active.load(Ordering::Acquire) < expected_window {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("revoked cleanup tasks did not fill their fixed window");
+        assert_eq!(
+            state.revoked_cleanup_peak.load(Ordering::Acquire),
+            expected_window
+        );
+
+        if binding_count > REVOKED_BINDING_CLEANUP_CONCURRENCY {
+            drop(operation_guards.remove(0));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while state.bindings.lock().await.len() == binding_count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("freeing one window slot did not advance the sweep");
+            assert_eq!(
+                state.revoked_cleanup_peak.load(Ordering::Acquire),
+                REVOKED_BINDING_CLEANUP_CONCURRENCY,
+                "the N+1 binding must reuse a completed slot instead of spawning another task"
+            );
+        }
+
+        drop(operation_guards);
+        tokio::time::timeout(Duration::from_secs(1), sweep)
+            .await
+            .expect("bounded revoked cleanup sweep did not finish")
+            .unwrap();
+        assert_eq!(state.revoked_cleanup_active.load(Ordering::Acquire), 0);
+        assert!(state.bindings.lock().await.is_empty());
+        server.stop_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn revoked_binding_sweep_has_a_fixed_n_and_n_plus_one_task_window() {
+        assert_revoked_cleanup_window(REVOKED_BINDING_CLEANUP_CONCURRENCY).await;
+        assert_revoked_cleanup_window(REVOKED_BINDING_CLEANUP_CONCURRENCY + 1).await;
     }
 
     #[tokio::test]
@@ -1845,6 +3752,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_owner_fields_fail_closed_before_binding_or_facade_dispatch() {
+        let (server, hub, child) = setup().await;
+        assert!(
+            TRUSTED_OWNER_INPUT_FIELDS.contains(&"runtime_cleanup_key"),
+            "the exact runtime cleanup key must remain host-owned"
+        );
+        for field in TRUSTED_OWNER_INPUT_FIELDS {
+            let response = call_tool_with_args(
+                &child,
+                "browser_open",
+                json!({
+                    "lane_name": "research",
+                    (*field): "model-controlled",
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{field}");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(
+                body.pointer("/error/code").and_then(Value::as_str),
+                Some("invalid_caller_identity"),
+                "{field} must fail at the MCP boundary: {body}"
+            );
+            assert!(
+                server.state.bindings.lock().await.is_empty(),
+                "{field} must be rejected before an owner binding is created"
+            );
+            assert!(
+                hub.list_lanes().await.is_empty(),
+                "{field} must be rejected before facade dispatch or Host launch"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn sibling_acp_runtimes_in_one_conversation_get_distinct_lanes() {
         let (server, hub, first) = setup().await;
         let second = server
@@ -1942,7 +3884,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graceful_shutdown_drains_in_flight_request_before_final_binding_cleanup() {
+    async fn shutdown_cancels_in_flight_handler_before_final_binding_cleanup() {
         let (server, hub, child) = setup().await;
         let capability_lease_id = child.bootstrap.access.claims.lease_id.clone();
         let entry = Arc::new(OwnerBindingEntry::default());
@@ -1974,27 +3916,51 @@ mod tests {
             server
                 .issuer
                 .is_lease_active(BROWSER_CAPABILITY_DOMAIN, &capability_lease_id),
-            "final binding drain must wait for the accepted request to finish"
-        );
-        assert!(
-            !in_flight.is_finished(),
-            "the accepted request must remain in flight while its transition is pinned"
+            "the final binding drain must retain authority while cleanup is pinned"
         );
 
+        let cancelled = tokio::time::timeout(Duration::from_secs(1), in_flight)
+            .await
+            .expect("shutdown did not cancel the blocked handler")
+            .unwrap();
+        if let Ok(response) = cancelled {
+            assert!(response.status().is_server_error());
+        }
+        assert!(
+            entry.state.lock().await.binding.is_none(),
+            "the cancelled handler must not publish an owner"
+        );
+
+        let unexpected_handler_start =
+            server.state.request_started.notified();
         let rejected = try_call_tool_with_args(
             &child,
             "navigate",
             json!({ "url": "https://example.test/rejected-after-stop" }),
         )
         .await;
+        if let Ok(response) = rejected {
+            assert!(
+                response.status().is_server_error(),
+                "a scheduling-race TCP handshake must still fail before the handler: {}",
+                response.status()
+            );
+        }
         assert!(
-            rejected.is_err(),
-            "a fresh connection must not be accepted after ingress shutdown"
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                unexpected_handler_start,
+            )
+            .await
+            .is_err(),
+            "a post-stop request reached the tool handler"
+        );
+        assert!(
+            entry.state.lock().await.binding.is_none(),
+            "a post-stop request created an owner binding"
         );
 
         drop(operation_guard);
-        let response = in_flight.await.unwrap().unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
         server.stop_and_wait().await.unwrap();
 
         assert!(
@@ -2005,7 +3971,7 @@ mod tests {
         );
         assert!(
             hub.list_lanes().await.is_empty(),
-            "the owner published by the final in-flight request must be drained"
+            "the authoritative post-cancellation drain must leave no owner resources"
         );
     }
 
@@ -2017,6 +3983,26 @@ mod tests {
         assert!(error.contains("HTTP ingress shutdown exceeded"));
         assert!(error.contains("cleanup exceeded"));
         assert!(error.contains("durable cleanup detached"));
+    }
+
+    #[test]
+    fn permanent_cleanup_failure_uses_a_bounded_exponential_backoff() {
+        let mut wait = CLEANUP_RETRY_WAIT;
+        let mut observed = Vec::new();
+        for _ in 0..16 {
+            observed.push(wait);
+            wait = next_cleanup_retry_wait(wait, false);
+        }
+        assert_eq!(observed[0], CLEANUP_RETRY_WAIT);
+        assert_eq!(wait, CLEANUP_RETRY_MAX_WAIT);
+        assert!(observed.into_iter().all(|delay| {
+            delay >= CLEANUP_RETRY_WAIT && delay <= CLEANUP_RETRY_MAX_WAIT
+        }));
+        assert_eq!(
+            next_cleanup_retry_wait(wait, true),
+            CLEANUP_RETRY_WAIT,
+            "any completed binding should restore prompt retry latency"
+        );
     }
 
     #[tokio::test]
@@ -2052,7 +4038,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finite_cleanup_wait_still_waits_for_http_quiescence_before_timing_out() {
+    async fn cancelling_stuck_periodic_cleanup_preserves_owned_final_drain() {
+        let (server, hub, child) = setup().await;
+        assert_eq!(call_tool(&child, "navigate").await.status(), StatusCode::OK);
+        let capability_lease_id = child.bootstrap.access.claims.lease_id.clone();
+        let entry = server
+            .state
+            .bindings
+            .lock()
+            .await
+            .get(&capability_lease_id)
+            .cloned()
+            .expect("tool call publishes an owner binding");
+        let operation_guard = entry.operation.lock().await;
+        let cleanup_captured = entry.cleanup_captured.notified();
+        LoopbackCapabilityLease::new(
+            Arc::clone(&server.issuer),
+            BROWSER_CAPABILITY_DOMAIN,
+            capability_lease_id,
+        )
+        .revoke();
+        tokio::time::timeout(Duration::from_secs(1), cleanup_captured)
+            .await
+            .expect("periodic cleanup did not capture the revoked binding");
+
+        let error = server
+            .stop_and_wait_for(Duration::from_millis(1))
+            .await
+            .unwrap_err();
+        assert!(error.contains("cleanup exceeded"), "unexpected error: {error}");
+        tokio::time::sleep(BROWSER_MCP_PERIODIC_CLEANUP_STOP_GRACE * 2).await;
+        assert_eq!(hub.list_lanes().await.len(), 1);
+        assert!(
+            !server.state.bindings.lock().await.is_empty(),
+            "aborting the optional periodic worker must retain exact cleanup authority"
+        );
+
+        drop(operation_guard);
+        tokio::time::timeout(Duration::from_secs(1), server.stop_and_wait())
+            .await
+            .expect("the owned final drain did not resume")
+            .unwrap();
+        assert!(server.state.bindings.lock().await.is_empty());
+        assert!(hub.list_lanes().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn finite_cleanup_wait_cancels_http_without_losing_owned_cleanup() {
         let (server, hub, child) = setup().await;
         let capability_lease_id = child.bootstrap.access.claims.lease_id.clone();
         let sibling = server
@@ -2095,33 +4127,34 @@ mod tests {
         request_started.await;
         ensure_captured.await;
 
-        let waiter = server.stop_and_wait_for(Duration::from_millis(1));
-        tokio::pin!(waiter);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(25), &mut waiter)
-                .await
-                .is_err(),
-            "the cleanup wait must not let a caller timeout bypass HTTP quiescence"
-        );
-        assert!(
-            !in_flight.is_finished(),
-            "the accepted request must still be held by the per-capability gate"
-        );
-
-        drop(operation_guard);
-        let in_flight = in_flight.await.unwrap();
-        if let Ok(response) = in_flight {
-            assert_eq!(response.status(), StatusCode::OK);
-        }
-        let error = waiter.await.unwrap_err();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            server.stop_and_wait_for(Duration::from_millis(1)),
+        )
+        .await
+        .expect("shutdown did not cancel the blocked HTTP handler")
+        .unwrap_err();
         assert!(
             error.contains("cleanup exceeded"),
-            "the finite wait may time out only after ingress quiesces: {error}"
+            "the finite caller wait may expire while owned cleanup continues: {error}"
         );
+        let in_flight = tokio::time::timeout(Duration::from_secs(1), in_flight)
+            .await
+            .expect("the blocked HTTP handler survived shutdown cancellation")
+            .unwrap();
+        if let Ok(response) = in_flight {
+            assert!(response.status().is_server_error());
+        }
         assert!(
             !server.state.bindings.lock().await.is_empty(),
             "the timed-out caller must leave exact-owner cleanup authority intact"
         );
+        assert_eq!(
+            hub.list_lanes().await.len(),
+            1,
+            "handler cancellation must not discard the sibling owner's live cleanup debt"
+        );
+        drop(operation_guard);
         drop(cleanup_guard);
         server.stop_and_wait().await.unwrap();
         assert!(hub.list_lanes().await.is_empty());
@@ -2307,6 +4340,10 @@ mod tests {
             issuer: Arc::clone(&server.issuer),
             hub: Arc::clone(&server.hub),
             bindings: Arc::new(Mutex::new(HashMap::new())),
+            request_admissions: TaskRequestAdmissions::default(),
+            owner_lease_issues: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_active: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_peak: Arc::new(AtomicUsize::new(0)),
             request_started: Arc::new(tokio::sync::Notify::new()),
         };
         let entry = Arc::new(OwnerBindingEntry::default());
@@ -2373,6 +4410,10 @@ mod tests {
             issuer: Arc::clone(&server.issuer),
             hub: Arc::clone(&server.hub),
             bindings: Arc::new(Mutex::new(HashMap::new())),
+            request_admissions: TaskRequestAdmissions::default(),
+            owner_lease_issues: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_active: Arc::new(AtomicUsize::new(0)),
+            revoked_cleanup_peak: Arc::new(AtomicUsize::new(0)),
             request_started: Arc::new(tokio::sync::Notify::new()),
         };
 

@@ -84,6 +84,10 @@ export type BrowserResourcePolicyPreset =
 
 export type BrowserResourcePolicyAdvanced = {
   max_memory_ratio?: number;
+  max_task_memory_bytes?: number;
+  max_task_active_operations?: number;
+  max_task_open_lanes?: number;
+  max_task_tabs?: number;
   reserved_memory_bytes?: number;
   max_active_operations?: number;
   max_open_lanes?: number;
@@ -98,6 +102,10 @@ export type BrowserResourcePolicy = {
 
 export const BROWSER_RESOURCE_POLICY_ADVANCED_FIELDS = [
   'max_memory_ratio',
+  'max_task_memory_bytes',
+  'max_task_active_operations',
+  'max_task_open_lanes',
+  'max_task_tabs',
   'reserved_memory_bytes',
   'max_active_operations',
   'max_open_lanes',
@@ -181,7 +189,8 @@ const advancedFieldsEqual = (
  * overrides AFTER the preset transition — echoing the fetched values back
  * would silently turn every preset change into a label-only no-op. Advanced
  * values are therefore included only when the user actually edited them away
- * from the persisted state.
+ * from the persisted state, and such overrides are explicitly labeled
+ * `custom` rather than masquerading as a named preset.
  */
 export function buildBrowserResourcePolicyPresetRequest(
   nextPreset: BrowserResourcePolicyPreset,
@@ -191,7 +200,7 @@ export function buildBrowserResourcePolicyPresetRequest(
   if (advancedFieldsEqual(current.advanced, persisted.advanced)) {
     return { preset: nextPreset };
   }
-  return { preset: nextPreset, advanced: current.advanced };
+  return { preset: 'custom', advanced: current.advanced };
 }
 
 /**
@@ -200,14 +209,15 @@ export function buildBrowserResourcePolicyPresetRequest(
  * explicitly configured reserve would silently not take effect. User-edited
  * advanced values therefore resolve the preset to `custom`, which the
  * scheduler treats as authoritative. Values that merely echo the persisted
- * state keep the current preset: an unchanged save must stay a no-op.
+ * state keep the current preset and omit `advanced`, allowing named presets
+ * to stay hardware-derived across restarts.
  */
 export function buildBrowserResourcePolicyAdvancedSaveRequest(
   current: BrowserResourcePolicy,
   persisted: BrowserResourcePolicy
 ): BrowserResourcePolicy {
   if (advancedFieldsEqual(current.advanced, persisted.advanced)) {
-    return { preset: current.preset, advanced: current.advanced };
+    return { preset: current.preset };
   }
   return { preset: 'custom', advanced: current.advanced };
 }

@@ -214,13 +214,29 @@ fn sample_process_forest(
         true,
         ProcessRefreshKind::nothing().with_memory(),
     );
+    let started_at_by_pid = system
+        .processes()
+        .values()
+        .map(|process| (process.pid().as_u32(), process.start_time()))
+        .collect::<HashMap<_, _>>();
     let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
     for process in system.processes().values() {
         if let Some(parent) = process.parent() {
-            children_by_parent
-                .entry(parent.as_u32())
-                .or_default()
-                .push(process.pid().as_u32());
+            let parent_pid = parent.as_u32();
+            // Windows keeps an orphan's stale parent PID. If that numeric PID
+            // is later reused by a test Chrome process, a parent-only walk
+            // incorrectly counts the unrelated orphan tree and later reports
+            // it as Chrome residue. Reject edges where the child predates the
+            // current process occupying its recorded parent PID.
+            let parent_is_not_newer = started_at_by_pid
+                .get(&parent_pid)
+                .is_none_or(|started_at| process.start_time() >= *started_at);
+            if parent_is_not_newer {
+                children_by_parent
+                    .entry(parent_pid)
+                    .or_default()
+                    .push(process.pid().as_u32());
+            }
         }
     }
 
