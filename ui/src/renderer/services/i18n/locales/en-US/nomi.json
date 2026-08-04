@@ -166,24 +166,33 @@
     "source_merge": "From merge"
   },
   "collect": {
-    "intro": "Choose what your companions may learn from. Nothing is collected by default; enabled sources are written to the local companion/nomi/ directory and can be wiped anytime.",
+    "intro": "Choose which work data your companions may learn from. Enabled sources are written locally under companion/shared/events/ and cleaned automatically by the policy below.",
     "sensitivity": {
       "low": "Low",
       "medium": "Medium",
       "high": "High"
     },
     "today": "Today",
-    "total": "Total",
-    "clear": "Clear all collected data",
-    "clearConfirm": "This deletes everything under companion/nomi/events. Learned memories are unaffected. Continue?",
-    "cleared": "Collected data cleared",
-    "clearHint": "Deletes raw event files only; learned memories stay.",
+    "total": "Stored",
     "disableAll": "Turn everything off",
     "disableAllConfirm": "Stop all collection, learning and evolution? Learned skills and memories are kept, model config is unchanged, and you can re-enable anytime.",
     "disabledAll": "Everything turned off",
-    "viewRaw": "View collected content",
-    "hideRaw": "Hide collected content",
-    "rawEmpty": "Nothing collected yet.",
+    "retentionTitle": "Automatic cleanup",
+    "retentionHint": "Raw events past the target age are cleaned after every enabled learning and evolution consumer has processed them. Extracted memories and skills are unaffected.",
+    "retentionDays": "Target retention",
+    "days": "days",
+    "capacityLimit": "Storage limit",
+    "applyPolicy": "Apply cleanup policy",
+    "policyApplied": "Cleanup policy applied",
+    "lowerPolicyConfirm": "Lowering retention or capacity may immediately delete the oldest raw events and cannot be undone. Extracted memories and skills are kept. Apply anyway?",
+    "storageUsage": "Storage: {{used}} / {{max}}",
+    "storedRange": "Stored range: {{from}} to {{to}} ({{count}} daily files)",
+    "storedRange_one": "Stored range: {{from}} to {{to}} ({{count}} daily file)",
+    "storedRange_other": "Stored range: {{from}} to {{to}} ({{count}} daily files)",
+    "noStoredEvents": "No collected event files are currently stored",
+    "storageLoading": "Loading storage status…",
+    "storageUnavailable": "Storage status is temporarily unavailable",
+    "hardLimitHint": "Capacity is a hard limit; the oldest daily file is removed first, even if it has not been processed yet.",
     "sources": {
       "tool_calls": {
         "name": "Tool calls",
@@ -205,7 +214,7 @@
   },
   "disclosure": {
     "title": "Let your companion learn you",
-    "body": "Once on, your companion learns from how you use the platform (tool calls, tasks, chats) and distills skills and memories automatically. All data stays local — view, clear, or turn it all off anytime under Data Sources.",
+    "body": "Once on, your companion learns from how you use the platform (tool calls, tasks, chats) and distills skills and memories automatically. All data stays local; adjust automatic cleanup or turn everything off under Data Sources.",
     "enable": "Enable self-learning",
     "later": "Not now",
     "enabled": "Enabled — your companion will learn from your usage"

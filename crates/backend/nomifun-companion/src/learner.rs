@@ -12,7 +12,7 @@ use nomifun_db::IProviderRepository;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
-use crate::collector::{SharedConfig, read_events_since};
+use crate::collector::{SharedConfig, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
 use crate::prompt::{self, LEARN_MAX_TOKENS};
 use crate::registry::CompanionRegistry;
@@ -92,6 +92,7 @@ pub struct Learner {
     pub registry: Arc<CompanionRegistry>,
     pub completer: Arc<dyn CompanionCompleter>,
     pub emitter: CompanionEventEmitter,
+    pub event_store_lock: SharedEventStoreLock,
     /// Re-entrancy guard shared between the tick loop and "run now".
     pub run_lock: Arc<Mutex<()>>,
 }
@@ -147,8 +148,10 @@ impl Learner {
         };
 
         let cursor = self.store.get_state_i64("learn_cursor_ts").await?;
-        let (events, truncated) =
-            read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?;
+        let (events, truncated) = {
+            let _event_guard = self.event_store_lock.read().await;
+            read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?
+        };
         if events.is_empty() {
             run.status = "no_events".into();
             return Ok(run);
@@ -363,6 +366,7 @@ mod tests {
             registry,
             completer: Arc::new(CannedCompleter(reply.to_owned())),
             emitter: CompanionEventEmitter::new(Arc::new(BroadcastEventBus::new(16)), "owner-a"),
+            event_store_lock: Arc::new(RwLock::new(())),
             run_lock: Arc::new(Mutex::new(())),
         };
         (learner, companion.companion_id)
@@ -519,6 +523,7 @@ mod tests {
             registry,
             completer: Arc::new(CannedCompleter(reply.to_owned())),
             emitter: CompanionEventEmitter::new(bc.clone(), "owner-a"),
+            event_store_lock: Arc::new(RwLock::new(())),
             run_lock: Arc::new(Mutex::new(())),
         };
         learner.run_once().await.unwrap();

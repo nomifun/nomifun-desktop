@@ -70,7 +70,15 @@ All companions share one set of memory facilities under
 
 - **Collection** — a single pipeline subscribes to the global event
   bus, gathers your working data according to the collect switches,
-  and writes `shared/events/YYYYMMDD.jsonl`.
+  and writes `shared/events/YYYYMMDD.jsonl`. Raw events default to a
+  **30-day target retention and a hard 64 MiB capacity**. Expired files are
+  removed after every enabled learning/evolution consumer has processed them;
+  the capacity boundary always wins and may evict the oldest unprocessed day.
+  Data Sources lets you configure 7–365 days and 16–512 MiB and shows current
+  usage plus the stored date range. There is no raw-row viewer or manual-clear
+  action. A memory bundle containing raw events must fit the current hard cap
+  before anything is imported; after a successful import, the same retention
+  cleanup runs immediately.
 - **Learning** — a single learner incrementally distills events into
   long-term memories on the configured interval, stored in
   `shared/memory.db`. The learning pipeline uses the **learn model

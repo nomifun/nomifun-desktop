@@ -13,7 +13,7 @@ use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 use nomifun_extension::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
 use tokio::sync::Mutex;
 
-use crate::collector::{SharedConfig, read_events_since};
+use crate::collector::{SharedConfig, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
 use crate::evolution::miner::{mine_patterns, MinedPattern};
 use crate::evolution::prompt::{self, DraftOutput};
@@ -52,6 +52,7 @@ pub struct EvolutionEngine {
     pub registry: Arc<CompanionRegistry>,
     pub completer: Arc<dyn CompanionCompleter>,
     pub emitter: CompanionEventEmitter,
+    pub event_store_lock: SharedEventStoreLock,
     pub skill_paths: Arc<SkillPaths>,
     /// 重水合源（会话库 = 唯一内容源）。`start()` 时为 Noop（会话库晚于伴随服务装配，
     /// 见 `attach_companion`），装配后经 [`set_transcript`] 换成真实适配器。未装配/会话已删
@@ -190,8 +191,10 @@ impl EvolutionEngine {
         };
 
         let cursor = self.store.get_state_i64("evolve_cursor_ts").await?;
-        let (events, _truncated) =
-            read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?;
+        let (events, _truncated) = {
+            let _event_guard = self.event_store_lock.read().await;
+            read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?
+        };
         if events.is_empty() {
             run.status = "no_events".into();
             run.finished_at = Some(now_ms());
@@ -697,6 +700,7 @@ mod tests {
             registry,
             completer,
             emitter: CompanionEventEmitter::new(Arc::new(BroadcastEventBus::new(16)), "owner-a"),
+            event_store_lock: Arc::new(tokio::sync::RwLock::new(())),
             skill_paths: test_skill_paths(dir),
             transcript: std::sync::RwLock::new(Arc::new(NoopTranscriptSource)),
             run_lock: Arc::new(Mutex::new(())),
