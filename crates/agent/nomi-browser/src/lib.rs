@@ -21,7 +21,9 @@ pub use platform_adapter::{
 };
 pub use nomifun_browser_platform::BrowserLaneClient;
 pub use redline::{accname_is_irreversible, classify_action, enforce_redline, ActionContext, ApprovalTier};
-pub use tool::{BrowserSecretSource, BrowserTool, OUT_OF_BAND_CONFIRMED_KEY};
+pub use tool::{
+    BrowserSecretSource, BrowserTool, StandaloneBrowserTask, OUT_OF_BAND_CONFIRMED_KEY,
+};
 
 /// Fields whose authority belongs to the main-process runtime/host registry.
 /// A caller may select an owner-scoped `lane_id`/`lane_name`, but it may never
@@ -58,4 +60,8 @@ pub const TRUSTED_OWNER_INPUT_FIELDS: &[&str] = &[
     "surface",
     "browser_surface",
     "lane_key",
+    "task_resource_key",
+    "runtime_cleanup_key",
+    "task_family_resource_key",
+    "task_resource_family_key",
 ];

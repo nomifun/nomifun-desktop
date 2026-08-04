@@ -4,6 +4,8 @@ use async_trait::async_trait;
 
 use crate::{ProcessError, NormalizedProcessRequest, OutputBuffer, Transport};
 
+pub(crate) mod poller;
+
 #[cfg(unix)]
 pub(crate) mod unix;
 #[cfg(unix)]

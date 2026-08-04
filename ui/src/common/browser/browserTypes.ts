@@ -119,10 +119,22 @@ export interface IBrowserDisplayModePolicy {
 }
 
 export interface IBrowserCapacityOverview {
+  /** Scheduler-admitted Lanes (running or starting), not driver operations. */
+  active_lanes?: number | null;
+  /** @deprecated Compatibility alias for backends predating active_lanes. */
   active?: number | null;
   queued?: number | null;
+  /** Global weighted-operation ceiling; it is not the active Lane denominator. */
   max_active?: number | null;
   max_open_lanes?: number | null;
+  /** Elastic machine-wide pressure threshold, not a fixed aggregate quota. */
+  global_memory_pressure_threshold_bytes?: number | null;
+  /** Estimated attributed-memory budget for one task on shared Hosts. */
+  max_task_memory_bytes?: number | null;
+  /** Exact per-task structural limits. */
+  max_task_active_operations?: number | null;
+  max_task_open_lanes?: number | null;
+  max_task_tabs?: number | null;
   recommended_concurrency?: number | null;
   reason_code?: string | null;
 }

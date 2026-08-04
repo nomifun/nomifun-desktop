@@ -385,6 +385,348 @@ pub fn write_motw(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Root directory holding one exclusive staging subdirectory per exact Host.
+///
+/// Chromium's `allowAndName` landing directory must never be shared across
+/// Hosts: a shared directory plus an mtime scanner is a cross-Host data
+/// destruction source, and completed outputs must never live next to
+/// in-flight artifacts. Each Host derives its own child from its trusted
+/// root-process identity ([`host_staging_dir_name`]).
+pub(crate) fn download_staging_root(base: &Path) -> PathBuf {
+    base.join("download-staging")
+}
+
+/// Exclusive staging directory name for one exact Host, derived from the
+/// trusted root Chromium process identity (pid + platform start key). The
+/// name is only ever produced from values captured while the launched child
+/// handle was owned, so it cannot be forged by page-controlled data.
+pub(crate) fn host_staging_dir_name(pid: u32, platform_start_key: u64) -> String {
+    format!("host-{pid}-{platform_start_key}")
+}
+
+/// Parses a directory name produced by [`host_staging_dir_name`]. Anything
+/// that does not match exactly is not ours to touch.
+pub(crate) fn parse_host_staging_dir_name(name: &str) -> Option<(u32, u64)> {
+    let rest = name.strip_prefix("host-")?;
+    let (pid, start_key) = rest.split_once('-')?;
+    if pid.is_empty()
+        || start_key.is_empty()
+        || !pid.bytes().all(|byte| byte.is_ascii_digit())
+        || !start_key.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((pid.parse().ok()?, start_key.parse().ok()?))
+}
+
+/// Upper bound of orphan staging directories examined per Host launch. The
+/// sweep is a crash-recovery safety net, not a general garbage collector;
+/// repeated launches make progress across the whole root.
+const MAX_ORPHAN_STAGING_SCAN_DIRS: usize = 64;
+
+/// Startup safety net for per-Host staging directories whose owning process
+/// died without running its durable cleanup (hard kill, power loss).
+///
+/// Deletion requires exact-ownership proof per directory: the recorded
+/// (pid, platform start key) pair parsed from the directory name must be
+/// positively proven dead — either no process runs under that PID, or the
+/// live process's start key differs (PID recycled). A probe error is not
+/// proof and leaves the directory alone, as does any live identity match
+/// (which can be a sibling application instance's healthy Host).
+pub(crate) fn sweep_orphan_host_staging_dirs(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.take(MAX_ORPHAN_STAGING_SCAN_DIRS) {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((pid, recorded_start_key)) = parse_host_staging_dir_name(name) else {
+            continue;
+        };
+        let proven_dead = match nomi_process_runtime::probe_process_identity(pid) {
+            Ok(None) => true,
+            Ok(Some(live)) => live.platform_start_key != recorded_start_key,
+            Err(_) => false,
+        };
+        if !proven_dead {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+            tracing::debug!(
+                dir = %entry.path().display(),
+                %error,
+                "orphan host staging directory removal failed; a later launch retries"
+            );
+        }
+    }
+}
+
+/// Prefix of the same-volume temp used by [`publish_task_output`].
+///
+/// The temp lives in the *destination* directory (a rename target must share
+/// the volume), which is also where `act_download`'s landing detector and
+/// callers poll for the finished artifact. It therefore carries a
+/// `.crdownload` suffix as well as this prefix: every existing scanner
+/// already skips `.crdownload`/`.tmp`, so an in-flight publication can never
+/// be mistaken for a completed download.
+const TASK_OUTPUT_TEMP_PREFIX: &str = ".nomifun-publish-";
+
+/// Payload for a two-phase task output publication.
+pub(crate) enum TaskOutputPayload<'a> {    /// A staged download artifact to move (or cross-volume copy) into place.
+    StagedFile(&'a Path),
+    /// In-memory bytes (e.g. a rendered PDF) to write.
+    Bytes(&'a [u8]),
+}
+
+/// Failure detail of [`publish_task_output`].
+#[derive(Debug)]
+pub(crate) struct TaskOutputPublishError {
+    pub(crate) message: String,
+    /// `true` when the prepared task charge was permanently committed even
+    /// though publication failed (the residual artifact could not be
+    /// deleted). `false` means no lasting charge: dropping the reservation
+    /// releases its active accounting and no artifact remains.
+    pub(crate) charged: bool,
+    /// A leftover file the caller owns deletion-retry debt for.
+    pub(crate) residual: Option<PathBuf>,
+}
+
+impl TaskOutputPublishError {
+    fn uncharged(message: String) -> Self {
+        Self {
+            message,
+            charged: false,
+            residual: None,
+        }
+    }
+}
+
+/// Two-phase, compensating publication of one task download/PDF output.
+///
+/// Order of operations (all synchronous; no await between publication and
+/// the permanent charge):
+/// 1. `prepare_complete(actual_bytes)` reserves the final task-lifetime
+///    byte/file charge — publication can never produce an unbilled artifact.
+/// 2. The payload is materialized in a unique same-volume temp file
+///    (`create_new`, never clobbering) inside the destination directory.
+/// 3. The temp is atomically published to its final name without
+///    overwriting an existing file.
+/// 4. `finalize_complete()` makes the charge permanent.
+///
+/// Compensation: any failure before step 4 deletes the temp and leaves the
+/// charge unprepared-for-commit (dropping the reservation releases the
+/// active accounting). If that deletion itself fails (Windows lock/AV), the
+/// charge is committed anyway — an artifact may exist on disk, so the task
+/// must keep paying for it; silence about an unbilled product is never an
+/// option — and the temp path is returned as retained cleanup debt.
+pub(crate) fn publish_task_output(
+    reservation: &dyn crate::host::TaskDownloadReservation,
+    actual_bytes: u64,
+    payload: TaskOutputPayload<'_>,
+    destination_dir: &Path,
+    preferred_name: &str,
+    unique_hint: &str,
+) -> Result<PathBuf, TaskOutputPublishError> {
+    if let Err(error) = reservation.prepare_complete(actual_bytes) {
+        return Err(TaskOutputPublishError::uncharged(format!(
+            "task output charge preparation denied: {error}"
+        )));
+    }
+    if let Err(error) = std::fs::create_dir_all(destination_dir) {
+        return Err(TaskOutputPublishError::uncharged(format!(
+            "task output directory is unavailable: {error}"
+        )));
+    }
+    let temp_path = destination_dir.join(format!("{TASK_OUTPUT_TEMP_PREFIX}{unique_hint}.crdownload"));
+    // A stale temp can only be our own crashed prior attempt: the name is
+    // derived from a Host-unique GUID/nonce, and this directory belongs to
+    // the task workspace.
+    let _ = std::fs::remove_file(&temp_path);
+    if let Err(error) = materialize_temp_output(&payload, &temp_path) {
+        let message = format!(
+            "task output staging into {} failed: {error}",
+            temp_path.display()
+        );
+        return Err(rollback_unpublished_temp(reservation, temp_path, message));
+    }
+    let published = publish_temp_no_clobber(
+        &temp_path,
+        destination_dir,
+        preferred_name,
+        unique_hint,
+    );
+    match published {
+        Ok(destination) => {
+            // Publication succeeded; the charge becomes permanent with no
+            // intervening await point.
+            reservation.finalize_complete();
+            if !matches!(payload, TaskOutputPayload::StagedFile(_)) {
+                // Bytes were written directly into the temp which was then
+                // linked/renamed; nothing else to reconcile.
+            }
+            cleanup_published_temp(&temp_path);
+            Ok(destination)
+        }
+        Err(error) => {
+            let message = format!(
+                "task output publication into {} failed: {error}",
+                destination_dir.display()
+            );
+            Err(rollback_unpublished_temp(reservation, temp_path, message))
+        }
+    }
+}
+
+/// Writes/moves the payload into the exclusive temp path.
+fn materialize_temp_output(
+    payload: &TaskOutputPayload<'_>,
+    temp_path: &Path,
+) -> std::io::Result<()> {
+    match payload {
+        TaskOutputPayload::Bytes(bytes) => {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(temp_path)?;
+            file.write_all(bytes)?;
+            file.sync_all()
+        }
+        TaskOutputPayload::StagedFile(source) => {
+            match std::fs::rename(source, temp_path) {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    // Workspaces can live on another volume. Stream into an
+                    // exclusively created temp instead of `fs::copy`, which
+                    // would truncate an unexpectedly existing path.
+                    use std::io::Write as _;
+                    let mut reader = std::fs::File::open(source)?;
+                    let mut writer = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(temp_path)?;
+                    std::io::copy(&mut reader, &mut writer)?;
+                    writer.flush()?;
+                    writer.sync_all()?;
+                    drop(writer);
+                    if let Err(error) = std::fs::remove_file(source) {
+                        // The published copy is authoritative; the staging
+                        // leftover stays on the caller's staging cleanup
+                        // path, which retries and is finally reconciled at
+                        // exact host stop.
+                        tracing::debug!(
+                            file = %source.display(),
+                            %error,
+                            "cross-volume staged source removal deferred to staging cleanup"
+                        );
+                    }
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+/// Atomically publishes the temp to a final name without clobbering. A hard
+/// link fails with `AlreadyExists` when the destination is taken, giving an
+/// atomic no-clobber publish on every mainstream filesystem; filesystems
+/// without hard links fall back to an existence-guarded rename.
+fn publish_temp_no_clobber(
+    temp_path: &Path,
+    destination_dir: &Path,
+    preferred_name: &str,
+    unique_hint: &str,
+) -> std::io::Result<PathBuf> {
+    let mut last_error = None;
+    for candidate in [
+        preferred_name.to_string(),
+        format!("{unique_hint}-{preferred_name}"),
+    ] {
+        let destination = destination_dir.join(&candidate);
+        match std::fs::hard_link(temp_path, &destination) {
+            Ok(()) => return Ok(destination),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                // No hard-link support: fall back to a rename guarded by an
+                // existence check. The TOCTOU window is bounded to this
+                // task-owned workspace directory.
+                if destination.exists() {
+                    last_error = Some(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "destination already exists",
+                    ));
+                    continue;
+                }
+                return std::fs::rename(temp_path, &destination).map(|()| destination);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "no non-clobbering destination name was available",
+        )
+    }))
+}
+
+/// Removes the temp after a successful hard-link publish. Failure is benign:
+/// the extra directory entry references the same already-charged inode.
+fn cleanup_published_temp(temp_path: &Path) {
+    if let Err(error) = std::fs::remove_file(temp_path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::debug!(
+            file = %temp_path.display(),
+            %error,
+            "published task output temp link removal deferred"
+        );
+    }
+}
+
+/// Compensates a failed publication after the charge was prepared. Removing
+/// the temp lets the caller drop the reservation and release the active
+/// charge; an undeletable temp is finalized (kept billed) instead of leaving
+/// an unbilled artifact behind.
+fn rollback_unpublished_temp(
+    reservation: &dyn crate::host::TaskDownloadReservation,
+    temp_path: PathBuf,
+    message: String,
+) -> TaskOutputPublishError {
+    match std::fs::remove_file(&temp_path) {
+        Ok(()) => TaskOutputPublishError::uncharged(message),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            TaskOutputPublishError::uncharged(message)
+        }
+        Err(error) => {
+            reservation.finalize_complete();
+            TaskOutputPublishError {
+                message: format!(
+                    "{message}; residual artifact {} could not be deleted ({error}) and its task charge was committed",
+                    temp_path.display()
+                ),
+                charged: true,
+                residual: Some(temp_path),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,5 +1073,274 @@ mod tests {
         // linux：空实现，对任意路径返回 Ok（不真写）。
         let p = Path::new("/tmp/whatever-nonexistent.pdf");
         assert!(write_motw(p).is_ok());
+    }
+
+    // ── per-Host staging 命名/解析与孤儿清扫 ─────────────────────────────────
+
+    #[test]
+    fn host_staging_dir_name_round_trips_and_rejects_foreign_names() {
+        let name = host_staging_dir_name(1234, 987_654_321);
+        assert_eq!(name, "host-1234-987654321");
+        assert_eq!(parse_host_staging_dir_name(&name), Some((1234, 987_654_321)));
+
+        for foreign in [
+            "host-",
+            "host-12",
+            "host-abc-123",
+            "host-12-abc",
+            "host--123",
+            "host-12-",
+            "downloads",
+            "host-12-34-56x",
+            "HOST-12-34",
+        ] {
+            assert_eq!(
+                parse_host_staging_dir_name(foreign),
+                None,
+                "{foreign:?} must never be treated as an owned staging dir"
+            );
+        }
+        // Extra dash segments parse as part of the start key only when fully
+        // numeric; "host-12-34-56" splits at the first dash after the pid, so
+        // the remainder "34-56" is non-numeric and rejected.
+        assert_eq!(parse_host_staging_dir_name("host-12-34-56"), None);
+    }
+
+    #[test]
+    fn orphan_staging_sweep_requires_exact_dead_process_proof() {
+        let temp = tempfile::tempdir().expect("create orphan sweep root");
+        let root = temp.path();
+        let own_pid = std::process::id();
+        let own_identity = nomi_process_runtime::probe_process_identity(own_pid)
+            .expect("probe own process")
+            .expect("own process is alive");
+
+        // Live identity match (this very test process) → never touched.
+        let live_dir = root.join(host_staging_dir_name(
+            own_pid,
+            own_identity.platform_start_key,
+        ));
+        // Same PID, different start key → the recorded instance is proven
+        // dead (PID recycle rule) → removed.
+        let recycled_dir = root.join(host_staging_dir_name(
+            own_pid,
+            own_identity.platform_start_key.wrapping_add(1),
+        ));
+        // A non-matching name is not ours to touch.
+        let foreign_dir = root.join("not-a-host-dir");
+        for dir in [&live_dir, &recycled_dir, &foreign_dir] {
+            std::fs::create_dir_all(dir).expect("create sweep fixture dir");
+            std::fs::write(dir.join("leftover.part"), b"x").expect("seed leftover");
+        }
+
+        sweep_orphan_host_staging_dirs(root);
+
+        assert!(live_dir.exists(), "a live exact identity is never swept");
+        assert!(
+            !recycled_dir.exists(),
+            "a proven-dead identity's staging dir is removed"
+        );
+        assert!(foreign_dir.exists(), "unrecognized names are left alone");
+    }
+
+    // ── 两阶段发布助手 ───────────────────────────────────────────────────────
+
+    struct PublishProbeReservation {
+        deny_prepare: bool,
+        prepared: std::sync::Mutex<Option<u64>>,
+        finalized: std::sync::atomic::AtomicBool,
+    }
+
+    impl PublishProbeReservation {
+        fn new(deny_prepare: bool) -> Self {
+            Self {
+                deny_prepare,
+                prepared: std::sync::Mutex::new(None),
+                finalized: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn prepared(&self) -> Option<u64> {
+            *self.prepared.lock().unwrap()
+        }
+
+        fn finalized(&self) -> bool {
+            self.finalized.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    impl crate::host::TaskDownloadReservation for PublishProbeReservation {
+        fn update_progress(
+            &self,
+            _received_bytes: u64,
+            _total_bytes: Option<u64>,
+        ) -> Result<(), BrowserError> {
+            Ok(())
+        }
+
+        fn prepare_complete(&self, actual_bytes: u64) -> Result<(), BrowserError> {
+            if self.deny_prepare {
+                return Err(BrowserError::Blocked {
+                    reason: "injected prepare denial".into(),
+                });
+            }
+            self.prepared.lock().unwrap().replace(actual_bytes);
+            Ok(())
+        }
+
+        fn finalize_complete(&self) {
+            self.finalized
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn publish_task_output_bytes_prepares_publishes_then_finalizes() {
+        let temp = tempfile::tempdir().expect("create publish root");
+        let dir = temp.path().join("outputs");
+        let reservation = PublishProbeReservation::new(false);
+
+        let published = publish_task_output(
+            &reservation,
+            5,
+            TaskOutputPayload::Bytes(b"hello"),
+            &dir,
+            "page.pdf",
+            "nonce-1",
+        )
+        .expect("publication succeeds");
+
+        assert_eq!(published, dir.join("page.pdf"));
+        assert_eq!(std::fs::read(&published).unwrap(), b"hello");
+        assert_eq!(reservation.prepared(), Some(5));
+        assert!(reservation.finalized());
+        assert!(
+            !dir.join(format!("{TASK_OUTPUT_TEMP_PREFIX}nonce-1.crdownload")).exists(),
+            "the temp is removed after publication"
+        );
+    }
+
+    #[test]
+    fn publish_task_output_prepare_denial_produces_no_artifact() {
+        let temp = tempfile::tempdir().expect("create publish root");
+        let dir = temp.path().join("outputs");
+        let reservation = PublishProbeReservation::new(true);
+
+        let failure = publish_task_output(
+            &reservation,
+            5,
+            TaskOutputPayload::Bytes(b"hello"),
+            &dir,
+            "page.pdf",
+            "nonce-2",
+        )
+        .expect_err("denied preparation fails the publication");
+
+        assert!(!failure.charged);
+        assert!(failure.residual.is_none());
+        assert!(!reservation.finalized());
+        assert!(!dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn publish_task_output_never_clobbers_and_rolls_back_on_full_collision() {
+        let temp = tempfile::tempdir().expect("create publish root");
+        let dir = temp.path().join("outputs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("page.pdf"), b"old").unwrap();
+
+        // First fallback name is free → published there, original intact.
+        let reservation = PublishProbeReservation::new(false);
+        let published = publish_task_output(
+            &reservation,
+            3,
+            TaskOutputPayload::Bytes(b"new"),
+            &dir,
+            "page.pdf",
+            "nonce-3",
+        )
+        .expect("fallback name publishes");
+        assert_eq!(published, dir.join("nonce-3-page.pdf"));
+        assert_eq!(std::fs::read(dir.join("page.pdf")).unwrap(), b"old");
+
+        // Both candidate names taken → rolled back, nothing overwritten,
+        // charge not committed, temp removed.
+        let reservation = PublishProbeReservation::new(false);
+        let failure = publish_task_output(
+            &reservation,
+            3,
+            TaskOutputPayload::Bytes(b"newer"),
+            &dir,
+            "page.pdf",
+            "nonce-3",
+        )
+        .expect_err("a full collision must fail instead of overwriting");
+        assert!(!failure.charged);
+        assert!(!reservation.finalized());
+        assert_eq!(std::fs::read(dir.join("page.pdf")).unwrap(), b"old");
+        assert_eq!(std::fs::read(dir.join("nonce-3-page.pdf")).unwrap(), b"new");
+        assert!(
+            !dir.join(format!("{TASK_OUTPUT_TEMP_PREFIX}nonce-3.crdownload")).exists()
+        );
+    }
+
+    #[test]
+    fn publish_task_output_undeletable_residual_keeps_the_charge() {
+        let temp = tempfile::tempdir().expect("create publish root");
+        let dir = temp.path().join("outputs");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A directory at the temp path defeats both the stale-temp removal
+        // and create_new, and the rollback deletion of a "file" fails too —
+        // the injected equivalent of a Windows lock/AV hold.
+        let blocked_temp = dir.join(format!("{TASK_OUTPUT_TEMP_PREFIX}nonce-4.crdownload"));
+        std::fs::create_dir(&blocked_temp).unwrap();
+
+        let reservation = PublishProbeReservation::new(false);
+        let failure = publish_task_output(
+            &reservation,
+            5,
+            TaskOutputPayload::Bytes(b"hello"),
+            &dir,
+            "page.pdf",
+            "nonce-4",
+        )
+        .expect_err("an unmaterializable temp fails the publication");
+
+        assert!(
+            failure.charged,
+            "an undeletable residual must keep its task charge committed"
+        );
+        assert_eq!(failure.residual.as_deref(), Some(blocked_temp.as_path()));
+        assert!(
+            reservation.finalized(),
+            "fail-closed: the charge is finalized when the artifact cannot be removed"
+        );
+    }
+
+    #[test]
+    fn publish_task_output_moves_staged_file_and_consumes_source() {
+        let temp = tempfile::tempdir().expect("create publish root");
+        let staging = temp.path().join("staging");
+        let dir = temp.path().join("outputs");
+        std::fs::create_dir_all(&staging).unwrap();
+        let source = staging.join("guid-move");
+        std::fs::write(&source, b"staged-bytes").unwrap();
+
+        let reservation = PublishProbeReservation::new(false);
+        let published = publish_task_output(
+            &reservation,
+            12,
+            TaskOutputPayload::StagedFile(&source),
+            &dir,
+            "moved.bin",
+            "guid-move",
+        )
+        .expect("staged publication succeeds");
+
+        assert_eq!(published, dir.join("moved.bin"));
+        assert_eq!(std::fs::read(&published).unwrap(), b"staged-bytes");
+        assert!(!source.exists(), "the staged source is consumed");
+        assert_eq!(reservation.prepared(), Some(12));
+        assert!(reservation.finalized());
     }
 }

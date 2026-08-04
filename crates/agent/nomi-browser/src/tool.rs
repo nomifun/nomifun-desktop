@@ -14,7 +14,7 @@
 //! value is resolved through an origin-bound vault and injected as
 //! [`nomi_browser_engine::TypeInput::Secret`] — it never reaches the LLM).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -56,6 +56,20 @@ use crate::redline::{self, ActionContext, ApprovalTier};
 /// facade skips SoM and uses the raw-bbox fallback instead. Also bounds the per-label palette
 /// cycling and keeps the annotated PNG legible.
 const MAX_SOM_LABELS: usize = 50;
+
+fn ensure_extract_schema_bound(schema: &Value) -> Result<(), ToolResult> {
+    if let Err(error) =
+        nomi_browser_engine::actions::validate_extract_schema_capacity(schema)
+    {
+        return Err(ToolResult::error(format!(
+            "The extract schema exceeds the per-operation capacity ({error:?}; serialized byte limit={}, depth limit={}, node limit={}).",
+            nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_BYTES,
+            nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_DEPTH,
+            nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_NODES,
+        )));
+    }
+    Ok(())
+}
 
 /// One authority for capture/save ordering of a shared persistent-login vault.
 ///
@@ -225,6 +239,25 @@ or UI change rather than reusing an old ref.\n\
 - The browser launches lazily on the first action; if it cannot start, the action returns an \
 error explaining why (do not retry blindly).";
 
+/// Trusted task owner for standalone Browser facades.
+///
+/// Construct this in the host/runtime layer, never from tool JSON. Clone the
+/// same value into every facade and restart belonging to one task; create a new
+/// value only for a genuinely distinct task. The opaque engine scope is not
+/// exposed through the Browser schema.
+#[derive(Clone, Debug)]
+pub struct StandaloneBrowserTask {
+    scope: nomi_browser_engine::StandaloneResourceScope,
+}
+
+impl StandaloneBrowserTask {
+    pub fn new() -> Self {
+        Self {
+            scope: nomi_browser_engine::StandaloneResourceScope::new(),
+        }
+    }
+}
+
 /// Browser automation tool. Holds the lazily-constructed engine and the config
 /// needed to construct it. `new` does NOT launch a browser; the engine is built
 /// (and any construction error cached) on the first action.
@@ -290,6 +323,10 @@ pub struct BrowserTool {
     /// It serializes the complete effect across every facade that targets the
     /// same path, and advances throttling only after a successful durable save.
     persist_login_coordinator: Arc<PersistLoginCoordinator>,
+    /// Trusted structural resource scope for this standalone facade. It is
+    /// created once and reused across lazy engine restarts; model input has no
+    /// field or builder path that can replace it.
+    standalone_resource_scope: nomi_browser_engine::StandaloneResourceScope,
     /// Lazily-initialized browser engine. `Some(Err)` caches an unavailable
     /// backend (chrome not resolvable, launch/connect failure) so we don't
     /// retry per call — the same failure-cache discipline as `ComputerTool`'s
@@ -600,6 +637,17 @@ impl BrowserTool {
         t
     }
 
+    /// Bind several trusted standalone facades to one structural task budget.
+    /// The scope is an opaque in-process capability and is intentionally not
+    /// represented in the Browser tool schema or model-controlled JSON.
+    fn with_standalone_resource_scope(
+        mut self,
+        scope: nomi_browser_engine::StandaloneResourceScope,
+    ) -> Self {
+        self.standalone_resource_scope = scope;
+        self
+    }
+
     /// Bind this Agent-facing facade to a trusted main-process Browser
     /// Platform capability.
     ///
@@ -679,6 +727,11 @@ impl BrowserTool {
             // 仅有 data_dir 的调用方 / 测试保持 Managed（现行为，零回归）。
             chrome_source: ChromeSource::Managed,
             persist_login_coordinator,
+            // Legacy callers do not supply a trusted task owner, so they all
+            // share the process compatibility budget. A real task factory may
+            // replace this with one freshly minted scope and must clone that
+            // same opaque capability into every facade/restart for the task.
+            standalone_resource_scope: nomi_browser_engine::StandaloneResourceScope::default(),
             engine: Mutex::new(None),
             // Standalone compatibility constructor: no Hub capability is bound.
             lane_client: None,
@@ -714,8 +767,8 @@ impl BrowserTool {
             // P3: 默认无抽取模型（graceful degradation → 返确定性载荷）。bootstrap/factory 经
             // `with_extract_model` 注入真实适配器。
             extract_model: None,
-            // Known-secret blackout: shared Arc created here, clone goes into EngineConfig.
-            known_secret_values: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            // Known-secret blackout: bounded shared registry; clone goes into EngineConfig.
+            known_secret_values: nomi_browser_engine::KnownSecretValues::default(),
             // Takeover: initially no re-observe needed.
             must_re_observe: AtomicBool::new(false),
             // Takeover controller: default OFF (fail-closed). Irreversible actions
@@ -734,6 +787,22 @@ impl BrowserTool {
             // it via `.with_approval_gate(...)` to enable takeover + egress approval.
             approval_gate: None,
         }
+    }
+
+    /// Construct a standalone facade bound to a trusted task owner.
+    ///
+    /// Multiple facades created with the same `task` aggregate against one
+    /// Host/Lane/tab budget; rebuilding a facade or its lazy engine does not
+    /// mint new capacity. The legacy [`Self::with_data_dir`] constructor has no
+    /// task authority and therefore remains in the single process-wide
+    /// compatibility scope.
+    pub fn with_data_dir_for_task(
+        task: &StandaloneBrowserTask,
+        data_dir: PathBuf,
+        headful: bool,
+    ) -> Self {
+        Self::with_data_dir(data_dir, headful)
+            .with_standalone_resource_scope(task.scope.clone())
     }
 
     /// Construct a Browser facade for a managed host without taking ownership
@@ -763,6 +832,10 @@ impl BrowserTool {
             headful: !config.headless,
             chrome_source: ChromeSource::Managed,
             persist_login_coordinator: Arc::new(PersistLoginCoordinator::new()),
+            // Managed facades cannot launch standalone Chromium, but retain the
+            // compatibility scope so accidentally removing the managed-only
+            // fence cannot create one fresh structural budget per facade.
+            standalone_resource_scope: nomi_browser_engine::StandaloneResourceScope::default(),
             engine: Mutex::new(None),
             lane_client: None,
             managed_only: true,
@@ -780,7 +853,7 @@ impl BrowserTool {
             evaluate_full_power,
             evaluate_persistent_login,
             extract_model: None,
-            known_secret_values: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            known_secret_values: nomi_browser_engine::KnownSecretValues::default(),
             must_re_observe: AtomicBool::new(false),
             takeover_controller: crate::takeover::TakeoverController::new(),
             site_memory: None,
@@ -828,12 +901,31 @@ impl BrowserTool {
     /// Cache an observation produced by the platform adapter so BrowserTool's
     /// origin-bound secret gate and irreversible-action classifier see exactly
     /// the same snapshot as the engine operation result.
-    pub(crate) fn cache_managed_observation(&self, observation: Observation) {
-        *self
-            .last_snapshot
-            .lock()
-            .expect("last_snapshot poisoned") = Some(observation);
+    pub(crate) fn cache_managed_observation(
+        &self,
+        observation: Observation,
+    ) -> Result<(), nomi_browser_engine::observe::ObservationCapacityError> {
+        if let Err(error) = observation.validate_retained_bytes() {
+            // Never leave an older generation available after a rejected
+            // observe.  The engine has revoked the new generation's refs; this
+            // clears the facade half and forces a fresh bounded observation.
+            self.invalidate_cached_observation();
+            return Err(error);
+        }
+        *self.last_snapshot.lock().expect("last_snapshot poisoned") = Some(observation);
         self.clear_must_re_observe();
+        Ok(())
+    }
+
+    /// Revoke the facade-side origin/ref authority after an observation is
+    /// rejected anywhere after the engine call (serialization, response
+    /// decoration, or cache validation).
+    pub(crate) fn invalidate_cached_observation(&self) {
+        self.last_snapshot
+            .lock()
+            .expect("last_snapshot poisoned")
+            .take();
+        self.set_must_re_observe();
     }
 
     /// Validate and classify an adapter action through the existing BrowserTool
@@ -852,7 +944,22 @@ impl BrowserTool {
         // not run its normal pre-launch vault bootstrap. Load the same trusted
         // secret source here before resolving a possible `secret:NAME`.
         self.ensure_secret_store_and_firewall();
-        let mut sanitized = input.clone();
+        // Extract retains only its schema. Validate that field before cloning
+        // and deliberately omit unrelated model fields so a huge ignored value
+        // cannot be duplicated by this policy layer.
+        let mut sanitized = if action == "extract" {
+            let mut object = serde_json::Map::new();
+            if let Some(schema) = input
+                .get("schema")
+                .filter(|value| value.is_object() || value.is_array())
+            {
+                ensure_extract_schema_bound(schema).map_err(|result| result.content)?;
+                object.insert("schema".to_owned(), schema.clone());
+            }
+            Value::Object(object)
+        } else {
+            input.clone()
+        };
         if let Some(object) = sanitized.as_object_mut() {
             object.remove(OUT_OF_BAND_CONFIRMED_KEY);
             if trusted_out_of_band_confirmation {
@@ -1261,6 +1368,7 @@ impl BrowserTool {
             // Known-secret blackout: share the facade's secret set with the engine so debug
             // serializers can exact-blackout resolved secrets.
             known_secret_values: self.known_secret_values.clone(),
+            standalone_resource_scope: self.standalone_resource_scope.clone(),
         })
         .await
         .map_err(|e| e.to_string());
@@ -1596,6 +1704,13 @@ impl BrowserTool {
         };
         match engine.observe(&opts).await {
             Ok(obs) => {
+                if obs.validate_retained_bytes().is_err() {
+                    self.invalidate_cached_observation();
+                    return ToolResult::error(
+                        "Observe failed: the page observation exceeded the per-task byte limit. \
+                         Simplify the page or reduce observe depth, then run a fresh observe.",
+                    );
+                }
                 let truncated = if obs.truncated {
                     " (tree truncated to the depth cap — deeper nodes were dropped)"
                 } else {
@@ -1621,10 +1736,21 @@ impl BrowserTool {
                 } else {
                     format!("{header}{}\n{hints}", obs.yaml)
                 };
-
-                *self.last_snapshot.lock().expect("last_snapshot poisoned") = Some(obs);
-                // A fresh observe clears the must-re-observe flag (refs are now valid).
-                self.clear_must_re_observe();
+                if nomi_browser_engine::observe::ensure_observation_bytes(text.len()).is_err()
+                    || nomi_browser_engine::observe::serialized_json_bytes_bounded(&text).is_err()
+                {
+                    self.invalidate_cached_observation();
+                    return ToolResult::error(
+                        "Observe failed: the page observation exceeded the per-task byte limit. \
+                         Simplify the page or reduce observe depth, then run a fresh observe.",
+                    );
+                }
+                if self.cache_managed_observation(obs).is_err() {
+                    return ToolResult::error(
+                        "Observe failed: the page observation exceeded the per-task byte limit. \
+                         Simplify the page or reduce observe depth, then run a fresh observe.",
+                    );
+                }
                 ToolResult::text(text)
             }
             Err(e) => self.engine_failure("Observe failed", e),
@@ -1801,9 +1927,13 @@ impl BrowserTool {
                 // over-matching trivial strings (e.g. empty, "a", "ab", "abc").
                 let plaintext = value.into_inner();
                 if plaintext.len() >= 4
-                    && let Ok(mut set) = self.known_secret_values.lock()
+                    && let Err(error) = self.known_secret_values.try_insert(&plaintext)
                 {
-                    set.insert(plaintext.clone());
+                    return Err(ToolResult::error(format!(
+                        "Secret {name:?} cannot be injected because the session's exact-redaction \
+                         registry is full ({error}). The value was NOT typed. Close this browser \
+                         task and start a fresh one before retrying"
+                    )));
                 }
                 Ok(TypeInput::Secret(plaintext))
             }
@@ -1977,7 +2107,10 @@ impl BrowserTool {
                 // (the normal case) or fall back to an empty object when absent — extract still
                 // returns a structured page representation, just without a field spec to guide it.
                 let schema = match input.get("schema") {
-                    Some(v) if v.is_object() || v.is_array() => v.clone(),
+                    Some(v) if v.is_object() || v.is_array() => {
+                        ensure_extract_schema_bound(v)?;
+                        v.clone()
+                    }
                     // Missing/null/non-structured schema: default to {} (extract still works,
                     // returning the deterministic page representation; the model can extract freely).
                     _ => serde_json::json!({}),
@@ -3252,6 +3385,45 @@ pub(crate) mod tests {
         BrowserTool::new(&BrowserConfig::default())
     }
 
+    #[test]
+    fn oversized_observation_is_never_cached_and_clears_prior_authority() {
+        let tool = tool();
+        tool.cache_managed_observation(Observation {
+            generation: nomi_browser_engine::SnapshotGen(1),
+            yaml: "<data>small</data>".into(),
+            entries: vec![],
+            url: Some("https://example.test".into()),
+            truncated: false,
+            current_page_is_post: false,
+            boxes: HashMap::new(),
+        })
+        .expect("small observation fits");
+        assert!(tool.last_snapshot.lock().unwrap().is_some());
+
+        let error = tool
+            .cache_managed_observation(Observation {
+                generation: nomi_browser_engine::SnapshotGen(2),
+                yaml: "x".repeat(
+                    nomi_browser_engine::observe::MAX_OBSERVATION_RETAINED_BYTES + 1,
+                ),
+                entries: vec![],
+                url: None,
+                truncated: false,
+                current_page_is_post: false,
+                boxes: HashMap::new(),
+            })
+            .expect_err("oversized observation must fail closed");
+        assert_eq!(
+            error.limit,
+            nomi_browser_engine::observe::MAX_OBSERVATION_RETAINED_BYTES
+        );
+        assert!(
+            tool.last_snapshot.lock().unwrap().is_none(),
+            "a rejected generation must not leave an older ref/origin snapshot authoritative"
+        );
+        assert!(tool.needs_re_observe());
+    }
+
 
     fn login_state(value: &str) -> nomi_browser_engine::StorageState {
         nomi_browser_engine::StorageState {
@@ -3433,6 +3605,23 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl BrowserLaneClientPort for FakeLaneClient {
+        fn task_resource_key(&self) -> String {
+            format!("tool-fake-task:{:p}", self)
+        }
+
+        fn handoff_bound_lane_cleanup(
+            &self,
+            lane_id: BrowserLaneId,
+        ) -> Result<(), BrowserPlatformError> {
+            self.closes.lock().unwrap().push(lane_id.clone());
+            self.lanes
+                .lock()
+                .unwrap()
+                .retain(|lane| lane.lane_id != lane_id);
+            self.close_called.notify_one();
+            Ok(())
+        }
+
         async fn open(
             &self,
             lane_name: Option<&str>,
@@ -3746,17 +3935,12 @@ pub(crate) mod tests {
         // F23: the native surface must reject the SAME trusted-owner set the
         // shared ManagedBrowserFacade rejects — including the surface/routing
         // fields that used to be accepted only here (contract drift).
-        for (field, value) in [
-            ("user_id", json!("model-chosen-owner")),
-            ("surface", json!("gateway")),
-            ("browser_surface", json!("gateway")),
-            ("lane_key", json!("other-runtime/default")),
-        ] {
+        for field in crate::TRUSTED_OWNER_INPUT_FIELDS {
             let result = tool
                 .execute(json!({
                     "action": "navigate",
                     "url": "https://example.test/",
-                    field: value,
+                    (*field): "model-controlled",
                 }))
                 .await;
 
@@ -4222,7 +4406,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn crawl_many_cancellation_during_open_closes_lane_by_deterministic_name() {
+    async fn crawl_many_cancellation_during_open_does_not_publish_name_cleanup() {
         let client = Arc::new(FakeLaneClient::default());
         client
             .block_open_after_insert
@@ -4246,12 +4430,16 @@ pub(crate) mod tests {
         task.abort();
         let join_error = task.await.expect_err("parent crawl task should be cancelled");
         assert!(join_error.is_cancelled());
-        tokio::time::timeout(Duration::from_secs(2), client.close_called.notified())
-            .await
-            .expect("RAII cleanup should resolve and close the partially-opened Lane");
-        assert!(client.lanes.lock().unwrap().is_empty());
-        assert_eq!(client.closes.lock().unwrap().len(), 1);
+        assert!(
+            client.closes.lock().unwrap().is_empty(),
+            "a cancelled open has no sealed Lane id, so managed code must not rescan a reusable name"
+        );
         assert!(client.operations.lock().unwrap().is_empty());
+        // This fake deliberately inserts before its pending await and has no
+        // BrowserSessionHub admission guard. Production cleanup belongs to the
+        // Hub's LaneStartWaiter/abandoned_lane_starts authority; the facade
+        // must not manufacture a second, name-based cleanup authority here.
+        client.lanes.lock().unwrap().clear();
     }
 
     #[tokio::test]
@@ -5006,6 +5194,65 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn standalone_task_owner_shares_budget_across_facades_and_separates_tasks() {
+        let data = std::env::temp_dir().join("bt-standalone-task-scope");
+        let task_a = StandaloneBrowserTask::new();
+        let task_b = StandaloneBrowserTask::new();
+        let a_first = BrowserTool::with_data_dir_for_task(&task_a, data.clone(), false);
+        let a_second = BrowserTool::with_data_dir_for_task(&task_a, data.clone(), false);
+        let b_first = BrowserTool::with_data_dir_for_task(&task_b, data, false);
+
+        assert!(
+            a_first
+                .standalone_resource_scope
+                .shares_budget_with(&a_second.standalone_resource_scope),
+            "every facade and restart for one trusted task must share structural capacity"
+        );
+        assert!(
+            !a_first
+                .standalone_resource_scope
+                .shares_budget_with(&b_first.standalone_resource_scope),
+            "distinct trusted tasks must not share the standalone 4/4/16 budget"
+        );
+    }
+
+    #[test]
+    fn legacy_facades_without_a_task_owner_share_the_compatibility_scope() {
+        let data = std::env::temp_dir().join("bt-legacy-compatibility-scope");
+        let first = BrowserTool::with_data_dir(data.clone(), false);
+        let second = BrowserTool::with_data_dir(data, false);
+        assert!(
+            first
+                .standalone_resource_scope
+                .shares_budget_with(&second.standalone_resource_scope),
+            "legacy no-owner constructors must not mint one fresh budget per facade"
+        );
+    }
+
+    #[test]
+    fn standalone_task_scope_is_absent_from_model_input_schema() {
+        let schema = BrowserTool::with_data_dir_for_task(
+            &StandaloneBrowserTask::new(),
+            std::env::temp_dir().join("bt-task-scope-schema"),
+            false,
+        )
+        .input_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("Browser input schema properties");
+        for field in crate::TRUSTED_OWNER_INPUT_FIELDS {
+            assert!(
+                !properties.contains_key(*field),
+                "trusted owner field `{field}` must be absent from the model schema: {schema}"
+            );
+        }
+        let schema = schema.to_string();
+        assert!(!schema.contains("resource_scope"), "{schema}");
+        assert!(!schema.contains("task_scope"), "{schema}");
+        assert!(!schema.contains("StandaloneBrowserTask"), "{schema}");
+    }
+
     #[tokio::test]
     async fn managed_constructor_owns_no_profile_and_never_initializes_standalone_engine() {
         let workspace = std::env::temp_dir().join("bt-managed-workspace");
@@ -5440,6 +5687,18 @@ pub(crate) mod tests {
         ));
     }
 
+    #[test]
+    fn extract_schema_byte_limit_is_checked_before_clone_or_browser_launch() {
+        let t = tool();
+        let oversized = json!({
+            "字段": "😀".repeat(nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_BYTES)
+        });
+        let error = t
+            .build_act_spec("extract", &json!({"action": "extract", "schema": oversized}))
+            .expect_err("oversized extraction schema must fail closed");
+        assert!(error.content.contains("serialized byte limit"), "{}", error.content);
+    }
+
     // ── 缺参在启动浏览器前返错（build_act_spec 纯逻辑，never launches）──
 
     #[test]
@@ -5543,6 +5802,31 @@ pub(crate) mod tests {
             "secret plaintext leaked into Debug: {dbg}"
         );
         assert!(dbg.contains("redacted") || dbg.contains("Secret"), "{dbg}");
+    }
+
+    #[test]
+    fn resolve_type_input_refuses_when_exact_redaction_registry_is_full() {
+        let store = store_with_secret("pw", "final-secret-PLAINTEXT", "example.com");
+        let t = BrowserTool::with_secret_store(std::env::temp_dir().join("bt-secret-cap"), false, store);
+        seed_snapshot(&t, "f0e1", "textbox", "Password");
+        for index in 0..nomi_browser_engine::MAX_KNOWN_SECRET_VALUES {
+            t.known_secret_values
+                .try_insert(&format!("known-{index:04}"))
+                .expect("test fills exact distinct-value capacity");
+        }
+
+        let error = t
+            .resolve_type_input("secret:pw")
+            .expect_err("a secret without exact-redaction admission must not be typed");
+        assert!(error.is_error);
+        assert!(error.content.contains("registry is full"), "{}", error.content);
+        assert!(error.content.contains("value was NOT typed"), "{}", error.content);
+        assert!(!error.content.contains("final-secret-PLAINTEXT"));
+        assert_eq!(
+            t.known_secret_values.len(),
+            nomi_browser_engine::MAX_KNOWN_SECRET_VALUES,
+            "refusal must not evict an older redaction value"
+        );
     }
 
     #[test]
@@ -6580,7 +6864,7 @@ pub(crate) mod tests {
             false,
             false,
             false,
-            Arc::new(Mutex::new(HashSet::new())),
+            nomi_browser_engine::KnownSecretValues::default(),
         )
     }
 

@@ -287,7 +287,7 @@ fn gw2_gate(
         Ok(_) => {}
         Err(error) => return Some(platform_error_to_value(error)),
     }
-    match registry.stash_pending(ctx, lane, input.clone()) {
+    match registry.stash_pending(ctx, lane, input) {
         Ok(Some(call_id)) => {
             Some(approval_required_value(&call_id, action, input))
         }

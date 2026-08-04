@@ -44,9 +44,15 @@ fn main() -> Result<ExitCode> {
     // `std::env::set_var` invoked inside `enhance_process_path`.
     let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let runtime = if commands::is_mcp_stdio_cli_command(cli.command.as_ref()) {
+        commands::build_mcp_stdio_runtime()?
+    } else {
+        // The long-lived application remains hardware-adaptive; only the
+        // short-lived stdio proxy children use the fixed runtime profile.
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+    };
     runtime.block_on(async_main(merged_path, cli))
 }
 

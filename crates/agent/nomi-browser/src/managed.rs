@@ -7,9 +7,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use nomi_types::tool::{ToolImage, ToolResult};
@@ -23,14 +23,28 @@ use serde_json::{Value, json};
 use crate::OUT_OF_BAND_CONFIRMED_KEY;
 /// Fields whose authority belongs to the main process.  A caller may select an
 /// owner-scoped `lane_id`, but it may never construct or override identity,
-/// target ownership, epochs, cancellation, or resource routing. ONE shared
-/// list for every managed surface — see [`crate::TRUSTED_OWNER_INPUT_FIELDS`].
+/// target ownership, epochs, cancellation, or resource routing. One shared
+/// list covers every managed surface; see [`crate::TRUSTED_OWNER_INPUT_FIELDS`].
 use crate::TRUSTED_OWNER_INPUT_FIELDS;
 
 const MAX_CRAWL_CONCURRENCY: usize = 8;
 const MAX_CRAWL_URLS: usize = 64;
+const MAX_CRAWL_URL_BYTES: usize = 16 * 1024;
+const MAX_CRAWL_URLS_RETAINED_BYTES: usize = 256 * 1024;
+const MAX_CRAWL_ITEM_RETAINED_BYTES: usize = 9 * 1024 * 1024;
+const MAX_CRAWL_BATCH_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const CRAWL_BATCH_ENVELOPE_RESERVE_BYTES: usize = 8 * 1024;
+const CRAWL_RESULT_BASE_RESERVE_BYTES: usize = 40 * 1024;
+const CRAWL_RESULT_POSTPROCESS_RESERVE_BYTES: usize = 4 * 1024;
 const CRAWL_OPERATION_TIMEOUT: Duration = Duration::from_secs(45);
 const CRAWL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const CRAWL_CLEANUP_CLOSE_CONCURRENCY: usize = 4;
+const CRAWL_CLEANUP_DISPATCHER_WORKERS: usize = 2;
+const CRAWL_CLEANUP_MAX_AUTHORITIES: usize = 256;
+const CRAWL_CLEANUP_MAX_AUTHORITIES_PER_RUNTIME: usize = 64;
+const CRAWL_CLEANUP_RETRY_MIN: Duration = Duration::from_millis(50);
+const CRAWL_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(1);
+const CRAWL_CLEANUP_EXACT_RETRY_ESCALATE: u32 = 3;
 const INVALID_CRAWL_REQUEST_CODE: &str = "invalid_browser_request";
 static MANAGED_LANE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -50,6 +64,20 @@ pub(crate) const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
 
 #[async_trait]
 pub(crate) trait BrowserLaneClientPort: Send + Sync {
+    /// Legacy ABI name for the exact runtime cleanup key sealed into this
+    /// client. It is intentionally not the task resource-family key used for
+    /// quotas: Drop/cleanup deduplication must never merge sibling runtimes.
+    fn task_resource_key(&self) -> String;
+
+    /// Synchronously transfer one exact Lane cleanup authority to the Hub.
+    /// The Lane id is sealed by the successful `open` result; cleanup must
+    /// never widen to every Lane in the runtime (or installation) when a local
+    /// dispatcher is saturated or unavailable.
+    fn handoff_bound_lane_cleanup(
+        &self,
+        lane_id: BrowserLaneId,
+    ) -> Result<(), BrowserPlatformError>;
+
     async fn open(
         &self,
         lane_name: Option<&str>,
@@ -80,6 +108,17 @@ pub(crate) trait BrowserLaneClientPort: Send + Sync {
 
 #[async_trait]
 impl BrowserLaneClientPort for BrowserLaneClient {
+    fn task_resource_key(&self) -> String {
+        BrowserLaneClient::task_resource_key(self)
+    }
+
+    fn handoff_bound_lane_cleanup(
+        &self,
+        lane_id: BrowserLaneId,
+    ) -> Result<(), BrowserPlatformError> {
+        BrowserLaneClient::handoff_bound_lane_cleanup(self, lane_id)
+    }
+
     async fn open(
         &self,
         lane_name: Option<&str>,
@@ -512,6 +551,77 @@ pub(crate) struct ManagedCrawlRequest {
     workspace_hint: Option<String>,
 }
 
+/// Shared retained-byte ledger for one `browser_crawl_many` call.
+///
+/// Every input URL owns a small fixed reserve for a compact terminal result;
+/// larger results atomically consume the remaining batch allowance as soon as
+/// a worker produces them.  Therefore concurrent workers never accumulate 64
+/// individually-valid multi-megabyte `Value`s before the coordinator can
+/// notice the aggregate overflow.
+struct CrawlBatchRetainedBudget {
+    extra_remaining: AtomicUsize,
+}
+
+impl CrawlBatchRetainedBudget {
+    fn new(url_count: usize) -> Self {
+        let results_budget = MAX_CRAWL_BATCH_OUTPUT_BYTES
+            .saturating_sub(CRAWL_BATCH_ENVELOPE_RESERVE_BYTES);
+        let base = CRAWL_RESULT_BASE_RESERVE_BYTES.saturating_mul(url_count);
+        Self {
+            extra_remaining: AtomicUsize::new(results_budget.saturating_sub(base)),
+        }
+    }
+
+    fn retain(&self, result: Value) -> Value {
+        let measured = nomi_browser_engine::actions::serialized_json_bytes_at_most(
+            &result,
+            MAX_CRAWL_ITEM_RETAINED_BYTES,
+        );
+        let Ok(bytes) = measured else {
+            return compact_crawl_byte_limit_result(&result, "crawl_item_byte_limit");
+        };
+        let charged = bytes.saturating_add(CRAWL_RESULT_POSTPROCESS_RESERVE_BYTES);
+        if charged <= CRAWL_RESULT_BASE_RESERVE_BYTES {
+            return result;
+        }
+        let additional = charged - CRAWL_RESULT_BASE_RESERVE_BYTES;
+        let admitted = self
+            .extra_remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(additional)
+            })
+            .is_ok();
+        if admitted {
+            result
+        } else {
+            compact_crawl_byte_limit_result(&result, "crawl_batch_byte_limit")
+        }
+    }
+}
+
+fn compact_crawl_byte_limit_result(result: &Value, code: &'static str) -> Value {
+    let compact = json!({
+        "url": result.get("url").and_then(Value::as_str).unwrap_or_default(),
+        "ok": false,
+        "lane_id": result.get("lane_id").cloned().unwrap_or(Value::Null),
+        "error": {
+            "code": code,
+            "message": "The crawl result exceeded this batch's retained-byte limit.",
+            "retryable": true,
+            "next_action": "Retry this URL alone or request a smaller extraction.",
+        }
+    });
+    debug_assert!(
+        nomi_browser_engine::actions::serialized_json_bytes_at_most(
+            &compact,
+            CRAWL_RESULT_BASE_RESERVE_BYTES,
+        )
+        .is_ok(),
+        "compact crawl byte-limit result must fit its fixed reserve"
+    );
+    compact
+}
+
 struct CrawlWorkerPlan {
     lane: BrowserLaneSnapshot,
     items: Vec<(usize, String)>,
@@ -527,14 +637,637 @@ enum CrawlLaneOpenFailure {
     Open(BrowserPlatformError),
 }
 
-/// Owns only Lane names that were absent from the preflight inventory and
-/// concrete Lane IDs returned by this batch's successful opens. A normal error
-/// disarms a pending name without closing it; cancellation during `open` keeps
-/// the pending name so Drop can resolve the partially-created Lane.
+#[derive(Clone, Copy)]
+struct CrawlCleanupDispatcherLimits {
+    max_authorities: usize,
+    max_authorities_per_runtime: usize,
+    workers: usize,
+}
+
+impl CrawlCleanupDispatcherLimits {
+    const fn production() -> Self {
+        Self {
+            max_authorities: CRAWL_CLEANUP_MAX_AUTHORITIES,
+            max_authorities_per_runtime: CRAWL_CLEANUP_MAX_AUTHORITIES_PER_RUNTIME,
+            workers: CRAWL_CLEANUP_DISPATCHER_WORKERS,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CrawlCleanupSubmission {
+    lane_id: BrowserLaneId,
+    lane_name: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CrawlCleanupIntentStatus {
+    Queued,
+    InFlight,
+}
+
+struct CrawlCleanupIntent {
+    task_resource_key: String,
+    client: Arc<dyn BrowserLaneClientPort>,
+    lane_name: String,
+    lane_ids: HashSet<BrowserLaneId>,
+    due_at: Instant,
+    attempts: u32,
+    status: CrawlCleanupIntentStatus,
+}
+
+impl CrawlCleanupIntent {
+    fn authority_count(&self) -> usize {
+        self.lane_ids.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lane_ids.is_empty()
+    }
+}
+
+#[derive(Default)]
+struct CrawlCleanupDispatcherState {
+    next_intent_id: u64,
+    intents: HashMap<u64, CrawlCleanupIntent>,
+    active_workers: usize,
+    max_active_workers: usize,
+    completed_authorities: usize,
+    shutdown: bool,
+}
+
+impl CrawlCleanupDispatcherState {
+    fn authority_count(&self) -> usize {
+        self.intents
+            .values()
+            .map(CrawlCleanupIntent::authority_count)
+            .sum()
+    }
+
+    fn runtime_authority_count(&self, task_resource_key: &str) -> usize {
+        self.intents
+            .values()
+            .filter(|intent| intent.task_resource_key == task_resource_key)
+            .map(CrawlCleanupIntent::authority_count)
+            .sum()
+    }
+}
+
+struct CrawlCleanupDispatcherInner {
+    limits: CrawlCleanupDispatcherLimits,
+    state: StdMutex<CrawlCleanupDispatcherState>,
+    work_available: Condvar,
+    live_workers: AtomicUsize,
+}
+
+#[derive(Clone)]
+struct CrawlCleanupDispatcher {
+    inner: Arc<CrawlCleanupDispatcherInner>,
+    threads: Arc<StdMutex<Vec<std::thread::JoinHandle<()>>>>,
+}
+
+static CRAWL_CLEANUP_DISPATCHER: OnceLock<Option<CrawlCleanupDispatcher>> = OnceLock::new();
+
+fn handoff_exact_crawl_lane(
+    client: &Arc<dyn BrowserLaneClientPort>,
+    lane_id: BrowserLaneId,
+) -> bool {
+    // Each admitted live Lane carries a Hub cleanup-ledger reservation, so a
+    // valid exact handoff cannot fail because the ledger is full. An error is
+    // stale/mismatched authority or an internal invariant violation; neither
+    // permits widening cleanup to a runtime or installation snapshot.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.handoff_bound_lane_cleanup(lane_id.clone())
+    })) {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::error!(
+                lane_id = %lane_id,
+                code = ?error.code,
+                "Hub rejected an exact crawl Lane cleanup handoff"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::error!(
+                lane_id = %lane_id,
+                "exact crawl Lane cleanup handoff panicked"
+            );
+            false
+        }
+    }
+}
+
+impl CrawlCleanupDispatcher {
+    fn global() -> Option<Self> {
+        CRAWL_CLEANUP_DISPATCHER
+            .get_or_init(|| match Self::new(CrawlCleanupDispatcherLimits::production()) {
+                Ok(dispatcher) => Some(dispatcher),
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "managed crawl cleanup dispatcher unavailable; using exact Hub cleanup handoff"
+                    );
+                    None
+                }
+            })
+            .clone()
+    }
+
+    fn new(limits: CrawlCleanupDispatcherLimits) -> Result<Self, String> {
+        if limits.max_authorities == 0
+            || limits.max_authorities_per_runtime == 0
+            || limits.workers == 0
+        {
+            return Err("managed crawl cleanup dispatcher limits must be non-zero".to_owned());
+        }
+        let dispatcher = Self {
+            inner: Arc::new(CrawlCleanupDispatcherInner {
+                limits,
+                state: StdMutex::new(CrawlCleanupDispatcherState::default()),
+                work_available: Condvar::new(),
+                live_workers: AtomicUsize::new(0),
+            }),
+            threads: Arc::new(StdMutex::new(Vec::with_capacity(limits.workers))),
+        };
+        for worker_index in 0..limits.workers {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::error!(
+                        worker_index,
+                        %error,
+                        "failed to build a managed crawl cleanup runtime"
+                    );
+                    continue;
+                }
+            };
+            let inner = Arc::clone(&dispatcher.inner);
+            dispatcher.inner.live_workers.fetch_add(1, Ordering::AcqRel);
+            match std::thread::Builder::new()
+                .name(format!("nomi-crawl-cleanup-{worker_index}"))
+                .spawn(move || crawl_cleanup_dispatcher_worker(inner, runtime))
+            {
+                Ok(thread) => dispatcher
+                    .threads
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(thread),
+                Err(error) => {
+                    dispatcher
+                        .inner
+                        .live_workers
+                        .fetch_sub(1, Ordering::AcqRel);
+                    tracing::error!(
+                        worker_index,
+                        %error,
+                        "failed to start a managed crawl cleanup worker"
+                    );
+                }
+            }
+        }
+        if dispatcher
+            .threads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            Err("no managed crawl cleanup worker could be started".to_owned())
+        } else {
+            Ok(dispatcher)
+        }
+    }
+
+    /// Synchronous, bounded ownership transfer used from Drop. Duplicate exact
+    /// Lane authorities merge locally. If either local bound is full, the
+    /// overflowing Lane is handed directly to the Hub's exact-Lane ledger;
+    /// cleanup scope is never widened to the runtime or installation.
+    fn enqueue_batch(
+        &self,
+        client: Arc<dyn BrowserLaneClientPort>,
+        submissions: Vec<CrawlCleanupSubmission>,
+    ) -> bool {
+        if self.inner.live_workers.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+        let task_resource_key = client.task_resource_key();
+        for submission in submissions {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            loop {
+                if state.shutdown || self.inner.live_workers.load(Ordering::Acquire) == 0 {
+                    drop(state);
+                    let _ = handoff_exact_crawl_lane(&client, submission.lane_id.clone());
+                    break;
+                }
+                let matching_intent = state.intents.iter().find_map(|(intent_id, intent)| {
+                    if intent.task_resource_key != task_resource_key {
+                        return None;
+                    }
+                    let same_id = intent.lane_ids.contains(&submission.lane_id);
+                    (same_id || intent.lane_name == submission.lane_name).then_some(*intent_id)
+                });
+
+                let additional_authorities = matching_intent
+                    .and_then(|intent_id| state.intents.get(&intent_id))
+                    .map(|intent| usize::from(!intent.lane_ids.contains(&submission.lane_id)))
+                    .unwrap_or(1);
+                if additional_authorities == 0 {
+                    break;
+                }
+
+                let global_available = state
+                    .authority_count()
+                    .saturating_add(additional_authorities)
+                    <= self.inner.limits.max_authorities;
+                let client_available = state
+                    .runtime_authority_count(&task_resource_key)
+                    .saturating_add(additional_authorities)
+                    <= self.inner.limits.max_authorities_per_runtime;
+                if !global_available || !client_available {
+                    drop(state);
+                    let _ = handoff_exact_crawl_lane(&client, submission.lane_id.clone());
+                    break;
+                }
+
+                let now = Instant::now();
+                if let Some(intent_id) = matching_intent {
+                    let intent = state
+                        .intents
+                        .get_mut(&intent_id)
+                        .expect("matching cleanup intent remains present");
+                    let changed = intent.lane_ids.insert(submission.lane_id.clone());
+                    if changed {
+                        intent.due_at = now;
+                    }
+                } else {
+                    state.next_intent_id = state.next_intent_id.wrapping_add(1).max(1);
+                    let intent_id = state.next_intent_id;
+                    let lane_ids = HashSet::from([submission.lane_id.clone()]);
+                    state.intents.insert(
+                        intent_id,
+                        CrawlCleanupIntent {
+                            task_resource_key: task_resource_key.clone(),
+                            client: Arc::clone(&client),
+                            lane_name: submission.lane_name.clone(),
+                            lane_ids,
+                            due_at: now,
+                            attempts: 0,
+                            status: CrawlCleanupIntentStatus::Queued,
+                        },
+                    );
+                }
+                self.inner.work_available.notify_all();
+                break;
+            }
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> CrawlCleanupDispatcherSnapshot {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        CrawlCleanupDispatcherSnapshot {
+            retained_authorities: state.authority_count(),
+            retained_intents: state.intents.len(),
+            active_workers: state.active_workers,
+            max_active_workers: state.max_active_workers,
+            completed_authorities: state.completed_authorities,
+            live_workers: self.inner.live_workers.load(Ordering::Acquire),
+        }
+    }
+
+    #[cfg(test)]
+    fn shutdown_and_join(&self) {
+        {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(
+                state.intents.is_empty() && state.active_workers == 0,
+                "test dispatcher must be idle before shutdown"
+            );
+            state.shutdown = true;
+        }
+        self.inner.work_available.notify_all();
+        let threads = std::mem::take(
+            &mut *self
+                .threads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for thread in threads {
+            thread.join().expect("crawl cleanup worker thread joins");
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct CrawlCleanupDispatcherSnapshot {
+    retained_authorities: usize,
+    retained_intents: usize,
+    active_workers: usize,
+    max_active_workers: usize,
+    completed_authorities: usize,
+    live_workers: usize,
+}
+
+struct CrawlCleanupWork {
+    intent_id: u64,
+    client: Arc<dyn BrowserLaneClientPort>,
+    lane_name: String,
+    lane_id: BrowserLaneId,
+    attempts: u32,
+}
+
+enum CrawlCleanupWorkOutcome {
+    ExactClosed(BrowserLaneId),
+    Retry,
+}
+
+fn crawl_cleanup_dispatcher_worker(
+    inner: Arc<CrawlCleanupDispatcherInner>,
+    runtime: tokio::runtime::Runtime,
+) {
+    let _liveness = CrawlCleanupWorkerLiveness {
+        inner: Arc::clone(&inner),
+    };
+    while let Some(work) = take_crawl_cleanup_work(&inner) {
+        let completion = CrawlCleanupWorkCompletion::new(&inner, &work);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(process_crawl_cleanup_work(&inner, &work))
+        }))
+        .unwrap_or_else(|_| {
+            tracing::error!(
+                lane_name = %work.lane_name,
+                lane_id = %work.lane_id,
+                "managed crawl cleanup client panicked; retaining authority for retry"
+            );
+            CrawlCleanupWorkOutcome::Retry
+        });
+        completion.finish(outcome);
+    }
+}
+
+struct CrawlCleanupWorkCompletion<'a> {
+    inner: &'a CrawlCleanupDispatcherInner,
+    work: &'a CrawlCleanupWork,
+    finished: bool,
+}
+
+impl<'a> CrawlCleanupWorkCompletion<'a> {
+    fn new(inner: &'a CrawlCleanupDispatcherInner, work: &'a CrawlCleanupWork) -> Self {
+        Self {
+            inner,
+            work,
+            finished: false,
+        }
+    }
+
+    fn finish(mut self, outcome: CrawlCleanupWorkOutcome) {
+        // Set first so a panic inside bookkeeping cannot double-complete the
+        // same authority while unwinding.
+        self.finished = true;
+        finish_crawl_cleanup_work(self.inner, self.work, outcome);
+    }
+}
+
+impl Drop for CrawlCleanupWorkCompletion<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            finish_crawl_cleanup_work(
+                self.inner,
+                self.work,
+                CrawlCleanupWorkOutcome::Retry,
+            );
+        }
+    }
+}
+
+struct CrawlCleanupWorkerLiveness {
+    inner: Arc<CrawlCleanupDispatcherInner>,
+}
+
+impl Drop for CrawlCleanupWorkerLiveness {
+    fn drop(&mut self) {
+        let previous = self.inner.live_workers.fetch_sub(1, Ordering::AcqRel);
+        if previous != 1 {
+            return;
+        }
+
+        // A dispatcher with no live workers must never keep claiming cleanup
+        // authority. Transfer every retained exact Lane to the Hub ledger;
+        // widening this to a task/global snapshot would be ABA-unsafe.
+        let exact_authorities = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let authorities = state
+                .intents
+                .values()
+                .flat_map(|intent| {
+                    intent
+                        .lane_ids
+                        .iter()
+                        .cloned()
+                        .map(|lane_id| (Arc::clone(&intent.client), lane_id))
+                })
+                .collect::<Vec<_>>();
+            state.intents.clear();
+            state.active_workers = 0;
+            authorities
+        };
+        self.inner.work_available.notify_all();
+        for (client, lane_id) in exact_authorities {
+            let _ = handoff_exact_crawl_lane(&client, lane_id);
+        }
+    }
+}
+
+fn take_crawl_cleanup_work(
+    inner: &CrawlCleanupDispatcherInner,
+) -> Option<CrawlCleanupWork> {
+    let mut state = inner
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        if state.shutdown && state.intents.is_empty() {
+            return None;
+        }
+        let now = Instant::now();
+        let candidate = state
+            .intents
+            .iter()
+            .filter(|(_, intent)| intent.status == CrawlCleanupIntentStatus::Queued)
+            .min_by_key(|(intent_id, intent)| (intent.due_at, **intent_id))
+            .map(|(intent_id, intent)| (*intent_id, intent.due_at));
+        match candidate {
+            Some((intent_id, due_at)) if due_at <= now => {
+                let intent = state
+                    .intents
+                    .get_mut(&intent_id)
+                    .expect("selected cleanup intent remains present");
+                intent.status = CrawlCleanupIntentStatus::InFlight;
+                let lane_id = intent
+                    .lane_ids
+                    .iter()
+                    .min_by(|left, right| left.as_str().cmp(right.as_str()))
+                    .cloned()
+                    .expect("non-empty cleanup intent has an exact Lane id");
+                let work = CrawlCleanupWork {
+                    intent_id,
+                    client: Arc::clone(&intent.client),
+                    lane_name: intent.lane_name.clone(),
+                    lane_id,
+                    attempts: intent.attempts,
+                };
+                state.active_workers += 1;
+                state.max_active_workers = state.max_active_workers.max(state.active_workers);
+                return Some(work);
+            }
+            Some((_, due_at)) => {
+                let wait = due_at.saturating_duration_since(now);
+                let (next_state, _) = inner
+                    .work_available
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state = next_state;
+            }
+            None => {
+                state = inner
+                    .work_available
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
+    }
+}
+
+async fn process_crawl_cleanup_work(
+    _inner: &CrawlCleanupDispatcherInner,
+    work: &CrawlCleanupWork,
+) -> CrawlCleanupWorkOutcome {
+    let lane_id = &work.lane_id;
+    match tokio::time::timeout(CRAWL_CLEANUP_TIMEOUT, work.client.close(lane_id)).await {
+            Ok(Ok(_)) => CrawlCleanupWorkOutcome::ExactClosed(lane_id.clone()),
+            Ok(Err(error))
+                if error.code == nomifun_browser_platform::BrowserErrorCode::LaneNotFound =>
+            {
+                CrawlCleanupWorkOutcome::ExactClosed(lane_id.clone())
+            }
+            Ok(Err(error)) => {
+                if should_log_cleanup_retry(work.attempts) {
+                    tracing::warn!(
+                        lane_id = %lane_id,
+                        code = ?error.code,
+                        "managed crawl cleanup dispatcher will retry Lane close"
+                    );
+                }
+                CrawlCleanupWorkOutcome::Retry
+            }
+            Err(_) => {
+                if should_log_cleanup_retry(work.attempts) {
+                    tracing::warn!(
+                        lane_id = %lane_id,
+                        "managed crawl cleanup dispatcher timed out; retrying"
+                    );
+                }
+                CrawlCleanupWorkOutcome::Retry
+            }
+    }
+}
+
+fn finish_crawl_cleanup_work(
+    inner: &CrawlCleanupDispatcherInner,
+    work: &CrawlCleanupWork,
+    outcome: CrawlCleanupWorkOutcome,
+) {
+    let mut state = inner
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.active_workers = state.active_workers.saturating_sub(1);
+    let mut completed = 0usize;
+    let mut remove_intent = false;
+    if let Some(intent) = state.intents.get_mut(&work.intent_id) {
+        match outcome {
+            CrawlCleanupWorkOutcome::ExactClosed(lane_id) => {
+                if intent.lane_ids.remove(&lane_id) {
+                    completed += 1;
+                }
+                intent.attempts = 0;
+                intent.due_at = Instant::now();
+            }
+            CrawlCleanupWorkOutcome::Retry => {
+                intent.attempts = intent.attempts.saturating_add(1);
+                if intent.attempts >= CRAWL_CLEANUP_EXACT_RETRY_ESCALATE {
+                    if handoff_exact_crawl_lane(&intent.client, work.lane_id.clone())
+                        && intent.lane_ids.remove(&work.lane_id)
+                    {
+                        completed += 1;
+                    }
+                    if intent.lane_ids.contains(&work.lane_id) {
+                        intent.due_at =
+                            Instant::now() + crawl_cleanup_retry_delay(intent.attempts);
+                    } else {
+                        intent.attempts = 0;
+                        intent.due_at = Instant::now();
+                    }
+                } else {
+                    intent.due_at = Instant::now() + crawl_cleanup_retry_delay(intent.attempts);
+                }
+            }
+        }
+        remove_intent = intent.is_empty();
+        if !remove_intent {
+            intent.status = CrawlCleanupIntentStatus::Queued;
+        }
+    }
+    if remove_intent {
+        state.intents.remove(&work.intent_id);
+    }
+    state.completed_authorities = state.completed_authorities.saturating_add(completed);
+    drop(state);
+    inner.work_available.notify_all();
+}
+
+fn crawl_cleanup_retry_delay(attempt: u32) -> Duration {
+    let factor = 1u32 << attempt.min(4);
+    CRAWL_CLEANUP_RETRY_MIN
+        .saturating_mul(factor)
+        .min(CRAWL_CLEANUP_RETRY_MAX)
+}
+
+fn should_log_cleanup_retry(attempt: u32) -> bool {
+    attempt == 0 || attempt.is_power_of_two()
+}
+
+
+/// Owns only concrete Lane IDs returned by this batch's successful opens.
+/// Cancellation while `open` itself is pending is already covered by the
+/// Hub's exact abandoned-start authority; re-resolving by name here would
+/// create a second, ABA-prone cleanup owner.
 struct CrawlBatchCleanup {
     client: Arc<dyn BrowserLaneClientPort>,
     owned_lanes: HashMap<BrowserLaneId, String>,
-    pending_names: HashSet<String>,
+    dispatcher: Option<CrawlCleanupDispatcher>,
+    allow_global_dispatcher: bool,
 }
 
 impl CrawlBatchCleanup {
@@ -542,20 +1275,38 @@ impl CrawlBatchCleanup {
         Self {
             client,
             owned_lanes: HashMap::new(),
-            pending_names: HashSet::new(),
+            // Lazily initialize the process singleton only if Drop actually
+            // has residual authority to hand off. Successful batches pay no
+            // persistent worker-thread cost.
+            dispatcher: None,
+            allow_global_dispatcher: true,
         }
     }
 
-    fn track_pending_name(&mut self, lane_name: String) {
-        self.pending_names.insert(lane_name);
+    #[cfg(test)]
+    fn new_with_dispatcher(
+        client: Arc<dyn BrowserLaneClientPort>,
+        dispatcher: CrawlCleanupDispatcher,
+    ) -> Self {
+        Self {
+            client,
+            owned_lanes: HashMap::new(),
+            dispatcher: Some(dispatcher),
+            allow_global_dispatcher: true,
+        }
     }
 
-    fn abandon_pending_name(&mut self, lane_name: &str) {
-        self.pending_names.remove(lane_name);
+    #[cfg(test)]
+    fn new_with_unavailable_dispatcher(client: Arc<dyn BrowserLaneClientPort>) -> Self {
+        Self {
+            client,
+            owned_lanes: HashMap::new(),
+            dispatcher: None,
+            allow_global_dispatcher: false,
+        }
     }
 
     fn track_owned_lane(&mut self, lane: &BrowserLaneSnapshot) {
-        self.pending_names.remove(&lane.lane_key.lane_name);
         self.owned_lanes
             .insert(lane.lane_id.clone(), lane.lane_key.lane_name.clone());
     }
@@ -595,25 +1346,38 @@ impl CrawlBatchCleanup {
 
 impl Drop for CrawlBatchCleanup {
     fn drop(&mut self) {
-        if self.owned_lanes.is_empty() && self.pending_names.is_empty() {
+        if self.owned_lanes.is_empty() {
             return;
         }
         let client = Arc::clone(&self.client);
-        let lane_ids = std::mem::take(&mut self.owned_lanes)
-            .into_keys()
+        let mut submissions = std::mem::take(&mut self.owned_lanes)
+            .into_iter()
+            .map(|(lane_id, lane_name)| CrawlCleanupSubmission {
+                lane_id,
+                lane_name,
+            })
             .collect::<Vec<_>>();
-        let pending_names = std::mem::take(&mut self.pending_names);
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            tracing::error!(
-                lane_count = lane_ids.len(),
-                lane_name_count = pending_names.len(),
-                "managed crawl batch dropped outside Tokio; Lane cleanup could not be scheduled"
-            );
-            return;
-        };
-        runtime.spawn(async move {
-            cleanup_dropped_crawl_batch(client, lane_ids, pending_names).await;
+        submissions.sort_by(|left, right| {
+            left
+                .lane_name
+                .cmp(&right.lane_name)
+                .then_with(|| left.lane_id.as_str().cmp(right.lane_id.as_str()))
         });
+        let dispatcher = self.dispatcher.take().or_else(|| {
+            self.allow_global_dispatcher
+                .then(CrawlCleanupDispatcher::global)
+                .flatten()
+        });
+        if let Some(dispatcher) = dispatcher {
+            let exact_fallback = submissions.clone();
+            if dispatcher.enqueue_batch(Arc::clone(&client), submissions) {
+                return;
+            }
+            submissions = exact_fallback;
+        }
+        for submission in submissions {
+            let _ = handoff_exact_crawl_lane(&client, submission.lane_id);
+        }
     }
 }
 
@@ -633,6 +1397,7 @@ async fn execute_managed_crawl_many(
     client: Arc<dyn BrowserLaneClientPort>,
     request: ManagedCrawlRequest,
 ) -> ToolResult {
+    let retained_budget = Arc::new(CrawlBatchRetainedBudget::new(request.urls.len()));
     let lane_names =
         match unused_crawl_lane_names(client.as_ref(), request.requested_concurrency).await {
             Ok(names) => names,
@@ -645,13 +1410,13 @@ async fn execute_managed_crawl_many(
                         .iter()
                         .cloned()
                         .map(|url| {
-                            crawl_error_result(
+                            retained_budget.retain(crawl_error_result(
                                 url,
                                 None,
                                 request.identity_mode,
                                 request.requested_concurrency,
                                 public_platform_error_json(&error),
-                            )
+                            ))
                         })
                         .collect(),
                 );
@@ -666,7 +1431,6 @@ async fn execute_managed_crawl_many(
     let mut worker_index = 0;
     while worker_index < open_limit {
         let lane_name = lane_names[worker_index].clone();
-        cleanup.track_pending_name(lane_name.clone());
         match client
             .open(
                 Some(&lane_name),
@@ -678,7 +1442,6 @@ async fn execute_managed_crawl_many(
             Err(error) => {
                 // The Hub rejected this open, so this batch did not acquire the
                 // Lane. Never close a same-name Lane that may belong to the caller.
-                cleanup.abandon_pending_name(&lane_name);
                 open_errors.push((worker_index, error));
             }
             Ok(outcome) => {
@@ -762,7 +1525,7 @@ async fn execute_managed_crawl_many(
             .enumerate()
             .map(|(index, url)| {
                 let worker_index = index % request.requested_concurrency;
-                match terminal_lanes.get(&worker_index) {
+                let result = match terminal_lanes.get(&worker_index) {
                     Some(CrawlLaneOpenFailure::Unavailable(lane)) => {
                         let mut result = crawl_lane_unavailable_result(
                             url,
@@ -805,7 +1568,8 @@ async fn execute_managed_crawl_many(
                         request.requested_concurrency,
                         public_platform_error_json(&fallback_error),
                     ),
-                }
+                };
+                retained_budget.retain(result)
             })
             .collect();
         return crawl_batch_result(&request, 0, results);
@@ -832,6 +1596,7 @@ async fn execute_managed_crawl_many(
             items,
             request.schema.clone(),
             effective_concurrency,
+            Arc::clone(&retained_budget),
         ));
         worker_plans.insert(abort_handle.id(), plan);
     }
@@ -845,12 +1610,12 @@ async fn execute_managed_crawl_many(
                 let mut by_index = worker_results.into_iter().collect::<HashMap<_, _>>();
                 for (index, url) in &plan.items {
                     ordered_results[*index] = Some(by_index.remove(index).unwrap_or_else(|| {
-                        crawl_worker_terminal_failure(
+                        retained_budget.retain(crawl_worker_terminal_failure(
                             url,
                             &plan.lane,
                             plan.recommended_concurrency,
                             "worker_incomplete",
-                        )
+                        ))
                     }));
                 }
             }
@@ -872,12 +1637,13 @@ async fn execute_managed_crawl_many(
                 // batch from being reported as successful after its Lane has
                 // become unusable and keeps assignment deterministic.
                 for (index, url) in &plan.items {
-                    ordered_results[*index] = Some(crawl_worker_terminal_failure(
+                    ordered_results[*index] = Some(retained_budget.retain(
+                        crawl_worker_terminal_failure(
                         url,
                         &plan.lane,
                         effective_concurrency,
                         cause,
-                    ));
+                    )));
                 }
             }
         }
@@ -889,7 +1655,7 @@ async fn execute_managed_crawl_many(
     // to a specific Lane, so return a metadata-safe batch error.
     for (index, url) in request.urls.iter().enumerate() {
         if ordered_results[index].is_none() {
-            ordered_results[index] = Some(crawl_error_result(
+            ordered_results[index] = Some(retained_budget.retain(crawl_error_result(
                 url.clone(),
                 None,
                 request.identity_mode,
@@ -900,7 +1666,7 @@ async fn execute_managed_crawl_many(
                     "retryable": true,
                     "next_action": "Retry this URL in a new bounded crawl batch.",
                 }),
-            ));
+            )));
         }
     }
     let mut results = ordered_results
@@ -963,6 +1729,7 @@ async fn run_crawl_worker(
     items: Vec<(usize, String)>,
     schema: Option<Value>,
     recommended_concurrency: usize,
+    retained_budget: Arc<CrawlBatchRetainedBudget>,
 ) -> Vec<(usize, Value)> {
     let mut results = Vec::with_capacity(items.len());
     for (index, url) in items {
@@ -974,7 +1741,7 @@ async fn run_crawl_worker(
             recommended_concurrency,
         )
         .await;
-        results.push((index, result));
+        results.push((index, retained_budget.retain(result)));
     }
     results
 }
@@ -1098,7 +1865,7 @@ fn crawl_batch_result(
     effective_concurrency: usize,
     results: Vec<Value>,
 ) -> ToolResult {
-    ToolResult::text(pretty_json(&json!({
+    let envelope = json!({
         "ok": results.iter().all(|result| {
             result.get("ok").and_then(Value::as_bool).unwrap_or(false)
         }),
@@ -1107,7 +1874,33 @@ fn crawl_batch_result(
         "requested": request.urls.len(),
         "concurrency": effective_concurrency,
         "results": results,
-    })))
+    });
+    let Ok(bytes) = nomi_browser_engine::actions::serialized_json_bytes_at_most(
+        &envelope,
+        MAX_CRAWL_BATCH_OUTPUT_BYTES,
+    ) else {
+        return ToolResult::error(
+            "{\"ok\":false,\"action\":\"browser_crawl_many\",\"error\":{\"code\":\"crawl_batch_byte_limit\",\"message\":\"The crawl batch exceeded its retained-byte limit. Retry fewer URLs or a smaller extraction.\"}}"
+                .to_owned(),
+        );
+    };
+    // Compact JSON avoids the otherwise-unbounded pretty-print whitespace
+    // copy. The envelope remains alive during serialization, but both copies
+    // now have the same deterministic per-batch ceiling.
+    let mut encoded = Vec::with_capacity(bytes);
+    if serde_json::to_writer(&mut encoded, &envelope).is_err() {
+        return ToolResult::error(
+            "{\"ok\":false,\"action\":\"browser_crawl_many\",\"error\":{\"code\":\"crawl_batch_serialization_failed\",\"message\":\"The bounded crawl result could not be serialized.\"}}"
+                .to_owned(),
+        );
+    }
+    match String::from_utf8(encoded) {
+        Ok(encoded) => ToolResult::text(encoded),
+        Err(_) => ToolResult::error(
+            "{\"ok\":false,\"action\":\"browser_crawl_many\",\"error\":{\"code\":\"crawl_batch_serialization_failed\",\"message\":\"The bounded crawl result was not UTF-8.\"}}"
+                .to_owned(),
+        ),
+    }
 }
 
 fn crawl_success_result(
@@ -1281,14 +2074,18 @@ async fn close_lane_ids_until(
     lane_ids: Vec<BrowserLaneId>,
     deadline: tokio::time::Instant,
 ) -> HashMap<BrowserLaneId, Result<CloseResult, BrowserPlatformError>> {
+    let mut seen = HashSet::new();
+    let mut pending = lane_ids
+        .into_iter()
+        .filter(|lane_id| seen.insert(lane_id.clone()))
+        .collect::<Vec<_>>();
     let mut workers = tokio::task::JoinSet::new();
     let mut task_lanes = HashMap::new();
-    for lane_id in lane_ids.iter().cloned() {
-        let worker_client = Arc::clone(&client);
-        let worker_lane_id = lane_id.clone();
-        let abort_handle =
-            workers.spawn(async move { worker_client.close(&worker_lane_id).await });
-        task_lanes.insert(abort_handle.id(), lane_id);
+    while workers.len() < CRAWL_CLEANUP_CLOSE_CONCURRENCY {
+        let Some(lane_id) = pending.pop() else {
+            break;
+        };
+        spawn_crawl_close_worker(&mut workers, &mut task_lanes, Arc::clone(&client), lane_id);
     }
     let mut results = HashMap::new();
     loop {
@@ -1320,9 +2117,20 @@ async fn close_lane_ids_until(
                 }
             }
         }
+        while workers.len() < CRAWL_CLEANUP_CLOSE_CONCURRENCY {
+            let Some(lane_id) = pending.pop() else {
+                break;
+            };
+            spawn_crawl_close_worker(
+                &mut workers,
+                &mut task_lanes,
+                Arc::clone(&client),
+                lane_id,
+            );
+        }
     }
     workers.abort_all();
-    for lane_id in task_lanes.into_values() {
+    for lane_id in task_lanes.into_values().chain(pending) {
         results.insert(
             lane_id.clone(),
             Err(BrowserPlatformError::new(
@@ -1337,49 +2145,15 @@ async fn close_lane_ids_until(
     results
 }
 
-async fn cleanup_dropped_crawl_batch(
+fn spawn_crawl_close_worker(
+    workers: &mut tokio::task::JoinSet<Result<CloseResult, BrowserPlatformError>>,
+    task_lanes: &mut HashMap<tokio::task::Id, BrowserLaneId>,
     client: Arc<dyn BrowserLaneClientPort>,
-    lane_ids: Vec<BrowserLaneId>,
-    pending_names: HashSet<String>,
+    lane_id: BrowserLaneId,
 ) {
-    let deadline = tokio::time::Instant::now() + CRAWL_CLEANUP_TIMEOUT;
-    let known_ids = lane_ids.iter().cloned().collect::<HashSet<_>>();
-    let results = close_lane_ids_until(Arc::clone(&client), lane_ids, deadline).await;
-    for (lane_id, result) in &results {
-        if let Err(error) = result {
-            tracing::warn!(
-                lane_id = %lane_id,
-                code = ?error.code,
-                "managed crawl RAII Lane cleanup failed"
-            );
-        }
-    }
-    if pending_names.is_empty() || tokio::time::Instant::now() >= deadline {
-        return;
-    }
-    let lanes = match tokio::time::timeout_at(deadline, client.list()).await {
-        Ok(Ok(lanes)) => lanes,
-        Ok(Err(error)) => {
-            tracing::warn!(
-                code = ?error.code,
-                "managed crawl RAII cleanup could not resolve a cancelled open"
-            );
-            return;
-        }
-        Err(_) => {
-            tracing::warn!("managed crawl RAII cleanup deadline expired resolving an open");
-            return;
-        }
-    };
-    let unresolved_ids = lanes
-        .into_iter()
-        .filter(|lane| {
-            pending_names.contains(&lane.lane_key.lane_name)
-                && !known_ids.contains(&lane.lane_id)
-        })
-        .map(|lane| lane.lane_id)
-        .collect::<Vec<_>>();
-    let _ = close_lane_ids_until(client, unresolved_ids, deadline).await;
+    let worker_lane_id = lane_id.clone();
+    let abort_handle = workers.spawn(async move { client.close(&worker_lane_id).await });
+    task_lanes.insert(abort_handle.id(), lane_id);
 }
 
 pub(crate) fn managed_lane_id(input: &Value) -> Result<Option<BrowserLaneId>, BrowserPlatformError> {
@@ -1410,12 +2184,13 @@ fn parse_crawl_request(
     }
     let urls = crawl_urls(input)?;
     let requested_concurrency = crawl_concurrency(input, urls.len())?;
+    let schema = crawl_schema(input)?;
     Ok(ManagedCrawlRequest {
         urls,
         requested_concurrency,
         auto_concurrency: crawl_concurrency_is_auto(input),
         identity_mode: BrowserIdentityMode::Anonymous,
-        schema: input.get("schema").cloned(),
+        schema,
         workspace_hint: workspace_dir.map(|path| path.to_string_lossy().into_owned()),
     })
 }
@@ -1438,20 +2213,58 @@ fn crawl_urls(input: &Value) -> Result<Vec<String>, String> {
             "`urls` is bounded to {MAX_CRAWL_URLS} entries per browser_crawl_many call."
         ));
     }
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let url = value
-                .as_str()
-                .map(str::trim)
-                .ok_or_else(|| format!("`urls[{index}]` must be a string."))?;
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(format!("`urls[{index}]` must be an HTTP(S) URL."));
-            }
-            Ok(url.to_owned())
-        })
-        .collect()
+    let mut urls = Vec::with_capacity(values.len());
+    let mut retained_bytes = 0usize;
+    for (index, value) in values.iter().enumerate() {
+        let raw = value
+            .as_str()
+            .ok_or_else(|| format!("`urls[{index}]` must be a string."))?;
+        if raw.len() > MAX_CRAWL_URL_BYTES {
+            return Err(format!(
+                "`urls[{index}]` exceeds the {MAX_CRAWL_URL_BYTES}-byte URL limit."
+            ));
+        }
+        let url = raw.trim();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(format!("`urls[{index}]` must be an HTTP(S) URL."));
+        }
+        if url.chars().any(|character| character.is_control()) {
+            return Err(format!("`urls[{index}]` contains a control character."));
+        }
+        retained_bytes = retained_bytes
+            .checked_add(url.len())
+            .ok_or_else(|| "`urls` retained-byte count overflowed.".to_owned())?;
+        if retained_bytes > MAX_CRAWL_URLS_RETAINED_BYTES {
+            return Err(format!(
+                "`urls` exceeds the {MAX_CRAWL_URLS_RETAINED_BYTES}-byte aggregate URL limit."
+            ));
+        }
+        urls.push(url.to_owned());
+    }
+    Ok(urls)
+}
+
+fn crawl_schema(input: &Value) -> Result<Option<Value>, String> {
+    let Some(schema) = input.get("schema") else {
+        return Ok(None);
+    };
+    if schema.is_null() {
+        return Ok(None);
+    }
+    if !(schema.is_object() || schema.is_array()) {
+        return Err("`schema` must be a JSON object or array when provided.".to_owned());
+    }
+    if let Err(error) =
+        nomi_browser_engine::actions::validate_extract_schema_capacity(schema)
+    {
+        return Err(format!(
+            "`schema` exceeds the extraction-schema capacity ({error:?}; bytes={}, depth={}, nodes={}).",
+            nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_BYTES,
+            nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_DEPTH,
+            nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_NODES,
+        ));
+    }
+    Ok(Some(schema.clone()))
 }
 
 fn crawl_concurrency(input: &Value, url_count: usize) -> Result<usize, String> {
@@ -1876,10 +2689,13 @@ mod tests {
     use nomi_tools::Tool;
     use std::collections::BTreeSet;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    static FAKE_TASK_RESOURCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
     struct FakeLaneClient {
+        task_resource_key: OnceLock<String>,
         opens: Mutex<Vec<(Option<String>, BrowserIdentityMode, Option<String>)>>,
         operations: Mutex<Vec<(BrowserLaneId, BrowserOperation)>>,
         closes: Mutex<Vec<BrowserLaneId>>,
@@ -1894,6 +2710,16 @@ mod tests {
         execute_started: tokio::sync::Notify,
         execute_release: tokio::sync::Notify,
         close_called: tokio::sync::Notify,
+        block_close: AtomicBool,
+        close_release: (Mutex<bool>, Condvar),
+        close_active: AtomicUsize,
+        close_max_active: AtomicUsize,
+        close_all_calls: AtomicUsize,
+        fail_close: AtomicBool,
+        reject_public_close_all: AtomicBool,
+        panic_close_remaining: AtomicUsize,
+        panic_list_remaining: AtomicUsize,
+        exact_handoffs: Mutex<Vec<BrowserLaneId>>,
     }
 
     impl FakeLaneClient {
@@ -1954,10 +2780,63 @@ mod tests {
                 recoverable: false,
             }
         }
+
+        fn release_all_closes(&self) {
+            let (released, wake) = &self.close_release;
+            *released.lock().unwrap() = true;
+            wake.notify_all();
+        }
+
+        fn take_injected_panic(counter: &AtomicUsize) -> bool {
+            counter
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    (remaining > 0).then(|| remaining - 1)
+                })
+                .is_ok()
+        }
+
+        fn apply_exact_handoffs(&self) {
+            let handed_off = std::mem::take(&mut *self.exact_handoffs.lock().unwrap());
+            let mut lanes = self.lanes.lock().unwrap();
+            lanes.retain(|lane| !handed_off.contains(&lane.lane_id));
+        }
+
+        fn pending_exact_handoffs(&self) -> Vec<BrowserLaneId> {
+            self.exact_handoffs.lock().unwrap().clone()
+        }
+
+        async fn close_all_for_test(&self) -> Result<CloseResult, BrowserPlatformError> {
+            self.close_all_calls.fetch_add(1, Ordering::AcqRel);
+            let mut lanes = self.lanes.lock().unwrap();
+            let closed = lanes.len();
+            lanes.clear();
+            Ok(CloseResult {
+                closed,
+                already_closed: closed == 0,
+                ..Default::default()
+            })
+        }
     }
 
     #[async_trait]
     impl BrowserLaneClientPort for FakeLaneClient {
+        fn task_resource_key(&self) -> String {
+            self.task_resource_key
+                .get_or_init(|| {
+                    let sequence = FAKE_TASK_RESOURCE_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
+                    format!("fake-task-resource-{sequence}")
+                })
+                .clone()
+        }
+
+        fn handoff_bound_lane_cleanup(
+            &self,
+            lane_id: BrowserLaneId,
+        ) -> Result<(), BrowserPlatformError> {
+            self.exact_handoffs.lock().unwrap().push(lane_id);
+            Ok(())
+        }
+
         async fn open(
             &self,
             lane_name: Option<&str>,
@@ -2055,6 +2934,10 @@ mod tests {
         }
 
         async fn list(&self) -> Result<Vec<BrowserLaneSnapshot>, BrowserPlatformError> {
+            assert!(
+                !Self::take_injected_panic(&self.panic_list_remaining),
+                "injected fake Lane list panic"
+            );
             Ok(self.lanes.lock().unwrap().clone())
         }
 
@@ -2076,10 +2959,35 @@ mod tests {
             lane_id: &BrowserLaneId,
         ) -> Result<CloseResult, BrowserPlatformError> {
             self.closes.lock().unwrap().push(lane_id.clone());
+            assert!(
+                !Self::take_injected_panic(&self.panic_close_remaining),
+                "injected fake Lane close panic"
+            );
+            let active = self.close_active.fetch_add(1, Ordering::AcqRel) + 1;
+            self.close_max_active.fetch_max(active, Ordering::AcqRel);
+            if self.block_close.load(Ordering::Acquire) {
+                let (released, wake) = &self.close_release;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+            }
+            if self.fail_close.load(Ordering::Acquire) {
+                self.close_active.fetch_sub(1, Ordering::AcqRel);
+                self.close_called.notify_one();
+                return Err(BrowserPlatformError::new(
+                    nomifun_browser_platform::BrowserErrorCode::BrowserUnavailable,
+                    "The fake Lane close failed permanently.",
+                    true,
+                    "Escalate to owner cleanup.",
+                )
+                .for_lane(lane_id.clone()));
+            }
             let mut lanes = self.lanes.lock().unwrap();
             let before = lanes.len();
             lanes.retain(|lane| &lane.lane_id != lane_id);
             let closed = usize::from(lanes.len() != before);
+            self.close_active.fetch_sub(1, Ordering::AcqRel);
             self.close_called.notify_one();
             Ok(CloseResult {
                 closed,
@@ -2089,14 +2997,15 @@ mod tests {
         }
 
         async fn close_all(&self) -> Result<CloseResult, BrowserPlatformError> {
-            let mut lanes = self.lanes.lock().unwrap();
-            let closed = lanes.len();
-            lanes.clear();
-            Ok(CloseResult {
-                closed,
-                already_closed: closed == 0,
-                ..Default::default()
-            })
+            if self.reject_public_close_all.load(Ordering::Acquire) {
+                return Err(BrowserPlatformError::new(
+                    nomifun_browser_platform::BrowserErrorCode::InvalidCallerIdentity,
+                    "The fake public cleanup capability is stale.",
+                    false,
+                    "Use trusted task teardown authority.",
+                ));
+            }
+            self.close_all_for_test().await
         }
     }
 
@@ -2105,6 +3014,36 @@ mod tests {
             client,
             workspace_dir: None,
         }
+    }
+
+    fn cleanup_test_dispatcher(
+        max_authorities: usize,
+        max_authorities_per_runtime: usize,
+        workers: usize,
+    ) -> CrawlCleanupDispatcher {
+        CrawlCleanupDispatcher::new(CrawlCleanupDispatcherLimits {
+            max_authorities,
+            max_authorities_per_runtime,
+            workers,
+        })
+        .expect("test cleanup dispatcher should start")
+    }
+
+    async fn wait_cleanup_dispatcher_idle(dispatcher: &CrawlCleanupDispatcher) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = dispatcher.snapshot();
+                if snapshot.retained_authorities == 0
+                    && snapshot.retained_intents == 0
+                    && snapshot.active_workers == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("crawl cleanup dispatcher should converge without another request");
     }
 
     fn queued_lane(client: &FakeLaneClient) -> BrowserLaneSnapshot {
@@ -2227,9 +3166,61 @@ mod tests {
             Some("runtime_instance_id")
         );
         assert_eq!(
+            first_trusted_owner_field(&json!({"task_resource_key": "forged"})),
+            Some("task_resource_key")
+        );
+        assert_eq!(
+            first_trusted_owner_field(&json!({"runtime_cleanup_key": "forged"})),
+            Some("runtime_cleanup_key")
+        );
+        assert_eq!(
+            first_trusted_owner_field(&json!({"task_family_resource_key": "forged"})),
+            Some("task_family_resource_key")
+        );
+        assert_eq!(
+            first_trusted_owner_field(&json!({"task_resource_family_key": "forged"})),
+            Some("task_resource_family_key")
+        );
+        assert_eq!(
             first_trusted_owner_field(&json!({"lane_id": "owner-scoped-handle"})),
             None
         );
+
+        let sanitized = sanitize_operation_input(&json!({
+            "url": "https://example.test/",
+            "task_resource_key": "forged",
+            "runtime_cleanup_key": "forged-runtime-cleanup",
+            "task_family_resource_key": "forged-family",
+            "task_resource_family_key": "forged-family-alias",
+        }));
+        assert_eq!(sanitized, json!({"url": "https://example.test/"}));
+    }
+
+    #[tokio::test]
+    async fn managed_facade_rejects_every_shared_trusted_owner_field_without_dispatch() {
+        let client = Arc::new(FakeLaneClient::default());
+        let facade = facade(Arc::clone(&client));
+        for field in TRUSTED_OWNER_INPUT_FIELDS {
+            let result = facade
+                .execute(
+                    "navigate",
+                    &json!({
+                        "url": "https://example.test/",
+                        (*field): "model-controlled",
+                    }),
+                )
+                .await;
+
+            assert!(result.is_error, "{field}: {}", result.content);
+            assert!(
+                result.content.contains("invalid_caller_identity"),
+                "{field}: {}",
+                result.content
+            );
+            assert!(result.content.contains(*field), "{field}: {}", result.content);
+        }
+        assert!(client.opens.lock().unwrap().is_empty());
+        assert!(client.operations.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2431,6 +3422,92 @@ mod tests {
                 .map(|index| format!("https://example.test/{index}"))
                 .collect::<Vec<_>>() }))
             .is_err()
+        );
+
+        let oversized_url = format!(
+            "https://example.test/{}",
+            "界".repeat(MAX_CRAWL_URL_BYTES / 3)
+        );
+        assert!(crawl_urls(&json!({"urls": [oversized_url]})).is_err());
+        assert!(
+            crawl_urls(&json!({"urls": ["https://example.test/ok\nforged"]})).is_err()
+        );
+
+        let aggregate = (0..17)
+            .map(|index| {
+                let prefix = format!("https://example.test/{index}/");
+                format!("{prefix}{}", "x".repeat(MAX_CRAWL_URL_BYTES - prefix.len()))
+            })
+            .collect::<Vec<_>>();
+        assert!(crawl_urls(&json!({"urls": aggregate})).is_err());
+
+        assert!(crawl_schema(&json!({"schema": {"title": "string"}})).is_ok());
+        assert!(crawl_schema(&json!({"schema": "not-structured"})).is_err());
+        assert!(
+            crawl_schema(&json!({
+                "schema": {"字段": "😀".repeat(
+                    nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_BYTES
+                )}
+            }))
+            .is_err()
+        );
+        let mut deep_schema = Value::Null;
+        for _ in 0..nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_DEPTH {
+            deep_schema = json!({"nested": deep_schema});
+        }
+        assert!(crawl_schema(&json!({"schema": deep_schema})).is_err());
+    }
+
+    #[test]
+    fn crawl_batch_retained_budget_caps_many_unicode_results_and_serialization() {
+        let urls = (0..MAX_CRAWL_URLS)
+            .map(|index| format!("https://example.test/{index}"))
+            .collect::<Vec<_>>();
+        let request = ManagedCrawlRequest {
+            urls: urls.clone(),
+            requested_concurrency: MAX_CRAWL_CONCURRENCY,
+            auto_concurrency: false,
+            identity_mode: BrowserIdentityMode::Anonymous,
+            schema: None,
+            workspace_hint: None,
+        };
+        let budget = CrawlBatchRetainedBudget::new(urls.len());
+        let results = urls
+            .into_iter()
+            .map(|url| {
+                budget.retain(json!({
+                    "url": url,
+                    "ok": true,
+                    "result": {"message": "😀".repeat(256 * 1024)},
+                }))
+            })
+            .collect::<Vec<_>>();
+        assert!(results.iter().any(|result| {
+            result["error"]["code"] == "crawl_batch_byte_limit"
+        }));
+
+        let rendered = crawl_batch_result(&request, MAX_CRAWL_CONCURRENCY, results);
+        assert!(!rendered.content.is_empty());
+        assert!(rendered.content.len() <= MAX_CRAWL_BATCH_OUTPUT_BYTES);
+        let parsed: Value = serde_json::from_str(&rendered.content).unwrap();
+        assert_eq!(parsed["results"].as_array().unwrap().len(), MAX_CRAWL_URLS);
+    }
+
+    #[test]
+    fn crawl_item_limit_replaces_one_oversized_value_with_compact_error() {
+        let budget = CrawlBatchRetainedBudget::new(1);
+        let retained = budget.retain(json!({
+            "url": "https://example.test/huge",
+            "ok": true,
+            "result": "界".repeat(MAX_CRAWL_ITEM_RETAINED_BYTES / 3 + 1),
+        }));
+        assert_eq!(retained["error"]["code"], "crawl_item_byte_limit");
+        assert!(
+            nomi_browser_engine::actions::serialized_json_bytes_at_most(
+                &retained,
+                CRAWL_RESULT_BASE_RESERVE_BYTES,
+            )
+            .is_ok()
         );
     }
 
@@ -2685,7 +3762,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn crawl_many_cancellation_during_open_closes_lane_by_name() {
+    async fn crawl_many_cancellation_during_open_does_not_publish_name_cleanup() {
         let client = Arc::new(FakeLaneClient::default());
         client
             .block_open_after_insert
@@ -2708,11 +3785,445 @@ mod tests {
             .expect("fake client should register a managed Lane before blocking");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        tokio::time::timeout(Duration::from_secs(2), client.close_called.notified())
-            .await
-            .expect("RAII cleanup should resolve the deterministic Lane name");
+        assert!(client.closes.lock().unwrap().is_empty());
+        assert!(client.pending_exact_handoffs().is_empty());
+        // This fake inserts before its await and has no Hub admission guard.
+        // Production cleanup belongs to LaneStartWaiter/abandoned_lane_starts;
+        // managed code must not rescan a reusable name as a second authority.
+        client.lanes.lock().unwrap().clear();
+    }
+
+    #[tokio::test]
+    async fn cancelled_crawl_storm_dedupes_cleanup_and_has_fixed_close_concurrency() {
+        const LANE_COUNT: usize = 8;
+        const CANCELLED_BATCHES: usize = 32;
+        let client = Arc::new(FakeLaneClient::default());
+        client.block_close.store(true, Ordering::Release);
+        let lanes = (0..LANE_COUNT)
+            .map(|index| {
+                client.snapshot(
+                    &format!("cancel-storm-{index}"),
+                    BrowserIdentityMode::Anonymous,
+                )
+            })
+            .collect::<Vec<_>>();
+        client.lanes.lock().unwrap().extend(lanes.clone());
+        let dispatcher = cleanup_test_dispatcher(LANE_COUNT, LANE_COUNT, 2);
+        let client_port: Arc<dyn BrowserLaneClientPort> = client.clone();
+        let ready = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..CANCELLED_BATCHES {
+            let dispatcher = dispatcher.clone();
+            let client = Arc::clone(&client_port);
+            let lanes = lanes.clone();
+            let ready = Arc::clone(&ready);
+            tasks.push(tokio::spawn(async move {
+                let mut cleanup = CrawlBatchCleanup::new_with_dispatcher(client, dispatcher);
+                for lane in &lanes {
+                    cleanup.track_owned_lane(lane);
+                }
+                ready.fetch_add(1, Ordering::AcqRel);
+                std::future::pending::<()>().await;
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while ready.load(Ordering::Acquire) != CANCELLED_BATCHES {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all cancelled batches should own their cleanup guards");
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+
+        let retained = dispatcher.snapshot();
+        assert_eq!(retained.retained_authorities, LANE_COUNT);
+        assert_eq!(retained.retained_intents, LANE_COUNT);
+        assert!(retained.active_workers <= 2);
+        assert!(retained.max_active_workers <= 2);
+
+        client.release_all_closes();
+        wait_cleanup_dispatcher_idle(&dispatcher).await;
+        let completed = dispatcher.snapshot();
+        assert_eq!(completed.completed_authorities, LANE_COUNT);
+        assert_eq!(client.closes.lock().unwrap().len(), LANE_COUNT);
         assert!(client.lanes.lock().unwrap().is_empty());
+        assert!(client.close_max_active.load(Ordering::Acquire) <= 2);
+        dispatcher.shutdown_and_join();
+    }
+
+    #[tokio::test]
+    async fn saturated_cleanup_dispatcher_hands_overflow_to_exact_hub_ledger() {
+        const CAPACITY: usize = 4;
+        const LANE_COUNT: usize = 12;
+        let client = Arc::new(FakeLaneClient::default());
+        client.block_close.store(true, Ordering::Release);
+        let lanes = (0..LANE_COUNT)
+            .map(|index| {
+                client.snapshot(
+                    &format!("capacity-{index}"),
+                    BrowserIdentityMode::Anonymous,
+                )
+            })
+            .collect::<Vec<_>>();
+        client.lanes.lock().unwrap().extend(lanes.clone());
+        let dispatcher = cleanup_test_dispatcher(CAPACITY, CAPACITY, 2);
+        let client_port: Arc<dyn BrowserLaneClientPort> = client.clone();
+        let producers = lanes
+            .into_iter()
+            .map(|lane| {
+                let dispatcher = dispatcher.clone();
+                let client = Arc::clone(&client_port);
+                std::thread::spawn(move || {
+                    let mut cleanup =
+                        CrawlBatchCleanup::new_with_dispatcher(client, dispatcher);
+                    cleanup.track_owned_lane(&lane);
+                    drop(cleanup);
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for producer in producers {
+            producer
+                .join()
+                .expect("bounded cleanup handoff must not wait for Lane close");
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = dispatcher.snapshot();
+                assert!(snapshot.retained_authorities <= CAPACITY);
+                if snapshot.retained_authorities == CAPACITY
+                    && snapshot.retained_intents == CAPACITY
+                    && snapshot.active_workers == 2
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("local exact dispatcher should stop at its hard authority bound");
+        assert_eq!(
+            client.pending_exact_handoffs().len(),
+            LANE_COUNT - CAPACITY,
+            "overflow must be handed to exact Hub Lane authority"
+        );
+
+        client.release_all_closes();
+        wait_cleanup_dispatcher_idle(&dispatcher).await;
+        let completed = dispatcher.snapshot();
+        assert_eq!(completed.completed_authorities, CAPACITY);
+        assert!(completed.max_active_workers <= 2);
+        assert_eq!(client.closes.lock().unwrap().len(), CAPACITY);
+        assert_eq!(client.close_all_calls.load(Ordering::Acquire), 0);
+        client.apply_exact_handoffs();
+        assert!(client.lanes.lock().unwrap().is_empty());
+        assert!(client.close_max_active.load(Ordering::Acquire) <= 2);
+        dispatcher.shutdown_and_join();
+    }
+
+    #[tokio::test]
+    async fn delayed_old_exact_handoff_preserves_new_batch_observe_and_other_runtime() {
+        let client = Arc::new(FakeLaneClient::default());
+        client.fail_close.store(true, Ordering::Release);
+        let old_lane = client.snapshot("old-crawl-batch", BrowserIdentityMode::Anonymous);
+        client.lanes.lock().unwrap().push(old_lane.clone());
+        let dispatcher = cleanup_test_dispatcher(4, 4, 1);
+        let client_port: Arc<dyn BrowserLaneClientPort> = client.clone();
+        let mut cleanup =
+            CrawlBatchCleanup::new_with_dispatcher(client_port, dispatcher.clone());
+        cleanup.track_owned_lane(&old_lane);
+        drop(cleanup);
+
+        wait_cleanup_dispatcher_idle(&dispatcher).await;
+        assert_eq!(
+            client.closes.lock().unwrap().len(),
+            CRAWL_CLEANUP_EXACT_RETRY_ESCALATE as usize
+        );
+        assert_eq!(client.pending_exact_handoffs(), vec![old_lane.lane_id.clone()]);
+
+        let new_batch_lane =
+            client.snapshot("new-crawl-batch", BrowserIdentityMode::Anonymous);
+        let observe_lane = client.snapshot("later-observe", BrowserIdentityMode::Primary);
+        let mut other_runtime_lane =
+            client.snapshot("other-runtime-download", BrowserIdentityMode::Anonymous);
+        other_runtime_lane.lane_key.runtime_instance_id = "other-runtime".to_owned();
+        other_runtime_lane.caller.runtime_instance_id = "other-runtime".to_owned();
+        other_runtime_lane.caller.owner_lease_id =
+            nomifun_browser_platform::OwnerLeaseId("other-owner-lease".to_owned());
+        client.lanes.lock().unwrap().extend([
+            new_batch_lane.clone(),
+            observe_lane.clone(),
+            other_runtime_lane.clone(),
+        ]);
+        client.apply_exact_handoffs();
+        let remaining = client
+            .lanes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|lane| lane.lane_id.clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            remaining,
+            HashSet::from([
+                new_batch_lane.lane_id,
+                observe_lane.lane_id,
+                other_runtime_lane.lane_id,
+            ])
+        );
+        assert_eq!(client.close_all_calls.load(Ordering::Acquire), 0);
+        let completed = dispatcher.snapshot();
+        assert_eq!(completed.retained_authorities, 0);
+        assert_eq!(completed.max_active_workers, 1);
+        dispatcher.shutdown_and_join();
+    }
+
+    #[test]
+    fn unavailable_dispatcher_hands_only_owned_lane_to_exact_hub_ledger() {
+        let client = Arc::new(FakeLaneClient::default());
+        let owned_lane = client.snapshot("dropped-crawl", BrowserIdentityMode::Anonymous);
+        let survivor = client.snapshot("later-observe", BrowserIdentityMode::Primary);
+        client
+            .lanes
+            .lock()
+            .unwrap()
+            .extend([owned_lane.clone(), survivor.clone()]);
+        let client_port: Arc<dyn BrowserLaneClientPort> = client.clone();
+        let mut cleanup = CrawlBatchCleanup::new_with_unavailable_dispatcher(client_port);
+        cleanup.track_owned_lane(&owned_lane);
+        drop(cleanup);
+
+        assert_eq!(
+            client.pending_exact_handoffs(),
+            vec![owned_lane.lane_id.clone()]
+        );
+        assert_eq!(client.close_all_calls.load(Ordering::Acquire), 0);
+        client.apply_exact_handoffs();
+        let remaining = client.lanes.lock().unwrap().clone();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].lane_id, survivor.lane_id);
+    }
+
+    #[test]
+    fn last_worker_exit_hands_retained_exact_lane_to_hub() {
+        let client = Arc::new(FakeLaneClient::default());
+        let abandoned_lane =
+            client.snapshot("worker-exit-crawl", BrowserIdentityMode::Anonymous);
+        let survivor = client.snapshot("healthy-observe", BrowserIdentityMode::Primary);
+        client
+            .lanes
+            .lock()
+            .unwrap()
+            .extend([abandoned_lane.clone(), survivor.clone()]);
+        let client_port: Arc<dyn BrowserLaneClientPort> = client.clone();
+        let intent = CrawlCleanupIntent {
+            task_resource_key: client_port.task_resource_key(),
+            client: Arc::clone(&client_port),
+            lane_name: abandoned_lane.lane_key.lane_name.clone(),
+            lane_ids: HashSet::from([abandoned_lane.lane_id.clone()]),
+            due_at: Instant::now(),
+            attempts: 2,
+            status: CrawlCleanupIntentStatus::InFlight,
+        };
+        let inner = Arc::new(CrawlCleanupDispatcherInner {
+            limits: CrawlCleanupDispatcherLimits {
+                max_authorities: 4,
+                max_authorities_per_runtime: 4,
+                workers: 1,
+            },
+            state: StdMutex::new(CrawlCleanupDispatcherState {
+                next_intent_id: 1,
+                intents: HashMap::from([(1, intent)]),
+                active_workers: 1,
+                max_active_workers: 1,
+                completed_authorities: 0,
+                shutdown: false,
+            }),
+            work_available: Condvar::new(),
+            live_workers: AtomicUsize::new(1),
+        });
+
+        drop(CrawlCleanupWorkerLiveness {
+            inner: Arc::clone(&inner),
+        });
+
+        assert_eq!(inner.live_workers.load(Ordering::Acquire), 0);
+        let state = inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(state.intents.is_empty());
+        assert_eq!(state.active_workers, 0);
+        drop(state);
+        assert_eq!(
+            client.pending_exact_handoffs(),
+            vec![abandoned_lane.lane_id]
+        );
+        assert_eq!(client.close_all_calls.load(Ordering::Acquire), 0);
+        client.apply_exact_handoffs();
+        let remaining = client.lanes.lock().unwrap().clone();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].lane_id, survivor.lane_id);
+    }
+
+    #[tokio::test]
+    async fn panicking_exact_close_hands_only_that_lane_to_hub() {
+        const WORKERS: usize = 2;
+        let close_panic_client = Arc::new(FakeLaneClient::default());
+        close_panic_client
+            .panic_close_remaining
+            .store(CRAWL_CLEANUP_EXACT_RETRY_ESCALATE as usize, Ordering::Release);
+        let close_panic_lane = close_panic_client.snapshot(
+            "panic-close",
+            BrowserIdentityMode::Anonymous,
+        );
+        close_panic_client
+            .lanes
+            .lock()
+            .unwrap()
+            .push(close_panic_lane.clone());
+
+        let healthy_client = Arc::new(FakeLaneClient::default());
+        let healthy_lane = healthy_client.snapshot("healthy-after-panic", BrowserIdentityMode::Anonymous);
+        healthy_client
+            .lanes
+            .lock()
+            .unwrap()
+            .push(healthy_lane.clone());
+
+        let dispatcher = cleanup_test_dispatcher(16, 8, WORKERS);
+        let close_panic_port: Arc<dyn BrowserLaneClientPort> = close_panic_client.clone();
+        let mut close_cleanup =
+            CrawlBatchCleanup::new_with_dispatcher(close_panic_port, dispatcher.clone());
+        close_cleanup.track_owned_lane(&close_panic_lane);
+        drop(close_cleanup);
+
+        let healthy_port: Arc<dyn BrowserLaneClientPort> = healthy_client.clone();
+        let mut healthy_cleanup =
+            CrawlBatchCleanup::new_with_dispatcher(healthy_port, dispatcher.clone());
+        healthy_cleanup.track_owned_lane(&healthy_lane);
+        drop(healthy_cleanup);
+
+        wait_cleanup_dispatcher_idle(&dispatcher).await;
+        let completed = dispatcher.snapshot();
+        assert_eq!(completed.live_workers, WORKERS);
+        assert_eq!(completed.retained_authorities, 0);
+        assert!(completed.max_active_workers <= WORKERS);
+        assert_eq!(
+            close_panic_client.pending_exact_handoffs(),
+            vec![close_panic_lane.lane_id.clone()]
+        );
+        close_panic_client.apply_exact_handoffs();
+        assert!(close_panic_client.lanes.lock().unwrap().is_empty());
+        assert!(healthy_client.lanes.lock().unwrap().is_empty());
+        assert_eq!(close_panic_client.close_all_calls.load(Ordering::Acquire), 0);
+        assert_eq!(healthy_client.closes.lock().unwrap().len(), 1);
+        dispatcher.shutdown_and_join();
+    }
+
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+    async fn normal_batch_cleanup_has_fixed_close_concurrency() {
+        const LANE_COUNT: usize = 12;
+        let client = Arc::new(FakeLaneClient::default());
+        client.block_close.store(true, Ordering::Release);
+        let lanes = (0..LANE_COUNT)
+            .map(|index| {
+                client.snapshot(
+                    &format!("normal-close-{index}"),
+                    BrowserIdentityMode::Anonymous,
+                )
+            })
+            .collect::<Vec<_>>();
+        let lane_ids = lanes
+            .iter()
+            .map(|lane| lane.lane_id.clone())
+            .collect::<Vec<_>>();
+        client.lanes.lock().unwrap().extend(lanes);
+        let client_port: Arc<dyn BrowserLaneClientPort> = client.clone();
+        let cleanup = tokio::spawn(async move {
+            close_lane_ids_until(
+                client_port,
+                lane_ids,
+                tokio::time::Instant::now() + Duration::from_secs(3),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.close_active.load(Ordering::Acquire)
+                != CRAWL_CLEANUP_CLOSE_CONCURRENCY
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("normal cleanup should fill only its fixed worker window");
+        assert_eq!(
+            client.close_max_active.load(Ordering::Acquire),
+            CRAWL_CLEANUP_CLOSE_CONCURRENCY
+        );
+
+        client.release_all_closes();
+        let results = cleanup.await.expect("normal cleanup task joins");
+        assert_eq!(results.len(), LANE_COUNT);
+        assert!(results.values().all(Result::is_ok));
+        assert_eq!(client.closes.lock().unwrap().len(), LANE_COUNT);
+        assert!(client.lanes.lock().unwrap().is_empty());
+        assert_eq!(
+            client.close_max_active.load(Ordering::Acquire),
+            CRAWL_CLEANUP_CLOSE_CONCURRENCY
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_drop_outside_tokio_closes_exact_lane_automatically() {
+        let client = Arc::new(FakeLaneClient::default());
+        let lane = client.snapshot("outside-runtime", BrowserIdentityMode::Anonymous);
+        client.lanes.lock().unwrap().push(lane.clone());
+        let dispatcher = cleanup_test_dispatcher(4, 4, 1);
+        let client_port: Arc<dyn BrowserLaneClientPort> = client.clone();
+        let producer_dispatcher = dispatcher.clone();
+        std::thread::spawn(move || {
+            assert!(
+                tokio::runtime::Handle::try_current().is_err(),
+                "fixture must exercise Drop without a caller Tokio runtime"
+            );
+            let mut cleanup =
+                CrawlBatchCleanup::new_with_dispatcher(client_port, producer_dispatcher);
+            cleanup.track_owned_lane(&lane);
+            drop(cleanup);
+        })
+        .join()
+        .expect("outside-runtime producer joins");
+
+        wait_cleanup_dispatcher_idle(&dispatcher).await;
+        let completed = dispatcher.snapshot();
+        assert_eq!(completed.completed_authorities, 1);
         assert_eq!(client.closes.lock().unwrap().len(), 1);
+        assert!(client.lanes.lock().unwrap().is_empty());
+        assert!(completed.max_active_workers <= 1);
+        dispatcher.shutdown_and_join();
+    }
+
+    #[tokio::test]
+    async fn empty_guard_from_cancelled_open_publishes_no_cleanup() {
+        let client = Arc::new(FakeLaneClient::default());
+        let dispatcher = cleanup_test_dispatcher(4, 4, 1);
+        let client_port: Arc<dyn BrowserLaneClientPort> = client.clone();
+        let cleanup = CrawlBatchCleanup::new_with_dispatcher(client_port, dispatcher.clone());
+        drop(cleanup);
+
+        assert_eq!(dispatcher.snapshot().retained_authorities, 0);
+        assert!(client.pending_exact_handoffs().is_empty());
+        assert_eq!(client.close_all_calls.load(Ordering::Acquire), 0);
+        assert_eq!(dispatcher.snapshot().completed_authorities, 0);
+        dispatcher.shutdown_and_join();
     }
 
     #[tokio::test]

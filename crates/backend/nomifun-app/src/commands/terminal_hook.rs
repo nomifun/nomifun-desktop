@@ -63,7 +63,9 @@ pub async fn run_terminal_hook(event: &str) -> ExitCode {
     let body = build_hook_post(event, &terminal_id, pty_epoch, stdin_json);
 
     // Reuse the bridge HTTP client (short-lived, no keepalive pool).
-    let client = super::stdio_common::build_bridge_http_client();
+    let Ok(client) = super::stdio_common::build_bridge_http_client() else {
+        return ExitCode::SUCCESS;
+    };
     let url = format!("http://127.0.0.1:{port}/hook");
 
     // Fire-and-forget with a tight per-request bound; hook must never stall the
