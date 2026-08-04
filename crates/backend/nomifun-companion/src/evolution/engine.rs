@@ -428,16 +428,9 @@ impl EvolutionEngine {
                     &skill.skill_name,
                 );
         } else {
-            let action = serde_json::json!({
-                "type": "create_skill",
-                "companion_skill_id": skill.companion_skill_id,
-                "companion_id": owner,
-            });
-            let title = format!("我学会了一个新技能：{name}");
-            let body = format!("你做过「{}」这套操作，我把它固化成了技能，采纳后我就能自动帮你做。", draft.description);
-            if let Ok(created) = self.store.insert_suggestion("create_skill", &title, &body, Some(&action)).await {
-                self.emitter.emit_suggestion_created(&owner, &created);
-            }
+            // Reviewable draft: skill-drafted is the surfacing signal (the
+            // 建议 review card was retired with the suggestion feature — the
+            // draft is reviewed on the companion's 技能 surface instead).
             self.emitter.emit_skill_drafted(
                 owner,
                 &skill.companion_skill_id,
@@ -557,20 +550,6 @@ impl EvolutionEngine {
                 AppError::Internal("demonstrated skill row disappeared after insert".into())
             })?
             .companion_skill_id;
-        let action = serde_json::json!({
-            "type": "create_skill",
-            "companion_skill_id": companion_skill_id,
-            "companion_id": owner,
-        });
-        let title = format!("我学会了你示范的技能：{name}");
-        let body = format!("照你示范的「{}」整理成了技能，采纳后我就能复用。", draft.description);
-        if let Ok(created) = self
-            .store
-            .insert_suggestion("create_skill", &title, &body, Some(&action))
-            .await
-        {
-            self.emitter.emit_suggestion_created(&owner, &created);
-        }
         self.emitter.emit_skill_drafted(owner, &companion_skill_id, &name);
         Ok(Some(name))
     }
@@ -723,10 +702,6 @@ mod tests {
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].status, "draft");
         assert_eq!(skills[0].source, "mined");
-        // 一条 create_skill 建议卡
-        let sugs = engine.store.list_suggestions(Some("new"), 10).await.unwrap();
-        assert_eq!(sugs.len(), 1);
-        assert_eq!(sugs[0].kind, "create_skill");
         // 草稿 SKILL.md 落盘
         let draft_md = dir.path().join("skills/_drafts").join(&cid).join("grep-read-edit/SKILL.md");
         assert!(draft_md.exists(), "draft SKILL.md missing at {}", draft_md.display());
@@ -816,8 +791,6 @@ mod tests {
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].status, "active", "high-confidence pattern should auto-activate");
         assert!(dir.path().join("skills/companion").join(&cid).join("auto-skill").join("SKILL.md").exists());
-        // auto path emits no review card
-        assert!(engine.store.list_suggestions(Some("new"), 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

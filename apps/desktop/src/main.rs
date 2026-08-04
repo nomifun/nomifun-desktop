@@ -32,7 +32,6 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
-mod memory_panel_window;
 mod companion_pointer;
 mod updater_install_context;
 
@@ -1972,21 +1971,13 @@ fn set_tray_labels(
 async fn sync_companion_windows(
     app: tauri::AppHandle,
     server: tauri::State<'_, Arc<DesktopServer>>,
-    memory_panel: tauri::State<'_, memory_panel_window::MemoryPanelWindowState>,
     specs: Vec<CompanionWindowSpec>,
 ) -> Result<(), String> {
     let init_script = webui_init_script(server.loopback_port(), server.local_trust_secret());
-    let enabled_ids = specs
-        .iter()
-        .filter(|spec| spec.enabled)
-        .map(|spec| spec.companion_id.clone())
-        .collect();
-    let hide_memory_panel = memory_panel.invalidate_owner_unless(&enabled_ids);
-    let memory_panel_for_task = memory_panel.inner().clone();
     let app_for_task = app.clone();
     run_on_main_thread_task(
         move |task| app.run_on_main_thread(task).map_err(|e| e.to_string()),
-        move || reconcile_companion_windows(app_for_task, init_script, specs, hide_memory_panel, memory_panel_for_task),
+        move || reconcile_companion_windows(app_for_task, init_script, specs),
     )
     .await
 }
@@ -1995,17 +1986,8 @@ fn reconcile_companion_windows(
     app: tauri::AppHandle,
     init_script: String,
     specs: Vec<CompanionWindowSpec>,
-    hide_memory_panel: bool,
-    memory_panel: memory_panel_window::MemoryPanelWindowState,
 ) -> Result<(), String> {
     use std::collections::HashSet;
-
-    if hide_memory_panel {
-        memory_panel.run_if_empty(|| {
-            if let Some(window) = app.get_webview_window(memory_panel_window::MEMORY_PANEL_LABEL) { let _ = window.hide(); }
-            Ok(())
-        })?;
-    }
 
     let known: HashSet<String> = specs
         .iter()
@@ -2507,16 +2489,11 @@ fn main() -> std::process::ExitCode {
         .manage(AwakeState(Mutex::new(None)))
         .manage(QuitFlag(AtomicBool::new(false)))
         .manage(Arc::new(ExitCoordinator::default()))
-        .manage(memory_panel_window::MemoryPanelWindowState::default())
         .invoke_handler(tauri::generate_handler![
             install_update,
             companion_pointer::get_companion_local_pointer,
             updater_install_context::get_updater_install_context,
             sync_companion_windows,
-            memory_panel_window::prepare_companion_memory_panel,
-            memory_panel_window::place_companion_memory_panel,
-            memory_panel_window::show_companion_memory_panel,
-            memory_panel_window::hide_companion_memory_panel,
             webui_get_status,
             webui_start,
             webui_stop,
