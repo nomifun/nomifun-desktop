@@ -6,7 +6,7 @@
     "overview": "Overview",
     "memories": "Memories",
     "review": "Session Review",
-    "collect": "Data Sources",
+    "collect": "Learning & Knowledge Sharing",
     "learn": "Knowledge Exchange",
     "suggestions": "Suggestions",
     "chat": "Chat",
@@ -97,6 +97,7 @@
     "affective": "Affective"
   },
   "overview": {
+    "basicConfig": "Basic configuration",
     "modelMissing": "No chat model configured for {{companionName}} yet — it can't learn or chat.",
     "goConfig": "Configure",
     "collectOff": "All data collection is off, so {{companionName}} has nothing to learn from.",
@@ -166,6 +167,7 @@
     "source_merge": "From merge"
   },
   "collect": {
+    "sectionTitle": "Data collection",
     "intro": "Choose which work data your companions may learn from. Enabled sources are written locally under companion/shared/events/ and cleaned automatically by the policy below.",
     "sensitivity": {
       "low": "Low",
@@ -220,6 +222,7 @@
     "enabled": "Enabled — your companion will learn from your usage"
   },
   "evolve": {
+    "sectionTitle": "Skill configuration",
     "title": "Skill evolution",
     "hint": "Distills skills from your repeated multi-step actions, using the shared learning model above.",
     "enabled": "Enable skill evolution",
@@ -244,7 +247,8 @@
     "enabled": "Enable smart collaboration"
   },
   "learn": {
-    "enabled": "Scheduled learning",
+    "sectionTitle": "Learning configuration",
+    "enabled": "Enable scheduled learning",
     "interval": "Interval",
     "minutes": "min",
     "runNow": "Learn now",
@@ -298,6 +302,8 @@
     "retry": "Retry"
   },
   "settings": {
+    "basicSection": "Basic settings",
+    "behaviorSection": "Personality & habits",
     "name": "Name",
     "nameHint": "What your companion is called — shown in chat and on the desktop companion",
     "providerPlaceholder": "Select provider",

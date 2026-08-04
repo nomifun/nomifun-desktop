@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Button, Checkbox, Drawer, Dropdown, Empty, Input, Menu, Message, Modal, Pagination, Radio, Select, Spin, Tag, Tooltip } from '@arco-design/web-react';
 import { More, Pin } from '@icon-park/react';
 import { ipcBridge } from '@/common';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
 import type {
   ICompanionMemory,
   ICompanionMemoryBatchAction,
@@ -447,14 +448,14 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
           <Radio value='active'>{t('nomi.memories.statusActive')}</Radio>
           <Radio value='archived'>{t('nomi.memories.statusArchived')}</Radio>
         </Radio.Group>
-        <Select style={{ width: 140 }} value={kind} onChange={setKind} placeholder={t('nomi.memories.kindAll')}>
-          <Select.Option value=''>{t('nomi.memories.kindAll')}</Select.Option>
+        <NomiSelect contentFit contentMaxWidth={180} value={kind} onChange={setKind} placeholder={t('nomi.memories.kindAll')}>
+          <NomiSelect.Option value=''>{t('nomi.memories.kindAll')}</NomiSelect.Option>
           {KINDS.map((k) => (
-            <Select.Option key={k} value={k}>
+            <NomiSelect.Option key={k} value={k}>
               {t(`nomi.kinds.${k}`)}
-            </Select.Option>
+            </NomiSelect.Option>
           ))}
-        </Select>
+        </NomiSelect>
         {companionId && (
           <Radio.Group type='button' size='small' value={scopeMode} onChange={(v: 'self' | 'all') => setScopeMode(v)}>
             <Radio value='self'>{t('nomi.memories.scopeFilterSelf')}</Radio>
@@ -468,11 +469,11 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
           onChange={setQ}
           allowClear
         />
-        <Select style={{ width: 120 }} value={sort} onChange={(v: ICompanionMemorySort) => setSort(v)}>
-          <Select.Option value='relevance'>{t('nomi.memories.sortRelevance')}</Select.Option>
-          <Select.Option value='time'>{t('nomi.memories.sortTime')}</Select.Option>
-          <Select.Option value='importance'>{t('nomi.memories.sortImportance')}</Select.Option>
-        </Select>
+        <NomiSelect contentFit contentMaxWidth={180} value={sort} onChange={(v: ICompanionMemorySort) => setSort(v)}>
+          <NomiSelect.Option value='relevance'>{t('nomi.memories.sortRelevance')}</NomiSelect.Option>
+          <NomiSelect.Option value='time'>{t('nomi.memories.sortTime')}</NomiSelect.Option>
+          <NomiSelect.Option value='importance'>{t('nomi.memories.sortImportance')}</NomiSelect.Option>
+        </NomiSelect>
         <Button onClick={() => void openMerge()}>{t('nomi.memories.merge')}</Button>
         <Button type='primary' onClick={openAdd}>
           {t('nomi.memories.add')}

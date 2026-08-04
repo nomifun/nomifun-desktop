@@ -31,11 +31,13 @@ const CharacterPicker: React.FC<{
   value: string;
   /** Selected library figure id when `value === 'custom'`. */
   figureId?: FigureId;
+  /** Use a denser card grid when embedded directly in the settings page. */
+  compact?: boolean;
   /** A built-in roster character was chosen. */
   onSelectCharacter: (id: string) => void;
   /** A library figure was chosen (or just created). */
   onSelectFigure: (figure: IFigureMeta) => void;
-}> = ({ value, figureId, onSelectCharacter, onSelectFigure }) => {
+}> = ({ value, figureId, compact = false, onSelectCharacter, onSelectFigure }) => {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -64,7 +66,14 @@ const CharacterPicker: React.FC<{
 
   return (
     <>
-      <div className='grid grid-cols-3 gap-10px max-[720px]:grid-cols-2'>
+      <div
+        className={classNames(
+          'grid',
+          compact
+            ? 'grid-cols-4 gap-8px max-[1040px]:grid-cols-3 max-[720px]:grid-cols-2'
+            : 'grid-cols-3 gap-10px max-[720px]:grid-cols-2'
+        )}
+      >
         {CHARACTERS.map((c) => {
           const active = c.id === value && value !== CUSTOM_CHARACTER_ID;
           const mood: CompanionMood = hovered === c.id ? 'excited' : 'content';
@@ -75,11 +84,14 @@ const CharacterPicker: React.FC<{
               onMouseEnter={() => setHovered(c.id)}
               onMouseLeave={() => setHovered((h) => (h === c.id ? null : h))}
               className={classNames(
-                'flex flex-col items-center gap-6px rd-12px px-10px pt-12px pb-10px cursor-pointer transition-all border-2 border-solid',
+                'flex flex-col items-center cursor-pointer transition-all border-solid',
+                compact
+                  ? 'gap-4px rd-10px px-8px pt-8px pb-7px border'
+                  : 'gap-6px rd-12px px-10px pt-12px pb-10px border-2',
                 active ? 'border-[var(--color-primary)] !bg-primary-1 shadow-[0_4px_14px_rgba(var(--primary-rgb),0.25)]' : 'border-transparent bg-fill-2 hover:bg-fill-3'
               )}
             >
-              <c.Component mood={mood} activity='idle' size={84} />
+              <c.Component mood={mood} activity='idle' size={compact ? 64 : 84} />
               <div className='flex items-center gap-6px'>
                 <span className='flex shrink-0 overflow-hidden rd-full w-14px h-14px border border-solid border-[var(--color-border-2)]'>
                   <span className='w-1/2 h-full' style={{ background: c.palette[0] }} />
@@ -105,11 +117,14 @@ const CharacterPicker: React.FC<{
               key={fig.figure_id}
               onClick={() => onSelectFigure(fig)}
               className={classNames(
-                'group relative flex flex-col items-center gap-6px rd-12px px-10px pt-12px pb-10px cursor-pointer overflow-hidden transition-all border-2 border-solid',
+                'group relative flex flex-col items-center cursor-pointer overflow-hidden transition-all border-solid',
+                compact
+                  ? 'gap-4px rd-10px px-8px pt-8px pb-7px border'
+                  : 'gap-6px rd-12px px-10px pt-12px pb-10px border-2',
                 active ? 'border-[var(--color-primary)] !bg-primary-1 shadow-[0_4px_14px_rgba(var(--primary-rgb),0.25)]' : 'border-transparent bg-fill-2 hover:bg-fill-3'
               )}
             >
-              <FigureActionVeil className='h-44px' />
+              <FigureActionVeil className={compact ? 'h-36px' : 'h-44px'} />
               <FigureActionSurface>
                 <FigureActionButton
                   tone='danger'
@@ -124,12 +139,18 @@ const CharacterPicker: React.FC<{
                   <IconDelete className='text-13px' />
                 </FigureActionButton>
               </FigureActionSurface>
-              <span className='flex items-center justify-center h-84px w-full rd-8px overflow-hidden' style={CHECKER_BG}>
+              <span
+                className={classNames(
+                  'flex items-center justify-center w-full rd-8px overflow-hidden',
+                  compact ? 'h-64px' : 'h-84px'
+                )}
+                style={CHECKER_BG}
+              >
                 <img
                   src={figureImageUrlOf(base, fig.figure_id, fig.created_at)}
                   alt={fig.name}
                   draggable={false}
-                  className='max-h-84px max-w-full object-contain'
+                  className={classNames('max-w-full object-contain', compact ? 'max-h-64px' : 'max-h-84px')}
                 />
               </span>
               <span className={classNames('text-13px font-600 truncate max-w-full', active ? 'text-[var(--color-primary)]' : 'text-t-primary')}>
@@ -143,9 +164,19 @@ const CharacterPicker: React.FC<{
         {/* New / import custom figure — opens the wizard immediately. */}
         <div
           onClick={() => setWizardOpen(true)}
-          className='flex flex-col items-center justify-center gap-6px rd-12px px-10px pt-12px pb-10px cursor-pointer transition-all border-2 border-dashed border-[var(--color-border-2)] bg-fill-2 hover:bg-fill-3 hover:border-[var(--color-primary)]'
+          className={classNames(
+            'flex flex-col items-center justify-center cursor-pointer transition-all border-dashed border-[var(--color-border-2)] bg-fill-2 hover:bg-fill-3 hover:border-[var(--color-primary)]',
+            compact
+              ? 'gap-4px rd-10px px-8px pt-8px pb-7px border'
+              : 'gap-6px rd-12px px-10px pt-12px pb-10px border-2'
+          )}
         >
-          <span className='flex items-center justify-center h-84px text-32px text-t-tertiary'>
+          <span
+            className={classNames(
+              'flex items-center justify-center text-t-tertiary',
+              compact ? 'h-64px text-26px' : 'h-84px text-32px'
+            )}
+          >
             <IconPlus />
           </span>
           <span className='text-13px font-600 text-t-primary'>{t('nomi.customFigure.createNew')}</span>

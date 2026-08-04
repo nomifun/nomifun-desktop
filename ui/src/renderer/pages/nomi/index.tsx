@@ -32,7 +32,7 @@ import type { CompanionId } from '@/common/types/ids';
  *  聊天已迁出管理中心 → 统一从「会话」侧边栏的桌面伙伴分组进入标准 /conversation/:id；
  *  本页只保留管理（形象/远程/记忆/技能/知识/设置）。 */
 const COMPANION_TABS = ['overview', 'remote', 'memories', 'review', 'knowledge', 'skills', 'settings'] as const;
-const SHARED_TABS = ['collect', 'learn', 'suggestions', 'migrate'] as const;
+const SHARED_TABS = ['collect', 'suggestions', 'migrate'] as const;
 const ALL_TABS: readonly string[] = [...COMPANION_TABS, ...SHARED_TABS];
 /** Standalone figure-library domain (not companion-scoped, no tab set of its own). */
 const FIGURES_TAB = 'figures';
@@ -54,7 +54,8 @@ const NomiConfigPage: React.FC = () => {
   // split into `knowledge`, so map it. `chat` is no longer a tab — 聊天已迁进会话；
   // 旧的 ?tab=chat 深链由下方 effect 重定向到伙伴会话 /conversation/:id。
   const rawTabParam = searchParams.get('tab');
-  const tabParam = rawTabParam === 'modelKnowledge' ? 'knowledge' : rawTabParam;
+  const tabParam =
+    rawTabParam === 'modelKnowledge' ? 'knowledge' : rawTabParam === 'learn' ? 'collect' : rawTabParam;
   const isFigures = tabParam === FIGURES_TAB;
   // 默认落地为 总览(overview)：进入伙伴域且无 ?tab= 时先看伙伴总览，而非直接进会话。
   const activeTab: TabKey = !isFigures && tabParam && ALL_TABS.includes(tabParam) ? (tabParam as TabKey) : 'overview';
@@ -268,10 +269,7 @@ const NomiConfigPage: React.FC = () => {
             ) : (
               <Tabs activeTab={activeTab} onChange={setTab} lazyload>
                 <Tabs.TabPane key='collect' title={t('nomi.tabs.collect')}>
-                  <CollectTab shared={shared} />
-                </Tabs.TabPane>
-                <Tabs.TabPane key='learn' title={t('nomi.tabs.learn')}>
-                  <LearnTab shared={shared} />
+                  <LearnTab shared={shared} collectionSection={<CollectTab shared={shared} />} />
                 </Tabs.TabPane>
                 <Tabs.TabPane key='suggestions' title={t('nomi.tabs.suggestions')}>
                   <SuggestionsTab />
