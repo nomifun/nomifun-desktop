@@ -151,6 +151,15 @@ chrono-tz = "0.10"
 
 # --- PTY / shell ---
 portable-pty = "0.8"
+
+# --- SSH remote sessions ---
+# russh: crypto backend = `ring` (0.17.14 already in the lock), which avoids the
+# aws-lc-sys native toolchain burden (NASM on Windows x86, clang-cl on ARM64).
+# Pinned exactly: russh's Handler API churns fast (8 releases in July 2026), so
+# the `nomi-ssh` adapter crate isolates it and an upgrade touches one place.
+russh = { version = "=0.62.5", default-features = false, features = ["ring", "flate2"] }
+russh-sftp = "2.4.0"
+zeroize = { version = "1.8", features = ["derive"] }
 # `shellexecute-on-windows`: launch via real ShellExecuteExW on Windows instead
 # of the default `cmd /c start "" <target>` fallback. The `start` builtin
 # mis-parses URLs/paths as window titles, runs with no console (CREATE_NO_WINDOW)
