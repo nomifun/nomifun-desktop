@@ -12,4 +12,4 @@ pub mod sink;
 
 pub use dto::{CreateSshHostRequest, SshHostResponse, UpdateSshHostRequest};
 pub use service::{DecryptedCredential, SshHostService, SshServiceError};
-pub use sink::{SshBackendSink, SshConnectionHandle};
+pub use sink::{SshBackendSink, SshConnectionHandle, SshConnectionProvider};
