@@ -1,0 +1,62 @@
+{
+  "title": "Remote hosts",
+  "description": "Saved SSH hosts can be reused by any session; credentials are encrypted on this machine.",
+  "empty": {
+    "title": "No saved hosts yet",
+    "description": "Add a remote Linux host and the agent can operate it from a chat session.",
+    "add": "Add host"
+  },
+  "sessionGroup": "SSH sessions",
+  "newSession": "New SSH session",
+  "form": {
+    "addTitle": "Add SSH host",
+    "editTitle": "Edit SSH host",
+    "name": "Display name",
+    "host": "Host",
+    "port": "Port",
+    "username": "Username",
+    "authType": "Authentication",
+    "authPassword": "Password",
+    "authKey": "Private key",
+    "authCertificate": "Certificate",
+    "authAgent": "SSH agent",
+    "password": "Password",
+    "privateKey": "Private key",
+    "privateKeyPlaceholder": "Paste the private key (PEM / OpenSSH), or leave blank to keep the stored one.",
+    "passphrase": "Key passphrase",
+    "certificate": "Certificate",
+    "sudoPassword": "sudo password",
+    "sudoHint": "Injected on the remote sudo prompt; the agent never sees it. Leave blank for passwordless sudo.",
+    "secretKept": "A value is stored. Leave as is to keep it, or type a new one to replace it.",
+    "test": "Test connection",
+    "save": "Save",
+    "cancel": "Cancel"
+  },
+  "status": {
+    "connected": "Connected",
+    "connecting": "Connecting…",
+    "reconnecting": "Reconnecting…",
+    "unknown": "Not connected",
+    "error": "Connection error"
+  },
+  "test": {
+    "running": "Testing connection…",
+    "ok": "Connection succeeded",
+    "failed": "Connection failed: {{message}}"
+  },
+  "delete": {
+    "confirm": "Delete this host? Sessions bound to it must be removed first.",
+    "ok": "Delete",
+    "cancel": "Cancel"
+  },
+  "sessionsOnline": "{{count}} session online",
+  "sessionsOnline_other": "{{count}} sessions online",
+  "validation": {
+    "nameRequired": "A display name is required.",
+    "hostRequired": "Host is required.",
+    "portRange": "Port must be between 1 and 65535.",
+    "usernameRequired": "Username is required.",
+    "passwordRequired": "A password is required for password authentication.",
+    "privateKeyRequired": "A private key is required for this authentication method."
+  }
+}
