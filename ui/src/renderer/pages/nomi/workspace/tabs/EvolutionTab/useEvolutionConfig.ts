@@ -7,15 +7,19 @@
 /**
  * MIGRATION SEAM — the 进化 tab's config adapter.
  *
- * The learn / evolve / learning-source settings this tab edits are TODAY stored
- * in the cross-companion shared config (`GET|PATCH /api/companion/config`, i.e.
+ * The learn / evolve settings this tab edits are TODAY stored in the
+ * cross-companion shared config (`GET|PATCH /api/companion/config`, i.e.
  * `ipcBridge.companion.getSharedConfig` / `patchSharedConfig`), so every value
  * here is install-wide: changing it changes it for all companions. A follow-up
  * backend change moves these fields onto the per-companion profile.
  *
- * This module is the ONLY place in the tab that knows that. It already exposes a
- * per-companion-shaped API (`useEvolutionConfig(companionId)` →
- * `{ learn, evolve, sources, patchLearn, patchEvolve, patchSources, loading }`),
+ * The `collect.*` fields of that same shared config are deliberately NOT read or
+ * written here: collection is machine-level and owned solely by
+ * `pages/settings/privacy` (设置 › 数据采集). This tab only links there.
+ *
+ * This module is the ONLY place in the tab that knows the rest is shared. It
+ * already exposes a per-companion-shaped API (`useEvolutionConfig(companionId)` →
+ * `{ learn, evolve, patchLearn, patchEvolve, loading }`),
  * so the migration is a rewrite of this file alone:
  *   - swap the two ipcBridge calls for `getCompanion` / `patchCompanion`,
  *   - key the fetch on `companionId` (already accepted),
@@ -46,22 +50,9 @@ export interface EvolutionLearnConfig {
 /** Skill-generation settings (技能生成). Thresholds stay internal to the tab. */
 export type EvolutionEvolveConfig = ICompanionEvolveConfig;
 
-/**
- * The recorded event sources that may feed learning. Deliberately only these
- * three: terminal metadata, the retention/capacity policy and the raw event
- * counters are machine-level privacy controls that live in app settings, not in
- * a companion's own page.
- */
-export const LEARNING_SOURCE_KEYS = ['tool_calls', 'chat_user_messages', 'requirements'] as const;
-
-export type LearningSourceKey = (typeof LEARNING_SOURCE_KEYS)[number];
-
-export type LearningSources = Record<LearningSourceKey, boolean>;
-
 export interface EvolutionConfigHandle {
   learn: EvolutionLearnConfig | null;
   evolve: EvolutionEvolveConfig | null;
-  sources: LearningSources | null;
   loading: boolean;
   /** Set when the config could not be read; the tab shows a retry instead of empty sections. */
   error: string | null;
@@ -78,14 +69,7 @@ export interface EvolutionConfigHandle {
   retry: () => void;
   patchLearn: (patch: Partial<EvolutionLearnConfig>) => Promise<void>;
   patchEvolve: (patch: Partial<EvolutionEvolveConfig>) => Promise<void>;
-  patchSources: (patch: Partial<LearningSources>) => Promise<void>;
 }
-
-const pickSources = (config: ICompanionSharedConfig): LearningSources => ({
-  tool_calls: config.collect.tool_calls,
-  chat_user_messages: config.collect.chat_user_messages,
-  requirements: config.collect.requirements,
-});
 
 /**
  * Live view of one companion's learning/evolution settings, with optimistic
@@ -161,16 +145,9 @@ export const useEvolutionConfig = (companionId: CompanionId | null): EvolutionCo
     [patch]
   );
 
-  const patchSources = useCallback(
-    (next: Partial<LearningSources>) =>
-      patch((prev) => ({ ...prev, collect: { ...prev.collect, ...next } }), { collect: next }),
-    [patch]
-  );
-
   return {
     learn: config?.learn ?? null,
     evolve: config?.evolve ?? null,
-    sources: config ? pickSources(config) : null,
     loading,
     error,
     installWide: true,
@@ -182,6 +159,5 @@ export const useEvolutionConfig = (companionId: CompanionId | null): EvolutionCo
     retry,
     patchLearn,
     patchEvolve,
-    patchSources,
   };
 };

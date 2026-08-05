@@ -15,6 +15,7 @@ const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
 const BrowserPage = React.lazy(() => import('@renderer/pages/browser'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
+const PrivacySettings = React.lazy(() => import('@renderer/pages/settings/PrivacySettings'));
 const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/AgentSettings'));
 const ExtensionSettingsPage = React.lazy(() => import('@renderer/pages/settings/ExtensionSettingsPage'));
 const LoginPage = React.lazy(() => import('@renderer/pages/login'));
@@ -218,6 +219,8 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           <Route path='/settings/display' element={<Navigate to='/settings/system' replace />} />
           <Route path='/settings/webui' element={<Navigate to='/open-capabilities' replace />} />
           <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
+          {/* 数据采集 — the app-level owner of every CollectConfig field. */}
+          <Route path='/settings/privacy' element={withRouteFallback(PrivacySettings)} />
           <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
           <Route path='/settings/agent-runtime' element={<Navigate to='/settings/execution-engines?tab=runtime' replace />} />
           <Route path='/settings/browser-use' element={withRouteFallback(SystemSettings)} />

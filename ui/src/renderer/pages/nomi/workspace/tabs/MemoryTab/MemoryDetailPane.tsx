@@ -144,7 +144,7 @@ const MemoryDetailPane: React.FC<MemoryDetailPaneProps> = ({
                   onDelete();
                 }
               }}
-              className='inline-flex cursor-pointer select-none items-center rd-8px px-10px py-5px text-13px text-[rgb(var(--danger-6))] transition-colors hover:bg-[rgba(var(--danger-6),0.1)]'
+              className='inline-flex cursor-pointer select-none items-center rd-8px px-10px py-5px text-13px text-danger-6 transition-colors hover:bg-[rgba(var(--danger-6),0.1)]'
             >
               {t('nomi.memories.delete', { defaultValue: '删除' })}
             </div>
