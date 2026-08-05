@@ -294,17 +294,22 @@ historical row migrations. The multi-companion layout:
 ```
 <data_dir>/companion/
 ├── shared/                      install-wide files (one per install, NOT shared memory)
-│   ├── config.json              SharedCompanionConfig: collect switches, event retention/capacity, learn interval & model, default_companion_id
+│   ├── config.json              SharedCompanionConfig: collect switches, event retention/capacity, session archiving, default_companion_id
+│                                (learn/evolve moved onto each companion profile in 2026-08)
 │   ├── events/YYYYMMDD.jsonl    raw events (automatic age/hard-cap cleanup; privacy-sensitive; export is opt-in)
 │   └── memory.db                standalone SQLite (PRAGMA user_version ladder):
 │                                one memory database for the whole install, but
 │                                every row is OWNED by exactly one companion
 │                                (scope_kind/scope_companion_id) and readable only
 │                                by that companion; + per-companion runtime
-│                                state (companion_runtime_state: XP, …)
+│                                state (companion_runtime_state: XP, mood, and
+│                                each companion's learn_cursor_ts /
+│                                evolve_cursor_ts position in events/)
 └── companions/
     └── {companion_id}/                bare UUIDv7 companion ID; the directory is the source of truth
-        └── config.json          CompanionProfileConfig: name/character/persona/per-companion model/desktop-companion toggle & position
+        └── config.json          CompanionProfileConfig: name/character/persona/per-companion chat model/
+                                 that companion's own learn + evolve settings/desktop-companion toggle,
+                                 position & quiet hours
 ```
 
 `shared/` is "one per install", not "shared between companions". `memory.db` holds

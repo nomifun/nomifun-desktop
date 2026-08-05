@@ -156,9 +156,24 @@ describe('deleted features stay deleted', () => {
     expect(offenders(({ code }) => /scope_kind/.test(code))).toEqual([]);
     // The install-wide memory read-outs went with it (their i18n keys are deleted
     // too, so a leftover call would render the defaultValue and silently lie).
-    // `nomi.evolution.installWideNote` is a DIFFERENT concept (learn/evolve config
-    // is still shared) and deliberately not matched here.
     expect(offenders(({ code }) => /nomi\.memory\.installWide/.test(code))).toEqual([]);
+  });
+
+  test('nothing in the workspace still calls learning or evolution install-wide', () => {
+    // 学习 / 进化 moved off the shared config onto each companion's profile, so
+    // every "applies to every companion" disclosure — and the `installWide` /
+    // `ownsLearningOutput` flags that gated them — is gone. Their i18n keys are
+    // deleted, so a leftover call site would render its defaultValue and lie to
+    // the user with no test failing anywhere else.
+    expect(
+      offenders(({ code }) => /installWideNote|installWide|ownsLearningOutput|InstallWideNote/.test(code))
+    ).toEqual([]);
+    // The tab must write through the per-companion profile, never the shared config.
+    expect(
+      offenders(
+        ({ name, code }) => name.includes('tabs/EvolutionTab/') && /patchSharedConfig|getSharedConfig/.test(code)
+      )
+    ).toEqual([]);
   });
 
   test('no cross-companion 共享 domain switch', () => {

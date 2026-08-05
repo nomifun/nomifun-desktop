@@ -202,11 +202,10 @@
   },
   "evolution": {
     "loadFailed": "Learning and evolution settings are temporarily unavailable.",
-    "installWideNote": "These settings currently apply to every companion; a later version will make them per-companion.",
     "collectionScopeTitle": "Where learning material comes from",
-    "collectionScopeDesc": "A companion can only learn from the work data this machine records. What is recorded and how long it is kept is an app-level setting shared by every companion.",
+    "collectionScopeDesc": "A companion can only learn from the work data this machine records. What is recorded and how long it is kept belongs to this machine — every companion reads the same recording.",
     "openCollectionSettings": "Open data collection settings",
-    "learningDesc": "Your companion reviews your work records on a schedule and distills memories and experience from them.",
+    "learningDesc": "This companion reviews your work records on the schedule below and files what it distills under its own name.",
     "learnEnabledDesc": "When off, periodic learning stops; memories and skills already distilled are left untouched.",
     "modelDesc": "The chat model used to review records and distill memories and skills.",
     "modelMissing": "No model selected — learning and skill generation won't run.",
@@ -214,10 +213,8 @@
     "interval": "Learning interval",
     "intervalDesc": "How often new records are reviewed.",
     "skillTitle": "Skill generation",
-    "skillDesc": "Distills your repeated multi-step actions into reusable skills, using the learning model above.",
+    "skillDesc": "Distills your repeated multi-step actions into this companion's own skills, using the learning model above.",
     "skillEnabledDesc": "When off, no new skills are generated; existing skills keep working.",
-    "learnNotOwnerNote": "These settings currently apply to every companion; memories distilled by scheduled learning land under the default companion and won't show up in this companion's Memory tab.",
-    "skillNotOwnerNote": "These settings currently apply to every companion; auto-generated skills land under the default companion and won't show up in this companion's Skills tab.",
     "minSessions": "Minimum sessions",
     "minSessionsDesc": "The same sequence of actions has to show up in at least this many sessions before it becomes a skill.",
     "sessionsUnit": "sessions",
@@ -228,9 +225,9 @@
     "preferenceAggressive": "Aggressive",
     "preferenceAggressiveDesc": "High-confidence skills activate straight away; the rest stay drafts (you can disable any of them in the Skills tab).",
     "quietTitle": "Quiet hours",
-    "quietSectionDesc": "Give this companion a quiet window; it only changes how it reaches out to you.",
+    "quietSectionDesc": "Give this companion a quiet window: it will not reach out, and its background learning rests too.",
     "quietRange": "Quiet hours",
-    "quietRangeDesc": "During this window the desktop companion stops popping bubbles at you; unread notices still pile up on its badge, and learning and skill generation run as usual. Leave it empty to allow interruptions all day."
+    "quietRangeDesc": "During this window the desktop companion stops popping bubbles at you and unread notices pile up on its badge; scheduled learning and skill generation are skipped until it wakes. Incoming messages are still answered. Leave it empty to allow interruptions all day."
   },
   "history": {
     "sectionTitle": "Chat history",

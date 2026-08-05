@@ -10,7 +10,6 @@ import { useNavigate } from 'react-router-dom';
 import { Message, Switch } from '@arco-design/web-react';
 import { Right } from '@icon-park/react';
 import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
-import InstallWideNote from './InstallWideNote';
 import LearningModelRow from './LearningModelRow';
 import NumberSetting from './NumberSetting';
 import type { EvolutionConfigHandle } from './useEvolutionConfig';
@@ -69,25 +68,9 @@ const LearningSection: React.FC<Props> = ({ config, needsModel }) => {
   return (
     <NomiSettingSection
       title={t('nomi.learn.sectionTitle', { defaultValue: '学习配置' })}
-      description={
-        <>
-          {t('nomi.evolution.learningDesc', {
-            defaultValue: '伙伴会定期回顾你的工作记录，从中提炼记忆和经验。',
-          })}
-          {config.installWide && (
-            <InstallWideNote
-              text={
-                config.ownsLearningOutput
-                  ? undefined
-                  : t('nomi.evolution.learnNotOwnerNote', {
-                      defaultValue:
-                        '这组设置目前对所有伙伴共同生效；定时学习提炼出的记忆会归到默认伙伴名下，不会出现在这个伙伴的记忆页。',
-                    })
-              }
-            />
-          )}
-        </>
-      }
+      description={t('nomi.evolution.learningDesc', {
+        defaultValue: '这个伙伴会按下面的节奏回顾你的工作记录，把提炼出的记忆记在自己名下。',
+      })}
     >
       <NomiSettingList>
         <NomiSettingRow
@@ -125,7 +108,7 @@ const LearningSection: React.FC<Props> = ({ config, needsModel }) => {
           title={t('nomi.evolution.collectionScopeTitle', { defaultValue: '学习素材来自哪里' })}
           description={t('nomi.evolution.collectionScopeDesc', {
             defaultValue:
-              '伙伴只能学到这台设备记录下来的工作数据。记什么、留多久是应用级设置，对所有伙伴共同生效。',
+              '伙伴只能学到这台设备记录下来的工作数据。记什么、留多久属于这台设备，所有伙伴共用同一份记录。',
           })}
           controls={<CollectionLink />}
         />

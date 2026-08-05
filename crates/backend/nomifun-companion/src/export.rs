@@ -293,7 +293,12 @@ pub async fn export_memory_bundle(
         return Err(AppError::BadRequest("dest_path must be absolute".into()));
     }
     let memories = store.dump_memories_all().await?;
-    let mood = store.get_state("mood").await?;
+    // `state.json` stays in the package for format compatibility (v3 importers
+    // require the entry and have always ignored its mood — the local machine's
+    // mood wins). Its value is now always null: mood belongs to a single
+    // companion, and a memory bundle is the whole hub, so there is no one mood to
+    // export. Nothing is lost — the field was never applied on import.
+    let mood: Option<String> = None;
 
     let dest = dest_path.to_path_buf();
     let events_dir = include_events.then(|| shared_dir.join("events"));
@@ -801,7 +806,12 @@ async fn import_memory_bundle(
             // it is deliberately best-effort so callers never receive a
             // failure after both memory rows and event files became durable.
             if let Some(config) = &storage_policy {
-                match crate::collector::active_consumer_watermark(store, config).await {
+                match crate::collector::active_consumer_watermark(
+                    store,
+                    &roster.list_companions().await,
+                )
+                .await
+                {
                     Ok(protected_after_ts) => {
                         if let Err(error) = crate::collector::prune_event_store(
                             shared_dir,
@@ -2788,8 +2798,6 @@ mod tests {
         let store = CompanionStore::open_memory().await.unwrap();
         let roster = scan_registry(dir.path(), "companions");
         let mut config = crate::profile::SharedCompanionConfig::default();
-        config.learn.enabled = false;
-        config.evolve.enabled = false;
         config.collect.event_retention_days = 7;
         let config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
         let event_lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));

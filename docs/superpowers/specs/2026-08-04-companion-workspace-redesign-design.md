@@ -254,12 +254,15 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 - 契约版本 4 → 5；CHANGELOG 记录降级不可逆。
 - §5.4 聊天历史按天：`GET /api/companion/companions/{id}/history/days` 落地（服务端按本地日分桶，只读解析会话、从不铸造），消息按天读取走既有 `GET /api/conversations/{id}/messages` 新增的 `day` 参数；客户端分页分组、「加载更早」与"索引只到某天"的脚注全部删除。
 - §5.5 导出范围：companion 包补齐 `memories.jsonl`（默认开）、`skills.jsonl` + `skills/{id}.md`（可选）与 `figure.webp`（伙伴用自定义形象时随包走）；`file_count` / `memories` / 新增 `skills` 均为实算；导入把每条记忆与技能改归到新铸造的伙伴 id 上（新行 id），范围复选框已启用（设定始终勾选且禁用）。契约版本 7 → 8。
+- §4.3 记忆归属（原未完成项 1）：`MemoryScope::Shared` → `Unowned`，单一 owner 解析器 `resolve_row_owner`，一次性回填迁移，导入改归本地 owner，per-companion 计数器；`MemoryDetailPane` 的「装机级」只读标注随之删除。
+- **§5.1 进化配置改为按伙伴（原未完成项 3）**：`learn` / `evolve` 从 `SharedCompanionConfig` 迁到 `CompanionProfileConfig`。每个伙伴自带节奏、模型、`companion_runtime_state` 里的独立事件游标，学习/挖矿产出（记忆、技能、XP、mood）全部归它自己；`EvolutionTab` 改走 `patchCompanion`，两处「当前对所有伙伴生效」标注与 `InstallWideNote.tsx`、`ownsLearningOutput` 一并删除。休眠时段现在同时门控这两条后台循环（IM 自动回复不门控）。启动迁移把现有装机级值播种到每个伙伴、把全局 `learn_cursor_ts` / `evolve_cursor_ts` / `mood` 播种到每个伙伴（播成 0 会让每个伙伴重蒸馏整段历史）；加列/建表一个没有，`INSERT OR IGNORE` 保证幂等且不覆盖已改过的值。保留期水位线改为「所有启用了消费者的伙伴的最小游标」，未建游标行的伙伴贡献 0（最大保护）。`skill_pattern_stats` / `evolution_feedback` 按设计保持装机级。契约版本 8 → 9。
 
 **验证证据**
 
-- `bun run check` 全 8 个子门通过；`bun test --cwd ui` 1661 通过 / 1 失败（该失败在干净树上同样存在，为测试间污染，非本次引入）；`cargo nextest run -p nomifun-companion` 236/236；`cargo check --workspace --all-targets` 干净；`bun run build:ui` 通过。
+- `bun run check` 全 8 个子门通过；`bun test --cwd ui` 1667 通过 / 1 失败（该失败在干净树上同样存在，为测试间污染，非本次引入）；`cargo nextest run -p nomifun-companion` 261/261；`cargo nextest run -p nomifun-gateway` 141/141；`cargo check --workspace --all-targets` 干净；`bun run build:ui` 通过。
 - **迁移端到端实测**：把真实 0.3.8 期数据目录（含 `companion_suggestions` 表）复制出来、植入一条金丝雀记忆，用真实 `nomifun-web` 启动 —— 后端正常启动（无启动即砖）、表已删除、金丝雀记忆逐字保留、external-content FTS5 索引仍能检索到它、`/api/companion/suggestions` 返回 404。
 - **UI 视觉实测**（补做）：本机有 `geckodriver`，用 WebDriver 驱动无头 Firefox 打开干净 dev server（`--insecure-no-auth` + 三个测试伙伴），逐一渲染七个标签与形象库视图并截图确认。此过程抓到并修掉了一个真 bug（见下）。
+- **§5.1 迁移端到端实测**：真实 `NomiFun-dev` 数据目录（1 个伙伴、v3 store）复制到 `/tmp`，装机级 `learn` 设为「开启 / 25 分钟」、`evolve` 设为「开启 / 45 分钟 / 激进 / min_distinct_sessions=6」，全局游标设为非零、`mood='curious'`，用真实 `nomifun-web` 启动：正常启动；该伙伴 profile 拿到逐字相同的 learn/evolve；两个游标等于旧全局值（不是 0）；mood 为 `curious`；`GET /api/companion/config` 里再没有 `learn`/`evolve`。随后改掉该伙伴的三项设置并推进它的游标，**第二次启动没有任何重播种日志，改动全部保留**。UI 侧用无头 Firefox 打开 `#/nomi?tab=evolution`：三个分区全部渲染、装机级标注为零；点开关后经 API 确认只落在该伙伴 profile 上，第二个伙伴的 `interval_minutes=600` 与共享配置逐字未变。
 
 **首次交付漏掉的缺陷（已修，提交 `72c411a8`）**
 
@@ -271,9 +274,7 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 
 **未完成（按优先级）**
 
-1. 共享记忆改归属（§4.3 Stage 1–3）：写入方改归属、一次性回填、wire/UI 移除。当前 `MemoryDetailPane` 会为 `scope_kind='user'` 的行显示"装机级"只读标注，是诚实的过渡态，但共享记忆本身尚未删除。
-2. 技能专精的后端残余：`giftSkill` 路由与共享作用域技能行仍存在（UI 已不再调用，`include_shared: false`）。
-3. 进化配置改为按伙伴（§5.1）：目前 `EvolutionTab` 通过 `useEvolutionConfig.ts` 适配器读写装机级共享配置，并在每个分区标注"当前对所有伙伴生效"。该文件顶部注明了迁移接缝位置。
-4. 采集配置迁出到应用设置 · 隐私（§5.2）。
-5. 文档：`docs/guides/companions*.md` 与 README 头条卖点仍在描述"共享记忆中枢"，需随第 1 项一起改。
+1. 技能专精的后端残余：`giftSkill` 路由与共享作用域技能行仍存在（UI 已不再调用，`include_shared: false`）。
+2. 采集配置迁出到应用设置 · 隐私（§5.2）：`EvolutionTab` 现在只链接到「设置 › 数据采集」，采集本身仍由那一页拥有 —— 这是正确的终态，但 §5.2 原本还想把该页搬进这个工作区。
+3. 伙伴包尚未携带 mood：`CompanionStatePayload` 只有 `xp`。mood 从来没有跨机迁移过（记忆包里的 mood 一直被导入侧忽略），所以不是回归，但既然它现在是伙伴的属性，随包走会更自然。
 

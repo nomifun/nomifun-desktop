@@ -1,7 +1,8 @@
 //! `nomifun-companion` — the desktop-companion domain: a roster of companions sharing one
-//! memory hub (opt-in event collection + scheduled LLM learning that distills
-//! events into memories), per-companion persona companion chats over
-//! the real agent engine, and the companion config/status API surface.
+//! memory hub (opt-in event collection + per-companion scheduled LLM learning
+//! that distills those events into memories that companion owns), per-companion
+//! persona companion chats over the real agent engine, and the companion
+//! config/status API surface.
 //!
 //! Layering: `profile` is the per-companion/shared config split; `registry` is the
 //! companion roster;
@@ -45,8 +46,8 @@ pub use memory_search::{
     CompanionMemoryRow, MemorySearchHit, MemorySearchQuery, MemoryStatusFilter,
 };
 pub use profile::{
-    CompanionProfileConfig, CompanionSkillConfig, CompanionWindowConfig, CustomFigureMeta,
-    HeadBox, SharedArchiveConfig, SharedCompanionConfig, SharedLearnConfig,
+    CompanionEvolveConfig, CompanionLearnConfig, CompanionProfileConfig, CompanionSkillConfig,
+    CompanionWindowConfig, CustomFigureMeta, HeadBox, SharedArchiveConfig, SharedCompanionConfig,
 };
 pub use registry::CompanionRegistry;
 pub use routes::{companion_public_routes, companion_routes};

@@ -419,6 +419,29 @@ impl CompanionStore {
     }
 }
 
+/// Runtime state that used to be a single global row in `companion_state` and is
+/// per companion since 学习 / 进化 became per-companion (2026-08). Copied onto every
+/// companion once by
+/// [`CompanionStore::seed_companion_state_from_global`]; the global rows are left
+/// in place, unread.
+pub const MIGRATED_GLOBAL_STATE_KEYS: &[&str] = &[
+    // How far each companion's loops have consumed the shared raw event spool.
+    // The retention watermark reads these, so a wrong value here deletes events.
+    crate::collector::LEARN_CURSOR_KEY,
+    crate::collector::EVOLVE_CURSOR_KEY,
+    // Schedule stamps: seeded so the whole roster does not fire at once on the
+    // first tick after the upgrade.
+    "last_learn_ts",
+    "last_evolve_ts",
+    // Give-up counter for a model that keeps returning unparseable learn output.
+    "learn_parse_fail_streak",
+    // The companion's current mood word.
+    MOOD_KEY,
+];
+
+/// `companion_runtime_state` key for one companion's mood word.
+pub const MOOD_KEY: &str = "mood";
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS companion_memories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1835,13 +1858,71 @@ impl CompanionStore {
         Ok(row.get("xp"))
     }
 
-    /// Grant the same XP delta to every listed companion (shared achievements like
-    /// successful learning passes).
-    pub async fn add_xp_all(&self, companion_ids: &[String], delta: i64) -> Result<(), AppError> {
-        for companion_id in companion_ids {
-            self.add_companion_xp(companion_id, delta).await?;
+    /// Write `(companion_id, key)` only if that row does not exist yet.
+    ///
+    /// `INSERT OR IGNORE` against `UNIQUE(companion_id, state_key)` is what makes
+    /// the per-companion state migrations idempotent without any extra marker:
+    /// re-running them can never clobber a value the companion has since moved on
+    /// from (a learn cursor that has advanced, a mood the last run wrote).
+    /// Returns true when a row was actually created.
+    pub async fn seed_companion_state(
+        &self,
+        companion_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<bool, AppError> {
+        validate_companion_id(companion_id, "companion state companion_id")?;
+        let affected = sqlx::query(
+            "INSERT OR IGNORE INTO companion_runtime_state(companion_id, state_key, value)
+             VALUES(?, ?, ?)",
+        )
+        .bind(companion_id)
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Boot migration for the runtime state that became per-companion in 2026-08
+    /// together with the 学习 / 进化 settings themselves.
+    ///
+    /// Each key listed in [`MIGRATED_GLOBAL_STATE_KEYS`] is copied from its single
+    /// `companion_state` row onto every companion that has no row of its own. It
+    /// is deliberately a COPY, not a move: the global rows stay put so a rollback
+    /// to an older build still finds them, and re-running this is a no-op.
+    ///
+    /// The cursors are the load-bearing part. Leaving a companion at the absent-row
+    /// default of 0 would make its first run re-read the entire retained event
+    /// history — N companions re-distilling weeks of events at once means duplicate
+    /// memories and a large, unexpected LLM bill. `mood` is here so nobody's
+    /// companion visibly resets to "content" on upgrade, and the two `last_*_ts`
+    /// stamps so the whole roster does not fire a run simultaneously on the first
+    /// tick after the update.
+    pub async fn seed_companion_state_from_global(
+        &self,
+        companion_ids: &[String],
+    ) -> Result<usize, AppError> {
+        let mut seeded = 0usize;
+        for key in MIGRATED_GLOBAL_STATE_KEYS {
+            let Some(value) = self.get_state(key).await? else {
+                continue;
+            };
+            for companion_id in companion_ids {
+                if self.seed_companion_state(companion_id, key, &value).await? {
+                    seeded += 1;
+                }
+            }
         }
-        Ok(())
+        if seeded > 0 {
+            tracing::info!(
+                rows = seeded,
+                "seeded per-companion learn state from the retired install-wide keys"
+            );
+        }
+        Ok(seeded)
     }
 
     /// Remove every per-companion row owned by `companion_id` (runtime kv + companion
@@ -3304,21 +3385,31 @@ impl CompanionStore {
         Ok(())
     }
 
-    /// Decay active-skill strength by age since last use; auto-archive those below threshold.
+    /// Decay `owner`'s active-skill strength by age since last use; auto-archive those below
+    /// threshold.
     /// Manual/demonstrated skills (`source != 'mined'`) never decay (analog of profile memories).
     /// This is NOT a user rejection: it writes no feedback and never suppresses the originating
     /// pattern, so resumed behavior can be re-mined. Only flips the DB row (SKILL.md stays). Returns archived count.
+    ///
+    /// Owner-scoped because forgetting is per companion: each companion's own
+    /// `evolve.skill_half_life_days` sets its clock, and its run must not archive a
+    /// sibling's skill. The vestigial unowned (`('user', NULL)`) rows are therefore
+    /// never decayed — they only exist in a zero-companion install, where no run
+    /// happens at all, and the boot migration re-homes them the moment one exists.
     pub async fn decay_skills(
         &self,
+        owner: &str,
         half_life_days: f64,
         archive_threshold: f64,
     ) -> Result<Vec<CompanionSkill>, AppError> {
+        validate_companion_id(owner, "skill decay companion_id")?;
         let now = now_ms();
         let rows = sqlx::query(
             "SELECT companion_skill_id, scope_companion_id, skill_name, source, strength,
                     COALESCE(last_used_at, created_at) AS clock \
-             FROM companion_skills WHERE status = 'active'",
+             FROM companion_skills WHERE status = 'active' AND scope_companion_id = ?",
         )
+        .bind(owner)
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;

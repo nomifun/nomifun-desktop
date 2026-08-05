@@ -42,9 +42,53 @@ notes at a high level rather than a complete historical log.
   now names the owner instead of meaning "private", `scope_kind` is gone from the
   memory shape the UI consumes, and `memories_active` / `memories_archived` plus
   the digest's `memories_added` are per-companion counts rather than install-wide
-  totals). Collection and learning **configuration** is unchanged and still
-  install-wide: one schedule, one learn model, one set of event sources for the
-  whole machine.
+  totals). Collection, learning and evolution **configuration** was still
+  install-wide at that point; the entry below makes learning and evolution
+  per-companion too.
+
+- **Behaviour change + migration.** 定时学习 and 技能进化 are now **per
+  companion**, not install-wide. Each companion carries its own `learn`
+  (`enabled` / `interval_minutes` / `model`) and `evolve` (`enabled`, a
+  保守/激进 preference, `min_distinct_sessions`) block on its profile, runs its
+  own loop on its own schedule from its **own cursor** into the shared raw-event
+  spool, and owns everything the run produces — memories, mined skills, XP and
+  mood alike. The 进化 tab therefore writes through `PATCH
+  /api/companion/companions/{id}` instead of the shared config, and every "these
+  settings currently apply to every companion" / "the output lands on the default
+  companion" disclosure is gone because it is no longer true. Two consequences
+  worth naming: learning-run XP is credited only to the companion that ran (it
+  used to be granted to the whole roster), and **mood is per companion** (it used
+  to be one global row, so whichever run finished last set everyone's mood).
+  休眠时段 now gates the two background loops as well as the desktop bubbles —
+  inside the window a companion neither interrupts you nor spends tokens; IM
+  auto-replies are deliberately still answered.
+
+  **On the first launch after upgrading, every existing companion is seeded from
+  the current install-wide values**, so nobody's behaviour changes: an install
+  learning every 25 minutes in 激进 mode keeps doing exactly that, on every
+  companion. Each companion's event cursors and its mood are seeded from the
+  retired global ones rather than from zero — seeding to zero would make every
+  companion re-distill the entire retained event history on its first run
+  (duplicate memories and a large unexpected LLM bill). The migration is additive
+  and idempotent: a companion that already has settings or a cursor of its own is
+  never overwritten, and `shared/config.json` is only rewritten without `learn` /
+  `evolve` once the seeding has durably succeeded, so an interrupted upgrade
+  replays cleanly. No table is rebuilt and no column is dropped. A companion
+  created after the upgrade starts reading the spool from its creation time, for
+  the same token-burn reason.
+
+  Raw-event retention follows: an event day-file is deleted only once **every**
+  companion with a consumer enabled has read past it, and a companion whose
+  consumer is on but has no cursor yet protects everything. `SharedCompanionConfig`
+  keeps `collect`, `archive`, `smart_collaboration`, `default_companion_id` and
+  `bridge_to_memory_dir`; `PATCH /api/companion/config` no longer accepts `learn`
+  or `evolve`, `POST /api/companion/learn/run` became `POST
+  /api/companion/companions/{id}/learn/run` (companion-scoped, so one companion's
+  run cannot serialise the others), and the MCP `learn`/`evolve` patch shape moved
+  from `nomi_companion_update_config` to `nomi_companion_update`. Skill-pattern
+  statistics and accept/reject feedback stay install-wide on purpose: a repeated
+  tool sequence is a fact about how the owner works, and a rejection is the
+  owner's judgement about that pattern rather than about a companion.
 
 - 聊天历史 (`/nomi` → 聊天历史) now reads a **server-side** day index:
   `GET /api/companion/companions/{id}/history/days` returns every local calendar

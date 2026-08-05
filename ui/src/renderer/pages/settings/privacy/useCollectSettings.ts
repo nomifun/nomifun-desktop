@@ -62,13 +62,6 @@ export interface CollectSettingsHandle {
   loading: boolean;
   /** Set when the config could not be read; the page shows a retry instead of empty sections. */
   error: string | null;
-  /**
-   * Whether a learning consumer currently holds back time-based deletion.
-   * `active_consumer_watermark` only consults the cursors of *enabled* consumers,
-   * so with both off an expired day-file is deleted the moment it expires.
-   */
-  learnEnabled: boolean;
-  evolveEnabled: boolean;
   stats: ICompanionSourceStats[];
   storage: ICompanionEventStorageStatus | null;
   storageState: StorageState;
@@ -187,8 +180,6 @@ export const useCollectSettings = (): CollectSettingsHandle => {
     collect: config?.collect ?? null,
     loading,
     error,
-    learnEnabled: config?.learn.enabled ?? false,
-    evolveEnabled: config?.evolve.enabled ?? false,
     stats,
     storage,
     storageState,

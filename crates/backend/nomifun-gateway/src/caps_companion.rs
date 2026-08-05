@@ -235,6 +235,20 @@ struct CompanionProfilePatch {
         deserialize_with = "deserialize_present"
     )]
     appearance: Option<CompanionWindowPatch>,
+    /// This companion's own 定时学习 loop (install-wide until 2026-08).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    learn: Option<CompanionLearnPatch>,
+    /// This companion's own 技能进化 loop (install-wide until 2026-08).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    evolve: Option<CompanionEvolvePatch>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -274,7 +288,7 @@ struct CollectConfigPatch {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct SharedLearnPatch {
+struct CompanionLearnPatch {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -293,7 +307,7 @@ struct SharedLearnPatch {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct SharedEvolvePatch {
+struct CompanionEvolvePatch {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -389,18 +403,6 @@ struct SharedCompanionConfigPatch {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
-    learn: Option<SharedLearnPatch>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present"
-    )]
-    evolve: Option<SharedEvolvePatch>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present"
-    )]
     archive: Option<SharedArchivePatch>,
     #[serde(
         default,
@@ -473,8 +475,8 @@ struct CompanionGetConfigParams {}
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CompanionUpdateConfigParams {
-    /// Fixed RFC 7396 merge-patch shape for collection, learning, evolution,
-    /// archiving, and the default companion pointer.
+    /// Fixed RFC 7396 merge-patch shape for collection, session archiving and the
+    /// default companion pointer. 学习 / 进化 live on each companion's profile.
     patch: SharedCompanionConfigPatch,
 }
 
@@ -644,31 +646,57 @@ mod id_contract_tests {
         );
     }
 
+    /// 学习 / 进化 are per companion, so their patch shape now hangs off the
+    /// PROFILE tool. Keeping them on the shared-config tool would advertise an MCP
+    /// surface the REST layer rejects.
     #[test]
-    fn shared_companion_patch_keeps_provider_model_paired() {
-        let params: CompanionUpdateConfigParams = serde_json::from_value(json!({
+    fn companion_learn_and_evolve_patch_lives_on_the_profile_and_keeps_models_paired() {
+        let params: CompanionUpdateParams = serde_json::from_value(json!({
+            "companion_id": CompanionId::new().as_str(),
             "patch": {
                 "learn": {
+                    "enabled": true,
                     "model": {"provider_id": PROVIDER_ID, "model": "model-a"}
-                },
-                "default_companion_id": null
+                }
             }
         }))
         .unwrap();
         let patch = serde_json::to_value(params.patch).unwrap();
         assert_eq!(patch["learn"]["model"]["provider_id"], PROVIDER_ID);
-        assert_eq!(patch["default_companion_id"], Value::Null);
+        assert_eq!(patch["learn"]["enabled"], Value::Bool(true));
 
+        // A half-specified Provider reference is still refused.
         assert!(
-            serde_json::from_value::<CompanionUpdateConfigParams>(json!({
-                "patch": {
-                    "evolve": {
-                        "model": {"model": "model-a"}
-                    }
-                }
+            serde_json::from_value::<CompanionUpdateParams>(json!({
+                "companion_id": CompanionId::new().as_str(),
+                "patch": {"evolve": {"model": {"model": "model-a"}}}
             }))
             .is_err()
         );
+        // And the shared-config tool no longer accepts them at all.
+        for retired in ["learn", "evolve"] {
+            assert!(
+                serde_json::from_value::<CompanionUpdateConfigParams>(json!({
+                    "patch": {retired: {"enabled": true}}
+                }))
+                .is_err(),
+                "{retired} must no longer be a shared-config field"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_companion_patch_still_accepts_its_remaining_fields() {
+        let params: CompanionUpdateConfigParams = serde_json::from_value(json!({
+            "patch": {
+                "collect": {"tool_calls": true},
+                "default_companion_id": null
+            }
+        }))
+        .unwrap();
+        let patch = serde_json::to_value(params.patch).unwrap();
+        assert_eq!(patch["collect"]["tool_calls"], Value::Bool(true));
+        assert_eq!(patch["default_companion_id"], Value::Null);
     }
 }
 
@@ -846,7 +874,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_companion_get_config",
             "companion",
-            "Read the shared companion configuration (collection toggles, learning schedule, default companion_id).",
+            "Read the machine-level companion configuration (collection toggles, session archiving, default companion_id). Learning and evolution settings are per companion — read them with nomi_companion_get.",
             DangerTier::Read,
         ),
         |deps, _ctx, p| get_config(deps, p),
@@ -857,7 +885,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_companion_update_config",
             "companion",
-            "Partially update the shared companion configuration (collection toggles, learning schedule, default companion, memory bridge). RFC 7396 merge-patch.",
+            "Partially update the machine-level companion configuration (collection toggles, session archiving, default companion, memory bridge). Learning and evolution are per companion — patch them with nomi_companion_update. RFC 7396 merge-patch.",
             DangerTier::Write,
         ),
         |deps, _ctx, p| update_config(deps, p),
