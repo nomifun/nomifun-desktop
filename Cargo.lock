@@ -6745,6 +6745,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-ssh"
+version = "0.3.8"
+dependencies = [
+ "async-trait",
+ "axum",
+ "dashmap",
+ "nomi-ssh",
+ "nomifun-api-types",
+ "nomifun-auth",
+ "nomifun-common",
+ "nomifun-db",
+ "nomifun-realtime",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "nomifun-system"
 version = "0.3.8"
 dependencies = [
