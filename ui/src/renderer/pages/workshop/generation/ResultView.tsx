@@ -29,8 +29,11 @@ export interface ResultViewProps {
   onToTextNode: (content: string) => void;
 }
 
+// 转圈的轨道宽度写 border-2px：`border-2` 是 --bg-2 颜色，生成顺序还在
+// border-[var(--color-fill-3)] 之后，等于既没宽度（回落 medium≈3px）又把轨道色改掉了。
+// `border-2` is a colour that both drops the width and overrides the track colour.
 const Spinner: React.FC = () => (
-  <span className='h-16px w-16px animate-spin rounded-full border-2 border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
+  <span className='h-16px w-16px animate-spin rounded-full border-2px border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
 );
 
 const ContinueBox: React.FC<{ onSubmit: (v: string) => void }> = ({ onSubmit }) => {

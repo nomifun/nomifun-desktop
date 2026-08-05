@@ -642,8 +642,14 @@ const UpdateModal: React.FC = () => {
     >
       <div className='flex flex-col h-full w-full'>
         <div className='min-h-0 flex-1'>{renderContent()}</div>
+        {/* 同方向的 border-t-solid：无方向的 border-solid 会给四边都上样式，另外三边没有
+            宽度类会回落到 medium≈3px。bg-fill-1/60 也是死写法（bg-fill-N 规则以 $ 锚定，
+            斜杠透明度让它一条都匹配不上），改用 color-mix 拿到同样的 60% 填充。
+            Same-direction style + a fill that actually compiles: `bg-fill-1/60` matched
+            no rule at all, so this strip had no background of any kind.
+            注意 updateDisclaimer.test.ts 用正则要求类名字符串紧跟在括号后面。 */}
         {renderDisclaimer(
-          'shrink-0 border-t border-solid border-[rgba(var(--warning-6),0.18)] bg-fill-1/60 px-20px py-10px text-center'
+          'shrink-0 border-t border-t-solid border-[rgba(var(--warning-6),0.18)] bg-[color-mix(in_srgb,var(--color-fill-1)_60%,transparent)] px-20px py-10px text-center'
         )}
       </div>
     </NomiModal>

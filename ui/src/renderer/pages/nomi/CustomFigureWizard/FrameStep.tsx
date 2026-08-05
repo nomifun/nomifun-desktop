@@ -128,7 +128,7 @@ const FrameStep: React.FC<FrameStepProps> = ({ imageUrl, aspect, headBox, onHead
           onPointerMove={onPointerMove}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
-          className='absolute border-2 border-solid border-[var(--color-primary)] rd-4px cursor-move'
+          className='absolute border-2px border-solid border-[var(--color-primary)] rd-4px cursor-move'
           style={{
             left: boxLeft,
             top: boxTop,
@@ -143,7 +143,7 @@ const FrameStep: React.FC<FrameStepProps> = ({ imageUrl, aspect, headBox, onHead
             onPointerMove={onPointerMove}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
-            className='absolute -right-6px -bottom-6px w-12px h-12px rd-full bg-[var(--color-bg-1)] border-2 border-solid border-[var(--color-primary)] cursor-nwse-resize'
+            className='absolute -right-6px -bottom-6px w-12px h-12px rd-full bg-[var(--color-bg-1)] border-2px border-solid border-[var(--color-primary)] cursor-nwse-resize'
             style={{ touchAction: 'none' }}
           />
         </div>

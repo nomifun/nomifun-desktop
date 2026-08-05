@@ -142,7 +142,11 @@ const SourceCard: React.FC<SourceCardProps> = ({ icon, name, description, status
               'bg-[var(--color-fill-2)] text-12px font-500 leading-none text-[var(--color-text-3)]',
               'cursor-pointer transition-colors duration-180',
               'hover:bg-[var(--color-primary-light-1)] hover:text-primary-6',
-              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(var(--primary-6),0.22)]',
+              // `outline-none` removes the native focus ring, so the `ring-*` classes are the only
+              // focus affordance here. `ring-2` set just `--un-ring-color` (numeric suffixes resolve
+              // against the theme's numeric colour keys), leaving the ring width at 0 and the focus
+              // state completely invisible. `ring-2px` is the width spelling.
+              'focus-visible:outline-none focus-visible:ring-2px focus-visible:ring-[rgba(var(--primary-6),0.22)]',
             ].join(' ')}
           >
             <span className='inline-flex size-14px flex-shrink-0 items-center justify-center line-height-0'>

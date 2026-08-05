@@ -167,7 +167,7 @@ const CompanionAccessTokenPanel: React.FC = () => {
       </div>
 
       {!hasCompanions ? (
-        <div className='rd-10px border border-line bg-fill-1 px-10px py-8px text-12px text-t-tertiary leading-relaxed'>
+        <div className='rd-10px border border-solid border-arco-2 bg-fill-1 px-10px py-8px text-12px text-t-tertiary leading-relaxed'>
           {companionsLoading ? t('common.loading') : t('settings.webui.companionToken.noCompanions')}
         </div>
       ) : (

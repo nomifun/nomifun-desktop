@@ -83,13 +83,22 @@
  * 这些字符串是「断言源码里不含/曾含某写法」的字面量，不会渲染成 CSS。.md 同理不扫，
  * 迁移指南 ui/src/renderer/styles/MIGRATION.md 需要把错误写法作为反例展示。
  *
+ * 第八层：生成器兜底 / The generator backstop
+ *   上面七条各对着一个**已知**的族，而这些族全是机械扫描才找出来的，有几个已经活了
+ *   好几个月（`border-line` 11 处、`divide-border-2` 7 处、`text-error`、`bg-border-2`、
+ *   `b-color-border-2`、`color-text-3`、`bg-fill-1/60`），没有一条能被当时的七条看见。
+ *   再加第八、第九条正则只会继续落后于下一个拼错的颜色名。所以最后一层不枚举错误
+ *   写法：把「长得像颜色/装饰工具类」的 token 喂给真实 UnoCSS 生成器，产出 0 条 CSS
+ *   即失败。判别轴见 looksLikeUtility 上的注释（是「首段是不是颜色前缀」，不是「有没有
+ *   在样式表里定义过」——后者不收敛）。
+ *
  * 用法 / Usage:
  *   bun scripts/check-dead-css-utilities.mjs             # 校验，发现违规 exit 1
- *   bun scripts/check-dead-css-utilities.mjs --self-test # 校验器自测
+ *   bun scripts/check-dead-css-utilities.mjs --self-test # 校验器自测（三段）
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCAN_DIR = join(ROOT, 'ui', 'src');
@@ -461,22 +470,233 @@ function selfTest() {
     process.exit(1);
   }
   console.log(`✅ check-dead-css-utilities self-test: ${total}/${total} cases pass`);
+  return failed;
 }
+
+/**
+ * 生成器兜底：凡「长得像工具类」的 token 都要真的产出 CSS。
+ *
+ * 上面七条正则各自对着一个已知的死写法族。问题是这些族全是**机械扫描**才找出来的，
+ * 有几个已经活了好几个月——`border-line` 11 处、`divide-border-2` 7 处、`text-error`、
+ * `bg-border-2`、`b-color-border-2`、`color-text-3`、`bg-fill-1/60`，没有一条能被
+ * 当时的七条正则看见。再加第八、第九条正则只会继续落后于下一个拼错的颜色名。
+ *
+ * 所以这一层不枚举错误写法，而是反过来：把 token 喂给真实 UnoCSS 生成器，产出
+ * 0 条 CSS 就失败。这一下就覆盖了「(i) 编译出零 CSS」整类，包括还没被写出来的。
+ *
+ * 判别轴是**首段是不是颜色/装饰前缀**，不是「有没有在样式表里定义过」。后者试过，
+ * 不收敛：`nomi-input` / `katex-display` / `markdown-shadow` / BEM 钩子名同样产出
+ * 0 条 CSS（它们的样式来自手写 CSS 或 CSS module），逐条加白名单意味着项目每加一个
+ * 语义类名门禁就红一次。而下面这个前缀集合是封闭的——它取自 uno.config.ts 里
+ * 真正走颜色/装饰管道的规则，`border-line` 命中，`nomi-input` 永远不会。
+ *
+ * A generator-backed backstop for failure mode (i): every token that LOOKS like a
+ * utility must actually emit CSS. Keyed on the leading segment being a colour or
+ * decoration prefix — NOT on "is it defined in a stylesheet", which does not
+ * converge, because semantic hook names emit nothing either and would need an
+ * ever-growing allowlist.
+ */
+const UTILITY_PREFIXES = new Set([
+  'bg', 'text', 'color', 'border', 'b', 'ring', 'ring-offset', 'outline', 'divide', 'fill', 'stroke', 'shadow', 'from', 'via', 'to',
+]);
+
+/**
+ * 这些后缀是 CSS 关键字而不是颜色，交给别的规则判断，兜底层不看。
+ *
+ * 这里**不排除数值**（裸的或带单位的都不排除）。曾经排除过，两次都是错的：裸数字
+ * `text-3` / `bg-1` 是本仓库自有的颜色规则（数字键映射到 --bg-N / --color-text-N），
+ * 排掉它们等于让真颜色类到不了生成器面前；带单位的 `ring-2px` / `border-b-2px` 是宽度类，
+ * 而宽度类本来就**会编译通过**，排除它们不解决任何误报，只白送一块盲区（`ring-9px` 这种
+ * 不存在的宽度就漏了）。兜底层的规则很简单：形状像工具类就送去编译，能编译就放行。
+ *
+ * Numeric suffixes are deliberately NOT excluded, in either form. Bare integers are
+ * this project's own colour rules; unit-suffixed ones are widths that compile anyway,
+ * so excluding them buys no false-positive relief and only creates a blind spot.
+ */
+const NON_COLOUR_SUFFIX =
+  /^(?:auto|none|full|solid|dashed|dotted|double|hidden|groove|ridge|inset|outset|current|transparent|inherit|initial|unset|center|left|right|top|bottom|start|end|justify|nowrap|balance|pretty|wrap|clip|ellipsis)$/;
+
+/** token 的首段（把方向/修饰段一起吃掉，`ring-offset-2` → `ring-offset`）。 */
+function utilityHead(token) {
+  const bare = token.replace(/\/[^/]*$/, '');
+  if (bare.startsWith('ring-offset')) return 'ring-offset';
+  const i = bare.indexOf('-');
+  return i === -1 ? bare : bare.slice(0, i);
+}
+
+/**
+ * 只有「首段是工具前缀、且不是纯长度/关键字、且不含任意值中括号」的 token 才送去编译。
+ * 中括号任意值排除掉，是因为 `border-[var(--x)]` 这类本来就由 ramp / rampSlash 两条
+ * 规则专门管，而且任意值的合法形态太多，兜底层看它只会互相打架。
+ *
+ * 还要挡掉一批**根本不是 class 的字符串**：`extractClassLists` 是按属性名/函数名抓
+ * 字符串字面量的，所以 MIME 类型（`text/plain;charset=utf-8`）、CSS 属性名
+ * （`border-color`、`stroke-dashoffset`）、`box-sizing` 的值（`border-box`）、
+ * SVG data-URI 碎片（`stroke-width='1.8'/%3E…`）和恰好以 `text-` 开头的散文
+ * （`text-only.`）都会混进 token 流。实测这 12 个就是兜底层的全部误报——判别轴是
+ * 对的，是这些 token 不该进来。所以这里按「真工具类长什么样」收紧：只允许
+ * 小写字母、数字、连字符，小数点只许出现在数字中间（`border-1.5px` 合法，散文里的
+ * `text-only.` 不合法）、以及结尾一段 `/alpha`。
+ *
+ * Also reject strings that are not class names at all. The class-list extractor
+ * keys on attribute/function names, so MIME types, CSS property names,
+ * box-sizing values, SVG data-URI fragments and prose that happens to start with
+ * `text-` all reach the token stream; those 12 were the backstop's entire false
+ * positive set. A real utility is lowercase letters, digits, hyphens, an interior
+ * decimal point only, and at most a trailing `/alpha`.
+ */
+const UTILITY_SHAPE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+(?:\.[a-z0-9]+)*)+(?:\/\d{1,3})?$/;
+
+/** CSS 属性名与 box-sizing 值等「形状合法但语义上不是工具类」的确定名单。 */
+const NOT_UTILITIES = new Set([
+  'border-color', 'border-box', 'border-width', 'border-style', 'border-radius', 'border-spacing',
+  'bg-animate', 'fill-box', 'stroke-dashoffset', 'stroke-dasharray', 'stroke-linecap', 'stroke-linejoin',
+  'text-align', 'text-decoration', 'text-transform', 'text-overflow', 'text-shadow', 'text-indent',
+  'outline-color', 'outline-style', 'outline-width', 'outline-offset',
+]);
+
+function looksLikeUtility(token) {
+  if (token.includes('[') || token.includes('(')) return false;
+  if (!UTILITY_SHAPE.test(token)) return false;
+  if (NOT_UTILITIES.has(token)) return false;
+  // `border-b-0` / `border-0` 是真的宽度归零（"0" 不是 theme 色键，宽度规则胜出），
+  // 由写法 6 的注释专门记着；兜底层不看它们。
+  if (BORDER_ZERO.test(token)) return false;
+  const head = utilityHead(token);
+  if (!UTILITY_PREFIXES.has(head)) return false;
+  const rest = token.slice(head.length + 1);
+  if (!rest || NON_COLOUR_SUFFIX.test(rest)) return false;
+  return true;
+}
+
+/**
+ * 兜底层的自检。分成两半，两半都必须过：
+ *   - 「该送去编译」：已知的死 token 必须通过 looksLikeUtility 的形状/前缀筛选，
+ *     否则它压根到不了生成器面前，兜底层就是一层假绿。
+ *   - 「不该送去编译」：MIME 类型、CSS 属性名、散文、语义钩子名（`nomi-input`）
+ *     必须被挡在外面——它们同样产出 0 条 CSS，放进去会让门禁对着项目自己的 BEM
+ *     命名一直红，那样这一层会被人直接删掉。
+ * 真正「产出 0 条 CSS」那一步由 selfTestBackstop 用真实生成器验，不在这里推理。
+ */
+async function selfTestBackstopShape() {
+  const mustCompile = [
+    'border-line', 'border-line-2', 'text-error', 'text-t-error', 'bg-border-2', 'divide-border-2',
+    'b-color-border-2', 'b-border-2', 'color-text-3', 'bg-fill-1/60', 'border-fill-3',
+    'bg-danger-6', 'bg-black/30', 'bg-t-tertiary', 'border-arco-2', 'text-3',
+    // 带单位的宽度类送进来也无害：它们会编译通过。留在这一组是为了钉住「兜底层不靠
+    // 排除宽度类来避免误报，而是靠它们真的产出 CSS」——万一哪天宽度规则被改坏，
+    // 这两条会立刻失败，而不是被 NON_COLOUR_SUFFIX 悄悄绕过去。
+    'border-b-2px', 'ring-2px', 'outline-offset-1px', 'border-1.5px',
+  ];
+  // 「必须跳过」只放**真的不是工具类**的东西：非 class 字符串、CSS 属性名、散文、
+  // 语义钩子名、以及由别的规则专管的中括号任意值与 `-0` 宽度归零。宽度类（`ring-2px`、
+  // `border-1.5px`）不在这里——它们送进去会编译通过，属于 mustCompile。
+  const mustSkip = [
+    'text/plain;charset=utf-8', 'border-color', 'border-box', 'stroke-dashoffset', 'bg-animate',
+    'fill-box;', 'text-only.', 'nomi-input', 'katex-display', 'markdown-shadow',
+    'border-b-0', 'border-0', 'bg-[var(--x)]',
+  ];
+  let failed = 0;
+  for (const t of mustCompile) {
+    if (!looksLikeUtility(t)) {
+      failed += 1;
+      console.error(`backstop shape self-test: "${t}" must reach the generator but was filtered out`);
+    }
+  }
+  for (const t of mustSkip) {
+    if (looksLikeUtility(t)) {
+      failed += 1;
+      console.error(`backstop shape self-test: "${t}" is not a colour utility and must be skipped`);
+    }
+  }
+  const total = mustCompile.length + mustSkip.length;
+  if (failed > 0) {
+    console.error(`❌ backstop shape self-test: ${failed}/${total} case(s) failed`);
+    process.exit(1);
+  }
+  console.log(`✅ backstop shape self-test: ${total}/${total} cases pass`);
+}
+
+/** 用真实生成器确认「必须编译」那一组里，已知的死写法真的产出 0 条 CSS。 */
+async function selfTestBackstopEmission(uno) {
+  const knownDead = [
+    'border-line', 'text-error', 'text-t-error', 'bg-border-2', 'divide-border-2',
+    'b-color-border-2', 'color-text-3', 'bg-fill-1/60', 'border-fill-3',
+  ];
+  const knownLive = ['bg-danger-6', 'bg-1', 'border-arco-2', 'text-3', 'ring-2px', 'border-b-2px', 'outline-offset-1px'];
+  const { matched } = await uno.generate([...knownDead, ...knownLive].join(' '), { preflights: false });
+  let failed = 0;
+  for (const t of knownDead) {
+    if (matched.has(t)) {
+      failed += 1;
+      console.error(`backstop emission self-test: "${t}" is known-dead but the generator matched it`);
+    }
+  }
+  for (const t of knownLive) {
+    if (!matched.has(t)) {
+      failed += 1;
+      console.error(`backstop emission self-test: "${t}" is known-live but the generator did not match it`);
+    }
+  }
+  const total = knownDead.length + knownLive.length;
+  if (failed > 0) {
+    console.error(`❌ backstop emission self-test: ${failed}/${total} case(s) failed`);
+    process.exit(1);
+  }
+  console.log(`✅ backstop emission self-test: ${total}/${total} cases pass`);
+}
+
+// 生成器实例三处都要用（自检两半 + 正式扫描），所以在 --self-test 早退之前就建好。
+// unocss 与 uno.config.ts 都装/住在 `ui/` 下，而这个脚本住在仓根，所以两个 import
+// 都必须按**绝对路径**解析——`import('unocss')` 从仓根解析不到这个包。
+// Both the package and the config live under `ui/`; a bare specifier does not
+// resolve from the repo root. Built before the --self-test early exit because the
+// backstop's own self-test needs it too.
+const { createGenerator } = await import(pathToFileURL(join(ROOT, 'ui', 'node_modules', 'unocss', 'dist', 'index.mjs')).href);
+const unoConfig = (await import(pathToFileURL(join(ROOT, 'ui', 'uno.config.ts')).href)).default;
+const uno = await createGenerator({ ...unoConfig });
 
 if (process.argv.includes('--self-test')) {
   selfTest();
+  await selfTestBackstopShape();
+  await selfTestBackstopEmission(uno);
   process.exit(0);
 }
 
 const errors = [];
 let scanned = 0;
+/** token → 首次出现的 `file:line`，用于兜底层报错时给坐标 */
+const utilityTokens = new Map();
 for (const abs of walk(SCAN_DIR)) {
   const file = relative(ROOT, abs).split('\\').join('/');
   scanned += 1;
-  const hits = scanSource(readFileSync(abs, 'utf8'));
+  const source = readFileSync(abs, 'utf8');
+  const hits = scanSource(source);
   if (hits.length) {
     errors.push([`${file} 使用了死 CSS 工具类:`, ...hits.map((h) => `    ${file}:${h.line}  ${h.snippet}`)].join('\n'));
   }
+  for (const { line, text } of extractClassLists(source)) {
+    for (const t of tokenize(text)) {
+      if (looksLikeUtility(t) && !utilityTokens.has(t)) utilityTokens.set(t, `${file}:${line}`);
+    }
+  }
+}
+
+// 一次 generate 调用判定全部 token（实测 14 个 token 10ms，全量同样是一次调用），
+// 所以这一层不会让 `bun run check` 变慢。
+const tokens = [...utilityTokens.keys()];
+const t0 = Date.now();
+const { matched } = await uno.generate(tokens.join(' '), { preflights: false });
+const elapsedMs = Date.now() - t0;
+const dead = tokens.filter((t) => !matched.has(t));
+if (dead.length) {
+  errors.push(
+    [
+      '以下 token 长得像颜色/装饰工具类，但真实 UnoCSS 生成器对它们产出 0 条 CSS',
+      '（元素静默沿用继承值 / the element silently keeps its inherited value）:',
+      ...dead.map((t) => `    ${utilityTokens.get(t)}  ${t}`),
+    ].join('\n'),
+  );
 }
 
 if (errors.length) {
@@ -489,4 +709,7 @@ if (errors.length) {
   process.exit(1);
 }
 
-console.log(`✅ dead CSS utilities clean (${scanned} file(s) scanned, ${Object.keys(FORMS).length} banned form(s), no baseline)`);
+console.log(
+  `✅ dead CSS utilities clean (${scanned} file(s) scanned, ${Object.keys(FORMS).length} banned form(s), no baseline; ` +
+    `${tokens.length} utility-shaped token(s) compiled through the real generator in ${elapsedMs}ms, 0 dead)`,
+);
