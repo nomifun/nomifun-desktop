@@ -2951,6 +2951,21 @@ impl AppServices {
             companion_summon: Some(
                 companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionSummonProvider>
             ),
+            // SSH remote sessions: a saved host book + a connection provider the
+            // factory calls when a conversation carries `extra.ssh_host_id`. Host
+            // keys are learned into the operator's own ~/.ssh/known_hosts.
+            ssh_provider: Some({
+                let repo = Arc::new(nomifun_db::SqliteSshHostRepository::new(
+                    database.pool().clone(),
+                )) as Arc<dyn nomifun_db::ISshHostRepository>;
+                let service = nomifun_ssh::SshHostService::new(repo, encryption_key);
+                let known_hosts = dirs::home_dir()
+                    .unwrap_or_else(|| data_dir.clone())
+                    .join(".ssh")
+                    .join("known_hosts");
+                Arc::new(nomifun_ssh::SshConnectionProvider::new(service, known_hosts))
+                    as Arc<dyn nomifun_ai_agent::SshBackendProvider>
+            }),
         });
 
         // Agent factory is now wired. Future extension/custom agents

@@ -732,9 +732,36 @@ pub(super) async fn build(
         .map(str::trim)
         .filter(|owner| !owner.is_empty())
         .map(ToOwned::to_owned);
+    // SSH-bound session: connect the saved host now (decrypt credential, dial,
+    // open shell + SFTP) so the runtime gets the remote tool family. A binding
+    // without a configured provider, or a failed connect, fails the build with a
+    // clear error rather than silently running against the local machine.
+    let ssh_backend = if let Some(ssh_host_id) = overrides.ssh_host_id.clone() {
+        let user_id = overrides.user_id.clone().unwrap_or_default();
+        let remote_cwd = overrides
+            .ssh_remote_cwd
+            .clone()
+            .unwrap_or_else(|| ".".to_string());
+        match &deps.ssh_provider {
+            Some(provider) => Some(
+                provider
+                    .connect(&user_id, &ssh_host_id, &remote_cwd)
+                    .await
+                    .map_err(|e| AppError::Internal(format!("SSH connect failed: {e}")))?,
+            ),
+            None => {
+                return Err(AppError::BadRequest(
+                    "conversation is bound to an SSH host but SSH support is not configured".into(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let host_wiring = NomiHostWiring {
         #[cfg(feature = "browser-use")]
         browser_lane_binding,
+        ssh_backend,
     };
     let agent = NomiAgentManager::new_with_host_wiring(
         ctx.conversation_id,

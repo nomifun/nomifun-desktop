@@ -233,6 +233,11 @@ pub struct AgentFactoryDeps {
     /// per-turn memory-snapshot contributor. `None` (standalone / tests) leaves
     /// summon unwired — `extra.summon` is then inert.
     pub companion_summon: Option<Arc<dyn CompanionSummonProvider>>,
+    /// Optional SSH connection provider. When `Some` AND a nomi session carries
+    /// `extra.ssh_host_id`, the factory connects the bound host and gives the
+    /// runtime the remote tool family instead of the local one. `None` leaves
+    /// SSH sessions unwired — `extra.ssh_host_id` is then inert.
+    pub ssh_provider: Option<Arc<dyn crate::SshBackendProvider>>,
 }
 
 /// Build a production agent factory that dispatches to concrete agent types.

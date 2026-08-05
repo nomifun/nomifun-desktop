@@ -203,6 +203,7 @@ import {
   parseCsNoteId,
   parseRequirementId,
   parseRemoteAgentId,
+  parseSshHostId,
   parseSkillPatternId,
   parseTerminalId,
   parseUserId,
@@ -235,6 +236,7 @@ import {
   type KnowledgeBaseId,
   type RequirementId,
   type RemoteAgentId,
+  type SshHostId,
   type SkillPatternId,
   type TerminalId,
   type WebhookId,
@@ -1795,6 +1797,83 @@ export const remoteAgent = {
 };
 
 // ---------------------------------------------------------------------------
+// SSH host book — saved, reusable remote-host connection profiles.
+// Secrets are write-only from the client: the server returns them masked as
+// '***', never as plaintext/ciphertext.
+// ---------------------------------------------------------------------------
+
+/** Owner-visible SSH host (secrets masked as '***' when present, else null). */
+export interface IApiSshHost {
+  sshHostId: SshHostId;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authType: 'password' | 'key' | 'certificate' | 'agent';
+  password: string | null;
+  privateKey: string | null;
+  passphrase: string | null;
+  certificate: string | null;
+  sudoPassword: string | null;
+  hostFingerprint: string | null;
+  status: string;
+  lastConnectedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Create payload (secrets are plaintext here, encrypted server-side). */
+export interface IApiCreateSshHost {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authType: 'password' | 'key' | 'certificate' | 'agent';
+  password?: string | null;
+  privateKey?: string | null;
+  passphrase?: string | null;
+  certificate?: string | null;
+  sudoPassword?: string | null;
+}
+
+export type IApiUpdateSshHost = Partial<IApiCreateSshHost>;
+
+const fromApiSshHost = (value: IApiSshHost): IApiSshHost => ({
+  ...value,
+  sshHostId: parseSshHostId(value.sshHostId),
+});
+
+export const ssh = {
+  list: withResponseMap(
+    httpGet<IApiSshHost[], void>('/api/ssh-hosts'),
+    (items) => items.map(fromApiSshHost)
+  ),
+  get: withResponseMap(
+    httpGet<IApiSshHost | null, { ssh_host_id: SshHostId }>(
+      (p) => `/api/ssh-hosts/${p.ssh_host_id}`
+    ),
+    (item) => (item == null ? null : fromApiSshHost(item))
+  ),
+  create: withResponseMap(
+    httpPost<IApiSshHost, IApiCreateSshHost>('/api/ssh-hosts'),
+    fromApiSshHost
+  ),
+  update: withResponseMap(
+    httpPut<IApiSshHost, { ssh_host_id: SshHostId; updates: IApiUpdateSshHost }>(
+      (p) => `/api/ssh-hosts/${p.ssh_host_id}`,
+      (p) => p.updates
+    ),
+    fromApiSshHost
+  ),
+  delete: httpDelete<void, { ssh_host_id: SshHostId }>(
+    (p) => `/api/ssh-hosts/${p.ssh_host_id}`
+  ),
+  testConnection: httpPost<{ ok: boolean; message: string }, { ssh_host_id: SshHostId }>(
+    (p) => `/api/ssh-hosts/${p.ssh_host_id}/test-connection`
+  ),
+};
+
+// ---------------------------------------------------------------------------
 // Database — routed to conversation/message endpoints
 // ---------------------------------------------------------------------------
 
@@ -2698,6 +2777,11 @@ export interface ICreateConversationParams {
     /** Legacy marker for pre-provider-probe health-check conversations. */
     is_health_check?: boolean;
     remote_agent_id?: import('../types/ids').RemoteAgentId;
+    /** Binds a nomi conversation to a saved SSH host: the remote tool family
+     *  operates that host. Optional companion `ssh_remote_cwd` sets the shell's
+     *  starting directory (defaults to the remote $HOME). */
+    ssh_host_id?: import('../types/ids').SshHostId;
+    ssh_remote_cwd?: string;
     extra_skill_paths?: string[];
   };
 }
