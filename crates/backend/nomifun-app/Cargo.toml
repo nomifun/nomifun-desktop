@@ -85,6 +85,10 @@ name = "remote_agent_e2e"
 path = "tests/remote_agent_e2e.rs"
 
 [[test]]
+name = "ssh_host_e2e"
+path = "tests/ssh_host_e2e.rs"
+
+[[test]]
 name = "auxiliary_e2e"
 path = "tests/auxiliary_e2e.rs"
 
@@ -224,6 +228,7 @@ nomifun-office.workspace = true
 nomifun-shell.workspace = true
 nomifun-model-invoke.workspace = true
 nomifun-ai-agent.workspace = true
+nomifun-ssh.workspace = true
 nomifun-mcp.workspace = true
 nomifun-conversation.workspace = true
 nomifun-extension.workspace = true

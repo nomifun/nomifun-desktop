@@ -45,6 +45,7 @@ The current frontend route map lives in
 - `/workshop` and `/workshop/:id`
 - `/settings/system` and `/settings/execution-engines`, plus system
   sub-sections routed through the system settings page
+- `/settings/ssh-hosts` — the SSH remote-host book (instance owner only)
 
 Several legacy paths still exist only as redirects. Do not document them as
 primary navigation.
