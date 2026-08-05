@@ -22,9 +22,7 @@ pub use pool::{
 };
 pub use routes::{ssh_host_routes, SshHostRouterState};
 pub use service::{DecryptedCredential, SshHostService, SshServiceError};
-pub use sink::{
-    SshBackendSink, SshConnectionHandle, SshConnectionProvider, SshDialError, SshLinkBackend,
-};
+pub use sink::{SshConnectionHandle, SshDialError, SshLinkBackend};
 pub use state::{
     is_retryable, reconnect_delay, SshLinkPhase, SshLinkState, SshTeardown, SSH_CLOSE_BUDGET,
     SSH_LIVENESS_POLL_INTERVAL, SSH_RECONNECT_INITIAL_BACKOFF_MS, SSH_RECONNECT_MAX_ATTEMPTS,

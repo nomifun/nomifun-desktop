@@ -425,6 +425,10 @@ pub struct DesktopServer {
     /// so the unified shutdown path can clean up all terminal sessions before
     /// the database is closed.
     terminal_service: Arc<nomifun_terminal::TerminalService>,
+    /// The process SSH connection pool. Held here so the unified shutdown path can
+    /// close every live remote session — and write the resulting host status — while
+    /// the database is still open.
+    ssh_pool: nomifun_ssh::SshConnectionPool,
     /// Clone of the database pool used by the embedded router. Closing this
     /// clone closes the shared pool, so fatal listener failures cannot leave
     /// the backend's persistent resources alive while the host is exiting.
@@ -733,6 +737,7 @@ impl DesktopServer {
             dev_frontend_url: dev_frontend_url.map(|u| Arc::from(u.trim_end_matches('/'))),
             runtime: Handle::current(),
             terminal_service,
+            ssh_pool: services.ssh_pool.clone(),
             database: services.database.clone(),
             _keep_alive: keep_alive.clone(),
             browser_platform_shutdown: services.browser_platform_shutdown.clone(),
@@ -960,6 +965,33 @@ impl DesktopServer {
             self.browser_platform_shutdown.shutdown().await;
         if let Err(error) = browser_result {
             errors.push(format!("browser cleanup failed: {error:#}"));
+        }
+
+        // Quiesce the SSH pool before the database closes: closing a link walks the
+        // host row back from "connected", and a link let go of without exit evidence
+        // is a real leak on someone else's machine, so it is reported rather than
+        // silently counted as clean.
+        let ssh_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.ssh_pool.shutdown_all(),
+        )
+        .await;
+        match ssh_result {
+            Ok(report) => {
+                tracing::info!(
+                    reaped = report.reaped,
+                    lost = report.lost,
+                    already_down = report.already_down,
+                    "ssh links closed during desktop shutdown"
+                );
+                if report.lost > 0 {
+                    errors.push(format!(
+                        "{} ssh link(s) were let go of without proof the remote shell died",
+                        report.lost
+                    ));
+                }
+            }
+            Err(_) => errors.push("ssh pool cleanup timed out after 5 seconds".to_owned()),
         }
 
         // Do not close the shared database after an earlier cleanup failure.
