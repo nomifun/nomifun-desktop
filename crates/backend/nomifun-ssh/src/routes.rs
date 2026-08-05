@@ -10,7 +10,7 @@ use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, SshHostId};
 
-use crate::dto::{CreateSshHostRequest, SshHostResponse, UpdateSshHostRequest};
+use crate::dto::{CreateSshHostRequest, SshHostResponse, SshStatusEvent, UpdateSshHostRequest};
 use crate::pool::SshConnectionPool;
 use crate::service::{SshHostService, SshServiceError};
 
@@ -28,6 +28,10 @@ pub struct SshHostRouterState {
 pub fn ssh_host_routes(state: SshHostRouterState) -> Router {
     Router::new()
         .route("/api/ssh-hosts", get(list).post(create))
+        // Before the `{ssh_host_id}` capture for the reader's sake; axum 0.8
+        // prefers a literal segment over a capture regardless of order, and no
+        // real host id can spell `statuses` because every one of them is a uuid.
+        .route("/api/ssh-hosts/statuses", get(statuses))
         .route(
             "/api/ssh-hosts/{ssh_host_id}",
             get(get_one).put(update).delete(delete_one),
@@ -108,6 +112,26 @@ async fn delete_one(
         .await
         .map_err(map_err)?;
     Ok(Json(ApiResponse::ok(())))
+}
+
+/// Every live link the caller owns, in the *same* wire shape the realtime
+/// `ssh.status` event carries. A client that missed an event and re-fetches can
+/// therefore never be told a different story than the one it was pushed.
+///
+/// Unlike test-connection, a missing pool is answered with an empty list rather
+/// than an error: a build with no SSH support truthfully owns no links, and this
+/// route is polled whenever a session opens — turning "not configured" into a
+/// failed request would break screens that are merely uninterested in SSH.
+async fn statuses(
+    State(state): State<SshHostRouterState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<Vec<SshStatusEvent>>>, AppError> {
+    let items = state
+        .pool
+        .as_ref()
+        .map(|pool| pool.snapshot(user.id.as_str()))
+        .unwrap_or_default();
+    Ok(Json(ApiResponse::ok(items)))
 }
 
 /// Result of a test-connection probe.
