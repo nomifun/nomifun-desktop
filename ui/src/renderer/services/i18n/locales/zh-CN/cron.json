@@ -20,8 +20,7 @@
     "goTo": "查看会话",
     "pause": "暂停",
     "resume": "恢复",
-    "delete": "删除",
-    "runNow": "立即执行"
+    "delete": "删除"
   },
   "confirmDeleteWithConversations": "确定要删除此定时任务吗？该任务下的所有会话也将被删除。",
   "deleteSuccess": "任务已删除",

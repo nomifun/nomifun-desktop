@@ -73,7 +73,7 @@ function GroupNodeImpl({ id, data, selected }: NodeProps<GroupFlowNode>) {
         <div
           className={[
             'relative flex h-full w-full flex-col rounded-16px box-border border border-dashed transition-colors',
-            selected ? 'border-[rgb(var(--primary-6))]' : 'border-[var(--color-border-3)]',
+            selected ? 'border-primary-6' : 'border-[var(--color-border-3)]',
           ].join(' ')}
           style={{
             background: selected

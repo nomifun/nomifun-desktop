@@ -288,7 +288,7 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
                     </div>
                   </Menu.Item>
                   <Menu.Item key='delete'>
-                    <div className='flex items-center gap-8px text-[rgb(var(--warning-6))]'>
+                    <div className='flex items-center gap-8px text-warning-6'>
                       <DeleteOne theme='outline' size='14' />
                       <span>{t('terminal.action.delete')}</span>
                     </div>

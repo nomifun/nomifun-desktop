@@ -66,8 +66,7 @@ describe('companion memory pagination bridge', () => {
               created_at: 1,
               updated_at: 1,
               last_reinforced_at: 1,
-              scope_kind: 'companion',
-              scope_companion_id: COMPANION_ID,
+              companion_id: COMPANION_ID,
             }
           : [];
         return new Response(JSON.stringify({ success: true, data }), {
@@ -79,30 +78,92 @@ describe('companion memory pagination bridge', () => {
       await companion.updateMemory.invoke({
         memory_id: MEMORY_ID,
         content: 'x',
-        scope_companion_id: COMPANION_ID,
+        companion_id: COMPANION_ID,
       });
-      await companion.deleteMemory.invoke({ memory_id: MEMORY_ID, scope_companion_id: COMPANION_ID });
+      await companion.deleteMemory.invoke({ memory_id: MEMORY_ID, companion_id: COMPANION_ID });
       await companion.batchMemories.invoke({
         ids: [MEMORY_ID],
         action: 'archive',
-        scope_companion_id: COMPANION_ID,
+        companion_id: COMPANION_ID,
       });
-      await companion.memoryMergeSuggestions.invoke({ scope_companion_id: COMPANION_ID });
+      await companion.memoryMergeSuggestions.invoke({ companion_id: COMPANION_ID });
       await companion.mergeMemories.invoke({
         group: [MEMORY_ID],
         merged_content: 'x',
         kind: 'knowledge',
-        scope_companion_id: COMPANION_ID,
+        companion_id: COMPANION_ID,
       });
 
       expect(calls.map((call) => call.method)).toEqual(['PUT', 'DELETE', 'POST', 'POST', 'POST']);
       // DELETE has no body, so the owner rides in the query string.
-      expect(calls[1]?.url.endsWith(`/api/companion/memories/${MEMORY_ID}?scope_companion_id=${COMPANION_ID}`)).toBe(
+      expect(calls[1]?.url.endsWith(`/api/companion/memories/${MEMORY_ID}?companion_id=${COMPANION_ID}`)).toBe(
         true
       );
       for (const call of calls) {
         if (call.method === 'DELETE') continue;
-        expect(call.body?.scope_companion_id).toBe(COMPANION_ID);
+        expect(call.body?.companion_id).toBe(COMPANION_ID);
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  /**
+   * A memory's owner arrives under the column's own name, `companion_id`. Two
+   * retired spellings must be REJECTED rather than ignored: `scope_kind` (the
+   * shared/private discriminator that died with 共享记忆) and `scope_companion_id`
+   * (the owner's historical name, which outlived the column rename as a bare
+   * `#[serde(rename)]`). Silently tolerating either is how a mismatched backend
+   * gets to serve rows whose owner every caller then reads as `undefined` — and
+   * `undefined !== companionId` is a comparison that fails open on some surfaces
+   * and closed on others. `fromApiCompanionSkill` has always rejected its retired
+   * fields; memory now does too.
+   */
+  test('memory rows carry companion_id, and retired owner spellings are rejected', async () => {
+    const rawMemory = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+      memory_id: MEMORY_ID,
+      kind: 'knowledge',
+      content: '主人喜欢深烘焙',
+      tags: [],
+      importance: 0.8,
+      strength: 0.8,
+      pinned: false,
+      source: 'manual',
+      status: 'active',
+      created_at: 1,
+      updated_at: 1,
+      last_reinforced_at: 1,
+      companion_id: COMPANION_ID,
+      ...overrides,
+    });
+    const listReturning = async (row: Record<string, unknown>) => {
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ success: true, data: { items: [row], total: 1 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })) as typeof fetch;
+      return companion.listMemories.invoke({ companion_id: COMPANION_ID });
+    };
+
+    try {
+      const page = await listReturning(rawMemory());
+      expect(page.items[0]?.companion_id).toBe(COMPANION_ID);
+
+      // A row the boot migration has not re-homed yet is the ONLY null owner.
+      const unowned = await listReturning(rawMemory({ companion_id: null }));
+      expect(unowned.items[0]?.companion_id).toBe(null);
+
+      for (const retiredField of ['scope_kind', 'scope_companion_id']) {
+        let error: unknown;
+        try {
+          await listReturning(rawMemory({ [retiredField]: 'companion' }));
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error instanceof TypeError).toBe(true);
+        expect((error as Error | undefined)?.message).toBe(
+          `companion memory must not contain retired field "${retiredField}"`
+        );
       }
     } finally {
       globalThis.fetch = realFetch;

@@ -77,7 +77,7 @@ const segmentGroupClass = 'inline-flex gap-4px rounded-11px bg-[var(--color-fill
 const segmentButtonBaseClass =
   'rounded-8px border-none px-13px py-7px text-12px font-inherit cursor-pointer transition-[background-color,color,box-shadow] focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
 
-const segmentButtonActiveClass = 'bg-[var(--color-bg-2)] font-600 text-[rgb(var(--primary-6))] shadow-[0_2px_8px_rgba(var(--primary-6),0.12)]';
+const segmentButtonActiveClass = 'bg-[var(--color-bg-2)] font-600 text-primary-6 shadow-[0_2px_8px_rgba(var(--primary-6),0.12)]';
 
 const segmentButtonIdleClass = 'bg-transparent text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]';
 
@@ -255,7 +255,7 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
               />
               <button
                 type='button'
-                className='flex size-34px flex-none cursor-pointer items-center justify-center rounded-10px border-none bg-[var(--color-fill-1)] text-[var(--color-text-3)] transition-colors hover:bg-[var(--color-danger-light-1)] hover:text-[rgb(var(--danger-6))] disabled:cursor-not-allowed disabled:opacity-45'
+                className='flex size-34px flex-none cursor-pointer items-center justify-center rounded-10px border-none bg-[var(--color-fill-1)] text-[var(--color-text-3)] transition-colors hover:bg-[var(--color-danger-light-1)] hover:text-danger-6 disabled:cursor-not-allowed disabled:opacity-45'
                 onClick={() => handleDeleteEntry(idx)}
                 disabled={entries.length <= 1}
               >
@@ -266,7 +266,7 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
           {entries.length < MAX_URLS && (
             <button
               type='button'
-              className='w-full cursor-pointer rounded-12px border-none bg-[rgba(var(--primary-6),0.07)] p-10px text-12px font-500 text-[rgb(var(--primary-6))] transition-colors hover:bg-[rgba(var(--primary-6),0.12)] focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
+              className='w-full cursor-pointer rounded-12px border-none bg-[rgba(var(--primary-6),0.07)] p-10px text-12px font-500 text-primary-6 transition-colors hover:bg-[rgba(var(--primary-6),0.12)] focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
               onClick={handleAddEntry}
             >
               ＋ {t('knowledge.studio.webAddUrl', { defaultValue: '添加网址' })}

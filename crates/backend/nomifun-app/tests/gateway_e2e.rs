@@ -524,9 +524,12 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
     assert!(result_of(&body).get("id").is_none());
     // The saved memory is OWNED by the resolved companion, never install-wide.
     // The owner id is the whole answer now: the retired `scope_kind`
-    // discriminator was collapsed away with the column pair behind it.
-    assert_eq!(result_of(&body)["scope_companion_id"], json!(owner));
-    assert!(result_of(&body).get("scope_kind").is_none());
+    // discriminator was collapsed away with the column pair behind it, and the
+    // owner travels under the column's own name.
+    assert_eq!(result_of(&body)["companion_id"], json!(owner));
+    for retired in ["scope_kind", "scope_companion_id"] {
+        assert!(result_of(&body).get(retired).is_none(), "retired `{retired}` is back on the wire");
+    }
 
     let body = gw
         .call(

@@ -31,7 +31,7 @@
     "test:ui": "bun test --cwd ui",
     "check": "bun run typecheck && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:agent-vocabulary && bun run help --check",
     "typecheck": "bun run --filter=./ui typecheck",
-    "check:i18n": "bun scripts/generate-i18n-types.mjs --check",
+    "check:i18n": "bun scripts/generate-i18n-types.mjs --self-test && bun scripts/generate-i18n-types.mjs --check",
     "check:theme": "bun scripts/check-theme-contract.mjs",
     "check:icons": "bun scripts/check-icon-imports.mjs",
     "check:dead-css": "bun scripts/check-dead-css-utilities.mjs",

@@ -50,6 +50,7 @@
     "cancel": "取消"
   },
   "sessionsOnline": "{{count}} 个会话在线",
+  "sessionsOnline_other": "{{count}} 个会话在线",
   "validation": {
     "nameRequired": "请填写显示名称。",
     "hostRequired": "请填写主机。",

@@ -1274,7 +1274,7 @@ impl CompanionService {
             .as_deref()
             .map(|id| {
                 CompanionId::try_from(id).map_err(|error| {
-                    AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
+                    AppError::BadRequest(format!("invalid companion_id: {error}"))
                 })
             })
             .transpose()?;

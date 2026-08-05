@@ -330,7 +330,7 @@ const RemoteAgentFormModal: React.FC<{
     >
       <div className='flex flex-col gap-16px pt-8px pb-20px'>
         <div className='flex gap-10px rounded-12px border border-solid border-[rgba(var(--warning-6),0.14)] bg-[rgba(var(--warning-6),0.08)] px-16px py-12px'>
-          <Attention theme='filled' size={16} className='mt-2px shrink-0 text-[rgb(var(--warning-6))]' />
+          <Attention theme='filled' size={16} className='mt-2px shrink-0 text-warning-6' />
           <div className='min-w-0 text-13px leading-20px text-t-secondary'>
             <span>{t('settings.agentManagement.remoteAgentsDescription')}</span>
           </div>

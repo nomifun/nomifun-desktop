@@ -710,7 +710,7 @@ const CompanionPage: React.FC = () => {
     // `'merge'`) — without it the pet would start popping bubbles for silent
     // background work nobody asked to be notified about.
     const unsubMemoryCreated = ipcBridge.companion.onMemoryCreated.on((m) => {
-      if (!companionId || m.scope_companion_id !== companionId) return;
+      if (!companionId || m.companion_id !== companionId) return;
       if (m.source !== 'chat') return;
       if (turnActiveRef.current) return;
       const brief = m.content.length > 40 ? `${m.content.slice(0, 40)}…` : m.content;

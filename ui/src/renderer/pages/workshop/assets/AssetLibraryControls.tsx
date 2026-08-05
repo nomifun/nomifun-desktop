@@ -108,7 +108,7 @@ export const UploadTray: React.FC<{
               <span
                 className={[
                   'shrink-0 text-11px font-600',
-                  u.status === 'error' ? 'text-[rgb(var(--danger-6))]' : 'text-[var(--color-text-3)]',
+                  u.status === 'error' ? 'text-danger-6' : 'text-[var(--color-text-3)]',
                 ].join(' ')}
               >
                 {u.status === 'error'
@@ -120,7 +120,7 @@ export const UploadTray: React.FC<{
               <div
                 className={[
                   'h-full rounded-full transition-all duration-200',
-                  u.status === 'error' ? 'bg-[rgb(var(--danger-6))]' : 'bg-[rgb(var(--primary-6))]',
+                  u.status === 'error' ? 'bg-danger-6' : 'bg-primary-6',
                 ].join(' ')}
                 style={{ width: `${u.status === 'error' ? 100 : u.percent}%` }}
               />
