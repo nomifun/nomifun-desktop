@@ -258,7 +258,9 @@ cargo test -p nomi-ssh -p nomifun-ssh -- --test-threads=2
 cargo test -p nomifun-ai-agent -p nomifun-realtime -- --test-threads=2
 cargo test -p nomifun-app --test ssh_host_e2e -- --test-threads=2
 cargo check --workspace
-cargo clippy -p nomi-ssh -p nomifun-ssh -p nomi-agent -- -D warnings
+# --no-deps 是必须的:`-D warnings` 会传播到 path 依赖,而 nomifun-common 有 9 个
+# 既有 clippy 错误(非本轮引入),不加 --no-deps 时任何 crate 的 lint 都会因它失败。
+cargo clippy -p nomi-ssh -p nomifun-ssh -p nomi-agent --all-targets --no-deps -- -D warnings
 
 # 真 sshd 端到端(手工验收):连接 → 复用 → 杀 sshd → 退避重连 → 状态事件 → 取证关闭
 cargo run -p nomifun-ssh --example demo_ssh
