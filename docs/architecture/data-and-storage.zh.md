@@ -198,7 +198,7 @@ v3 reset/restore，不通过历史逐行迁移导入。多伙伴布局如下：
 
 `shared/` 的含义是「整机一份」，不是「伙伴之间共用」。`memory.db` 把所有伙伴的记忆行放在同一张表里，每行用**唯一一列可空的** `companion_id` 标明主人（`companion_skills` 同理）；所有面向伙伴的读取都按主人过滤，因此一个伙伴永远看不到另一个伙伴的记忆，记忆也不能在主人之间转移。唯一的无主状态是 `companion_id IS NULL`：升级前的旧行、以及名册为空时导入的行就是这个样子。这一列保持可空（零伙伴的安装是受支持的状态），这类行会由一次幂等的启动迁移落户到唯一主人名下（若显式 `default_companion_id` 仍在名册里就是它，否则是最早创建的伙伴）——一条 `UPDATE`，绝不按伙伴复制，因此 `memory_id` 保持稳定，同一件事也不会分裂成每个伙伴各一份。
 
-2026-08 之前，两张表用两列编码同一件事：`scope_kind TEXT NOT NULL`（`'user'` / `'companion'`）+ 可空的 `scope_companion_id`，再用一条表级 CHECK 把它们钉死成 `('user', NULL)` 与 `('companion', id)` 两种合法组合。判别列完全由「有没有主人」决定，因此它只可能与主人列打架，不可能提供额外信息；启动迁移把两张表重建为这一列（SQLite 不允许 DROP 一个被表级 CHECK 引用的列）。重建逐行保留原有 `id`：`companion_memories_fts` 是 external-content FTS5，索引以 `content_rowid='id'` 为锚。记忆行的主人以列本名 `companion_id` 上线（技能行仍沿用历史名 `scope_companion_id`）；旧包里的 `scope_kind` 在导入时被接受并丢弃，记忆行上的 `scope_companion_id` 则被翻译成 `companion_id` —— 导出包是主人磁盘上的长期文件，不是能让他们重新发一次的请求。
+2026-08 之前，两张表用两列编码同一件事：`scope_kind TEXT NOT NULL`（`'user'` / `'companion'`）+ 可空的 `scope_companion_id`，再用一条表级 CHECK 把它们钉死成 `('user', NULL)` 与 `('companion', id)` 两种合法组合。判别列完全由「有没有主人」决定，因此它只可能与主人列打架，不可能提供额外信息；启动迁移把两张表重建为这一列（SQLite 不允许 DROP 一个被表级 CHECK 引用的列）。重建逐行保留原有 `id`：`companion_memories_fts` 是 external-content FTS5，索引以 `content_rowid='id'` 为锚。记忆行与技能行的主人都以列本名 `companion_id` 上线 —— 技能 wire 曾靠一个 `serde(rename)` 多沿用了一个版本的历史名，而这正是 wire 与列悄悄对不上的典型途径；旧包里的 `scope_kind` 在导入时被接受并丢弃，两种行上的 `scope_companion_id` 都被翻译成 `companion_id` —— 导出包是主人磁盘上的长期文件，不是能让他们重新发一次的请求。
 
 历史单宠布局 `companion/nomi/` 不迁移到 v3；检测到它时随整个旧数据集退役。
 

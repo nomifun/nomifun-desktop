@@ -107,7 +107,7 @@ const TypeRail: React.FC<TypeRailProps> = ({ value, onChange }) => {
   ];
 
   return (
-    <div className='flex flex-col gap-0 overflow-y-auto border-r border-r-[var(--color-border)] bg-[var(--color-bg-1)] p-16px pr-12px'>
+    <div className='flex flex-col gap-0 overflow-y-auto border-r border-r-solid border-r-[var(--color-border)] bg-[var(--color-bg-1)] p-16px pr-12px'>
       {groups.map((group, gi) => (
         <React.Fragment key={gi}>
           <div
@@ -126,7 +126,7 @@ const TypeRail: React.FC<TypeRailProps> = ({ value, onChange }) => {
                   if (!item.disabled) onChange(item.key as StudioSourceType);
                 }}
                 className={[
-                  'flex cursor-pointer items-center gap-11px rounded-10px border border-transparent p-10px mb-3px transition-colors',
+                  'flex cursor-pointer items-center gap-11px rounded-10px border border-solid border-transparent p-10px mb-3px transition-colors',
                   item.disabled && 'cursor-not-allowed opacity-50',
                   isSelected && '!bg-primary-1 !border-primary-6 !text-primary-6',
                   !isSelected && !item.disabled && 'hover:bg-fill-2',
@@ -137,7 +137,10 @@ const TypeRail: React.FC<TypeRailProps> = ({ value, onChange }) => {
                 {/* Icon box */}
                 <div
                   className={[
-                    'flex size-30px flex-none items-center justify-center rounded-8px border',
+                    // border 只给宽度；边框色在下面的分支里，而 border-style 谁都没写，
+                    // 于是这个图标框的描边一直没画出来（本仓库没有全局 border reset）。
+                    // `border` is width-only and the style class was missing entirely.
+                    'flex size-30px flex-none items-center justify-center rounded-8px border border-solid',
                     isSelected
                       ? '!bg-primary-1 !border-primary-6 !text-primary-6'
                       : 'bg-[var(--color-fill-2)] border-[var(--color-border-2)] text-[var(--color-text-2)]',

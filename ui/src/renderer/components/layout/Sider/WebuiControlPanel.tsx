@@ -435,7 +435,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
 
           <div className='flex flex-col items-center gap-12px'>
             {qrBaseUrls.length > 0 && (
-              <div className='qr-address-picker w-full rd-12px border border-[rgba(var(--primary-6),0.30)] bg-[rgba(var(--primary-6),0.07)] p-10px shadow-[0_8px_22px_rgba(var(--primary-6),0.08)]'>
+              <div className='qr-address-picker w-full rd-12px border border-solid border-[rgba(var(--primary-6),0.30)] bg-[rgba(var(--primary-6),0.07)] p-10px shadow-[0_8px_22px_rgba(var(--primary-6),0.08)]'>
                 <div className='flex items-start gap-8px'>
                   <span className='mt-1px flex size-24px shrink-0 items-center justify-center rd-8px bg-primary-1 text-primary-6'>
                     <Earth size={14} />
@@ -463,7 +463,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
                     ))}
                   </Select>
                 ) : (
-                  <div className='mt-8px flex min-h-28px items-center rd-8px border border-arco-2 bg-fill-0 px-9px'>
+                  <div className='mt-8px flex min-h-28px items-center rd-8px border border-solid border-arco-2 bg-fill-0 px-9px'>
                     <code className='truncate font-mono text-11px text-t-primary'>{selectedQrDisplayUrl}</code>
                   </div>
                 )}

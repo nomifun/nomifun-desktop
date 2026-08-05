@@ -373,9 +373,13 @@ const UpdateModal: React.FC = () => {
       case 'checking':
         return (
           <div className='flex flex-col items-center justify-center py-48px'>
+            {/* 环形 spinner：border-3 是颜色类（--bg-3）而不是 3px 宽度，配上本仓库没有
+                border-style 全局重置，两层圆环一条边都画不出来。宽度/样式/颜色分开写。
+                `border-3` is a colour (--bg-3), not a width — with no border-style
+                reset in this repo both rings painted nothing. */}
             <div className='w-48px h-48px mb-20px relative'>
-              <div className='absolute inset-0 border-3 border-fill-3 rounded-full' />
-              <div className='absolute inset-0 border-3 border-primary border-t-transparent rounded-full animate-spin' />
+              <div className='absolute inset-0 border-3px border-solid border-[var(--color-fill-3)] rounded-full' />
+              <div className='absolute inset-0 border-3px border-solid border-primary border-t-transparent rounded-full animate-spin' />
             </div>
             <div className='text-15px text-t-primary font-500'>{t('update.checking')}</div>
             <div className='mt-16px'>{renderBaiduManualDownloadButton()}</div>
@@ -400,7 +404,7 @@ const UpdateModal: React.FC = () => {
         return (
           <div className='flex flex-col h-full'>
             {/* Version info header */}
-            <div className='flex items-center justify-between px-24px py-16px border-b border-arco-2 bg-fill-1'>
+            <div className='flex items-center justify-between px-24px py-16px border-b border-b-solid border-arco-2 bg-fill-1'>
               <div className='flex items-center gap-12px'>
                 <div className='w-40px h-40px bg-[rgba(var(--primary-6),0.12)] rounded-10px flex items-center justify-center'>
                   <Download size='20' fill='rgb(var(--primary-6))' />
@@ -536,8 +540,8 @@ const UpdateModal: React.FC = () => {
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
             <div className='w-56px h-56px mb-20px relative'>
-              <div className='absolute inset-0 border-3 border-fill-3 rounded-full' />
-              <div className='absolute inset-0 border-3 border-primary border-t-transparent rounded-full animate-spin' />
+              <div className='absolute inset-0 border-3px border-solid border-[var(--color-fill-3)] rounded-full' />
+              <div className='absolute inset-0 border-3px border-solid border-primary border-t-transparent rounded-full animate-spin' />
               <div className='absolute inset-0 flex items-center justify-center'>
                 <Install size='20' fill='rgb(var(--primary-6))' />
               </div>

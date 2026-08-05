@@ -235,7 +235,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
 
       {/* Next Steps Guide - show when bot is enabled and no authorized users yet */}
       {pluginStatus?.enabled && pluginStatus?.connected && authorizedUsers.length === 0 && (
-        <div className='bg-[rgba(var(--primary-rgb),0.08)] rd-12px p-16px border border-[rgba(var(--primary-rgb),0.2)]'>
+        <div className='bg-[rgba(var(--primary-rgb),0.08)] rd-12px p-16px border border-solid border-[rgba(var(--primary-rgb),0.2)]'>
           <SectionHeader title={t('settings.channels.nextSteps', 'Next Steps')} />
           <div className='text-14px text-t-secondary space-y-8px'>
             <p className='m-0'>

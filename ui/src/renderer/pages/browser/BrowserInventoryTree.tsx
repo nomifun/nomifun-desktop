@@ -99,7 +99,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
           <section
             key={group.key}
             className={classNames(
-              'overflow-hidden rd-12px border border-solid bg-bg-1 transition-[border-color,box-shadow,transform] duration-200',
+              'overflow-hidden rd-12px border border-solid bg-1 transition-[border-color,box-shadow,transform] duration-200',
               isCurrentConversation
                 ? 'border-[rgba(var(--primary-6),0.30)] shadow-[0_5px_16px_rgba(var(--primary-6),0.07)]'
                 : 'border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] shadow-[0_3px_12px_rgba(15,23,42,0.025)]'

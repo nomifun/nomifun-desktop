@@ -5,6 +5,77 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Fixed (appearance).** Three tab underlines that did not exist, two spinner
+  rings that painted nothing, 63 borders that were invisible, and 87 panel
+  backgrounds that were transparent. All of it is one root cause: `uno.config.ts`
+  merges the background ramp into the theme colour map under *numeric* keys, so a
+  numeric suffix on a border-ish prefix is read as a COLOUR, not a length.
+  `border-b-2 border-primary` on an active tab compiled to
+  `border-bottom-color: var(--bg-2)` — no width, no style, and the author's colour
+  overridden by a background variable. `border-3 border-fill-3` on the
+  update-check spinner named a colour that does not exist. `bg-bg-1` looks up a
+  colour literally named "bg-1" and emits nothing at all. Separately, this repo has
+  no global border reset, so a border colour and width with no `border-style` also
+  paints nothing — and the non-directional `border-solid` puts a style on all four
+  sides, which makes the three sides that have no width class fall back to the CSS
+  initial `medium` (~3px). Every site now uses same-direction classes
+  (`border-b border-b-solid border-b-[…]`) or an explicit unit (`border-b-2px`).
+  A global `*{border-width:0;border-style:solid}` reset was considered and
+  rejected: it would strip default borders from native form controls across a
+  thousand files, and it would silently turn the sites that pair `border-solid`
+  with a colour-only `border-N` from 3px into nothing. The gate grew from four
+  banned forms to seven and now analyses one class-list at a time — it had to learn
+  which classes share an element — with a colour whitelist so an unknown token is
+  not assumed to be a colour, and `border-*-0` classified as a width reset rather
+  than a violation. Its self-test grew from 31 to 68 cases.
+
+- **Fixed (accessibility).** The warning, error, success and info Alerts are
+  legible in every theme. Light and dark are expressed here by *two* attributes —
+  `html[data-theme]` and `body[arco-theme]` — and the Alert had a foot in each:
+  Arco keys the surface off `--color-*-light-1`, whose dark values exist only under
+  `body[arco-theme='dark']`, while the ambiance presets rewrite the *text* token
+  under `[data-theme='dark'] body` with `!important`. Whenever the two attributes
+  disagreed, the dark warning Alert rendered near-white text on Arco's light cream
+  surface at **1.02–1.07:1** — effectively invisible. The info Alert was separately
+  and unconditionally broken at 1.41:1, because the presets replace
+  `--color-primary-light-1` with an opaque brand colour. All four types now derive
+  from `data-theme`-keyed tokens via `color-mix()`, so the `arco-theme` dependency
+  is gone and the desynchronised state measures identically to the normal one.
+  Measured in a real browser across 72 theme × mode × type combinations: worst case
+  11.25:1 for content text, 5.40:1 for body text under a title, 3.38:1 for icons —
+  nothing below its floor, where before there were eleven. A new contract test
+  resolves each theme's palette and recomputes the ratios, so a regression fails
+  the suite rather than shipping.
+
+- A skill's owner is named the same thing as a memory's. The physical column had
+  already collapsed to `companion_skills.companion_id`, but the skill wire kept the
+  retired spelling alive on a single `#[serde(rename = "scope_companion_id")]` —
+  which is exactly how a wire and its column get to disagree without anyone
+  noticing. The list route, the single-skill content route and `skills.jsonl` in
+  every bundle now all say `companion_id`, and the UI/API contract version was
+  bumped. Bundles written by an older build still import with their owner intact:
+  the retired spelling is translated on the way in for both row types, which also
+  let the per-caller `legacy_owner_key` parameter go away — one fewer thing for a
+  future caller to forget. The skill adapter now REJECTS the retired name instead
+  of ignoring it, matching the memory adapter, because a tolerated retired field is
+  how a mismatched backend gets to serve rows whose owner every caller reads as
+  `undefined`.
+
+- The i18n gate is quiet again. `bun run check` had been printing two warnings on
+  every single run: `browser.close.conversationContent_one` and
+  `browser.diagnostics.hostCount_one` can never resolve in zh-CN, which has exactly
+  one plural category. They could not simply be deleted, because
+  `browserLocalization.test.ts` demanded literal key-for-key equality between the
+  two locales — the dead keys were what kept the test green, and the warnings were
+  what kept the gate noisy. The plural-aware rule the gate already had is now a
+  single shared module imported by both, so the two cannot demand opposite things
+  again, and the test additionally fails on any variant a locale can never resolve.
+  A warning that prints on every build is not cosmetic: it teaches everyone to skim
+  past the gate's output. Also corrected four comments in the desktop-companion
+  window page that spelled its query parameter `?companionId=` when both ends of
+  that URL have always used `?companion_id=` — verified by running the writer's
+  format string through the reader's lookup rather than by reading them.
+
 - **Fixed (appearance).** Coloured text, backgrounds, borders, rings and outlines
   render in the colour they were written to be, in 293 places across 98 files —
   warning and error glyphs that were silently inheriting the surrounding text
