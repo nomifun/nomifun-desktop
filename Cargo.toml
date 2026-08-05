@@ -48,6 +48,8 @@ nomifun-browser-platform = { path = "crates/backend/nomifun-browser-platform" }
 nomifun-net = { path = "crates/shared/nomifun-net" }
 nomi-redact = { path = "crates/shared/nomi-redact" }
 nomi-process-runtime = { path = "crates/shared/nomi-process-runtime" }
+nomi-ssh = { path = "crates/shared/nomi-ssh" }
+nomifun-ssh = { path = "crates/backend/nomifun-ssh" }
 
 # --- Internal crates: agent (from nomifun-agent-rs, now local) ---
 nomi-types = { path = "crates/agent/nomi-types" }
