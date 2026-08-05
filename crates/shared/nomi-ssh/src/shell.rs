@@ -38,9 +38,10 @@ use crate::connection::{SshConnection, SshError};
 const CTRL_C: u8 = 0x03;
 /// How long to wait for the shell to reach its first ready sentinel at spawn.
 const INIT_READY_TIMEOUT: Duration = Duration::from_millis(5_000);
-/// After an interrupt on timeout, how long to wait for the aborted command's
-/// sentinel to flush before escalating to signals.
-const INTERRUPT_RESYNC_GRACE: Duration = Duration::from_millis(1_000);
+/// After an interrupt on timeout, how long to wait for the fresh drain sentinel
+/// to flush before declaring the shell unrecoverable. Generous because the
+/// interrupted command's own late sentinel is drained first.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(3_000);
 
 /// Outcome of running one command in the persistent remote shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,21 +136,39 @@ impl RemoteShell {
                 })
             }
             None => {
-                // Timed out — interrupt and try to resync to the aborted sentinel.
+                // Timed out. Interrupt the foreground command, then actively
+                // *drain* the channel by emitting a fresh sentinel probe and
+                // reading until it appears. This consumes the aborted command's
+                // own late sentinel and any trailing bytes, so the channel is
+                // clean for the next command — a plain resync-to-old-nonce is
+                // unreliable under load and leaves stale bytes that corrupt the
+                // next submission. Matches how mature persistent-shell tools
+                // recover from an interrupt.
                 let partial = extract_output(&buf, &prefix);
                 ch.data_bytes(vec![CTRL_C]).await.ok();
-                let mut sink = buf;
-                if let Some((rc, cwd)) =
-                    collect_until_sentinel(&mut ch, &prefix, INTERRUPT_RESYNC_GRACE, &mut sink).await
+
+                let drain_nonce = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let drain_prefix = sentinel_prefix(drain_nonce);
+                ch.data_bytes(sentinel_command(drain_nonce).into_bytes())
+                    .await
+                    .ok();
+
+                let mut drain = String::new();
+                if let Some((_, cwd)) =
+                    collect_until_sentinel(&mut ch, &drain_prefix, DRAIN_TIMEOUT, &mut drain).await
                 {
+                    // Interrupt succeeded and the shell is resynchronized.
                     return Ok(ShellOutcome {
                         output: partial,
-                        exit_code: rc,
+                        exit_code: 124, // conventional timeout code
                         cwd,
                         timed_out: true,
                     });
                 }
-                // Escalate: SIGINT then SIGTERM.
+
+                // Drain failed: the shell is unrecoverable. Escalate signals so
+                // the remote process is asked to die, and report an honest,
+                // cwd-less timeout — the caller/pool should recycle the shell.
                 ch.signal(russh::Sig::INT).await.ok();
                 ch.signal(russh::Sig::TERM).await.ok();
                 Ok(ShellOutcome {
