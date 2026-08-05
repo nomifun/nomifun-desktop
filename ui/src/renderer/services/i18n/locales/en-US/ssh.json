@@ -41,8 +41,25 @@
     "connected": "Connected",
     "connecting": "Connecting…",
     "reconnecting": "Reconnecting…",
+    "idle": "No link",
+    "degraded": "Recycling shell…",
+    "dropped": "Link lost",
+    "closed": "Closed",
     "unknown": "Not connected",
     "error": "Connection error"
+  },
+  "pill": {
+    "endpoint": "Endpoint",
+    "hostKey": "Host key",
+    "hostKeyUnpinned": "Not pinned yet",
+    "sudoStored": "A sudo password is stored for this host.",
+    "sudoMissing": "No sudo password stored — sudo must be passwordless.",
+    "attempt": "Dial attempt {{attempt}}",
+    "retryIn": "Next retry in {{seconds}}s",
+    "detail": "Detail",
+    "noLink": "This session has no live link to the host yet.",
+    "droppedHint": "Commands cannot reach the host until the link is back. If it does not return on its own, check the credentials and the host key.",
+    "unconfirmedExit": "The remote shell could not be confirmed as exited — a process may still be running on the host."
   },
   "test": {
     "running": "Testing connection…",

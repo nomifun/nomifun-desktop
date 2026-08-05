@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ConversationId } from '@/common/types/ids';
+import type { ConversationId, SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import addChatIcon from '@/renderer/assets/icons/add-chat.svg';
@@ -49,6 +49,7 @@ import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
 import StarOfficeMonitorCard from '../platforms/openclaw/StarOfficeMonitorCard.tsx';
 import NomiSessionMetricsPanel from '../platforms/nomi/NomiSessionMetricsPanel';
 import ConversationTerminalPanel from './ConversationTerminalPanel';
+import SshHostStatusPill from './SshHostStatusPill';
 import { useExecutionModelPool } from '../execution/useExecutionModelPool';
 import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
 
@@ -57,6 +58,10 @@ const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: 
   const skills = (conversation?.extra as { skills?: string[] } | undefined)?.skills;
   return skills?.includes(skillName) ?? false;
 };
+
+/** Host id of an SSH-bound session, or undefined for every other conversation. */
+const sshHostIdOf = (conversation: TChatConversation | undefined): SshHostId | undefined =>
+  (conversation?.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
 
 const buildConversationModelPool = (
   mainRef: TExecutionModelRef | null,
@@ -499,6 +504,7 @@ const NomiConversationPanel: React.FC<{
 
   const workspaceEnabled = Boolean(conversation.extra?.workspace);
   const { info: presetPresetInfo } = usePresetInfo(conversation);
+  const sshHostId = sshHostIdOf(conversation);
 
   const chatLayoutProps = {
     title: conversation.name,
@@ -506,6 +512,13 @@ const NomiConversationPanel: React.FC<{
     sider: <ChatSlider conversation={conversation} />,
     headerExtra: (
       <div className='flex items-center gap-8px'>
+        {/* An SSH-bound session is indistinguishable from a local one everywhere
+            else in the chrome, so the host it drives — and whether the link is
+            actually up — leads the header. It is also the one control kept on
+            mobile (ChatLayout portals headerExtra into the mobile actions slot):
+            knowing which machine you are typing at matters more on a phone, not
+            less. */}
+        {sshHostId ? <SshHostStatusPill conversationId={conversation.id} sshHostId={sshHostId} /> : null}
         {/* The collaboration canvas lives beside the mounted conversation; the
             header keeps the existing capability controls. */}
         <CronJobManager
