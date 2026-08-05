@@ -191,6 +191,46 @@ pub(crate) fn rollback_promotion(draft: &Path, active: &Path) -> Result<(), AppE
         .map_err(|error| AppError::Internal(format!("rollback skill promotion: {error}")))
 }
 
+/// Read one row's durable `SKILL.md` body — the bytes a companion bundle
+/// carries. The row's owner and status decide where that body lives, so this is
+/// deliberately the same [`expected_path`] the boot inventory audit uses: a
+/// bundle can never export a body from a place the audit would call orphaned.
+pub(crate) async fn read_skill_body(
+    paths: &SkillPaths,
+    skill: &CompanionSkill,
+) -> Result<String, AppError> {
+    let manifest = expected_path(paths, skill)?.join(SKILL_MANIFEST_FILE);
+    tokio::fs::read_to_string(&manifest).await.map_err(|error| {
+        AppError::Internal(format!(
+            "read skill body {}: {error}",
+            manifest.display()
+        ))
+    })
+}
+
+/// Delete a companion's whole skill tree (active + drafts). Used by the delete
+/// cascade and by the rollback of a half-imported companion bundle: leaving a
+/// body behind whose row is gone makes `validate_store` hard-fail the next boot.
+pub(crate) fn remove_companion_trees(
+    paths: &SkillPaths,
+    companion_id: &str,
+) -> Result<(), AppError> {
+    let companion_id = nomifun_common::CompanionId::try_from(companion_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid companion id: {error}")))?;
+    for path in [
+        skill_service::companion_skills_root(paths).join(companion_id.as_str()),
+        skill_service::drafts_root(paths).join(companion_id.as_str()),
+    ] {
+        crate::fsio::remove_path_entry(&path).map_err(|error| {
+            AppError::Internal(format!(
+                "remove companion skill tree {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// Where a row's body must live: under its owner's tree, or — for a row the
 /// re-homing migration has not claimed yet — the legacy shared tree.
 fn expected_path(paths: &SkillPaths, skill: &CompanionSkill) -> Result<PathBuf, AppError> {

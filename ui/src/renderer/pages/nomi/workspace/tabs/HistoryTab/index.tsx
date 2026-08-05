@@ -14,7 +14,7 @@ import DayIndexRail from './DayIndexRail';
 import DayReader from './DayReader';
 import HistoryEmptyState from './HistoryEmptyState';
 import OnThisDayPanel from './OnThisDayPanel';
-import { useChatHistory } from './useChatHistory';
+import { useDayMessages, useHistoryDays } from './useChatHistory';
 import type { DayKey } from './historyFormat';
 
 type Mode = 'byDay' | 'onThisDay';
@@ -24,24 +24,27 @@ const isMode = (value: string): value is Mode => value === 'byDay' || value === 
 /**
  * 聊天历史 — this companion's single long-lived conversation, read by day.
  *
- * Read-only: the session is resolved, never minted. The day index is derived
- * client-side from a keyset-paged message window (there is no day-index endpoint),
- * so the rail states how far back it currently reaches and 「加载更早」 extends it.
- * Day digests, when 会话归档 produced any, ride above the messages as a summary.
+ * Read-only: the session is resolved, never minted. The day index comes from the
+ * server (`/history/days`) and is COMPLETE, so the rail reaches back to the first
+ * message with no 「加载更早」; picking a day fetches exactly that day. Day digests,
+ * when 会话归档 produced any, ride above the messages as a summary.
  */
 const HistoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAttentionChange }) => {
   const { t } = useTranslation();
-  const history = useChatHistory(companionId);
+  const history = useHistoryDays(companionId);
   const [mode, setMode] = useState<Mode>('byDay');
   const [selectedDay, setSelectedDay] = useState<DayKey | null>(null);
+  const selected = history.days.find((entry) => entry.day === selectedDay) ?? null;
+  const content = useDayMessages(companionId, history.conversationId, selected?.day ?? null);
 
   // A history reader never demands attention — it is always a lookback surface.
   useEffect(() => {
     onAttentionChange?.(false);
   }, [onAttentionChange]);
 
-  // Keep the selection valid across companion switches and 加载更早 (which only
-  // appends OLDER days, so the newest-day default survives a load).
+  // Keep the selection valid across companion switches: the newest day is the
+  // default, and an index that no longer holds the previous selection falls back
+  // to it rather than showing an empty reader.
   useEffect(() => {
     if (history.days.length === 0) {
       setSelectedDay((prev) => (prev === null ? prev : null));
@@ -51,7 +54,6 @@ const HistoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtt
   }, [history.days]);
 
   const companionName = companion.profile?.name ?? t('nomi.history.roleCompanion', { defaultValue: '伙伴' });
-  const selected = history.days.find((entry) => entry.day === selectedDay) ?? null;
 
   const modeItems = useMemo(
     () => [
@@ -72,7 +74,7 @@ const HistoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtt
       );
     }
 
-    if (history.failed && history.days.length === 0) {
+    if (history.failed) {
       return (
         <HistoryEmptyState
           title={t('nomi.history.loadFailedTitle', { defaultValue: '历史加载失败' })}
@@ -84,33 +86,15 @@ const HistoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtt
       );
     }
 
-    if (history.conversationId == null || (history.days.length === 0 && !history.hasMore)) {
+    // No conversation yet, or one that holds nothing readable: the same honest
+    // zero-state, and never a CTA that would mint a session from a reader.
+    if (history.days.length === 0) {
       return (
         <HistoryEmptyState
           title={t('nomi.history.emptyTitle', { defaultValue: '还没有聊天记录' })}
           description={t('nomi.history.emptyHint', {
             defaultValue: '和这个伙伴聊过第一句之后，对话会按天出现在这里。',
           })}
-        />
-      );
-    }
-
-    // A conversation with older windows left, whose newest window held nothing a
-    // human re-reads (permission prompts, status pings). Carry 「加载更早」 into the
-    // zero-state so this is never a dead end with no way forward.
-    if (history.days.length === 0) {
-      return (
-        <HistoryEmptyState
-          title={t('nomi.history.noReadableTitle', { defaultValue: '这一段没有可阅读的内容' })}
-          description={t('nomi.history.noReadableHint', {
-            defaultValue: '最近读到的记录里只有系统消息。继续往前翻可以找到真正的对话。',
-          })}
-          onRetry={history.loadMore}
-          retryLabel={
-            history.loadingMore
-              ? t('nomi.history.loadingEarlier', { defaultValue: '正在加载…' })
-              : t('nomi.history.loadEarlier', { defaultValue: '加载更早' })
-          }
         />
       );
     }
@@ -125,21 +109,12 @@ const HistoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtt
             days={history.days}
             selectedDay={selectedDay}
             onSelect={setSelectedDay}
-            hasMore={history.hasMore}
-            loadingMore={history.loadingMore}
-            onLoadMore={history.loadMore}
-            entryCount={history.entryCount}
-            oldestDay={history.oldestDay}
-            loadMoreFailed={history.failed}
+            messageCount={history.messageCount}
           />
         </div>
         <div className='min-w-0 flex-1'>
           {selected ? (
-            <DayReader
-              day={selected}
-              companionName={companionName}
-              partial={history.hasMore && selected.day === history.oldestDay}
-            />
+            <DayReader day={selected} content={content} companionName={companionName} />
           ) : (
             <div className='py-40px text-center text-13px text-t-tertiary'>
               {t('nomi.history.selectDay', { defaultValue: '从左侧选择一天开始阅读。' })}
