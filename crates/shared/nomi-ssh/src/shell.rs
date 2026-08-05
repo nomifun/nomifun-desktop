@@ -33,6 +33,7 @@ use russh::client::Msg;
 use tokio::sync::Mutex;
 
 use crate::connection::{SshConnection, SshError};
+use crate::responder::AnswerRule;
 
 /// Ctrl-C (ETX): interrupts the foreground command on a PTY.
 const CTRL_C: u8 = 0x03;
@@ -62,6 +63,9 @@ pub struct ShellOutcome {
 pub struct RemoteShell {
     seq: std::sync::atomic::AtomicU64,
     channel: Mutex<russh::Channel<Msg>>,
+    /// Prompt-driven auto-answers (sudo password, apt y/n, ...). Injected during
+    /// `run`; answers are written to input only, never captured.
+    answer_rules: Vec<AnswerRule>,
 }
 
 impl SshConnection {
@@ -69,6 +73,17 @@ impl SshConnection {
     /// the prompt, disables echo, cds into `cwd`, and drains init noise via a
     /// priming sentinel.
     pub async fn open_shell(&self, cwd: &str) -> Result<Arc<RemoteShell>, SshError> {
+        self.open_shell_with_rules(cwd, Vec::new()).await
+    }
+
+    /// Like [`open_shell`](Self::open_shell) but installs prompt-driven
+    /// auto-answer rules (e.g. a sudo password) that inject into the shell's
+    /// input during `run`. Answers are written to input only and never captured.
+    pub async fn open_shell_with_rules(
+        &self,
+        cwd: &str,
+        answer_rules: Vec<AnswerRule>,
+    ) -> Result<Arc<RemoteShell>, SshError> {
         let channel = self.handle().channel_open_session().await?;
         channel
             .request_pty(true, "xterm-256color", 200, 50, 0, 0, &[])
@@ -78,6 +93,7 @@ impl SshConnection {
         let shell = RemoteShell {
             seq: std::sync::atomic::AtomicU64::new(1),
             channel: Mutex::new(channel),
+            answer_rules,
         };
 
         // Init. `request_shell` starts the operator's *interactive login shell*,
@@ -97,7 +113,7 @@ impl SshConnection {
             ch.data_bytes(init.into_bytes()).await?;
             ch.data_bytes(sentinel_command(0).into_bytes()).await?;
             let mut sink = String::new();
-            if collect_until_sentinel(&mut ch, &sentinel_prefix(0), INIT_READY_TIMEOUT, &mut sink)
+            if collect_until_sentinel(&mut ch, &sentinel_prefix(0), INIT_READY_TIMEOUT, &mut sink, &[])
                 .await
                 .is_none()
             {
@@ -121,11 +137,16 @@ impl RemoteShell {
         let prefix = sentinel_prefix(nonce);
         let mut ch = self.channel.lock().await;
 
-        let payload = format!("{submission}\n{}", sentinel_command(nonce));
+        // Join the command and its sentinel with `;` on ONE input line (not two
+        // lines). A command that reads stdin/tty (sudo, `read`) would otherwise
+        // consume the sentinel line buffered behind it. On one line the shell
+        // parses the whole list first, leaving the input buffer empty for the
+        // interactive command to receive the responder's injected answer.
+        let payload = format!("{submission}; {}", sentinel_command(nonce));
         ch.data_bytes(payload.into_bytes()).await?;
 
         let mut buf = String::new();
-        match collect_until_sentinel(&mut ch, &prefix, timeout, &mut buf).await {
+        match collect_until_sentinel(&mut ch, &prefix, timeout, &mut buf, &self.answer_rules).await {
             Some((rc, cwd)) => {
                 let start = find_sentinel(&buf, &prefix).map(|(s, _, _)| s).unwrap_or(buf.len());
                 Ok(ShellOutcome {
@@ -155,7 +176,7 @@ impl RemoteShell {
 
                 let mut drain = String::new();
                 if let Some((_, cwd)) =
-                    collect_until_sentinel(&mut ch, &drain_prefix, DRAIN_TIMEOUT, &mut drain).await
+                    collect_until_sentinel(&mut ch, &drain_prefix, DRAIN_TIMEOUT, &mut drain, &[]).await
                 {
                     // Interrupt succeeded and the shell is resynchronized.
                     return Ok(ShellOutcome {
@@ -195,15 +216,22 @@ fn sentinel_prefix(nonce: u64) -> String {
 
 /// Read from the channel into `sink` until a parseable sentinel for `prefix`
 /// appears or `timeout` elapses / the channel closes. Returns `(exit_code, cwd)`.
+///
+/// While reading, `answer_rules` are matched against freshly-arrived output and
+/// their answers injected into the shell's input (once each, if `once`). The
+/// answer bytes are written to the channel only — never pushed into `sink` — so
+/// a sudo password cannot appear in captured output.
 async fn collect_until_sentinel(
     ch: &mut russh::Channel<Msg>,
     prefix: &str,
     timeout: Duration,
     sink: &mut String,
+    answer_rules: &[AnswerRule],
 ) -> Option<(i32, String)> {
     if let Some((_, rc, cwd)) = find_sentinel(sink, prefix) {
         return Some((rc, cwd));
     }
+    let mut fired = vec![false; answer_rules.len()];
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -216,6 +244,7 @@ async fn collect_until_sentinel(
                 if let Some((_, rc, cwd)) = find_sentinel(sink, prefix) {
                     return Some((rc, cwd));
                 }
+                maybe_inject_answers(ch, sink, answer_rules, &mut fired).await;
             }
             Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
                 // A PTY normally folds stderr into Data, but be tolerant.
@@ -223,11 +252,35 @@ async fn collect_until_sentinel(
                 if let Some((_, rc, cwd)) = find_sentinel(sink, prefix) {
                     return Some((rc, cwd));
                 }
+                maybe_inject_answers(ch, sink, answer_rules, &mut fired).await;
             }
             // Non-output messages (WindowAdjusted, Success, ...) — keep waiting.
             Ok(Some(_)) => continue,
             // Channel closed (shell died) or timeout — give up.
             Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
+/// Check each not-yet-fired rule against the accumulated output; on a match,
+/// write `answer\n` to the shell input and mark the rule fired (if `once`).
+async fn maybe_inject_answers(
+    ch: &russh::Channel<Msg>,
+    sink: &str,
+    answer_rules: &[AnswerRule],
+    fired: &mut [bool],
+) {
+    for (i, rule) in answer_rules.iter().enumerate() {
+        if fired[i] {
+            continue;
+        }
+        if rule.prompt.is_match(sink) {
+            let mut bytes = rule.answer.as_bytes().to_vec();
+            bytes.push(b'\n');
+            let _ = ch.data_bytes(bytes).await;
+            if rule.once {
+                fired[i] = true;
+            }
         }
     }
 }
