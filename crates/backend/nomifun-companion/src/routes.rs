@@ -22,7 +22,7 @@ use crate::service::{
 };
 use crate::state::CompanionRouterState;
 use crate::store::{
-    MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryScope,
+    MemoryBatchAction, MemoryFilter, MemoryListSort,
     CompanionMemory, CompanionSkill,
 };
 
@@ -122,46 +122,15 @@ async fn patch_config(
     Ok(Json(ApiResponse::ok(state.service.patch_config(patch).await?)))
 }
 
-/// Build an optional [`MemoryScope`] from wire parts without accepting empty-ID
-/// sentinels. Both fields absent means "leave unchanged"; shared is exactly
-/// `scope_kind = "user"` with no owner, and private requires a canonical owner.
-fn scope_from_parts(
-    scope_kind: Option<&str>,
-    scope_companion_id: Option<&str>,
-) -> Result<Option<MemoryScope>, AppError> {
-    match (scope_kind, scope_companion_id) {
-        (None, None) => Ok(None),
-        (Some("user"), None) => Ok(Some(MemoryScope::Shared)),
-        (Some("companion"), Some(companion_id)) => {
-            nomifun_common::CompanionId::try_from(companion_id).map_err(|error| {
-                AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
-            })?;
-            Ok(Some(MemoryScope::Companion(companion_id.to_owned())))
-        }
-        (Some(kind), _) if kind != "user" && kind != "companion" => {
-            Err(AppError::BadRequest(format!("invalid memory scope_kind {kind:?}")))
-        }
-        (Some("user"), Some(_)) => Err(AppError::BadRequest(
-            "shared memory scope must not include scope_companion_id".into(),
-        )),
-        (Some("companion"), None) => Err(AppError::BadRequest(
-            "private memory scope requires scope_companion_id".into(),
-        )),
-        (None, Some(_)) => Err(AppError::BadRequest(
-            "scope_companion_id requires an explicit scope_kind".into(),
-        )),
-        _ => unreachable!(),
-    }
-}
-
 #[derive(Deserialize)]
 struct ListMemoriesQuery {
     kind: Option<String>,
     q: Option<String>,
     /// `active` (default) / `archived` / `all`.
     status: Option<String>,
-    /// When set, scope the list to memories visible to this companion (shared +
-    /// its own private). Absent = cross-companion "all" view.
+    /// When set, list only what this companion can read: its own memories plus
+    /// any vestigial unowned row the boot migration has not re-homed yet.
+    /// Absent = every memory (the owner's administrative view).
     scope_companion_id: Option<String>,
     /// `relevance` (default with `q`) / `time` / `importance`.
     sort: Option<String>,
@@ -243,7 +212,8 @@ struct AddMemoryRequest {
     content: String,
     #[serde(default)]
     tags: Vec<String>,
-    /// Owning canonical companion for a private memory; absent = shared.
+    /// The owning companion. Absent lets the server resolve the owner (explicit
+    /// default → oldest companion); it never means "shared" — that concept is gone.
     #[serde(default)]
     scope_companion_id: Option<String>,
 }
@@ -254,25 +224,27 @@ async fn add_memory(
     body: Result<Json<AddMemoryRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CompanionMemory>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let scope = match req.scope_companion_id.as_deref() {
-        Some(companion_id) => scope_from_parts(Some("companion"), Some(companion_id))?
-            .expect("explicit scope"),
-        None => MemoryScope::Shared,
-    };
+    if let Some(companion_id) = req.scope_companion_id.as_deref() {
+        nomifun_common::CompanionId::try_from(companion_id).map_err(|error| {
+            AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
+        })?;
+    }
     Ok(Json(ApiResponse::ok(
-        state.service.add_memory(&req.kind, &req.content, &req.tags, scope).await?,
+        state
+            .service
+            .add_memory(&req.kind, &req.content, &req.tags, req.scope_companion_id.as_deref())
+            .await?,
     )))
 }
 
+/// Content / pin / lifecycle only. A memory's owner is fixed at write time, so
+/// this body deliberately carries no scope fields: an edit must never re-home a
+/// memory between companions.
 #[derive(Deserialize)]
 struct UpdateMemoryRequest {
     content: Option<String>,
     pinned: Option<bool>,
     status: Option<String>,
-    /// `'user'` (shared) or `'companion'` (private). Present together with
-    /// `scope_companion_id` to re-home a memory; both absent = scope unchanged.
-    scope_kind: Option<String>,
-    scope_companion_id: Option<String>,
 }
 
 async fn update_memory(
@@ -282,7 +254,6 @@ async fn update_memory(
     body: Result<Json<UpdateMemoryRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let scope = scope_from_parts(req.scope_kind.as_deref(), req.scope_companion_id.as_deref())?;
     state
         .service
         .update_memory(
@@ -290,7 +261,6 @@ async fn update_memory(
             req.content.as_deref(),
             req.pinned,
             req.status.as_deref(),
-            scope,
         )
         .await?;
     Ok(Json(ApiResponse::ok(())))
@@ -1192,8 +1162,15 @@ mod tests {
     async fn batch_endpoint_applies_all_actions_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let a = service.add_memory("episode", "上周试了埃塞俄比亚豆", &[], MemoryScope::Shared).await.unwrap();
-        let b = service.add_memory("episode", "昨天喝了危地马拉豆", &[], MemoryScope::Shared).await.unwrap();
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let a = service
+            .add_memory("episode", "上周试了埃塞俄比亚豆", &[], Some(&owner))
+            .await
+            .unwrap();
+        let b = service
+            .add_memory("episode", "昨天喝了危地马拉豆", &[], Some(&owner))
+            .await
+            .unwrap();
 
         // archive both
         let resp = app
@@ -1205,7 +1182,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(service.store.count_memories("archived").await.unwrap(), 2);
+        assert_eq!(service.store.count_memories("archived", Some(&owner)).await.unwrap(), 2);
 
         // restore both
         let resp = app
@@ -1217,7 +1194,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(service.store.count_memories("active").await.unwrap(), 2);
+        assert_eq!(service.store.count_memories("active", Some(&owner)).await.unwrap(), 2);
 
         // reclassify one; an invalid kind is a 400 and changes nothing
         let resp = app
@@ -1263,7 +1240,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(service.store.count_memories("active").await.unwrap(), 0);
+        assert_eq!(service.store.count_memories("active", Some(&owner)).await.unwrap(), 0);
     }
 
     #[tokio::test]

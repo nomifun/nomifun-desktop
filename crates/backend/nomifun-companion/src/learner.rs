@@ -16,7 +16,7 @@ use crate::collector::{SharedConfig, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
 use crate::prompt::{self, LEARN_MAX_TOKENS};
 use crate::registry::CompanionRegistry;
-use crate::store::{MemoryFilter, CompanionStore};
+use crate::store::{CompanionStore, MemoryFilter, MemoryScope};
 
 const MAX_EVENTS_PER_RUN: usize = 300;
 const TICK_SECONDS: u64 = 60;
@@ -157,21 +157,35 @@ impl Learner {
         run.events_processed = events.len() as i64;
         let new_cursor = events.last().map(|e| e.ts).unwrap_or(cursor);
 
-        // 选项A：共享学习产出只由「默认体」窗口呈现，避免 N 个伙伴窗口同时弹气泡（提示风暴）。
-        let target = {
+        // 选项A：学习产出只由「记忆主人」窗口呈现，避免 N 个伙伴窗口同时弹气泡（提示风暴）。
+        // 同一个 id 既是本轮记忆的归属方，也是气泡/心情的落点 —— 记忆写给谁，
+        // 就由谁来汇报，两者不允许分叉。
+        //
+        // 共享记忆已删除：没有伙伴就没有合法的记忆主人。此时提前退出且不推进游标，
+        // 等主人建好伙伴后同一批事件仍会被学习（既不烧 token，也不落孤儿行）。
+        let owner = {
             let did = { self.config.read().await.default_companion_id.clone() };
-            self.registry.resolve_default(did.as_deref()).await
+            self.registry.resolve_memory_owner(did.as_deref()).await
+        };
+        let Some(owner) = owner else {
+            run.status = "no_companion".into();
+            tracing::warn!(
+                events = run.events_processed,
+                "companion learn run skipped: no companion to own the distilled memories"
+            );
+            return Ok(run);
         };
 
-        if let Some(target) = target.as_deref() {
-            self.emitter.emit_learn_started(target);
-        }
+        self.emitter.emit_learn_started(&owner);
 
-        // Existing-memory digest for reinforcement/conflict matching.
+        // Existing-memory digest for reinforcement/conflict matching — only the
+        // owner's own memories: the learner must never reinforce or supersede
+        // another companion's row.
         let existing = self
             .store
             .list_memories(&MemoryFilter {
                 status: Some("active".into()),
+                scope_companion_id: Some(owner.clone()),
                 limit: 120,
                 ..Default::default()
             })
@@ -232,36 +246,65 @@ impl Learner {
                     self.store.set_state("learn_parse_fail_streak", &streak.to_string()).await?;
                 }
             }
-            if let Some(target) = target.as_deref() {
-                self.emitter.emit_learn_finished(target, &run);
-            }
+            self.emitter.emit_learn_finished(&owner, &run);
             return Ok(run);
         };
         let _ = self.store.set_state("learn_parse_fail_streak", "0").await;
 
         // Apply: decay first, then reinforce/supersede/insert.
         let _ = self.store.decay_memories().await;
+        // The two id lists come back from the MODEL, and `reinforce_memories` /
+        // `archive_memories` address rows by id alone — so they are filtered to
+        // the ids this run actually showed it (the owner's own active memories).
+        // 共享记忆删除后这道过滤是必需的：事件流里可能出现别的伙伴的 memory_id
+        // （例如 owner agent 调用过 nomi_memory_list 这个跨伙伴视图，其输出被采集
+        // 成了事件），模型把它抄进 supersede_memory_ids 就会静默归档别人的记忆。
+        let owned_ids: std::collections::HashSet<&str> =
+            existing.iter().map(|m| m.memory_id.as_str()).collect();
+        let keep_owned = |ids: &[String], what: &str| -> Vec<String> {
+            let (mine, foreign): (Vec<String>, Vec<String>) =
+                ids.iter().cloned().partition(|id| owned_ids.contains(id.as_str()));
+            if !foreign.is_empty() {
+                tracing::warn!(
+                    companion_id = %owner,
+                    dropped = foreign.len(),
+                    "companion learn output referenced {what} outside this companion's memories; ignored"
+                );
+            }
+            mine
+        };
         self.store
-            .reinforce_memories(&output.reinforce_memory_ids)
+            .reinforce_memories(&keep_owned(&output.reinforce_memory_ids, "reinforce_memory_ids"))
             .await?;
         self.store
-            .archive_memories(&output.supersede_memory_ids)
+            .archive_memories(&keep_owned(&output.supersede_memory_ids, "supersede_memory_ids"))
             .await?;
 
+        // 每条蒸馏记忆都落在 owner 名下（共享记忆概念已删除）。
         for m in &output.memories {
-            if self.store.find_similar_active(&m.kind, &m.content).await?.is_some() {
+            if self
+                .store
+                .find_similar_active(&m.kind, &m.content, &owner)
+                .await?
+                .is_some()
+            {
                 continue;
             }
             self.store
-                .insert_memory(&m.kind, &m.content, &m.tags, m.importance, "learn")
+                .insert_memory_scoped(
+                    &m.kind,
+                    &m.content,
+                    &m.tags,
+                    m.importance,
+                    "learn",
+                    MemoryScope::Companion(owner.clone()),
+                )
                 .await?;
             run.memories_added += 1;
         }
         if let Some(mood) = &output.mood {
             self.store.set_state("mood", mood).await?;
-            if let Some(target) = target.as_deref() {
-                self.emitter.emit_mood_changed(target, mood);
-            }
+            self.emitter.emit_mood_changed(&owner, mood);
         }
         run.summary = output.diary;
 
@@ -277,9 +320,7 @@ impl Learner {
             .await;
 
         self.store.set_state("learn_cursor_ts", &new_cursor.to_string()).await?;
-        if let Some(target) = target.as_deref() {
-            self.emitter.emit_learn_finished(target, &run);
-        }
+        self.emitter.emit_learn_finished(&owner, &run);
         Ok(run)
     }
 }
@@ -364,9 +405,59 @@ mod tests {
         assert_eq!(run2.status, "no_events");
     }
 
+    /// 记忆有主人之后，模型回传的 id 不能再无条件生效：`reinforce_memories` /
+    /// `archive_memories` 只按 memory_id 定位行，所以一个从事件流里抄来的、属于
+    /// **别的伙伴**的 id 会静默改掉别人的记忆。这里把两条列表都钉住。
     #[tokio::test]
-    async fn run_once_records_error_on_garbage_output() {
+    async fn run_once_ignores_memory_ids_outside_this_companions_own_rows() {
         let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (learner, owner) = make_learner(dir.path(), "{}").await;
+        let stranger = learner.registry.create("别的伙伴", "ink").await.unwrap().companion_id;
+
+        // 一条属于 stranger 的活跃记忆 + 一条属于 owner 的活跃记忆。
+        let theirs = learner
+            .store
+            .insert_memory_scoped("profile", "别的伙伴的画像", &[], 0.9, "chat", MemoryScope::Companion(stranger))
+            .await
+            .unwrap();
+        let mine = learner
+            .store
+            .insert_memory_scoped("profile", "我记得主人写 Rust", &[], 0.9, "chat", MemoryScope::Companion(owner))
+            .await
+            .unwrap();
+
+        // 模型把两条 id 都塞进 supersede/reinforce：只有自己的那条可以生效。
+        let reply = format!(
+            r#"{{"memories":[],"supersede_memory_ids":["{}"],"reinforce_memory_ids":["{}"],"mood":"content","diary":"d"}}"#,
+            theirs.memory_id, theirs.memory_id
+        );
+        let learner = Learner { completer: Arc::new(CannedCompleter(reply)), ..learner };
+        assert_eq!(learner.run_once().await.unwrap().status, "ok");
+        let untouched = learner.store.get_memory(&theirs.memory_id).await.unwrap().unwrap();
+        assert_eq!(untouched.status, "active", "another companion's memory must not be archived");
+        assert_eq!(
+            untouched.strength, theirs.strength,
+            "another companion's memory must not be reinforced"
+        );
+
+        // 自己的那条照常生效（过滤没有把功能一起关掉）。
+        let reply = format!(
+            r#"{{"memories":[],"supersede_memory_ids":["{}"],"mood":"content","diary":"d"}}"#,
+            mine.memory_id
+        );
+        let learner = Learner { completer: Arc::new(CannedCompleter(reply)), ..learner };
+        learner.store.set_state("learn_cursor_ts", "0").await.unwrap();
+        assert_eq!(learner.run_once().await.unwrap().status, "ok");
+        assert_eq!(
+            learner.store.get_memory(&mine.memory_id).await.unwrap().unwrap().status,
+            "archived",
+            "the companion's own memory is still supersedable"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_once_records_error_on_garbage_output() {        let dir = tempfile::tempdir().unwrap();
         seed_event(dir.path());
         let (learner, _) = make_learner(dir.path(), "我不会输出 JSON").await;
         let run = learner.run_once().await.unwrap();
@@ -382,6 +473,57 @@ mod tests {
         learner.config.write().await.learn.model = Default::default();
         let run = learner.run_once().await.unwrap();
         assert_eq!(run.status, "model_unconfigured");
+    }
+
+    /// 共享记忆删除后，空 roster 就没有合法的记忆主人。这一轮必须：不调用模型、
+    /// 不落任何行、**不推进游标** —— 主人建好伙伴后同一批事件还要被学习到。
+    /// 没有这条测试，"不烧 token、不丢事件"这两个承诺没有任何守卫。
+    #[tokio::test]
+    async fn run_once_without_any_companion_writes_nothing_and_keeps_the_cursor() {
+        struct ExplodingCompleter;
+        #[async_trait::async_trait]
+        impl CompanionCompleter for ExplodingCompleter {
+            async fn complete(&self, _: &str, _: &str, _: &str, _: &str, _: u32) -> Result<String, AppError> {
+                panic!("the learner must not call the model when no companion can own the output");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (learner, only) = make_learner(dir.path(), "{}").await;
+        learner.registry.remove(&only).await.unwrap();
+        let learner = Learner { completer: Arc::new(ExplodingCompleter), ..learner };
+
+        let run = learner.run_once().await.unwrap();
+        assert_eq!(run.status, "no_companion");
+        assert_eq!(run.events_processed, 1);
+        assert_eq!(run.memories_added, 0);
+        assert_eq!(learner.store.count_memories("active", None).await.unwrap(), 0);
+        assert_eq!(
+            learner.store.get_state_i64("learn_cursor_ts").await.unwrap(),
+            0,
+            "the cursor must stay put so these events are still learned once a companion exists"
+        );
+
+        // 建好伙伴之后，同一批事件确实还会被学习（游标没被烧掉）。
+        let owner = learner.registry.create("迟到的伙伴", "ink").await.unwrap().companion_id;
+        let reply = r#"{"memories":[{"kind":"profile","content":"主人在写 Rust","importance":0.9}],
+            "mood":"content","diary":"补上了"}"#;
+        let learner = Learner { completer: Arc::new(CannedCompleter(reply.to_owned())), ..learner };
+        learner.store.set_state("last_learn_ts", "0").await.unwrap();
+        let run = learner.run_once().await.unwrap();
+        assert_eq!(run.status, "ok");
+        assert_eq!(run.memories_added, 1);
+        let mine = learner
+            .store
+            .list_memories(&MemoryFilter {
+                scope_companion_id: Some(owner.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].scope_companion_id.as_deref(), Some(owner.as_str()));
     }
 
     #[derive(Default)]

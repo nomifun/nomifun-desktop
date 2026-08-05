@@ -47,14 +47,8 @@ const MemoryDetailPane: React.FC<MemoryDetailPaneProps> = ({
 
   const archived = memory.status === 'archived';
   const dirty = draft.trim().length > 0 && draft.trim() !== memory.content;
-  /**
-   * Today the learning pipeline still writes install-wide memories (`scope_kind:
-   * 'user'`), and the list shows them because this companion really does consult
-   * them. They are not this companion's to change alone, so say so where the
-   * destructive controls are instead of letting the pane imply otherwise. This is
-   * a read-out, not a scope control — there is no way to re-home a memory here.
-   */
-  const installWide = memory.scope_kind === 'user';
+  // No ownership read-out here on purpose: every memory belongs to the companion
+  // whose workspace this is, so "who else is affected" is not a question any more.
 
   const save = async () => {
     if (!dirty || saving) return;
@@ -75,14 +69,6 @@ const MemoryDetailPane: React.FC<MemoryDetailPaneProps> = ({
 
   return (
     <div className='flex flex-col gap-16px'>
-      {installWide && (
-        <div className='rd-8px bg-fill-1 px-10px py-8px text-12px leading-18px text-t-secondary'>
-          {t('nomi.memory.installWideNote', {
-            defaultValue: '这条记忆是装机级的：这台电脑上的每个伙伴都会检索到它。在这里修改、归档或删除会同时影响所有伙伴。',
-          })}
-        </div>
-      )}
-
       <div className='flex flex-col gap-8px'>
         <Input.TextArea
           value={draft}

@@ -87,17 +87,8 @@ const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
     (memory: ICompanionMemory) => {
       Modal.confirm({
         title: t('nomi.memories.delete', { defaultValue: '删除' }),
-        content: (
-          <div className='flex flex-col gap-6px'>
-            <span>{t('nomi.memories.deleteConfirm', { defaultValue: '确定永久删除这条记忆？' })}</span>
-            {/* Deleting an install-wide memory takes it away from every companion. */}
-            {memory.scope_kind === 'user' && (
-              <span className='text-12px leading-18px text-t-tertiary'>
-                {t('nomi.memory.installWideShort', { defaultValue: '装机级记忆：这台电脑上的所有伙伴都会受影响。' })}
-              </span>
-            )}
-          </div>
-        ),
+        // Memory is per-companion, so a delete only ever affects this companion.
+        content: t('nomi.memories.deleteConfirm', { defaultValue: '确定永久删除这条记忆？' }),
         okButtonProps: { status: 'danger' },
         onOk: async () => {
           try {

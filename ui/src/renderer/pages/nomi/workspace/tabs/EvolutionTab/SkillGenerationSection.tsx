@@ -91,7 +91,7 @@ const SkillGenerationSection: React.FC<Props> = ({ config }) => {
           {config.installWide && (
             <InstallWideNote
               text={
-                config.ownsGeneratedSkills
+                config.ownsLearningOutput
                   ? undefined
                   : t('nomi.evolution.skillNotOwnerNote', {
                       defaultValue:

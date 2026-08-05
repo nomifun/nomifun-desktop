@@ -41,7 +41,13 @@ pub struct LearnOutput {
     pub diary: Option<String>,
 }
 
-pub const LEARN_SYSTEM: &str = r#"你是这台电脑上所有电子伙伴共享的记忆中枢管家。你的任务是阅读主人最近的工作事件记录，提炼出帮助伙伴们"更懂主人"的记忆。
+/// System prompt of one learning pass. Written in the FIRST PERSON SINGULAR on
+/// purpose: 共享记忆已删除，这一轮蒸馏出来的每条记忆都只属于发起学习的那一个伙伴，
+/// 所以不能再用「所有伙伴共享的记忆中枢」那种口吻，否则模型会产出泛化的、
+/// 不属于任何具体伙伴的「中枢」式记忆。
+pub const LEARN_SYSTEM: &str = r#"你是主人的电子伙伴，正在整理只属于你自己的记忆。你的任务是阅读主人最近的工作事件记录，提炼出让你"更懂主人"的记忆。
+
+这些记忆只写进你自己的记忆库，别的伙伴看不到、也不会检索到，所以请用"我和主人之间"的视角来写，不要替其他伙伴代言。
 
 记忆 kind 只能是：profile(画像,稳定事实) / preference(偏好,风格口味) / knowledge(知识,可复用结论) / episode(事件,带时间的经历) / task(任务线索,未完成事项或口头承诺) / affective(情感,情绪轨迹)。
 
@@ -49,8 +55,8 @@ pub const LEARN_SYSTEM: &str = r#"你是这台电脑上所有电子伙伴共享�
 1. 只提炼有信息量的内容，宁缺毋滥；每条记忆一句话、自包含、用中文。
 2. 若新事件印证了"已有记忆"列表中的某条，把它的 memory_id 放进 reinforce_memory_ids，不要重复生成。
 3. 若新事件与某条已有记忆矛盾，生成新记忆并把旧 memory_id 放进 supersede_memory_ids。
-4. mood 从 happy/content/sleepy/worried/excited 中选一个，代表伙伴们读完这些事件后的共同心情。
-5. diary 是以伙伴们的第一人称写的一句话日记（中文、简短、温暖），措辞不要绑定任何单一角色名，如"今天主人修了一下午 bug，我们记住了他喜欢先看报错"。
+4. mood 从 happy/content/sleepy/worried/excited 中选一个，代表你读完这些事件后的心情。
+5. diary 是你的第一人称一句话日记（中文、简短、温暖），如"今天主人修了一下午 bug，我记住了他喜欢先看报错"。
 6. 事件 data 中 origin 为 companion/cron/autowork/idmm、或 created_by 为 agent 的内容，是 agent 的自动行为而非主人发言：绝不能据此蒸馏出"主人想要/主人计划/主人提出"类记忆。
 7. 事件名 companion.user_message 是主人对伙伴说的话（高价值：偏好/意图/情感都值得提炼）；companion.reply 是伙伴自己说的话，只能用作上下文理解，绝不能当作主人的事实、意愿或承诺。
 8. 若事件表明某个任务/需求已完成或不再需要，把"已有记忆"中对应的 task 记忆 memory_id 放进 supersede_memory_ids，不要为已完成的事保留或新建 task 记忆。
@@ -278,6 +284,15 @@ mod tests {
         assert!(LEARN_SYSTEM.contains("companion.user_message"));
         assert!(LEARN_SYSTEM.contains("companion.reply"));
         assert!(LEARN_SYSTEM.contains("supersede_memory_ids"));
+        // 共享记忆已删除：学习提示词不能再用「记忆中枢 / 所有伙伴共享」的口吻，
+        // 否则模型会产出不属于任何具体伙伴的泛化记忆。
+        for hub_flavour in ["共享", "中枢", "伙伴们", "我们记住"] {
+            assert!(
+                !LEARN_SYSTEM.contains(hub_flavour),
+                "LEARN_SYSTEM must not carry hub framing: {hub_flavour}"
+            );
+        }
+        assert!(LEARN_SYSTEM.contains("只属于你自己的记忆"));
     }
 
     #[test]

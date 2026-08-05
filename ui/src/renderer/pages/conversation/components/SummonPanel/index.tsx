@@ -167,8 +167,8 @@ export const SummonDrawer: React.FC<SummonDrawerProps> = ({ visible, onCancel, i
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, roster]);
 
-  // Memory search scoped to the summoned companion's visibility (shared + its
-  // own private memories) — the same scope the read-only recall tool gets.
+  // Memory search scoped to the summoned companion's own memories — the same
+  // scope the read-only recall tool gets.
   useEffect(() => {
     if (!visible || !companionId) return;
     let cancelled = false;

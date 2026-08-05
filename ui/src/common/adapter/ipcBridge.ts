@@ -4276,9 +4276,14 @@ export interface ICompanionMemory {
   created_at: number;
   updated_at: number;
   last_reinforced_at: number;
-  /** `'user'` = shared (all companions) / `'companion'` = private to one. */
-  scope_kind: 'user' | 'companion';
-  /** Owning canonical companion id when private; `null` when shared. */
+  /**
+   * The companion this memory belongs to. Memory is strictly per-companion —
+   * there is no shared/install-wide scope any more, and no way to re-home a
+   * memory. `null` is only the vestigial state of a legacy row the backend's
+   * one-time re-homing migration has not reached yet (it runs at every launch
+   * that has at least one companion), so no surface should build behaviour on it
+   * beyond "belongs to nobody in particular yet".
+   */
   scope_companion_id: CompanionId | null;
   /** FTS highlight snippet (`<b>…</b>` markers) — list results of a full-text query only. */
   snippet?: string | null;
@@ -4741,6 +4746,11 @@ const fromApiCompanionSharedConfig = (raw: unknown): ICompanionSharedConfig => {
 };
 
 export const companion = {
+  /**
+   * `scope_companion_id` narrows the list to ONE companion's memories (plus any
+   * legacy row not yet re-homed). Omitting it returns every companion's memories
+   * and is only for an owner-level administrative view.
+   */
   listMemories: withResponseMap(
     httpGet<
       { items: unknown[]; total: number },
@@ -4767,23 +4777,23 @@ export const companion = {
     }),
     (raw): ICompanionMemoryPage => ({ ...raw, items: raw.items.map(fromApiCompanionMemory) })
   ),
+  /** `scope_companion_id` is the OWNER of the new memory (omitted = server-resolved). */
   addMemory: withResponseMap(
     httpPost<unknown, { kind: string; content: string; tags?: string[]; scope_companion_id?: CompanionId }>(
       '/api/companion/memories'
     ),
     fromApiCompanionMemory
   ),
+  /** Content / pin / lifecycle only: a memory's owner is fixed at write time. */
   updateMemory: httpPut<
     void,
-    { memory_id: CompanionMemoryId; content?: string; pinned?: boolean; status?: string; scope_kind?: string; scope_companion_id?: CompanionId }
+    { memory_id: CompanionMemoryId; content?: string; pinned?: boolean; status?: string }
   >(
     (p) => `/api/companion/memories/${p.memory_id}`,
     (p) => ({
       content: p.content,
       pinned: p.pinned,
       status: p.status,
-      scope_kind: p.scope_kind,
-      scope_companion_id: p.scope_companion_id,
     })
   ),
   deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId }>((p) => `/api/companion/memories/${p.memory_id}`),

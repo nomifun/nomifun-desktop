@@ -44,4 +44,13 @@ describe('desktop companion chrome layout', () => {
     expect(companionSource.includes('clear-unread')).toBe(false);
     expect(/\bunread\b/.test(companionSource)).toBe(false);
   });
+
+  test('only chat-saved memories pop the memory bubble', () => {
+    // 共享记忆删除后，每条记忆都有主人 —— 包括后台 learner 蒸馏出来的那些
+    // (`source: 'learn'`)、主人在工作区手输的和 agent 通过 MCP 写的
+    // (`'manual'` / `'merge'`)。没有这道 source 闸门，桌宠会开始为没人要求通知的
+    // 后台动作弹气泡。
+    expect(companionSource.includes("if (m.source !== 'chat') return;")).toBe(true);
+    expect(companionSource.includes('m.scope_companion_id !== companionId')).toBe(true);
+  });
 });

@@ -11,7 +11,7 @@
 //!    (`nomi_agent::summon_tools::SummonContextSink`).
 //! 2. [`SummonMemorySink`] — a read-only `CompanionMemorySink` over the
 //!    A-track `CompanionStore::search_memories` contract, visibility locked to
-//!    the summoned companion (shared + its own private memories). `save` and
+//!    the summoned companion (its own memories only). `save` and
 //!    `recent_events` refuse: `save_memory` is never registered in a summoned
 //!    session, and this sink fails closed even if it were.
 //!
@@ -144,7 +144,6 @@ impl CompanionMemorySink for SummonMemorySink {
         let query = MemorySearchQuery {
             queries: queries.to_vec(),
             kind: kind.map(str::to_owned),
-            scope: None,
             status: if include_archived { MemoryStatusFilter::All } else { MemoryStatusFilter::Active },
             companion_id: Some(self.companion_id.clone()),
             limit: if limit == 0 { 20 } else { limit },
@@ -267,12 +266,24 @@ mod tests {
         }
     }
 
+    /// 共享记忆已删除，所以这里不再断言「共享记忆对被召唤的伙伴可见」。
+    /// 保留的那一半才是这个测试真正的价值，也是唯一的守卫：**别人的记忆永远不可见**。
     #[tokio::test]
     async fn summon_memory_sink_is_scoped_and_read_only() {
         let store = CompanionStore::open_memory().await.unwrap();
         let summoned = companion_fixture(1);
         let stranger = companion_fixture(2);
-        store.insert_memory("preference", "主人喜欢手冲咖啡", &[], 0.8, "manual").await.unwrap();
+        store
+            .insert_memory_scoped(
+                "preference",
+                "主人喜欢手冲咖啡",
+                &[],
+                0.8,
+                "chat",
+                MemoryScope::Companion(summoned.as_str().to_owned()),
+            )
+            .await
+            .unwrap();
         store
             .insert_memory_scoped(
                 "task",
@@ -301,11 +312,11 @@ mod tests {
             .recall("conv_w", &["咖啡".into()], None, false, 20)
             .await
             .unwrap();
-        assert!(out.contains("主人喜欢手冲咖啡"), "shared memories visible: {out}");
-        assert!(out.contains("帮主人试三种咖啡豆"), "own private memories visible: {out}");
+        assert!(out.contains("主人喜欢手冲咖啡"), "own memories visible: {out}");
+        assert!(out.contains("帮主人试三种咖啡豆"), "own memories visible: {out}");
         assert!(
             !out.contains("别的伙伴的咖啡私事"),
-            "another companion's private memories must stay invisible: {out}"
+            "another companion's memories must stay invisible: {out}"
         );
 
         let err = sink.save("conv_w", "preference", "x", &[]).await.unwrap_err();

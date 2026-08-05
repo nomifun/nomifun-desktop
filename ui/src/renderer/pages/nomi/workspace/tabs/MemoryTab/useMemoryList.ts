@@ -20,7 +20,8 @@ import type { MemoryStatusFilter } from './constants';
  * The memory list of ONE companion. Every request carries
  * `scope_companion_id: companionId` — this surface has no cross-companion mode
  * and no scope picker, so the companion id is the single source of truth for
- * what the user is looking at and what a new memory belongs to.
+ * what the user is looking at and who a new memory belongs to. Memory is
+ * strictly per-companion: there is no shared/install-wide scope to pick.
  */
 export const useMemoryList = (companionId: CompanionId) => {
   const [q, setQ] = useState('');
@@ -125,9 +126,8 @@ export const useMemoryList = (companionId: CompanionId) => {
   );
 
   // ── mutations ──
-  // `updateMemory` never sends a scope: the backend rejects `scope_companion_id`
-  // without an explicit `scope_kind`, and omitting both means "scope unchanged",
-  // which is exactly right — editing text must not re-home a memory.
+  // `updateMemory` carries no ownership at all: the wire has no scope fields left,
+  // so editing text can no longer re-home a memory between companions.
 
   const addMemory = useCallback(
     async (nextKind: ICompanionMemoryKind, content: string) => {

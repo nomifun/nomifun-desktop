@@ -107,6 +107,37 @@ fn max_live_seq(companions: &HashMap<String, CompanionProfileConfig>) -> u64 {
     companions.values().map(|p| p.seq).max().unwrap_or(0)
 }
 
+/// 记忆归属的唯一裁决规则（共享记忆概念已删除：每条记忆都必须有主人）。
+/// 顺序：存活的显式默认体 → roster 中最早创建的伙伴（`created_at` 最小，
+/// `companion_id` 作为同毫秒并列时的稳定 tie-break）→ 空 roster 返回 `None`
+/// （此时没有合法主人，写入方必须干净失败而不是落一条孤儿行）。
+///
+/// 故意不走 [`CompanionRegistry::list`] 的侧栏顺序：`order_index` 是主人拖出来的
+/// 展示偏好，记忆归属不能因为拖动侧栏而改变。一个已被删除的默认体也绝不会被采纳
+/// —— 那会写出一条启动即失败的孤儿引用。
+pub(crate) fn memory_owner_of<'a>(
+    companions: impl IntoIterator<Item = &'a CompanionProfileConfig>,
+    default_companion_id: Option<&str>,
+) -> Option<String> {
+    let mut default_alive = false;
+    let mut oldest: Option<&CompanionProfileConfig> = None;
+    for profile in companions {
+        if Some(profile.companion_id.as_str()) == default_companion_id {
+            default_alive = true;
+        }
+        let beats_current = oldest.is_none_or(|best| {
+            (profile.created_at, &profile.companion_id) < (best.created_at, &best.companion_id)
+        });
+        if beats_current {
+            oldest = Some(profile);
+        }
+    }
+    if default_alive {
+        return default_companion_id.map(str::to_owned);
+    }
+    oldest.map(|profile| profile.companion_id.clone())
+}
+
 pub struct CompanionRegistry {
     companions_dir: PathBuf,
     /// Shared multi-companion home (`{data_dir}/companion/shared`) — where the seq
@@ -355,6 +386,13 @@ impl CompanionRegistry {
         ids.into_iter().next()
     }
 
+    /// 记忆归属的唯一解析器：共享记忆概念已删除，每条记忆都必须有主人，
+    /// 所以每个「没有明确伙伴」的写入方都用这里解析出来的 owner。
+    /// 顺序见 [`memory_owner_of`]。
+    pub async fn resolve_memory_owner(&self, default_companion_id: Option<&str>) -> Option<String> {
+        memory_owner_of(self.inner.read().await.values(), default_companion_id)
+    }
+
     /// Create a companion: validate the name, allocate its short number from the
     /// registry watermark, durably advance the watermark, persist
     /// `{companions_dir}/{companion_id}/config.json`, then insert into the map under the
@@ -590,6 +628,53 @@ mod tests {
         assert_eq!(reg.resolve_default(Some("malformed-companion-id")).await.as_deref(), Some(first.as_str()));
         // 未配置默认体 → 首个注册
         assert_eq!(reg.resolve_default(None).await.as_deref(), Some(first.as_str()));
+    }
+
+    /// 记忆归属的解析顺序是一个产品契约（共享记忆删除后，每条记忆都必须有主人）：
+    /// 存活的显式默认体 → 最早创建的伙伴 → 空 roster 无主人。
+    #[tokio::test]
+    async fn resolve_memory_owner_prefers_alive_default_then_oldest() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = registry(dir.path());
+        // 空 roster：没有合法主人，写入方必须干净失败而不是落孤儿行。
+        assert_eq!(reg.resolve_memory_owner(None).await, None);
+        assert_eq!(reg.resolve_memory_owner(Some("malformed-companion-id")).await, None);
+
+        let a = reg.create("甲", "ink").await.unwrap();
+        let b = reg.create("乙", "ink").await.unwrap();
+        // 未配置默认体 → 最早创建的伙伴
+        assert_eq!(reg.resolve_memory_owner(None).await.as_deref(), Some(a.companion_id.as_str()));
+        // 显式默认体且存活 → 用之
+        assert_eq!(
+            reg.resolve_memory_owner(Some(&b.companion_id)).await.as_deref(),
+            Some(b.companion_id.as_str())
+        );
+        // 显式默认体已删 → 回退最早创建，绝不采纳一个已不存在的主人
+        // （那会写出启动即失败的孤儿引用）。
+        reg.remove(&b.companion_id).await.unwrap();
+        assert_eq!(
+            reg.resolve_memory_owner(Some(&b.companion_id)).await.as_deref(),
+            Some(a.companion_id.as_str())
+        );
+
+        // 侧栏顺序（order_index）是展示偏好，不能改变记忆归属。
+        reg.patch(&a.companion_id, serde_json::json!({"order_index": 99}))
+            .await
+            .unwrap();
+        assert_eq!(reg.resolve_memory_owner(None).await.as_deref(), Some(a.companion_id.as_str()));
+
+        // 同毫秒并列时用 companion_id 做稳定 tie-break。
+        let mut left = CompanionProfileConfig::new("同刻甲", "ink", 90);
+        let mut right = CompanionProfileConfig::new("同刻乙", "ink", 91);
+        left.created_at = 1;
+        right.created_at = 1;
+        let (small, large) = if left.companion_id < right.companion_id {
+            (left.companion_id.clone(), right.companion_id.clone())
+        } else {
+            (right.companion_id.clone(), left.companion_id.clone())
+        };
+        assert_eq!(memory_owner_of([&left, &right], None).as_deref(), Some(small.as_str()));
+        assert_ne!(memory_owner_of([&left, &right], None).as_deref(), Some(large.as_str()));
     }
 
     #[tokio::test]
