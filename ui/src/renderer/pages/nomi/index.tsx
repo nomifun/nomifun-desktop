@@ -249,21 +249,6 @@ const NomiWorkspacePage: React.FC = () => {
     [attentionOwner]
   );
 
-  // Attention dots belong to a companion, not to the page: reading them through
-  // the owner id means a stale dot cannot follow the user onto another companion,
-  // without needing to reset state on switch.
-  const attentionFlags = attention.owner === attentionOwner ? attention.flags : EMPTY_ATTENTION;
-
-  if (loading) {
-    return (
-      <div className='flex size-full items-center justify-center'>
-        <Spin />
-      </div>
-    );
-  }
-
-  const ActiveTab = TAB_COMPONENTS[activeTab];
-
   const closeFigures = useCallback(() => {
     setSearchParams(
       (prev) => {
@@ -273,6 +258,25 @@ const NomiWorkspacePage: React.FC = () => {
       { replace: true }
     );
   }, [setSearchParams]);
+
+  // Attention dots belong to a companion, not to the page: reading them through
+  // the owner id means a stale dot cannot follow the user onto another companion,
+  // without needing to reset state on switch.
+  const attentionFlags = attention.owner === attentionOwner ? attention.flags : EMPTY_ATTENTION;
+
+  // Every hook must be above this early return: React counts hooks per render, so
+  // a hook declared below it is skipped on the loading pass and reached on the
+  // loaded one — "Rendered more hooks than during the previous render", which
+  // corrupts the root and makes unrelated pages fail too.
+  if (loading) {
+    return (
+      <div className='flex size-full items-center justify-center'>
+        <Spin />
+      </div>
+    );
+  }
+
+  const ActiveTab = TAB_COMPONENTS[activeTab];
 
   const workspace = figuresActive ? (
     <>
