@@ -219,6 +219,15 @@ impl RemoteShell {
                 // recover from an interrupt.
                 let partial = extract_output(&buf, &prefix);
                 ch.data_bytes(vec![CTRL_C]).await.ok();
+                // A PTY Ctrl-C does not reliably interrupt a shell builtin that
+                // is already blocked reading the tty (`read`, a password
+                // prompt). When it does not, the next line we write is consumed
+                // as that read's *input* — swallowing the drain probe below and
+                // leaving the shell desynchronized for every later command.
+                // Feeding one bare newline first satisfies any pending read with
+                // an empty line; if the interrupt did land, it is merely an
+                // empty command line against an already-blank prompt.
+                ch.data_bytes(vec![b'\n']).await.ok();
 
                 let drain_nonce = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let drain_prefix = sentinel_prefix(drain_nonce);
