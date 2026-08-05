@@ -165,7 +165,7 @@ impl Learner {
         // 等主人建好伙伴后同一批事件仍会被学习（既不烧 token，也不落孤儿行）。
         let owner = {
             let did = { self.config.read().await.default_companion_id.clone() };
-            self.registry.resolve_memory_owner(did.as_deref()).await
+            self.registry.resolve_row_owner(did.as_deref()).await
         };
         let Some(owner) = owner else {
             run.status = "no_companion".into();

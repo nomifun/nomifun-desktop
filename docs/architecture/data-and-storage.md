@@ -27,7 +27,7 @@ Inside the data directory:
 │                        the open OS handle; a leftover file is harmless)
 ├── logs/                tracing-appender file output (rotated daily)
 ├── conversations/       per-conversation workspaces (see below)
-└── companion/                 companion file domain (shared memory hub + per-companion profiles, see below)
+└── companion/                 companion file domain (install-wide memory database + per-companion profiles, see below)
 ```
 
 All three hosts resolve the unset default through one shared helper,
@@ -293,16 +293,31 @@ historical row migrations. The multi-companion layout:
 
 ```
 <data_dir>/companion/
-├── shared/                      shared memory hub (one copy for all companions)
+├── shared/                      install-wide files (one per install, NOT shared memory)
 │   ├── config.json              SharedCompanionConfig: collect switches, event retention/capacity, learn interval & model, default_companion_id
 │   ├── events/YYYYMMDD.jsonl    raw events (automatic age/hard-cap cleanup; privacy-sensitive; export is opt-in)
 │   └── memory.db                standalone SQLite (PRAGMA user_version ladder):
-│                                shared memories + per-companion runtime
+│                                one memory database for the whole install, but
+│                                every row is OWNED by exactly one companion
+│                                (scope_kind/scope_companion_id) and readable only
+│                                by that companion; + per-companion runtime
 │                                state (companion_runtime_state: XP, …)
 └── companions/
     └── {companion_id}/                bare UUIDv7 companion ID; the directory is the source of truth
         └── config.json          CompanionProfileConfig: name/character/persona/per-companion model/desktop-companion toggle & position
 ```
+
+`shared/` is "one per install", not "shared between companions". `memory.db` holds
+every companion's memory rows in one table, and each row carries its owner in
+`(scope_kind, scope_companion_id)`; every companion-facing read filters on that
+owner, so a companion never sees another's memories and a memory cannot be moved
+between owners. The vestigial `('user', NULL)` pair is the only ownerless state:
+it is what pre-upgrade rows and imports into an empty roster look like. It stays
+legal at the DB level because a zero-companion install is supported, and rows in
+that state are re-homed onto one owner (the explicit `default_companion_id` if it
+is still in the roster, else the oldest companion) by an idempotent boot
+migration — one `UPDATE`, never a per-companion copy, so `memory_id` values stay
+stable and a fact cannot diverge into per-companion duplicates.
 
 The historical single-companion layout `companion/nomi/` is not migrated into
 v3. If detected, it is retired together with the complete old managed dataset.
@@ -397,8 +412,8 @@ non-loopback bind address.
   `<work_dir>/conversations/` tree. User-selected/custom workspaces elsewhere
   on disk are external user projects and are never copied implicitly.
 - **Companion data** — the bundle recursively includes
-  `<data_dir>/companion/` (shared memory hub + per-companion profiles; see the
-  [Companions guide](../guides/companions.md)).
+  `<data_dir>/companion/` (the install-wide memory database + per-companion
+  profiles; see the [Companions guide](../guides/companions.md)).
 - **Bun runtime cache** — disposable; will be re-extracted on next boot.
 
 Offline CLI commands are provided by `nomicore`:

@@ -4311,8 +4311,13 @@ export interface ICompanionMemoryMergeGroup {
 export interface ICompanionSkill {
   companion_skill_id: CompanionSkillId;
   skill_name: string;
-  scope_kind: string;
-  scope_companion_id: CompanionId | null; // null = shared
+  /**
+   * The companion this skill belongs to. A self-evolved skill is strictly
+   * per-companion — there is no shared tier and no way to hand one to another
+   * companion. `null` is only the vestigial state of a legacy row the backend's
+   * one-time re-homing migration has not claimed yet.
+   */
+  scope_companion_id: CompanionId | null;
   status: 'draft' | 'active' | 'archived';
   source: string;
   confidence: number;
@@ -4360,16 +4365,14 @@ export interface ICompanionStatus {
   mood: string;
   memories_active: number;
   memories_archived: number;
-  skills_active: number;
   model_configured: boolean;
   collect_any_enabled: boolean;
 }
 
-/** "What I learned this week" digest (skills per-companion; memories global). */
+/** "What I learned this week" digest for one companion (skills + memories it gained). */
 export interface ICompanionWeeklyDigest {
   since_ms: number;
   skills_learned: number;
-  skills_active_new: number;
   memories_added: number;
   new_skill_names: string[];
 }
@@ -4617,13 +4620,12 @@ const fromApiCompanionMemory = (raw: unknown): ICompanionMemory => {
 
 const fromApiCompanionSkill = (raw: unknown): ICompanionSkill => {
   const value = asWireObject(raw, 'companion skill');
-  if (
-    Object.prototype.hasOwnProperty.call(value, 'provenance') ||
-    Object.prototype.hasOwnProperty.call(value, 'superseded_by')
-  ) {
-    throw new TypeError(
-      'companion skill legacy fields "provenance" and "superseded_by" are not accepted'
-    );
+  for (const retiredField of ['provenance', 'superseded_by', 'scope_kind']) {
+    // `scope_kind` was the shared/private discriminator; 共享技能 is gone and the
+    // owner alone answers "whose skill is this", so the backend must not send it.
+    if (Object.prototype.hasOwnProperty.call(value, retiredField)) {
+      throw new TypeError(`companion skill must not contain retired field "${retiredField}"`);
+    }
   }
   if (!Array.isArray(value.provenance_event_ids)) {
     throw new TypeError('companion skill provenance_event_ids must be an array');
@@ -4822,19 +4824,18 @@ export const companion = {
     fromApiCompanionMemory
   ),
   // ── Self-evolved skills (P2: see + edit). Addressed by companion_id + companion_skill_id. ──
+  /** One companion's own skills — the companion in the path IS the whole scope. */
   listSkills: withResponseMap(
     httpGet<
       { items: unknown[]; total: number },
       {
       companion_id: CompanionId;
-      include_shared?: boolean;
       status?: string;
       limit?: number;
       offset?: number;
       }
     >((p) => {
       const params = new URLSearchParams();
-      if (p.include_shared === false) params.set('include_shared', 'false');
       if (p.status) params.set('status', p.status);
       if (p.limit) params.set('limit', String(p.limit));
       if (p.offset) params.set('offset', String(p.offset));
@@ -4907,22 +4908,6 @@ export const companion = {
   draftFromSession: httpPost<string | null, { companion_id: CompanionId; conversation_id: ConversationId }>(
     (p) => `/api/companion/companions/${p.companion_id}/skills/from-session`,
     (p) => ({ conversation_id: p.conversation_id })
-  ),
-  /** Gift a skill to another companion (互教). */
-  giftSkill: withResponseMap(
-    httpPost<
-      unknown,
-      {
-        companion_id: CompanionId;
-        companion_skill_id: CompanionSkillId;
-        to_companion_id: CompanionId;
-      }
-    >(
-      (p) =>
-        `/api/companion/companions/${p.companion_id}/skills/${p.companion_skill_id}/gift`,
-      (p) => ({ to_companion_id: p.to_companion_id })
-    ),
-    fromApiCompanionSkill
   ),
   runLearn: withResponseMap(
     httpPost<unknown, void>('/api/companion/learn/run'),

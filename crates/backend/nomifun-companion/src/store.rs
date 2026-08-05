@@ -553,6 +553,11 @@ CREATE TABLE IF NOT EXISTS companion_skills (
         (scope_kind = 'companion' AND scope_companion_id IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_companion_skills_owner ON companion_skills(scope_companion_id, status, strength DESC);
+-- Kept on purpose after 共享技能 was removed as a product concept: no writer
+-- creates a ('user', NULL) row any more, but a zero-companion install has no
+-- legal owner to re-home the legacy ones onto (see backfill_skill_owner), and
+-- while they sit there this is the only thing keeping two of them from claiming
+-- the same {user_skills_dir}/shared/{name} directory.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_shared_name ON companion_skills(skill_name) WHERE scope_kind = 'user';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_private_owner_name ON companion_skills(scope_companion_id, skill_name) WHERE scope_kind = 'companion';
 
@@ -1362,12 +1367,12 @@ async fn create_baseline_schema(pool: &SqlitePool) -> Result<(), AppError> {
 /// baseline: add the nullable embedding columns and the external-content FTS5
 /// index when missing, rebuild the index when its row count desyncs from the
 /// main table, remove the retired learn-run history table, and re-home the
-/// vestigial unowned memories onto `memory_owner`. User memories are preserved
-/// verbatim — nothing is ever deleted or duplicated here. Non-v3 stores are left
-/// untouched for `validate_baseline_schema` to reject.
+/// vestigial unowned memories and skills onto `row_owner`. User memories and
+/// skills are preserved verbatim — nothing is ever deleted or duplicated here.
+/// Non-v3 stores are left untouched for `validate_baseline_schema` to reject.
 async fn upgrade_schema_in_place(
     pool: &SqlitePool,
-    memory_owner: Option<&str>,
+    row_owner: Option<&str>,
 ) -> Result<(), AppError> {
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
@@ -1443,12 +1448,13 @@ async fn upgrade_schema_in_place(
         .execute(pool)
         .await
         .map_err(db_err)?;
-    backfill_memory_owner(pool, memory_owner).await?;
+    backfill_memory_owner(pool, row_owner).await?;
+    backfill_skill_owner(pool, row_owner).await?;
     Ok(())
 }
 
 /// One-time, idempotent re-homing of the vestigial shared memories
-/// (`('user', NULL)`) onto `memory_owner`. 共享记忆作为产品概念已删除，而
+/// (`('user', NULL)`) onto `row_owner`. 共享记忆作为产品概念已删除，而
 /// **历史上每一条 learner 写出来的记忆都是共享的**，所以这些行是主人积累的
 /// 大多数记忆：它们必须原地改主人，一条都不能删。
 ///
@@ -1463,9 +1469,9 @@ async fn upgrade_schema_in_place(
 /// zero-companion install is a supported state.
 async fn backfill_memory_owner(
     pool: &SqlitePool,
-    memory_owner: Option<&str>,
+    row_owner: Option<&str>,
 ) -> Result<(), AppError> {
-    let Some(owner) = memory_owner else {
+    let Some(owner) = row_owner else {
         return Ok(());
     };
     // A malformed owner would write an unreadable row and hard-fail the very
@@ -1486,6 +1492,73 @@ async fn backfill_memory_owner(
             memories = affected,
             companion_id = %owner,
             "re-homed shared companion memories onto their owner"
+        );
+    }
+    Ok(())
+}
+
+/// One-time, idempotent re-homing of the vestigial shared skills
+/// (`('user', NULL)`) onto `row_owner` — the exact analogue of
+/// [`backfill_memory_owner`], for the same reason: 共享技能 is gone as a product
+/// concept, a skill belongs to one companion, and the owner-scoped list would
+/// otherwise hide these rows from every companion forever.
+///
+/// RE-HOME, never duplicate or delete: a skill row is the metadata half of one
+/// on-disk `SKILL.md`, so copying it per companion would point several rows at
+/// one file and dropping it would orphan that file (and hard-fail the boot
+/// inventory audit). The file itself is moved into the owner's tree by
+/// [`crate::skill_io::rehome_unowned_skill_dirs`], which reconciles from the
+/// filesystem and therefore also repairs a crash in between.
+///
+/// A name COLLISION is skipped rather than forced: `idx_companion_skills_private_owner_name`
+/// makes `(owner, skill_name)` unique, so re-homing a shared `foo` onto a
+/// companion that already has its own `foo` would raise a UNIQUE violation
+/// inside `upgrade_schema_in_place` — i.e. fail the boot of every install that
+/// has such a pair, permanently. The colliding row keeps its legacy shape (still
+/// on disk, still exportable, nothing lost) and is logged.
+async fn backfill_skill_owner(
+    pool: &SqlitePool,
+    row_owner: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(owner) = row_owner else {
+        return Ok(());
+    };
+    // A malformed owner would write an unreadable row and hard-fail the very
+    // next boot on `validate_companion_references`; fail here instead.
+    validate_companion_id(owner, "skill backfill companion_id")?;
+    let affected = sqlx::query(
+        "UPDATE companion_skills
+            SET scope_kind = 'companion', scope_companion_id = ?
+          WHERE scope_kind = 'user'
+            AND NOT EXISTS (
+              SELECT 1 FROM companion_skills owned
+               WHERE owned.scope_companion_id = ?
+                 AND owned.skill_name = companion_skills.skill_name
+            )",
+    )
+    .bind(owner)
+    .bind(owner)
+    .execute(pool)
+    .await
+    .map_err(db_err)?
+    .rows_affected();
+    if affected > 0 {
+        tracing::info!(
+            skills = affected,
+            companion_id = %owner,
+            "re-homed shared companion skills onto their owner"
+        );
+    }
+    let stranded: Vec<String> =
+        sqlx::query_scalar("SELECT skill_name FROM companion_skills WHERE scope_kind = 'user'")
+            .fetch_all(pool)
+            .await
+            .map_err(db_err)?;
+    if !stranded.is_empty() {
+        tracing::warn!(
+            skills = ?stranded,
+            companion_id = %owner,
+            "kept these legacy shared skills unowned: the owner already has a skill of the same name"
         );
     }
     Ok(())
@@ -1607,12 +1680,12 @@ impl CompanionStore {
 
     /// Open (or create) the v3 baseline `{companion_dir}/memory.db`.
     ///
-    /// `memory_owner` is the companion that the one-time re-homing migration
-    /// assigns to every vestigial shared (`('user', NULL)`) memory — resolve it
+    /// `row_owner` is the companion that the one-time re-homing migrations assign
+    /// to every vestigial shared (`('user', NULL)`) memory and skill — resolve it
     /// from the live roster BEFORE opening the store (see
-    /// [`CompanionRegistry::resolve_memory_owner`](crate::registry::CompanionRegistry::resolve_memory_owner)).
+    /// [`CompanionRegistry::resolve_row_owner`](crate::registry::CompanionRegistry::resolve_row_owner)).
     /// `None` (empty roster) leaves those rows untouched for a later open.
-    pub async fn open(companion_dir: &Path, memory_owner: Option<&str>) -> Result<Self, AppError> {
+    pub async fn open(companion_dir: &Path, row_owner: Option<&str>) -> Result<Self, AppError> {
         std::fs::create_dir_all(companion_dir)
             .map_err(|e| AppError::Internal(format!("create companion dir: {e}")))?;
         let database_path = companion_dir.join("memory.db");
@@ -1646,7 +1719,7 @@ impl CompanionStore {
             let init = if database_exists {
                 // In-place upgrade first (idempotent ALTER/CREATE IF; preserves
                 // rows), then the strict contract check.
-                match upgrade_schema_in_place(&bootstrap, memory_owner).await {
+                match upgrade_schema_in_place(&bootstrap, row_owner).await {
                     Ok(()) => validate_baseline_schema(&bootstrap).await,
                     Err(error) => Err(error),
                 }
@@ -2820,18 +2893,27 @@ impl CompanionStore {
 // ---------------------------------------------------------------------------
 // 自进化：技能注册表 / 挖矿统计 / 反馈回流
 // 正文以磁盘 SKILL.md 为事实源（见 nomifun-extension::skill_service）；这里只存
-// 元数据 + 溯源 + 生命周期。scope_companion_id = NULL 表示 shared（全员可用）。
+// 元数据 + 溯源 + 生命周期。共享技能已作为产品概念删除：每个技能行都属于恰好
+// 一个伙伴（scope_companion_id）；scope_companion_id = NULL 只是启动迁移还没
+// 认领的遗留行。
 // ---------------------------------------------------------------------------
 
 /// 一个伙伴自进化技能的注册表行。
+///
+/// The `(scope_kind, scope_companion_id)` column pair is deliberately NOT
+/// mirrored field-for-field: `scope_kind` is fully determined by whether there
+/// is an owner, so carrying both invited the two to disagree (and shipped a
+/// dead discriminator over the wire). `scope_companion_id` is the single answer
+/// to "whose skill is this".
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompanionSkill {
     #[serde(deserialize_with = "deserialize_uuidv7_string")]
     pub companion_skill_id: String,
-    pub scope_kind: String,
     pub skill_name: String,
-    /// `None` = shared（全员可用）；`Some` is the canonical owning companion ID.
+    /// The owning companion. `None` is only the vestigial legacy state — a row
+    /// written when skills could be shared, which [`backfill_skill_owner`]
+    /// re-homes at the first launch that has a companion to re-home it onto.
     pub scope_companion_id: Option<String>,
     pub status: String,
     pub source: String,
@@ -2853,7 +2935,7 @@ pub struct CompanionSkill {
     pub signature: String,
 }
 
-/// One page of skills visible to a companion and the number of matching rows.
+/// One page of a companion's own skills and the number of matching rows.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompanionSkillPage {
     pub items: Vec<CompanionSkill>,
@@ -2884,6 +2966,9 @@ fn row_to_skill(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionSkill, AppErro
     }
     let scope_kind: String = row.get("scope_kind");
     let scope_companion_id: Option<String> = row.get("scope_companion_id");
+    // The column pair is still validated as a pair even though only the owner
+    // half is carried in the struct: a row where the two disagree is corrupt
+    // side-store state, not something to silently reinterpret.
     match (scope_kind.as_str(), scope_companion_id.as_deref()) {
         ("user", None) => {}
         ("companion", Some(owner)) => {
@@ -2904,7 +2989,6 @@ fn row_to_skill(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionSkill, AppErro
     Ok(CompanionSkill {
         companion_skill_id,
         skill_name: row.get("skill_name"),
-        scope_kind,
         scope_companion_id,
         status: row.get("status"),
         source: row.get("source"),
@@ -2932,18 +3016,20 @@ impl CompanionStore {
     }
 
     /// Insert or update a skill registry row by its durable business ID.
+    ///
+    /// An owner is mandatory: 共享技能 is gone, so there is no legitimate way to
+    /// create an ownerless row any more. Failing here is what keeps the vestigial
+    /// `('user', NULL)` shape a read-only legacy artefact instead of something a
+    /// new write path can resurrect.
     pub async fn insert_skill(&self, s: &CompanionSkill) -> Result<(), AppError> {
         validate_uuidv7(&s.companion_skill_id)
             .map_err(|error| AppError::BadRequest(format!("invalid companion_skill_id: {error}")))?;
-        match (s.scope_kind.as_str(), s.scope_companion_id.as_deref()) {
-            ("user", None) => {}
-            ("companion", Some(owner)) => validate_companion_id(owner, "skill scope companion_id")?,
-            _ => {
-                return Err(AppError::BadRequest(
-                    "skill scope must be shared (user/None) or private (companion/Some(canonical ID))".into(),
-                ));
-            }
-        }
+        let Some(owner) = s.scope_companion_id.as_deref() else {
+            return Err(AppError::BadRequest(
+                "a companion skill must belong to one companion (scope_companion_id)".into(),
+            ));
+        };
+        validate_companion_id(owner, "skill scope companion_id")?;
         for event_id in &s.provenance_event_ids {
             validate_uuidv7(event_id).map_err(|error| {
                 AppError::BadRequest(format!(
@@ -2974,7 +3060,7 @@ impl CompanionStore {
         sqlx::query(
             "INSERT INTO companion_skills(companion_skill_id, skill_name, scope_kind, scope_companion_id, status, source, confidence,
                 provenance_event_ids, strength, version, skill_pattern_id, usage_count, last_used_at, created_at, updated_at, signature)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             VALUES(?,?,'companion',?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(companion_skill_id) DO UPDATE SET
                 skill_name=excluded.skill_name, scope_kind=excluded.scope_kind,
                 scope_companion_id=excluded.scope_companion_id,
@@ -2986,8 +3072,7 @@ impl CompanionStore {
         )
         .bind(&s.companion_skill_id)
         .bind(&s.skill_name)
-        .bind(&s.scope_kind)
-        .bind(&s.scope_companion_id)
+        .bind(owner)
         .bind(&s.status)
         .bind(&s.source)
         .bind(s.confidence)
@@ -3006,42 +3091,37 @@ impl CompanionStore {
         Ok(())
     }
 
-    /// List a companion's own skills; with `include_shared`, also the user-scoped (shared) ones.
-    pub async fn list_skills(&self, companion_id: &str, include_shared: bool) -> Result<Vec<CompanionSkill>, AppError> {
+    /// A companion's skills. There is no cross-companion read: a skill belongs
+    /// to exactly one companion, so this is the whole list.
+    pub async fn list_skills(&self, companion_id: &str) -> Result<Vec<CompanionSkill>, AppError> {
         validate_companion_id(companion_id, "skill companion_id")?;
-        let sql = if include_shared {
-            "SELECT * FROM companion_skills WHERE scope_companion_id = ? OR scope_kind = 'user' \
-             ORDER BY strength DESC, updated_at DESC, scope_kind ASC, scope_companion_id ASC, skill_name ASC"
-        } else {
+        let rows = sqlx::query(
             "SELECT * FROM companion_skills WHERE scope_companion_id = ? \
-             ORDER BY strength DESC, updated_at DESC, scope_kind ASC, scope_companion_id ASC, skill_name ASC"
-        };
-        let rows = sqlx::query(sql).bind(companion_id).fetch_all(&self.pool).await.map_err(db_err)?;
+             ORDER BY strength DESC, updated_at DESC, skill_name ASC",
+        )
+        .bind(companion_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
         rows.iter().map(row_to_skill).collect()
     }
 
-    /// List one page of skills visible to a companion, optionally limited to one lifecycle status.
+    /// One page of a companion's own skills, optionally limited to one lifecycle status.
     pub async fn list_skill_page(
         &self,
         companion_id: &str,
-        include_shared: bool,
         status: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<CompanionSkillPage, AppError> {
         validate_companion_id(companion_id, "skill companion_id")?;
-        let scope_clause = if include_shared {
-            " WHERE (scope_companion_id = ? OR scope_kind = 'user')"
-        } else {
-            " WHERE scope_companion_id = ?"
-        };
         let status_clause = if status.is_some() { " AND status = ?" } else { "" };
         let limit = limit.clamp(1, 500);
         let offset = offset.max(0);
 
         let items_sql = format!(
-            "SELECT * FROM companion_skills{scope_clause}{status_clause} \
-             ORDER BY strength DESC, updated_at DESC, scope_kind ASC, scope_companion_id ASC, skill_name ASC LIMIT ? OFFSET ?"
+            "SELECT * FROM companion_skills WHERE scope_companion_id = ?{status_clause} \
+             ORDER BY strength DESC, updated_at DESC, skill_name ASC LIMIT ? OFFSET ?"
         );
         let mut items_query = sqlx::query(&items_sql).bind(companion_id);
         if let Some(status) = status {
@@ -3054,7 +3134,9 @@ impl CompanionStore {
             .await
             .map_err(db_err)?;
 
-        let count_sql = format!("SELECT COUNT(*) AS n FROM companion_skills{scope_clause}{status_clause}");
+        let count_sql = format!(
+            "SELECT COUNT(*) AS n FROM companion_skills WHERE scope_companion_id = ?{status_clause}"
+        );
         let mut count_query = sqlx::query(&count_sql).bind(companion_id);
         if let Some(status) = status {
             count_query = count_query.bind(status);
@@ -3164,24 +3246,22 @@ impl CompanionStore {
         Ok(())
     }
 
-    /// Resolve the runtime tool's human-readable name to one durable row, then
-    /// perform the durable update by `companion_skill_id`.
+    /// Resolve the runtime tool's human-readable name to one durable row of
+    /// `owner`'s, then perform the durable update by `companion_skill_id`.
+    /// Name lookups are owner-scoped: two companions may hold same-named skills
+    /// and the usage must land on the one that was actually loaded.
     pub async fn record_skill_usage_by_name(
         &self,
-        scope_companion_id: Option<&str>,
+        owner: &str,
         skill_name: &str,
         now: i64,
     ) -> Result<(), AppError> {
-        if let Some(companion_id) = scope_companion_id {
-            validate_companion_id(companion_id, "skill scope companion_id")?;
-        }
+        validate_companion_id(owner, "skill scope companion_id")?;
         let companion_skill_id: Option<String> = sqlx::query_scalar(
             "SELECT companion_skill_id FROM companion_skills
-             WHERE ((? IS NULL AND scope_companion_id IS NULL) OR scope_companion_id = ?)
-               AND skill_name = ?",
+             WHERE scope_companion_id = ? AND skill_name = ?",
         )
-        .bind(scope_companion_id)
-        .bind(scope_companion_id)
+        .bind(owner)
         .bind(skill_name)
         .fetch_optional(&self.pool)
         .await
@@ -3215,7 +3295,7 @@ impl CompanionStore {
         for row in rows {
             let source: String = row.get("source");
             if source != "mined" {
-                continue; // manual / demonstrated / gifted skills never decay
+                continue; // manual / demonstrated skills never decay
             }
             let strength: f64 = row.get("strength");
             let clock: i64 = row.get("clock");
@@ -3264,41 +3344,20 @@ impl CompanionStore {
         Ok(archived)
     }
 
-    /// Count a companion's own active skills (for the expertise badge).
-    pub async fn count_active_skills(&self, companion_id: &str) -> Result<i64, AppError> {
+    /// Count the skills a companion generated since `since_ms` — the weekly
+    /// digest's "what I learned". Deliberately not split by lifecycle status:
+    /// how many of them are currently *active* was the 专精 badge's number, and
+    /// that framing is gone.
+    pub async fn count_skills_since(&self, companion_id: &str, since_ms: i64) -> Result<i64, AppError> {
         validate_companion_id(companion_id, "skill companion_id")?;
         let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM companion_skills WHERE scope_companion_id = ? AND status = 'active'",
+            "SELECT COUNT(*) FROM companion_skills WHERE scope_companion_id = ? AND created_at >= ?",
         )
         .bind(companion_id)
+        .bind(since_ms)
         .fetch_one(&self.pool)
         .await
         .map_err(db_err)?;
-        Ok(n)
-    }
-
-    /// Count a companion's skills created since `since_ms` (optionally filtered by status) — weekly digest.
-    pub async fn count_skills_since(&self, companion_id: &str, since_ms: i64, status: Option<&str>) -> Result<i64, AppError> {
-        validate_companion_id(companion_id, "skill companion_id")?;
-        let n: i64 = match status {
-            Some(s) => sqlx::query_scalar(
-                "SELECT COUNT(*) FROM companion_skills WHERE scope_companion_id = ? AND created_at >= ? AND status = ?",
-            )
-            .bind(companion_id)
-            .bind(since_ms)
-            .bind(s)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(db_err)?,
-            None => sqlx::query_scalar(
-                "SELECT COUNT(*) FROM companion_skills WHERE scope_companion_id = ? AND created_at >= ?",
-            )
-            .bind(companion_id)
-            .bind(since_ms)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(db_err)?,
-        };
         Ok(n)
     }
 
@@ -3913,6 +3972,12 @@ mod tests {
         let database_path = root.path().join("memory.db");
         let memory_id_active = CompanionMemoryId::new().into_string();
         let memory_id_archived = CompanionMemoryId::new().into_string();
+        // 共享技能 rows, the pre-re-homing shape: ('user', NULL). `collides` shares
+        // its name with a skill the future owner already owns.
+        let skill_id_shared = nomifun_common::generate_id();
+        let skill_id_collides = nomifun_common::generate_id();
+        let skill_id_owned = nomifun_common::generate_id();
+        let owner = companion_fixture(77);
         {
             let pool = SqlitePoolOptions::new()
                 .max_connections(1)
@@ -3938,6 +4003,24 @@ mod tests {
                 )
                 .bind(memory_id)
                 .bind(content)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            for (skill_id, name, owner_id, status) in [
+                (&skill_id_shared, "legacy-shared", None, "active"),
+                (&skill_id_collides, "collides", None, "archived"),
+                (&skill_id_owned, "collides", Some(owner.as_str()), "active"),
+            ] {
+                sqlx::query(
+                    "INSERT INTO companion_skills(companion_skill_id, skill_name, scope_kind, scope_companion_id, status, source, confidence, provenance_event_ids, strength, version, usage_count, created_at, updated_at, signature)
+                     VALUES(?, ?, ?, ?, ?, 'mined', 0.9, '[]', 1.0, 1, 0, 1, 1, '')",
+                )
+                .bind(skill_id)
+                .bind(name)
+                .bind(if owner_id.is_some() { "companion" } else { "user" })
+                .bind(owner_id)
                 .bind(status)
                 .execute(&pool)
                 .await
@@ -3972,6 +4055,8 @@ mod tests {
         let archived = store.get_memory(&memory_id_archived).await.unwrap().unwrap();
         assert_eq!(archived.status, "archived");
         assert_eq!(archived.scope_kind, "user");
+        // Same for the shared SKILL rows: no roster, no owner, no re-homing.
+        assert_eq!(store.get_skill(&skill_id_shared).await.unwrap().unwrap().scope_companion_id, None);
 
         // Idempotent: a second open of the already-upgraded store succeeds.
         drop(store);
@@ -3982,7 +4067,6 @@ mod tests {
         // Opening WITH an owner re-homes every shared row onto it — active and
         // archived alike — preserving each memory verbatim otherwise. This is the
         // migration that deletes 共享记忆 from the data: **每条记忆都不能丢**。
-        let owner = companion_fixture(77);
         let migrated = CompanionStore::open(root.path(), Some(&owner)).await.unwrap();
         let shared_left: i64 =
             sqlx::query_scalar("SELECT count(*) FROM companion_memories WHERE scope_kind = 'user'")
@@ -4012,6 +4096,33 @@ mod tests {
         assert_eq!(injected.len(), 1, "only the active row injects: {injected:?}");
         assert_eq!(injected[0].memory_id, memory_id_active);
 
+        // The SKILL rows re-home the same way — 共享技能 is gone as a concept, and
+        // an unowned row would be invisible in every companion's list. Each row
+        // keeps its name and lifecycle; the only thing that changes is the owner.
+        let rehomed = migrated.get_skill(&skill_id_shared).await.unwrap().unwrap();
+        assert_eq!(rehomed.skill_name, "legacy-shared");
+        assert_eq!(rehomed.status, "active");
+        assert_eq!(rehomed.scope_companion_id.as_deref(), Some(owner.as_str()));
+        assert_eq!(
+            migrated.list_skills(&owner).await.unwrap().len(),
+            2,
+            "the re-homed skill and the pre-owned one both belong to the owner now"
+        );
+        // A name collision is SKIPPED, never forced: (owner, skill_name) is unique,
+        // so forcing it would raise a UNIQUE violation inside the boot migration and
+        // fail the launch of every install that has such a pair. The row keeps its
+        // legacy shape — nothing is deleted, nothing is overwritten.
+        let stranded = migrated.get_skill(&skill_id_collides).await.unwrap().unwrap();
+        assert_eq!(stranded.scope_companion_id, None, "a colliding row stays unowned");
+        assert_eq!(stranded.status, "archived", "and keeps its lifecycle verbatim");
+        let pre_owned = migrated.get_skill(&skill_id_owned).await.unwrap().unwrap();
+        assert_eq!(pre_owned.status, "active", "the owner's own same-named skill is untouched");
+        let skill_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM companion_skills")
+            .fetch_one(&migrated.pool)
+            .await
+            .unwrap();
+        assert_eq!(skill_rows, 3, "re-homing must never add or drop a skill row");
+
         // Idempotent: re-running with a DIFFERENT owner must not steal already
         // owned rows (the UPDATE only touches scope_kind = 'user').
         drop(migrated);
@@ -4019,6 +4130,17 @@ mod tests {
         let again = CompanionStore::open(root.path(), Some(&other_owner)).await.unwrap();
         let still_owned = again.get_memory(&memory_id_active).await.unwrap().unwrap();
         assert_eq!(still_owned.scope_companion_id.as_deref(), Some(owner.as_str()));
+        assert_eq!(
+            again.get_skill(&skill_id_shared).await.unwrap().unwrap().scope_companion_id.as_deref(),
+            Some(owner.as_str()),
+            "a second boot must not re-home an already owned skill onto someone else"
+        );
+        // The collision was skipped, not resolved forever: the roster changed, so
+        // the row gets a fresh chance and finally lands on a real owner.
+        assert_eq!(
+            again.get_skill(&skill_id_collides).await.unwrap().unwrap().scope_companion_id.as_deref(),
+            Some(other_owner.as_str())
+        );
     }
 
     #[tokio::test]

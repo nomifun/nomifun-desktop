@@ -41,7 +41,7 @@ const NO_AUTO_NAMES: ReadonlySet<string> = new Set<string>();
  * and skills the companion mined out of real work); a source badge is the only
  * place that distinction shows. Drafts wait on the user, so they sort first and
  * are this tab's attention signal. Nothing here is shared with another
- * companion: the registry is queried with `include_shared: false`.
+ * companion: the registry list is scoped to it by companion_id.
  */
 const SkillsTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAttentionChange }) => {
   const { t, i18n } = useTranslation();

@@ -130,11 +130,11 @@ describe('deleted features stay deleted', () => {
     expect(offenders(({ code }) => code.includes('赠送') || /giftSkill/.test(code))).toEqual([]);
   });
 
-  test('a companion skill list opts out of shared skills', () => {
-    // `include_shared` still exists on the API; passing anything but false would
-    // resurrect cross-companion skills. The lookahead must swallow the whitespace
-    // itself — `\s*(?!false)` backtracks to zero width and matches the space.
-    expect(offenders(({ code }) => /include_shared\s*:(?!\s*false\b)/.test(code))).toEqual([]);
+  test('no cross-companion skill scope at all', () => {
+    // `include_shared` is gone from the API, not merely defaulted to false: a
+    // companion's skill list is its own rows, so the identifier itself must not
+    // come back in any form (a request param, a prop, a local flag).
+    expect(offenders(({ code }) => /include_shared/.test(code))).toEqual([]);
   });
 
   test('no shared-memory scope selector', () => {

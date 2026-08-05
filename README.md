@@ -131,10 +131,10 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 The companion you talk to every day quietly becomes the partner who *gets* you.
 
 - **Make it yours.** Upload a custom companion figure (DIY), or pick from an independent figure library decoupled from any single companion.
-- **One brain, many faces.** Run multiple companions that share a common memory hub, while each keeps its own **private** memory and can mount different domain knowledge bases. Teach *one* companion well, then have it teach the others.
+- **A family, not a hive mind.** Run multiple companions side by side, each a complete individual with **its own** chat model, persona, memory, and domain knowledge bases. Memory belongs to exactly one companion — nothing you tell the work companion leaks into the one you chat with at home.
 - **Chat with them where you already work.** Companion chats now live in the main **Sessions** UI under a dedicated desktop-companion group, while `/nomi` stays focused on companion management.
 - **It learns you (opt-in, on by default after a one-time consent).** A background learner distills your usage into durable memories; a deterministic evolution engine mines your recurring multi-step tool sequences into **draft skills** it proposes for your review. Memory is fully **visible and editable**.
-- **Skills that spread.** Companions generate their own skills, discuss them with you, and can **gift** a skill to another companion (the recipient gets a copy) — opt-in shared learning across your roster.
+- **Skills it writes itself.** Companions distill their own skills out of real work and discuss them with you before anything is kept.
 - **A super gateway, not just a buddy.** Each companion is a complete, independent individual that can connect to multiple IM channels. From anywhere with a network and a chat app, message your companion to drive your computer for you. Each companion can fully operate the desktop's capabilities.
 
 ### 🧠 Agent collaboration
