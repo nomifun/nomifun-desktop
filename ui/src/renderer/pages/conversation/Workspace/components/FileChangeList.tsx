@@ -76,7 +76,7 @@ const FileChangeItem: React.FC<{
   const statusLabel = STATUS_LABELS[change.operation];
 
   return (
-    <div className='border-b border-b-base last:border-b-0'>
+    <div className='border-b border-b-solid border-b-[var(--border-base)] last:border-b-0'>
       <div
         className={`group flex items-center justify-between px-8px py-6px transition-colors ${
           expandable ? 'cursor-pointer hover:bg-fill-2' : ''
@@ -137,7 +137,7 @@ const PanelHeader: React.FC<{
   count: number;
   actions?: React.ReactNode;
 }> = ({ title, count, actions }) => (
-  <div className='flex items-center justify-between px-8px py-4px bg-fill-2 border-b border-b-base select-none flex-shrink-0'>
+  <div className='flex items-center justify-between px-8px py-4px bg-fill-2 border-b border-b-solid border-b-[var(--border-base)] select-none flex-shrink-0'>
     <span className='text-12px font-medium text-t-secondary'>
       {title} ({count})
     </span>
@@ -359,7 +359,7 @@ const FileChangeList: React.FC<FileChangeListProps> = ({
   return (
     <div className='flex flex-col size-full'>
       {/* Top toolbar */}
-      <div className='px-8px py-4px border-b border-b-base flex items-center justify-between flex-shrink-0'>
+      <div className='px-8px py-4px border-b border-b-solid border-b-[var(--border-base)] flex items-center justify-between flex-shrink-0'>
         <span className='text-12px text-t-secondary'>
           {t('conversation.workspace.changes.summary', { count: totalCount })}
         </span>

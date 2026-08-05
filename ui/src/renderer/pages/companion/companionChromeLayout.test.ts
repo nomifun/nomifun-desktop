@@ -51,6 +51,6 @@ describe('desktop companion chrome layout', () => {
     // (`'manual'` / `'merge'`)。没有这道 source 闸门，桌宠会开始为没人要求通知的
     // 后台动作弹气泡。
     expect(companionSource.includes("if (m.source !== 'chat') return;")).toBe(true);
-    expect(companionSource.includes('m.scope_companion_id !== companionId')).toBe(true);
+    expect(companionSource.includes('m.companion_id !== companionId')).toBe(true);
   });
 });

@@ -57,9 +57,9 @@ const formatRefreshInterval = (
 const managedSourceAlias = (): string => 'oc';
 
 const healthDotClass = (status: ManagedModelHealthResult['status'] | 'checking'): string => {
-  if (status === 'healthy') return 'bg-[rgb(var(--success-6))] shadow-[0_0_0_3px_rgba(var(--success-6),0.1)]';
-  if (status === 'unhealthy') return 'bg-[rgb(var(--danger-6))] shadow-[0_0_0_3px_rgba(var(--danger-6),0.1)]';
-  if (status === 'checking') return 'bg-[rgb(var(--primary-6))] animate-pulse';
+  if (status === 'healthy') return 'bg-success-6 shadow-[0_0_0_3px_rgba(var(--success-6),0.1)]';
+  if (status === 'unhealthy') return 'bg-danger-6 shadow-[0_0_0_3px_rgba(var(--danger-6),0.1)]';
+  if (status === 'checking') return 'bg-primary-6 animate-pulse';
   return 'bg-[var(--color-fill-4)]';
 };
 
@@ -243,7 +243,7 @@ const FreeModelsContent: React.FC = () => {
             backgroundColor: 'rgba(var(--primary-6),0.06)',
           }}
         >
-          <Info theme='outline' size='16' className='mt-1px shrink-0 text-[rgb(var(--primary-6))]' />
+          <Info theme='outline' size='16' className='mt-1px shrink-0 text-primary-6' />
           <div className='min-w-0'>
             <div className='text-13px font-600 leading-18px text-t-primary'>{t('settings.modelHub.free.privacyTitle')}</div>
             <div className='mt-2px text-12px leading-18px text-t-secondary'>{t('settings.modelHub.free.privacyNotice')}</div>
@@ -362,7 +362,7 @@ const FreeModelsContent: React.FC = () => {
                       <Tag
                         size='small'
                         bordered={false}
-                        className='!rd-6px !px-7px !text-10px !bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]'
+                        className='!rd-6px !px-7px !text-10px !bg-[rgba(var(--success-6),0.1)] !text-success-6'
                       >
                         {t('settings.modelHub.free.freeBadge')}
                       </Tag>
@@ -445,7 +445,7 @@ const FreeModelsContent: React.FC = () => {
                           aria-hidden='true'
                           className={classNames(
                             'absolute left-0 top-9px h-24px w-2px rd-r-3px transition-colors',
-                            modelAvailable ? 'bg-[rgb(var(--primary-6))]' : 'bg-[var(--color-fill-4)]'
+                            modelAvailable ? 'bg-primary-6' : 'bg-[var(--color-fill-4)]'
                           )}
                         />
 

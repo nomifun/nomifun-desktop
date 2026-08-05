@@ -159,7 +159,7 @@ const CompanionAccessTokenPanel: React.FC = () => {
 
       {/* 标题 / Section header */}
       <div className='flex items-center gap-6px px-2px'>
-        <Key theme='outline' size='14' className='text-[rgb(var(--primary-6))] shrink-0' />
+        <Key theme='outline' size='14' className='text-primary-6 shrink-0' />
         <span className='text-12px font-500 text-t-tertiary'>{t('settings.webui.companionToken.title')}</span>
       </div>
       <div className='text-12px text-t-tertiary px-2px leading-relaxed'>
@@ -210,8 +210,8 @@ const CompanionAccessTokenPanel: React.FC = () => {
           {/* 一次性明文令牌块（仅本次铸造可见，镜像初始密码块）/ One-time plaintext token */}
           {plaintext && (
             <div className='flex flex-col gap-4px'>
-              <div className='inline-flex items-center gap-8px rd-100px border border-[rgb(var(--primary-6))]/40 bg-[rgb(var(--primary-1))] px-10px py-4px min-w-0'>
-                <Key theme='outline' size='14' className='text-[rgb(var(--primary-6))] shrink-0' />
+              <div className='inline-flex items-center gap-8px rd-100px border border-[rgba(var(--primary-6),0.4)] bg-primary-1 px-10px py-4px min-w-0'>
+                <Key theme='outline' size='14' className='text-primary-6 shrink-0' />
                 <span className='text-13px text-t-primary font-mono truncate flex-1'>{plaintext}</span>
                 <Tooltip content={t('common.copy')}>
                   <Button

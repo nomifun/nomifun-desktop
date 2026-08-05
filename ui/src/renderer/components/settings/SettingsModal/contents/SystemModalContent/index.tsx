@@ -364,7 +364,7 @@ const SystemModalContent: React.FC = () => {
 
           {/* Danger zone: factory reset (clears the database + derived data) */}
           <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
-            <div className='text-13px font-600 text-[rgb(var(--danger-6))]'>{t('settings.factoryReset.dangerZone')}</div>
+            <div className='text-13px font-600 text-danger-6'>{t('settings.factoryReset.dangerZone')}</div>
             <div className='flex items-center justify-between gap-12px flex-wrap'>
               <div className='flex-1 min-w-200px'>
                 <div className='text-14px text-t-primary'>{t('settings.factoryReset.title')}</div>

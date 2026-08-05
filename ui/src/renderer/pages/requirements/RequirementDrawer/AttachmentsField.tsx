@@ -133,7 +133,7 @@ const AttachmentsField: React.FC<AttachmentsFieldProps> = ({
   const count = existing.length + value.length;
 
   return (
-    <div className='rounded-8px border border-solid border-border-2 overflow-hidden'>
+    <div className='rounded-8px border border-solid border-arco-2 overflow-hidden'>
       {messageCtx}
       {/* ── Collapsible header ─────────────────────────────────────────── */}
       <div
@@ -158,7 +158,7 @@ const AttachmentsField: React.FC<AttachmentsFieldProps> = ({
 
       {/* ── Expanded body: dropzone + previews ─────────────────────────── */}
       {open ? (
-        <div className='border-t border-solid border-border-2 px-12px py-12px flex flex-col gap-8px'>
+        <div className='border-t border-solid border-arco-2 px-12px py-12px flex flex-col gap-8px'>
           <div className='text-12px text-t-secondary'>{t('requirements.form.attachmentsHelp')}</div>
           <div
             {...dragHandlers}
@@ -167,7 +167,7 @@ const AttachmentsField: React.FC<AttachmentsFieldProps> = ({
             tabIndex={-1}
             className={classNames(
               'rounded-8px border border-dashed p-12px flex flex-col gap-8px outline-none',
-              isFileDragging ? 'border-primary-6 bg-primary-1' : 'border-border-2'
+              isFileDragging ? 'border-primary-6 bg-primary-1' : 'border-arco-2'
             )}
           >
             <div className='flex flex-wrap gap-8px'>

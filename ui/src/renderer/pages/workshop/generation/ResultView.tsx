@@ -30,7 +30,7 @@ export interface ResultViewProps {
 }
 
 const Spinner: React.FC = () => (
-  <span className='h-16px w-16px animate-spin rounded-full border-2 border-solid border-[var(--color-fill-3)] border-t-[rgb(var(--primary-6))]' />
+  <span className='h-16px w-16px animate-spin rounded-full border-2 border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
 );
 
 const ContinueBox: React.FC<{ onSubmit: (v: string) => void }> = ({ onSubmit }) => {
@@ -43,7 +43,7 @@ const ContinueBox: React.FC<{ onSubmit: (v: string) => void }> = ({ onSubmit }) 
     setDraft('');
   };
   return (
-    <div className='flex items-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px focus-within:border-[rgb(var(--primary-6))]'>
+    <div className='flex items-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px focus-within:border-primary-6'>
       <input
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -66,7 +66,7 @@ const ContinueBox: React.FC<{ onSubmit: (v: string) => void }> = ({ onSubmit }) 
         className={[
           'nodrag grid h-22px w-22px shrink-0 place-items-center rounded-6px cursor-pointer transition-colors',
           draft.trim()
-            ? 'bg-[rgb(var(--primary-6))] text-white hover:opacity-90'
+            ? 'bg-primary-6 text-white hover:opacity-90'
             : 'bg-[var(--color-fill-3)] text-[var(--color-text-3)]',
         ].join(' ')}
       >
@@ -121,7 +121,7 @@ const MediaResult: React.FC<{ mode: 'image' | 'video'; assetId: AssetId; index: 
         <div className='flex h-120px flex-col items-center justify-center gap-5px px-8px text-center'>
           {media.status === 'error' ? (
             <>
-              <span className='text-11px text-[rgb(var(--danger-6))]'>
+              <span className='text-11px text-danger-6'>
                 {t('workshopGeneration.result.loadFailed', { defaultValue: '加载失败' })}
               </span>
               <span className='max-w-full break-all text-9px text-[var(--color-text-3)]'>{assetId}</span>
@@ -151,7 +151,7 @@ const AudioResult: React.FC<{ assetId: AssetId; index: number; total: number }> 
         <div className='flex h-48px flex-col items-center justify-center gap-5px px-8px text-center'>
           {media.status === 'error' ? (
             <>
-              <span className='text-11px text-[rgb(var(--danger-6))]'>
+              <span className='text-11px text-danger-6'>
                 {t('workshopGeneration.result.loadFailed', { defaultValue: '加载失败' })}
               </span>
               <span className='max-w-full break-all text-9px text-[var(--color-text-3)]'>{assetId}</span>
@@ -195,7 +195,7 @@ const TextResult: React.FC<{
         {state.status === 'ready' ? (
           state.content || <span className='text-[var(--color-text-3)]'>{t('workshopGeneration.result.emptyText', { defaultValue: '空文本' })}</span>
         ) : state.status === 'error' ? (
-          <span className='flex flex-col gap-3px text-[rgb(var(--danger-6))]'>
+          <span className='flex flex-col gap-3px text-danger-6'>
             {t('workshopGeneration.result.loadFailed', { defaultValue: '加载失败' })}
             <span className='break-all text-9px text-[var(--color-text-3)]'>{assetId}</span>
           </span>
@@ -209,7 +209,7 @@ const TextResult: React.FC<{
           tabIndex={0}
           onClick={() => onToTextNode(state.content)}
           onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onToTextNode(state.content)}
-          className='nodrag inline-flex w-fit items-center gap-5px rounded-7px border border-solid border-[var(--color-border-2)] px-9px py-5px text-11px font-500 text-[var(--color-text-2)] cursor-pointer hover:border-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-6))] transition-colors'
+          className='nodrag inline-flex w-fit items-center gap-5px rounded-7px border border-solid border-[var(--color-border-2)] px-9px py-5px text-11px font-500 text-[var(--color-text-2)] cursor-pointer hover:border-primary-6 hover:text-primary-6 transition-colors'
         >
           <TransferData theme='outline' size={12} strokeWidth={3} />
           {t('workshopGeneration.result.toTextNode', { defaultValue: '转为文本节点' })}

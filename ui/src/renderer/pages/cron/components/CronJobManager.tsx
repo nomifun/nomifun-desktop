@@ -146,7 +146,7 @@ const CronJobManager: React.FC<CronJobManagerProps> = ({ conversation_id, cron_j
         <span className='inline-flex items-center gap-2px rounded-full px-8px py-2px bg-2'>
           <AlarmClock theme='outline' size={16} fill={iconColors.primary} />
           <span
-            className={`ml-4px w-8px h-8px rounded-full ${hasError ? 'bg-[rgb(var(--danger-6))]' : isPaused ? 'bg-[rgb(var(--warning-6))]' : 'bg-[rgb(var(--success-6))]'}`}
+            className={`ml-4px w-8px h-8px rounded-full ${hasError ? 'bg-danger-6' : isPaused ? 'bg-warning-6' : 'bg-success-6'}`}
           />
         </span>
       </Button>

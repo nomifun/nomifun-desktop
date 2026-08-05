@@ -80,7 +80,7 @@ function VideoNodeImpl({ id, data, selected }: NodeProps<VideoFlowNode>) {
                 </div>
               )}
               {status === 'error' && (
-                <div className='absolute inset-0 flex flex-col items-center justify-center gap-6px px-12px text-center text-[rgb(var(--danger-6))]' style={{ background: 'var(--color-bg-2)' }}>
+                <div className='absolute inset-0 flex flex-col items-center justify-center gap-6px px-12px text-center text-danger-6' style={{ background: 'var(--color-bg-2)' }}>
                   <Info theme='outline' size={20} strokeWidth={3} />
                   <span className='text-11px'>{t('workshopCanvas.node.video.loadFailed', { defaultValue: '视频加载失败' })}</span>
                 </div>

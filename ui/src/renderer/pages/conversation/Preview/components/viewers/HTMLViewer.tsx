@@ -322,7 +322,7 @@ const HTMLPreview: React.FC<HTMLPreviewProps> = ({ content, file_path, hideToolb
 
       {/* 工具栏 */}
       {!hideToolbar && (
-        <div className='flex items-center justify-between h-40px px-12px bg-bg-2 border-b border-border-base flex-shrink-0'>
+        <div className='flex items-center justify-between h-40px px-12px bg-bg-2 border-b border-b-solid border-b-[var(--border-base)] flex-shrink-0'>
           <div className='flex items-center gap-8px'>
             {/* 编辑按钮 */}
             <button
@@ -379,7 +379,7 @@ const HTMLPreview: React.FC<HTMLPreviewProps> = ({ content, file_path, hideToolb
       <div className='flex-1 flex overflow-hidden'>
         {/* 左侧：代码编辑器（编辑模式时显示） */}
         {editMode && (
-          <div className='flex-1 overflow-hidden border-r border-border-base'>
+          <div className='flex-1 overflow-hidden border-r border-r-solid border-r-[var(--border-base)]'>
             <MonacoEditor
               height='100%'
               language='html'
@@ -414,7 +414,7 @@ const HTMLPreview: React.FC<HTMLPreviewProps> = ({ content, file_path, hideToolb
       {/* 右键菜单 */}
       {contextMenu && (
         <div
-          className='fixed bg-bg-1 border border-border-base rd-6px shadow-lg py-4px z-9999'
+          className='fixed bg-bg-1 border border-solid border-[var(--border-base)] rd-6px shadow-lg py-4px z-9999'
           style={{
             left: contextMenu.x,
             top: contextMenu.y,

@@ -192,7 +192,7 @@ const AssetsPanel: React.FC<AssetsPanelProps> = ({ open, onClose, onInsertAsset 
       {/* Header */}
       <div className='shrink-0 flex items-center gap-10px border-b border-solid border-[var(--color-border-2)] px-14px py-12px'>
         <span
-          className='grid h-28px w-28px shrink-0 place-items-center rounded-8px text-[rgb(var(--primary-6))]'
+          className='grid h-28px w-28px shrink-0 place-items-center rounded-8px text-primary-6'
           style={{ background: 'rgba(var(--primary-6),0.12)' }}
         >
           <Platte theme='outline' size={16} fill='currentColor' className='block' style={{ lineHeight: 0 }} />
@@ -301,7 +301,7 @@ const AssetsPanel: React.FC<AssetsPanelProps> = ({ open, onClose, onInsertAsset 
         ) : lib.displayItems.length === 0 ? (
           <div className='flex h-full flex-col items-center justify-center gap-14px px-8px text-center'>
             <span
-              className='grid h-56px w-56px place-items-center rounded-16px text-[rgb(var(--primary-6))]'
+              className='grid h-56px w-56px place-items-center rounded-16px text-primary-6'
               style={{
                 background: 'linear-gradient(150deg, rgba(var(--primary-5),0.16) 0%, rgba(var(--primary-6),0.28) 100%)',
                 border: '1px solid rgba(var(--primary-6),0.22)',
@@ -369,8 +369,8 @@ const AssetsPanel: React.FC<AssetsPanelProps> = ({ open, onClose, onInsertAsset 
 
         {/* Drag-to-upload overlay */}
         {dragActive && (
-          <div className='pointer-events-none absolute inset-8px z-10 grid place-items-center rounded-14px border-2 border-dashed border-[rgb(var(--primary-6))] bg-[rgba(var(--primary-6),0.1)] backdrop-blur-sm'>
-            <div className='flex flex-col items-center gap-8px text-center text-[rgb(var(--primary-6))]'>
+          <div className='pointer-events-none absolute inset-8px z-10 grid place-items-center rounded-14px border-2 border-dashed border-primary-6 bg-[rgba(var(--primary-6),0.1)] backdrop-blur-sm'>
+            <div className='flex flex-col items-center gap-8px text-center text-primary-6'>
               <Upload theme='outline' size={30} strokeWidth={3} />
               <span className='text-14px font-700'>{t('workshopAssets.upload.dropTitle', { defaultValue: '松开以上传' })}</span>
               <span className='max-w-[220px] text-12px text-[var(--color-text-2)]'>

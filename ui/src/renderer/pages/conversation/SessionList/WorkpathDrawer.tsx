@@ -407,7 +407,7 @@ const WorkpathDrawer: React.FC<WorkpathDrawerProps> = ({
                   role='button'
                   tabIndex={0}
                   aria-label={t('sessionList.removeWorkpath')}
-                  className='flex-center cursor-pointer transition-colors text-t-secondary hover:text-[rgb(var(--danger-6))] size-20px rd-4px sider-action-btn'
+                  className='flex-center cursor-pointer transition-colors text-t-secondary hover:text-danger-6 size-20px rd-4px sider-action-btn'
                   onClick={(e) => {
                     e.stopPropagation();
                     onRemoveProjectWorkpath(node);

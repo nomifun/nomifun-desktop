@@ -182,7 +182,7 @@ const CsAgentDetailPage: React.FC = () => {
             </span>
           </Button>
           <span
-            className='flex items-center justify-center w-34px h-34px rd-10px shrink-0 text-[rgb(var(--primary-6))]'
+            className='flex items-center justify-center w-34px h-34px rd-10px shrink-0 text-primary-6'
             style={{
               background: 'linear-gradient(150deg, rgba(var(--primary-5),0.16) 0%, rgba(var(--primary-6),0.26) 100%)',
               border: '1px solid rgba(var(--primary-6),0.22)',

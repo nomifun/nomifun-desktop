@@ -79,7 +79,7 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
               {t('common.loading', { defaultValue: 'Loading...' })}
             </div>
           ) : extensions.length === 0 ? (
-            <div className='py-24px text-center text-t-secondary text-14px border border-dashed border-border-2 rd-12px'>
+            <div className='py-24px text-center text-t-secondary text-14px border border-dashed border-arco-2 rd-12px'>
               {t('settings.plugins.emptyInstalled', { defaultValue: 'No installed plugins found.' })}
             </div>
           ) : (
@@ -104,7 +104,7 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
                       bordered={false}
                       className={
                         extension.enabled
-                          ? '!bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]'
+                          ? '!bg-[rgba(var(--success-6),0.1)] !text-success-6'
                           : '!bg-[var(--color-fill-2)] !text-t-tertiary'
                       }
                     >

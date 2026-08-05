@@ -19,7 +19,7 @@ const CHROME_BTN =
   'grid h-30px w-30px place-items-center rounded-8px cursor-pointer transition-colors text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]';
 const CHROME_BTN_DISABLED = 'grid h-30px w-30px place-items-center rounded-8px text-[var(--color-text-3)] opacity-45 cursor-not-allowed';
 const CHROME_BTN_ACTIVE =
-  'grid h-30px w-30px place-items-center rounded-8px cursor-pointer transition-colors text-[rgb(var(--primary-6))]';
+  'grid h-30px w-30px place-items-center rounded-8px cursor-pointer transition-colors text-primary-6';
 
 export interface CanvasToolbarProps {
   canUndo: boolean;
