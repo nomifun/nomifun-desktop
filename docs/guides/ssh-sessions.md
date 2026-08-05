@@ -48,6 +48,28 @@ From that point the agent's tools operate the remote host:
   and preserved permissions. File edits are never built out of shell strings.
 - `Grep` and `Glob` search the remote tree (ripgrep if present, else grep).
 
+## The link, and how you can see it
+
+One connection is held per session, by a backend pool that outlives the agent —
+switching models tears the agent down and rebuilds it, and your remote shell,
+its working directory and its environment all survive that untouched.
+
+The session header carries a pill showing which host you are operating and the
+live state of its link. Click it for `user@host:port`, the host key
+fingerprint, and whether a sudo password is stored. The states are:
+
+| State | Meaning |
+| --- | --- |
+| Connecting | dialling and authenticating |
+| Connected | shell and SFTP are live |
+| Shell recovering | the transport is fine, but a timed-out command left the shell unusable, so it is being reopened on the same connection |
+| Reconnecting | the link dropped; redialling on a doubling backoff (1s to 60s), replaying the last proven working directory |
+| Disconnected | the link is down. If it will not be retried — rejected credentials, or a changed host key — the pill says so, because retrying a rejected credential only locks the account out |
+| Closed | the session's link is gone. It also reports whether the remote shell was **provably** reaped: if we could not confirm the remote shell exited, it says that rather than claiming a clean shutdown |
+
+The sidebar groups SSH sessions by host, so a session bound to a machine is
+always reachable from the list, not just right after you create it.
+
 ## Host keys
 
 On the first connection to a host, its key is recorded in your own
