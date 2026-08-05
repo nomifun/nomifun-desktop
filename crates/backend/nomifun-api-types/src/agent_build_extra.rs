@@ -319,6 +319,17 @@ pub struct NomiBuildExtra {
     /// (recall/save memory, recent events) and skips unrelated Guide capabilities.
     #[serde(default, rename = "companion_session")]
     pub companion: bool,
+    /// When set, this Nomi conversation is bound to a saved SSH host: the remote
+    /// tool family operates that host instead of the local machine. References
+    /// `ssh_hosts.ssh_host_id` (see the id-schema logical reference). Credentials
+    /// are never here — only the host id.
+    #[serde(default)]
+    pub ssh_host_id: Option<String>,
+    /// Remote working directory the agent's shell starts in for an SSH session.
+    /// Defaults to the remote `$HOME` when absent. Distinct from `workspace`,
+    /// which stays a LOCAL scratch path (skill/knowledge plumbing assumes local).
+    #[serde(default)]
+    pub ssh_remote_cwd: Option<String>,
     /// Opt-in to the Computer tool (screen/mouse/keyboard control) for this
     /// session. Falls back to host config / NOMIFUN_COMPUTER_USE when None.
     #[serde(default)]
