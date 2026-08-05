@@ -181,16 +181,19 @@ v3 reset/restore，不通过历史逐行迁移导入。多伙伴布局如下：
 ```
 <data_dir>/companion/
 ├── shared/                      整机唯一的一份文件（不是「共享记忆」）
-│   ├── config.json              SharedCompanionConfig：采集开关、事件保留/容量策略、学习间隔与学习模型、default_companion_id
+│   ├── config.json              SharedCompanionConfig：采集开关、事件保留/容量策略、会话归档、default_companion_id
+│                                （learn/evolve 已于 2026-08 迁到每个伙伴的 profile 上）
 │   ├── events/YYYYMMDD.jsonl    采集链路的原始事件（自动按期限/硬容量清理；隐私敏感，导出需显式勾选）
 │   └── memory.db                独立 SQLite（PRAGMA user_version 版本阶梯）：
 │                                整机一个记忆数据库，但每一行记忆都归属于
 │                                唯一一个伙伴（scope_kind/scope_companion_id），
 │                                也只有该伙伴读得到；+ 每宠运行态
-│                                （companion_runtime_state：XP 等）
+│                                （companion_runtime_state：XP、mood，以及每个伙伴在
+│                                events/ 里的 learn_cursor_ts / evolve_cursor_ts 游标）
 └── companions/
     └── {companion_id}/                companion_id 为裸标准 UUIDv7，目录即真相
-        └── config.json          CompanionProfileConfig：名称/形象/人格/每宠模型/桌宠开关与位置
+        └── config.json          CompanionProfileConfig：名称/形象/人格/每宠聊天模型/
+                                 该伙伴自己的 learn + evolve 设置/桌宠开关、位置与休眠时段
 ```
 
 `shared/` 的含义是「整机一份」，不是「伙伴之间共用」。`memory.db` 把所有伙伴的记忆行放在同一张表里，每行用 `(scope_kind, scope_companion_id)` 标明主人；所有面向伙伴的读取都按主人过滤，因此一个伙伴永远看不到另一个伙伴的记忆，记忆也不能在主人之间转移。唯一的无主状态是残留的 `('user', NULL)`：升级前的旧行、以及名册为空时导入的行就是这个样子。它在 DB 层仍然合法（零伙伴的安装是受支持的状态），这类行会由一次幂等的启动迁移落户到唯一主人名下（若显式 `default_companion_id` 仍在名册里就是它，否则是最早创建的伙伴）——一条 `UPDATE`，绝不按伙伴复制，因此 `memory_id` 保持稳定，同一件事也不会分裂成每个伙伴各一份。

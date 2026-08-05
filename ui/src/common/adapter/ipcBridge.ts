@@ -4510,6 +4510,10 @@ export interface ICompanionProfile {
   character: string;
   persona: ICompanionPersona;
   model: ICompanionModelRef | null;
+  /** This companion's own 定时学习 loop (install-wide until 2026-08). */
+  learn: ICompanionLearnConfig;
+  /** This companion's own 技能进化 loop (install-wide until 2026-08). */
+  evolve: ICompanionEvolveConfig;
   skills: ICompanionSkillConfig;
   appearance: ICompanionWindowConfig;
   /** Frozen execution configuration last applied to this companion. */
@@ -4523,7 +4527,23 @@ export interface ICompanionProfile {
   created_at: number;
 }
 
-/** Shared skill-evolution settings (P1/P2 backend; P3 surfaces in UI). */
+/** One companion's periodic-learning settings (定时学习). */
+export interface ICompanionLearnConfig {
+  enabled: boolean;
+  /** 5..=1440. */
+  interval_minutes: number;
+  model: ICompanionModelRef | null;
+}
+
+/**
+ * One companion's skill-evolution settings (技能进化).
+ *
+ * Every field the backend serializes is listed, including the four tuning knobs
+ * the UI deliberately never surfaces (`min_pattern_count`, `auto_threshold`,
+ * `skill_half_life_days`, `skill_archive_threshold`) — the wire shape is the
+ * truth, and omitting a field here just makes the type lie about what arrives.
+ * `auto_activate` IS the 保守/激进 preference the 进化 tab renders.
+ */
 export interface ICompanionEvolveConfig {
   enabled: boolean;
   interval_minutes: number;
@@ -4532,6 +4552,8 @@ export interface ICompanionEvolveConfig {
   min_distinct_sessions: number;
   auto_activate: boolean;
   auto_threshold: number;
+  skill_half_life_days: number;
+  skill_archive_threshold: number;
 }
 
 /** Shared session-window archiving settings (伙伴会话窗口归档). Default OFF (opt-in). */
@@ -4542,21 +4564,29 @@ export interface ICompanionArchiveConfig {
   inject_recent_days: number;
 }
 
-/** Shared (cross-companion) config — `shared/config.json`, served by /api/companion/config. */
+/**
+ * Machine-level (cross-companion) config — `shared/config.json`, served by
+ * /api/companion/config.
+ *
+ * `learn` / `evolve` used to live here, which is what made the 进化 tab
+ * install-wide; they are per companion on {@link ICompanionProfile} since
+ * 2026-08. What remains is genuinely machine-level: which events this device
+ * records, the session archiver, and the default-companion pointer.
+ */
 export interface ICompanionSharedConfig {
   collect: ICompanionCollectConfig;
-  learn: {
-    enabled: boolean;
-    interval_minutes: number;
-    model: ICompanionModelRef | null;
-  };
-  evolve: ICompanionEvolveConfig;
   /** Session-window archiving (伙伴会话归档). */
   archive: ICompanionArchiveConfig;
   /** 智能协作：开启后本地伙伴可把复杂任务拆给多个协作者并行推进。 */
   smart_collaboration: boolean;
   /** Null when no companion exists yet (zero-companion state is allowed). */
   default_companion_id: CompanionId | null;
+  /**
+   * Opt-in (default null = off): when set to a directory path, companion `save`
+   * memories are ALSO mirrored into the nomi agent's file-memory there, so the
+   * agent recalls companion-learned facts.
+   */
+  bridge_to_memory_dir: string | null;
 }
 
 export type ICompanionWithStatus = ICompanionProfile & {
@@ -4569,6 +4599,8 @@ export type ICompanionProfilePatch = {
   character?: string;
   persona?: Partial<ICompanionPersona>;
   model?: ICompanionModelRef | null;
+  learn?: Partial<ICompanionLearnConfig>;
+  evolve?: Partial<ICompanionEvolveConfig>;
   skills?: Partial<ICompanionSkillConfig>;
   appearance?: Partial<ICompanionWindowConfig>;
   order_index?: number | null;
@@ -4577,14 +4609,9 @@ export type ICompanionProfilePatch = {
 /// RFC 7396 merge patch over ICompanionSharedConfig — nested partial objects merge.
 export type ICompanionSharedConfigPatch = {
   collect?: Partial<ICompanionCollectConfig>;
-  learn?: Partial<{
-    enabled: boolean;
-    interval_minutes: number;
-    model: ICompanionModelRef | null;
-  }>;
-  evolve?: Partial<ICompanionEvolveConfig>;
   archive?: Partial<ICompanionArchiveConfig>;
   smart_collaboration?: boolean;
+  bridge_to_memory_dir?: string | null;
 };
 
 /** Export endpoint result — backend echoes the resolved destination path
@@ -4937,8 +4964,12 @@ export const companion = {
     (p) => `/api/companion/companions/${p.companion_id}/skills/from-session`,
     (p) => ({ conversation_id: p.conversation_id })
   ),
+  /** Run ONE companion's 定时学习 pass now (the run lock is per companion). */
   runLearn: withResponseMap(
-    httpPost<unknown, void>('/api/companion/learn/run'),
+    httpPost<unknown, { companion_id: CompanionId }>(
+      (p) => `/api/companion/companions/${p.companion_id}/learn/run`,
+      () => ({})
+    ),
     fromApiCompanionLearnResult
   ),
   eventStats: httpGet<ICompanionSourceStats[], void>('/api/companion/events/stats'),
