@@ -69,7 +69,18 @@ const LearningSection: React.FC<Props> = ({ config, needsModel }) => {
           {t('nomi.evolution.learningDesc', {
             defaultValue: '伙伴会定期回顾你的工作记录，从中提炼记忆和经验。',
           })}
-          {config.installWide && <InstallWideNote />}
+          {config.installWide && (
+            <InstallWideNote
+              text={
+                config.ownsLearningOutput
+                  ? undefined
+                  : t('nomi.evolution.learnNotOwnerNote', {
+                      defaultValue:
+                        '这组设置目前对所有伙伴共同生效；定时学习提炼出的记忆会归到默认伙伴名下，不会出现在这个伙伴的记忆页。',
+                    })
+              }
+            />
+          )}
         </>
       }
     >

@@ -700,11 +700,18 @@ const CompanionPage: React.FC = () => {
         }
       })();
     });
-    // The companion just saved a memory of its own (private to it): a low-key
-    // bubble note, but only when idle so it never clobbers an in-flight reply.
-    // Editing/managing is a right-click away (打开记忆 → the scope-aware tab).
+    // The companion just saved a memory DURING A CHAT with the owner (`source:
+    // 'chat'`): a low-key bubble note, but only when idle so it never clobbers an
+    // in-flight reply. Editing/managing is a right-click away (打开记忆).
+    //
+    // The source gate is load-bearing. Every memory is owned now, including the
+    // ones the background learner distills (`source: 'learn'`) and the ones the
+    // owner types in the workspace or an agent writes over MCP (`'manual'`,
+    // `'merge'`) — without it the pet would start popping bubbles for silent
+    // background work nobody asked to be notified about.
     const unsubMemoryCreated = ipcBridge.companion.onMemoryCreated.on((m) => {
       if (!companionId || m.scope_companion_id !== companionId) return;
+      if (m.source !== 'chat') return;
       if (turnActiveRef.current) return;
       const brief = m.content.length > 40 ? `${m.content.slice(0, 40)}…` : m.content;
       popBubble(t('nomi.companion.memorySavedToast', { brief }));

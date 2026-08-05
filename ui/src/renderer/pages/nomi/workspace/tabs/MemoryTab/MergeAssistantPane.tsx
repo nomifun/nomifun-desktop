@@ -31,9 +31,9 @@ interface MergeAssistantPaneProps {
  *
  * The dry-run endpoint scans the whole memory layer, so groups are narrowed here
  * to members this companion can actually see — the tab must never offer to merge
- * another companion's private memories. The backend groups only same-scope
- * memories, so every group shown is either entirely this companion's or entirely
- * install-wide; the hint below says what the second case costs.
+ * another companion's memories. The backend groups by owner, so a shown group is
+ * always entirely this companion's (a legacy row not yet re-homed has no owner
+ * and is visible to everyone until the boot migration assigns it one).
  */
 const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, onMerged }) => {
   const { t } = useTranslation();
@@ -55,7 +55,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
         const visible = raw
           .map((group) => ({
             memories: group.memories.filter(
-              (m) => m.scope_kind !== 'companion' || m.scope_companion_id === companionId
+              (m) => m.scope_companion_id === null || m.scope_companion_id === companionId
             ),
           }))
           .filter((group) => group.memories.length >= 2);
@@ -140,21 +140,11 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
         const draft = drafts[index];
         if (!draft) return null;
         const ready = draft.ids.length >= 2 && draft.content.trim().length > 0;
-        // Groups never mix scopes (the backend buckets by scope), so the head
-        // member decides whether this merge reaches beyond this companion.
-        const installWide = group.memories[0]?.scope_kind === 'user';
         return (
           <div
             key={group.memories[0]?.memory_id ?? index}
             className='flex flex-col gap-8px rd-12px border border-solid border-[var(--color-border-2)] p-12px'
           >
-            {installWide && (
-              <div className='text-12px leading-18px text-t-tertiary'>
-                {t('nomi.memory.installWideShort', {
-                  defaultValue: '装机级记忆：这台电脑上的所有伙伴都会受影响。',
-                })}
-              </div>
-            )}
             <div className='flex flex-col gap-6px'>
               {group.memories.map((m) => (
                 <Checkbox

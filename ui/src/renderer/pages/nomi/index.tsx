@@ -182,7 +182,7 @@ const NomiWorkspacePage: React.FC = () => {
         content: t('nomi.danger.deleteConfirmBody', {
           companionName: target.name,
           defaultValue:
-            '将永久删除 {{companionName}} 及其全部记忆、技能与设定。此操作不可撤销，建议先在「其他 → 迁移」里导出备份。',
+            '将永久删除「{{companionName}}」及其全部记忆、技能、成长进度与聊天记录，无法恢复。注意：迁移包只保存设定与成长进度，记忆不在包内，先导出也留不下它们。',
         }),
         okButtonProps: { status: 'danger' },
         onOk: async () => {
