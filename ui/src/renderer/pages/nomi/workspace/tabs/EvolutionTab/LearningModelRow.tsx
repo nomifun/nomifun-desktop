@@ -74,7 +74,7 @@ const LearningModelRow: React.FC<Props> = ({ learn, patchLearn, missing }) => {
             size='14'
             fill='currentColor'
             strokeWidth={3}
-            className='line-height-0 shrink-0 text-[rgb(var(--danger-6))]'
+            className='line-height-0 shrink-0 text-danger-6'
           />
         ) : undefined
       }
@@ -86,14 +86,14 @@ const LearningModelRow: React.FC<Props> = ({ learn, patchLearn, missing }) => {
             })}
           </div>
           {missing && (
-            <div className='mt-2px text-[rgb(var(--danger-6))]'>
+            <div className='mt-2px text-danger-6'>
               {t('nomi.evolution.modelMissing', {
                 defaultValue: '还没有选择模型，学习与技能生成都不会运行。',
               })}
             </div>
           )}
           {!missing && stale && saved && (
-            <div className='mt-2px text-[rgb(var(--warning-6))]'>
+            <div className='mt-2px text-warning-6'>
               {t('nomi.evolution.modelStale', {
                 defaultValue: '当前选择的 {{model}} 已不在可用模型清单里，学习会失败，请重新选择。',
                 model: saved.model,

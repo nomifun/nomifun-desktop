@@ -77,7 +77,7 @@ const LearnFromSessionModal: React.FC<LearnFromSessionModalProps> = ({ visible, 
           placeholder={t('nomi.skills.teachPlaceholder', { defaultValue: '会话 ID' })}
         />
         {malformed && (
-          <span className='text-12px leading-18px text-[rgb(var(--danger-6))]'>
+          <span className='text-12px leading-18px text-danger-6'>
             {t('nomi.skills.learnFromSessionInvalid', {
               defaultValue: '这不像一个会话 ID，请从会话地址栏里复制完整的 ID。',
             })}

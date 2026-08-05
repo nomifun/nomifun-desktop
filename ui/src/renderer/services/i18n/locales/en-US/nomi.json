@@ -203,6 +203,9 @@
   "evolution": {
     "loadFailed": "Learning and evolution settings are temporarily unavailable.",
     "installWideNote": "These settings currently apply to every companion; a later version will make them per-companion.",
+    "collectionScopeTitle": "Where learning material comes from",
+    "collectionScopeDesc": "A companion can only learn from the work data this machine records. What is recorded and how long it is kept is an app-level setting shared by every companion.",
+    "openCollectionSettings": "Open data collection settings",
     "learningDesc": "Your companion reviews your work records on a schedule and distills memories and experience from them.",
     "learnEnabledDesc": "When off, periodic learning stops; memories and skills already distilled are left untouched.",
     "modelDesc": "The chat model used to review records and distill memories and skills.",
@@ -210,8 +213,6 @@
     "modelStale": "The selected {{model}} is no longer in the available model list, so learning will fail — please pick another.",
     "interval": "Learning interval",
     "intervalDesc": "How often new records are reviewed.",
-    "sourcesTitle": "Learning data sources",
-    "sourcesDesc": "Choose which work records are kept as learning material. Turning one off stops new records of that kind; the ones already kept still feed learning.",
     "skillTitle": "Skill generation",
     "skillDesc": "Distills your repeated multi-step actions into reusable skills, using the learning model above.",
     "skillEnabledDesc": "When off, no new skills are generated; existing skills keep working.",
@@ -287,26 +288,6 @@
   },
   "figures": {
     "back": "Back to companions"
-  },
-  "collect": {
-    "sources": {
-      "tool_calls": {
-        "name": "Tool calls",
-        "desc": "Which tools were called in work sessions (tool name + param shape only, never values)"
-      },
-      "chat_user_messages": {
-        "name": "Chat prompts",
-        "desc": "The questions you send in conversations"
-      },
-      "requirements": {
-        "name": "Requirements",
-        "desc": "Titles, descriptions and tags of requirements you create"
-      },
-      "terminal_sessions": {
-        "name": "Terminal session metadata",
-        "desc": "Terminal create/exit records (no output content)"
-      }
-    }
   },
   "evolve": {
     "enabled": "Enable skill evolution"

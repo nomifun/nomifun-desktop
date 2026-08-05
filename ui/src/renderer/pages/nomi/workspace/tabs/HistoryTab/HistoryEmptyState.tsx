@@ -30,7 +30,7 @@ const HistoryEmptyState: React.FC<HistoryEmptyStateProps> = ({ onRetry, title, d
 
   return (
     <div className='flex flex-col items-center justify-center gap-14px px-24px py-64px text-center'>
-      <span className='flex h-72px w-72px items-center justify-center rd-full bg-fill-2 text-[rgb(var(--primary-6))]'>
+      <span className='flex h-72px w-72px items-center justify-center rd-full bg-fill-2 text-primary-6'>
         <Comment theme='outline' size='30' fill='currentColor' strokeWidth={3} />
       </span>
       <span className='text-16px font-500 text-t-primary'>{title}</span>

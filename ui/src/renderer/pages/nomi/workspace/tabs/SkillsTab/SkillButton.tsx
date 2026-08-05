@@ -25,7 +25,7 @@ const TONES: Record<SkillButtonTone, string> = {
     'bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)] font-700 shadow-[0_6px_18px_rgba(var(--primary-6),0.14)] hover:bg-[rgba(var(--primary-6),0.18)]',
   quiet:
     'bg-[var(--color-bg-2)] border border-solid border-[var(--color-border-2)] text-t-secondary hover:text-t-primary hover:bg-fill-2',
-  danger: 'text-[rgb(var(--danger-6))] hover:bg-[rgba(var(--danger-6),0.1)]',
+  danger: 'text-danger-6 hover:bg-[rgba(var(--danger-6),0.1)]',
 };
 
 /**

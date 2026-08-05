@@ -26,7 +26,7 @@ const DigestCard: React.FC<DigestCardProps> = ({ digest }) => {
   return (
     <div className='flex flex-col gap-8px rd-10px bg-fill-2 px-12px py-10px'>
       <div className='flex items-center gap-6px'>
-        <span className='flex items-center text-[rgb(var(--primary-6))]'>
+        <span className='flex items-center text-primary-6'>
           <NotebookOne theme='outline' size='14' fill='currentColor' strokeWidth={3} />
         </span>
         <span className='text-13px font-500 text-t-primary'>

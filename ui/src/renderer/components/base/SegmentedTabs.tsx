@@ -87,7 +87,7 @@ const SegmentedTabs: React.FC<SegmentedTabsProps> = ({ items, activeKey, onChang
             {item.dot && (
               <span
                 aria-hidden
-                className='shrink-0 w-6px h-6px rd-full bg-[rgb(var(--primary-6))]'
+                className='shrink-0 w-6px h-6px rd-full bg-primary-6'
               />
             )}
           </button>
