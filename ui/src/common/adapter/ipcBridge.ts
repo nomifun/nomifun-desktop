@@ -1838,7 +1838,53 @@ export interface IApiCreateSshHost {
 
 export type IApiUpdateSshHost = Partial<IApiCreateSshHost>;
 
+/**
+ * Live phase of one conversation↔host link (backend `SshLinkPhase`).
+ *
+ * `degraded` = the transport is fine and the remote shell is being recycled.
+ * `dropped` = the link is gone; `detail` says why. `closed` is a finished link,
+ * whose `reaped` flag says whether the remote shell was *proven* to have exited.
+ */
+export type ISshLinkPhase =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'degraded'
+  | 'reconnecting'
+  | 'dropped'
+  | 'closed';
+
+/**
+ * The single wire shape for link state: the realtime `ssh.status` event and the
+ * `/api/ssh-hosts/statuses` snapshot both carry it, so a link cannot look
+ * different depending on how the client learned about it. Every field is always
+ * present — "unknown" is an explicit null, never an omitted key.
+ *
+ * This — not {@link IApiSshHost.status} — is live link state. The host row's
+ * `status` column is a per-host hint that is written on first connect and never
+ * walked back, so it is permanently green once a host has ever worked.
+ */
+export interface IApiSshStatus {
+  sshHostId: SshHostId;
+  conversationId: string;
+  state: ISshLinkPhase;
+  /** Which dial attempt this is; 0 outside connecting/reconnecting. */
+  attempt: number;
+  nextRetryInMs: number | null;
+  hostFingerprint: string | null;
+  /** Operator-facing transport diagnostics — never credential material. */
+  detail: string | null;
+  /** Non-null only for `closed`; `false` there means the exit was NOT proven. */
+  reaped: boolean | null;
+  changedAt: number;
+}
+
 const fromApiSshHost = (value: IApiSshHost): IApiSshHost => ({
+  ...value,
+  sshHostId: parseSshHostId(value.sshHostId),
+});
+
+const fromApiSshStatus = (value: IApiSshStatus): IApiSshStatus => ({
   ...value,
   sshHostId: parseSshHostId(value.sshHostId),
 });
@@ -1870,6 +1916,19 @@ export const ssh = {
   ),
   testConnection: httpPost<{ ok: boolean; message: string }, { ssh_host_id: SshHostId }>(
     (p) => `/api/ssh-hosts/${p.ssh_host_id}/test-connection`
+  ),
+  /**
+   * Snapshot of every live link the caller owns. Plural on purpose: a singular
+   * `/api/ssh-hosts/status` would be shadowed by the `/{ssh_host_id}` capture
+   * on the same prefix.
+   */
+  statuses: withResponseMap(
+    httpGet<IApiSshStatus[], void>('/api/ssh-hosts/statuses'),
+    (items) => items.map(fromApiSshStatus)
+  ),
+  /** Every link transition, owner-scoped. Same payload as `statuses`. */
+  onStatus: wsMappedEmitter<IApiSshStatus>('ssh.status', (raw) =>
+    fromApiSshStatus(raw as IApiSshStatus)
   ),
 };
 
