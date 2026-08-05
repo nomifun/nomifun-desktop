@@ -357,15 +357,18 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
     <div className='flex flex-col w-full h-full overflow-hidden'>
       {/* 工具栏：Tabs 切换 + 下载按钮 / Toolbar: Tabs toggle + Download button */}
       {!hideToolbar && (
-        <div className='flex items-center justify-between h-40px px-12px bg-bg-2 flex-shrink-0 border-b border-arco-1 overflow-x-auto'>
+        <div className='flex items-center justify-between h-40px px-12px bg-2 flex-shrink-0 border-b border-b-solid border-arco-1 overflow-x-auto'>
           <div className='flex items-center justify-between gap-12px w-full' style={{ minWidth: 'max-content' }}>
             {/* 左侧：原文/预览 Tabs / Left: Source/Preview Tabs */}
+            {/* 选中下划线用 border-b-2px：`border-b-2` 是「下边框颜色 = --bg-2」而不是 2px，
+                而且仓库没有 border-style 重置，所以还得显式写 border-b-solid。
+                `border-b-2` is a bottom colour, not a width — the underline never painted. */}
             <div className='flex items-center h-full gap-2px'>
               {/* 预览 Tab */}
               <div
                 className={`
                   flex items-center h-full px-16px cursor-pointer transition-all text-14px font-medium
-                  ${viewMode === 'preview' ? 'text-primary border-b-2 border-primary' : 'text-t-secondary hover:text-t-primary hover:bg-bg-3'}
+                  ${viewMode === 'preview' ? 'text-primary border-b-2px border-b-solid border-primary' : 'text-t-secondary hover:text-t-primary hover:bg-3'}
                 `}
                 onClick={() => handleViewModeChange('preview')}
               >
@@ -375,7 +378,7 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
               <div
                 className={`
                   flex items-center h-full px-16px cursor-pointer transition-all text-14px font-medium
-                  ${viewMode === 'source' ? 'text-primary border-b-2 border-primary' : 'text-t-secondary hover:text-t-primary hover:bg-bg-3'}
+                  ${viewMode === 'source' ? 'text-primary border-b-2px border-b-solid border-primary' : 'text-t-secondary hover:text-t-primary hover:bg-3'}
                 `}
                 onClick={() => handleViewModeChange('source')}
               >
@@ -387,7 +390,7 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
             <div className='flex items-center gap-8px flex-shrink-0'>
               {/* 下载按钮 / Download button */}
               <div
-                className='flex items-center gap-4px px-8px py-4px rd-4px cursor-pointer hover:bg-bg-3 transition-colors'
+                className='flex items-center gap-4px px-8px py-4px rd-4px cursor-pointer hover:bg-3 transition-colors'
                 onClick={handleDownload}
                 title={t('preview.downloadMarkdown')}
               >

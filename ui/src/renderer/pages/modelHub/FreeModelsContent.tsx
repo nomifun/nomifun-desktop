@@ -176,7 +176,7 @@ const FreeModelsContent: React.FC = () => {
     <div className='flex flex-col bg-2 rd-16px px-24px py-16px'>
       {messageContext}
 
-      <div className='flex-shrink-0 border-b border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
+      <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
         <div className='flex items-center justify-between gap-12px flex-wrap'>
           <div className='flex items-center gap-8px min-w-0'>
             <span className='size-28px flex items-center justify-center rd-8px bg-primary-1 text-primary-6 shrink-0'>

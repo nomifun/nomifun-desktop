@@ -139,7 +139,7 @@ const WecomConfigForm: React.FC<WecomConfigFormProps> = ({
 
   return (
     <div className='flex flex-col gap-24px'>
-      <div className='text-12px leading-relaxed p-10px rd-8px bg-[rgba(var(--orange-6),0.08)] border border-[rgba(var(--orange-6),0.3)] text-t-secondary'>
+      <div className='text-12px leading-relaxed p-10px rd-8px bg-[rgba(var(--orange-6),0.08)] border border-solid border-[rgba(var(--orange-6),0.3)] text-t-secondary'>
         <div className='font-500 text-t-primary mb-6px'>
           {t('settings.wecom.wsTitle', 'WeCom WebSocket connection')}
         </div>

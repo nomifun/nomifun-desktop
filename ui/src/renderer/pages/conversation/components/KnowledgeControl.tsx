@@ -635,7 +635,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
         </>
       )}
 
-      {footer ? <div className='shrink-0 border-t border-[var(--color-border-1)] pt-8px'>{footer}</div> : null}
+      {footer ? <div className='shrink-0 border-t border-t-solid border-[var(--color-border-1)] pt-8px'>{footer}</div> : null}
     </div>
   );
 

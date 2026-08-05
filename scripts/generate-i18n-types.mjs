@@ -1,23 +1,28 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * generate-i18n-types.mjs — regenerate ui/src/renderer/services/i18n/i18n-keys.d.ts
  * from the en-US locale JSON files (source of truth), and enforce that every
  * shipped locale carries the same keys.
  *
  * Usage:
- *   node scripts/generate-i18n-types.mjs             # write the d.ts
- *   node scripts/generate-i18n-types.mjs --check     # no write; exit 1 if the
- *                                                    # committed d.ts drifts from
- *                                                    # the locale key set
- *   node scripts/generate-i18n-types.mjs --self-test # exercise the parity rule
- *                                                    # against fixtures, no repo read
+ *   bun scripts/generate-i18n-types.mjs             # write the d.ts
+ *   bun scripts/generate-i18n-types.mjs --check     # no write; exit 1 if the
+ *                                                   # committed d.ts drifts from
+ *                                                   # the locale key set
+ *   bun scripts/generate-i18n-types.mjs --self-test # exercise the parity rule
+ *                                                   # against fixtures, no repo read
  *
  * Either mode also fails on cross-language drift (see `diffLocaleKeys`): the d.ts is
  * generated from ONE locale, so without this a key added to zh-CN only, or dropped
  * from zh-CN only, is invisible — the type still typechecks and the runtime silently
  * falls back to English.
  *
- * No dependencies. Node >= 16.
+ * Must run under `bun`, not bare `node` (package.json already does: `check:i18n`,
+ * `gen:i18n`). The plural-aware parity rule is imported from the renderer's
+ * TypeScript source so this gate and the per-namespace locale tests cannot answer
+ * the same question differently; node 22 rejects that import with
+ * ERR_UNKNOWN_FILE_EXTENSION, and one shared rule is worth more than a bare-node
+ * entry point nothing in this repo uses.
  *
  * Rules (mirrors the historical generator output):
  * - Namespaces and their order come from locales/en-US/index.ts (runtime truth).
@@ -30,6 +35,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// The plural-aware parity rule lives in the renderer source, not here: the
+// per-namespace locale tests must reach the same verdict, and their literal
+// key-for-key comparison used to contradict this gate outright — it demanded plural
+// variants i18next can never resolve (see the module's own header).
+import { diffLocaleKeys } from '../ui/src/renderer/services/i18n/localeKeyParity.ts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const i18nDir = path.join(repoRoot, 'ui', 'src', 'renderer', 'services', 'i18n');
@@ -111,114 +122,8 @@ function collectKeys(namespaces, localeDir) {
 }
 
 // ── Cross-language parity ──────────────────────────────────────────────────────
-
-/**
- * Every CLDR plural category. A trailing `_<category>` on a key is i18next's
- * plural suffix (JSON v4, which is what i18next ≥21 uses without
- * `compatibilityJSON`), not part of the key name.
- */
-const PLURAL_CATEGORIES = ['zero', 'one', 'two', 'few', 'many', 'other'];
-const PLURAL_SUFFIX_RE = new RegExp(`^(.*)_(${PLURAL_CATEGORIES.join('|')})$`);
-
-/**
- * The plural categories i18next will actually look up for a locale — the same
- * `Intl.PluralRules` set it resolves `count` through. en-US has two (`one`,
- * `other`); zh-CN has exactly one (`other`), because Chinese does not inflect for
- * number. So `foo_one` in en-US has NO counterpart to demand in zh-CN, and a set
- * comparison that demanded one would fail on correct translations.
- */
-function pluralCategories(locale) {
-  return new Set(new Intl.PluralRules(locale, { type: 'cardinal' }).resolvedOptions().pluralCategories);
-}
-
-/**
- * Compare the flattened key sets of every shipped locale.
- *
- * `keysByLocale`: `{ [locale]: string[] }`. Returns `{ errors, warnings }`, both
- * arrays of `{ locale, key, reason }`.
- *
- * The rule, in two halves:
- *
- * 1. Keys with no plural suffix must exist in EVERY locale. This is the plain
- *    parity a naive set diff gives, and it is where real drift shows up (a key
- *    translated in one language and forgotten in the other).
- * 2. A plural variant `base_<category>` is required of a locale only when
- *    `category` is one of THAT locale's plural categories. So en-US must have
- *    `_one` + `_other` where zh-CN needs only `_other`; but any variant a sibling
- *    locale provides for a category this locale does have is mandatory — that is
- *    the hole `ssh.sessionsOnline_other` fell through (en-US had it, zh-CN did
- *    not, and `other` is the one category zh-CN has).
- *
- * A variant for a category the locale does NOT have (`foo_one` in zh-CN) is dead
- * weight rather than a bug: i18next will never resolve it. Reported as a warning,
- * not an error — some namespaces have a per-file locale test that still demands a
- * literal key-for-key match, so the two must be able to coexist.
- */
-function diffLocaleKeys(keysByLocale) {
-  const locales = Object.keys(keysByLocale);
-  const errors = [];
-  const warnings = [];
-
-  const plainByLocale = new Map(); // locale -> Set(key)
-  const variantsByBase = new Map(); // base -> Map(locale -> Set(category))
-  for (const locale of locales) {
-    const plain = new Set();
-    plainByLocale.set(locale, plain);
-    for (const key of keysByLocale[locale]) {
-      const match = PLURAL_SUFFIX_RE.exec(key);
-      if (!match) {
-        plain.add(key);
-        continue;
-      }
-      const [, base, category] = match;
-      if (!variantsByBase.has(base)) variantsByBase.set(base, new Map());
-      const perLocale = variantsByBase.get(base);
-      if (!perLocale.has(locale)) perLocale.set(locale, new Set());
-      perLocale.get(locale).add(category);
-    }
-  }
-
-  const allPlain = new Set(locales.flatMap((locale) => [...plainByLocale.get(locale)]));
-  for (const locale of locales) {
-    for (const key of allPlain) {
-      if (!plainByLocale.get(locale).has(key)) {
-        const present = locales.filter((other) => plainByLocale.get(other).has(key));
-        errors.push({ locale, key, reason: `present in ${present.join(', ')}` });
-      }
-    }
-  }
-
-  const categoriesByLocale = new Map(locales.map((locale) => [locale, pluralCategories(locale)]));
-  for (const [base, perLocale] of variantsByBase) {
-    const provided = new Set([...perLocale.values()].flatMap((set) => [...set]));
-    for (const locale of locales) {
-      const categories = categoriesByLocale.get(locale);
-      const present = perLocale.get(locale) ?? new Set();
-      for (const category of provided) {
-        if (categories.has(category) && !present.has(category)) {
-          errors.push({
-            locale,
-            key: `${base}_${category}`,
-            reason: `plural form '${category}' exists for another locale and is one of ${locale}'s own plural categories`,
-          });
-        }
-      }
-      for (const category of present) {
-        if (!categories.has(category)) {
-          warnings.push({
-            locale,
-            key: `${base}_${category}`,
-            reason: `'${category}' is not a plural category of ${locale}, so i18next never resolves this key`,
-          });
-        }
-      }
-    }
-  }
-
-  const order = (entry) => `${entry.locale} ${entry.key}`;
-  const byLocaleThenKey = (a, b) => (order(a) < order(b) ? -1 : order(a) > order(b) ? 1 : 0);
-  return { errors: errors.sort(byLocaleThenKey), warnings: warnings.sort(byLocaleThenKey) };
-}
+// The rule itself is `diffLocaleKeys` (imported above); what follows only feeds it
+// the repo's locales and renders its verdict.
 
 /** Read every shipped locale's flattened key set. Returns `{ keysByLocale, namespacesByLocale }`. */
 function readAllLocales() {
@@ -405,7 +310,7 @@ function main() {
       if (missing.length) console.error(`missing from d.ts (${missing.length}):\n  ${missing.join('\n  ')}`);
       if (stale.length) console.error(`stale in d.ts (${stale.length}):\n  ${stale.join('\n  ')}`);
       if (!missing.length && !stale.length) console.error('key sets match but file text differs (ordering/header/EOL)');
-      console.error('\ni18n-keys.d.ts is out of date — run: node scripts/generate-i18n-types.mjs');
+      console.error('\ni18n-keys.d.ts is out of date — run: bun run gen:i18n');
       process.exitCode = 1;
     }
     if (!reportParity(locales)) process.exitCode = 1;

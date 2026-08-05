@@ -255,7 +255,7 @@ const OpenCapabilitiesPage: React.FC = () => {
       >
         <Tabs.TabPane key='webui' title={t('settings.openCapabilities.webuiTab', { defaultValue: 'WebUI 访问' })}>
           <section className='grid grid-cols-1 gap-16px lg:grid-cols-[minmax(0,1fr)_360px]'>
-            <div className='rd-12px border border-arco-2 bg-fill-0 p-16px'>
+            <div className='rd-12px border border-solid border-arco-2 bg-fill-0 p-16px'>
               <SectionHeader
                 icon={<WebPage theme='outline' size='18' fill='currentColor' />}
                 title={t('settings.openCapabilities.webuiTitle', { defaultValue: 'WebUI 远程访问' })}
@@ -295,7 +295,7 @@ const OpenCapabilitiesPage: React.FC = () => {
         <Tabs.TabPane key='mcp' title={t('settings.openCapabilities.mcpTab', { defaultValue: 'MCP 能力' })}>
           <div className='flex flex-col gap-16px'>
             <section className='grid grid-cols-1 gap-16px lg:grid-cols-[minmax(0,1fr)_360px]'>
-              <div className='rd-12px border border-arco-2 bg-fill-0 p-16px'>
+              <div className='rd-12px border border-solid border-arco-2 bg-fill-0 p-16px'>
                 <SectionHeader
                   icon={<ApiApp theme='outline' size='18' fill='currentColor' />}
                   title={t('settings.openCapabilities.remoteTitle', { defaultValue: 'NomiFun Remote MCP 能力范围' })}
@@ -362,7 +362,7 @@ const OpenCapabilitiesPage: React.FC = () => {
                   value={openapiUrl}
                 />
                 {lifecycleSupported && (
-                  <div className='rd-12px border border-arco-2 bg-fill-0 p-14px'>
+                  <div className='rd-12px border border-solid border-arco-2 bg-fill-0 p-14px'>
                     <CompanionAccessTokenPanel />
                   </div>
                 )}
@@ -386,7 +386,7 @@ const OpenCapabilitiesPage: React.FC = () => {
                 local-trust gated and 403'd on every click
                 (audit 2026-07-30, finding I). */}
             {lifecycleSupported && (
-              <section className='rd-12px border border-arco-2 bg-fill-0 p-16px'>
+              <section className='rd-12px border border-solid border-arco-2 bg-fill-0 p-16px'>
                 <SectionHeader
                   icon={<Terminal theme='outline' size='18' fill='currentColor' />}
                   title={t('settings.openCapabilities.projectRegisterTitle', {
@@ -462,7 +462,7 @@ const GlobalKnowledgeRegistrationPanel: React.FC = () => {
   };
 
   return (
-    <div className='rd-10px border border-arco-2 bg-fill-1 px-12px py-10px'>
+    <div className='rd-10px border border-solid border-arco-2 bg-fill-1 px-12px py-10px'>
       <div className='mb-8px text-13px font-600 text-t-primary'>
         {t('settings.openCapabilities.globalRegisterTitle', { defaultValue: '用户级注册（所有目录）' })}
       </div>
@@ -545,7 +545,7 @@ const DomainOptionCard: React.FC<{
 );
 
 const InfoPanel: React.FC<{ icon: React.ReactElement; title: string; body: string }> = ({ icon, title, body }) => (
-  <div className='rd-12px border border-arco-2 bg-fill-0 p-14px'>
+  <div className='rd-12px border border-solid border-arco-2 bg-fill-0 p-14px'>
     <div className='flex items-center gap-8px text-14px font-600 text-t-primary'>
       <span className='text-primary-6'>{icon}</span>
       {title}
@@ -555,7 +555,7 @@ const InfoPanel: React.FC<{ icon: React.ReactElement; title: string; body: strin
 );
 
 const EndpointBlock: React.FC<{ label: string; value: string }> = ({ label, value }) => (
-  <div className='rd-10px border border-arco-2 bg-fill-0 px-12px py-10px'>
+  <div className='rd-10px border border-solid border-arco-2 bg-fill-0 px-12px py-10px'>
     <div className='mb-5px text-12px font-500 text-t-tertiary'>{label}</div>
     <div className='flex items-center gap-8px'>
       <code className='min-w-0 flex-1 truncate font-mono text-12px text-t-primary'>{value}</code>
@@ -565,7 +565,7 @@ const EndpointBlock: React.FC<{ label: string; value: string }> = ({ label, valu
 );
 
 const SnippetBlock: React.FC<{ label: string; code: string }> = ({ label, code }) => (
-  <div className='rd-10px border border-arco-2 bg-fill-0 px-12px py-10px'>
+  <div className='rd-10px border border-solid border-arco-2 bg-fill-0 px-12px py-10px'>
     <div className='mb-6px flex items-center justify-between gap-8px'>
       <span className='text-12px font-500 text-t-tertiary'>{label}</span>
       <CopyIconButton text={code} size={14} className='size-22px shrink-0' />
@@ -577,7 +577,7 @@ const SnippetBlock: React.FC<{ label: string; code: string }> = ({ label, code }
 );
 
 const CapabilityNote: React.FC<{ title: string; body: string }> = ({ title, body }) => (
-  <div className='rd-10px border border-arco-2 bg-fill-1 px-12px py-10px'>
+  <div className='rd-10px border border-solid border-arco-2 bg-fill-1 px-12px py-10px'>
     <div className='text-13px font-600 text-t-primary'>{title}</div>
     <div className='mt-4px text-12px leading-17px text-t-tertiary'>{body}</div>
   </div>

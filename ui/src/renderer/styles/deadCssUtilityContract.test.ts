@@ -6,14 +6,21 @@
 
 /**
  * Guards the root causes of the dead CSS utility classes that
- * `bun run check:dead-css` ratchets. The check script stops new *usages*; these
+ * `bun run check:dead-css` bans. The check script stops new *usages*; these
  * tests stop the *sources* of those usages from coming back:
  *
  *  - the unreachable `borderColors` theme block in uno.config.ts (UnoCSS eats
  *    `-b-` as the bottom direction before consulting the theme, so its keys
- *    could never be reached), and
+ *    could never be reached),
  *  - MIGRATION.md recommending `border-b-base` / `border-b-light` as the "base
- *    border" utilities, which is how the existing occurrences got written.
+ *    border" utilities, which is how the existing occurrences got written,
+ *  - colors.ts recommending the doubled-prefix classes (`bg-bg-0` and friends),
+ *    which is where all 87 `bg-bg-N` usages came from, and
+ *  - a global `* { border-width: 0; border-style: solid }` reset sneaking into
+ *    uno.config.ts's preflights. That reset would make form 7 (border width +
+ *    colour with no border-style) impossible to write — and would also strip the
+ *    default borders off every native form control in the app. It was evaluated
+ *    and rejected; MIGRATION.md records why, and this test keeps it out.
  */
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -25,6 +32,7 @@ const uiRoot = resolve(stylesDir, '../../..');
 
 const unoConfig = readFileSync(join(uiRoot, 'uno.config.ts'), 'utf8');
 const migrationGuide = readFileSync(join(stylesDir, 'MIGRATION.md'), 'utf8');
+const colorsModule = readFileSync(join(stylesDir, 'colors.ts'), 'utf8');
 
 describe('dead border utility root causes', () => {
   test('uno.config.ts carries no unreachable border color keys', () => {
@@ -59,5 +67,46 @@ describe('dead border utility root causes', () => {
     expect(migrationGuide.includes('text-danger-6')).toBe(true);
     // The explicit-alpha form is legal and must stay called out as such.
     expect(migrationGuide.includes('rgba(var(--primary-6),0.12)')).toBe(true);
+  });
+});
+
+describe('doubled-prefix root cause', () => {
+  test('colors.ts no longer recommends the doubled-prefix classes', () => {
+    // The header used to hand out `bg-bg-0` / `text-text` / `border-border` as the
+    // recommended atomic classes. It may keep naming them as counter-examples, but
+    // never as advice, and it must say what to write instead.
+    expect(colorsModule.includes('bg-1..bg-6')).toBe(true);
+    expect(colorsModule.includes('border-arco-2')).toBe(true);
+    expect(colorsModule.includes('ZERO CSS')).toBe(true);
+  });
+
+  test('MIGRATION.md documents that bg-bg-N and bg-0 both emit nothing', () => {
+    expect(migrationGuide.includes('bg-bg-N')).toBe(true);
+    expect(migrationGuide.includes('`bg-0` **也是死的**')).toBe(true);
+  });
+});
+
+describe('no global border reset', () => {
+  test('uno.config.ts preflights do not reset border-width or border-style', () => {
+    // A `* { border-width: 0; border-style: solid }` preflight is the Tailwind cure
+    // for form 7, and it is deliberately absent — see MIGRATION.md for the reason.
+    // 只看 preflights 块本身：头注里提到这两个属性名是讲解，不是重置。
+    const preflightBlock = unoConfig.slice(unoConfig.indexOf('preflights:'), unoConfig.indexOf('shortcuts:'));
+    expect(preflightBlock.length > 0).toBe(true);
+    const offenders = ['border-width', 'border-style', '@unocss/reset'].filter(
+      (needle) => preflightBlock.includes(needle) || unoConfig.includes(`import '${needle}`),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  test('MIGRATION.md records that the global reset was considered and rejected', () => {
+    expect(migrationGuide.includes('为什么不加全局 border reset')).toBe(true);
+    expect(migrationGuide.includes('border-width: 0; border-style: solid;')).toBe(true);
+    expect(migrationGuide.includes('1000+')).toBe(true);
+  });
+
+  test('MIGRATION.md spells out that directional widths need directional styles', () => {
+    expect(migrationGuide.includes('border-b border-b-solid')).toBe(true);
+    expect(migrationGuide.includes('border-width: medium')).toBe(true);
   });
 });

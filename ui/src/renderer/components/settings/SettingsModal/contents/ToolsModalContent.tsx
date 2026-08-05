@@ -314,7 +314,7 @@ export const ToolsModalContentWithState: React.FC<{
       {mcpMessageContext}
 
       <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
-        <div className='px-[12px] md:px-[32px] py-[24px] bg-2 rd-12px md:rd-16px flex flex-col min-h-0 border border-arco-2'>
+        <div className='px-[12px] md:px-[32px] py-[24px] bg-2 rd-12px md:rd-16px flex flex-col min-h-0 border border-solid border-arco-2'>
           <NomiScrollArea className='h-full overflow-visible' disableOverflow>
             <ModalMcpManagementSection
               message={mcpMessage}

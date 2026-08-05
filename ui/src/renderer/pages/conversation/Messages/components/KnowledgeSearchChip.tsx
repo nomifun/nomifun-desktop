@@ -46,7 +46,7 @@ const KnowledgeSearchChip: React.FC<{ message: IMessageToolCall }> = ({ message 
   return (
     <div className='flex flex-col'>
       <div
-        className={'inline-flex items-center gap-6px px-8px py-2px rounded-6px bg-fill-2 text-13px max-w-full' + (canExpand ? ' cursor-pointer hover:bg-bg-3' : '')}
+        className={'inline-flex items-center gap-6px px-8px py-2px rounded-6px bg-fill-2 text-13px max-w-full' + (canExpand ? ' cursor-pointer hover:bg-3' : '')}
         onClick={canExpand ? () => setExpanded(!expanded) : undefined}
       >
         <span className='flex-shrink-0 inline-flex'>

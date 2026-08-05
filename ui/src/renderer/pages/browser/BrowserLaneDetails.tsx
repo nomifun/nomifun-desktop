@@ -100,7 +100,7 @@ const StatusSection: React.FC<{
   children: React.ReactNode;
 }> = ({ id, title, description, children }) => (
   <section
-    className='min-w-0 rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_74%,transparent)] bg-bg-1 p-15px shadow-[0_6px_18px_rgba(15,23,42,0.025)]'
+    className='min-w-0 rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_74%,transparent)] bg-1 p-15px shadow-[0_6px_18px_rgba(15,23,42,0.025)]'
     data-browser-status-section={id}
   >
     <div className='mb-11px border-b border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_52%,transparent)] border-l-0 border-r-0 border-t-0 pb-10px'>
@@ -185,7 +185,7 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
       data-browser-lane-management
       data-browser-lane-id={lane.lane_id}
     >
-      <header className='rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_82%,transparent)] bg-bg-1 px-16px py-15px shadow-[0_7px_22px_rgba(15,23,42,0.03)]'>
+      <header className='rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_82%,transparent)] bg-1 px-16px py-15px shadow-[0_7px_22px_rgba(15,23,42,0.03)]'>
         <div className='flex flex-wrap items-start gap-12px'>
           <div className='size-36px shrink-0 rd-10px border border-solid border-[rgba(var(--primary-6),0.16)] bg-primary-1 text-primary-6 flex items-center justify-center'>
             <WebPage theme='outline' size='18' />

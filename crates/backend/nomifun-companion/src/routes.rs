@@ -1436,6 +1436,85 @@ mod tests {
         }
     }
 
+    /// The skill wire names the owner exactly what the column names it, the same
+    /// way the memory wire above does. `scope_companion_id` outlived the column
+    /// rename on this half of the codebase as a bare `#[serde(rename)]`, so it must
+    /// be asserted on the response BODY: a rename that stops at the struct field is
+    /// invisible to every test that reads typed rows. `scope_kind` — the retired
+    /// shared/private discriminator — must stay gone too.
+    #[tokio::test]
+    async fn skill_wire_names_the_owner_companion_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+
+        // The list route fails closed without a real SKILL.md, so seed both halves:
+        // the file under the owner's scope and the registry row that points at it.
+        let paths = nomifun_extension::skill_service::resolve_skill_paths(dir.path(), dir.path());
+        nomifun_extension::skill_service::create_skill(
+            &paths,
+            &nomifun_extension::skill_service::SkillScope::Companion(owner.clone()),
+            true,
+            &nomifun_extension::skill_service::SkillDraftInput {
+                name: "research".into(),
+                description: "一个可复用的调研流程".into(),
+                when_to_use: None,
+                allowed_tools: None,
+                paths: None,
+                body: "步骤".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let now = nomifun_common::now_ms();
+        service
+            .store
+            .insert_skill(&CompanionSkill {
+                companion_skill_id: nomifun_common::CompanionSkillId::new().into_string(),
+                skill_name: "research".into(),
+                companion_id: Some(owner.clone()),
+                status: "draft".into(),
+                source: "mined".into(),
+                confidence: 0.9,
+                provenance_event_ids: vec![],
+                strength: 1.0,
+                version: 1,
+                skill_pattern_id: None,
+                usage_count: 0,
+                last_used_at: None,
+                created_at: now,
+                updated_at: now,
+                signature: String::new(),
+            })
+            .await
+            .unwrap();
+
+        let listed = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get(format!("/api/companion/companions/{owner}/skills"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let items = listed["data"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{listed}");
+        let row = items[0].as_object().unwrap();
+        // `get`, not `[]`: an absent key is the exact regression under test, and
+        // indexing a `Map` panics without naming what was missing.
+        assert_eq!(
+            row.get("companion_id"),
+            Some(&serde_json::json!(owner.as_str())),
+            "the skill wire must name the owner `companion_id`: {listed}"
+        );
+        for retired in ["scope_companion_id", "scope_kind"] {
+            assert!(!row.contains_key(retired), "retired `{retired}` is back on the wire: {listed}");
+        }
+    }
+
     /// PUT and DELETE address a memory by id alone, so the ASKING companion has to
     /// travel with the request (body field / query param) or the store cannot
     /// enforce ownership. A foreign companion gets a 404 and the row survives;

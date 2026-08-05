@@ -95,11 +95,11 @@ const FeedbackReportModal: React.FC<FeedbackReportModalProps> = ({ visible, onCa
         <p className='m-0 text-13px leading-20px text-t-secondary'>
           {t('settings.contactDescription')}
         </p>
-        <div className='mt-16px overflow-hidden rd-10px border border-arco-2 bg-bg-1'>
+        <div className='mt-16px overflow-hidden rd-10px border border-solid border-arco-2 bg-1'>
           {CONTACT_ITEMS.map((item) => (
             <div
               key={item.labelKey}
-              className='group flex min-h-48px items-center gap-12px border-b border-arco-2 px-14px py-10px last:border-b-0 hover:bg-fill-1'
+              className='group flex min-h-48px items-center gap-12px border-b border-b-solid border-arco-2 px-14px py-10px last:border-b-0 hover:bg-fill-1'
             >
               <div className='w-88px shrink-0 text-13px font-500 text-t-primary'>
                 {t(item.labelKey, item.fallbackLabel)}
