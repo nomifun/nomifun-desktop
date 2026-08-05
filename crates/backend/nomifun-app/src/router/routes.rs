@@ -39,8 +39,6 @@ use nomifun_system::{connection_test_routes, system_routes};
 use nomifun_terminal::terminal_routes;
 use nomifun_webhook::webhook_routes;
 
-use nomifun_secret::secret_routes;
-
 use crate::services::AppServices;
 
 use super::computer_permissions::{
@@ -321,7 +319,7 @@ pub async fn create_router(services: &AppServices) -> Router {
             )
         }),
         // Computer-use: one shared desktop ComputerTool (no per-companion
-        // isolation, no secret vault — the desktop is a single screen).
+        // isolation — the desktop is a single screen).
         #[cfg(feature = "computer-use")]
         computer_registry: Some(nomifun_gateway::computer_registry::ComputerRegistry::new()),
     });
@@ -442,22 +440,28 @@ pub async fn create_router(services: &AppServices) -> Router {
     // app), not in `create_router_with_states`, so test harnesses that call that
     // directly are unaffected. The LAN listener's host_guard (DNS-rebind) still
     // wraps it at the listener level.
+    let remote_mcp_admission =
+        nomifun_public::RemoteMcpSessionAdmissionAuthority::for_gateway(
+            gateway_deps.as_ref(),
+        );
     let router = router.nest(
         "/mcp",
-        nomifun_public::public_mcp_router(
+        nomifun_public::public_mcp_router_with_admission(
             gateway_deps.clone(),
             services.companion_token_validator.clone(),
             None,
+            remote_mcp_admission.clone(),
         ),
     );
     // Curated "agent" profile endpoint — a tight do-work tool list for external
     // task-delegation agents (sibling of /mcp to avoid the catch-all conflict).
     let router = router.nest(
         "/mcp-agent",
-        nomifun_public::public_mcp_router(
+        nomifun_public::public_mcp_router_with_admission(
             gateway_deps.clone(),
             services.companion_token_validator.clone(),
             Some(nomifun_public::AGENT_PROFILE_DOMAINS),
+            remote_mcp_admission,
         ),
     );
     // REST /v1 adapter (human/script-facing), same registry + instance token,
@@ -867,13 +871,6 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
-    // P3-X2: per-pet browser-use credential secret routes protected by auth middleware
-    let secret_authenticated = protect_instance_owner(
-        secret_routes(states.secret),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
-
     // PTY, Office and shell operations all execute in the backend OS account.
     // SQL owner columns cannot sandbox processes sharing that uid.
     let terminal_authenticated = protect_instance_owner(
@@ -1078,7 +1075,6 @@ pub fn create_router_with_all_state(
         .merge(webhook_authenticated)
         .merge(agent_execution_authenticated)
         .merge(agent_execution_template_authenticated)
-        .merge(secret_authenticated)
         .merge(terminal_authenticated)
         .merge(office_authenticated)
         .merge(shell_authenticated)

@@ -38,7 +38,7 @@ const companionToPosterFigure = (companion: ICompanionWithStatus, index: number)
   companionId: companion.companion_id,
   customFigure: customFigureMetaOf(companion),
   mood: resolveMood(companion.status?.mood, POSTER_MOODS[index % POSTER_MOODS.length]),
-  activity: companion.status?.last_learn?.status === 'running' ? 'thinking' : 'idle',
+  activity: 'idle',
 });
 
 const GuidCompanionPosterPreview: React.FC = () => {

@@ -177,7 +177,6 @@ import {
   parseChannelUserId,
   parseCompanionEventId,
   parseCompanionId,
-  parseCompanionLearnRunId,
   parseCompanionMemoryId,
   parseCompanionSessionWindowId,
   parseCompanionSkillId,
@@ -215,7 +214,6 @@ import {
   type CronJobRunId,
   type CompanionEventId,
   type CompanionId,
-  type CompanionLearnRunId,
   type CompanionMemoryId,
   type CompanionSessionWindowId,
   type CompanionSkillId,
@@ -4257,21 +4255,12 @@ export const agentExecutionTemplate = {
 
 export interface ICompanionCollectConfig {
   chat_user_messages: boolean;
-  chat_assistant_replies: boolean;
   requirements: boolean;
-  cron_runs: boolean;
-  conversation_lifecycle: boolean;
   terminal_sessions: boolean;
   tool_calls: boolean;
-}
-
-/** One sanitized collected event ({event_id,ts,source,name,data}) for the transparency viewer. */
-export interface ICompanionCollectedEvent {
-  event_id: string;
-  ts: number;
-  source: string;
-  name: string;
-  data: unknown;
+  companion_dialogues: boolean;
+  event_retention_days: number;
+  event_max_storage_mb: number;
 }
 
 export type ICompanionMemoryKind = 'profile' | 'preference' | 'knowledge' | 'episode' | 'task' | 'affective';
@@ -4368,10 +4357,7 @@ export interface ICompanionSkillEvent {
   skill_name: string;
 }
 
-export interface ICompanionLearnRun {
-  learn_run_id: CompanionLearnRunId;
-  started_at: number;
-  finished_at?: number | null;
+export interface ICompanionLearnResult {
   status: string;
   events_processed: number;
   memories_added: number;
@@ -4392,24 +4378,31 @@ export interface ICompanionStatus {
   skills_active: number;
   model_configured: boolean;
   collect_any_enabled: boolean;
-  last_learn?: ICompanionLearnRun | null;
 }
 
-/** "What I learned this week" digest (skills per-companion; memories/learn-runs global). */
+/** "What I learned this week" digest (skills per-companion; memories global). */
 export interface ICompanionWeeklyDigest {
   since_ms: number;
   skills_learned: number;
   skills_active_new: number;
   memories_added: number;
-  learn_runs: number;
   new_skill_names: string[];
-  recent_summaries: string[];
 }
 
 export interface ICompanionSourceStats {
   source: string;
   today: number;
   total: number;
+}
+
+export interface ICompanionEventStorageStatus {
+  total_bytes: number;
+  max_bytes: number;
+  file_count: number;
+  oldest_day: string | null;
+  newest_day: string | null;
+  retention_days: number;
+  max_storage_mb: number;
 }
 
 /** One archived session-window day-digest (伙伴会话归档回看). */
@@ -4524,7 +4517,6 @@ export interface ICompanionEvolveConfig {
   model: ICompanionModelRef | null;
   min_pattern_count: number;
   min_distinct_sessions: number;
-  reflect_enabled: boolean;
   auto_activate: boolean;
   auto_threshold: number;
 }
@@ -4662,11 +4654,33 @@ const fromApiCompanionSkill = (raw: unknown): ICompanionSkill => {
   };
 };
 
-const fromApiCompanionLearnRun = (raw: unknown): ICompanionLearnRun => {
-  const value = asWireObject(raw, 'companion learn run');
+const fromApiCompanionLearnResult = (raw: unknown): ICompanionLearnResult => {
+  const value = asWireObject(raw, 'companion learn result');
+  for (const retiredField of ['learn_run_id', 'started_at', 'finished_at']) {
+    if (Object.prototype.hasOwnProperty.call(value, retiredField)) {
+      throw new TypeError(`companion learn result must not contain retired history field "${retiredField}"`);
+    }
+  }
+  if (typeof value.status !== 'string') {
+    throw new TypeError('companion learn result status must be a string');
+  }
+  for (const countField of ['events_processed', 'memories_added', 'suggestions_added'] as const) {
+    if (typeof value[countField] !== 'number' || !Number.isSafeInteger(value[countField])) {
+      throw new TypeError(`companion learn result ${countField} must be a safe integer`);
+    }
+  }
+  for (const textField of ['error', 'summary'] as const) {
+    if (value[textField] != null && typeof value[textField] !== 'string') {
+      throw new TypeError(`companion learn result ${textField} must be a string or null`);
+    }
+  }
   return {
-    ...(value as unknown as ICompanionLearnRun),
-    learn_run_id: parseCompanionLearnRunId(value.learn_run_id),
+    status: value.status,
+    events_processed: value.events_processed as number,
+    memories_added: value.memories_added as number,
+    suggestions_added: value.suggestions_added as number,
+    error: value.error as string | null | undefined,
+    summary: value.summary as string | null | undefined,
   };
 };
 
@@ -4675,7 +4689,6 @@ const fromApiCompanionStatus = (raw: unknown): ICompanionStatus => {
   return {
     ...(value as unknown as ICompanionStatus),
     companion_id: nullableCompanionId(value.companion_id),
-    last_learn: value.last_learn == null ? null : fromApiCompanionLearnRun(value.last_learn),
   };
 };
 
@@ -4943,19 +4956,10 @@ export const companion = {
   ),
   runLearn: withResponseMap(
     httpPost<unknown, void>('/api/companion/learn/run'),
-    fromApiCompanionLearnRun
-  ),
-  listLearnRuns: withResponseMap(
-    httpGet<unknown[], { limit?: number }>(
-      (p) => `/api/companion/learn/runs${p?.limit ? `?limit=${p.limit}` : ''}`
-    ),
-    (raw): ICompanionLearnRun[] => raw.map(fromApiCompanionLearnRun)
+    fromApiCompanionLearnResult
   ),
   eventStats: httpGet<ICompanionSourceStats[], void>('/api/companion/events/stats'),
-  recentEvents: httpGet<ICompanionCollectedEvent[], { limit?: number }>(
-    (p) => `/api/companion/events/recent${p?.limit ? `?limit=${p.limit}` : ''}`
-  ),
-  clearEvents: httpDelete<void, void>('/api/companion/events'),
+  eventStorage: httpGet<ICompanionEventStorageStatus, void>('/api/companion/events/storage'),
   /** First-launch consent: apply self-evolution default-ON once (server KV-gated). */
   applyConsent: httpPost<ICompanionSharedConfig, void>('/api/companion/consent'),
   /** Master kill switch: stop all collection + learning + evolution. */
@@ -5093,12 +5097,12 @@ export const companion = {
     const value = asWireObject(raw, 'companion learn-started event');
     return value.companion_id == null ? {} : { companion_id: parseCompanionId(value.companion_id) };
   }),
-  onLearnFinished: wsMappedEmitter<ICompanionLearnRun & { companion_id?: CompanionId }>(
+  onLearnFinished: wsMappedEmitter<ICompanionLearnResult & { companion_id?: CompanionId }>(
     'companion.learn-finished',
     (raw) => {
       const value = asWireObject(raw, 'companion learn-finished event');
       return {
-        ...fromApiCompanionLearnRun(value),
+        ...fromApiCompanionLearnResult(value),
         ...(value.companion_id == null ? {} : { companion_id: parseCompanionId(value.companion_id) }),
       };
     }
@@ -5161,38 +5165,6 @@ export const companion = {
     const value = asWireObject(raw, 'companion deleted event');
     return { companion_id: parseCompanionId(value.companion_id) };
   }),
-};
-
-// ==================== Browser-use credential secrets (P3-X2) ====================
-
-/** A registered browser-use secret as returned to the client — metadata ONLY.
- *  The plaintext `value` is write-only (register) and is NEVER returned by any
- *  endpoint (it is encrypted into a per-pet, machine-bound vault). */
-export interface ISecretListItem {
-  /** The reference name used as `secret:NAME` in a browser type/set_value action. */
-  name: string;
-  /** The registrable domains (eTLD+1) this secret is bound to. These also feed the
-   *  browser egress domain allowlist (shared per-pet config). */
-  allowed_origins: string[];
-}
-
-/** Global browser-use credential secret CRUD. The value is write-only. */
-export const browserSecret = {
-  /** List registered secrets (name + bound origins; NEVER the value). */
-  list: httpGet<ISecretListItem[], void>('/api/browser-secrets'),
-  /** Register (or overwrite) a secret. `value` is encrypted into the vault and never echoed. */
-  register: httpPost<void, { name: string; value: string; allowed_origins: string[] }>(
-    '/api/browser-secrets',
-    (p) => ({
-      name: p.name,
-      value: p.value,
-      allowed_origins: p.allowed_origins,
-    })
-  ),
-  /** Remove a secret by name. */
-  remove: httpDelete<void, { name: string }>(
-    (p) => `/api/browser-secrets/${encodeURIComponent(p.name)}`
-  ),
 };
 
 /** Phase 2b「登录我的浏览器」status returned by open/close/status. */

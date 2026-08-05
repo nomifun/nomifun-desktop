@@ -667,3 +667,105 @@ fn numeric_process_store_contains_metadata_but_no_process_owner() {
         );
     }
 }
+
+#[test]
+fn platform_lifecycle_uses_one_fixed_bounded_poller_instead_of_per_process_threads() {
+    let unix = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/unix.rs",
+    ));
+    let windows = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/windows.rs",
+    ));
+    for (platform, source) in [("Unix", unix.as_str()), ("Windows", windows.as_str())] {
+        assert!(
+            !source.contains("std::thread::Builder::new()"),
+            "{platform} platform code must not create one lifecycle/reaper thread per process"
+        );
+    }
+    let conpty = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/windows/conpty.rs",
+    ));
+    assert!(
+        !conpty.contains("mpsc::channel") && !conpty.contains("run_close_relay("),
+        "ConPTY cleanup must not restore its unbounded close relay"
+    );
+    assert_eq!(
+        count(&conpty, "std::thread::Builder::new()"),
+        1,
+        "ConPTY may build only its fixed worker set, never one thread per close job"
+    );
+    for required in [
+        "constCLOSE_WORKERS:usize=4;",
+        "forworker_idin0..worker_count",
+        "current<shared.capacity",
+        "CreatePseudoConsole",
+        "letauthority=executor.reserve()?;",
+    ] {
+        assert!(
+            conpty.contains(required),
+            "bounded ConPTY close contract is missing {required}"
+        );
+    }
+    assert!(
+        !unix.contains("mpsc::channel::<CleanupJob>()")
+            && !unix.contains("run_cleanup_relay(")
+            && !unix.contains("Sender<CleanupJob>"),
+        "Unix cleanup must not restore the old unbounded cleanup relay"
+    );
+
+    let poller = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/poller.rs",
+    ));
+    assert_eq!(
+        count(&poller, "std::thread::Builder::new()"),
+        2,
+        "the process-wide platform runtime must own one dispatcher builder and one fixed worker builder"
+    );
+    for required in [
+        "constBLOCKING_WORKERS:usize=4;",
+        "forworker_idin0..BLOCKING_WORKERS",
+        "retained_jobs.fetch_update(",
+        "current<shared.capacity",
+        "overflow_retained.fetch_add(",
+    ] {
+        assert!(
+            poller.contains(required),
+            "bounded platform poller contract is missing {required}"
+        );
+    }
+}
+
+#[test]
+fn exact_process_identity_registries_are_admission_bounded_and_retire_terminal_entries() {
+    let windows = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/windows.rs",
+    ));
+    for required in [
+        "fnregister_child_process_job(",
+        "permit:PlatformLifecyclePermit",
+        "_permit:permit",
+        "remove_child_process_job(self.pid,&self.process);",
+        "remove_child_process_job(pid,&process);poller.quarantine_unscheduled(",
+    ] {
+        assert!(
+            windows.contains(required),
+            "Windows child-process identity registry contract is missing {required}"
+        );
+    }
+
+    let unix = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/unix.rs",
+    ));
+    for required in [
+        "fnregister_child_process_watchdog(",
+        "permit:PlatformLifecyclePermit",
+        "_permit:permit",
+        "remove_child_process_watchdog(self.watchdog.pid,&self.watchdog);",
+        "remove_child_process_watchdog(watchdog.pid,&watchdog);poller.quarantine_unscheduled(",
+    ] {
+        assert!(
+            unix.contains(required),
+            "Unix watchdog identity registry contract is missing {required}"
+        );
+    }
+}

@@ -128,10 +128,10 @@ human-facing `display_no`. The Agent Execution and Channel child entities use
 `participant_id`, `step_id`, `attempt_id`, `template_participant_id`,
 `channel_plugin_id`, `channel_user_id`, and `channel_session_id`.
 Managed Companion side-store records that can be addressed again through an
-API, file, or another record—memories, suggestions, learn runs, session
-windows, collected events, skills, and skill patterns—also use distinct named
-UUIDv7 newtypes. A temporary evolution summary that exists only in one call
-result remains an operation token and is not promoted to a stable entity.
+API, file, or another record—memories, suggestions, session windows, collected
+events, skills, and skill patterns—also use distinct named UUIDv7 newtypes.
+Temporary learning and evolution results that exist only in one call remain
+ephemeral values without IDs and are not promoted to stable entities.
 
 ## Internal technical rows
 

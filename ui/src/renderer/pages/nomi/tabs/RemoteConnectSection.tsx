@@ -8,6 +8,7 @@ import type { IChannelPluginStatus } from '@/common/types/channel/channel';
 import { channel } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import NomiModal from '@/renderer/components/base/NomiModal';
+import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import type { ChannelPlatform } from '@/renderer/components/settings/SettingsModal/contents/channels/channelTarget';
 import {
   CHANNEL_PLATFORMS,
@@ -292,10 +293,13 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
 
   return (
     <>
-      <div className='mt-8px text-13px font-600 text-t-secondary'>{t('nomi.settings.remoteTitle')}</div>
-      <div className='text-12px text-t-tertiary -mt-6px'>{t('nomi.settings.remoteHint', { companionName })}</div>
-
-      {CHANNEL_PLATFORMS.map(({ id, logo, titleKey, fallback }) => {
+      <NomiSettingSection
+        className='mt-8px'
+        title={t('nomi.settings.remoteTitle')}
+        description={t('nomi.settings.remoteHint', { companionName })}
+      >
+        <NomiSettingList>
+        {CHANNEL_PLATFORMS.map(({ id, logo, titleKey, fallback }) => {
         const title = t(titleKey, fallback);
         // Only configured plugins: `GET /plugins` may pad a builtin platform
         // with an unconfigured placeholder. Configured plugins carry credentials
@@ -384,26 +388,27 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
         }
 
         return (
-          <div key={id} className='flex items-center gap-16px bg-fill-2 rd-10px px-14px py-12px flex-wrap'>
-            <div className='flex items-center gap-10px w-200px shrink-0 min-w-0'>
-              <img src={logo} alt={title} className='w-18px h-18px object-contain shrink-0' />
-              <div className='min-w-0'>
-                <div className='flex items-center gap-6px'>
+          <NomiSettingRow
+            key={id}
+            leading={<img src={logo} alt={title} className='h-18px w-18px shrink-0 object-contain' />}
+            title={
+              <div className='flex min-w-0 items-center gap-6px flex-wrap'>
                   <span className='text-14px text-t-primary font-500 truncate'>{title}</span>
                   {statusTag(focusRow)}
-                </div>
                 {pending > 0 && (
-                  <Tag size='small' color='orangered' className='mt-4px'>
+                  <Tag size='small' color='orangered'>
                     {t('nomi.settings.remotePending', { num: pending })}
                   </Tag>
                 )}
               </div>
-            </div>
-            <div className='flex-1 min-w-0 text-12px text-t-tertiary'>{subtitle}</div>
-            <div className='flex items-center gap-8px shrink-0'>{actions}</div>
-          </div>
+            }
+            description={subtitle || undefined}
+            controls={actions}
+          />
         );
-      })}
+        })}
+        </NomiSettingList>
+      </NomiSettingSection>
 
       <NomiModal
         visible={Boolean(configTarget)}

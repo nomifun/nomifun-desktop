@@ -19,7 +19,7 @@ use nomifun_api_types::CreateConversationRequest;
 use nomifun_common::{AppError, ProviderWithModel};
 use nomifun_conversation::ConversationService;
 
-use crate::collector::{self, SharedConfig};
+use crate::collector::{self, SharedConfig, SharedEventStoreLock};
 use crate::events::CompanionEventEmitter;
 use crate::managed_skills::{
     load_manifest, record_managed_entry, record_source_matches, remove_stale_managed_entries,
@@ -1044,6 +1044,7 @@ pub struct CompanionStoreSink {
     pub config: SharedConfig,
     pub emitter: CompanionEventEmitter,
     pub companion_dir: std::path::PathBuf,
+    pub event_store_lock: SharedEventStoreLock,
 }
 
 impl CompanionStoreSink {
@@ -1165,8 +1166,11 @@ impl CompanionMemorySink for CompanionStoreSink {
     }
 
     async fn recent_events(&self, limit: usize) -> Result<String, String> {
-        let events = collector::read_recent_events(&self.companion_dir, limit)
-            .map_err(|error| error.to_string())?;
+        let events = {
+            let _event_guard = self.event_store_lock.read().await;
+            collector::read_recent_events(&self.companion_dir, limit)
+                .map_err(|error| error.to_string())?
+        };
         if events.is_empty() {
             return Ok("最近没有采集到事件（采集可能未开启）。".into());
         }
@@ -1328,6 +1332,7 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             emitter: CompanionEventEmitter::new(Arc::new(BroadcastEventBus::new(16)), "owner-a"),
             companion_dir: dir.to_path_buf(),
+            event_store_lock: Arc::new(RwLock::new(())),
         }
     }
 

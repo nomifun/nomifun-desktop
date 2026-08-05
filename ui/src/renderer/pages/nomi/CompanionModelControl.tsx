@@ -6,7 +6,8 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Select, Tooltip } from '@arco-design/web-react';
+import { Tooltip } from '@arco-design/web-react';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import type { ProviderId } from '@/common/types/ids';
@@ -16,6 +17,8 @@ import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSe
 interface Props {
   /** 伙伴 profile + 乐观 patch 通道。 */
   companion: ReturnType<typeof useCompanion>;
+  /** 总览的“基础配置”行已经渲染标题时，隐藏内联重复标签。 */
+  showLabel?: boolean;
 }
 
 /**
@@ -31,7 +34,7 @@ interface Props {
  * 生成类模型不在其中，不能作对话模型）。当前存储的模型若已不在该供应商的可用列表里（供应商改配后失效），
  * 会以「(不可用)」禁用项显式呈现并给出重选提示，避免出现无法解释的残留值。
  */
-const CompanionModelControl: React.FC<Props> = ({ companion }) => {
+const CompanionModelControl: React.FC<Props> = ({ companion, showLabel = true }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
   // 对话主模型清单来自统一 catalog resolve（task='chat'，无名称启发式）。
@@ -90,37 +93,41 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
   return (
     <div className='flex flex-col gap-6px'>
       <div className='flex items-center gap-6px flex-wrap'>
-        <Tooltip content={t('nomi.chat.modelConfigHint')}>
-          <span className='flex items-center gap-4px text-12px text-t-tertiary shrink-0 cursor-help'>
-            <span
-              className='w-7px h-7px rd-full shrink-0'
-              style={{ background: configured ? 'rgb(var(--success-6))' : 'rgb(var(--warning-6))' }}
-            />
-            {t('nomi.chat.modelConfig')}
-          </span>
-        </Tooltip>
-        <Select
+        {showLabel && (
+          <Tooltip content={t('nomi.chat.modelConfigHint')}>
+            <span className='flex items-center gap-4px text-12px text-t-tertiary shrink-0 cursor-help'>
+              <span
+                className='w-7px h-7px rd-full shrink-0'
+                style={{ background: configured ? 'rgb(var(--success-6))' : 'rgb(var(--warning-6))' }}
+              />
+              {t('nomi.chat.modelConfig')}
+            </span>
+          </Tooltip>
+        )}
+        <NomiSelect
           size='mini'
-          style={{ width: 148 }}
+          contentFit
+          contentMaxWidth={220}
           placeholder={t('nomi.chat.modelProvider')}
           value={providerId ?? undefined}
           onChange={(provider_id: ProviderId) => setDraftProviderId(provider_id)}
         >
           {/* 供应商被删时，把生 id 作为禁用项展示，让用户看到失效来源。 */}
           {providerStale && providerId && (
-            <Select.Option key={providerId} value={providerId} disabled>
+            <NomiSelect.Option key={providerId} value={providerId} disabled>
               {t('nomi.chat.modelUnavailableOption', { model: providerId })}
-            </Select.Option>
+            </NomiSelect.Option>
           )}
           {enabledProviders.map((p) => (
-            <Select.Option key={p.id} value={p.id}>
+            <NomiSelect.Option key={p.id} value={p.id}>
               {providerLabel(p)}
-            </Select.Option>
+            </NomiSelect.Option>
           ))}
-        </Select>
-        <Select
+        </NomiSelect>
+        <NomiSelect
           size='mini'
-          style={{ width: 176 }}
+          contentFit
+          contentMaxWidth={280}
           placeholder={t('nomi.chat.modelName')}
           value={selectedModel || undefined}
           disabled={!currentProvider}
@@ -130,16 +137,16 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
         >
           {/* 失效的当前模型：禁用项，明确标注「(不可用)」，用户须改选有效模型。 */}
           {showStaleModel && selectedModel && (
-            <Select.Option key={selectedModel} value={selectedModel} disabled>
+            <NomiSelect.Option key={selectedModel} value={selectedModel} disabled>
               {t('nomi.chat.modelUnavailableOption', { model: selectedModel })}
-            </Select.Option>
+            </NomiSelect.Option>
           )}
           {availableModels.map((m) => (
-            <Select.Option key={m} value={m}>
+            <NomiSelect.Option key={m} value={m}>
               {m}
-            </Select.Option>
+            </NomiSelect.Option>
           ))}
-        </Select>
+        </NomiSelect>
       </div>
       {hint && (
         <span className='text-11px leading-tight' style={{ color: 'rgb(var(--warning-6))' }}>

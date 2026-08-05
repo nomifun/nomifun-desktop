@@ -61,8 +61,6 @@ use nomifun_system::{
 use nomifun_terminal::TerminalRouterState;
 use nomifun_webhook::WebhookRouterState;
 
-use nomifun_secret::SecretRouterState;
-
 use crate::services::AppServices;
 
 /// All module-level router states bundled into a single struct.
@@ -96,8 +94,6 @@ pub struct ModuleStates {
     pub webhook: WebhookRouterState,
     /// Persistent Agent collaboration and execution state.
     pub agent_execution: Arc<AgentExecutionEngine>,
-    /// P3-X2: per-pet browser-use credential secret CRUD state.
-    pub secret: SecretRouterState,
     pub terminal: TerminalRouterState,
     pub office: OfficeRouterState,
     pub shell: ShellRouterState,
@@ -594,7 +590,6 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             execution_conversation,
             preset.service.clone(),
         ),
-        secret: build_secret_state(services),
         terminal: build_terminal_state(services),
         office: build_office_state(services),
         shell: build_shell_state(services),
@@ -1413,17 +1408,6 @@ pub fn build_agent_execution_engine(
     engine
 }
 
-/// **P3-X2**: build the `SecretRouterState` (browser-use credential CRUD).
-/// The service holds the app data dir (去 per-pet 键化: browser identity globally
-/// shared —one vault under `{data_dir}/browser-secrets/shared`) + the machine-bound
-/// `encryption_key` (the same persistent `[u8; 32]` the session/factory
-/// side uses to build the `SecretStore`), so a secret registered here decrypts in a session.
-pub fn build_secret_state(services: &AppServices) -> SecretRouterState {
-    let encryption_key = services.encryption_key;
-    let service = nomifun_secret::SecretService::new(services.data_dir.clone(), encryption_key);
-    SecretRouterState::new(service)
-}
-
 /// Build the `IdmmRouterState` (the IDMM supervisor manager + service). Shares
 /// the caller's `ConversationService` / conversation repo / terminal driver so
 /// IDMM supervises the same live sessions AutoWork + the UI drive. Constructs
@@ -2100,6 +2084,14 @@ pub async fn build_extension_states(
 
 /// Build the default `WsHandlerState` from application services.
 pub fn build_ws_state(services: &AppServices) -> WsHandlerState {
+    // Operator escape hatch for deployments behind a reverse proxy that
+    // forwards neither the original `Host` nor `X-Forwarded-Host`: the WS
+    // handshake additionally accepts these exact browser origins.
+    let allowed_origins: Arc<[String]> = std::env::var("NOMIFUN_ALLOWED_ORIGINS")
+        .map(|raw| nomifun_realtime::parse_allowed_origins(&raw))
+        .unwrap_or_default()
+        .into();
+
     // NoAuth: every upgrade is accepted (dev / `--insecure-no-auth`).
     if services.auth_policy.is_no_auth() {
         let authoritative_user_id = services.authoritative_user_id.to_string();
@@ -2107,6 +2099,7 @@ pub fn build_ws_state(services: &AppServices) -> WsHandlerState {
             manager: services.ws_manager.clone(),
             token_authenticator: Arc::new(move |_| Some(authoritative_user_id.clone())),
             token_extractor: Arc::new(|_| Some("local".into())),
+            allowed_origins,
         };
     }
 
@@ -2132,6 +2125,7 @@ pub fn build_ws_state(services: &AppServices) -> WsHandlerState {
         manager: services.ws_manager.clone(),
         token_authenticator,
         token_extractor,
+        allowed_origins,
     }
 }
 

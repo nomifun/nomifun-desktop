@@ -13,9 +13,9 @@ use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 use nomifun_extension::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
 use tokio::sync::Mutex;
 
-use crate::collector::{SharedConfig, read_events_since};
+use crate::collector::{SharedConfig, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
-use crate::evolution::miner::{mine_patterns, mine_reflection_candidates, MinedPattern};
+use crate::evolution::miner::{mine_patterns, MinedPattern};
 use crate::evolution::prompt::{self, DraftOutput};
 use crate::evolution::transcript::{render_transcript, TranscriptAnchor, TranscriptSource};
 use crate::learner::CompanionCompleter;
@@ -28,8 +28,6 @@ const DRAFT_MAX_TOKENS: u32 = 1200;
 const CRITIC_MAX_TOKENS: u32 = 256;
 /// 一次最多起草几个新技能（避免单轮爆量骚扰）。
 const MAX_DRAFTS_PER_RUN: usize = 3;
-/// 任务后反思的最小步数门槛（单会话工具序列折叠后 ≥ 此值才作反思候选）。
-const REFLECT_MIN_STEPS: usize = 4;
 /// 重水合转录行的单行字符上限（控 drafter 上下文成本）。
 const DRAFT_LINE_CHARS: usize = 240;
 /// 喂给 drafter 的转录行数上限（窗口可能跨多轮）。
@@ -54,6 +52,7 @@ pub struct EvolutionEngine {
     pub registry: Arc<CompanionRegistry>,
     pub completer: Arc<dyn CompanionCompleter>,
     pub emitter: CompanionEventEmitter,
+    pub event_store_lock: SharedEventStoreLock,
     pub skill_paths: Arc<SkillPaths>,
     /// 重水合源（会话库 = 唯一内容源）。`start()` 时为 Noop（会话库晚于伴随服务装配，
     /// 见 `attach_companion`），装配后经 [`set_transcript`] 换成真实适配器。未装配/会话已删
@@ -147,7 +146,7 @@ impl EvolutionEngine {
             }
         }
 
-        let (model, min_count, min_distinct, reflect_enabled, auto_activate, auto_threshold) = {
+        let (model, min_count, min_distinct, auto_activate, auto_threshold) = {
             let cfg = self.config.read().await;
             // One model for the whole flywheel: fall back to the learn model when no
             // dedicated evolve model is configured, so default-on works out of the box
@@ -157,7 +156,6 @@ impl EvolutionEngine {
                 model,
                 cfg.evolve.min_pattern_count,
                 cfg.evolve.min_distinct_sessions,
-                cfg.evolve.reflect_enabled,
                 cfg.evolve.auto_activate,
                 cfg.evolve.auto_threshold,
             )
@@ -193,8 +191,10 @@ impl EvolutionEngine {
         };
 
         let cursor = self.store.get_state_i64("evolve_cursor_ts").await?;
-        let (events, _truncated) =
-            read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?;
+        let (events, _truncated) = {
+            let _event_guard = self.event_store_lock.read().await;
+            read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?
+        };
         if events.is_empty() {
             run.status = "no_events".into();
             run.finished_at = Some(now_ms());
@@ -206,16 +206,8 @@ impl EvolutionEngine {
         let patterns = mine_patterns(&events, min_count, min_distinct);
         run.patterns_found = patterns.len() as i64;
 
-        // Candidates = repeated patterns first, then (if enabled) single complex sessions
-        // for post-task reflection. Reflection candidates have distinct_sessions=1 → low
-        // confidence → always reviewed, never auto-activated.
-        let mut candidates = patterns;
-        if reflect_enabled {
-            candidates.extend(mine_reflection_candidates(&events, REFLECT_MIN_STEPS, MAX_DRAFTS_PER_RUN));
-        }
-
         let mut provider_failed = false;
-        for p in candidates {
+        for p in patterns {
             if run.drafts_created as usize >= MAX_DRAFTS_PER_RUN {
                 break;
             }
@@ -246,7 +238,7 @@ impl EvolutionEngine {
         Ok(run)
     }
 
-    /// Process one candidate (mined pattern or reflection) through draft→critic→materialize.
+    /// Process one mined pattern through draft→critic→materialize.
     /// Returns `Ok(true)` if a skill was produced (draft or auto-activated), `Ok(false)` if
     /// skipped (rejected/already-drafted/critic-reject/invalid/disk-fail), and `Err` ONLY on
     /// provider failure (the caller terminates the run and keeps the cursor). Never `emit_error`.
@@ -382,8 +374,7 @@ impl EvolutionEngine {
             body: draft.body.clone(),
         };
         let confidence = ((p.distinct_sessions as f64) / ((min_distinct + 2) as f64)).clamp(0.3, 0.95);
-        // High-confidence auto-activation only when the user opted in AND confidence clears
-        // the bar (repetition-derived; single-session reflections never reach it).
+        // High-confidence auto-activation only when the user opted in AND confidence clears the bar.
         let auto = auto_activate && confidence >= auto_threshold;
 
         if let Err(e) = crate::skill_io::create_skill(&self.skill_paths, &scope, /* draft= */ !auto, &input).await {
@@ -709,6 +700,7 @@ mod tests {
             registry,
             completer,
             emitter: CompanionEventEmitter::new(Arc::new(BroadcastEventBus::new(16)), "owner-a"),
+            event_store_lock: Arc::new(tokio::sync::RwLock::new(())),
             skill_paths: test_skill_paths(dir),
             transcript: std::sync::RwLock::new(Arc::new(NoopTranscriptSource)),
             run_lock: Arc::new(Mutex::new(())),
@@ -829,19 +821,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reflection_drafts_single_complex_session_and_never_auto_activates() {
+    async fn single_complex_session_is_not_mined() {
         let dir = tempfile::tempdir().unwrap();
-        // one session, a long non-repeating tool sequence (5 steps) → reflection candidate.
-        seed_repeated(dir.path(), &[conversation_fixture(5)], &["grep", "read", "edit", "write", "bash"]);
-        let draft = r#"{"name":"reflect-skill","description":"d","when_to_use":"w","body":"b"}"#;
+        seed_repeated(
+            dir.path(),
+            &[conversation_fixture(5)],
+            &["grep", "read", "edit", "write", "bash"],
+        );
+        let draft = r#"{"name":"single-session-skill","description":"d","when_to_use":"w","body":"b"}"#;
         let (engine, cid) = make_engine(dir.path(), draft, true).await;
-        // even with auto on, a single-session reflection (distinct=1, low confidence) stays a draft.
-        engine.config.write().await.evolve.auto_activate = true;
+
         let run = engine.run_once().await.unwrap();
-        assert_eq!(run.drafts_created, 1);
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].status, "draft", "single-session reflection must be reviewed, not auto-activated");
+
+        assert_eq!(run.patterns_found, 0);
+        assert_eq!(run.drafts_created, 0);
+        assert!(engine.store.list_skills(&cid, false).await.unwrap().is_empty());
     }
 
     struct VersioningCompleter;

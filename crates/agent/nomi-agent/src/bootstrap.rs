@@ -302,15 +302,9 @@ pub struct AgentBootstrap {
     /// no protocol approval manager (e.g. the interactive REPL) leave it `None` and the
     /// facade falls back to the construction-time snapshot (unchanged behavior).
     approval_manager: Option<Arc<nomi_protocol::ToolApprovalManager>>,
-    /// **P3-X2: the session's per-pet browser secret vault source** (vault file path +
-    /// machine-bound 32-byte key). Threaded into the native `BrowserTool` so it can lazily
-    /// load the registered credentials (`secret:NAME` resolves, origin-gated) and derive the
-    /// firewall domain allowlist from the same per-pet `allowed_origins` (裁决⑤). Stored as
-    /// the raw pieces (NOT the `nomi_browser` type) so the field exists regardless of the
-    /// `browser-use` feature; the `BrowserSecretSource` is constructed only at the
-    /// feature-gated `with_policy` call site. `None` → empty store + unrestricted egress.
+    /// Machine-bound key for encrypted persistent-browser-login snapshots.
     #[cfg_attr(not(feature = "browser-use"), allow(dead_code))]
-    browser_secret_source: Option<(PathBuf, [u8; 32])>,
+    persistent_login_key: Option<[u8; 32]>,
     /// **Phase D: the session's browser approval gate** (human takeover + SD-5 cross-origin
     /// egress). Threaded into the native `BrowserTool` so an irreversible action in a bypass
     /// session — and a gated cross-origin POST — is surfaced to the user and awaited. `None`
@@ -339,7 +333,7 @@ impl AgentBootstrap {
             goal: None,
             install_embedded_agent_execution: true,
             approval_manager: None,
-            browser_secret_source: None,
+            persistent_login_key: None,
             #[cfg(feature = "browser-use")]
             approval_gate: None,
             #[cfg(feature = "browser-use")]
@@ -379,14 +373,9 @@ impl AgentBootstrap {
         self
     }
 
-    /// **P3-X2: provide the session's per-pet browser secret vault source** so the native
-    /// `BrowserTool` can load the user-registered credentials (`secret:NAME`, origin-gated)
-    /// and derive the firewall domain allowlist from the same per-pet `allowed_origins`
-    /// (裁决⑤). Takes the raw pieces (vault file path + machine-bound 32-byte key) so backend
-    /// callers (`nomifun-ai-agent`) need not depend on `nomi-browser` to wire it. Omit it
-    /// (the default) to keep an empty store + unrestricted egress (current behavior).
-    pub fn browser_secret_source(mut self, vault_path: PathBuf, key: [u8; 32]) -> Self {
-        self.browser_secret_source = Some((vault_path, key));
+    /// Provide the application data key used to encrypt persistent-browser-login snapshots.
+    pub fn persistent_login_key(mut self, key: [u8; 32]) -> Self {
+        self.persistent_login_key = Some(key);
         self
     }
 
@@ -745,12 +734,7 @@ impl AgentBootstrap {
                 self.config.tools.browser.persistent_login,
                 Some(PathBuf::from(cwd)),
                 self.approval_manager.clone(),
-                // P3-X2: per-pet secret vault source (vault path + machine-bound key) so the
-                // facade lazily loads registered credentials + derives the firewall domain
-                // allowlist from their allowed_origins (裁决⑤). None → empty store + unrestricted.
-                self.browser_secret_source
-                    .clone()
-                    .map(|(vault_path, key)| nomi_browser::BrowserSecretSource { vault_path, key }),
+                self.persistent_login_key,
             );
             if let Some(client) = self.browser_lane_client.clone() {
                 // Authoritative mode switch: once injected, BrowserTool::engine()

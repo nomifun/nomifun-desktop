@@ -39,6 +39,12 @@ pub const DEFAULT_PROFILE_SUBDIR: &str = "Default";
 pub const PREFERENCES_FILE: &str = "Preferences";
 /// `profile.exit_type` 的干净值（对应 Chromium `ExitType::kClean`）。
 const EXIT_TYPE_NORMAL: &str = "Normal";
+/// Crash-marker scrubbing is launch hygiene, not a general Preferences parser.
+/// Keep one corrupt or hostile profile from allocating an unbounded buffer on
+/// the launching task. Normal Chromium Preferences files are far below this
+/// ceiling; oversized files are preserved and skipped under the existing
+/// best-effort semantics.
+const MAX_PREFERENCES_BYTES: u64 = 16 * 1024 * 1024;
 
 /// `<user-data-dir>/Default/Preferences` 的绝对路径。
 pub fn preferences_path(user_data_dir: &Path) -> PathBuf {
@@ -90,8 +96,15 @@ pub fn scrub_crash_markers(user_data_dir: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()), // 首启，无 profile
         Err(e) => return Err(e),
     };
-    let mut text = String::new();
-    source.read_to_string(&mut text)?;
+    let Some(text) = read_preferences_bounded(&mut source)? else {
+        tracing::warn!(
+            target: "nomi_browser_engine::profile",
+            reason = "preferences_size_limit",
+            limit_bytes = MAX_PREFERENCES_BYTES,
+            "Preferences crash-marker scrub skipped (best-effort; launch continues)"
+        );
+        return Ok(());
+    };
     match scrub_prefs_json(&text) {
         Ok(Some(new_text)) => {
             // 原子回写：写同目录临时文件再 rename（同卷 rename 是原子替换）。
@@ -127,6 +140,25 @@ pub fn scrub_crash_markers(user_data_dir: &Path) -> std::io::Result<()> {
             Ok(())
         }
     }
+}
+
+fn read_preferences_bounded(source: &mut std::fs::File) -> std::io::Result<Option<String>> {
+    let declared_len = source.metadata()?.len();
+    if declared_len > MAX_PREFERENCES_BYTES {
+        return Ok(None);
+    }
+
+    let mut text = String::with_capacity(declared_len as usize);
+    // The metadata check avoids a needless allocation for an already-large
+    // file. `take(limit + 1)` also closes the grow-after-metadata race without
+    // ever reading the remainder into memory.
+    (&mut *source)
+        .take(MAX_PREFERENCES_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_PREFERENCES_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(text))
 }
 
 /// macOS/Linux：清理 stale `Singleton*` 三件套（symlink → `hostname-pid`，硬杀残留）。
@@ -326,10 +358,53 @@ pub const COMMITTED_OWNERSHIP_RECORD_FILE: &str =
 const DEVTOOLS_ACTIVE_PORT_FILE: &str = "DevToolsActivePort";
 
 const OWNERSHIP_MARKER_VERSION: u32 = 1;
-/// Defensive bound for a complete no-follow ownership-marker walk. Hitting the
-/// bound is an explicit incomplete scan and every destructive caller fails
-/// closed; directories are never silently truncated by depth.
+/// Ownership records contain only two process identities and fixed lineage
+/// fields. Treat a larger file as corrupt authority and fail closed instead of
+/// letting profile recovery allocate attacker-controlled bytes.
+const MAX_OWNERSHIP_RECORD_BYTES: u64 = 64 * 1024;
+/// Defensive bound for one complete no-follow ownership-marker discovery
+/// walk. Hitting it is an explicit incomplete scan. Unresolved trees still
+/// fail closed; an already-discovered exact ephemeral profile may instead be
+/// removed by the separate bounded marker-last continuation and then rescanned.
 const MAX_MARKER_SCAN_ENTRIES: usize = 100_000;
+/// One exact ephemeral-profile cleanup attempt is intentionally bounded, but
+/// reaching this limit is resumable rather than a permanent quarantine.  The
+/// root ownership record stays in place, so the caller retains exact cleanup
+/// authority and a later attempt continues over the smaller remaining tree.
+const MAX_EPHEMERAL_DELETE_BATCH_ENTRIES: usize = MAX_MARKER_SCAN_ENTRIES;
+/// Bound the aggregate directory-name/path bytes copied while one deletion
+/// batch is in memory. This is independent from the entry count because one
+/// hostile wide directory can otherwise make 100k long names expensive.
+const MAX_EPHEMERAL_DELETE_BATCH_PATH_BYTES: usize = 16 * 1024 * 1024;
+const EPHEMERAL_DELETE_RETRY_REQUIRED: &str =
+    "ephemeral profile cleanup reached its bounded batch limit; retry required";
+/// Startup recovery keeps one exact claimed profile moving through bounded
+/// batches in the same invocation. The attempt/time ceilings prevent a
+/// hostile concurrent writer from turning startup into an unbounded loop.
+const MAX_RECOVERY_DELETE_CONTINUATION_ATTEMPTS: usize = 64;
+const MAX_RECOVERY_DELETE_CONTINUATION_TIME: Duration = Duration::from_secs(30);
+/// Full `PathBuf`s duplicate their parent prefix. Bound those retained copies
+/// separately from raw directory-name bytes so a deep common prefix multiplied
+/// by many profiles cannot exceed the per-scan memory envelope.
+const MAX_MARKER_SCAN_RETAINED_PATH_BYTES: usize = 16 * 1024 * 1024;
+/// Windows traversal retains a frontier of child paths rather than Unix
+/// directory fds. Its *current* frontier has an independent byte ceiling and
+/// releases charges as paths are popped.
+#[cfg(windows)]
+const MAX_MARKER_SCAN_PENDING_PATH_BYTES: usize = 16 * 1024 * 1024;
+/// In addition to the entry count, cap the aggregate bytes retained for Unix
+/// directory names. A 100k-entry directory otherwise still permits tens of
+/// MiB of attacker-controlled names before callers get a chance to enforce
+/// their entry budget.
+#[cfg(unix)]
+const MAX_MARKER_SCAN_NAME_BYTES: usize = 16 * 1024 * 1024;
+/// Marker-last verification only needs to observe the two permitted ownership
+/// records plus one unexpected entry. Any wider concurrent mutation is an
+/// immediate fail-closed result rather than another large inventory.
+#[cfg(unix)]
+const MAX_POST_CLEANUP_ROOT_ENTRIES: usize = 3;
+#[cfg(unix)]
+const MAX_POST_CLEANUP_ROOT_NAME_BYTES: usize = 4 * 1024;
 /// Unix marker scans hold one directory fd per *ancestor*, so this bound is
 /// also the exact ceiling of concurrently open scan fds; it must stay far
 /// below the default macOS RLIMIT_NOFILE soft limit of 256. Exceeding it is
@@ -349,6 +424,172 @@ const PROCESS_TREE_CONFIRM_INTERVAL: Duration = Duration::from_millis(25);
 const PROCESS_TREE_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const PROCESS_TREE_ABSENCE_CONFIRMATIONS: usize = 2;
 const PROFILE_OPERATION_LOCK_PREFIX: &str = ".nomifun-browser-operation";
+
+#[derive(Clone, Copy, Debug)]
+struct EphemeralDeleteLimits {
+    max_entries: usize,
+    max_path_bytes: usize,
+}
+
+impl EphemeralDeleteLimits {
+    fn production() -> Self {
+        #[cfg(test)]
+        if let Some(limits) = TEST_EPHEMERAL_DELETE_LIMITS.with(std::cell::Cell::get) {
+            return limits;
+        }
+        Self {
+            max_entries: MAX_EPHEMERAL_DELETE_BATCH_ENTRIES,
+            max_path_bytes: MAX_EPHEMERAL_DELETE_BATCH_PATH_BYTES,
+        }
+    }
+}
+
+fn marker_scan_entry_limit() -> usize {
+    #[cfg(test)]
+    if let Some(limits) = TEST_EPHEMERAL_DELETE_LIMITS.with(std::cell::Cell::get) {
+        return limits.max_entries;
+    }
+    MAX_MARKER_SCAN_ENTRIES
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_EPHEMERAL_DELETE_LIMITS: std::cell::Cell<Option<EphemeralDeleteLimits>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct TestEphemeralDeleteLimitsGuard(Option<EphemeralDeleteLimits>);
+
+#[cfg(test)]
+impl TestEphemeralDeleteLimitsGuard {
+    fn install(limits: EphemeralDeleteLimits) -> Self {
+        Self(TEST_EPHEMERAL_DELETE_LIMITS.with(|slot| slot.replace(Some(limits))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEphemeralDeleteLimitsGuard {
+    fn drop(&mut self) {
+        TEST_EPHEMERAL_DELETE_LIMITS.with(|slot| slot.set(self.0));
+    }
+}
+
+#[derive(Debug)]
+struct EphemeralDeleteBudget {
+    limits: EphemeralDeleteLimits,
+    entries: usize,
+    path_bytes: usize,
+}
+
+impl EphemeralDeleteBudget {
+    fn new(limits: EphemeralDeleteLimits) -> Self {
+        Self {
+            limits,
+            entries: 0,
+            path_bytes: 0,
+        }
+    }
+
+    /// Reserve one entry before retaining its name/path. `Ok(false)` is a
+    /// normal continuation boundary: no accounting is changed and the caller
+    /// must keep the root marker for a later exact retry.
+    fn try_charge(&mut self, path_bytes: usize) -> Result<bool, String> {
+        let next_entries = self
+            .entries
+            .checked_add(1)
+            .ok_or_else(|| "ephemeral profile deletion entry accounting overflowed".to_string())?;
+        let next_path_bytes = self
+            .path_bytes
+            .checked_add(path_bytes)
+            .ok_or_else(|| "ephemeral profile deletion path accounting overflowed".to_string())?;
+        if next_entries > self.limits.max_entries
+            || next_path_bytes > self.limits.max_path_bytes
+        {
+            return Ok(false);
+        }
+        self.entries = next_entries;
+        self.path_bytes = next_path_bytes;
+        Ok(true)
+    }
+
+    #[cfg(unix)]
+    fn try_charge_unix_name(&mut self, name: &[u8]) -> Result<bool, String> {
+        self.try_charge(name.len())
+    }
+
+    #[cfg(windows)]
+    fn try_charge_windows_path(&mut self, path: &Path) -> Result<bool, String> {
+        self.try_charge(path_storage_bytes(path))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EphemeralDeleteProgress {
+    Complete,
+    MoreWork,
+}
+
+#[cfg(unix)]
+fn path_storage_bytes(path: &Path) -> usize {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().len()
+}
+
+#[cfg(windows)]
+fn path_storage_bytes(path: &Path) -> usize {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .count()
+        .saturating_mul(std::mem::size_of::<u16>())
+}
+
+#[derive(Debug)]
+struct RetainedPathBudget {
+    limit_bytes: usize,
+    used_bytes: usize,
+    label: &'static str,
+}
+
+impl RetainedPathBudget {
+    fn new(limit_bytes: usize, label: &'static str) -> Self {
+        Self {
+            limit_bytes,
+            used_bytes: 0,
+            label,
+        }
+    }
+
+    /// Atomically charge every path before any of them is retained. On error
+    /// the previous accounting remains valid and the caller can fail closed.
+    fn charge(&mut self, paths: &[&Path]) -> Result<(), String> {
+        let additional = paths.iter().try_fold(0_usize, |total, path| {
+            total.checked_add(path_storage_bytes(path)).ok_or(())
+        });
+        let next = additional
+            .ok()
+            .and_then(|additional| self.used_bytes.checked_add(additional))
+            .ok_or_else(|| format!("{} byte accounting overflowed", self.label))?;
+        if next > self.limit_bytes {
+            return Err(format!(
+                "{} exceeded {} bytes",
+                self.label, self.limit_bytes
+            ));
+        }
+        self.used_bytes = next;
+        Ok(())
+    }
+
+    #[cfg(any(windows, test))]
+    fn release(&mut self, path: &Path) -> Result<(), String> {
+        self.used_bytes = self
+            .used_bytes
+            .checked_sub(path_storage_bytes(path))
+            .ok_or_else(|| format!("{} byte accounting underflowed", self.label))?;
+        Ok(())
+    }
+}
 
 static MANAGED_APP_INSTANCE_ID: OnceLock<String> = OnceLock::new();
 
@@ -505,6 +746,16 @@ impl std::fmt::Debug for BrowserOwnershipToken {
             .field("profile_configured", &true)
             .field("marker", &self.marker)
             .finish()
+    }
+}
+
+impl BrowserOwnershipToken {
+    pub(crate) fn browser_start_time_epoch_seconds(&self) -> u64 {
+        self.marker.browser.start_time_epoch_seconds
+    }
+
+    pub(crate) fn browser_platform_start_key(&self) -> u64 {
+        self.marker.browser.platform_start_key
     }
 }
 
@@ -1148,6 +1399,25 @@ fn validate_marker_process(identity: &ProcessIdentity) -> Result<(), String> {
     Ok(())
 }
 
+fn read_ownership_record_bytes(
+    file: &mut std::fs::File,
+    declared_len: u64,
+    context: &'static str,
+) -> Result<Vec<u8>, String> {
+    if declared_len > MAX_OWNERSHIP_RECORD_BYTES {
+        return Err(format!("{context} is too large"));
+    }
+    let mut bytes = Vec::with_capacity(declared_len as usize);
+    (&mut *file)
+        .take(MAX_OWNERSHIP_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read {context}: {error}"))?;
+    if bytes.len() as u64 > MAX_OWNERSHIP_RECORD_BYTES {
+        return Err(format!("{context} grew beyond its size limit"));
+    }
+    Ok(bytes)
+}
+
 fn read_marker_at(
     profile_dir: &Path,
     path: &Path,
@@ -1157,8 +1427,22 @@ fn read_marker_at(
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("ownership marker is not a regular file".into());
     }
-    let bytes =
-        std::fs::read(&path).map_err(|error| format!("read ownership marker: {error}"))?;
+    if metadata.len() > MAX_OWNERSHIP_RECORD_BYTES {
+        return Err("ownership marker is too large".into());
+    }
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("open ownership marker: {error}"))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect opened ownership marker: {error}"))?;
+    if !opened_metadata.is_file() {
+        return Err("opened ownership marker is not a regular file".into());
+    }
+    let bytes = read_ownership_record_bytes(
+        &mut file,
+        opened_metadata.len(),
+        "ownership marker",
+    )?;
     let marker: BrowserOwnershipMarker = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse ownership marker: {error}"))?;
     validate_marker(&marker, profile_dir)?;
@@ -1269,13 +1553,11 @@ fn open_pinned_ownership_record(
     if links != 1 {
         return Err("pinned browser ownership record has multiple hard links".into());
     }
-    const MAX_OWNERSHIP_RECORD_BYTES: u64 = 64 * 1024;
-    if metadata.len() > MAX_OWNERSHIP_RECORD_BYTES {
-        return Err("pinned browser ownership record is too large".into());
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)
-        .map_err(|error| format!("read pinned browser ownership record: {error}"))?;
+    let bytes = read_ownership_record_bytes(
+        &mut file,
+        metadata.len(),
+        "pinned browser ownership record",
+    )?;
     let marker: BrowserOwnershipMarker = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse pinned browser ownership record: {error}"))?;
     validate_marker(&marker, profile_dir)?;
@@ -1997,10 +2279,11 @@ fn commit_ownership_marker_path(
     marker_guard
         .seek(SeekFrom::Start(0))
         .map_err(|error| format!("rewind pinned ownership record: {error}"))?;
-    let mut readback = Vec::new();
-    marker_guard
-        .read_to_end(&mut readback)
-        .map_err(|error| format!("read back pinned ownership record: {error}"))?;
+    let readback = read_ownership_record_bytes(
+        &mut marker_guard,
+        bytes.len() as u64,
+        "pinned ownership record readback",
+    )?;
     let observed: BrowserOwnershipMarker = serde_json::from_slice(&readback)
         .map_err(|error| format!("parse pinned ownership record readback: {error}"))?;
     validate_marker(&observed, profile_dir)?;
@@ -2170,26 +2453,21 @@ fn cleanup_uncommitted_ephemeral_profile_under_claim(
         return Err("exact uncommitted browser profile is not a regular directory".into());
     }
 
-    let current_marker = read_marker(&token.profile_dir)?;
-    if current_marker != token.provisional_marker {
+    let current_records = read_ownership_record_set(&token.profile_dir)?;
+    if current_records.active != token.provisional_marker
+        || current_records.active_path != ownership_marker_path(&token.profile_dir)
+        || current_records.provisional_predecessor.is_some()
+    {
         return Err(
-            "provisional ownership marker changed before uncommitted cleanup".into(),
+            "provisional ownership inventory changed before uncommitted cleanup".into(),
         );
     }
-    let (nested_markers, scan_errors, _) =
-        collect_marker_paths(&token.profile_dir);
-    if let Some(error) = scan_errors.into_iter().next() {
-        return Err(format!(
-            "refusing uncommitted ephemeral cleanup after an incomplete marker scan: {error}"
-        ));
-    }
-    let expected_marker = ownership_marker_path(&token.profile_dir);
-    if nested_markers.len() != 1 || nested_markers[0] != expected_marker {
-        return Err(
-            "refusing uncommitted ephemeral cleanup while an unexpected ownership marker remains"
-                .into(),
-        );
-    }
+    // Do not pre-scan the complete profile here. An exact provisional record,
+    // exact directory identity, held operation claim, and proven process-tree
+    // exit are already the deletion authority. The bounded no-follow walker
+    // below checks every child directory for nested ownership records before
+    // deleting anything in that directory and keeps this root record across
+    // continuation boundaries.
     remove_ephemeral_profile_contents_marker_last(
         &token.profile_dir,
         Some(&token.provisional_marker),
@@ -2207,6 +2485,18 @@ pub(crate) fn cleanup_ephemeral_profile_after_exact_shutdown(
     token: &BrowserOwnershipToken,
     profile_dir: &Path,
 ) -> Result<(), String> {
+    cleanup_ephemeral_profile_after_exact_shutdown_with_limits(
+        token,
+        profile_dir,
+        EphemeralDeleteLimits::production(),
+    )
+}
+
+fn cleanup_ephemeral_profile_after_exact_shutdown_with_limits(
+    token: &BrowserOwnershipToken,
+    profile_dir: &Path,
+    limits: EphemeralDeleteLimits,
+) -> Result<(), String> {
     match std::fs::symlink_metadata(profile_dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
@@ -2220,7 +2510,12 @@ pub(crate) fn cleanup_ephemeral_profile_after_exact_shutdown(
         Ok(_) => {}
     }
     let operation_claim = ProfileOperationClaim::acquire(profile_dir)?;
-    cleanup_ephemeral_profile_under_claim(token, profile_dir, &operation_claim)
+    cleanup_ephemeral_profile_under_claim_with_limits(
+        token,
+        profile_dir,
+        &operation_claim,
+        limits,
+    )
 }
 
 pub(crate) fn cleanup_ephemeral_profile_after_exact_shutdown_under_launch_claim(
@@ -2236,6 +2531,20 @@ fn cleanup_ephemeral_profile_under_claim(
     token: &BrowserOwnershipToken,
     profile_dir: &Path,
     operation_claim: &ProfileOperationClaim,
+) -> Result<(), String> {
+    cleanup_ephemeral_profile_under_claim_with_limits(
+        token,
+        profile_dir,
+        operation_claim,
+        EphemeralDeleteLimits::production(),
+    )
+}
+
+fn cleanup_ephemeral_profile_under_claim_with_limits(
+    token: &BrowserOwnershipToken,
+    profile_dir: &Path,
+    operation_claim: &ProfileOperationClaim,
+    limits: EphemeralDeleteLimits,
 ) -> Result<(), String> {
     operation_claim.validates(&token.profile_dir)?;
     if operation_claim.directory_identity()? != token.profile_identity {
@@ -2266,13 +2575,6 @@ fn cleanup_ephemeral_profile_under_claim(
     if canonical_profile != token.profile_dir {
         return Err("ephemeral profile cleanup target changed before removal".into());
     }
-    let (mut nested_markers, scan_errors, _) =
-        collect_marker_paths(&canonical_profile);
-    if let Some(error) = scan_errors.into_iter().next() {
-        return Err(format!(
-            "refusing ephemeral cleanup after an incomplete marker scan: {error}"
-        ));
-    }
     let expected_records = read_ownership_record_set(&canonical_profile)?;
     if expected_records.active != token.marker
         || expected_records.active_path != token.marker_path
@@ -2281,21 +2583,15 @@ fn cleanup_ephemeral_profile_under_claim(
             "ephemeral ownership record paths changed before cleanup".into(),
         );
     }
-    let mut expected_paths = vec![expected_records.active_path.clone()];
-    if let Some((path, _)) = &expected_records.provisional_predecessor {
-        expected_paths.push(path.clone());
-    }
-    nested_markers.sort();
-    expected_paths.sort();
-    if nested_markers != expected_paths {
-        return Err(
-            "refusing ephemeral cleanup while unexpected ownership markers remain".into(),
-        );
-    }
-    remove_ephemeral_profile_contents_marker_last(
+    // A complete pre-scan used to make profiles with more than 100k entries
+    // permanently undeletable. The deletion walker performs the same nested
+    // ownership check directory-by-directory before mutation, while its root
+    // record remains durable across bounded retries.
+    remove_ephemeral_profile_contents_marker_last_with_limits(
         &canonical_profile,
         Some(&token.marker),
         token.profile_identity,
+        limits,
     )
 }
 
@@ -2312,10 +2608,26 @@ fn remove_ephemeral_profile_contents_marker_last(
     expected_marker: Option<&BrowserOwnershipMarker>,
     expected_profile_identity: ProfileDirectoryIdentity,
 ) -> Result<(), String> {
+    remove_ephemeral_profile_contents_marker_last_with_limits(
+        canonical_profile,
+        expected_marker,
+        expected_profile_identity,
+        EphemeralDeleteLimits::production(),
+    )
+}
+
+#[cfg(not(windows))]
+fn remove_ephemeral_profile_contents_marker_last_with_limits(
+    canonical_profile: &Path,
+    expected_marker: Option<&BrowserOwnershipMarker>,
+    expected_profile_identity: ProfileDirectoryIdentity,
+    limits: EphemeralDeleteLimits,
+) -> Result<(), String> {
     remove_ephemeral_profile_contents_marker_last_unix(
         canonical_profile,
         expected_marker,
         expected_profile_identity,
+        limits,
     )
 }
 
@@ -2324,6 +2636,21 @@ fn remove_ephemeral_profile_contents_marker_last(
     canonical_profile: &Path,
     expected_marker: Option<&BrowserOwnershipMarker>,
     expected_profile_identity: ProfileDirectoryIdentity,
+) -> Result<(), String> {
+    remove_ephemeral_profile_contents_marker_last_with_limits(
+        canonical_profile,
+        expected_marker,
+        expected_profile_identity,
+        EphemeralDeleteLimits::production(),
+    )
+}
+
+#[cfg(windows)]
+fn remove_ephemeral_profile_contents_marker_last_with_limits(
+    canonical_profile: &Path,
+    expected_marker: Option<&BrowserOwnershipMarker>,
+    expected_profile_identity: ProfileDirectoryIdentity,
+    limits: EphemeralDeleteLimits,
 ) -> Result<(), String> {
     let root_directory_guard =
         open_locked_non_reparse_directory_for_deletion(canonical_profile)?;
@@ -2375,15 +2702,16 @@ fn remove_ephemeral_profile_contents_marker_last(
         .unwrap_or_default();
     preserved_record_paths.sort();
 
-    let mut removed_entries = 0_usize;
+    let mut delete_budget = EphemeralDeleteBudget::new(limits);
     for entry in std::fs::read_dir(canonical_profile)
         .map_err(|error| format!("read exact ephemeral browser profile: {error}"))?
     {
         let entry =
             entry.map_err(|error| format!("read exact ephemeral profile entry: {error}"))?;
+        let entry_path = entry.path();
         if preserved_record_paths
             .iter()
-            .any(|record| entry.path() == *record)
+            .any(|record| entry_path == *record)
         {
             continue;
         }
@@ -2392,11 +2720,17 @@ fn remove_ephemeral_profile_contents_marker_last(
                 "unexpected ownership record appeared during ephemeral profile cleanup".into(),
             );
         }
-        remove_ephemeral_entry_tree_no_follow(
-            &entry.path(),
+        if !delete_budget.try_charge_windows_path(&entry_path)? {
+            return Err(EPHEMERAL_DELETE_RETRY_REQUIRED.into());
+        }
+        if remove_windows_profile_entry_tree_no_follow(
+            &entry_path,
             0,
-            &mut removed_entries,
-        )?;
+            &mut delete_budget,
+        )? == EphemeralDeleteProgress::MoreWork
+        {
+            return Err(EPHEMERAL_DELETE_RETRY_REQUIRED.into());
+        }
     }
 
     // A non-cooperating writer may have added a nested marker while ordinary
@@ -2673,6 +3007,70 @@ struct UnixDirectory {
 }
 
 #[cfg(unix)]
+struct UnixDirectoryStream(*mut libc::DIR);
+
+#[cfg(unix)]
+impl Drop for UnixDirectoryStream {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper is only constructed from a successful
+        // `fdopendir` and owns that DIR pointer exactly once.
+        unsafe {
+            libc::closedir(self.0);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct UnixDirectoryEnumerationBudget {
+    max_entries: usize,
+    max_name_bytes: usize,
+    entries: usize,
+    name_bytes: usize,
+}
+
+#[cfg(unix)]
+impl UnixDirectoryEnumerationBudget {
+    fn new(max_entries: usize, max_name_bytes: usize) -> Self {
+        Self {
+            max_entries,
+            max_name_bytes,
+            entries: 0,
+            name_bytes: 0,
+        }
+    }
+
+    /// Reserve one name before it is copied out of libc's transient dirent.
+    /// A failed charge leaves the budget unchanged so a caller can report the
+    /// limit without accounting bytes it never retained.
+    fn charge(&mut self, name: &[u8]) -> Result<(), String> {
+        let next_entries = self
+            .entries
+            .checked_add(1)
+            .ok_or_else(|| "Unix directory entry budget overflowed".to_string())?;
+        if next_entries > self.max_entries {
+            return Err(format!(
+                "Unix directory enumeration exceeded {} entries",
+                self.max_entries
+            ));
+        }
+        let next_name_bytes = self
+            .name_bytes
+            .checked_add(name.len())
+            .ok_or_else(|| "Unix directory name-byte budget overflowed".to_string())?;
+        if next_name_bytes > self.max_name_bytes {
+            return Err(format!(
+                "Unix directory enumeration exceeded {} name bytes",
+                self.max_name_bytes
+            ));
+        }
+        self.entries = next_entries;
+        self.name_bytes = next_name_bytes;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
 impl UnixDirectory {
     fn open_path(path: &Path) -> Result<Self, String> {
         use std::os::unix::fs::OpenOptionsExt;
@@ -2743,9 +3141,11 @@ impl UnixDirectory {
         }
     }
 
-    fn entries(&self) -> Result<Vec<std::ffi::OsString>, String> {
+    fn visit_entries(
+        &self,
+        mut visitor: impl FnMut(&[u8]) -> Result<bool, String>,
+    ) -> Result<(), String> {
         use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStringExt;
 
         // fdopendir owns and closes the supplied descriptor. Opening "." via
         // openat creates a new open file description with an independent
@@ -2781,36 +3181,95 @@ impl UnixDirectory {
                 std::io::Error::last_os_error()
             ));
         }
-        let mut entries = Vec::new();
+        let directory = UnixDirectoryStream(directory);
         loop {
             // errno must be cleared to distinguish end-of-directory from an
             // enumeration error.
             set_unix_errno_zero();
             // SAFETY: directory remains live until closed below.
-            let entry = unsafe { libc::readdir(directory) };
+            let entry = unsafe { libc::readdir(directory.0) };
             if entry.is_null() {
                 let error = std::io::Error::last_os_error();
-                // SAFETY: directory was returned by fdopendir and is closed
-                // exactly once here.
-                unsafe {
-                    libc::closedir(directory);
-                }
                 if error.raw_os_error().unwrap_or(0) == 0 {
-                    return Ok(entries);
+                    return Ok(());
                 }
                 return Err(format!("read Unix profile directory: {error}"));
             }
             // SAFETY: d_name is NUL-terminated for the live dirent.
             let bytes = unsafe {
-                std::ffi::CStr::from_ptr((*entry).d_name.as_ptr())
-                    .to_bytes()
-                    .to_vec()
+                std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes()
             };
             if bytes == b"." || bytes == b".." {
                 continue;
             }
-            entries.push(std::ffi::OsString::from_vec(bytes));
+            if visitor(bytes)? {
+                return Ok(());
+            }
         }
+    }
+
+    fn entries_bounded(
+        &self,
+        budget: &mut UnixDirectoryEnumerationBudget,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut entries = Vec::new();
+        self.visit_entries(|bytes| {
+            // Enforce both budgets while `bytes` still points at libc's
+            // transient dirent and before allocating an owned name.
+            budget.charge(bytes)?;
+            entries.push(std::ffi::OsString::from_vec(bytes.to_vec()));
+            Ok(false)
+        })?;
+        Ok(entries)
+    }
+
+    /// Copy one deletion candidate only after charging it to the current work
+    /// budget. Enumerating and recursing one entry at a time prevents a wide
+    /// row of non-empty sibling directories from consuming the whole budget
+    /// before the first child can make progress.
+    ///
+    /// Ownership-record names are skipped for the exact profile root and fail
+    /// closed in children. `exhausted=true` means the next ordinary entry could
+    /// not be charged, so the root marker must remain for a later retry.
+    fn next_deletion_entry(
+        &self,
+        budget: &mut EphemeralDeleteBudget,
+        allow_root_ownership_records: bool,
+    ) -> Result<(Option<std::ffi::OsString>, bool), String> {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let mut entry = None;
+        let mut exhausted = false;
+        self.visit_entries(|bytes| {
+            let name = std::ffi::OsStr::from_bytes(bytes);
+            if is_ownership_record_name(name) {
+                if allow_root_ownership_records {
+                    return Ok(false);
+                }
+                return Err(
+                    "unexpected nested ownership record appeared during Unix profile cleanup"
+                        .into(),
+                );
+            }
+            if !budget.try_charge_unix_name(bytes)? {
+                exhausted = true;
+                return Ok(true);
+            }
+            entry = Some(std::ffi::OsString::from_vec(bytes.to_vec()));
+            Ok(true)
+        })?;
+        Ok((entry, exhausted))
+    }
+
+    fn has_entries(&self) -> Result<bool, String> {
+        let mut found = false;
+        self.visit_entries(|_| {
+            found = true;
+            Ok(true)
+        })?;
+        Ok(found)
     }
 }
 
@@ -3026,7 +3485,7 @@ fn read_unix_marker_record(
         ));
     }
     // SAFETY: openat returned a new owned descriptor.
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     let metadata = file
         .metadata()
         .map_err(|error| format!("inspect exact Unix ownership record: {error}"))?;
@@ -3035,10 +3494,11 @@ fn read_unix_marker_record(
             "Unix ownership record is not a single-link regular file".into(),
         );
     }
-    let mut bytes = Vec::new();
-    file.take(1024 * 1024)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read exact Unix ownership record: {error}"))?;
+    let bytes = read_ownership_record_bytes(
+        &mut file,
+        metadata.len(),
+        "exact Unix ownership record",
+    )?;
     let marker: BrowserOwnershipMarker = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse exact Unix ownership record: {error}"))?;
     validate_marker(&marker, profile_dir)?;
@@ -3281,14 +3741,10 @@ fn remove_unix_profile_entry_tree(
     name: &std::ffi::OsStr,
     root_device: u64,
     depth: usize,
-    removed_entries: &mut usize,
-) -> Result<(), String> {
+    budget: &mut EphemeralDeleteBudget,
+) -> Result<EphemeralDeleteProgress, String> {
     if depth > MAX_EPHEMERAL_DELETE_DEPTH {
         return Err("Unix profile deletion exceeded the safe directory depth".into());
-    }
-    *removed_entries = removed_entries.saturating_add(1);
-    if *removed_entries > MAX_MARKER_SCAN_ENTRIES {
-        return Err("Unix profile deletion exceeded the safe entry budget".into());
     }
     if is_ownership_record_name(name) {
         return Err(
@@ -3300,7 +3756,8 @@ fn remove_unix_profile_entry_tree(
     let is_directory =
         stat.st_mode & libc::S_IFMT == libc::S_IFDIR;
     if !is_directory {
-        return unlink_unix_entry(parent, name, 0);
+        unlink_unix_entry(parent, name, 0)?;
+        return Ok(EphemeralDeleteProgress::Complete);
     }
     let child = parent.open_child(name)?;
     if child.device != root_device
@@ -3321,23 +3778,46 @@ fn remove_unix_profile_entry_tree(
             "Unix profile child crossed a mount or changed identity".into(),
         );
     }
-    for child_name in child.entries()? {
-        remove_unix_profile_entry_tree(
+    // Detect a nested managed profile before mutating any of its contents.
+    // `fstatat(..., AT_SYMLINK_NOFOLLOW)` backs these exact-name checks, so a
+    // marker symlink/directory also quarantines the subtree.
+    for marker_name in [OWNERSHIP_MARKER_FILE, COMMITTED_OWNERSHIP_RECORD_FILE] {
+        if unix_entry_exists(&child, std::ffi::OsStr::new(marker_name))? {
+            return Err(
+                "unexpected nested ownership record appeared during Unix profile cleanup"
+                    .into(),
+            );
+        }
+    }
+
+    loop {
+        let (child_name, exhausted) = child.next_deletion_entry(budget, false)?;
+        if exhausted {
+            return Ok(EphemeralDeleteProgress::MoreWork);
+        }
+        let Some(child_name) = child_name else {
+            break;
+        };
+        if remove_unix_profile_entry_tree(
             &child,
             &child_name,
             root_device,
             depth.saturating_add(1),
-            removed_entries,
-        )?;
+            budget,
+        )? == EphemeralDeleteProgress::MoreWork
+        {
+            return Ok(EphemeralDeleteProgress::MoreWork);
+        }
     }
-    if !child.entries()?.is_empty() {
+    if child.has_entries()? {
         return Err("Unix profile child changed before directory removal".into());
     }
     let current = unix_entry_stat(parent, name)?;
     if !same_unix_entry(&current, &child) {
         return Err("Unix profile child changed before unlinkat".into());
     }
-    unlink_unix_entry(parent, name, libc::AT_REMOVEDIR)
+    unlink_unix_entry(parent, name, libc::AT_REMOVEDIR)?;
+    Ok(EphemeralDeleteProgress::Complete)
 }
 
 #[cfg(unix)]
@@ -3382,6 +3862,7 @@ fn remove_ephemeral_profile_contents_marker_last_unix(
     canonical_profile: &Path,
     expected_marker: Option<&BrowserOwnershipMarker>,
     expected_profile_identity: ProfileDirectoryIdentity,
+    limits: EphemeralDeleteLimits,
 ) -> Result<(), String> {
     let parent_path = canonical_profile
         .parent()
@@ -3424,9 +3905,11 @@ fn remove_ephemeral_profile_contents_marker_last_unix(
     let fixed_name = std::ffi::OsStr::new(OWNERSHIP_MARKER_FILE);
     let committed_name =
         std::ffi::OsStr::new(COMMITTED_OWNERSHIP_RECORD_FILE);
-    let initial_names = root.entries()?;
-    let has_fixed = initial_names.iter().any(|name| name == fixed_name);
-    let has_committed = initial_names.iter().any(|name| name == committed_name);
+    // Ownership record names are fixed, so resolve them directly through the
+    // pinned root fd. A wide root directory must not require a complete 100k
+    // inventory before the first resumable deletion batch can make progress.
+    let has_fixed = unix_entry_exists(&root, fixed_name)?;
+    let has_committed = unix_entry_exists(&root, committed_name)?;
 
     let (active_name, predecessor) = match expected_marker {
         None => {
@@ -3486,21 +3969,32 @@ fn remove_ephemeral_profile_contents_marker_last_unix(
         }
     };
 
-    let mut removed_entries = 0_usize;
-    for name in initial_names {
-        if name == fixed_name || name == committed_name {
-            continue;
+    let mut delete_budget = EphemeralDeleteBudget::new(limits);
+    loop {
+        let (name, exhausted) = root.next_deletion_entry(&mut delete_budget, true)?;
+        if exhausted {
+            return Err(EPHEMERAL_DELETE_RETRY_REQUIRED.into());
         }
-        remove_unix_profile_entry_tree(
+        let Some(name) = name else {
+            break;
+        };
+        if remove_unix_profile_entry_tree(
             &root,
             &name,
             root.device,
             0,
-            &mut removed_entries,
-        )?;
+            &mut delete_budget,
+        )? == EphemeralDeleteProgress::MoreWork
+        {
+            return Err(EPHEMERAL_DELETE_RETRY_REQUIRED.into());
+        }
     }
 
-    let remaining = root.entries()?;
+    let mut verification_budget = UnixDirectoryEnumerationBudget::new(
+        MAX_POST_CLEANUP_ROOT_ENTRIES,
+        MAX_POST_CLEANUP_ROOT_NAME_BYTES,
+    );
+    let remaining = root.entries_bounded(&mut verification_budget)?;
     if remaining.iter().any(|name| {
         name != fixed_name && name != committed_name
     }) {
@@ -3531,63 +4025,141 @@ fn remove_ephemeral_profile_contents_marker_last_unix(
         unlink_unix_entry(&root, name, 0)?;
     }
 
-    if !root.entries()?.is_empty() {
+    let restore_active = |error: String| -> Result<(), String> {
         if let (Some(name), Some(expected)) = (active_name, expected_marker) {
-            let _ = restore_unix_record_relative(&root, name, expected);
+            if let Err(restore_error) = restore_unix_record_relative(&root, name, expected) {
+                return Err(format!(
+                    "{error}; ownership restore also failed: {restore_error}"
+                ));
+            }
         }
-        return Err("Unix profile changed before final unlinkat".into());
+        Err(error)
+    };
+
+    let root_has_entries = match root.has_entries() {
+        Ok(has_entries) => has_entries,
+        Err(error) => {
+            return restore_active(format!(
+                "verify empty Unix profile before final unlinkat: {error}"
+            ));
+        }
+    };
+    if root_has_entries {
+        return restore_active("Unix profile changed before final unlinkat".into());
     }
-    let current_root = unix_entry_stat(&parent, leaf)?;
-    if !same_unix_entry(&current_root, &root) {
-        if let (Some(name), Some(expected)) = (active_name, expected_marker) {
-            let _ = restore_unix_record_relative(&root, name, expected);
+    let current_root = match unix_entry_stat(&parent, leaf) {
+        Ok(stat) => stat,
+        Err(error) => {
+            return restore_active(format!(
+                "verify Unix profile leaf before final unlinkat: {error}"
+            ));
         }
-        return Err("Unix profile leaf changed before final unlinkat".into());
+    };
+    if !same_unix_entry(&current_root, &root) {
+        return restore_active("Unix profile leaf changed before final unlinkat".into());
     }
     match unlink_unix_entry(&parent, leaf, libc::AT_REMOVEDIR) {
         Ok(()) => Ok(()),
-        Err(error) => {
-            if let (Some(name), Some(expected)) = (active_name, expected_marker) {
-                let restore =
-                    restore_unix_record_relative(&root, name, expected);
-                if let Err(restore_error) = restore {
-                    return Err(format!(
-                        "{error}; ownership restore also failed: {restore_error}"
-                    ));
-                }
-            }
-            Err(error)
-        }
+        Err(error) => restore_active(error),
     }
 }
 
-/// 仅被 `#[cfg(windows)]` 版 `remove_ephemeral_profile_contents_marker_last`
-/// 使用（unix 走 `remove_unix_profile_entry_tree`），故同门。
 #[cfg(windows)]
-fn remove_ephemeral_entry_tree_no_follow(
+fn windows_directory_contains_ownership_record(path: &Path) -> Result<bool, String> {
+    for name in [OWNERSHIP_MARKER_FILE, COMMITTED_OWNERSHIP_RECORD_FILE] {
+        match std::fs::symlink_metadata(path.join(name)) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect nested Windows ownership record before deletion: {error}"
+                ));
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Delete one Windows subtree in bounded, resumable steps. Every regular
+/// directory is pinned with a non-reparse DELETE handle before traversal;
+/// reparse points are removed as links and are never followed. A direct
+/// ownership record quarantines the complete directory before any of its
+/// children are touched.
+#[cfg(windows)]
+fn remove_windows_profile_entry_tree_no_follow(
     path: &Path,
     depth: usize,
-    removed_entries: &mut usize,
-) -> Result<(), String> {
+    budget: &mut EphemeralDeleteBudget,
+) -> Result<EphemeralDeleteProgress, String> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+
     if depth > MAX_EPHEMERAL_DELETE_DEPTH {
         return Err("ephemeral profile deletion exceeded the safe directory depth".into());
     }
-    *removed_entries = removed_entries.saturating_add(1);
-    if *removed_entries > MAX_MARKER_SCAN_ENTRIES {
-        return Err("ephemeral profile deletion exceeded the safe entry budget".into());
-    }
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("inspect exact ephemeral profile entry: {error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return std::fs::remove_file(path)
-            .map_err(|error| format!("remove exact ephemeral profile file: {error}"));
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        // Use single-entry unlink operations only. A path that races from a
+        // directory reparse point to a non-empty regular directory therefore
+        // fails instead of making a recursive path-based deletion cross the
+        // no-follow boundary.
+        if metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            std::fs::remove_dir(path).map_err(|error| {
+                format!("remove exact ephemeral profile directory reparse point: {error}")
+            })?;
+        } else {
+            std::fs::remove_file(path).map_err(|error| {
+                format!("remove exact ephemeral profile file reparse point: {error}")
+            })?;
+        }
+        return Ok(EphemeralDeleteProgress::Complete);
     }
-    // Rust's platform implementation is explicitly symlink-race resistant on
-    // Windows and Unix. Keeping the root ownership record outside this subtree
-    // preserves marker-last recovery while avoiding a custom path-recursive
-    // walker whose metadata/read_dir gap could cross a junction.
-    std::fs::remove_dir_all(path)
-        .map_err(|error| format!("remove exact ephemeral profile subtree: {error}"))
+    if !metadata.is_dir() {
+        std::fs::remove_file(path)
+            .map_err(|error| format!("remove exact ephemeral profile file: {error}"))?;
+        return Ok(EphemeralDeleteProgress::Complete);
+    }
+
+    let directory_guard = open_locked_non_reparse_directory_for_deletion(path)?;
+    if windows_directory_contains_ownership_record(path)? {
+        return Err(
+            "unexpected nested ownership record appeared during Windows profile cleanup"
+                .into(),
+        );
+    }
+
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| format!("read exact Windows profile directory: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("read exact Windows profile directory entry: {error}"))?;
+        if is_ownership_record_name(&entry.file_name()) {
+            return Err(
+                "unexpected nested ownership record appeared during Windows profile cleanup"
+                    .into(),
+            );
+        }
+        let child = entry.path();
+        if !budget.try_charge_windows_path(&child)? {
+            return Ok(EphemeralDeleteProgress::MoreWork);
+        }
+        if remove_windows_profile_entry_tree_no_follow(
+            &child,
+            depth.saturating_add(1),
+            budget,
+        )? == EphemeralDeleteProgress::MoreWork
+        {
+            return Ok(EphemeralDeleteProgress::MoreWork);
+        }
+    }
+
+    delete_locked_empty_directory(&directory_guard)
+        .map_err(|error| format!("delete exact empty Windows profile directory: {error}"))?;
+    drop(directory_guard);
+    Ok(EphemeralDeleteProgress::Complete)
 }
 
 /// Variant used by launch failures which occur while the original exclusive
@@ -3698,6 +4270,46 @@ fn remove_regular_devtools_active_port(
 }
 
 #[cfg(unix)]
+fn collect_direct_unix_ownership_records(
+    directory: &UnixDirectory,
+    display_path: &Path,
+    markers: &mut Vec<PathBuf>,
+    errors: &mut Vec<String>,
+    identities: &mut HashMap<PathBuf, ProfileDirectoryIdentity>,
+    retained_path_budget: &mut RetainedPathBudget,
+    directly_examined_paths: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
+    for marker_name in [OWNERSHIP_MARKER_FILE, COMMITTED_OWNERSHIP_RECORD_FILE] {
+        let marker_name = std::ffi::OsStr::new(marker_name);
+        if !unix_entry_exists(directory, marker_name)? {
+            continue;
+        }
+        let marker_path = display_path.join(marker_name);
+        if directly_examined_paths.contains(&marker_path) {
+            continue;
+        }
+        let stat = unix_entry_stat(directory, marker_name)?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            errors.push("ownership record name is occupied by a non-regular file".into());
+            continue;
+        }
+        // Account separately for the marker vector, identity-map key, and the
+        // duplicate path retained by the direct-probe de-duplication set.
+        retained_path_budget.charge(&[
+            marker_path.as_path(),
+            display_path,
+            marker_path.as_path(),
+        ])?;
+        directly_examined_paths.insert(marker_path.clone());
+        markers.push(marker_path);
+        identities
+            .entry(display_path.to_path_buf())
+            .or_insert(directory.identity());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn collect_marker_paths(
     root: &Path,
 ) -> (
@@ -3723,6 +4335,26 @@ fn collect_marker_paths(
     let mut markers: Vec<PathBuf> = Vec::new();
     let mut errors = Vec::new();
     let mut identities = HashMap::new();
+    let mut retained_path_budget = RetainedPathBudget::new(
+        MAX_MARKER_SCAN_RETAINED_PATH_BYTES,
+        "browser profile marker retained paths",
+    );
+    let mut directly_examined_paths = HashSet::new();
+    // Probe the two fixed authority names before copying a potentially huge
+    // directory listing. This lets an already-open, marker-owned profile enter
+    // bounded cleanup even when its root itself exceeds the scan ceiling.
+    if let Err(error) = collect_direct_unix_ownership_records(
+        &root_directory,
+        root,
+        &mut markers,
+        &mut errors,
+        &mut identities,
+        &mut retained_path_budget,
+        &mut directly_examined_paths,
+    ) {
+        errors.push(error);
+        return (markers, errors, identities);
+    }
     // Depth-first with one open fd per *ancestor* only. A frontier of sibling
     // fds over a wide Chromium profile tree could exhaust the default macOS
     // RLIMIT_NOFILE of 256 and turn every cleanup fail-closed.
@@ -3732,7 +4364,10 @@ fn collect_marker_paths(
         entries: Vec<std::ffi::OsString>,
         next: usize,
     }
-    let root_entries = match root_directory.entries() {
+    let scan_entry_limit = marker_scan_entry_limit();
+    let mut enumeration_budget =
+        UnixDirectoryEnumerationBudget::new(scan_entry_limit, MAX_MARKER_SCAN_NAME_BYTES);
+    let root_entries = match root_directory.entries_bounded(&mut enumeration_budget) {
         Ok(entries) => entries,
         Err(error) => return (markers, vec![error], identities),
     };
@@ -3751,9 +4386,9 @@ fn collect_marker_paths(
         let name = std::mem::take(&mut frame.entries[frame.next]);
         frame.next += 1;
         scanned_entries = scanned_entries.saturating_add(1);
-        if scanned_entries > MAX_MARKER_SCAN_ENTRIES {
+        if scanned_entries > scan_entry_limit {
             errors.push(format!(
-                "browser profile marker scan exceeded {MAX_MARKER_SCAN_ENTRIES} entries"
+                "browser profile marker scan exceeded {scan_entry_limit} entries"
             ));
             markers.sort_by_key(|path| {
                 std::cmp::Reverse(path.components().count())
@@ -3770,7 +4405,19 @@ fn collect_marker_paths(
         let path = frame.display_path.join(&name);
         let kind = stat.st_mode & libc::S_IFMT;
         if is_ownership_record_name(&name) {
+            if directly_examined_paths.contains(&path) {
+                continue;
+            }
             if kind == libc::S_IFREG {
+                if let Err(error) = retained_path_budget
+                    .charge(&[path.as_path(), frame.display_path.as_path()])
+                {
+                    errors.push(error);
+                    markers.sort_by_key(|path| {
+                        std::cmp::Reverse(path.components().count())
+                    });
+                    return (markers, errors, identities);
+                }
                 markers.push(path);
                 identities
                     .entry(frame.display_path.clone())
@@ -3810,7 +4457,22 @@ fn collect_marker_paths(
                         }
                     } =>
             {
-                match child.entries() {
+                if let Err(error) = collect_direct_unix_ownership_records(
+                    &child,
+                    &path,
+                    &mut markers,
+                    &mut errors,
+                    &mut identities,
+                    &mut retained_path_budget,
+                    &mut directly_examined_paths,
+                ) {
+                    errors.push(error);
+                    markers.sort_by_key(|path| {
+                        std::cmp::Reverse(path.components().count())
+                    });
+                    return (markers, errors, identities);
+                }
+                match child.entries_bounded(&mut enumeration_budget) {
                     Ok(entries) => stack.push(ScanFrame {
                         directory: child,
                         display_path: path,
@@ -3833,6 +4495,52 @@ fn collect_marker_paths(
 }
 
 #[cfg(windows)]
+fn collect_direct_windows_ownership_records(
+    directory: &Path,
+    markers: &mut Vec<PathBuf>,
+    errors: &mut Vec<String>,
+    identities: &mut HashMap<PathBuf, ProfileDirectoryIdentity>,
+    retained_path_budget: &mut RetainedPathBudget,
+    directly_examined_paths: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
+    for marker_name in [OWNERSHIP_MARKER_FILE, COMMITTED_OWNERSHIP_RECORD_FILE] {
+        let marker_path = directory.join(marker_name);
+        let metadata = match std::fs::symlink_metadata(&marker_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "inspect direct Windows ownership record: {error}"
+                ));
+            }
+        };
+        if directly_examined_paths.contains(&marker_path) {
+            continue;
+        }
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            errors.push("ownership record name is occupied by a non-regular file".into());
+            continue;
+        }
+        // Account separately for the marker vector, identity-map key, and the
+        // duplicate path retained by the direct-probe de-duplication set.
+        retained_path_budget.charge(&[
+            marker_path.as_path(),
+            directory,
+            marker_path.as_path(),
+        ])?;
+        directly_examined_paths.insert(marker_path.clone());
+        markers.push(marker_path);
+        match capture_profile_directory_identity(directory) {
+            Ok(identity) => {
+                identities.entry(directory.to_path_buf()).or_insert(identity);
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn collect_marker_paths(
     root: &Path,
 ) -> (
@@ -3843,6 +4551,10 @@ fn collect_marker_paths(
     let mut markers = Vec::new();
     let mut errors = Vec::new();
     let mut identities = HashMap::new();
+    let mut retained_path_budget = RetainedPathBudget::new(
+        MAX_MARKER_SCAN_RETAINED_PATH_BYTES,
+        "browser profile marker retained paths",
+    );
     match std::fs::symlink_metadata(root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return (markers, errors, identities);
@@ -3857,9 +4569,39 @@ fn collect_marker_paths(
         }
         Ok(_) => {}
     }
+    let mut pending_path_budget = RetainedPathBudget::new(
+        MAX_MARKER_SCAN_PENDING_PATH_BYTES,
+        "browser profile marker pending frontier",
+    );
+    if let Err(error) = pending_path_budget.charge(&[root]) {
+        errors.push(error);
+        return (markers, errors, identities);
+    }
     let mut pending = vec![root.to_path_buf()];
+    let mut directly_examined_paths = HashSet::new();
+    let scan_entry_limit = marker_scan_entry_limit();
     let mut scanned_entries = 0_usize;
     while let Some(directory) = pending.pop() {
+        if let Err(error) = pending_path_budget.release(&directory) {
+            errors.push(error);
+            markers.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+            return (markers, errors, identities);
+        }
+        // Marker names are fixed and cheap to probe. Discover exact authority
+        // before a wide directory consumes the traversal budget, while the
+        // later pinned operation claim still verifies path and file identity.
+        if let Err(error) = collect_direct_windows_ownership_records(
+            &directory,
+            &mut markers,
+            &mut errors,
+            &mut identities,
+            &mut retained_path_budget,
+            &mut directly_examined_paths,
+        ) {
+            errors.push(error);
+            markers.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+            return (markers, errors, identities);
+        }
         let entries = match std::fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -3870,9 +4612,9 @@ fn collect_marker_paths(
         };
         for entry in entries {
             scanned_entries = scanned_entries.saturating_add(1);
-            if scanned_entries > MAX_MARKER_SCAN_ENTRIES {
+            if scanned_entries > scan_entry_limit {
                 errors.push(format!(
-                    "browser profile marker scan exceeded {MAX_MARKER_SCAN_ENTRIES} entries"
+                    "browser profile marker scan exceeded {scan_entry_limit} entries"
                 ));
                 markers.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
                 return (markers, errors, identities);
@@ -3892,8 +4634,21 @@ fn collect_marker_paths(
                 }
             };
             if is_ownership_record_name(&entry.file_name()) {
+                if directly_examined_paths.contains(&entry.path()) {
+                    continue;
+                }
                 if file_type.is_file() && !file_type.is_symlink() {
-                    markers.push(entry.path());
+                    let marker_path = entry.path();
+                    if let Err(error) = retained_path_budget
+                        .charge(&[marker_path.as_path(), directory.as_path()])
+                    {
+                        errors.push(error);
+                        markers.sort_by_key(|path| {
+                            std::cmp::Reverse(path.components().count())
+                        });
+                        return (markers, errors, identities);
+                    }
+                    markers.push(marker_path);
                     match capture_profile_directory_identity(&directory) {
                         Ok(identity) => {
                             identities
@@ -3913,7 +4668,15 @@ fn collect_marker_paths(
                 continue;
             }
             if file_type.is_dir() {
-                pending.push(entry.path());
+                let child = entry.path();
+                if let Err(error) = pending_path_budget.charge(&[child.as_path()]) {
+                    errors.push(error);
+                    markers.sort_by_key(|path| {
+                        std::cmp::Reverse(path.components().count())
+                    });
+                    return (markers, errors, identities);
+                }
+                pending.push(child);
             }
         }
     }
@@ -3942,40 +4705,54 @@ fn cleanup_recovered_profile(
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err("recovered ephemeral profile is not a regular directory".into());
             }
-            let (mut nested_markers, scan_errors, _) =
-                collect_marker_paths(&canonical_profile);
-            if let Some(error) = scan_errors.into_iter().next() {
-                return Err(format!(
-                    "refusing recursive cleanup after an incomplete nested marker scan: {error}"
-                ));
-            }
             let records = read_ownership_record_set(&canonical_profile)?;
             if records.active != *expected {
                 return Err(
                     "recovered ownership record changed before recursive cleanup".into(),
                 );
             }
-            let mut expected_paths = vec![records.active_path];
-            if let Some((path, _)) = records.provisional_predecessor {
-                expected_paths.push(path);
-            }
-            nested_markers.sort();
-            expected_paths.sort();
-            if nested_markers != expected_paths {
-                return Err(
-                    "refusing recursive cleanup while a descendant ownership marker remains"
-                        .into(),
-                );
-            }
+            // Exact recovery has already pinned the ownership record and
+            // proven the browser tree absent. Let the bounded no-follow
+            // walker discover nested ownership directory-by-directory so an
+            // oversized, otherwise valid profile can make resumable progress.
             let expected_profile_identity =
                 operation_claim.directory_identity()?;
             #[cfg(windows)]
             operation_claim.release_profile_guard_for_directory_removal()?;
-            remove_ephemeral_profile_contents_marker_last(
-                &canonical_profile,
-                Some(expected),
-                expected_profile_identity,
-            )
+            let continuation_started = std::time::Instant::now();
+            for attempt in 1..=MAX_RECOVERY_DELETE_CONTINUATION_ATTEMPTS {
+                match remove_ephemeral_profile_contents_marker_last(
+                    &canonical_profile,
+                    Some(expected),
+                    expected_profile_identity,
+                ) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if error == EPHEMERAL_DELETE_RETRY_REQUIRED => {
+                        if attempt == MAX_RECOVERY_DELETE_CONTINUATION_ATTEMPTS
+                            || continuation_started.elapsed()
+                                >= MAX_RECOVERY_DELETE_CONTINUATION_TIME
+                        {
+                            return Err(format!(
+                                "{EPHEMERAL_DELETE_RETRY_REQUIRED}; startup recovery continuation budget exhausted"
+                            ));
+                        }
+                        // Each pass re-acquires the exact root handle inside
+                        // the marker-last remover. Revalidate the canonical
+                        // path and file identity before the next bounded pass.
+                        operation_claim.validates(&canonical_profile)?;
+                        if operation_claim.directory_identity()?
+                            != expected_profile_identity
+                        {
+                            return Err(
+                                "recovered ephemeral profile identity changed between deletion batches"
+                                    .into(),
+                            );
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!("the bounded startup recovery loop always returns")
         }
         ProfileRecoveryMode::PreserveStableProfile => {
             let records = read_ownership_record_set(&canonical_profile)?;
@@ -4008,6 +4785,32 @@ fn cleanup_recovered_profile(
             std::fs::remove_file(&records.active_path)
                 .map_err(|error| format!("clear recovered stable ownership record: {error}"))
         }
+    }
+}
+
+/// An initial marker discovery may hit the scan ceiling inside a very large
+/// marker-owned profile after already discovering its exact root record. Give
+/// bounded cleanup a chance to remove that profile, then count only scan
+/// errors which still reproduce. This keeps the startup report fail-closed for
+/// genuinely unresolved trees without permanently degrading on stale errors
+/// from a profile that was safely removed in the same invocation.
+fn record_unresolved_recovery_scan_errors(
+    recovery_root: &Path,
+    initial_scan_errors: &[String],
+    report: &mut ProfileRecoveryReport,
+) {
+    if initial_scan_errors.is_empty() {
+        return;
+    }
+    let (_, unresolved, _) = collect_marker_paths(recovery_root);
+    for error in unresolved {
+        report.failures += 1;
+        tracing::warn!(
+            target: "nomi_browser_engine::profile",
+            reason = "recovery_scan_incomplete",
+            "browser orphan recovery scan remained incomplete after bounded cleanup; affected profiles were preserved"
+        );
+        let _ = error;
     }
 }
 
@@ -4171,15 +4974,6 @@ fn recover_owned_profiles_with(
     let (markers, scan_errors, scanned_profile_identities) =
         collect_marker_paths(recovery_root);
     report.markers_scanned = markers.len();
-    for error in scan_errors {
-        report.failures += 1;
-        tracing::warn!(
-            target: "nomi_browser_engine::profile",
-            reason = "recovery_scan_incomplete",
-            "browser orphan recovery scan was incomplete; affected profiles were preserved"
-        );
-        let _ = error;
-    }
 
     let mut processed_profiles = HashSet::new();
     for marker_path in markers {
@@ -4443,6 +5237,7 @@ fn recover_owned_profiles_with(
             }
         }
     }
+    record_unresolved_recovery_scan_errors(recovery_root, &scan_errors, &mut report);
     report
 }
 
@@ -4464,15 +5259,6 @@ fn recover_owned_profiles_with(
     let (markers, scan_errors, scanned_profile_identities) =
         collect_marker_paths(recovery_root);
     report.markers_scanned = markers.len();
-    for error in scan_errors {
-        report.failures += 1;
-        tracing::warn!(
-            target: "nomi_browser_engine::profile",
-            reason = "recovery_scan_incomplete",
-            "browser orphan recovery scan was incomplete; affected profiles were preserved"
-        );
-        let _ = error;
-    }
 
     let mut processed_profiles = HashSet::new();
     for marker_path in markers {
@@ -4702,6 +5488,7 @@ fn recover_owned_profiles_with(
             }
         }
     }
+    record_unresolved_recovery_scan_errors(recovery_root, &scan_errors, &mut report);
     report
 }
 
@@ -5246,7 +6033,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unix_marker_scan_depth_overflow_fails_closed() {
+    fn unix_marker_scan_depth_overflow_is_resolved_by_exact_cleanup() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("ephemeral");
         let profile = root.join("too-deep");
@@ -5266,7 +6053,41 @@ mod tests {
             &mut control,
         );
 
-        assert!(profile.exists(), "an incompletely scanned profile is preserved");
+        assert!(
+            !profile.exists(),
+            "the exact marker-owned deletion walker safely resolves a stale discovery-depth error"
+        );
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.ephemeral_profiles_removed, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_ephemeral_delete_depth_overflow_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("beyond-delete-depth");
+        write_test_marker(
+            &profile,
+            identity(107, "nomifun-gone"),
+            identity(207, "chrome-gone"),
+        );
+        let mut deep = profile.clone();
+        for level in 0..=MAX_EPHEMERAL_DELETE_DEPTH {
+            deep = deep.join(format!("d{level}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("entry.bin"), b"beyond-delete-depth").unwrap();
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists(), "the deletion depth ceiling fails closed");
+        assert!(ownership_marker_path(&profile).is_file());
         assert!(report.failures > 0);
         assert_eq!(report.ephemeral_profiles_removed, 0);
     }
@@ -6139,6 +6960,56 @@ mod tests {
     }
 
     #[test]
+    fn oversized_ownership_record_is_rejected_before_body_allocation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("oversized-marker");
+        std::fs::create_dir_all(&profile).unwrap();
+        let marker_path = ownership_marker_path(&profile);
+        let marker = std::fs::File::create(&marker_path).unwrap();
+        marker
+            .set_len(MAX_OWNERSHIP_RECORD_BYTES + 1)
+            .unwrap();
+        drop(marker);
+
+        let error = read_marker_at(&profile, &marker_path)
+            .expect_err("oversized ownership authority must fail closed");
+        assert!(error.contains("too large"), "{error}");
+        assert_eq!(
+            std::fs::metadata(marker_path).unwrap().len(),
+            MAX_OWNERSHIP_RECORD_BYTES + 1
+        );
+    }
+
+    #[test]
+    fn retained_path_budget_counts_full_prefixes_atomically_and_releases_them() {
+        let parent = PathBuf::from("shared-prefix").join("x".repeat(4096));
+        let marker = parent.join(OWNERSHIP_MARKER_FILE);
+        let combined = path_storage_bytes(&parent)
+            .checked_add(path_storage_bytes(&marker))
+            .unwrap();
+        let mut too_small = RetainedPathBudget::new(combined - 1, "test retained paths");
+
+        assert!(
+            too_small
+                .charge(&[parent.as_path(), marker.as_path()])
+                .is_err()
+        );
+        assert_eq!(
+            too_small.used_bytes, 0,
+            "a rejected multi-path charge must not retain partial accounting"
+        );
+
+        let mut exact = RetainedPathBudget::new(combined, "test pending paths");
+        exact
+            .charge(&[parent.as_path(), marker.as_path()])
+            .unwrap();
+        assert_eq!(exact.used_bytes, combined);
+        exact.release(&marker).unwrap();
+        exact.release(&parent).unwrap();
+        assert_eq!(exact.used_bytes, 0);
+    }
+
+    #[test]
     fn provisional_marker_is_atomically_replaced_by_exact_committed_identity() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile = tmp.path().join("provisional-transition");
@@ -6591,6 +7462,146 @@ mod tests {
         cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile)
             .expect("exact token authorizes whole ephemeral profile cleanup");
 
+        assert!(!profile.exists());
+    }
+
+    #[test]
+    fn exact_ephemeral_cleanup_continues_across_small_bounded_batches() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("ephemeral-bounded-continuation");
+        let token = write_current_app_test_token(&profile);
+        let data = profile.join("Default").join("Cache");
+        std::fs::create_dir_all(&data).unwrap();
+        for index in 0..11 {
+            std::fs::write(data.join(format!("entry-{index:02}.bin")), b"cache").unwrap();
+        }
+        let _limits = TestEphemeralDeleteLimitsGuard::install(EphemeralDeleteLimits {
+            max_entries: 4,
+            max_path_bytes: 4 * 1024,
+        });
+
+        let mut previous_files = 11_usize;
+        let mut continuation_failures = 0_usize;
+        for _ in 0..16 {
+            match cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile) {
+                Ok(()) => break,
+                Err(error) if error == EPHEMERAL_DELETE_RETRY_REQUIRED => {
+                    continuation_failures += 1;
+                    assert!(
+                        ownership_marker_path(&profile).is_file(),
+                        "every partial batch must retain exact cleanup authority"
+                    );
+                    let remaining = std::fs::read_dir(&data)
+                        .map(|entries| entries.count())
+                        .unwrap_or(0);
+                    assert!(
+                        remaining < previous_files,
+                        "each bounded retry must make monotonic progress: {remaining} !< {previous_files}"
+                    );
+                    previous_files = remaining;
+                }
+                Err(error) => panic!("unexpected bounded cleanup failure: {error}"),
+            }
+        }
+
+        assert!(
+            continuation_failures >= 2,
+            "the small test limit must exercise multiple fresh-claim retries"
+        );
+        assert!(
+            !profile.exists(),
+            "the final batch removes the marker last and then the exact root"
+        );
+    }
+
+    #[test]
+    fn startup_recovery_finishes_all_bounded_batches_in_one_invocation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("oversized-owned-profile");
+        let browser = identity(8_490, "chrome-gone");
+        write_test_marker(
+            &profile,
+            identity(8_491, "nomifun-gone"),
+            browser.clone(),
+        );
+        for index in 0..13 {
+            std::fs::write(profile.join(format!("entry-{index:02}.bin")), b"cache").unwrap();
+        }
+        let _limits = TestEphemeralDeleteLimitsGuard::install(EphemeralDeleteLimits {
+            max_entries: 4,
+            max_path_bytes: 4 * 1024,
+        });
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+        control.absence_result = Ok(true);
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(!profile.exists());
+        assert_eq!(report.ephemeral_profiles_removed, 1);
+        assert_eq!(report.failures, 0);
+        assert_eq!(control.absence_identities, vec![browser]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_ephemeral_cleanup_unlinks_symlink_without_touching_external_tree() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside-profile-tree");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"preserve").unwrap();
+        let profile = tmp.path().join("ephemeral-symlink-cleanup");
+        let token = write_current_app_test_token(&profile);
+        symlink(&outside, profile.join("linked-cache")).unwrap();
+
+        cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile).unwrap();
+
+        assert!(!profile.exists());
+        assert_eq!(std::fs::read(outside.join("sentinel")).unwrap(), b"preserve");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_ephemeral_cleanup_progresses_across_nonempty_root_siblings() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("ephemeral-wide-directory-row");
+        let token = write_current_app_test_token(&profile);
+        for index in 0..4 {
+            let directory = profile.join(format!("cache-{index}"));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("entry.bin"), b"cache").unwrap();
+        }
+        let _limits = TestEphemeralDeleteLimitsGuard::install(EphemeralDeleteLimits {
+            max_entries: 4,
+            max_path_bytes: 4 * 1024,
+        });
+
+        let first = cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile);
+        assert_eq!(first.unwrap_err(), EPHEMERAL_DELETE_RETRY_REQUIRED);
+        assert!(ownership_marker_path(&profile).is_file());
+        let remaining_after_first = std::fs::read_dir(&profile)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| !is_ownership_record_name(&entry.file_name()))
+            .count();
+        assert!(
+            remaining_after_first < 4,
+            "the first bounded pass must delete at least one non-empty sibling"
+        );
+
+        for _ in 0..4 {
+            match cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile) {
+                Ok(()) => break,
+                Err(error) if error == EPHEMERAL_DELETE_RETRY_REQUIRED => {}
+                Err(error) => panic!("unexpected bounded sibling cleanup failure: {error}"),
+            }
+        }
         assert!(!profile.exists());
     }
 
@@ -7110,6 +8121,33 @@ mod tests {
     }
 
     #[test]
+    fn scrub_crash_markers_skips_oversized_preferences_without_a_temp_copy() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prefs = preferences_path(tmp.path());
+        let preferences_dir = prefs.parent().unwrap();
+        std::fs::create_dir_all(preferences_dir).unwrap();
+        let source = std::fs::File::create(&prefs).unwrap();
+        source.set_len(MAX_PREFERENCES_BYTES + 1).unwrap();
+        drop(source);
+
+        scrub_crash_markers(tmp.path()).expect("oversized Preferences is best-effort benign");
+
+        assert_eq!(
+            std::fs::metadata(&prefs).unwrap().len(),
+            MAX_PREFERENCES_BYTES + 1,
+            "the oversized source must be preserved verbatim"
+        );
+        let entries = std::fs::read_dir(preferences_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from(PREFERENCES_FILE)]
+        );
+    }
+
+    #[test]
     fn scrub_ignores_a_precreated_legacy_fixed_temp_hardlink() {
         let tmp = tempfile::TempDir::new().unwrap();
         let prefs = preferences_path(tmp.path());
@@ -7233,13 +8271,106 @@ mod tests {
         std::fs::write(tmp.path().join("one"), b"1").unwrap();
         std::fs::write(tmp.path().join("two"), b"2").unwrap();
         let directory = UnixDirectory::open_path(tmp.path()).unwrap();
-        let mut first = directory.entries().unwrap();
-        let mut second = directory.entries().unwrap();
+        let mut first_budget = UnixDirectoryEnumerationBudget::new(2, 6);
+        let mut second_budget = UnixDirectoryEnumerationBudget::new(2, 6);
+        let mut first = directory.entries_bounded(&mut first_budget).unwrap();
+        let mut second = directory.entries_bounded(&mut second_budget).unwrap();
         first.sort();
         second.sort();
 
         assert_eq!(first, second);
         assert_eq!(first.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_wide_directory_limit_closes_cursor_and_allows_complete_retry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for index in 0..65 {
+            std::fs::write(tmp.path().join(format!("entry-{index:03}")), b"x").unwrap();
+        }
+        let directory = UnixDirectory::open_path(tmp.path()).unwrap();
+        let mut tight_budget = UnixDirectoryEnumerationBudget::new(64, 4 * 1024);
+
+        assert!(
+            directory.entries_bounded(&mut tight_budget).is_err(),
+            "a wide directory must fail before retaining entry 65"
+        );
+
+        let mut retry_budget = UnixDirectoryEnumerationBudget::new(65, 4 * 1024);
+        let retry = directory.entries_bounded(&mut retry_budget).unwrap();
+        assert_eq!(retry.len(), 65);
+        assert_eq!(retry_budget.entries, 65);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_long_name_is_rejected_before_owned_name_allocation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let long_name = "x".repeat(240);
+        std::fs::write(tmp.path().join(&long_name), b"x").unwrap();
+        let directory = UnixDirectory::open_path(tmp.path()).unwrap();
+        let mut budget = UnixDirectoryEnumerationBudget::new(1, 239);
+
+        assert!(directory.entries_bounded(&mut budget).is_err());
+        assert_eq!(budget.entries, 0);
+        assert_eq!(budget.name_bytes, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_cleanup_budget_failure_preserves_marker_and_retry_authority() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join(OWNERSHIP_MARKER_FILE);
+        let subtree = tmp.path().join("browser-data");
+        std::fs::write(&marker, b"cleanup-authority").unwrap();
+        std::fs::create_dir(&subtree).unwrap();
+        std::fs::write(subtree.join("one"), b"1").unwrap();
+        std::fs::write(subtree.join("two"), b"2").unwrap();
+        let root = UnixDirectory::open_path(tmp.path()).unwrap();
+        let mut tight_budget = EphemeralDeleteBudget::new(EphemeralDeleteLimits {
+            max_entries: 2,
+            max_path_bytes: 1024,
+        });
+        assert!(tight_budget.try_charge_unix_name(b"browser-data").unwrap());
+
+        assert_eq!(
+            remove_unix_profile_entry_tree(
+                &root,
+                std::ffi::OsStr::new("browser-data"),
+                root.device,
+                0,
+                &mut tight_budget,
+            )
+            .unwrap(),
+            EphemeralDeleteProgress::MoreWork
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), b"cleanup-authority");
+        assert_eq!(
+            std::fs::read_dir(&subtree).unwrap().count(),
+            1,
+            "the bounded pass commits safe progress before yielding"
+        );
+
+        let mut retry_budget = EphemeralDeleteBudget::new(EphemeralDeleteLimits {
+            max_entries: 2,
+            max_path_bytes: 1024,
+        });
+        assert!(retry_budget.try_charge_unix_name(b"browser-data").unwrap());
+        assert_eq!(
+            remove_unix_profile_entry_tree(
+                &root,
+                std::ffi::OsStr::new("browser-data"),
+                root.device,
+                0,
+                &mut retry_budget,
+            )
+            .unwrap(),
+            EphemeralDeleteProgress::Complete
+        );
+
+        assert!(!subtree.exists());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"cleanup-authority");
     }
 
     #[cfg(target_os = "linux")]
