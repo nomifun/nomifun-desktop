@@ -9,6 +9,7 @@ import {
   Earth,
   Info,
   Puzzle,
+  Server,
   System,
 } from '@icon-park/react';
 import classNames from 'classnames';
@@ -23,6 +24,7 @@ import { buildSettingsNavItems } from './settingsNavigation';
 export const BUILTIN_TAB_IDS = [
   'system',
   'execution-engines',
+  'ssh-hosts',
   'browser-use',
   'computer-use',
   'about',
@@ -66,6 +68,12 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
         label: t('settings.executionEngineHub.railTitle'),
         icon: <Cpu />,
         path: 'execution-engines',
+      },
+      'ssh-hosts': {
+        id: 'ssh-hosts',
+        label: t('ssh.title'),
+        icon: <Server />,
+        path: 'ssh-hosts',
       },
       system: { id: 'system', label: t('settings.system'), icon: <System />, path: 'system' },
       'browser-use': {

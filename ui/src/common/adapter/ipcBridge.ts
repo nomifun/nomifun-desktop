@@ -2777,6 +2777,11 @@ export interface ICreateConversationParams {
     /** Legacy marker for pre-provider-probe health-check conversations. */
     is_health_check?: boolean;
     remote_agent_id?: import('../types/ids').RemoteAgentId;
+    /** Binds a nomi conversation to a saved SSH host: the remote tool family
+     *  operates that host. Optional companion `ssh_remote_cwd` sets the shell's
+     *  starting directory (defaults to the remote $HOME). */
+    ssh_host_id?: import('../types/ids').SshHostId;
+    ssh_remote_cwd?: string;
     extra_skill_paths?: string[];
   };
 }
