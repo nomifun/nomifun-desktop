@@ -6992,6 +6992,79 @@ mod tests {
         assert!(!data.path().join(DB_FILE).exists());
     }
 
+    /// Managed dataset roots that did not exist when the v1 planner froze its
+    /// registry shape. Every later *addition* must be listed here.
+    const POST_V1_MANAGED_DATASET_ROOTS: &[&str] = &[
+        WORK_ROOT_OWNER_FILE,
+        WORK_ROOT_BINDING_FILE,
+        AGENT_PROCESS_REGISTRY_FILE,
+    ];
+
+    /// The persisted plan shape is a compatibility surface, not an
+    /// implementation detail: `RELEASED_V1_MANAGED_ROOTS` must stay
+    /// reproducible from the live registry, and the v2 registry that
+    /// v0.3.1..=v0.3.7 wrote into user data dirs is the live registry filtered
+    /// by [`ResetPolicy::Retire`].
+    ///
+    /// So dropping a root from `MANAGED_DATASET_ROOTS` — even one whose
+    /// subsystem was deleted — both stops factory reset from sweeping data left
+    /// by older installations and makes previously written plan bytes fail
+    /// `validate_plan` / `validate_completed_plan_replay_identity`, which turns
+    /// an interrupted reset on upgrade into a hard startup failure. Removals are
+    /// therefore never compatible; keep the root and mark it cleanup-only.
+    #[test]
+    fn released_v1_managed_roots_stay_reproducible_from_the_live_registry() {
+        let derived = lifecycle_managed_roots()
+            .chain(managed_dataset_roots().filter_map(|root| {
+                if POST_V1_MANAGED_DATASET_ROOTS.contains(&root.path) {
+                    return None;
+                }
+                Some((
+                    root.path,
+                    match root.kind {
+                        DatasetRootKind::File => ManagedRootKind::File,
+                        DatasetRootKind::Directory => ManagedRootKind::Directory,
+                    },
+                ))
+            }))
+            .collect::<Vec<_>>();
+
+        let derived_paths =
+            derived.iter().map(|(path, _)| *path).collect::<Vec<_>>();
+        let frozen_paths = RELEASED_V1_MANAGED_ROOTS
+            .iter()
+            .map(|(path, _)| *path)
+            .collect::<Vec<_>>();
+        let removed = frozen_paths
+            .iter()
+            .filter(|path| !derived_paths.contains(path))
+            .collect::<Vec<_>>();
+        let added = derived_paths
+            .iter()
+            .filter(|path| !frozen_paths.contains(path))
+            .collect::<Vec<_>>();
+        assert!(
+            removed.is_empty(),
+            "managed dataset roots disappeared from the live registry: {removed:?}. \
+             Persisted v1/v2 reset plans still list them, so removal breaks plan \
+             validation on upgrade and abandons data from older installations. \
+             Keep the root and mark it cleanup-only instead."
+        );
+        assert!(
+            added.is_empty(),
+            "new managed dataset roots are not declared as post-v1 additions: \
+             {added:?}. Adding a root changes the v2 plan shape that shipped in \
+             v0.3.1..=v0.3.7, so record it in POST_V1_MANAGED_DATASET_ROOTS and \
+             confirm the persisted-plan compatibility story."
+        );
+        assert_eq!(
+            derived,
+            RELEASED_V1_MANAGED_ROOTS.to_vec(),
+            "the live managed-root registry drifted from the released v1 order \
+             or kinds; persisted plans are compared element-by-element"
+        );
+    }
+
     #[test]
     fn explicit_reset_quarantines_every_registered_side_store_and_db_family_member() {
         let data = tempfile::tempdir().unwrap();

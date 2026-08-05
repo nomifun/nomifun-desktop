@@ -92,7 +92,7 @@ async fn list(deps: Arc<GatewayDeps>, p: MemoryListParams) -> Value {
         // to a companion, so it spans EVERY companion's memories. It is the one
         // read surface that stays cross-companion after 共享记忆 was removed —
         // the owner agent has no companion identity to scope to.
-        scope_companion_id: None,
+        companion_id: None,
         limit: p.limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, 200),
         offset: p.offset.unwrap_or(0).max(0),
     };

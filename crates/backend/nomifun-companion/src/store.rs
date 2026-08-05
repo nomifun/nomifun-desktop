@@ -34,39 +34,20 @@ fn half_life_days(kind: &str) -> Option<f64> {
 /// Below this strength a memory is auto-archived (still restorable in the UI).
 const ARCHIVE_THRESHOLD: f64 = 0.05;
 
-/// Ownership of a companion memory, i.e. the `(scope_kind, scope_companion_id)`
-/// column pair. 共享记忆 was removed as a product concept: every memory belongs
-/// to exactly one companion, and [`MemoryScope::Companion`] is the only variant
-/// a writer creates from scratch.
+/// Validate the owner of a row about to be written: `Some` must be a canonical
+/// companion id, `None` (not yet owned) is always legal.
 ///
-/// [`MemoryScope::Unowned`] is the vestigial `('user', NULL)` pair. It stays
-/// legal at the DB level (see the table CHECK constraints) because a
-/// zero-companion install is a supported state and because pre-re-homing rows
-/// must survive verbatim until the boot migration assigns them an owner. Its
-/// rows are still readable by every companion — an unowned row is "not yet
+/// 共享记忆 was removed as a product concept: every memory belongs to exactly one
+/// companion, so ownership is ONE nullable column (`companion_memories.companion_id`)
+/// and no writer creates an unowned row from scratch. `None` stays legal at the DB
+/// level because a zero-companion install is a supported state and because
+/// pre-re-homing rows must survive verbatim until the boot migration assigns them
+/// an owner. Those rows are readable by every companion — unowned means "not yet
 /// assigned", never "shared on purpose".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemoryScope {
-    /// Legacy / not-yet-assigned: `('user', NULL)`. No writer *creates* one, but
-    /// [`CompanionStore::merge_memories`] propagates it: merging a group of
-    /// still-unowned rows yields an unowned row, which the next boot migration
-    /// then re-homes like any other. Import parks rows here when the roster is
-    /// empty, for the same reason.
-    Unowned,
-    /// Owned by one companion: visible only to it.
-    Companion(String),
-}
-
-impl MemoryScope {
-    /// `(scope_kind, scope_companion_id)` column values.
-    pub fn columns(&self) -> Result<(&'static str, Option<String>), AppError> {
-        match self {
-            MemoryScope::Unowned => Ok(("user", None)),
-            MemoryScope::Companion(id) => {
-                validate_companion_id(id, "memory scope companion_id")?;
-                Ok(("companion", Some(id.clone())))
-            }
-        }
+fn validate_row_owner(owner: Option<&str>) -> Result<(), AppError> {
+    match owner {
+        None => Ok(()),
+        Some(id) => validate_companion_id(id, "memory companion_id"),
     }
 }
 
@@ -101,12 +82,14 @@ impl MemoryActor {
     }
 
     /// Row-level twin of [`MEMORY_VISIBILITY_PREDICATE`]: true iff this actor may
-    /// reach a row carrying this owner pair. `visibility_rule_matches_sql` keeps
-    /// the two in lockstep.
-    fn can_reach(&self, scope_kind: &str, scope_companion_id: Option<&str>) -> bool {
+    /// reach a row carrying this owner. `visibility_rule_matches_sql` keeps the
+    /// two in lockstep.
+    fn can_reach(&self, companion_id: Option<&str>) -> bool {
         match self {
             MemoryActor::AnyOwner => true,
-            MemoryActor::Companion(id) => scope_kind == "user" || scope_companion_id == Some(id.as_str()),
+            MemoryActor::Companion(id) => {
+                companion_id.is_none() || companion_id == Some(id.as_str())
+            }
         }
     }
 }
@@ -137,26 +120,18 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     let row = sqlx::query(
-        "SELECT id, content, scope_kind, scope_companion_id FROM companion_memories WHERE memory_id = ?",
+        "SELECT id, content, companion_id FROM companion_memories WHERE memory_id = ?",
     )
     .bind(memory_id)
     .fetch_optional(executor)
     .await
     .map_err(db_err)?;
     let Some(row) = row else { return Ok(None) };
-    let scope_kind: String = row.get("scope_kind");
-    let scope_companion_id: Option<String> = row.get("scope_companion_id");
-    if !actor.can_reach(&scope_kind, scope_companion_id.as_deref()) {
+    let companion_id: Option<String> = row.get("companion_id");
+    if !actor.can_reach(companion_id.as_deref()) {
         return Err(memory_not_found(memory_id));
     }
     Ok(Some((row.get("id"), row.get("content"))))
-}
-
-/// The vestigial `scope_kind` of an unowned row. Only a bundle written before
-/// the field existed can omit it; such a row is treated as unowned and re-homed
-/// on import (or by the boot migration).
-fn default_scope_kind() -> String {
-    "user".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,13 +149,16 @@ pub struct CompanionMemory {
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
     pub last_reinforced_at: TimestampMs,
-    /// `'companion'` (owned) or the vestigial `'user'` (unowned legacy row).
-    /// Defaulted so a bundle exported without the field still imports.
-    #[serde(default = "default_scope_kind")]
-    pub scope_kind: String,
-    /// Owning canonical companion id; `None` only for a vestigial unowned row.
-    #[serde(default)]
-    pub scope_companion_id: Option<String>,
+    /// The owning companion (`companion_memories.companion_id`); `None` only for
+    /// a vestigial row the boot migration has not re-homed yet.
+    ///
+    /// Serialized under its historical wire name: this field is read by the
+    /// shipped UI contract and by every memory bundle ever exported, so the
+    /// column rename stops at the process boundary. The retired `scope_kind`
+    /// discriminator that used to travel next to it is gone from the wire —
+    /// [`crate::export`] accepts and discards it when importing an older bundle.
+    #[serde(rename = "scope_companion_id")]
+    pub companion_id: Option<String>,
 }
 
 /// One registered companion chat thread (a real `type='nomi'` conversation
@@ -272,10 +250,10 @@ pub struct MemoryFilter {
     pub q: Option<String>,
     pub status: Option<String>,
     /// When set, return only memories this companion may read: its own plus
-    /// the vestigial unowned (`scope_kind='user'`) rows the boot migration has
+    /// the vestigial unowned (`companion_id IS NULL`) rows the boot migration has
     /// not re-homed yet. `None` returns every memory (the owner-agent
     /// administrative view).
-    pub scope_companion_id: Option<String>,
+    pub companion_id: Option<String>,
     pub limit: i64,
     pub offset: i64,
 }
@@ -309,19 +287,20 @@ fn memory_filter_clause(filter: &MemoryFilter) -> String {
     if filter.status.is_some() {
         sql.push_str(" AND status = ?");
     }
-    if filter.scope_companion_id.is_some() {
+    if filter.companion_id.is_some() {
         sql.push_str(MEMORY_VISIBILITY_PREDICATE);
     }
     sql
 }
 
 /// The single visibility predicate every companion-facing read uses: the
-/// companion's own memories plus the vestigial unowned rows (`('user', NULL)`)
-/// that the boot migration re-homes as soon as a companion exists. Keeping the
-/// unowned half is deliberate — a row the migration has not reached yet must
-/// stay readable rather than silently vanish from every prompt.
+/// companion's own memories plus the vestigial unowned rows
+/// (`companion_id IS NULL`) that the boot migration re-homes as soon as a
+/// companion exists. Keeping the unowned half is deliberate — a row the
+/// migration has not reached yet must stay readable rather than silently vanish
+/// from every prompt.
 pub(crate) const MEMORY_VISIBILITY_PREDICATE: &str =
-    " AND (scope_kind = 'user' OR scope_companion_id = ?)";
+    " AND (companion_id IS NULL OR companion_id = ?)";
 
 /// The normalized-similarity predicate shared by the write-path dedup guard
 /// (`find_similar_active`) and the merge-assistant grouping: equal after
@@ -399,15 +378,7 @@ impl CompanionStore {
         for memory in memories {
             CompanionMemoryId::try_from(memory.memory_id.as_str())
                 .map_err(|error| AppError::BadRequest(format!("invalid imported memory id: {error}")))?;
-            match (memory.scope_kind.as_str(), memory.scope_companion_id.as_deref()) {
-                ("user", None) => {}
-                ("companion", Some(owner)) => validate_companion_id(owner, "imported memory scope companion_id")?,
-                _ => {
-                    return Err(AppError::BadRequest(
-                        "imported memory scope must be shared (user/None) or private (companion/Some(canonical ID))".into(),
-                    ));
-                }
-            }
+            validate_row_owner(memory.companion_id.as_deref())?;
         }
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         let mut imported = 0u64;
@@ -443,12 +414,12 @@ impl CompanionStore {
                 let mut sql = String::from(
                     "SELECT memory_id, content FROM companion_memories WHERE kind = ? AND status = 'active'",
                 );
-                match memory.scope_companion_id.as_deref() {
+                match memory.companion_id.as_deref() {
                     Some(_) => sql.push_str(MEMORY_VISIBILITY_PREDICATE),
-                    None => sql.push_str(" AND scope_kind = 'user'"),
+                    None => sql.push_str(" AND companion_id IS NULL"),
                 }
                 let mut similar_query = sqlx::query(&sql).bind(&memory.kind);
-                if let Some(owner) = memory.scope_companion_id.as_deref() {
+                if let Some(owner) = memory.companion_id.as_deref() {
                     similar_query = similar_query.bind(owner);
                 }
                 let similar = similar_query.fetch_all(&mut *tx).await.map_err(db_err)?;
@@ -464,8 +435,8 @@ impl CompanionStore {
             }
 
             let row = sqlx::query(
-                "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, companion_id)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                  RETURNING id",
             )
             .bind(&memory.memory_id)
@@ -482,8 +453,7 @@ impl CompanionStore {
             .bind(memory.created_at)
             .bind(memory.updated_at)
             .bind(memory.last_reinforced_at)
-            .bind(&memory.scope_kind)
-            .bind(&memory.scope_companion_id)
+            .bind(&memory.companion_id)
             .fetch_one(&mut *tx)
             .await
             .map_err(db_err)?;
@@ -503,9 +473,11 @@ impl CompanionStore {
 
 /// Runtime state that used to be a single global row in `companion_state` and is
 /// per companion since 学习 / 进化 became per-companion (2026-08). Copied onto every
-/// companion once by
-/// [`CompanionStore::seed_companion_state_from_global`]; the global rows are left
-/// in place, unread.
+/// companion once by [`CompanionStore::seed_companion_state_from_global`], which
+/// then DELETES the global rows: they have no reader left, and keeping them "in
+/// case of a rollback" was never true — the same upgrade drops
+/// `companion_suggestions`, and an older build validates an exact table set, so a
+/// downgrade fails at boot no matter what these rows say.
 pub const MIGRATED_GLOBAL_STATE_KEYS: &[&str] = &[
     // How far each companion's loops have consumed the shared raw event spool.
     // The retention watermark reads these, so a wrong value here deletes events.
@@ -544,20 +516,17 @@ CREATE TABLE IF NOT EXISTS companion_memories (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   last_reinforced_at INTEGER NOT NULL,
-  scope_kind TEXT NOT NULL DEFAULT 'user' CHECK(scope_kind IN ('user', 'companion')),
-  scope_companion_id TEXT CHECK (
-    scope_companion_id IS NULL
+  companion_id TEXT CHECK (
+    companion_id IS NULL
     OR (
-      length(scope_companion_id) = 36
-      AND lower(scope_companion_id) = scope_companion_id
-      AND scope_companion_id GLOB '????????-????-7???-[89ab]???-????????????'
-      AND replace(scope_companion_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+      length(companion_id) = 36
+      AND lower(companion_id) = companion_id
+      AND companion_id GLOB '????????-????-7???-[89ab]???-????????????'
+      AND replace(companion_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     )
   ),
   embedding BLOB,
-  embedding_model TEXT,
-  CHECK((scope_kind = 'user' AND scope_companion_id IS NULL) OR
-        (scope_kind = 'companion' AND scope_companion_id IS NOT NULL))
+  embedding_model TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_companion_memories_kind ON companion_memories(kind, status, strength DESC);
 
@@ -608,14 +577,13 @@ CREATE TABLE IF NOT EXISTS companion_skills (
     AND replace(companion_skill_id, '-', '') NOT GLOB '*[^0-9a-f]*'
   ),
   skill_name TEXT NOT NULL,
-  scope_kind TEXT NOT NULL DEFAULT 'companion' CHECK(scope_kind IN ('user', 'companion')),
-  scope_companion_id TEXT CHECK (
-    scope_companion_id IS NULL
+  companion_id TEXT CHECK (
+    companion_id IS NULL
     OR (
-      length(scope_companion_id) = 36
-      AND lower(scope_companion_id) = scope_companion_id
-      AND scope_companion_id GLOB '????????-????-7???-[89ab]???-????????????'
-      AND replace(scope_companion_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+      length(companion_id) = 36
+      AND lower(companion_id) = companion_id
+      AND companion_id GLOB '????????-????-7???-[89ab]???-????????????'
+      AND replace(companion_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     )
   ),
   status TEXT NOT NULL DEFAULT 'draft',
@@ -636,18 +604,16 @@ CREATE TABLE IF NOT EXISTS companion_skills (
   last_used_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  signature TEXT NOT NULL DEFAULT '',
-  CHECK((scope_kind = 'user' AND scope_companion_id IS NULL) OR
-        (scope_kind = 'companion' AND scope_companion_id IS NOT NULL))
+  signature TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_companion_skills_owner ON companion_skills(scope_companion_id, status, strength DESC);
+CREATE INDEX IF NOT EXISTS idx_companion_skills_owner ON companion_skills(companion_id, status, strength DESC);
 -- Kept on purpose after 共享技能 was removed as a product concept: no writer
--- creates a ('user', NULL) row any more, but a zero-companion install has no
--- legal owner to re-home the legacy ones onto (see backfill_skill_owner), and
--- while they sit there this is the only thing keeping two of them from claiming
--- the same {user_skills_dir}/shared/{name} directory.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_shared_name ON companion_skills(skill_name) WHERE scope_kind = 'user';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_private_owner_name ON companion_skills(scope_companion_id, skill_name) WHERE scope_kind = 'companion';
+-- creates an unowned row any more, but a zero-companion install has no legal
+-- owner to re-home the legacy ones onto (see backfill_skill_owner), and while
+-- they sit there this is the only thing keeping two of them from claiming the
+-- same {user_skills_dir}/shared/{name} directory.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_shared_name ON companion_skills(skill_name) WHERE companion_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_private_owner_name ON companion_skills(companion_id, skill_name) WHERE companion_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS skill_pattern_stats (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -869,18 +835,16 @@ const BASELINE_TABLES: &[TableContract] = &[
             ColumnContract { name: "created_at", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
             ColumnContract { name: "updated_at", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
             ColumnContract { name: "last_reinforced_at", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "scope_kind", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "scope_companion_id", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
+            ColumnContract { name: "companion_id", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
             ColumnContract { name: "embedding", declared_type: "BLOB", not_null: false, primary_key_position: 0 },
             ColumnContract { name: "embedding_model", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
         ],
-        uuidv7_columns: &["memory_id", "scope_companion_id"],
+        uuidv7_columns: &["memory_id", "companion_id"],
         unique_indexes: &[UniqueIndexContract { columns: &["memory_id"], origin: "u", partial: false }],
-        required_sql_fragments: &[
-            "scope_kindin('user','companion')",
-            "scope_kind='user'andscope_companion_idisnull",
-            "scope_kind='companion'andscope_companion_idisnotnull",
-        ],
+        // Ownership is ONE nullable column now, so there is no cross-column
+        // CHECK left to pin down: `uuidv7_columns` already asserts the shape of
+        // `companion_id`, and NULL (not yet owned) needs no discriminator.
+        required_sql_fragments: &[],
     },
     TableContract {
         name: "companion_state",
@@ -928,8 +892,7 @@ const BASELINE_TABLES: &[TableContract] = &[
             ColumnContract { name: "id", declared_type: "INTEGER", not_null: false, primary_key_position: 1 },
             ColumnContract { name: "companion_skill_id", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
             ColumnContract { name: "skill_name", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "scope_kind", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "scope_companion_id", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
+            ColumnContract { name: "companion_id", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
             ColumnContract { name: "status", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
             ColumnContract { name: "source", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
             ColumnContract { name: "confidence", declared_type: "REAL", not_null: true, primary_key_position: 0 },
@@ -943,17 +906,13 @@ const BASELINE_TABLES: &[TableContract] = &[
             ColumnContract { name: "updated_at", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
             ColumnContract { name: "signature", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
         ],
-        uuidv7_columns: &["companion_skill_id", "scope_companion_id", "skill_pattern_id"],
+        uuidv7_columns: &["companion_skill_id", "companion_id", "skill_pattern_id"],
         unique_indexes: &[
             UniqueIndexContract { columns: &["companion_skill_id"], origin: "u", partial: false },
             UniqueIndexContract { columns: &["skill_name"], origin: "c", partial: true },
-            UniqueIndexContract { columns: &["scope_companion_id", "skill_name"], origin: "c", partial: true },
+            UniqueIndexContract { columns: &["companion_id", "skill_name"], origin: "c", partial: true },
         ],
-        required_sql_fragments: &[
-            "scope_kindin('user','companion')",
-            "scope_kind='user'andscope_companion_idisnull",
-            "scope_kind='companion'andscope_companion_idisnotnull",
-        ],
+        required_sql_fragments: &[],
     },
     TableContract {
         name: "skill_pattern_stats",
@@ -1031,7 +990,7 @@ const BASELINE_INDEXES: &[NamedIndexContract] = &[
         unique: false,
         partial: false,
         columns: &[
-            IndexColumnContract { name: "scope_companion_id", descending: false },
+            IndexColumnContract { name: "companion_id", descending: false },
             IndexColumnContract { name: "status", descending: false },
             IndexColumnContract { name: "strength", descending: true },
         ],
@@ -1043,7 +1002,7 @@ const BASELINE_INDEXES: &[NamedIndexContract] = &[
         unique: true,
         partial: true,
         columns: &[IndexColumnContract { name: "skill_name", descending: false }],
-        where_fragment: Some("wherescope_kind='user'"),
+        where_fragment: Some("wherecompanion_idisnull"),
     },
     NamedIndexContract {
         name: "idx_companion_skills_private_owner_name",
@@ -1051,10 +1010,10 @@ const BASELINE_INDEXES: &[NamedIndexContract] = &[
         unique: true,
         partial: true,
         columns: &[
-            IndexColumnContract { name: "scope_companion_id", descending: false },
+            IndexColumnContract { name: "companion_id", descending: false },
             IndexColumnContract { name: "skill_name", descending: false },
         ],
-        where_fragment: Some("wherescope_kind='companion'"),
+        where_fragment: Some("wherecompanion_idisnotnull"),
     },
     NamedIndexContract {
         name: "idx_skill_pattern_signature",
@@ -1452,11 +1411,13 @@ async fn create_baseline_schema(pool: &SqlitePool) -> Result<(), AppError> {
 }
 
 /// Idempotent in-place upgrade of an existing v3 store to the current v3
-/// baseline: add the nullable embedding columns and the external-content FTS5
-/// index when missing, rebuild the index when its row count desyncs from the
-/// main table, remove the retired learn-run history table, and re-home the
-/// vestigial unowned memories and skills onto `row_owner`. User memories and
-/// skills are preserved verbatim — nothing is ever deleted or duplicated here.
+/// baseline: add the nullable embedding columns, collapse the retired
+/// `(scope_kind, scope_companion_id)` owner pair into one nullable
+/// `companion_id`, add the external-content FTS5 index when missing, rebuild the
+/// index when its row count desyncs from the main table, remove the retired
+/// learn-run/suggestion tables, and re-home the vestigial unowned memories and
+/// skills onto `row_owner`. User memories and skills are preserved verbatim —
+/// nothing is ever deleted or duplicated here.
 /// Non-v3 stores are left untouched for `validate_baseline_schema` to reject.
 async fn upgrade_schema_in_place(
     pool: &SqlitePool,
@@ -1486,6 +1447,9 @@ async fn upgrade_schema_in_place(
             sqlx::raw_sql(definition).execute(pool).await.map_err(db_err)?;
         }
     }
+    // Must run before the FTS bookkeeping below: it rebuilds companion_memories,
+    // and the forced index rebuild is how the index is re-anchored afterwards.
+    let owner_columns_collapsed = collapse_owner_columns(pool).await?;
 
     let fts_sql: Option<String> = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -1501,6 +1465,11 @@ async fn upgrade_schema_in_place(
         }
         Some(_) => false,
     };
+    // The owner-column collapse re-creates the external-content table the index
+    // points at. The copy preserves every `id` verbatim, so the index is still
+    // correct — this rebuild is the belt to that braces, and cheap: it only ever
+    // runs on the single boot that performs the collapse.
+    rebuild = rebuild || owner_columns_collapsed;
     if !rebuild {
         let main_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM companion_memories")
             .fetch_one(pool)
@@ -1541,8 +1510,136 @@ async fn upgrade_schema_in_place(
     Ok(())
 }
 
-/// One-time, idempotent re-homing of the vestigial shared memories
-/// (`('user', NULL)`) onto `row_owner`. 共享记忆作为产品概念已删除，而
+/// One-time, idempotent collapse of the retired two-column owner encoding
+/// (`scope_kind TEXT NOT NULL` + `scope_companion_id TEXT`, paired by a table
+/// CHECK into `('user', NULL)` = unowned and `('companion', id)` = owned) into
+/// ONE nullable `companion_id`. Returns true when it actually rebuilt anything.
+///
+/// `scope_kind` was fully determined by whether an owner was present, so the pair
+/// could only ever disagree, never inform: `companion_id IS NULL` says exactly
+/// what `('user', NULL)` said, once instead of twice. Collapsing it also deletes
+/// the two paired CHECK constraints, the `scope_kind`-keyed partial indexes and
+/// the "is this pair one of the two legal states?" validation on every read.
+///
+/// This is a full table rebuild, not an `ALTER TABLE ... DROP COLUMN`: SQLite
+/// refuses to drop a column named in a table CHECK. It is unconditional (no "is
+/// every row owned yet?" precondition) precisely because the target column stays
+/// NULLABLE — a zero-companion install, where nothing can be owned, is still
+/// representable.
+///
+/// Non-negotiables:
+/// - Every row survives, with its owner, lifecycle, pin, strength and timestamps
+///   verbatim. `SELECT`ing `scope_companion_id` straight into `companion_id` is
+///   exactly the old semantics (the CHECK made the id NULL iff the kind was
+///   `'user'`), and it never *loses* an owner even if some historical build wrote
+///   a pair the CHECK would have rejected.
+/// - `id` is preserved verbatim, because `companion_memories_fts` is
+///   external-content FTS5 with `content_rowid='id'` — renumbering the rows would
+///   silently point every indexed document at the wrong memory. The caller also
+///   forces an index rebuild after this returns true.
+/// - The new tables are created by replaying [`SCHEMA`] (every statement is
+///   `IF NOT EXISTS`), so the rebuilt shape cannot drift from the baseline the
+///   contract validation demands, and the named indexes — dropped along with
+///   their table — come back with it.
+/// - It all happens in ONE transaction, so an interrupted upgrade leaves the
+///   pre-collapse store fully intact.
+async fn collapse_owner_columns(pool: &SqlitePool) -> Result<bool, AppError> {
+    /// Column mapping of one table's rebuild: the fresh column list, and the
+    /// matching `SELECT` list against the legacy table.
+    struct Rebuild {
+        table: &'static str,
+        columns: String,
+        legacy_select: String,
+    }
+
+    async fn legacy_columns(pool: &SqlitePool, table: &str) -> Result<Vec<String>, AppError> {
+        sqlx::query_scalar(&format!("SELECT name FROM pragma_table_xinfo('{table}')"))
+            .fetch_all(pool)
+            .await
+            .map_err(db_err)
+    }
+
+    let mut rebuilds = Vec::new();
+    // `{owner}` is the one column that differs between the two shapes; every
+    // other column is copied position-for-position, by name.
+    for (table, template) in [
+        (
+            "companion_memories",
+            "id, memory_id, kind, content, tags, importance, strength, pinned, source, \
+             status, created_at, updated_at, last_reinforced_at, {owner}, embedding, \
+             embedding_model",
+        ),
+        (
+            "companion_skills",
+            "id, companion_skill_id, skill_name, {owner}, status, source, confidence, \
+             provenance_event_ids, strength, version, skill_pattern_id, usage_count, \
+             last_used_at, created_at, updated_at, signature",
+        ),
+    ] {
+        let present = legacy_columns(pool, table).await?;
+        if !present.iter().any(|name| name == "scope_kind" || name == "scope_companion_id") {
+            continue; // already collapsed
+        }
+        // A store carrying `scope_kind` without `scope_companion_id` is not a
+        // shape this codebase ever wrote, but reading a column that is not there
+        // would fail the boot of that install for good; treat it as unowned.
+        let owner = if present.iter().any(|name| name == "scope_companion_id") {
+            "scope_companion_id"
+        } else {
+            "NULL"
+        };
+        rebuilds.push(Rebuild {
+            table,
+            columns: template.replace("{owner}", "companion_id"),
+            // Aliased, so the staging table already carries the NEW column names
+            // and the copy back is one symmetric column list.
+            legacy_select: template.replace("{owner}", &format!("{owner} AS companion_id")),
+        });
+    }
+    if rebuilds.is_empty() {
+        return Ok(false);
+    }
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    for rebuild in &rebuilds {
+        sqlx::query(&format!(
+            "CREATE TEMP TABLE {}_owner_collapse AS SELECT {} FROM {}",
+            rebuild.table, rebuild.legacy_select, rebuild.table
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        // Drops the table's indexes with it; SCHEMA below re-creates both.
+        sqlx::query(&format!("DROP TABLE {}", rebuild.table))
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    }
+    sqlx::raw_sql(SCHEMA).execute(&mut *tx).await.map_err(db_err)?;
+    for rebuild in &rebuilds {
+        sqlx::query(&format!(
+            "INSERT INTO {table}({columns}) SELECT {columns} FROM {table}_owner_collapse",
+            table = rebuild.table,
+            columns = rebuild.columns
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(&format!("DROP TABLE {}_owner_collapse", rebuild.table))
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    }
+    tx.commit().await.map_err(db_err)?;
+    tracing::info!(
+        tables = ?rebuilds.iter().map(|rebuild| rebuild.table).collect::<Vec<_>>(),
+        "collapsed the retired (scope_kind, scope_companion_id) pair into one nullable companion_id"
+    );
+    Ok(true)
+}
+
+/// One-time, idempotent re-homing of the vestigial unowned memories
+/// (`companion_id IS NULL`) onto `row_owner`. 共享记忆作为产品概念已删除，而
 /// **历史上每一条 learner 写出来的记忆都是共享的**，所以这些行是主人积累的
 /// 大多数记忆：它们必须原地改主人，一条都不能删。
 ///
@@ -1553,8 +1650,8 @@ async fn upgrade_schema_in_place(
 ///
 /// An empty roster has no legal owner: the rows are left exactly as they are and
 /// this simply takes effect the next time the store opens with a companion
-/// present. That is also why `('user', NULL)` stays legal at the DB level — a
-/// zero-companion install is a supported state.
+/// present. That is also why `companion_id` stays NULLABLE — a zero-companion
+/// install is a supported state.
 async fn backfill_memory_owner(
     pool: &SqlitePool,
     row_owner: Option<&str>,
@@ -1567,8 +1664,8 @@ async fn backfill_memory_owner(
     validate_companion_id(owner, "memory backfill companion_id")?;
     let affected = sqlx::query(
         "UPDATE companion_memories
-            SET scope_kind = 'companion', scope_companion_id = ?
-          WHERE scope_kind = 'user'",
+            SET companion_id = ?
+          WHERE companion_id IS NULL",
     )
     .bind(owner)
     .execute(pool)
@@ -1585,8 +1682,8 @@ async fn backfill_memory_owner(
     Ok(())
 }
 
-/// One-time, idempotent re-homing of the vestigial shared skills
-/// (`('user', NULL)`) onto `row_owner` — the exact analogue of
+/// One-time, idempotent re-homing of the vestigial unowned skills
+/// (`companion_id IS NULL`) onto `row_owner` — the exact analogue of
 /// [`backfill_memory_owner`], for the same reason: 共享技能 is gone as a product
 /// concept, a skill belongs to one companion, and the owner-scoped list would
 /// otherwise hide these rows from every companion forever.
@@ -1599,7 +1696,7 @@ async fn backfill_memory_owner(
 /// filesystem and therefore also repairs a crash in between.
 ///
 /// A name COLLISION is skipped rather than forced: `idx_companion_skills_private_owner_name`
-/// makes `(owner, skill_name)` unique, so re-homing a shared `foo` onto a
+/// makes `(owner, skill_name)` unique, so re-homing an unowned `foo` onto a
 /// companion that already has its own `foo` would raise a UNIQUE violation
 /// inside `upgrade_schema_in_place` — i.e. fail the boot of every install that
 /// has such a pair, permanently. The colliding row keeps its legacy shape (still
@@ -1616,11 +1713,11 @@ async fn backfill_skill_owner(
     validate_companion_id(owner, "skill backfill companion_id")?;
     let affected = sqlx::query(
         "UPDATE companion_skills
-            SET scope_kind = 'companion', scope_companion_id = ?
-          WHERE scope_kind = 'user'
+            SET companion_id = ?
+          WHERE companion_id IS NULL
             AND NOT EXISTS (
               SELECT 1 FROM companion_skills owned
-               WHERE owned.scope_companion_id = ?
+               WHERE owned.companion_id = ?
                  AND owned.skill_name = companion_skills.skill_name
             )",
     )
@@ -1638,7 +1735,7 @@ async fn backfill_skill_owner(
         );
     }
     let stranded: Vec<String> =
-        sqlx::query_scalar("SELECT skill_name FROM companion_skills WHERE scope_kind = 'user'")
+        sqlx::query_scalar("SELECT skill_name FROM companion_skills WHERE companion_id IS NULL")
             .fetch_all(pool)
             .await
             .map_err(db_err)?;
@@ -1663,19 +1760,10 @@ pub(crate) fn row_to_memory(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionMe
             memory_id
         ))
     })?;
-    let scope_kind: String = row.try_get("scope_kind").map_err(db_err)?;
-    let scope_companion_id: Option<String> = row.try_get("scope_companion_id").map_err(db_err)?;
-    match (scope_kind.as_str(), scope_companion_id.as_deref()) {
-        ("user", None) => {}
-        ("companion", Some(owner)) => {
-            CompanionId::try_from(owner)
-                .map_err(|error| invalid_disk_id("memory scope companion id", owner, error))?;
-        }
-        _ => {
-            return Err(AppError::Internal(format!(
-                "companion store contains invalid memory scope: kind={scope_kind:?}, owner={scope_companion_id:?}"
-            )));
-        }
+    let companion_id: Option<String> = row.try_get("companion_id").map_err(db_err)?;
+    if let Some(owner) = companion_id.as_deref() {
+        CompanionId::try_from(owner)
+            .map_err(|error| invalid_disk_id("memory companion id", owner, error))?;
     }
     Ok(CompanionMemory {
         memory_id,
@@ -1690,8 +1778,7 @@ pub(crate) fn row_to_memory(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionMe
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         last_reinforced_at: row.get("last_reinforced_at"),
-        scope_kind,
-        scope_companion_id,
+        companion_id,
     })
 }
 
@@ -1769,7 +1856,7 @@ impl CompanionStore {
     /// Open (or create) the v3 baseline `{companion_dir}/memory.db`.
     ///
     /// `row_owner` is the companion that the one-time re-homing migrations assign
-    /// to every vestigial shared (`('user', NULL)`) memory and skill — resolve it
+    /// to every vestigial unowned (`companion_id IS NULL`) memory and skill — resolve it
     /// from the live roster BEFORE opening the store (see
     /// [`CompanionRegistry::resolve_row_owner`](crate::registry::CompanionRegistry::resolve_row_owner)).
     /// `None` (empty roster) leaves those rows untouched for a later open.
@@ -1972,9 +2059,11 @@ impl CompanionStore {
     /// together with the 学习 / 进化 settings themselves.
     ///
     /// Each key listed in [`MIGRATED_GLOBAL_STATE_KEYS`] is copied from its single
-    /// `companion_state` row onto every companion that has no row of its own. It
-    /// is deliberately a COPY, not a move: the global rows stay put so a rollback
-    /// to an older build still finds them, and re-running this is a no-op.
+    /// `companion_state` row onto every companion that has no row of its own, and
+    /// the global row is then DELETED. Re-running this is a no-op either way, and
+    /// the per-companion write is `INSERT OR IGNORE`, so a value a companion has
+    /// since moved on from (an advanced cursor, a mood the last run wrote) can
+    /// never be clobbered.
     ///
     /// The cursors are the load-bearing part. Leaving a companion at the absent-row
     /// default of 0 would make its first run re-read the entire retained event
@@ -1983,6 +2072,11 @@ impl CompanionStore {
     /// companion visibly resets to "content" on upgrade, and the two `last_*_ts`
     /// stamps so the whole roster does not fire a run simultaneously on the first
     /// tick after the update.
+    ///
+    /// An EMPTY roster deletes nothing: with nobody to copy the values onto, the
+    /// global rows are still the only place the owner's cursors exist, and the
+    /// first companion created later must inherit them rather than restart from
+    /// the oldest retained event.
     pub async fn seed_companion_state_from_global(
         &self,
         companion_ids: &[String],
@@ -2004,7 +2098,40 @@ impl CompanionStore {
                 "seeded per-companion learn state from the retired install-wide keys"
             );
         }
+        if !companion_ids.is_empty() {
+            let dropped = self.delete_retired_global_state().await?;
+            if dropped > 0 {
+                tracing::info!(
+                    rows = dropped,
+                    "deleted the retired install-wide learn/evolve state rows"
+                );
+            }
+        }
         Ok(seeded)
+    }
+
+    /// Delete the install-wide `companion_state` rows that became per-companion,
+    /// once every companion has its own copy. Idempotent: the second call deletes
+    /// nothing because the first one already did.
+    ///
+    /// These rows had exactly one remaining justification — "a rollback to an
+    /// older build still finds them" — and it is false: the same in-place upgrade
+    /// drops the retired `companion_suggestions` table, and an older build
+    /// validates an exact table set, so it cannot open this store at all. Unread
+    /// rows that no longer answer any question are just data waiting to be
+    /// mistaken for the truth.
+    async fn delete_retired_global_state(&self) -> Result<u64, AppError> {
+        let placeholders = MIGRATED_GLOBAL_STATE_KEYS
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("DELETE FROM companion_state WHERE state_key IN ({placeholders})");
+        let mut query = sqlx::query(&sql);
+        for key in MIGRATED_GLOBAL_STATE_KEYS {
+            query = query.bind(*key);
+        }
+        Ok(query.execute(&self.pool).await.map_err(db_err)?.rows_affected())
     }
 
     /// Remove every per-companion row owned by `companion_id` (runtime kv + companion
@@ -2016,7 +2143,7 @@ impl CompanionStore {
         // De-index the private memories about to be deleted (FTS 'delete' needs
         // the old rowid+content, so this must run before the DELETE below).
         let indexed = sqlx::query(
-            "SELECT id, content FROM companion_memories WHERE scope_kind = 'companion' AND scope_companion_id = ?",
+            "SELECT id, content FROM companion_memories WHERE companion_id = ?",
         )
         .bind(companion_id)
         .fetch_all(&mut *tx)
@@ -2026,8 +2153,8 @@ impl CompanionStore {
             fts_index_delete(&mut *tx, row.get("id"), row.get("content")).await?;
         }
         for sql in [
-            "DELETE FROM companion_memories WHERE scope_kind = 'companion' AND scope_companion_id = ?",
-            "DELETE FROM companion_skills WHERE scope_kind = 'companion' AND scope_companion_id = ?",
+            "DELETE FROM companion_memories WHERE companion_id = ?",
+            "DELETE FROM companion_skills WHERE companion_id = ?",
             "DELETE FROM companion_session_windows WHERE companion_id = ?",
             "DELETE FROM companion_runtime_state WHERE companion_id = ?",
             "DELETE FROM companion_threads WHERE companion_id = ?",
@@ -2051,15 +2178,18 @@ impl CompanionStore {
         live_companion_ids: &std::collections::HashSet<String>,
     ) -> Result<(), AppError> {
         let references = [
-            ("companion_memories", "scope_companion_id", "scope_kind = 'companion'"),
-            ("companion_skills", "scope_companion_id", "scope_kind = 'companion'"),
-            ("companion_runtime_state", "companion_id", "1 = 1"),
-            ("companion_threads", "companion_id", "1 = 1"),
-            ("companion_session_windows", "companion_id", "1 = 1"),
+            // The two owner columns are NULLABLE (an unowned row the boot
+            // migration has not re-homed yet), which the IS NOT NULL below skips;
+            // the other three are NOT NULL.
+            ("companion_memories", "companion_id"),
+            ("companion_skills", "companion_id"),
+            ("companion_runtime_state", "companion_id"),
+            ("companion_threads", "companion_id"),
+            ("companion_session_windows", "companion_id"),
         ];
-        for (table, column, predicate) in references {
+        for (table, column) in references {
             let sql = format!(
-                "SELECT DISTINCT {column} FROM {table} WHERE {predicate} AND {column} IS NOT NULL"
+                "SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL"
             );
             let values: Vec<String> = sqlx::query_scalar(&sql)
                 .fetch_all(&self.pool)
@@ -2080,7 +2210,7 @@ impl CompanionStore {
 
     // ----- memories -----
 
-    /// Test-only insert of an UNOWNED (`('user', NULL)`) memory — the shape
+    /// Test-only insert of an UNOWNED (`companion_id = NULL`) memory — the shape
     /// legacy installs are full of. Deliberately `cfg(test)`: production has no
     /// ownerless write path any more, every writer resolves an owner first.
     #[cfg(test)]
@@ -2092,12 +2222,11 @@ impl CompanionStore {
         importance: f64,
         source: &str,
     ) -> Result<CompanionMemory, AppError> {
-        self.insert_memory_scoped(kind, content, tags, importance, source, MemoryScope::Unowned).await
+        self.insert_memory_scoped(kind, content, tags, importance, source, None).await
     }
 
-    /// Insert a memory owned by one companion ([`MemoryScope::Companion`]).
-    /// Every production caller resolves the owner first; `MemoryScope::Unowned`
-    /// exists only for legacy fixtures.
+    /// Insert a memory owned by `owner`. Every production caller resolves the
+    /// owner first; `None` (an unowned row) exists only for legacy fixtures.
     pub async fn insert_memory_scoped(
         &self,
         kind: &str,
@@ -2105,14 +2234,14 @@ impl CompanionStore {
         tags: &[String],
         importance: f64,
         source: &str,
-        scope: MemoryScope,
+        owner: Option<&str>,
     ) -> Result<CompanionMemory, AppError> {
         // Best-effort redaction before any secret reaches durable storage.
         // Covers both write paths (manual save_memory and the distill learner),
         // which both funnel through here.
         let content = nomi_redact::redact_secrets(content);
         let now = now_ms();
-        let (scope_kind, scope_companion_id) = scope.columns()?;
+        validate_row_owner(owner)?;
         let mem = CompanionMemory {
             memory_id: CompanionMemoryId::new().into_string(),
             kind: kind.to_owned(),
@@ -2126,13 +2255,12 @@ impl CompanionStore {
             created_at: now,
             updated_at: now,
             last_reinforced_at: now,
-            scope_kind: scope_kind.to_owned(),
-            scope_companion_id,
+            companion_id: owner.map(str::to_owned),
         };
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         let row = sqlx::query(
-            "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, companion_id)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
              RETURNING id",
         )
         .bind(&mem.memory_id)
@@ -2150,8 +2278,7 @@ impl CompanionStore {
         .bind(mem.created_at)
         .bind(mem.updated_at)
         .bind(mem.last_reinforced_at)
-        .bind(&mem.scope_kind)
-        .bind(&mem.scope_companion_id)
+        .bind(&mem.companion_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -2198,7 +2325,7 @@ impl CompanionStore {
     }
 
     pub async fn list_memories(&self, filter: &MemoryFilter) -> Result<Vec<CompanionMemory>, AppError> {
-        if let Some(companion_id) = filter.scope_companion_id.as_deref() {
+        if let Some(companion_id) = filter.companion_id.as_deref() {
             validate_companion_id(companion_id, "memory filter companion_id")?;
         }
         let mut sql = format!("SELECT * FROM companion_memories{}", memory_filter_clause(filter));
@@ -2213,7 +2340,7 @@ impl CompanionStore {
         if let Some(status) = &filter.status {
             query = query.bind(status);
         }
-        if let Some(cid) = &filter.scope_companion_id {
+        if let Some(cid) = &filter.companion_id {
             query = query.bind(cid);
         }
         let limit = if filter.limit <= 0 { 100 } else { filter.limit.min(500) };
@@ -2225,7 +2352,7 @@ impl CompanionStore {
     /// One page of memories with an explicit sort order (the REST list endpoint's
     /// `sort` param on the non-FTS path; the FTS path ranks in `search_memories`).
     pub async fn list_memory_page_sorted(&self, filter: &MemoryFilter, sort: MemoryListSort) -> Result<MemoryPage, AppError> {
-        if let Some(companion_id) = filter.scope_companion_id.as_deref() {
+        if let Some(companion_id) = filter.companion_id.as_deref() {
             validate_companion_id(companion_id, "memory filter companion_id")?;
         }
         let order_by = match sort {
@@ -2246,7 +2373,7 @@ impl CompanionStore {
         if let Some(status) = &filter.status {
             items_query = items_query.bind(status);
         }
-        if let Some(cid) = &filter.scope_companion_id {
+        if let Some(cid) = &filter.companion_id {
             items_query = items_query.bind(cid);
         }
         let limit = if filter.limit <= 0 { 100 } else { filter.limit.min(500) };
@@ -2268,7 +2395,7 @@ impl CompanionStore {
         if let Some(status) = &filter.status {
             count_query = count_query.bind(status);
         }
-        if let Some(cid) = &filter.scope_companion_id {
+        if let Some(cid) = &filter.companion_id {
             count_query = count_query.bind(cid);
         }
         let total = count_query.fetch_one(&self.pool).await.map_err(db_err)?.get("n");
@@ -2495,7 +2622,7 @@ impl CompanionStore {
             // Ownership gate, same rule as every other mutator: a companion can
             // only merge rows it can see. The mixed-owner check below then keeps
             // an AnyOwner caller from welding two companions' memories together.
-            if !actor.can_reach(&memory.scope_kind, memory.scope_companion_id.as_deref()) {
+            if !actor.can_reach(memory.companion_id.as_deref()) {
                 return Err(memory_not_found(id));
             }
             if memory.status != "active" {
@@ -2505,8 +2632,8 @@ impl CompanionStore {
             }
             sources.push(memory);
         }
-        let scope = (sources[0].scope_kind.clone(), sources[0].scope_companion_id.clone());
-        if sources.iter().any(|m| (m.scope_kind.clone(), m.scope_companion_id.clone()) != scope) {
+        let owner = sources[0].companion_id.clone();
+        if sources.iter().any(|m| m.companion_id != owner) {
             return Err(AppError::BadRequest(
                 "merge group must share one owner: memories of different companions never merge".into(),
             ));
@@ -2526,12 +2653,11 @@ impl CompanionStore {
             created_at: now,
             updated_at: now,
             last_reinforced_at: now,
-            scope_kind: scope.0,
-            scope_companion_id: scope.1,
+            companion_id: owner,
         };
         let row = sqlx::query(
-            "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
-             VALUES(?,?,?,'[]',?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, companion_id)
+             VALUES(?,?,?,'[]',?,?,?,?,?,?,?,?,?)
              RETURNING id",
         )
         .bind(&merged.memory_id)
@@ -2545,8 +2671,7 @@ impl CompanionStore {
         .bind(merged.created_at)
         .bind(merged.updated_at)
         .bind(merged.last_reinforced_at)
-        .bind(&merged.scope_kind)
-        .bind(&merged.scope_companion_id)
+        .bind(&merged.companion_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -2918,13 +3043,13 @@ impl CompanionStore {
         &self,
         companion_id: &str,
     ) -> Result<Vec<CompanionMemory>, AppError> {
-        validate_companion_id(companion_id, "memory scope_companion_id")?;
+        validate_companion_id(companion_id, "memory companion_id")?;
         let mut out = Vec::new();
         let mut cursor = String::new();
         loop {
             let rows = sqlx::query(
                 "SELECT * FROM companion_memories \
-                 WHERE scope_kind = 'companion' AND scope_companion_id = ? AND memory_id > ? \
+                 WHERE companion_id = ? AND memory_id > ? \
                  ORDER BY memory_id LIMIT ?",
             )
             .bind(companion_id)
@@ -2954,7 +3079,7 @@ impl CompanionStore {
         &self,
         companion_id: &str,
     ) -> Result<Vec<CompanionMemory>, AppError> {
-        validate_companion_id(companion_id, "memory scope_companion_id")?;
+        validate_companion_id(companion_id, "memory companion_id")?;
         let sql = format!(
             "SELECT * FROM companion_memories \
              WHERE status = 'active' AND memory_id > ?{MEMORY_VISIBILITY_PREDICATE} \
@@ -2998,19 +3123,11 @@ impl CompanionStore {
     pub async fn insert_memory_raw(&self, mem: &CompanionMemory) -> Result<(), AppError> {
         CompanionMemoryId::try_from(mem.memory_id.as_str())
             .map_err(|error| AppError::BadRequest(format!("invalid imported memory id: {error}")))?;
-        match (mem.scope_kind.as_str(), mem.scope_companion_id.as_deref()) {
-            ("user", None) => {}
-            ("companion", Some(owner)) => validate_companion_id(owner, "imported memory scope companion_id")?,
-            _ => {
-                return Err(AppError::BadRequest(
-                    "imported memory scope must be shared (user/None) or private (companion/Some(canonical ID))".into(),
-                ));
-            }
-        }
+        validate_row_owner(mem.companion_id.as_deref())?;
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         let row = sqlx::query(
-            "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, companion_id)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
              RETURNING id",
         )
         .bind(&mem.memory_id)
@@ -3029,8 +3146,7 @@ impl CompanionStore {
         .bind(mem.created_at)
         .bind(mem.updated_at)
         .bind(mem.last_reinforced_at)
-        .bind(&mem.scope_kind)
-        .bind(&mem.scope_companion_id)
+        .bind(&mem.companion_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -3132,27 +3248,31 @@ impl CompanionStore {
 // 自进化：技能注册表 / 挖矿统计 / 反馈回流
 // 正文以磁盘 SKILL.md 为事实源（见 nomifun-extension::skill_service）；这里只存
 // 元数据 + 溯源 + 生命周期。共享技能已作为产品概念删除：每个技能行都属于恰好
-// 一个伙伴（scope_companion_id）；scope_companion_id = NULL 只是启动迁移还没
-// 认领的遗留行。
+// 一个伙伴（companion_id）；companion_id = NULL 只是启动迁移还没认领的遗留行。
 // ---------------------------------------------------------------------------
 
 /// 一个伙伴自进化技能的注册表行。
 ///
-/// The `(scope_kind, scope_companion_id)` column pair is deliberately NOT
-/// mirrored field-for-field: `scope_kind` is fully determined by whether there
-/// is an owner, so carrying both invited the two to disagree (and shipped a
-/// dead discriminator over the wire). `scope_companion_id` is the single answer
-/// to "whose skill is this".
+/// The retired `scope_kind` discriminator is neither stored nor carried: it was
+/// fully determined by whether there is an owner, so having both invited the two
+/// to disagree (and shipped a dead discriminator over the wire). `companion_id`
+/// is the single answer to "whose skill is this".
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompanionSkill {
     #[serde(deserialize_with = "deserialize_uuidv7_string")]
     pub companion_skill_id: String,
     pub skill_name: String,
-    /// The owning companion. `None` is only the vestigial legacy state — a row
-    /// written when skills could be shared, which [`backfill_skill_owner`]
-    /// re-homes at the first launch that has a companion to re-home it onto.
-    pub scope_companion_id: Option<String>,
+    /// The owning companion (`companion_skills.companion_id`). `None` is only the
+    /// vestigial legacy state — a row written when skills could be shared, which
+    /// [`backfill_skill_owner`] re-homes at the first launch that has a companion
+    /// to re-home it onto.
+    ///
+    /// Serialized under its historical wire name, like
+    /// [`CompanionMemory::companion_id`]: the shipped UI contract and every skill
+    /// bundle ever exported read `scope_companion_id`.
+    #[serde(rename = "scope_companion_id")]
+    pub companion_id: Option<String>,
     pub status: String,
     pub source: String,
     pub confidence: f64,
@@ -3202,22 +3322,10 @@ fn row_to_skill(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionSkill, AppErro
         validate_uuidv7(event_id)
             .map_err(|error| invalid_disk_id("skill provenance event id", event_id, error))?;
     }
-    let scope_kind: String = row.get("scope_kind");
-    let scope_companion_id: Option<String> = row.get("scope_companion_id");
-    // The column pair is still validated as a pair even though only the owner
-    // half is carried in the struct: a row where the two disagree is corrupt
-    // side-store state, not something to silently reinterpret.
-    match (scope_kind.as_str(), scope_companion_id.as_deref()) {
-        ("user", None) => {}
-        ("companion", Some(owner)) => {
-            CompanionId::try_from(owner)
-                .map_err(|error| invalid_disk_id("skill scope companion id", owner, error))?;
-        }
-        _ => {
-            return Err(AppError::Internal(format!(
-                "companion store contains invalid skill scope: kind={scope_kind:?}, owner={scope_companion_id:?}"
-            )));
-        }
+    let companion_id: Option<String> = row.get("companion_id");
+    if let Some(owner) = companion_id.as_deref() {
+        CompanionId::try_from(owner)
+            .map_err(|error| invalid_disk_id("skill companion id", owner, error))?;
     }
     let skill_pattern_id: Option<String> = row.get("skill_pattern_id");
     if let Some(skill_pattern_id) = skill_pattern_id.as_deref() {
@@ -3227,7 +3335,7 @@ fn row_to_skill(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionSkill, AppErro
     Ok(CompanionSkill {
         companion_skill_id,
         skill_name: row.get("skill_name"),
-        scope_companion_id,
+        companion_id,
         status: row.get("status"),
         source: row.get("source"),
         confidence: row.get("confidence"),
@@ -3257,17 +3365,17 @@ impl CompanionStore {
     ///
     /// An owner is mandatory: 共享技能 is gone, so there is no legitimate way to
     /// create an ownerless row any more. Failing here is what keeps the vestigial
-    /// `('user', NULL)` shape a read-only legacy artefact instead of something a
-    /// new write path can resurrect.
+    /// unowned shape a read-only legacy artefact instead of something a new write
+    /// path can resurrect.
     pub async fn insert_skill(&self, s: &CompanionSkill) -> Result<(), AppError> {
         validate_uuidv7(&s.companion_skill_id)
             .map_err(|error| AppError::BadRequest(format!("invalid companion_skill_id: {error}")))?;
-        let Some(owner) = s.scope_companion_id.as_deref() else {
+        let Some(owner) = s.companion_id.as_deref() else {
             return Err(AppError::BadRequest(
-                "a companion skill must belong to one companion (scope_companion_id)".into(),
+                "a companion skill must belong to one companion (companion_id)".into(),
             ));
         };
-        validate_companion_id(owner, "skill scope companion_id")?;
+        validate_companion_id(owner, "skill companion_id")?;
         for event_id in &s.provenance_event_ids {
             validate_uuidv7(event_id).map_err(|error| {
                 AppError::BadRequest(format!(
@@ -3296,12 +3404,11 @@ impl CompanionStore {
         let provenance_event_ids = serde_json::to_string(&s.provenance_event_ids)
             .map_err(|error| AppError::BadRequest(format!("invalid skill provenance_event_ids: {error}")))?;
         sqlx::query(
-            "INSERT INTO companion_skills(companion_skill_id, skill_name, scope_kind, scope_companion_id, status, source, confidence,
+            "INSERT INTO companion_skills(companion_skill_id, skill_name, companion_id, status, source, confidence,
                 provenance_event_ids, strength, version, skill_pattern_id, usage_count, last_used_at, created_at, updated_at, signature)
-             VALUES(?,?,'companion',?,?,?,?,?,?,?,?,?,?,?,?,?)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(companion_skill_id) DO UPDATE SET
-                skill_name=excluded.skill_name, scope_kind=excluded.scope_kind,
-                scope_companion_id=excluded.scope_companion_id,
+                skill_name=excluded.skill_name, companion_id=excluded.companion_id,
                 status=excluded.status, source=excluded.source, confidence=excluded.confidence,
                 provenance_event_ids=excluded.provenance_event_ids, strength=excluded.strength,
                 version=excluded.version, skill_pattern_id=excluded.skill_pattern_id,
@@ -3334,7 +3441,7 @@ impl CompanionStore {
     pub async fn list_skills(&self, companion_id: &str) -> Result<Vec<CompanionSkill>, AppError> {
         validate_companion_id(companion_id, "skill companion_id")?;
         let rows = sqlx::query(
-            "SELECT * FROM companion_skills WHERE scope_companion_id = ? \
+            "SELECT * FROM companion_skills WHERE companion_id = ? \
              ORDER BY strength DESC, updated_at DESC, skill_name ASC",
         )
         .bind(companion_id)
@@ -3358,7 +3465,7 @@ impl CompanionStore {
         let offset = offset.max(0);
 
         let items_sql = format!(
-            "SELECT * FROM companion_skills WHERE scope_companion_id = ?{status_clause} \
+            "SELECT * FROM companion_skills WHERE companion_id = ?{status_clause} \
              ORDER BY strength DESC, updated_at DESC, skill_name ASC LIMIT ? OFFSET ?"
         );
         let mut items_query = sqlx::query(&items_sql).bind(companion_id);
@@ -3373,7 +3480,7 @@ impl CompanionStore {
             .map_err(db_err)?;
 
         let count_sql = format!(
-            "SELECT COUNT(*) AS n FROM companion_skills WHERE scope_companion_id = ?{status_clause}"
+            "SELECT COUNT(*) AS n FROM companion_skills WHERE companion_id = ?{status_clause}"
         );
         let mut count_query = sqlx::query(&count_sql).bind(companion_id);
         if let Some(status) = status {
@@ -3408,7 +3515,7 @@ impl CompanionStore {
             .map_err(|error| AppError::BadRequest(format!("invalid companion_skill_id: {error}")))?;
         let row = sqlx::query(
             "SELECT * FROM companion_skills
-             WHERE scope_companion_id = ? AND companion_skill_id = ?",
+             WHERE companion_id = ? AND companion_skill_id = ?",
         )
             .bind(companion_id)
             .bind(companion_skill_id)
@@ -3426,7 +3533,7 @@ impl CompanionStore {
         validate_companion_id(companion_id, "skill companion_id")?;
         let row = sqlx::query(
             "SELECT * FROM companion_skills
-             WHERE scope_companion_id = ? AND skill_name = ?",
+             WHERE companion_id = ? AND skill_name = ?",
         )
         .bind(companion_id)
         .bind(skill_name)
@@ -3494,10 +3601,10 @@ impl CompanionStore {
         skill_name: &str,
         now: i64,
     ) -> Result<(), AppError> {
-        validate_companion_id(owner, "skill scope companion_id")?;
+        validate_companion_id(owner, "skill companion_id")?;
         let companion_skill_id: Option<String> = sqlx::query_scalar(
             "SELECT companion_skill_id FROM companion_skills
-             WHERE scope_companion_id = ? AND skill_name = ?",
+             WHERE companion_id = ? AND skill_name = ?",
         )
         .bind(owner)
         .bind(skill_name)
@@ -3518,7 +3625,7 @@ impl CompanionStore {
     ///
     /// Owner-scoped because forgetting is per companion: each companion's own
     /// `evolve.skill_half_life_days` sets its clock, and its run must not archive a
-    /// sibling's skill. The vestigial unowned (`('user', NULL)`) rows are therefore
+    /// sibling's skill. The vestigial unowned (`companion_id IS NULL`) rows are therefore
     /// never decayed — they only exist in a zero-companion install, where no run
     /// happens at all, and the boot migration re-homes them the moment one exists.
     pub async fn decay_skills(
@@ -3530,9 +3637,9 @@ impl CompanionStore {
         validate_companion_id(owner, "skill decay companion_id")?;
         let now = now_ms();
         let rows = sqlx::query(
-            "SELECT companion_skill_id, scope_companion_id, skill_name, source, strength,
+            "SELECT companion_skill_id, companion_id, skill_name, source, strength,
                     COALESCE(last_used_at, created_at) AS clock \
-             FROM companion_skills WHERE status = 'active' AND scope_companion_id = ?",
+             FROM companion_skills WHERE status = 'active' AND companion_id = ?",
         )
         .bind(owner)
         .fetch_all(&self.pool)
@@ -3549,7 +3656,7 @@ impl CompanionStore {
             let clock: i64 = row.get("clock");
             let age_days = ((now - clock).max(0)) as f64 / 86_400_000.0;
             let decayed = strength * 0.5f64.powf(age_days / half);
-            let cid: Option<String> = row.get("scope_companion_id");
+            let cid: Option<String> = row.get("companion_id");
             if let Some(companion_id) = cid.as_deref() {
                 CompanionId::try_from(companion_id)
                     .map_err(|error| invalid_disk_id("skill scope companion id", companion_id, error))?;
@@ -3599,7 +3706,7 @@ impl CompanionStore {
     pub async fn count_skills_since(&self, companion_id: &str, since_ms: i64) -> Result<i64, AppError> {
         validate_companion_id(companion_id, "skill companion_id")?;
         let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM companion_skills WHERE scope_companion_id = ? AND created_at >= ?",
+            "SELECT COUNT(*) FROM companion_skills WHERE companion_id = ? AND created_at >= ?",
         )
         .bind(companion_id)
         .bind(since_ms)
@@ -3613,7 +3720,7 @@ impl CompanionStore {
     pub async fn list_skill_names_since(&self, companion_id: &str, since_ms: i64, limit: i64) -> Result<Vec<String>, AppError> {
         validate_companion_id(companion_id, "skill companion_id")?;
         let rows = sqlx::query(
-            "SELECT skill_name FROM companion_skills WHERE scope_companion_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT skill_name FROM companion_skills WHERE companion_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
         )
         .bind(companion_id)
         .bind(since_ms)
@@ -3653,7 +3760,7 @@ impl CompanionStore {
         let target = name.to_lowercase();
         let rows = sqlx::query(
             "SELECT * FROM companion_skills
-             WHERE scope_companion_id = ? AND status IN ('active','draft')",
+             WHERE companion_id = ? AND status IN ('active','draft')",
         )
         .bind(companion_id)
         .fetch_all(&self.pool)
@@ -3975,6 +4082,22 @@ mod tests {
         }
     }
 
+    /// Replace one fragment of [`SCHEMA`], asserting that it occurs EXACTLY once.
+    ///
+    /// Every schema-drift fixture below is a string mutation of the real schema,
+    /// which makes them silently self-disabling: the day a needle stops matching,
+    /// `replacen` returns the schema unchanged and the "malformed" case becomes a
+    /// copy of the valid one — a test that passes while testing nothing. This
+    /// helper turns that into a loud failure at the mutation site.
+    fn mutate_schema(needle: &str, replacement: &str) -> String {
+        let occurrences = SCHEMA.matches(needle).count();
+        assert_eq!(
+            occurrences, 1,
+            "schema-drift fixture needle must occur exactly once in SCHEMA (found {occurrences}): {needle}"
+        );
+        SCHEMA.replacen(needle, replacement, 1)
+    }
+
     async fn assert_malformed_v3_rejected(schema: &str, description: &str) {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -3999,56 +4122,71 @@ mod tests {
     async fn v3_baseline_rejects_missing_columns_uuid_checks_uniques_and_indexes() {
         let malformed = [
             (
-                SCHEMA.replacen("  embedding_model TEXT,\n", "", 1),
+                mutate_schema("  embedding BLOB,\n  embedding_model TEXT\n", "  embedding BLOB\n"),
                 "all tables exist but companion_memories.embedding_model is missing",
             ),
             (
-                SCHEMA.replacen("  embedding_model TEXT,\n", "  embedding_model INTEGER,\n", 1),
+                mutate_schema("  embedding_model TEXT\n", "  embedding_model INTEGER\n"),
                 "companion_memories.embedding_model has the wrong declared type",
             ),
             (
-                SCHEMA.replacen("  embedding_model TEXT,\n", "  embedding_model TEXT NOT NULL,\n", 1),
+                mutate_schema("  embedding_model TEXT\n", "  embedding_model TEXT NOT NULL\n"),
                 "companion_memories.embedding_model has the wrong nullability",
             ),
             (
-                SCHEMA.replacen(
-                    "  embedding_model TEXT,\n  CHECK(",
-                    "  embedding_model TEXT,\n  unexpected TEXT,\n  CHECK(",
-                    1,
+                mutate_schema(
+                    "  embedding_model TEXT\n",
+                    "  embedding_model TEXT,\n  unexpected TEXT\n",
                 ),
                 "companion_memories has an extra column",
             ),
             (
-                SCHEMA.replacen(
+                mutate_schema(
                     "memory_id TEXT NOT NULL UNIQUE CHECK (\n    length(memory_id) = 36\n    AND lower(memory_id) = memory_id\n    AND memory_id GLOB '????????-????-7???-[89ab]???-????????????'\n    AND replace(memory_id, '-', '') NOT GLOB '*[^0-9a-f]*'\n  )",
                     "memory_id TEXT NOT NULL UNIQUE",
-                    1,
                 ),
                 "memory_id has no UUIDv7 CHECK",
             ),
             (
-                SCHEMA.replacen(
+                mutate_schema(
                     "memory_id TEXT NOT NULL UNIQUE CHECK",
                     "memory_id TEXT NOT NULL CHECK",
-                    1,
                 ),
                 "memory_id has no UNIQUE constraint",
             ),
             (
-                SCHEMA.replacen(
+                // The owner column is nullable and carries no discriminator, so
+                // its UUIDv7 CHECK is the only thing standing between the store
+                // and an unaddressable owner id.
+                mutate_schema(
+                    "  companion_id TEXT CHECK (\n    companion_id IS NULL\n    OR (\n      length(companion_id) = 36\n      AND lower(companion_id) = companion_id\n      AND companion_id GLOB '????????-????-7???-[89ab]???-????????????'\n      AND replace(companion_id, '-', '') NOT GLOB '*[^0-9a-f]*'\n    )\n  ),\n  embedding BLOB,",
+                    "  companion_id TEXT,\n  embedding BLOB,",
+                ),
+                "companion_memories.companion_id has no UUIDv7 CHECK",
+            ),
+            (
+                mutate_schema(
                     "CREATE INDEX IF NOT EXISTS idx_companion_memories_kind ON companion_memories(kind, status, strength DESC);\n",
                     "",
-                    1,
                 ),
                 "required memory kind index is missing",
             ),
             (
-                SCHEMA.replacen(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_shared_name ON companion_skills(skill_name) WHERE scope_kind = 'user';\n",
+                mutate_schema(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_shared_name ON companion_skills(skill_name) WHERE companion_id IS NULL;\n",
                     "",
-                    1,
                 ),
                 "required partial unique skill index is missing",
+            ),
+            (
+                // Same columns, wrong predicate: the two partial uniques together
+                // are what keep one skill name per owner AND one unowned row per
+                // name, so a widened predicate must not pass as the baseline.
+                mutate_schema(
+                    "ON companion_skills(companion_id, skill_name) WHERE companion_id IS NOT NULL;",
+                    "ON companion_skills(companion_id, skill_name) WHERE status != 'archived';",
+                ),
+                "the private-owner unique index has the wrong partial predicate",
             ),
             (
                 format!(
@@ -4187,13 +4325,98 @@ mod tests {
         );
     }
 
-    /// The pre-FTS v3 layout: current SCHEMA minus the embedding columns and
-    /// without the FTS5 stanza (which lives in `FTS_SCHEMA`, so plain SCHEMA
-    /// minus the columns IS the legacy layout).
-    fn legacy_v3_schema() -> String {
-        let legacy = SCHEMA.replacen("  embedding BLOB,\n  embedding_model TEXT,\n", "", 1);
-        assert_ne!(legacy, SCHEMA, "legacy fixture must strip the new columns");
-        legacy
+    /// The PRE-COLLAPSE v3 layout, i.e. what every install on disk actually has:
+    /// both owner tables still carry the retired `(scope_kind, scope_companion_id)`
+    /// pair with its paired CHECK, the two partial skill uniques are keyed on
+    /// `scope_kind`, `companion_memories` has no embedding columns, and there is no
+    /// FTS5 stanza (that lives in `FTS_SCHEMA`).
+    ///
+    /// Derived from [`SCHEMA`] rather than frozen as a literal so that a baseline
+    /// table added later is present here too — `upgrade_schema_in_place` never
+    /// CREATES a missing table, so a frozen fixture would rot into a "missing
+    /// table" failure that says nothing about this migration. Every needle is
+    /// asserted to match exactly once, so the fixture can never quietly stop being
+    /// legacy.
+    fn legacy_scope_v3_schema() -> String {
+        // The three DDL fragments below are verbatim: two of them are the shape
+        // 0.3.8 shipped, the third is the shape SCHEMA has now.
+        let legacy_owner_columns = |default_kind: &str| {
+            format!(
+                r#"  scope_kind TEXT NOT NULL DEFAULT '{default_kind}' CHECK(scope_kind IN ('user', 'companion')),
+  scope_companion_id TEXT CHECK (
+    scope_companion_id IS NULL
+    OR (
+      length(scope_companion_id) = 36
+      AND lower(scope_companion_id) = scope_companion_id
+      AND scope_companion_id GLOB '????????-????-7???-[89ab]???-????????????'
+      AND replace(scope_companion_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    )
+  ),
+"#
+            )
+        };
+        const PAIRED_CHECK: &str = r#"  CHECK((scope_kind = 'user' AND scope_companion_id IS NULL) OR
+        (scope_kind = 'companion' AND scope_companion_id IS NOT NULL))
+"#;
+        const NEW_OWNER_COLUMN: &str = r#"  companion_id TEXT CHECK (
+    companion_id IS NULL
+    OR (
+      length(companion_id) = 36
+      AND lower(companion_id) = companion_id
+      AND companion_id GLOB '????????-????-7???-[89ab]???-????????????'
+      AND replace(companion_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    )
+  ),
+"#;
+
+        let steps: Vec<(String, String)> = vec![
+            // companion_memories: the owner column plus the two embedding columns
+            // are its whole tail, so one needle restores the legacy tail in full.
+            (
+                format!("{NEW_OWNER_COLUMN}  embedding BLOB,\n  embedding_model TEXT\n);"),
+                format!("{}{PAIRED_CHECK});", legacy_owner_columns("user")),
+            ),
+            // companion_skills: the owner column sits mid-table, and the paired
+            // CHECK goes after the last column.
+            (
+                format!("{NEW_OWNER_COLUMN}  status TEXT NOT NULL DEFAULT 'draft',"),
+                format!(
+                    "{}  status TEXT NOT NULL DEFAULT 'draft',",
+                    legacy_owner_columns("companion")
+                ),
+            ),
+            (
+                "  signature TEXT NOT NULL DEFAULT ''\n);".to_owned(),
+                format!("  signature TEXT NOT NULL DEFAULT '',\n{PAIRED_CHECK});"),
+            ),
+            (
+                "ON companion_skills(companion_id, status, strength DESC)".to_owned(),
+                "ON companion_skills(scope_companion_id, status, strength DESC)".to_owned(),
+            ),
+            (
+                "ON companion_skills(skill_name) WHERE companion_id IS NULL;".to_owned(),
+                "ON companion_skills(skill_name) WHERE scope_kind = 'user';".to_owned(),
+            ),
+            (
+                "ON companion_skills(companion_id, skill_name) WHERE companion_id IS NOT NULL;".to_owned(),
+                "ON companion_skills(scope_companion_id, skill_name) WHERE scope_kind = 'companion';".to_owned(),
+            ),
+        ];
+        let mut sql = SCHEMA.to_owned();
+        for (needle, replacement) in steps {
+            let occurrences = sql.matches(needle.as_str()).count();
+            assert_eq!(
+                occurrences, 1,
+                "legacy fixture needle must occur exactly once (found {occurrences}): {needle}"
+            );
+            sql = sql.replacen(needle.as_str(), &replacement, 1);
+        }
+        assert!(
+            // Anchored on the line start so `scope_companion_id` does not match it.
+            !sql.contains("\n  companion_id TEXT CHECK"),
+            "the legacy fixture must carry no collapsed owner column"
+        );
+        sql
     }
 
     /// Actual indexed-document count. `count(*)` on an external-content fts5
@@ -4214,18 +4437,28 @@ mod tests {
             .unwrap()
     }
 
+    /// The whole owner migration, on the layout every existing install has: the
+    /// retired `(scope_kind, scope_companion_id)` pair is rebuilt into one nullable
+    /// `companion_id`, and only then are the unowned rows re-homed. Both halves
+    /// must preserve every row EXACTLY — this is the owner's accumulated memory,
+    /// and a rebuild that drops, duplicates, renumbers or silently re-owns a row
+    /// is unrecoverable for them.
     #[tokio::test]
     async fn legacy_v3_file_store_upgrades_in_place_preserving_memories() {
         let root = tempfile::tempdir().unwrap();
         let database_path = root.path().join("memory.db");
         let memory_id_active = CompanionMemoryId::new().into_string();
         let memory_id_archived = CompanionMemoryId::new().into_string();
-        // 共享技能 rows, the pre-re-homing shape: ('user', NULL). `collides` shares
-        // its name with a skill the future owner already owns.
+        let memory_id_owned_pinned = CompanionMemoryId::new().into_string();
+        // Unowned 共享技能 rows, the pre-re-homing shape: ('user', NULL). `collides`
+        // shares its name with a skill the future owner already owns.
         let skill_id_shared = nomifun_common::generate_id();
         let skill_id_collides = nomifun_common::generate_id();
         let skill_id_owned = nomifun_common::generate_id();
         let owner = companion_fixture(77);
+        // Row ids of the pre-collapse rows: the FTS index is external-content and
+        // keyed on `companion_memories.id`, so the rebuild must preserve them.
+        let ids_before: Vec<(String, i64)>;
         {
             let pool = SqlitePoolOptions::new()
                 .max_connections(1)
@@ -4236,22 +4469,34 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            sqlx::raw_sql(&legacy_v3_schema()).execute(&pool).await.unwrap();
+            sqlx::raw_sql(&legacy_scope_v3_schema()).execute(&pool).await.unwrap();
             sqlx::raw_sql(&format!("PRAGMA user_version = {STORE_VERSION}"))
                 .execute(&pool)
                 .await
                 .unwrap();
-            for (memory_id, status, content) in [
-                (&memory_id_active, "active", "主人喜欢深烘焙咖啡豆"),
-                (&memory_id_archived, "archived", "主人去年在东京出差"),
+            // Owned and unowned, active and archived, pinned and not.
+            for (memory_id, status, pinned, scope_kind, scope_owner, content) in [
+                (&memory_id_active, "active", 0, "user", None, "主人喜欢深烘焙咖啡豆"),
+                (&memory_id_archived, "archived", 0, "user", None, "主人去年在东京出差"),
+                (
+                    &memory_id_owned_pinned,
+                    "active",
+                    1,
+                    "companion",
+                    Some(owner.as_str()),
+                    "主人的生日是十一月三号",
+                ),
             ] {
                 sqlx::query(
                     "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
-                     VALUES(?, 'preference', ?, '[]', 0.8, 0.8, 0, 'manual', ?, 1, 1, 1, 'user', NULL)",
+                     VALUES(?, 'preference', ?, '[\"a\"]', 0.8, 0.6, ?, 'manual', ?, 11, 22, 33, ?, ?)",
                 )
                 .bind(memory_id)
                 .bind(content)
+                .bind(pinned)
                 .bind(status)
+                .bind(scope_kind)
+                .bind(scope_owner)
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -4274,75 +4519,149 @@ mod tests {
                 .await
                 .unwrap();
             }
+            ids_before = sqlx::query("SELECT memory_id, id FROM companion_memories ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get("memory_id"), row.get("id")))
+                .collect();
             pool.close().await;
         }
 
         let store = CompanionStore::open(root.path(), None).await.unwrap();
 
-        // The nullable embedding columns were added in place.
-        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_xinfo('companion_memories')")
-            .fetch_all(&store.pool)
-            .await
-            .unwrap();
-        assert!(columns.contains(&"embedding".to_owned()), "columns: {columns:?}");
-        assert!(columns.contains(&"embedding_model".to_owned()), "columns: {columns:?}");
+        // The nullable embedding columns were added in place, and the retired
+        // owner pair is physically gone from BOTH tables.
+        for (table, expected) in [
+            ("companion_memories", vec!["companion_id", "embedding", "embedding_model"]),
+            ("companion_skills", vec!["companion_id"]),
+        ] {
+            let columns: Vec<String> =
+                sqlx::query_scalar(&format!("SELECT name FROM pragma_table_xinfo('{table}')"))
+                    .fetch_all(&store.pool)
+                    .await
+                    .unwrap();
+            for retired in ["scope_kind", "scope_companion_id"] {
+                assert!(
+                    !columns.contains(&retired.to_owned()),
+                    "{table}.{retired} must be dropped in place: {columns:?}"
+                );
+            }
+            for column in expected {
+                assert!(columns.contains(&column.to_owned()), "{table}: {columns:?}");
+            }
+        }
 
-        // The FTS index exists and was backfilled with every row (active + archived).
-        assert_eq!(fts_count(&store.pool).await, 2);
+        // The FTS index exists and was backfilled with every row (active + archived),
+        // and it is anchored on the PRESERVED rowids.
+        assert_eq!(fts_count(&store.pool).await, 3);
         assert_eq!(fts_match_count(&store.pool, "深烘焙").await, 1);
         assert_eq!(fts_match_count(&store.pool, "东京出差").await, 1);
+        assert_eq!(fts_match_count(&store.pool, "十一月三号").await, 1);
+        let ids_after: Vec<(String, i64)> =
+            sqlx::query("SELECT memory_id, id FROM companion_memories ORDER BY id")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get("memory_id"), row.get("id")))
+                .collect();
+        assert_eq!(
+            ids_after, ids_before,
+            "the rebuild must preserve every rowid: the FTS index is content_rowid='id'"
+        );
 
-        // Existing rows survived untouched — including their vestigial
-        // ('user', NULL) ownership: an empty roster has no legal owner, so the
-        // re-homing migration deliberately leaves them for a later open.
+        // Every row survived the rebuild verbatim — content, lifecycle, pin,
+        // strength, tags, timestamps — including the vestigial unowned ownership:
+        // an empty roster has no legal owner, so the re-homing migration
+        // deliberately leaves those rows for a later open.
         let active = store.get_memory(&memory_id_active).await.unwrap().unwrap();
         assert_eq!(active.content, "主人喜欢深烘焙咖啡豆");
         assert_eq!(active.status, "active");
-        assert_eq!(active.scope_kind, "user");
-        assert_eq!(active.scope_companion_id, None);
+        assert_eq!(active.companion_id, None);
+        assert_eq!(active.tags, vec!["a".to_owned()]);
+        assert_eq!((active.importance, active.strength), (0.8, 0.6));
+        assert_eq!(
+            (active.created_at, active.updated_at, active.last_reinforced_at),
+            (11, 22, 33)
+        );
         let archived = store.get_memory(&memory_id_archived).await.unwrap().unwrap();
         assert_eq!(archived.status, "archived");
-        assert_eq!(archived.scope_kind, "user");
-        // Same for the shared SKILL rows: no roster, no owner, no re-homing.
-        assert_eq!(store.get_skill(&skill_id_shared).await.unwrap().unwrap().scope_companion_id, None);
+        assert_eq!(archived.companion_id, None);
+        // An already-owned row keeps its owner and its pin through the rebuild.
+        let owned = store.get_memory(&memory_id_owned_pinned).await.unwrap().unwrap();
+        assert_eq!(owned.companion_id.as_deref(), Some(owner.as_str()));
+        assert!(owned.pinned, "a pinned row must stay pinned");
+        assert!(!active.pinned);
+        // Same for the skill rows: no roster, no owner, no re-homing.
+        assert_eq!(store.get_skill(&skill_id_shared).await.unwrap().unwrap().companion_id, None);
+        assert_eq!(
+            store.get_skill(&skill_id_owned).await.unwrap().unwrap().companion_id.as_deref(),
+            Some(owner.as_str()),
+            "an already-owned skill keeps its owner through the rebuild"
+        );
 
-        // Idempotent: a second open of the already-upgraded store succeeds.
+        // Idempotent: a second open of the already-collapsed store is a no-op that
+        // still opens, and does not rebuild anything a third time.
         drop(store);
         let reopened = CompanionStore::open(root.path(), None).await.unwrap();
-        assert_eq!(fts_count(&reopened.pool).await, 2);
+        assert_eq!(fts_count(&reopened.pool).await, 3);
+        assert!(!collapse_owner_columns(&reopened.pool).await.unwrap());
+        let ids_again: Vec<(String, i64)> =
+            sqlx::query("SELECT memory_id, id FROM companion_memories ORDER BY id")
+                .fetch_all(&reopened.pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get("memory_id"), row.get("id")))
+                .collect();
+        assert_eq!(ids_again, ids_before, "the second boot must change nothing");
         drop(reopened);
 
-        // Opening WITH an owner re-homes every shared row onto it — active and
+        // Opening WITH an owner re-homes every unowned row onto it — active and
         // archived alike — preserving each memory verbatim otherwise. This is the
         // migration that deletes 共享记忆 from the data: **每条记忆都不能丢**。
         let migrated = CompanionStore::open(root.path(), Some(&owner)).await.unwrap();
-        let shared_left: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM companion_memories WHERE scope_kind = 'user'")
+        let unowned_left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM companion_memories WHERE companion_id IS NULL")
                 .fetch_one(&migrated.pool)
                 .await
                 .unwrap();
-        assert_eq!(shared_left, 0, "no shared memory may survive the backfill");
+        assert_eq!(unowned_left, 0, "no unowned memory may survive the backfill");
         for (memory_id, content, status) in [
             (&memory_id_active, "主人喜欢深烘焙咖啡豆", "active"),
             (&memory_id_archived, "主人去年在东京出差", "archived"),
+            (&memory_id_owned_pinned, "主人的生日是十一月三号", "active"),
         ] {
             let memory = migrated.get_memory(memory_id).await.unwrap().unwrap();
             assert_eq!(memory.content, content, "content must survive verbatim");
             assert_eq!(memory.status, status, "lifecycle must survive verbatim");
-            assert_eq!(memory.scope_kind, "companion");
-            assert_eq!(memory.scope_companion_id.as_deref(), Some(owner.as_str()));
+            assert_eq!(memory.companion_id.as_deref(), Some(owner.as_str()));
         }
-        // RE-HOMED, not duplicated: still exactly two rows and two indexed docs.
+        // RE-HOMED, not duplicated: still exactly three rows and three indexed docs.
         let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM companion_memories")
             .fetch_one(&migrated.pool)
             .await
             .unwrap();
-        assert_eq!(rows, 2, "re-homing must never multiply rows");
-        assert_eq!(fts_count(&migrated.pool).await, 2);
-        // The re-homed rows now inject for their owner.
+        assert_eq!(rows, 3, "re-homing must never multiply rows");
+        assert_eq!(fts_count(&migrated.pool).await, 3);
+        // The re-homed rows now inject for their owner, and the index still
+        // answers a query for a row that was written before the rebuild.
         let injected = migrated.memories_for_injection(&owner, 10, 10_000).await.unwrap();
-        assert_eq!(injected.len(), 1, "only the active row injects: {injected:?}");
-        assert_eq!(injected[0].memory_id, memory_id_active);
+        assert_eq!(injected.len(), 2, "only the two active rows inject: {injected:?}");
+        let found = migrated
+            .list_memory_page_sorted(
+                &MemoryFilter {
+                    q: Some("深烘焙".into()),
+                    companion_id: Some(owner.clone()),
+                    ..Default::default()
+                },
+                MemoryListSort::Default,
+            )
+            .await
+            .unwrap();
+        assert_eq!(found.total, 1, "the re-homed row is still findable by content");
 
         // The SKILL rows re-home the same way — 共享技能 is gone as a concept, and
         // an unowned row would be invisible in every companion's list. Each row
@@ -4350,7 +4669,7 @@ mod tests {
         let rehomed = migrated.get_skill(&skill_id_shared).await.unwrap().unwrap();
         assert_eq!(rehomed.skill_name, "legacy-shared");
         assert_eq!(rehomed.status, "active");
-        assert_eq!(rehomed.scope_companion_id.as_deref(), Some(owner.as_str()));
+        assert_eq!(rehomed.companion_id.as_deref(), Some(owner.as_str()));
         assert_eq!(
             migrated.list_skills(&owner).await.unwrap().len(),
             2,
@@ -4361,7 +4680,7 @@ mod tests {
         // fail the launch of every install that has such a pair. The row keeps its
         // legacy shape — nothing is deleted, nothing is overwritten.
         let stranded = migrated.get_skill(&skill_id_collides).await.unwrap().unwrap();
-        assert_eq!(stranded.scope_companion_id, None, "a colliding row stays unowned");
+        assert_eq!(stranded.companion_id, None, "a colliding row stays unowned");
         assert_eq!(stranded.status, "archived", "and keeps its lifecycle verbatim");
         let pre_owned = migrated.get_skill(&skill_id_owned).await.unwrap().unwrap();
         assert_eq!(pre_owned.status, "active", "the owner's own same-named skill is untouched");
@@ -4372,21 +4691,21 @@ mod tests {
         assert_eq!(skill_rows, 3, "re-homing must never add or drop a skill row");
 
         // Idempotent: re-running with a DIFFERENT owner must not steal already
-        // owned rows (the UPDATE only touches scope_kind = 'user').
+        // owned rows (the UPDATE only touches companion_id IS NULL).
         drop(migrated);
         let other_owner = companion_fixture(78);
         let again = CompanionStore::open(root.path(), Some(&other_owner)).await.unwrap();
         let still_owned = again.get_memory(&memory_id_active).await.unwrap().unwrap();
-        assert_eq!(still_owned.scope_companion_id.as_deref(), Some(owner.as_str()));
+        assert_eq!(still_owned.companion_id.as_deref(), Some(owner.as_str()));
         assert_eq!(
-            again.get_skill(&skill_id_shared).await.unwrap().unwrap().scope_companion_id.as_deref(),
+            again.get_skill(&skill_id_shared).await.unwrap().unwrap().companion_id.as_deref(),
             Some(owner.as_str()),
             "a second boot must not re-home an already owned skill onto someone else"
         );
         // The collision was skipped, not resolved forever: the roster changed, so
         // the row gets a fresh chance and finally lands on a real owner.
         assert_eq!(
-            again.get_skill(&skill_id_collides).await.unwrap().unwrap().scope_companion_id.as_deref(),
+            again.get_skill(&skill_id_collides).await.unwrap().unwrap().companion_id.as_deref(),
             Some(other_owner.as_str())
         );
     }
@@ -4448,16 +4767,16 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
                 .await
                 .unwrap();
             sqlx::query(
-                "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
-                 VALUES(?, 'preference', '保留的学习记忆', '[]', 0.8, 0.8, 0, 'learn', 'active', 1, 1, 1, 'user', NULL)",
+                "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, companion_id)
+                 VALUES(?, 'preference', '保留的学习记忆', '[]', 0.8, 0.8, 0, 'learn', 'active', 1, 1, 1, NULL)",
             )
             .bind(&memory_id)
             .execute(&pool)
             .await
             .unwrap();
             sqlx::query(
-                "INSERT INTO companion_skills(companion_skill_id, skill_name, scope_kind, scope_companion_id, status, source, confidence, provenance_event_ids, strength, version, created_at, updated_at, signature)
-                 VALUES(?, 'preserved-skill', 'companion', ?, 'active', 'mined', 0.9, '[]', 1.0, 1, 1, 1, 'grep-read')",
+                "INSERT INTO companion_skills(companion_skill_id, skill_name, companion_id, status, source, confidence, provenance_event_ids, strength, version, created_at, updated_at, signature)
+                 VALUES(?, 'preserved-skill', ?, 'active', 'mined', 0.9, '[]', 1.0, 1, 1, 1, 'grep-read')",
             )
             .bind(&skill_id)
             .bind(&companion_id)
@@ -4522,7 +4841,10 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
         let preserved_skill = store.get_skill(&skill_id).await.unwrap().unwrap();
         assert_eq!(preserved_skill.skill_name, "preserved-skill");
         assert_eq!(preserved_skill.status, "active");
-        assert_eq!(preserved_skill.scope_companion_id.as_deref(), Some(companion_id.as_str()));
+        assert_eq!(preserved_skill.companion_id.as_deref(), Some(companion_id.as_str()));
+        // Opening the store alone must not touch the install-wide rows: the
+        // per-companion seeding below is what consumes them, and it needs the
+        // roster, which the store layer does not have.
         for (key, expected) in [
             ("last_learn_ts", 101),
             ("learn_cursor_ts", 102),
@@ -4534,9 +4856,50 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
         assert_eq!(store.get_state("mood").await.unwrap().as_deref(), Some("happy"));
         assert_eq!(store.get_companion_state_i64(&companion_id, "xp").await.unwrap(), 17);
 
+        // The seeding copies each key onto the roster and then DELETES the
+        // install-wide row: it has no reader left, and the "keep it for a
+        // rollback" story is false — the same upgrade just dropped
+        // companion_suggestions, which an older build refuses to open without.
+        let roster = vec![companion_id.clone()];
+        assert!(store.seed_companion_state_from_global(&roster).await.unwrap() > 0);
+        for key in MIGRATED_GLOBAL_STATE_KEYS {
+            assert_eq!(store.get_state(key).await.unwrap(), None, "global {key} must be deleted");
+        }
+        assert_eq!(
+            store.get_companion_state_i64(&companion_id, "learn_cursor_ts").await.unwrap(),
+            102,
+            "the cursor must survive on the companion — a lost cursor re-distills the whole spool"
+        );
+        assert_eq!(
+            store.get_companion_state(&companion_id, MOOD_KEY).await.unwrap().as_deref(),
+            Some("happy")
+        );
+        // Idempotent, and it never clobbers a value the companion has moved on from.
+        store.set_companion_state(&companion_id, "learn_cursor_ts", "999").await.unwrap();
+        assert_eq!(store.seed_companion_state_from_global(&roster).await.unwrap(), 0);
+        assert_eq!(
+            store.get_companion_state_i64(&companion_id, "learn_cursor_ts").await.unwrap(),
+            999
+        );
+
         // The removal migration is idempotent and the strict baseline remains openable.
         drop(store);
         CompanionStore::open(root.path(), None).await.unwrap();
+    }
+
+    /// An empty roster must NOT delete the install-wide rows: there is nobody to
+    /// copy them onto, so they are still the only record of how far the owner's
+    /// loops had consumed the event spool. Deleting them here would make the first
+    /// companion created afterwards re-distill the entire retained history.
+    #[tokio::test]
+    async fn retired_global_state_survives_a_zero_companion_install() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        store.set_state(crate::collector::LEARN_CURSOR_KEY, "4200").await.unwrap();
+        assert_eq!(store.seed_companion_state_from_global(&[]).await.unwrap(), 0);
+        assert_eq!(
+            store.get_state_i64(crate::collector::LEARN_CURSOR_KEY).await.unwrap(),
+            4200
+        );
     }
 
     #[tokio::test]
@@ -4609,8 +4972,7 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
             created_at: 1,
             updated_at: 1,
             last_reinforced_at: 1,
-            scope_kind: "user".into(),
-            scope_companion_id: None,
+            companion_id: None,
         };
         store.insert_memory_raw(&imported).await.unwrap();
         assert_eq!(fts_match_count(&store.pool, "流水线").await, 1);
@@ -4618,7 +4980,7 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
         // delete_companion_rows drops the owner's private memories from the index
         let owner = companion_fixture(7);
         store
-            .insert_memory_scoped("task", "帮主人盯 CI 构建", &[], 0.8, "chat", MemoryScope::Companion(owner.clone()))
+            .insert_memory_scoped("task", "帮主人盯 CI 构建", &[], 0.8, "chat", Some(&owner))
             .await
             .unwrap();
         assert_eq!(fts_count(&store.pool).await, 2);
@@ -4651,7 +5013,7 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
                         &[],
                         0.8,
                         "manual",
-                        MemoryScope::Companion(owner),
+                        Some(&owner),
                     )
                     .await
                     .unwrap()
@@ -4750,7 +5112,7 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
             .merge_memories(&group, "主人的猫叫豆豆，很黏人", "preference", &actor_a)
             .await
             .unwrap();
-        assert_eq!(merged.scope_companion_id.as_deref(), Some(a.as_str()));
+        assert_eq!(merged.companion_id.as_deref(), Some(a.as_str()));
 
         // ── The administrative escape is the only cross-owner path ──
         let stranger = own(&b, "别的伙伴的私事").await;
@@ -4764,7 +5126,7 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
         );
     }
 
-    /// A vestigial unowned row (`('user', NULL)`) is mutable by any companion,
+    /// A vestigial unowned row (`companion_id IS NULL`) is mutable by any companion,
     /// exactly as it is READABLE by any companion: it means "not yet assigned",
     /// so a companion that sees it in its own list must be able to act on it.
     /// The new dump behind the merge assistant follows the same rule.
@@ -4780,11 +5142,11 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
             .await
             .unwrap();
         let mine = store
-            .insert_memory_scoped("task", "帮主人盯 CI 构建", &[], 0.8, "chat", MemoryScope::Companion(a.clone()))
+            .insert_memory_scoped("task", "帮主人盯 CI 构建", &[], 0.8, "chat", Some(&a))
             .await
             .unwrap();
         let theirs = store
-            .insert_memory_scoped("task", "别的伙伴的私事", &[], 0.8, "chat", MemoryScope::Companion(b))
+            .insert_memory_scoped("task", "别的伙伴的私事", &[], 0.8, "chat", Some(&b))
             .await
             .unwrap();
 
@@ -4831,11 +5193,11 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
         assert!(store.get_memory(&unowned.memory_id).await.unwrap().is_none());
     }
 
-    /// Regression net for the re-homing migration: an UNOWNED (`('user', NULL)`)
+    /// Regression net for the re-homing migration: an UNOWNED (`companion_id IS NULL`)
     /// row — the shape every learner-written memory had before this change —
     /// must still reach `memories_for_injection` for an arbitrary companion,
     /// while another companion's owned row must not. Collapsing the visibility
-    /// predicate to `scope_companion_id = ?` while such rows exist would stop
+    /// predicate to `companion_id = ?` while such rows exist would stop
     /// injecting them silently, with no error and no other failing test.
     #[tokio::test]
     async fn injection_sees_unowned_rows_and_never_another_companions() {
@@ -4854,7 +5216,7 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
                 &[],
                 0.8,
                 "chat",
-                MemoryScope::Companion(reader.clone()),
+                Some(&reader),
             )
             .await
             .unwrap();
@@ -4865,7 +5227,7 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
                 &[],
                 0.8,
                 "chat",
-                MemoryScope::Companion(stranger.clone()),
+                Some(&stranger),
             )
             .await
             .unwrap();
@@ -4899,8 +5261,7 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
             created_at: 1,
             updated_at: 1,
             last_reinforced_at: 1,
-            scope_kind: "user".into(),
-            scope_companion_id: None,
+            companion_id: None,
         };
         let tx = store.begin_memory_import(std::slice::from_ref(&imported)).await.unwrap();
         tx.commit().await.unwrap();

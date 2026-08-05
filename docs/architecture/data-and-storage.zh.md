@@ -186,7 +186,7 @@ v3 reset/restore，不通过历史逐行迁移导入。多伙伴布局如下：
 │   ├── events/YYYYMMDD.jsonl    采集链路的原始事件（自动按期限/硬容量清理；隐私敏感，导出需显式勾选）
 │   └── memory.db                独立 SQLite（PRAGMA user_version 版本阶梯）：
 │                                整机一个记忆数据库，但每一行记忆都归属于
-│                                唯一一个伙伴（scope_kind/scope_companion_id），
+│                                唯一一个伙伴（companion_memories.companion_id），
 │                                也只有该伙伴读得到；+ 每宠运行态
 │                                （companion_runtime_state：XP、mood，以及每个伙伴在
 │                                events/ 里的 learn_cursor_ts / evolve_cursor_ts 游标）
@@ -196,7 +196,9 @@ v3 reset/restore，不通过历史逐行迁移导入。多伙伴布局如下：
                                  该伙伴自己的 learn + evolve 设置/桌宠开关、位置与休眠时段
 ```
 
-`shared/` 的含义是「整机一份」，不是「伙伴之间共用」。`memory.db` 把所有伙伴的记忆行放在同一张表里，每行用 `(scope_kind, scope_companion_id)` 标明主人；所有面向伙伴的读取都按主人过滤，因此一个伙伴永远看不到另一个伙伴的记忆，记忆也不能在主人之间转移。唯一的无主状态是残留的 `('user', NULL)`：升级前的旧行、以及名册为空时导入的行就是这个样子。它在 DB 层仍然合法（零伙伴的安装是受支持的状态），这类行会由一次幂等的启动迁移落户到唯一主人名下（若显式 `default_companion_id` 仍在名册里就是它，否则是最早创建的伙伴）——一条 `UPDATE`，绝不按伙伴复制，因此 `memory_id` 保持稳定，同一件事也不会分裂成每个伙伴各一份。
+`shared/` 的含义是「整机一份」，不是「伙伴之间共用」。`memory.db` 把所有伙伴的记忆行放在同一张表里，每行用**唯一一列可空的** `companion_id` 标明主人（`companion_skills` 同理）；所有面向伙伴的读取都按主人过滤，因此一个伙伴永远看不到另一个伙伴的记忆，记忆也不能在主人之间转移。唯一的无主状态是 `companion_id IS NULL`：升级前的旧行、以及名册为空时导入的行就是这个样子。这一列保持可空（零伙伴的安装是受支持的状态），这类行会由一次幂等的启动迁移落户到唯一主人名下（若显式 `default_companion_id` 仍在名册里就是它，否则是最早创建的伙伴）——一条 `UPDATE`，绝不按伙伴复制，因此 `memory_id` 保持稳定，同一件事也不会分裂成每个伙伴各一份。
+
+2026-08 之前，两张表用两列编码同一件事：`scope_kind TEXT NOT NULL`（`'user'` / `'companion'`）+ 可空的 `scope_companion_id`，再用一条表级 CHECK 把它们钉死成 `('user', NULL)` 与 `('companion', id)` 两种合法组合。判别列完全由「有没有主人」决定，因此它只可能与主人列打架，不可能提供额外信息；启动迁移把两张表重建为这一列（SQLite 不允许 DROP 一个被表级 CHECK 引用的列）。重建逐行保留原有 `id`：`companion_memories_fts` 是 external-content FTS5，索引以 `content_rowid='id'` 为锚。导出包仍以历史线上字段名 `scope_companion_id` 携带主人；旧包里的 `scope_kind` 在导入时被接受并丢弃。
 
 历史单宠布局 `companion/nomi/` 不迁移到 v3；检测到它时随整个旧数据集退役。
 

@@ -127,7 +127,7 @@ fn build_filter(q: &MemorySearchQuery) -> Result<FilterClause, AppError> {
     // Same visibility rule as `store::MEMORY_VISIBILITY_PREDICATE` (aliased `m.`
     // here): the companion's own memories plus the not-yet-re-homed unowned ones.
     let visible_to = q.companion_id.as_ref().map(|companion_id| {
-        sql.push_str(" AND (m.scope_kind = 'user' OR m.scope_companion_id = ?)");
+        sql.push_str(" AND (m.companion_id IS NULL OR m.companion_id = ?)");
         companion_id.as_str().to_owned()
     });
     Ok(FilterClause { sql, kind, status, visible_to })
@@ -269,7 +269,6 @@ impl CompanionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::MemoryScope;
     use nomifun_common::CompanionMemoryId;
 
     fn companion_fixture(sequence: u64) -> String {
@@ -300,8 +299,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             last_reinforced_at: 1,
-            scope_kind: "user".into(),
-            scope_companion_id: None,
+            companion_id: None,
         }
     }
 
@@ -369,7 +367,7 @@ mod tests {
         // One vestigial unowned row (a pre-re-homing legacy memory) + one owned.
         store.insert_memory("preference", "主人喜欢手冲咖啡", &[], 0.8, "manual").await.unwrap();
         store
-            .insert_memory_scoped("task", "帮主人试三种咖啡豆", &[], 0.8, "chat", MemoryScope::Companion(owner.clone()))
+            .insert_memory_scoped("task", "帮主人试三种咖啡豆", &[], 0.8, "chat", Some(&owner))
             .await
             .unwrap();
 

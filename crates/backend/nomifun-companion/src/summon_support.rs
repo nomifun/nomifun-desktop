@@ -185,7 +185,6 @@ impl CompanionMemorySink for SummonMemorySink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::MemoryScope;
 
     fn companion_fixture(sequence: u64) -> CompanionId {
         CompanionId::try_from(format!("0190f5fe-7c00-7a00-8abc-{sequence:012}").as_str()).unwrap()
@@ -280,7 +279,7 @@ mod tests {
                 &[],
                 0.8,
                 "chat",
-                MemoryScope::Companion(summoned.as_str().to_owned()),
+                Some(summoned.as_str()),
             )
             .await
             .unwrap();
@@ -291,7 +290,7 @@ mod tests {
                 &[],
                 0.8,
                 "chat",
-                MemoryScope::Companion(summoned.as_str().to_owned()),
+                Some(summoned.as_str()),
             )
             .await
             .unwrap();
@@ -302,7 +301,7 @@ mod tests {
                 &[],
                 0.8,
                 "chat",
-                MemoryScope::Companion(stranger.as_str().to_owned()),
+                Some(stranger.as_str()),
             )
             .await
             .unwrap();

@@ -4373,6 +4373,12 @@ export interface ICompanionMemory {
    * one-time re-homing migration has not reached yet (it runs at every launch
    * that has at least one companion), so no surface should build behaviour on it
    * beyond "belongs to nobody in particular yet".
+   *
+   * This is the WHOLE answer to "whose memory is this": the `scope_kind`
+   * discriminator that used to travel beside it is gone from the wire and from
+   * the database (one nullable owner column, `companion_memories.companion_id`).
+   * The field keeps its historical wire name because export bundles and this
+   * contract both read it.
    */
   scope_companion_id: CompanionId | null;
   /** FTS highlight snippet (`<b>…</b>` markers) — list results of a full-text query only. */

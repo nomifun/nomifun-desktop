@@ -106,6 +106,94 @@ async fn initialized_database_satisfies_the_v3_id_schema_contract() {
         .expect("clean v3 baseline uses integer row keys and named business IDs");
 }
 
+/// Every product table, in `sqlite_schema` name order.
+///
+/// Named rather than counted on purpose: a bare `tables.len()` assertion says
+/// only that the number moved, and it fires before the per-table invariant
+/// loop, so a newly added table can silently skip the row-key contract
+/// entirely. Migration 024 added `ssh_hosts` and did exactly that.
+const EXPECTED_PRODUCT_TABLES: &[&str] = &[
+    "acp_session",
+    "agent_execution_attempts",
+    "agent_execution_events",
+    "agent_execution_participants",
+    "agent_execution_step_dependencies",
+    "agent_execution_steps",
+    "agent_execution_template_participants",
+    "agent_execution_templates",
+    "agent_executions",
+    "agent_metadata",
+    "attachments",
+    "channel_inbound_receipts",
+    "channel_pairing_codes",
+    "channel_pending_prompts",
+    "channel_plugins",
+    "channel_session_bindings",
+    "channel_sessions",
+    "channel_users",
+    "client_preferences",
+    "companion_access_token",
+    "conversation_artifacts",
+    "conversation_creation_keys",
+    "conversation_delivery_notify",
+    "conversation_delivery_receipts",
+    "conversation_execution_links",
+    "conversation_mcp_servers",
+    "conversations",
+    "creation_tasks",
+    "cron_job_runs",
+    "cron_jobs",
+    "cron_run_reservations",
+    "cs_agents",
+    "cs_audit_events",
+    "cs_channel_bindings",
+    "cs_dialogues",
+    "cs_messages",
+    "cs_notes",
+    "idmm_action_reservations",
+    "idmm_interventions",
+    "installation_identity",
+    "knowledge_bases",
+    "knowledge_binding_bases",
+    "knowledge_bindings",
+    "knowledge_tags",
+    "mcp_servers",
+    "message_correlations",
+    "messages",
+    "oauth_tokens",
+    "preset_agent_preferences",
+    "preset_examples",
+    "preset_knowledge_bases",
+    "preset_knowledge_policy",
+    "preset_localizations",
+    "preset_model_preferences",
+    "preset_skill_bindings",
+    "preset_tag_bindings",
+    "preset_tags",
+    "preset_targets",
+    "preset_user_state",
+    "presets",
+    "provider_connections",
+    "provider_models",
+    "providers",
+    "remote_agents",
+    "requirement_display_sequence",
+    "requirement_pre_effect_abandon_guards",
+    "requirement_tags",
+    "requirements",
+    "skill_tags",
+    "ssh_hosts",
+    "system_settings",
+    "tag_settings",
+    "terminal_scrollback",
+    "terminal_sessions",
+    "terminal_turn_admissions",
+    "users",
+    "webhooks",
+    "workshop_assets",
+    "workshop_canvases",
+];
+
 #[tokio::test]
 async fn every_product_table_has_one_integer_autoincrement_row_primary_key() {
     let database = init_database_memory().await.expect("database");
@@ -119,7 +207,19 @@ async fn every_product_table_has_one_integer_autoincrement_row_primary_key() {
     .await
     .expect("tables");
 
-    assert_eq!(tables.len(), 78);
+    assert_eq!(
+        tables,
+        EXPECTED_PRODUCT_TABLES,
+        "product table set drifted; added: {:?}, removed: {:?}",
+        tables
+            .iter()
+            .filter(|table| !EXPECTED_PRODUCT_TABLES.contains(&table.as_str()))
+            .collect::<Vec<_>>(),
+        EXPECTED_PRODUCT_TABLES
+            .iter()
+            .filter(|table| !tables.iter().any(|name| name == *table))
+            .collect::<Vec<_>>(),
+    );
     for table in tables {
         let columns = sqlx::query(&format!("PRAGMA table_info(\"{table}\")"))
             .fetch_all(pool)

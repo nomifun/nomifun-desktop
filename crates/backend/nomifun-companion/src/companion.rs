@@ -28,7 +28,7 @@ use crate::managed_skills::{
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, normalized_effective_skill_names};
 use crate::registry::CompanionRegistry;
-use crate::store::{CompanionThread, MEMORY_KINDS, MemoryScope, CompanionStore};
+use crate::store::{CompanionThread, MEMORY_KINDS, CompanionStore};
 
 /// Per-companion runtime-state key holding that companion's active companion thread.
 pub(crate) const ACTIVE_THREAD_KEY: &str = "companion_active_thread";
@@ -1102,8 +1102,8 @@ impl CompanionMemorySink for CompanionStoreSink {
         // Scope recall to the owning companion: shared memories + this
         // companion's own private ones. Mirrors the prompt-injection scope so a
         // companion never recalls another's private memories.
-        let scope_companion_id = self.owner_of(conversation_id).await;
-        let companion_id = scope_companion_id
+        let owner_id = self.owner_of(conversation_id).await;
+        let companion_id = owner_id
             .as_deref()
             .and_then(|id| nomifun_common::CompanionId::try_from(id).ok());
         let query = MemorySearchQuery {
@@ -1152,7 +1152,7 @@ impl CompanionMemorySink for CompanionStoreSink {
         }
         let mem = self
             .store
-            .insert_memory_scoped(kind, content, tags, 0.8, "chat", MemoryScope::Companion(owner.clone()))
+            .insert_memory_scoped(kind, content, tags, 0.8, "chat", Some(&owner))
             .await
             .map_err(|e| e.to_string())?;
         // Exclusive-interaction XP: credit the owning companion only (spec ruling 2).
@@ -1382,14 +1382,13 @@ mod tests {
         let fallback_owned = store
             .list_memories(&MemoryFilter {
                 kind: Some("knowledge".into()),
-                scope_companion_id: Some(default_companion.clone()),
+                companion_id: Some(default_companion.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
         assert_eq!(fallback_owned.len(), 1);
-        assert_eq!(fallback_owned[0].scope_kind, "companion");
-        assert_eq!(fallback_owned[0].scope_companion_id.as_deref(), Some(default_companion.as_str()));
+        assert_eq!(fallback_owned[0].companion_id.as_deref(), Some(default_companion.as_str()));
 
         let hits = s.recall(&owned_conversation, &["结论".into()], None, false, 20).await.unwrap();
         assert!(hits.contains("先结论后细节"));
