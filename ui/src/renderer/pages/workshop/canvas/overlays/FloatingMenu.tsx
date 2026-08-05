@@ -96,7 +96,7 @@ const FloatingMenu: React.FC<FloatingMenuProps> = ({ x, y, entries, onClose }) =
               entry.disabled
                 ? 'cursor-not-allowed text-[var(--color-text-4,var(--color-text-3))] opacity-60'
                 : entry.danger
-                  ? 'cursor-pointer text-[var(--color-text-2)] hover:bg-[rgba(var(--danger-6),0.1)] hover:text-[rgb(var(--danger-6))]'
+                  ? 'cursor-pointer text-[var(--color-text-2)] hover:bg-[rgba(var(--danger-6),0.1)] hover:text-danger-6'
                   : 'cursor-pointer text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
             ].join(' ')}
           >

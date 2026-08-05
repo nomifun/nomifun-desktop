@@ -166,14 +166,14 @@ const PromptField: React.FC<PromptFieldProps> = ({ value, mode, selfId, onChange
         className={[
           'nodrag nowheel w-full box-border resize-none rounded-9px border border-solid px-10px py-8px',
           'border-[var(--color-border-2)] bg-[var(--color-fill-1)] text-12px leading-[1.55] text-[var(--color-text-1)]',
-          'outline-none transition-colors placeholder:text-[var(--color-text-3)] focus:border-[rgb(var(--primary-6))]',
+          'outline-none transition-colors placeholder:text-[var(--color-text-3)] focus:border-primary-6',
         ].join(' ')}
         rows={3}
       />
 
       <Floating anchorRect={rect} open={open && candidates.length > 0} onClose={() => setOpen(false)} maxHeight={240}>
         <div className='flex items-center gap-6px border-b border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-t-0 px-10px py-6px'>
-          <AtSign theme='outline' size={12} strokeWidth={3} className='text-[rgb(var(--primary-6))]' />
+          <AtSign theme='outline' size={12} strokeWidth={3} className='text-primary-6' />
           <span className='text-10px font-600 text-[var(--color-text-3)]'>
             {t('workshopGeneration.mention.title', { defaultValue: '引用素材' })}
           </span>

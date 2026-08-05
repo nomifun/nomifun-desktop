@@ -106,7 +106,7 @@ export const ToolButton: React.FC<{
     className={[
       'grid h-24px w-24px place-items-center rounded-6px cursor-pointer transition-colors',
       danger
-        ? 'text-[var(--color-text-3)] hover:!bg-[rgba(var(--danger-6),0.12)] hover:!text-[rgb(var(--danger-6))]'
+        ? 'text-[var(--color-text-3)] hover:!bg-[rgba(var(--danger-6),0.12)] hover:!text-danger-6'
         : 'text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
     ].join(' ')}
   >
@@ -128,7 +128,7 @@ export const NodeCard: React.FC<{
     className={[
       'relative flex h-full w-full flex-col overflow-hidden rounded-13px box-border',
       'border border-solid bg-[var(--color-bg-2)] transition-shadow duration-120',
-      selected ? 'border-[rgb(var(--primary-6))]' : 'border-[var(--color-border-2)]',
+      selected ? 'border-primary-6' : 'border-[var(--color-border-2)]',
       className ?? '',
     ].join(' ')}
     style={{
@@ -164,7 +164,7 @@ export const UploadPlaceholder: React.FC<{
     }}
     className={[
       'flex h-full w-full flex-col items-center justify-center gap-8px px-14px text-center cursor-pointer select-none',
-      'text-[var(--color-text-3)] transition-colors hover:text-[rgb(var(--primary-6))]',
+      'text-[var(--color-text-3)] transition-colors hover:text-primary-6',
     ].join(' ')}
   >
     <span

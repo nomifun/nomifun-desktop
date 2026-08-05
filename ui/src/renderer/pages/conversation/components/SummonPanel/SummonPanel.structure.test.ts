@@ -23,7 +23,7 @@ describe('SummonPanel structure', () => {
   test('memory picker rides the A-track FTS retrieval face, scoped to the companion', () => {
     expect(source.includes('ipcBridge.companion')).toBe(true);
     expect(source.includes('listMemories.invoke')).toBe(true);
-    expect(source.includes('scope_companion_id: companionId')).toBe(true);
+    expect(source.includes('companion_id: companionId')).toBe(true);
     expect(source.includes("status: 'all'")).toBe(true);
     expect(source.includes("'relevance'")).toBe(true);
   });

@@ -210,7 +210,7 @@ const ModelDescriptionEditor: React.FC<{
       <Tooltip content={t('settings.editModelDescription', { defaultValue: '编辑模型描述' })}>
         <Button
           size='mini'
-          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${description ? 'text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))]' : 'text-t-secondary hover:text-t-primary'}`}
+          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${description ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
           icon={<Write theme='outline' size='14' />}
           onClick={(e) => e.stopPropagation()}
         />
@@ -270,7 +270,7 @@ const ModelContextLimitEditor: React.FC<{
       <Tooltip content={t('settings.editModelContextLimit', { defaultValue: '编辑模型上下文窗口' })}>
         <Button
           size='mini'
-          className={`model-provider-action-btn !h-24px !min-w-44px shrink-0 px-6px text-11px ${value ? 'text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))]' : 'text-t-secondary hover:text-t-primary'}`}
+          className={`model-provider-action-btn !h-24px !min-w-44px shrink-0 px-6px text-11px ${value ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
           onClick={(e) => e.stopPropagation()}
         >
           {label}
@@ -393,7 +393,7 @@ const ModelModalityEditor: React.FC<{
       <Tooltip content={t('settings.editModelModality', { defaultValue: '编辑模型类别' })}>
         <Button
           size='mini'
-          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${hasUserSelection ? 'text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))]' : 'text-t-secondary hover:text-t-primary'}`}
+          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${hasUserSelection ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
           icon={<TagOne theme='outline' size='14' />}
           onClick={(e) => e.stopPropagation()}
         />
@@ -933,7 +933,7 @@ const ModelModalContent: React.FC = () => {
             backgroundColor: 'rgba(var(--primary-6),0.06)',
           }}
         >
-          <Info theme='outline' size='16' className='mt-1px shrink-0 text-[rgb(var(--primary-6))]' />
+          <Info theme='outline' size='16' className='mt-1px shrink-0 text-primary-6' />
           <div className='min-w-0'>
             <div className='text-13px font-600 leading-18px text-t-primary'>
               {t('settings.modelHub.provider.noticeTitle')}
@@ -957,7 +957,7 @@ const ModelModalContent: React.FC = () => {
                 href='https://github.com/nomifun/nomifun-app/wiki/LLM-Configuration'
                 target='_blank'
                 rel='noopener noreferrer'
-                className='text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))] underline ml-4px'
+                className='text-primary-6 hover:text-primary-5 underline ml-4px'
               >
                 {t('settings.configGuide')}
               </a>

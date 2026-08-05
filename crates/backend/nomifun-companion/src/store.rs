@@ -152,12 +152,10 @@ pub struct CompanionMemory {
     /// The owning companion (`companion_memories.companion_id`); `None` only for
     /// a vestigial row the boot migration has not re-homed yet.
     ///
-    /// Serialized under its historical wire name: this field is read by the
-    /// shipped UI contract and by every memory bundle ever exported, so the
-    /// column rename stops at the process boundary. The retired `scope_kind`
-    /// discriminator that used to travel next to it is gone from the wire —
-    /// [`crate::export`] accepts and discards it when importing an older bundle.
-    #[serde(rename = "scope_companion_id")]
+    /// Serialized under the column's own name: the field used to travel as
+    /// `scope_companion_id` next to a retired `scope_kind` discriminator, and
+    /// both retired names are now gone from the wire. [`crate::export`] accepts
+    /// and translates them when importing a bundle written by an older build.
     pub companion_id: Option<String>,
 }
 
@@ -3268,9 +3266,10 @@ pub struct CompanionSkill {
     /// [`backfill_skill_owner`] re-homes at the first launch that has a companion
     /// to re-home it onto.
     ///
-    /// Serialized under its historical wire name, like
-    /// [`CompanionMemory::companion_id`]: the shipped UI contract and every skill
-    /// bundle ever exported read `scope_companion_id`.
+    /// Serialized under its historical wire name: the shipped UI contract and
+    /// every skill bundle ever exported read `scope_companion_id`. Memory's
+    /// owner field ([`CompanionMemory::companion_id`]) has since dropped the
+    /// alias; skills keep it until the same rename is made on the skill wire.
     #[serde(rename = "scope_companion_id")]
     pub companion_id: Option<String>,
     pub status: String,

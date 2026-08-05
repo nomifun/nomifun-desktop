@@ -75,7 +75,7 @@ const SiderWorkshopEntry: React.FC<SiderWorkshopEntryProps> = ({
         </span>
         <span className='collapsed-hidden text-14px font-[500] leading-24px'>{label}</span>
         <span
-          className='collapsed-hidden ml-auto shrink-0 text-9px font-600 leading-none tracking-wide uppercase px-4px py-2px rd-4px bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))]'
+          className='collapsed-hidden ml-auto shrink-0 text-9px font-600 leading-none tracking-wide uppercase px-4px py-2px rd-4px bg-[rgba(var(--primary-6),0.12)] text-primary-6'
           aria-hidden='true'
         >
           {betaLabel}

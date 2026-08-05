@@ -85,7 +85,7 @@ const ChatTitleEditor: React.FC<ChatTitleEditorProps> = ({
             className={classNames(
               'block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-16px font-bold text-t-primary transition-colors duration-150',
               canRenameTitle &&
-                'cursor-text group-hover:text-[rgb(var(--primary-6))] group-focus-within:text-[rgb(var(--primary-6))] focus:outline-none'
+                'cursor-text group-hover:text-primary-6 group-focus-within:text-primary-6 focus:outline-none'
             )}
             onClick={() => {
               if (!canRenameTitle) return;

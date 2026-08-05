@@ -150,7 +150,7 @@ const NomiSessionMetricsPanel: React.FC<{ conversation: TChatConversation }> = (
       <div className='mb-12px'>
         <div className='text-13px font-600 leading-20px'>{t('conversation.sessionMetrics.title')}</div>
         <div className='text-11px text-t-tertiary leading-16px'>{t('conversation.sessionMetrics.subtitle')}</div>
-        <div className='mt-8px rounded-6px border border-solid border-[rgb(var(--warning-3))] bg-[rgba(var(--warning-1),0.72)] px-8px py-6px text-11px leading-16px text-[rgb(var(--warning-8))]'>
+        <div className='mt-8px rounded-6px border border-solid border-warning-3 bg-[rgba(var(--warning-1),0.72)] px-8px py-6px text-11px leading-16px text-warning-8'>
           {t('conversation.sessionMetrics.notice')}
         </div>
       </div>

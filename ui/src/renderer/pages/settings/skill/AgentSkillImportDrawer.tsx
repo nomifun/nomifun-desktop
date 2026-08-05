@@ -41,7 +41,7 @@ type AgentSkillImportDrawerProps = {
 const sourceToneClass = (source: string) => {
   if (source === 'claude') return 'bg-[rgba(245,132,38,0.08)] text-[rgb(210,105,30)]';
   if (source === 'gemini') return 'bg-[rgba(var(--primary-6),0.08)] text-primary-6';
-  if (source === 'agents') return 'bg-[rgba(var(--success-6),0.1)] text-[rgb(var(--success-6))]';
+  if (source === 'agents') return 'bg-[rgba(var(--success-6),0.1)] text-success-6';
   return 'bg-fill-2 text-t-secondary';
 };
 
@@ -292,7 +292,7 @@ const AgentSkillImportDrawer: React.FC<AgentSkillImportDrawerProps> = ({
                         {row.sourceName}
                       </Tag>
                       {row.alreadyImported && (
-                        <Tag size='small' bordered={false} className='!bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]'>
+                        <Tag size='small' bordered={false} className='!bg-[rgba(var(--success-6),0.1)] !text-success-6'>
                           <span className='inline-flex items-center gap-3px'>
                             <CheckSmall size={12} fill='currentColor' />
                             {t('settings.agentSkillImport.alreadyImported', { defaultValue: 'In library' })}

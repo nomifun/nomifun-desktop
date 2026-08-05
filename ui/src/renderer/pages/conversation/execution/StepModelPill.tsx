@@ -98,7 +98,7 @@ const StepModelPill: React.FC<StepModelPillProps> = ({ currentModel, onApply, cl
             ))}
           </NomiSelect>
         ) : (
-          <span className='text-12px leading-18px text-[rgb(var(--warning-6))]'>
+          <span className='text-12px leading-18px text-warning-6'>
             {t('agentExecution.configure.noModels', {
               defaultValue: '暂无可用模型，请先配置模型。',
             })}

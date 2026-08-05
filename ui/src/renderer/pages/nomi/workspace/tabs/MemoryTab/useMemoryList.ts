@@ -18,7 +18,7 @@ import type { MemoryStatusFilter } from './constants';
 
 /**
  * The memory list of ONE companion. Every request carries
- * `scope_companion_id: companionId` — this surface has no cross-companion mode
+ * `companion_id: companionId` — this surface has no cross-companion mode
  * and no scope picker, so the companion id is the single source of truth for
  * what the user is looking at and who a new memory belongs to. Memory is
  * strictly per-companion: there is no shared/install-wide scope to pick.
@@ -48,7 +48,7 @@ export const useMemoryList = (companionId: CompanionId) => {
         kind: kind || undefined,
         q: q.trim() || undefined,
         status,
-        scope_companion_id: companionId,
+        companion_id: companionId,
         sort,
         limit: pageSize,
         offset: (page - 1) * pageSize,
@@ -126,7 +126,7 @@ export const useMemoryList = (companionId: CompanionId) => {
   );
 
   // ── mutations ──
-  // Every mutation carries `scope_companion_id: companionId` — the companion DOING
+  // Every mutation carries `companion_id: companionId` — the companion DOING
   // it, never a new owner: ownership is fixed at write time and the store rejects
   // a row belonging to anybody else. This tab can therefore only ever change the
   // memories it is displaying.
@@ -136,7 +136,7 @@ export const useMemoryList = (companionId: CompanionId) => {
       await ipcBridge.companion.addMemory.invoke({
         kind: nextKind,
         content: content.trim(),
-        scope_companion_id: companionId,
+        companion_id: companionId,
       });
       void refresh();
     },
@@ -148,7 +148,7 @@ export const useMemoryList = (companionId: CompanionId) => {
       await ipcBridge.companion.updateMemory.invoke({
         memory_id: memoryId,
         content: content.trim(),
-        scope_companion_id: companionId,
+        companion_id: companionId,
       });
       void refresh();
     },
@@ -160,7 +160,7 @@ export const useMemoryList = (companionId: CompanionId) => {
       await ipcBridge.companion.updateMemory.invoke({
         memory_id: memory.memory_id,
         pinned,
-        scope_companion_id: companionId,
+        companion_id: companionId,
       });
       void refresh();
     },
@@ -172,7 +172,7 @@ export const useMemoryList = (companionId: CompanionId) => {
       await ipcBridge.companion.updateMemory.invoke({
         memory_id: memory.memory_id,
         status: archived ? 'archived' : 'active',
-        scope_companion_id: companionId,
+        companion_id: companionId,
       });
       void refresh();
     },
@@ -181,7 +181,7 @@ export const useMemoryList = (companionId: CompanionId) => {
 
   const removeMemory = useCallback(
     async (memoryId: CompanionMemoryId) => {
-      await ipcBridge.companion.deleteMemory.invoke({ memory_id: memoryId, scope_companion_id: companionId });
+      await ipcBridge.companion.deleteMemory.invoke({ memory_id: memoryId, companion_id: companionId });
       void refresh();
     },
     [companionId, refresh]
@@ -200,7 +200,7 @@ export const useMemoryList = (companionId: CompanionId) => {
         ids: selected,
         action,
         kind: batchKind,
-        scope_companion_id: companionId,
+        companion_id: companionId,
       });
       setSelected([]);
       void refresh();

@@ -1259,7 +1259,6 @@
     "agent": "对话 Agent",
     "agentDesc": "用于企业微信对话"
   },
-  "addPreset": "添加设定",
   "extensionPresetReadonly": "扩展设定为只读，你可以复制它并编辑副本。",
   "executionEngineHub": {
     "title": "执行引擎",

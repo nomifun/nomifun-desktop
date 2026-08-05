@@ -944,7 +944,7 @@ const KnowledgeDetailPage: React.FC = () => {
         {/* ─── Back link ─────────────────────────────────────────────────────── */}
         <button
           type='button'
-          className='knowledge-detail-back-link inline-flex h-24px items-center gap-6px border-0 bg-transparent p-0 font-[inherit] text-12px leading-none text-[var(--color-text-3)] appearance-none cursor-pointer transition-colors hover:text-[rgb(var(--primary-6))] focus-visible:outline-none focus-visible:text-[rgb(var(--primary-6))]'
+          className='knowledge-detail-back-link inline-flex h-24px items-center gap-6px border-0 bg-transparent p-0 font-[inherit] text-12px leading-none text-[var(--color-text-3)] appearance-none cursor-pointer transition-colors hover:text-primary-6 focus-visible:outline-none focus-visible:text-primary-6'
           onClick={() => navigate('/knowledge')}
         >
           <span className='knowledge-detail-back-icon inline-flex h-14px w-14px items-center justify-center leading-none [&_svg]:block'>
@@ -963,7 +963,7 @@ const KnowledgeDetailPage: React.FC = () => {
                 {base?.name ?? '...'}
                 {/* Pen icon — edit entry point (actual editing in D5/Settings tab) */}
                 <span
-                  className='text-12px text-[var(--color-text-3)] cursor-pointer hover:text-[rgb(var(--primary-6))]'
+                  className='text-12px text-[var(--color-text-3)] cursor-pointer hover:text-primary-6'
                   onClick={() => setTab('set')}
                   title={t('knowledge.detail.editName', { defaultValue: '编辑名称' })}
                 >
@@ -1031,7 +1031,7 @@ const KnowledgeDetailPage: React.FC = () => {
                   <Menu.Item key='openFolder' onClick={() => void handleOpenFolder()}>
                     {t('knowledge.actions.openFolder', { defaultValue: '打开文件夹' })}
                   </Menu.Item>
-                  <Menu.Item key='delete' className='!text-[rgb(var(--danger-6))]' onClick={() => setTab('set')}>
+                  <Menu.Item key='delete' className='!text-danger-6' onClick={() => setTab('set')}>
                     {t('knowledge.detail.delete', { defaultValue: '删除知识库' })}
                   </Menu.Item>
                 </Menu>
@@ -1233,7 +1233,7 @@ const KnowledgeDetailPage: React.FC = () => {
                                           {t('knowledge.actions.rename', { defaultValue: '重命名' })}
                                         </span>
                                       </Menu.Item>
-                                      <Menu.Item key='delete' className='!text-[rgb(var(--danger-6))]'>
+                                      <Menu.Item key='delete' className='!text-danger-6'>
                                         <span className='inline-flex items-center gap-4px'>
                                           <Delete theme='outline' size='11' />
                                           {t('knowledge.actions.delete', { defaultValue: '删除' })}
@@ -1401,7 +1401,7 @@ const KnowledgeDetailPage: React.FC = () => {
               <div className={classNames('grid gap-12px', isMobile ? 'grid-cols-1' : 'grid-cols-3')}>
                 {/* Step 1 */}
                 <div className='box-border rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-16px'>
-                  <div className='w-26px h-26px rd-8px grid place-items-center mb-10px text-13px font-700 bg-[rgba(var(--primary-6),0.1)] text-[rgb(var(--primary-5))] border border-solid border-[rgba(var(--primary-6),0.4)]'>
+                  <div className='w-26px h-26px rd-8px grid place-items-center mb-10px text-13px font-700 bg-[rgba(var(--primary-6),0.1)] text-primary-5 border border-solid border-[rgba(var(--primary-6),0.4)]'>
                     1
                   </div>
                   <b className='block text-13px text-[var(--color-text-1)] mb-5px'>
@@ -1415,7 +1415,7 @@ const KnowledgeDetailPage: React.FC = () => {
                 </div>
                 {/* Step 2 */}
                 <div className='box-border rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-16px'>
-                  <div className='w-26px h-26px rd-8px grid place-items-center mb-10px text-13px font-700 bg-[rgba(var(--primary-6),0.1)] text-[rgb(var(--primary-5))] border border-solid border-[rgba(var(--primary-6),0.4)]'>
+                  <div className='w-26px h-26px rd-8px grid place-items-center mb-10px text-13px font-700 bg-[rgba(var(--primary-6),0.1)] text-primary-5 border border-solid border-[rgba(var(--primary-6),0.4)]'>
                     2
                   </div>
                   <b className='block text-13px text-[var(--color-text-1)] mb-5px'>
@@ -1429,7 +1429,7 @@ const KnowledgeDetailPage: React.FC = () => {
                 </div>
                 {/* Step 3 */}
                 <div className='box-border rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-16px'>
-                  <div className='w-26px h-26px rd-8px grid place-items-center mb-10px text-13px font-700 bg-[rgba(var(--primary-6),0.1)] text-[rgb(var(--primary-5))] border border-solid border-[rgba(var(--primary-6),0.4)]'>
+                  <div className='w-26px h-26px rd-8px grid place-items-center mb-10px text-13px font-700 bg-[rgba(var(--primary-6),0.1)] text-primary-5 border border-solid border-[rgba(var(--primary-6),0.4)]'>
                     3
                   </div>
                   <b className='block text-13px text-[var(--color-text-1)] mb-5px'>

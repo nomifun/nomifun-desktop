@@ -57,7 +57,7 @@ const RequirementDisplayNumber: React.FC<RequirementDisplayNumberProps> = ({
         'inline-flex h-24px min-w-48px flex-shrink-0 items-center justify-center gap-4px rounded-6px border border-solid px-6px',
         'border-[var(--color-border-2)] bg-[var(--color-fill-1)] font-mono text-11px font-medium leading-none tabular-nums text-[var(--color-text-3)]',
         fullId
-          ? 'cursor-copy transition-colors hover:border-[var(--color-primary-light-4)] hover:bg-[var(--color-primary-light-1)] hover:text-[rgb(var(--primary-6))] focus-visible:outline-2 focus-visible:outline-[rgb(var(--primary-6))]'
+          ? 'cursor-copy transition-colors hover:border-[var(--color-primary-light-4)] hover:bg-[var(--color-primary-light-1)] hover:text-primary-6 focus-visible:outline-2 focus-visible:outline-[rgba(var(--primary-6),1)]'
           : '',
         className,
       ]

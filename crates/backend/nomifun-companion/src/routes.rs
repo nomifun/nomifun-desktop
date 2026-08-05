@@ -134,7 +134,7 @@ struct ListMemoriesQuery {
     /// When set, list only what this companion can read: its own memories plus
     /// any vestigial unowned row the boot migration has not re-homed yet.
     /// Absent = every memory (the owner's administrative view).
-    scope_companion_id: Option<String>,
+    companion_id: Option<String>,
     /// `relevance` (default with `q`) / `time` / `importance`.
     sort: Option<String>,
     limit: Option<i64>,
@@ -146,8 +146,8 @@ async fn list_memories(
     Extension(_user): Extension<CurrentUser>,
     Query(query): Query<ListMemoriesQuery>,
 ) -> Result<Json<ApiResponse<MemoryListPage>>, AppError> {
-    if let Some(companion_id) = query.scope_companion_id.as_deref() {
-        validate_scope_companion_id(companion_id)?;
+    if let Some(companion_id) = query.companion_id.as_deref() {
+        validate_companion_id(companion_id)?;
     }
     let status = query.status.filter(|s| !s.is_empty()).unwrap_or_else(|| "active".into());
     let kind = query.kind.filter(|k| !k.is_empty());
@@ -172,7 +172,7 @@ async fn list_memories(
         let sort = sort.as_deref().unwrap_or("relevance");
         let page = state
             .service
-            .search_memory_page(&q, kind, status, query.scope_companion_id, sort, limit, offset)
+            .search_memory_page(&q, kind, status, query.companion_id, sort, limit, offset)
             .await?;
         return Ok(Json(ApiResponse::ok(page)));
     }
@@ -192,7 +192,7 @@ async fn list_memories(
         kind,
         q: None,
         status: status_filter,
-        companion_id: query.scope_companion_id,
+        companion_id: query.companion_id,
         limit,
         offset,
     };
@@ -216,7 +216,7 @@ struct AddMemoryRequest {
     /// The owning companion. Absent lets the server resolve the owner (explicit
     /// default → oldest companion); it never means "shared" — that concept is gone.
     #[serde(default)]
-    scope_companion_id: Option<String>,
+    companion_id: Option<String>,
 }
 
 async fn add_memory(
@@ -225,18 +225,18 @@ async fn add_memory(
     body: Result<Json<AddMemoryRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CompanionMemory>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if let Some(companion_id) = req.scope_companion_id.as_deref() {
-        validate_scope_companion_id(companion_id)?;
+    if let Some(companion_id) = req.companion_id.as_deref() {
+        validate_companion_id(companion_id)?;
     }
     Ok(Json(ApiResponse::ok(
         state
             .service
-            .add_memory(&req.kind, &req.content, &req.tags, req.scope_companion_id.as_deref())
+            .add_memory(&req.kind, &req.content, &req.tags, req.companion_id.as_deref())
             .await?,
     )))
 }
 
-/// Content / pin / lifecycle only — `scope_companion_id` is the CALLER, not a
+/// Content / pin / lifecycle only — `companion_id` is the CALLER, not a
 /// target: it says which companion is asking, and a memory owned by any other
 /// companion is not addressable. It can never re-home a memory, because the owner
 /// is fixed at write time and no wire carries a new one.
@@ -245,20 +245,20 @@ struct UpdateMemoryRequest {
     content: Option<String>,
     pinned: Option<bool>,
     status: Option<String>,
-    scope_companion_id: String,
+    companion_id: String,
 }
 
 /// The asking companion for a mutation that has no body to carry it (DELETE).
 #[derive(Deserialize)]
 struct MemoryActorQuery {
-    scope_companion_id: String,
+    companion_id: String,
 }
 
-/// Reject a malformed `scope_companion_id` before it reaches the store, on every
+/// Reject a malformed `companion_id` before it reaches the store, on every
 /// memory route that takes one.
-fn validate_scope_companion_id(scope_companion_id: &str) -> Result<(), AppError> {
-    nomifun_common::CompanionId::try_from(scope_companion_id)
-        .map_err(|error| AppError::BadRequest(format!("invalid scope_companion_id: {error}")))?;
+fn validate_companion_id(companion_id: &str) -> Result<(), AppError> {
+    nomifun_common::CompanionId::try_from(companion_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid companion_id: {error}")))?;
     Ok(())
 }
 
@@ -266,9 +266,9 @@ fn validate_scope_companion_id(scope_companion_id: &str) -> Result<(), AppError>
 /// always knows whose memory list it is showing, and an absent owner would mean
 /// "check nothing". The cross-companion administrative view is the owner agent's
 /// MCP surface, which passes [`MemoryActor::AnyOwner`] explicitly.
-fn memory_actor(scope_companion_id: &str) -> Result<MemoryActor, AppError> {
-    validate_scope_companion_id(scope_companion_id)?;
-    Ok(MemoryActor::Companion(scope_companion_id.to_owned()))
+fn memory_actor(companion_id: &str) -> Result<MemoryActor, AppError> {
+    validate_companion_id(companion_id)?;
+    Ok(MemoryActor::Companion(companion_id.to_owned()))
 }
 
 async fn update_memory(
@@ -285,7 +285,7 @@ async fn update_memory(
             req.content.as_deref(),
             req.pinned,
             req.status.as_deref(),
-            &memory_actor(&req.scope_companion_id)?,
+            &memory_actor(&req.companion_id)?,
         )
         .await?;
     Ok(Json(ApiResponse::ok(())))
@@ -299,7 +299,7 @@ async fn delete_memory(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state
         .service
-        .delete_memory(&memory_id, &memory_actor(&query.scope_companion_id)?)
+        .delete_memory(&memory_id, &memory_actor(&query.companion_id)?)
         .await?;
     Ok(Json(ApiResponse::ok(())))
 }
@@ -313,7 +313,7 @@ struct BatchMemoriesRequest {
     #[serde(default)]
     kind: Option<String>,
     /// The asking companion; every id in the batch must be one of its memories.
-    scope_companion_id: String,
+    companion_id: String,
 }
 
 /// Atomic batch memory operation (single transaction; any bad id rolls back).
@@ -338,17 +338,17 @@ async fn batch_memories(
     };
     state
         .service
-        .batch_memories(&req.ids, &action, &memory_actor(&req.scope_companion_id)?)
+        .batch_memories(&req.ids, &action, &memory_actor(&req.companion_id)?)
         .await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
 /// Merge-assistant dry run for ONE companion: suspected-duplicate groups over the
-/// active layer it can see. `scope_companion_id` is required — the response
+/// active layer it can see. `companion_id` is required — the response
 /// carries memory CONTENT, so it is scoped here and never filtered client-side.
 #[derive(Deserialize)]
 struct MergeSuggestionsRequest {
-    scope_companion_id: String,
+    companion_id: String,
 }
 
 async fn memory_merge_suggestions(
@@ -357,9 +357,9 @@ async fn memory_merge_suggestions(
     body: Result<Json<MergeSuggestionsRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<MemoryMergeGroup>>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    validate_scope_companion_id(&req.scope_companion_id)?;
+    validate_companion_id(&req.companion_id)?;
     Ok(Json(ApiResponse::ok(
-        state.service.memory_merge_suggestions(&req.scope_companion_id).await?,
+        state.service.memory_merge_suggestions(&req.companion_id).await?,
     )))
 }
 
@@ -369,7 +369,7 @@ struct MergeMemoriesRequest {
     merged_content: String,
     kind: String,
     /// The asking companion; every member of the group must be one of its memories.
-    scope_companion_id: String,
+    companion_id: String,
 }
 
 /// Merge-assistant confirm: insert the merged memory, archive the source group.
@@ -386,7 +386,7 @@ async fn merge_memories(
                 &req.group,
                 &req.merged_content,
                 &req.kind,
-                &memory_actor(&req.scope_companion_id)?,
+                &memory_actor(&req.companion_id)?,
             )
             .await?,
     )))
@@ -1305,7 +1305,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "archive", "scope_companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "archive", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
@@ -1317,7 +1317,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "restore", "scope_companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "restore", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
@@ -1329,7 +1329,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "knowledge", "scope_companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "knowledge", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
@@ -1339,7 +1339,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "bogus", "scope_companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "bogus", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
@@ -1351,7 +1351,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), missing.as_str()], "action": "delete", "scope_companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), missing.as_str()], "action": "delete", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
@@ -1364,7 +1364,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "delete", "scope_companion_id": stranger.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "delete", "companion_id": stranger.as_str() }),
             ))
             .await
             .unwrap();
@@ -1376,12 +1376,64 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "delete", "scope_companion_id": owner.as_str() }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "delete", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(service.store.count_memories("active", Some(&owner)).await.unwrap(), 0);
+    }
+
+    /// The memory wire names the owner exactly what the column names it:
+    /// `companion_id`. Two retired spellings must never come back — `scope_kind`
+    /// (the discriminator that used to travel beside the owner) and
+    /// `scope_companion_id` (the owner's own historical name, which outlived the
+    /// column rename as a bare `#[serde(rename)]`). Asserted on the response BODY,
+    /// because a rename that stops at the struct field is invisible to every test
+    /// that reads typed rows.
+    #[tokio::test]
+    async fn memory_wire_names_the_owner_companion_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+
+        // The write takes the owner under the same name the read gives it back.
+        let created = json_body(
+            app.clone()
+                .oneshot(post_json(
+                    "/api/companion/memories",
+                    serde_json::json!({
+                        "kind": "preference",
+                        "content": "主人喜欢深烘焙咖啡",
+                        "companion_id": owner.as_str(),
+                    }),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(created["data"]["companion_id"], serde_json::json!(owner.as_str()), "{created}");
+
+        let listed = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get(format!("/api/companion/memories?companion_id={owner}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let items = listed["data"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "the query param filters by the same name: {listed}");
+        for row in [&created["data"], &items[0]] {
+            let object = row.as_object().unwrap();
+            assert_eq!(object["companion_id"], serde_json::json!(owner.as_str()), "{row}");
+            for retired in ["scope_companion_id", "scope_kind"] {
+                assert!(!object.contains_key(retired), "retired `{retired}` is back on the wire: {row}");
+            }
+        }
     }
 
     /// PUT and DELETE address a memory by id alone, so the ASKING companion has to
@@ -1408,7 +1460,7 @@ mod tests {
         // Foreign asker: 404, and the content is untouched.
         let resp = app
             .clone()
-            .oneshot(put(serde_json::json!({ "content": "篡改", "scope_companion_id": stranger.as_str() })))
+            .oneshot(put(serde_json::json!({ "content": "篡改", "companion_id": stranger.as_str() })))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -1416,7 +1468,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::delete(format!(
-                    "/api/companion/memories/{}?scope_companion_id={stranger}",
+                    "/api/companion/memories/{}?companion_id={stranger}",
                     mine.memory_id
                 ))
                 .body(Body::empty())
@@ -1446,7 +1498,7 @@ mod tests {
         // The owner can do both.
         let resp = app
             .clone()
-            .oneshot(put(serde_json::json!({ "content": "主人现在只喝浅烘焙", "scope_companion_id": owner.as_str() })))
+            .oneshot(put(serde_json::json!({ "content": "主人现在只喝浅烘焙", "companion_id": owner.as_str() })))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1458,7 +1510,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::delete(format!(
-                    "/api/companion/memories/{}?scope_companion_id={owner}",
+                    "/api/companion/memories/{}?companion_id={owner}",
                     mine.memory_id
                 ))
                 .body(Body::empty())
@@ -1508,7 +1560,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/merge-suggestions",
-                serde_json::json!({ "scope_companion_id": owner.as_str() }),
+                serde_json::json!({ "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
@@ -1546,7 +1598,7 @@ mod tests {
                     "group": [a.memory_id.as_str(), b.memory_id.as_str()],
                     "merged_content": "抢来的",
                     "kind": "preference",
-                    "scope_companion_id": stranger.as_str(),
+                    "companion_id": stranger.as_str(),
                 }),
             ))
             .await
@@ -1562,7 +1614,7 @@ mod tests {
                     "group": [a.memory_id.as_str(), b.memory_id.as_str()],
                     "merged_content": "主人喜欢深烘焙咖啡豆，常用手冲",
                     "kind": "preference",
-                    "scope_companion_id": owner.as_str(),
+                    "companion_id": owner.as_str(),
                 }),
             ))
             .await
@@ -1587,7 +1639,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/merge",
-                serde_json::json!({ "group": [a.memory_id.as_str(), b.memory_id.as_str()], "merged_content": "x", "kind": "bogus", "scope_companion_id": owner.as_str() }),
+                serde_json::json!({ "group": [a.memory_id.as_str(), b.memory_id.as_str()], "merged_content": "x", "kind": "bogus", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();

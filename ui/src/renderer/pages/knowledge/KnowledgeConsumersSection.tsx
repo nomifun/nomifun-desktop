@@ -148,7 +148,7 @@ const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ b
         )}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className={classNames('shrink-0 text-[var(--color-text-3)]', open && 'text-[rgb(var(--primary-6))]')}>
+        <span className={classNames('shrink-0 text-[var(--color-text-3)]', open && 'text-primary-6')}>
           {open ? <Down theme='outline' size='14' /> : <Right theme='outline' size='14' />}
         </span>
         <span className='truncate'>{t('knowledge.consumers.summary', { count: consumers.length })}</span>
@@ -183,7 +183,7 @@ const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ b
                       size='mini'
                       shape='circle'
                       loading={removingKey === rowKey}
-                      className='knowledge-consumers-remove !h-24px !w-24px !min-w-24px shrink-0 !p-0 !text-[var(--color-text-3)] hover:!bg-[rgba(var(--danger-6),0.1)] hover:!text-[rgb(var(--danger-6))] focus-visible:!bg-[rgba(var(--danger-6),0.1)] focus-visible:!text-[rgb(var(--danger-6))]'
+                      className='knowledge-consumers-remove !h-24px !w-24px !min-w-24px shrink-0 !p-0 !text-[var(--color-text-3)] hover:!bg-[rgba(var(--danger-6),0.1)] hover:!text-danger-6 focus-visible:!bg-[rgba(var(--danger-6),0.1)] focus-visible:!text-danger-6'
                       icon={<Unlink theme='outline' size='13' />}
                       aria-label={t('knowledge.consumers.removeMount', { defaultValue: '取消挂载' })}
                       onClick={(event) => {

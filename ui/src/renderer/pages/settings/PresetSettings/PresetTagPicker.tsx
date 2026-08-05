@@ -228,7 +228,7 @@ const PresetTagPicker = forwardRef<PresetTagPickerHandle, PresetTagPickerProps>(
               className={[
                 'inline-flex items-center gap-4px select-none rounded-[16px] px-11px py-3px text-13px leading-20px cursor-pointer',
                 'border border-dashed border-[var(--color-border-3)] text-[var(--color-text-3)] transition-all duration-150',
-                'hover:text-[rgb(var(--primary-6))] hover:border-[var(--color-primary-light-3)] hover:bg-[var(--color-primary-light-1)]',
+                'hover:text-primary-6 hover:border-[var(--color-primary-light-3)] hover:bg-[var(--color-primary-light-1)]',
               ].join(' ')}
             >
               <Plus theme='outline' size={13} strokeWidth={3} />

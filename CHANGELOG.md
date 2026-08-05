@@ -5,6 +5,63 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Fixed (appearance).** Coloured text, backgrounds, borders, rings and outlines
+  render in the colour they were written to be, in 293 places across 98 files —
+  warning and error glyphs that were silently inheriting the surrounding text
+  colour, tinted panels that painted nothing, focus rings that never appeared.
+  `{text,bg,border,ring,outline}-[rgb(var(--ramp-N))]` looks like it names a
+  colour, but UnoCSS treats an arbitrary value as opaque and appends its own
+  slash-alpha, producing `rgb(var(--danger-6) / var(--un-text-opacity))` — and
+  because every ramp variable is a comma-separated triplet (`245,63,63`), the
+  result is unparseable and the browser drops the whole declaration. The project's
+  own `text-danger-6` / `bg-primary-6` rules emit the alpha-aware form correctly
+  and are what these all use now. Three tests had pinned the broken class strings
+  as expected output; they now compile the class with the real generator and assert
+  a parseable colour, so they fail if the bug returns. The gate that guards this
+  (`scripts/check-dead-css-utilities.mjs`) was a ratchet whitelisting the 95
+  pre-existing files; with the sweep done its baseline is deleted and it is a flat
+  prohibition over four banned forms, so a single new occurrence anywhere fails.
+
+- **Fixed (data safety).** A factory reset left half-finished by an older build no
+  longer risks a hard startup error on a build whose managed-root registry has
+  moved on. The persisted plan is compared element-by-element against a *frozen*
+  registry chosen by the plan's own version, so v1 and the v2 shape every current
+  release writes each validate against the bytes they were written with; a plan
+  version this build does not know is quarantined into
+  `retired/unrecognized-reset-plans/` with a warning and reported as "no reset
+  pending" instead of failing the boot path outright. A test reproduces the frozen
+  v2 list from the live registry, so moving the registry without minting a v3 fails
+  at development time rather than on a user's data directory.
+
+- A memory's owner is named the same thing everywhere. The column collapsed to a
+  single nullable `companion_memories.companion_id`, but the wire kept spelling it
+  `scope_companion_id` through a `#[serde(rename)]`, so the REST shape, the query
+  parameters, the ipcBridge contract and every UI reader disagreed with the
+  database. All of them now say `companion_id` (the response field and the
+  parameter on list / add / update / delete / batch / merge / merge-suggestions),
+  and the UI/API contract version was bumped accordingly. Memory bundles written by
+  an older build still import: an owner arriving under the retired name is
+  translated on the way in, never dropped, and a row that already carries a live
+  owner keeps it. Skill rows still ship their owner as `scope_companion_id` — that
+  wire has not been renamed yet. The memory adapter now also REJECTS both retired
+  names (`scope_kind`, `scope_companion_id`) instead of ignoring them, the guard the
+  skill adapter already had: a tolerated retired field is how a mismatched backend
+  gets to serve rows whose owner every caller then reads as `undefined`.
+
+- Translations are now checked in both directions. `bun run check:i18n` only ever
+  read en-US and diffed it against the generated key union, so a key present in one
+  language and missing in the other passed silently and fell back to English at
+  runtime; three had already slipped through (`ssh.sessionsOnline_other` missing
+  from zh-CN, and stray zh-CN-only `cron.actions.runNow` / `settings.addPreset`,
+  whose live counterparts are `cron.detail.runNow` and `settings.createPreset`).
+  The gate now requires every shipped locale to carry the same keys and names the
+  missing ones per language. It is plural-aware rather than a naive set diff:
+  i18next resolves `_one` / `_other` through `Intl.PluralRules`, and Chinese has
+  exactly one plural category, so en-US's `_one` is not demanded of zh-CN while the
+  one category zh-CN does have is. A `--self-test` mode proves both halves on
+  fixtures — it catches a genuine one-sided key and tolerates a legitimate plural
+  difference — and runs as part of the gate.
+
 - Desktop companion management page (`/nomi`) rebuilt as a three-pane
   workspace: a companion sidebar (create, drag-reorder, 形象库), a seven-tab
   centre workspace (总览 / 记忆&知识库 / 远程控制 / 进化 / 技能 / 聊天历史 /
@@ -38,8 +95,8 @@ notes at a high level rather than a complete historical log.
   every row onto the local owner, since companion ids are not stable across
   machines. The UI/API contract version was bumped accordingly
   (`PUT /api/companion/memories/{id}` no longer accepts `scope_kind`, and its
-  `scope_companion_id` no longer names a target scope — see the ownership-check
-  entry below, where it becomes the *asking* companion; `scope_companion_id` on
+  owner parameter no longer names a target scope — see the ownership-check
+  entry below, where it becomes the *asking* companion; the owner parameter on
   `POST /api/companion/memories` now names the owner instead of meaning
   "private", `scope_kind` is gone from the
   memory shape the UI consumes, and `memories_active` / `memories_archived` plus
@@ -69,10 +126,10 @@ notes at a high level rather than a complete historical log.
   `last_evolve_ts`, `learn_parse_fail_streak`, `mood`) are now deleted once every
   companion has its own copy — an install with no companions keeps them, since
   they are still the only record of how far the owner's loops had read the event
-  spool. Memory and skill export bundles are unaffected in both directions: they
-  still carry the owner under its historical field name `scope_companion_id`, and a
+  spool. Memory and skill export bundles are unaffected in both directions: a
   bundle written by 0.3.8 (which also carries `scope_kind`) still imports — the
-  retired field is accepted and discarded. `scope_kind` no longer appears in any
+  retired discriminator is accepted and discarded, and a retired owner spelling is
+  translated (see the field-rename entry below). `scope_kind` no longer appears in any
   response, so the UI/API contract version was bumped.
 
 - **Behaviour change + migration.** 定时学习 and 技能进化 are now **per
@@ -125,14 +182,14 @@ notes at a high level rather than a complete historical log.
   /api/companion/memories/merge` used to address rows by memory id alone, so "a
   memory can only be changed by its owner" held only because a companion's
   workspace happens to know just its own ids. All four now require the asking
-  companion (`scope_companion_id` in the body; the query string for `DELETE`) and
+  companion (`companion_id` in the body; the query string for `DELETE`) and
   refuse anything that is not its memory with a `404` — never a silent no-op
   reported as success. It is the caller's identity, not a new owner: no wire can
   re-home a memory. The one cross-companion surface is the machine owner's MCP
   tools (`nomi_memory_update` / `nomi_memory_delete`), which pass an explicitly
   named "any owner" actor, because the owner agent has no companion identity of its
   own. `POST /api/companion/memories/merge-suggestions` is scoped the same way and
-  requires `scope_companion_id` too: it used to scan every companion's memories and
+  requires `companion_id` too: it used to scan every companion's memories and
   let the client filter, which put other companions' memory **text** on a wire
   belonging to a single companion. The UI/API contract version was bumped
   accordingly.

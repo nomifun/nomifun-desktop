@@ -283,7 +283,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
     <div className={containerClass}>
       {/* 标题 / Title */}
       <div className='flex items-center gap-8px px-2px'>
-        <Earth theme='outline' size='16' className='text-[rgb(var(--primary-6))] shrink-0' />
+        <Earth theme='outline' size='16' className='text-primary-6 shrink-0' />
         <span className='text-14px font-500 text-t-primary'>{t('settings.webui')}</span>
       </div>
 
@@ -463,7 +463,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
                     ))}
                   </Select>
                 ) : (
-                  <div className='mt-8px flex min-h-28px items-center rd-8px border border-border-2 bg-fill-0 px-9px'>
+                  <div className='mt-8px flex min-h-28px items-center rd-8px border border-arco-2 bg-fill-0 px-9px'>
                     <code className='truncate font-mono text-11px text-t-primary'>{selectedQrDisplayUrl}</code>
                   </div>
                 )}

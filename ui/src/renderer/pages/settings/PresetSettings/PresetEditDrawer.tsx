@@ -580,7 +580,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
             </Tag>
           </div>
 
-          <div className='flex-shrink-0 p-12px rd-10px border border-solid border-border-2 bg-bg-1'>
+          <div className='flex-shrink-0 p-12px rd-10px border border-solid border-arco-2 bg-bg-1'>
             <Typography.Text bold>{t('settings.presetApplication', { defaultValue: 'Application' })}</Typography.Text>
             <Checkbox.Group
               className='preset-scope-selection-checkbox mt-10px flex flex-wrap gap-x-16px gap-y-8px'
@@ -609,7 +609,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
             </div>
           </div>
 
-          <div className='flex-shrink-0 p-12px rd-10px border border-solid border-border-2 bg-bg-1'>
+          <div className='flex-shrink-0 p-12px rd-10px border border-solid border-arco-2 bg-bg-1'>
             <div className='flex items-center justify-between gap-12px'>
               <div>
                 <Typography.Text bold>{t('settings.presetKnowledge', { defaultValue: 'Knowledge scope' })}</Typography.Text>
@@ -736,11 +736,11 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
               </Button>
             </div>
             <div
-              className='mt-10px border border-border-2 overflow-hidden rounded-4px'
+              className='mt-10px border border-arco-2 overflow-hidden rounded-4px'
               style={{ height: rulesContainerHeight }}
             >
               {isRuleEditable && (
-                <div className='flex items-center h-36px bg-fill-2 border-b border-border-2 flex-shrink-0'>
+                <div className='flex items-center h-36px bg-fill-2 border-b border-arco-2 flex-shrink-0'>
                   <div
                     className={`flex items-center h-full px-16px cursor-pointer transition-all text-13px font-medium ${promptViewMode === 'edit' ? 'text-primary border-b-2 border-primary bg-bg-1' : 'text-t-secondary hover:text-t-primary'}`}
                     onClick={() => setPromptViewMode('edit')}
@@ -1080,7 +1080,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                             skill={skill}
                             localeKey={localeKey}
                             badge={
-                              <span className='bg-[rgba(var(--success-6),0.08)] text-[rgb(var(--success-6))] border border-[rgba(var(--success-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
+                              <span className='bg-[rgba(var(--success-6),0.08)] text-success-6 border border-[rgba(var(--success-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
                                 {t('settings.autoInjectedSkillsBadge', { defaultValue: 'Auto' })}
                               </span>
                             }

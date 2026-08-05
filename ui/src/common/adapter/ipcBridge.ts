@@ -4376,11 +4376,11 @@ export interface ICompanionMemory {
    *
    * This is the WHOLE answer to "whose memory is this": the `scope_kind`
    * discriminator that used to travel beside it is gone from the wire and from
-   * the database (one nullable owner column, `companion_memories.companion_id`).
-   * The field keeps its historical wire name because export bundles and this
-   * contract both read it.
+   * the database (one nullable owner column, `companion_memories.companion_id`),
+   * and the field itself no longer travels under its historical name
+   * `scope_companion_id` — wire, column and contract now agree.
    */
-  scope_companion_id: CompanionId | null;
+  companion_id: CompanionId | null;
   /** FTS highlight snippet (`<b>…</b>` markers) — list results of a full-text query only. */
   snippet?: string | null;
   /** Fused relevance rank — list results of a full-text query only. */
@@ -4747,10 +4747,21 @@ const nullableCompanionId = (value: unknown): CompanionId | null =>
 
 const fromApiCompanionMemory = (raw: unknown): ICompanionMemory => {
   const value = asWireObject(raw, 'companion memory');
+  for (const retiredField of ['scope_kind', 'scope_companion_id']) {
+    // `scope_kind` was the shared/private discriminator and `scope_companion_id`
+    // the owner's historical name; both are gone from the memory wire, which now
+    // spells the owner exactly like its column (`companion_id`). Rejecting them
+    // is what stops a downgraded backend from quietly serving memories whose
+    // owner this adapter would then read as `undefined` — the same guard
+    // `fromApiCompanionSkill` has always had.
+    if (Object.prototype.hasOwnProperty.call(value, retiredField)) {
+      throw new TypeError(`companion memory must not contain retired field "${retiredField}"`);
+    }
+  }
   return {
     ...(value as unknown as ICompanionMemory),
     memory_id: parseCompanionMemoryId(value.memory_id),
-    scope_companion_id: nullableCompanionId(value.scope_companion_id),
+    companion_id: nullableCompanionId(value.companion_id),
   };
 };
 
@@ -4885,7 +4896,7 @@ const fromApiCompanionSharedConfig = (raw: unknown): ICompanionSharedConfig => {
 
 export const companion = {
   /**
-   * `scope_companion_id` narrows the list to ONE companion's memories (plus any
+   * `companion_id` narrows the list to ONE companion's memories (plus any
    * legacy row not yet re-homed). Omitting it returns every companion's memories
    * and is only for an owner-level administrative view.
    */
@@ -4896,7 +4907,7 @@ export const companion = {
       kind?: string;
       q?: string;
       status?: string;
-      scope_companion_id?: CompanionId;
+      companion_id?: CompanionId;
       sort?: ICompanionMemorySort;
       limit?: number;
       offset?: number;
@@ -4906,7 +4917,7 @@ export const companion = {
       if (p?.kind) params.set('kind', p.kind);
       if (p?.q) params.set('q', p.q);
       if (p?.status) params.set('status', p.status);
-      if (p?.scope_companion_id) params.set('scope_companion_id', p.scope_companion_id);
+      if (p?.companion_id) params.set('companion_id', p.companion_id);
       if (p?.sort) params.set('sort', p.sort);
       if (p?.limit) params.set('limit', String(p.limit));
       if (p?.offset) params.set('offset', String(p.offset));
@@ -4915,9 +4926,9 @@ export const companion = {
     }),
     (raw): ICompanionMemoryPage => ({ ...raw, items: raw.items.map(fromApiCompanionMemory) })
   ),
-  /** `scope_companion_id` is the OWNER of the new memory (omitted = server-resolved). */
+  /** `companion_id` is the OWNER of the new memory (omitted = server-resolved). */
   addMemory: withResponseMap(
-    httpPost<unknown, { kind: string; content: string; tags?: string[]; scope_companion_id?: CompanionId }>(
+    httpPost<unknown, { kind: string; content: string; tags?: string[]; companion_id?: CompanionId }>(
       '/api/companion/memories'
     ),
     fromApiCompanionMemory
@@ -4925,7 +4936,7 @@ export const companion = {
   /**
    * Content / pin / lifecycle only: a memory's owner is fixed at write time.
    *
-   * `scope_companion_id` is the companion DOING the edit, not a new owner — the
+   * `companion_id` is the companion DOING the edit, not a new owner — the
    * store rejects a row owned by anyone else with a 404. Required on every memory
    * mutation below for the same reason: the invariant is enforced server-side, so
    * the caller has to say who it is.
@@ -4934,7 +4945,7 @@ export const companion = {
     void,
     {
       memory_id: CompanionMemoryId;
-      scope_companion_id: CompanionId;
+      companion_id: CompanionId;
       content?: string;
       pinned?: boolean;
       status?: string;
@@ -4945,11 +4956,11 @@ export const companion = {
       content: p.content,
       pinned: p.pinned,
       status: p.status,
-      scope_companion_id: p.scope_companion_id,
+      companion_id: p.companion_id,
     })
   ),
-  deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId; scope_companion_id: CompanionId }>(
-    (p) => `/api/companion/memories/${p.memory_id}?scope_companion_id=${encodeURIComponent(p.scope_companion_id)}`
+  deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId; companion_id: CompanionId }>(
+    (p) => `/api/companion/memories/${p.memory_id}?companion_id=${encodeURIComponent(p.companion_id)}`
   ),
   /** Atomic batch memory op (single transaction — any bad or foreign id rolls the whole batch back). */
   batchMemories: httpPost<
@@ -4958,7 +4969,7 @@ export const companion = {
       ids: CompanionMemoryId[];
       action: ICompanionMemoryBatchAction;
       kind?: ICompanionMemoryKind;
-      scope_companion_id: CompanionId;
+      companion_id: CompanionId;
     }
   >('/api/companion/memories/batch'),
   /**
@@ -4967,7 +4978,7 @@ export const companion = {
    * this surface never receives another companion's text to filter out.
    */
   memoryMergeSuggestions: withResponseMap(
-    httpPost<unknown[], { scope_companion_id: CompanionId }>('/api/companion/memories/merge-suggestions'),
+    httpPost<unknown[], { companion_id: CompanionId }>('/api/companion/memories/merge-suggestions'),
     (raw): ICompanionMemoryMergeGroup[] =>
       raw.map((entry) => {
         const value = asWireObject(entry, 'companion memory merge group');
@@ -4985,7 +4996,7 @@ export const companion = {
         group: CompanionMemoryId[];
         merged_content: string;
         kind: ICompanionMemoryKind;
-        scope_companion_id: CompanionId;
+        companion_id: CompanionId;
       }
     >('/api/companion/memories/merge'),
     fromApiCompanionMemory

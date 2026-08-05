@@ -53,7 +53,7 @@ const studioInputClass =
   'knowledge-studio-input w-full rounded-12px border border-transparent bg-[var(--color-fill-1)] px-13px py-11px text-13px text-[var(--color-text-1)] outline-none font-[inherit] transition-[background-color,border-color,box-shadow,color] placeholder:text-[var(--color-text-4)] hover:bg-[var(--color-fill-2)] focus:border-[rgba(var(--primary-6),0.36)] focus:bg-[var(--color-bg-2)] focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
 
 const studioActionClass =
-  'knowledge-studio-ai-action inline-flex items-center gap-4px border-0 bg-transparent p-0 text-12px font-500 leading-20px text-[var(--color-text-2)] appearance-none transition-colors hover:text-[rgb(var(--primary-6))] focus-visible:outline-none focus-visible:text-[rgb(var(--primary-6))]';
+  'knowledge-studio-ai-action inline-flex items-center gap-4px border-0 bg-transparent p-0 text-12px font-500 leading-20px text-[var(--color-text-2)] appearance-none transition-colors hover:text-primary-6 focus-visible:outline-none focus-visible:text-primary-6';
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -367,7 +367,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
                     {t('knowledge.studio.basicInfoHelp', { defaultValue: '名称用于识别，描述决定模型何时查阅此库。' })}
                   </div>
                 </div>
-                <span className='shrink-0 rounded-8px bg-[rgba(var(--primary-6),0.08)] px-8px py-4px text-11px font-600 text-[rgb(var(--primary-6))]'>
+                <span className='shrink-0 rounded-8px bg-[rgba(var(--primary-6),0.08)] px-8px py-4px text-11px font-600 text-primary-6'>
                   {t('knowledge.studio.requiredBadge', { defaultValue: '名称必填' })}
                 </span>
               </div>
@@ -375,7 +375,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
               {/* Name (required) */}
               <div className={studioFieldClass}>
                 <label className='mb-7px block text-13px font-500 text-[var(--color-text-2)]'>
-                  <span className='text-[rgb(var(--warning-6))]'>*</span>{' '}
+                  <span className='text-warning-6'>*</span>{' '}
                   {t('knowledge.studio.nameLabel', { defaultValue: '名称' })}
                 </label>
                 <input
@@ -488,7 +488,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
         <div className='flex shrink-0 items-center justify-between gap-12px border-t border-t-[var(--color-border)] bg-[var(--color-bg-1)] px-24px py-14px'>
           {/* Left hint */}
           <div className='flex items-center gap-7px text-12px text-[var(--color-text-3)]'>
-            <span className='rounded-6px bg-[var(--color-success-light-1)] px-7px py-2px text-10px font-600 text-[rgb(var(--success-6))]'>
+            <span className='rounded-6px bg-[var(--color-success-light-1)] px-7px py-2px text-10px font-600 text-success-6'>
               {t('knowledge.studio.lowBarrier', { defaultValue: '低门槛' })}
             </span>
             <span>{t('knowledge.studio.footerHint', { defaultValue: '只有「名称」必填，来源等都能创建后再调整' })}</span>

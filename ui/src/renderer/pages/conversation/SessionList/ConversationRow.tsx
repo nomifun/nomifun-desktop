@@ -262,7 +262,7 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
                     </Menu.Item>
                   )}
                   <Menu.Item key='delete'>
-                    <div className='flex items-center gap-8px text-[rgb(var(--warning-6))]'>
+                    <div className='flex items-center gap-8px text-warning-6'>
                       <DeleteOne theme='outline' size='14' />
                       <span>{t('conversation.history.deleteTitle')}</span>
                     </div>

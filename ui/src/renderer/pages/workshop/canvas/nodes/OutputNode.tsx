@@ -94,13 +94,13 @@ function OutputNodeImpl({ id, selected }: NodeProps<OutputFlowNode>) {
                 <img src={media.url} alt='' draggable={false} className='h-full w-full select-none object-contain' />
               )
             ) : media.status === 'error' ? (
-              <div className='flex h-full w-full flex-col items-center justify-center gap-6px text-[rgb(var(--danger-6))]'>
+              <div className='flex h-full w-full flex-col items-center justify-center gap-6px text-danger-6'>
                 <Info theme='outline' size={18} strokeWidth={3} />
                 <span className='text-11px'>{t('workshopCanvas.node.output.loadFailed', { defaultValue: '加载失败' })}</span>
               </div>
             ) : (
               <div className='flex h-full w-full items-center justify-center'>
-                <span className='h-18px w-18px animate-spin rounded-full border-2 border-solid border-[var(--color-fill-3)] border-t-[rgb(var(--primary-6))]' />
+                <span className='h-18px w-18px animate-spin rounded-full border-2 border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
               </div>
             )}
           </div>

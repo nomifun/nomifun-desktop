@@ -52,7 +52,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
       setLoading(true);
       try {
         const groups = await ipcBridge.companion.memoryMergeSuggestions.invoke({
-          scope_companion_id: companionId,
+          companion_id: companionId,
         });
         if (!isAlive()) return;
         setGroups(groups);
@@ -97,7 +97,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
           group: draft.ids,
           merged_content: draft.content.trim(),
           kind: draft.kind,
-          scope_companion_id: companionId,
+          companion_id: companionId,
         });
         Message.success(t('nomi.memories.merged', { defaultValue: '已合并' }));
         setGroups((prev) => prev.filter((_, i) => i !== index));

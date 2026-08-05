@@ -354,7 +354,7 @@ const UpdateModal: React.FC = () => {
   };
 
   const renderDisclaimer = (className = '') => (
-    <div className={`text-12px leading-18px text-[rgb(var(--warning-6))] ${className}`}>{t('update.disclaimer')}</div>
+    <div className={`text-12px leading-18px text-warning-6 ${className}`}>{t('update.disclaimer')}</div>
   );
 
   const renderBaiduManualDownloadButton = (className = '') => (
@@ -385,7 +385,7 @@ const UpdateModal: React.FC = () => {
       case 'upToDate':
         return (
           <div className='flex flex-col items-center justify-center py-48px'>
-            <div className='w-56px h-56px bg-[rgb(var(--success-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--success-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <CheckOne theme='filled' size='28' fill='rgb(var(--success-6))' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.upToDateTitle')}</div>
@@ -400,16 +400,16 @@ const UpdateModal: React.FC = () => {
         return (
           <div className='flex flex-col h-full'>
             {/* Version info header */}
-            <div className='flex items-center justify-between px-24px py-16px border-b border-border-2 bg-fill-1'>
+            <div className='flex items-center justify-between px-24px py-16px border-b border-arco-2 bg-fill-1'>
               <div className='flex items-center gap-12px'>
-                <div className='w-40px h-40px bg-[rgb(var(--primary-6))]/12 rounded-10px flex items-center justify-center'>
+                <div className='w-40px h-40px bg-[rgba(var(--primary-6),0.12)] rounded-10px flex items-center justify-center'>
                   <Download size='20' fill='rgb(var(--primary-6))' />
                 </div>
                 <div>
                   <div className='text-15px font-600 text-t-primary'>{t('update.availableTitle')}</div>
                   <div className='text-12px text-t-tertiary mt-2px'>
                     {currentVersion} →{' '}
-                    <span className='text-[rgb(var(--primary-6))] font-500'>
+                    <span className='text-primary-6 font-500'>
                       {updateInfo?.version || autoUpdateInfo?.version}
                     </span>
                   </div>
@@ -434,7 +434,7 @@ const UpdateModal: React.FC = () => {
             </div>
 
             {!hasCompatibleManualAsset && !autoUpdateAvailable && (
-              <div className='mx-24px mt-12px px-12px py-10px text-12px rounded-8px bg-[rgb(var(--warning-6))]/10 text-[rgb(var(--warning-6))]'>
+              <div className='mx-24px mt-12px px-12px py-10px text-12px rounded-8px bg-[rgba(var(--warning-6),0.1)] text-warning-6'>
                 {t('update.noCompatibleAssetManual')}
               </div>
             )}
@@ -447,7 +447,7 @@ const UpdateModal: React.FC = () => {
                   type='button'
                   onClick={openBaiduReleaseMirror}
                   title={BAIDU_RELEASE_MIRROR_URL}
-                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-[rgb(var(--primary-6))] underline-offset-2 hover:underline'
+                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-primary-6 underline-offset-2 hover:underline'
                 >
                   {t('update.baiduMirrorLink')}
                 </button>
@@ -458,7 +458,7 @@ const UpdateModal: React.FC = () => {
                   type='button'
                   onClick={openProductWebsite}
                   title={PRODUCT_WEBSITE_URL}
-                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-[rgb(var(--primary-6))] underline-offset-2 hover:underline'
+                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-primary-6 underline-offset-2 hover:underline'
                 >
                   {PRODUCT_WEBSITE_URL}
                 </button>
@@ -482,7 +482,7 @@ const UpdateModal: React.FC = () => {
       case 'downloading':
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
-            <div className='w-56px h-56px bg-[rgb(var(--primary-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--primary-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <Download size='24' fill='rgb(var(--primary-6))' className='animate-bounce' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-20px'>{t('update.downloadingTitle')}</div>
@@ -498,7 +498,7 @@ const UpdateModal: React.FC = () => {
                 <span>
                   {formatSize(progress.transferred)} / {formatSize(progress.total)}
                 </span>
-                <span className='text-[rgb(var(--primary-6))] font-500'>{progress.speed}</span>
+                <span className='text-primary-6 font-500'>{progress.speed}</span>
               </div>
             </div>
             <div className='mt-16px'>{renderBaiduManualDownloadButton()}</div>
@@ -508,11 +508,11 @@ const UpdateModal: React.FC = () => {
       case 'downloaded':
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
-            <div className='w-56px h-56px bg-[rgb(var(--success-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--success-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <CheckOne theme='filled' size='28' fill='rgb(var(--success-6))' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.readyToInstall')}</div>
-            <div className='mb-24px text-13px text-[rgb(var(--warning-6))] max-w-360px text-center'>
+            <div className='mb-24px text-13px text-warning-6 max-w-360px text-center'>
               {t('update.installWarning')}
             </div>
             <div className='flex flex-wrap justify-center gap-12px'>
@@ -565,7 +565,7 @@ const UpdateModal: React.FC = () => {
                       ? `${formatSize(progress.transferred)} / ${formatSize(progress.total)}`
                       : formatSize(progress.transferred)}
                   </span>
-                  <span className='text-[rgb(var(--primary-6))] font-500'>{progress.speed}</span>
+                  <span className='text-primary-6 font-500'>{progress.speed}</span>
                 </div>
               </div>
             )}
@@ -576,7 +576,7 @@ const UpdateModal: React.FC = () => {
       case 'success':
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
-            <div className='w-56px h-56px bg-[rgb(var(--success-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--success-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <CheckOne theme='filled' size='28' fill='rgb(var(--success-6))' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.downloadCompleteTitle')}</div>
@@ -598,7 +598,7 @@ const UpdateModal: React.FC = () => {
       case 'error':
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
-            <div className='w-56px h-56px bg-[rgb(var(--danger-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--danger-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <CloseOne theme='filled' size='28' fill='rgb(var(--danger-6))' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.errorTitle')}</div>

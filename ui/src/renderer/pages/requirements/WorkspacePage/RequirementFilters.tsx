@@ -58,7 +58,7 @@ export const FilterTrigger = React.forwardRef<HTMLButtonElement, FilterTriggerPr
       aria-label={value ? `${label}: ${value}${valueIconLabel ? `, ${valueIconLabel}` : ''}` : label}
       aria-pressed={active || undefined}
       className={[
-        'inline-flex h-32px max-w-full cursor-pointer items-center gap-6px rounded-6px border-0 px-8px text-13px transition-colors focus-visible:outline-2 focus-visible:outline-[rgb(var(--primary-6))]',
+        'inline-flex h-32px max-w-full cursor-pointer items-center gap-6px rounded-6px border-0 px-8px text-13px transition-colors focus-visible:outline-2 focus-visible:outline-[rgba(var(--primary-6),1)]',
         active
           ? '!bg-primary-1 !text-primary-6'
           : 'bg-transparent text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
@@ -75,7 +75,7 @@ export const FilterTrigger = React.forwardRef<HTMLButtonElement, FilterTriggerPr
         <span className='ml-2px inline-flex max-w-160px items-center gap-4px text-12px font-medium text-[var(--color-text-1)]'>
           <span className='min-w-0 truncate'>{value}</span>
           {valueIcon && (
-            <span aria-hidden='true' className='inline-flex shrink-0 text-[rgb(var(--primary-6))]'>
+            <span aria-hidden='true' className='inline-flex shrink-0 text-primary-6'>
               {valueIcon}
             </span>
           )}

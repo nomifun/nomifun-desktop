@@ -130,10 +130,10 @@ install 级的**迁移** Tab 提供三种 `.zip` 迁移包（仅桌面版提供�
 | 伙伴列表 / 创建 | `GET/POST /api/companion/companions` |
 | 伙伴详情 / 修改 / 删除 | `GET/PATCH/DELETE /api/companion/companions/{companionId}` |
 | install 级配置（采集 / 学习 / 默认伙伴） | `GET/PATCH /api/companion/config` |
-| 某个伙伴的记忆列表 / 新增记忆 | `GET /api/companion/memories?scope_companion_id={companionId}`、`POST /api/companion/memories`（`scope_companion_id` 即主人；不传则由后端解析） |
-| 修改记忆（只有内容 / 置顶 / 状态，改不了主人） | `PUT /api/companion/memories/{memoryId}`（`scope_companion_id` 是*发起*的伙伴；别人的记忆一律 404） |
-| 删除记忆 / 批量 / 合并 | `DELETE /api/companion/memories/{memoryId}?scope_companion_id={companionId}`、`POST /api/companion/memories/batch`、`POST /api/companion/memories/merge`（三者都必须带 `scope_companion_id`） |
-| 某个伙伴的疑似重复分组 | `POST /api/companion/memories/merge-suggestions`（`{scope_companion_id}` —— 扫描与返回都只限这个伙伴） |
+| 某个伙伴的记忆列表 / 新增记忆 | `GET /api/companion/memories?companion_id={companionId}`、`POST /api/companion/memories`（`companion_id` 即主人；不传则由后端解析） |
+| 修改记忆（只有内容 / 置顶 / 状态，改不了主人） | `PUT /api/companion/memories/{memoryId}`（`companion_id` 是*发起*的伙伴；别人的记忆一律 404） |
+| 删除记忆 / 批量 / 合并 | `DELETE /api/companion/memories/{memoryId}?companion_id={companionId}`、`POST /api/companion/memories/batch`、`POST /api/companion/memories/merge`（三者都必须带 `companion_id`） |
+| 某个伙伴的疑似重复分组 | `POST /api/companion/memories/merge-suggestions`（`{companion_id}` —— 扫描与返回都只限这个伙伴） |
 | 每个伙伴的陪伴线程 | `GET /api/companion/companions/{companionId}/companion/threads`、`…/companion/active` |
 | 某个伙伴的聊天历史日期索引 | `GET /api/companion/companions/{companionId}/history/days` → `[{day, message_count, has_digest}]`，最新在前（本地日；只读，从不铸造会话） |
 | 读取会话的某一天 | `GET /api/conversations/{conversationId}/messages?day=YYYYMMDD`（最早在前，由后端划界） |

@@ -64,7 +64,7 @@ const ShortcutsHelp: React.FC<ShortcutsHelpProps> = ({ onClose }) => {
         onClick={(e) => e.stopPropagation()}
       >
         <div className='flex items-center gap-9px border-b border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-t-0 px-18px py-14px'>
-          <span className='flex h-26px w-26px items-center justify-center rounded-8px text-[rgb(var(--primary-6))]' style={{ background: 'rgba(var(--primary-6),0.12)' }}>
+          <span className='flex h-26px w-26px items-center justify-center rounded-8px text-primary-6' style={{ background: 'rgba(var(--primary-6),0.12)' }}>
             <Keyboard theme='outline' size={16} strokeWidth={3} />
           </span>
           <span className='text-15px font-700 text-[var(--color-text-1)]'>

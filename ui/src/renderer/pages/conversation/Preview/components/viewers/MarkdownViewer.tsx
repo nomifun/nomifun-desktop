@@ -357,7 +357,7 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
     <div className='flex flex-col w-full h-full overflow-hidden'>
       {/* 工具栏：Tabs 切换 + 下载按钮 / Toolbar: Tabs toggle + Download button */}
       {!hideToolbar && (
-        <div className='flex items-center justify-between h-40px px-12px bg-bg-2 flex-shrink-0 border-b border-border-1 overflow-x-auto'>
+        <div className='flex items-center justify-between h-40px px-12px bg-bg-2 flex-shrink-0 border-b border-arco-1 overflow-x-auto'>
           <div className='flex items-center justify-between gap-12px w-full' style={{ minWidth: 'max-content' }}>
             {/* 左侧：原文/预览 Tabs / Left: Source/Preview Tabs */}
             <div className='flex items-center h-full gap-2px'>

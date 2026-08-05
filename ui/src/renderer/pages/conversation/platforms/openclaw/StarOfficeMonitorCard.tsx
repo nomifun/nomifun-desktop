@@ -490,7 +490,7 @@ const StarOfficeMonitorCard: React.FC<StarOfficeMonitorCardProps> = ({ conversat
           </div>
 
           {detectError ? (
-            <div className='text-11px text-[rgb(var(--danger-6))]'>
+            <div className='text-11px text-danger-6'>
               {statusText} · {detectError}
             </div>
           ) : null}

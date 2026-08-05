@@ -153,7 +153,7 @@ describe('deleted features stay deleted', () => {
     // the column is now physically gone (ownership is one nullable owner column) and
     // the backend never sends it, so NO workspace surface may read it — not to
     // filter, not to badge. Ownership questions are answered by the owner id alone,
-    // which still travels under its historical wire name `scope_companion_id`.
+    // which now travels under the column's own name, `companion_id`.
     expect(offenders(({ code }) => /scope_kind/.test(code))).toEqual([]);
     // The install-wide memory read-outs went with it (their i18n keys are deleted
     // too, so a leftover call would render the defaultValue and silently lie).

@@ -57,7 +57,7 @@ export function ContextUsageRing({ used, max }: ContextUsageRingProps) {
         type='button'
         aria-label={ariaLabel}
         data-testid='nomi-context-usage-ring'
-        className='relative h-22px w-22px shrink-0 rd-999px b-none bg-transparent p-0 cursor-pointer outline-none transition-transform hover:scale-105 active:scale-95 focus-visible:ring-2 focus-visible:ring-[rgb(var(--primary-6))] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg-2)]'
+        className='relative h-22px w-22px shrink-0 rd-999px b-none bg-transparent p-0 cursor-pointer outline-none transition-transform hover:scale-105 active:scale-95 focus-visible:ring-2 focus-visible:ring-[rgba(var(--primary-6),1)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg-2)]'
         style={{ color: tone }}
       >
         <span aria-hidden='true' className='absolute inset-0 rd-999px' style={{ background: ringFill }} />
