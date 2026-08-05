@@ -4680,7 +4680,6 @@ export type I18nKey =
   | 'update.crossDeviceInstallUnsupported'
   | 'update.currentVersion'
   | 'update.disclaimer'
-  | 'update.downloadAndInstall'
   | 'update.downloadButton'
   | 'update.downloadCompleteTitle'
   | 'update.downloadFailed'

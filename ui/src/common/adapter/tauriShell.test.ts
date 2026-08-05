@@ -6,7 +6,11 @@
 
 import { describe, expect, test } from 'bun:test';
 
-import { tauriInstallUpdate, type TauriInstallUpdateProgress } from './tauriShell';
+import {
+  tauriDownloadUpdate,
+  tauriInstallUpdate,
+  type TauriDownloadUpdateProgress,
+} from './tauriShell';
 
 const originalWindow = globalThis.window;
 
@@ -43,25 +47,38 @@ const withTauriInternals = async (
   }
 };
 
-describe('tauriInstallUpdate', () => {
-  test('invokes the Rust-owned updater command with the selected version', async () => {
+describe('native update commands', () => {
+  test('download invokes the Rust-owned command and forwards progress', async () => {
     const calls: Array<{ command: string; args: unknown; options: unknown }> = [];
-    const events: TauriInstallUpdateProgress[] = [];
+    const events: TauriDownloadUpdateProgress[] = [];
     await withTauriInternals(async (command, args, options) => {
       calls.push({ command, args, options });
       const payload = args as {
-        onEvent: { onmessage: (event: TauriInstallUpdateProgress) => void };
+        onEvent: { onmessage: (event: TauriDownloadUpdateProgress) => void };
       };
       payload.onEvent.onmessage({ phase: 'downloading', chunkLength: 64, contentLength: 128 });
     }, async () => {
-      await tauriInstallUpdate('1.2.3', (event) => events.push(event));
+      await tauriDownloadUpdate('1.2.3', (event) => events.push(event));
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.command).toBe('install_update');
+    expect(calls[0]?.command).toBe('download_update');
     expect((calls[0]?.args as { version: string }).version).toBe('1.2.3');
     expect(calls[0]?.options).toBeUndefined();
     expect(events).toEqual([{ phase: 'downloading', chunkLength: 64, contentLength: 128 }]);
+  });
+
+  test('install invokes a separate command with no download channel', async () => {
+    const calls: Array<{ command: string; args: unknown; options: unknown }> = [];
+    await withTauriInternals(async (command, args, options) => {
+      calls.push({ command, args, options });
+    }, async () => {
+      await tauriInstallUpdate('1.2.3');
+    });
+
+    expect(calls).toEqual([
+      { command: 'install_update', args: { version: '1.2.3' }, options: undefined },
+    ]);
   });
 
   test('propagates native installation failures', async () => {
@@ -70,7 +87,7 @@ describe('tauriInstallUpdate', () => {
       throw new Error('native updater failed');
     }, async () => {
       try {
-        await tauriInstallUpdate('1.2.3', () => {});
+        await tauriInstallUpdate('1.2.3');
       } catch (error) {
         errorMessage = error instanceof Error ? error.message : String(error);
       }
