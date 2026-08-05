@@ -17,14 +17,12 @@ const COMPANION_ID = parseCompanionId('0190f5fe-7c00-7a00-8000-000000000001');
 const COMPANION_SKILL_ID = parseCompanionSkillId('0190f5fe-7c00-7a00-8000-000000000002');
 const COMPANION_EVENT_ID = parseCompanionEventId('0190f5fe-7c00-7a00-8000-000000000003');
 const SKILL_PATTERN_ID = parseSkillPatternId('0190f5fe-7c00-7a00-8000-000000000004');
-const TO_COMPANION_ID = parseCompanionId('0190f5fe-7c00-7a00-8000-000000000005');
 
 const realFetch = globalThis.fetch;
 
 const rawSkill = (overrides: Record<string, unknown> = {}) => ({
   companion_skill_id: COMPANION_SKILL_ID,
   skill_name: 'research',
-  scope_kind: 'companion',
   scope_companion_id: COMPANION_ID,
   status: 'draft',
   source: 'evolution',
@@ -81,7 +79,6 @@ describe('companion skill v3 wire contract', () => {
 
       const page = await companion.listSkills.invoke({
         companion_id: COMPANION_ID,
-        include_shared: false,
         status: 'draft',
         limit: 10,
         offset: 20,
@@ -98,7 +95,7 @@ describe('companion skill v3 wire contract', () => {
           method: 'GET',
           url:
             `http://127.0.0.1:13400/api/companion/companions/${COMPANION_ID}/skills` +
-            '?include_shared=false&status=draft&limit=10&offset=20',
+            '?status=draft&limit=10&offset=20',
         },
       ]);
     } finally {
@@ -142,13 +139,6 @@ describe('companion skill v3 wire contract', () => {
       });
       expect(decided.companion_skill_id).toBe(COMPANION_SKILL_ID);
 
-      const gifted = await companion.giftSkill.invoke({
-        companion_id: COMPANION_ID,
-        companion_skill_id: COMPANION_SKILL_ID,
-        to_companion_id: TO_COMPANION_ID,
-      });
-      expect(gifted.companion_skill_id).toBe(COMPANION_SKILL_ID);
-
       expect(calls).toEqual([
         {
           method: 'GET',
@@ -166,13 +156,6 @@ describe('companion skill v3 wire contract', () => {
             `${COMPANION_SKILL_ID}/decide`,
           body: { accept: true, reason: 'useful' },
         },
-        {
-          method: 'POST',
-          url:
-            `http://127.0.0.1:13400/api/companion/companions/${COMPANION_ID}/skills/` +
-            `${COMPANION_SKILL_ID}/gift`,
-          body: { to_companion_id: TO_COMPANION_ID },
-        },
       ]);
     } finally {
       globalThis.fetch = realFetch;
@@ -188,6 +171,9 @@ describe('companion skill v3 wire contract', () => {
       rawSkill({ skill_pattern_id: `pattern_${SKILL_PATTERN_ID}` }),
       rawSkill({ provenance: [] }),
       rawSkill({ superseded_by: null }),
+      // 共享技能 is gone: the owner alone answers "whose skill is this", so a
+      // backend that still shipped the discriminator would be a regression.
+      rawSkill({ scope_kind: 'user' }),
       rawSkill({ provenance_event_ids: '[]' }),
     ];
 

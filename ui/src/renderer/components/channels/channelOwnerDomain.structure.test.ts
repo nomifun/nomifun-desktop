@@ -37,7 +37,7 @@ const bridgeSource = readFileSync(
 );
 const bodySource = readFileSync(new URL('./PlatformConfigBody.tsx', import.meta.url), 'utf8');
 const remoteConnectSource = readFileSync(
-  new URL('../../pages/nomi/tabs/RemoteConnectSection.tsx', import.meta.url),
+  new URL('../../pages/nomi/workspace/tabs/RemoteTab/RemoteConnectSection.tsx', import.meta.url),
   'utf8'
 );
 

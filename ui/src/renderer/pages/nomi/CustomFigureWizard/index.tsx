@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Alert, Button, Input, Modal, Progress, Slider, Spin, Steps } from '@arco-design/web-react';
-import { IconUpload } from '@arco-design/web-react/icon';
+import { Upload } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { IFigureMeta } from '@/common/adapter/ipcBridge';
 import { uploadFileViaHttp } from '@renderer/services/FileService';
@@ -370,7 +370,7 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
         <span
           className='flex items-center justify-center w-64px h-64px rd-full text-30px transition-all duration-200 bg-primary-1 text-primary-6 group-hover:scale-105'
         >
-          <IconUpload />
+          <Upload theme='outline' size='14' fill='currentColor' />
         </span>
         <div className='flex flex-col items-center gap-3px'>
           <span className='text-14px font-600 text-t-primary'>{t('nomi.customFigure.dropHint')}</span>

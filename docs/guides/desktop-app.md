@@ -98,7 +98,7 @@ To start fresh, **quit the app** and delete that directory. To migrate, copy the
 ~/Library/Application Support/NomiFun/    # macOS (see paths above for Windows/Linux)
 ├── nomifun-backend.db        # SQLite state (conversations, settings, sessions, …)
 ├── logs/                     # nomicore.log
-├── companion/                # companions + the shared memory hub
+├── companion/                # companions + their memory database (one file, per-companion rows)
 ├── knowledge/                # managed knowledge bases
 ├── runtime/                  # extracted Bun runtime cache (regenerable)
 └── server.lock               # exclusive lock held while a backend is running

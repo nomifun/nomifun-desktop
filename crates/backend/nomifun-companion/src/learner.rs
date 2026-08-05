@@ -1,7 +1,14 @@
-//! The scheduled learning loop: every tick, if enabled and due, read new
-//! collected events, run one LLM distillation call, and apply the output
-//! (memories / reinforcement / supersedes / suggestions / mood / diary).
+//! The scheduled learning loop: every tick, for every companion whose 定时学习 is
+//! enabled and due (and which is not in its 休眠时段), read the events IT has not
+//! consumed yet, run one LLM distillation call, and apply the output to that
+//! companion (memories / reinforcement / supersedes / mood / diary / XP).
+//!
+//! One schedule, one model and one cursor served the whole roster until 2026-08.
+//! Everything the loop reads now comes off [`CompanionProfileConfig::learn`], and
+//! everything it writes is owned by the companion whose config drove the run —
+//! there is no "default companion collects for everyone" step left.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,17 +19,45 @@ use nomifun_db::IProviderRepository;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
-use crate::collector::{SharedConfig, SharedEventStoreLock, read_events_since};
+use crate::collector::{LEARN_CURSOR_KEY, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
 use crate::prompt::{self, LEARN_MAX_TOKENS};
 use crate::registry::CompanionRegistry;
-use crate::store::{MemoryFilter, CompanionStore};
+use crate::store::{CompanionStore, MOOD_KEY, MemoryFilter, MemoryScope};
 
 const MAX_EVENTS_PER_RUN: usize = 300;
 const TICK_SECONDS: u64 = 60;
 /// After this many consecutive scheduled runs fail to parse, the batch is
 /// abandoned (cursor advanced) instead of re-burning tokens forever.
 const PARSE_FAIL_GIVE_UP_RUNS: i64 = 3;
+/// Per-companion `companion_runtime_state` keys owned by this loop.
+const LAST_LEARN_TS_KEY: &str = "last_learn_ts";
+const PARSE_FAIL_STREAK_KEY: &str = "learn_parse_fail_streak";
+
+/// Re-entrancy guards, one per companion.
+///
+/// A single process-wide `Mutex` would make "run now" on companion A return
+/// `Conflict` just because B's scheduled tick happened to be mid-flight, and each
+/// run holds an LLM call — the one thing a per-companion feature must not
+/// serialize. The map only ever grows by roster size, and each entry is a bare
+/// `Mutex<()>`.
+#[derive(Default)]
+pub struct CompanionRunLocks(Mutex<HashMap<String, Arc<Mutex<()>>>>);
+
+impl CompanionRunLocks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) async fn for_companion(&self, companion_id: &str) -> Arc<Mutex<()>> {
+        self.0
+            .lock()
+            .await
+            .entry(companion_id.to_owned())
+            .or_default()
+            .clone()
+    }
+}
 
 /// Ephemeral outcome of one learning pass. It is returned to an explicit
 /// caller and broadcast to live companion surfaces, but is deliberately not
@@ -32,7 +67,6 @@ pub struct CompanionLearnResult {
     pub status: String,
     pub events_processed: i64,
     pub memories_added: i64,
-    pub suggestions_added: i64,
     pub error: Option<String>,
     /// Nomi's one-line diary for this pass, used by the live companion bubble.
     pub summary: Option<String>,
@@ -86,68 +120,98 @@ impl CompanionCompleter for LiveCompanionCompleter {
 
 pub struct Learner {
     pub companion_dir: PathBuf,
-    pub config: SharedConfig,
     pub store: CompanionStore,
-    /// Companion roster: learn-run XP is a shared achievement granted to every companion.
+    /// The roster IS the schedule: each companion's own `learn` block decides
+    /// whether, how often and with which model it distills.
     pub registry: Arc<CompanionRegistry>,
     pub completer: Arc<dyn CompanionCompleter>,
     pub emitter: CompanionEventEmitter,
     pub event_store_lock: SharedEventStoreLock,
-    /// Re-entrancy guard shared between the tick loop and "run now".
-    pub run_lock: Arc<Mutex<()>>,
+    /// Re-entrancy guards shared between the tick loop and "run now".
+    pub run_locks: Arc<CompanionRunLocks>,
 }
 
 impl Learner {
-    /// Spawn the periodic tick loop.
+    /// Spawn the periodic tick loop. Companions are visited sequentially so an
+    /// N-companion roster cannot fire N concurrent LLM calls on one tick.
     pub fn spawn(self: Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(TICK_SECONDS));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                let (enabled, interval_minutes) = {
-                    let cfg = self.config.read().await;
-                    (cfg.learn.enabled, cfg.learn.interval_minutes.max(5) as i64)
-                };
-                if !enabled {
-                    continue;
-                }
-                let last_run = self.store.get_state_i64("last_learn_ts").await.unwrap_or(0);
-                if now_ms() - last_run < interval_minutes * 60_000 {
-                    continue;
-                }
-                if let Err(e) = self.run_once().await {
-                    tracing::warn!(error = %e, "companion scheduled learn run failed");
+                for profile in self.registry.list().await {
+                    if !profile.learn.enabled {
+                        continue;
+                    }
+                    // 休眠时段 means "leave me alone", not just "don't pop a
+                    // bubble": a background LLM run costs the owner money and
+                    // writes memories, so it waits for the window to pass. (IM
+                    // auto-replies are deliberately NOT gated — silently not
+                    // answering a message would be a surprise.)
+                    if profile.appearance.in_quiet_hours_now() {
+                        continue;
+                    }
+                    let last_run = self
+                        .store
+                        .get_companion_state_i64(&profile.companion_id, LAST_LEARN_TS_KEY)
+                        .await
+                        .unwrap_or(0);
+                    let interval_minutes = profile.learn.effective_interval_minutes() as i64;
+                    if now_ms() - last_run < interval_minutes * 60_000 {
+                        continue;
+                    }
+                    if let Err(e) = self.run_for(&profile.companion_id).await {
+                        tracing::warn!(
+                            companion_id = %profile.companion_id,
+                            error = %e,
+                            "companion scheduled learn run failed"
+                        );
+                    }
                 }
             }
         });
     }
 
-    /// Execute one learning pass and return its transient result.
-    pub async fn run_once(&self) -> Result<CompanionLearnResult, AppError> {
-        let Ok(_guard) = self.run_lock.try_lock() else {
-            return Err(AppError::Conflict("a learn run is already in progress".into()));
+    /// Execute one learning pass for `companion_id` and return its transient
+    /// result. An unknown companion is a `NotFound` before anything is written or
+    /// any token spent — the roster can change under a queued tick.
+    pub async fn run_for(&self, companion_id: &str) -> Result<CompanionLearnResult, AppError> {
+        let profile = self
+            .registry
+            .get(companion_id)
+            .await
+            .ok_or_else(|| AppError::NotFound(format!("companion '{companion_id}' not found")))?;
+        let owner = profile.companion_id.clone();
+        let lock = self.run_locks.for_companion(&owner).await;
+        let Ok(_guard) = lock.try_lock() else {
+            return Err(AppError::Conflict(
+                "a learn run is already in progress for this companion".into(),
+            ));
         };
         let started_at = now_ms();
         // Stamp first so a crashed/failed run doesn't hot-loop the scheduler.
-        self.store.set_state("last_learn_ts", &started_at.to_string()).await?;
+        self.store
+            .set_companion_state(&owner, LAST_LEARN_TS_KEY, &started_at.to_string())
+            .await?;
 
-        let model = { self.config.read().await.learn.model.clone() };
         let mut run = CompanionLearnResult {
             status: "ok".into(),
             events_processed: 0,
             memories_added: 0,
-            suggestions_added: 0,
             error: None,
             summary: None,
         };
 
-        let Some(model) = model else {
+        let Some(model) = profile.learn.model.clone() else {
             run.status = "model_unconfigured".into();
             return Ok(run);
         };
 
-        let cursor = self.store.get_state_i64("learn_cursor_ts").await?;
+        let cursor = self
+            .store
+            .get_companion_state_i64(&owner, LEARN_CURSOR_KEY)
+            .await?;
         let (events, truncated) = {
             let _event_guard = self.event_store_lock.read().await;
             read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?
@@ -159,27 +223,23 @@ impl Learner {
         run.events_processed = events.len() as i64;
         let new_cursor = events.last().map(|e| e.ts).unwrap_or(cursor);
 
-        // 选项A：共享学习产出只由「默认体」窗口呈现，避免 N 个伙伴窗口同时弹气泡（提示风暴）。
-        let target = {
-            let did = { self.config.read().await.default_companion_id.clone() };
-            self.registry.resolve_default(did.as_deref()).await
-        };
+        // 选项A：学习产出只由「记忆主人」窗口呈现。主人就是本轮配置的来源 ——
+        // 记忆写给谁、气泡/心情落在谁头上、XP 记在谁账上，全是同一个伙伴，
+        // 三者不允许分叉。
+        self.emitter.emit_learn_started(&owner);
 
-        if let Some(target) = target.as_deref() {
-            self.emitter.emit_learn_started(target);
-        }
-
-        // Existing-memory digest for reinforcement/conflict matching, plus
-        // the pending suggestions so the model can avoid re-raising them.
+        // Existing-memory digest for reinforcement/conflict matching — only the
+        // owner's own memories: the learner must never reinforce or supersede
+        // another companion's row.
         let existing = self
             .store
             .list_memories(&MemoryFilter {
                 status: Some("active".into()),
+                scope_companion_id: Some(owner.clone()),
                 limit: 120,
                 ..Default::default()
             })
             .await?;
-        let pending_suggestions = self.store.list_suggestions(Some("new"), 50).await.unwrap_or_default();
         let event_lines: Vec<String> = events
             .iter()
             .map(|event| {
@@ -188,7 +248,7 @@ impl Learner {
                 })
             })
             .collect::<Result<_, _>>()?;
-        let user_prompt = prompt::build_learn_prompt(&existing, &pending_suggestions, &event_lines, truncated);
+        let user_prompt = prompt::build_learn_prompt(&existing, &event_lines, truncated);
 
         // One retry on parse failure (the model occasionally wraps in prose).
         let mut parsed = None;
@@ -227,111 +287,117 @@ impl Learner {
             // then advance past it so a consistently-confused model can't
             // re-burn tokens on the same batch forever.
             if !provider_failed {
-                let streak = self.store.get_state_i64("learn_parse_fail_streak").await.unwrap_or(0) + 1;
+                let streak = self
+                    .store
+                    .get_companion_state_i64(&owner, PARSE_FAIL_STREAK_KEY)
+                    .await
+                    .unwrap_or(0)
+                    + 1;
                 if streak >= PARSE_FAIL_GIVE_UP_RUNS {
-                    self.store.set_state("learn_cursor_ts", &new_cursor.to_string()).await?;
-                    self.store.set_state("learn_parse_fail_streak", "0").await?;
-                    tracing::warn!(events = run.events_processed, "companion learn batch abandoned after repeated parse failures");
+                    self.store
+                        .set_companion_state(&owner, LEARN_CURSOR_KEY, &new_cursor.to_string())
+                        .await?;
+                    self.store
+                        .set_companion_state(&owner, PARSE_FAIL_STREAK_KEY, "0")
+                        .await?;
+                    tracing::warn!(companion_id = %owner, events = run.events_processed, "companion learn batch abandoned after repeated parse failures");
                 } else {
-                    self.store.set_state("learn_parse_fail_streak", &streak.to_string()).await?;
+                    self.store
+                        .set_companion_state(&owner, PARSE_FAIL_STREAK_KEY, &streak.to_string())
+                        .await?;
                 }
             }
-            if let Some(target) = target.as_deref() {
-                self.emitter.emit_learn_finished(target, &run);
-            }
+            self.emitter.emit_learn_finished(&owner, &run);
             return Ok(run);
         };
-        let _ = self.store.set_state("learn_parse_fail_streak", "0").await;
+        let _ = self
+            .store
+            .set_companion_state(&owner, PARSE_FAIL_STREAK_KEY, "0")
+            .await;
 
         // Apply: decay first, then reinforce/supersede/insert.
         let _ = self.store.decay_memories().await;
+        // The two id lists come back from the MODEL, and `reinforce_memories` /
+        // `archive_memories` address rows by id alone — so they are filtered to
+        // the ids this run actually showed it (the owner's own active memories).
+        // 共享记忆删除后这道过滤是必需的：事件流里可能出现别的伙伴的 memory_id
+        // （例如 owner agent 调用过 nomi_memory_list 这个跨伙伴视图，其输出被采集
+        // 成了事件），模型把它抄进 supersede_memory_ids 就会静默归档别人的记忆。
+        let owned_ids: std::collections::HashSet<&str> =
+            existing.iter().map(|m| m.memory_id.as_str()).collect();
+        let keep_owned = |ids: &[String], what: &str| -> Vec<String> {
+            let (mine, foreign): (Vec<String>, Vec<String>) =
+                ids.iter().cloned().partition(|id| owned_ids.contains(id.as_str()));
+            if !foreign.is_empty() {
+                tracing::warn!(
+                    companion_id = %owner,
+                    dropped = foreign.len(),
+                    "companion learn output referenced {what} outside this companion's memories; ignored"
+                );
+            }
+            mine
+        };
         self.store
-            .reinforce_memories(&output.reinforce_memory_ids)
+            .reinforce_memories(&keep_owned(&output.reinforce_memory_ids, "reinforce_memory_ids"))
             .await?;
         self.store
-            .archive_memories(&output.supersede_memory_ids)
+            .archive_memories(&keep_owned(&output.supersede_memory_ids, "supersede_memory_ids"))
             .await?;
 
-        let prior_active = self.store.count_memories("active").await.unwrap_or(0);
+        // 每条蒸馏记忆都落在 owner 名下（共享记忆概念已删除）。
         for m in &output.memories {
-            if self.store.find_similar_active(&m.kind, &m.content).await?.is_some() {
+            if self
+                .store
+                .find_similar_active(&m.kind, &m.content, &owner)
+                .await?
+                .is_some()
+            {
                 continue;
             }
             self.store
-                .insert_memory(&m.kind, &m.content, &m.tags, m.importance, "learn")
+                .insert_memory_scoped(
+                    &m.kind,
+                    &m.content,
+                    &m.tags,
+                    m.importance,
+                    "learn",
+                    MemoryScope::Companion(owner.clone()),
+                )
                 .await?;
             run.memories_added += 1;
         }
-        // First-preference milestone: the moment nomi visibly "gets" you.
-        if prior_active == 0 && run.memories_added > 0 {
-            let milestone = self
-                .store
-                .insert_suggestion(
-                    "insight",
-                    "nomi 学会了关于你的第一条记忆！",
-                    "我开始懂你了，快来记忆页看看吧～",
-                    Some(&serde_json::json!({"type": "navigate", "to": "/nomi?tab=memories"})),
-                )
-                .await?;
-            run.suggestions_added += 1;
-            if let Some(target) = target.as_deref() {
-                self.emitter.emit_suggestion_created(target, &milestone);
-            }
-        }
-        for s in output.suggestions.iter().take(3) {
-            // Insert-side dedup backstop: even when the model ignores the
-            // "don't repeat pending suggestions" rule, a similar status='new'
-            // suggestion blocks the duplicate. The hit is not silently
-            // dropped: the existing suggestion is touched (created_at bumped)
-            // so repeated evidence re-floats it instead of vanishing.
-            if let Some(existing_id) = self.store.find_similar_suggestion(&s.kind, &s.title, &s.body).await? {
-                if let Err(e) = self.store.touch_suggestion(&existing_id).await {
-                    tracing::warn!(error = %e, suggestion_id = %existing_id, "companion learn failed to touch duplicate suggestion");
-                }
-                continue;
-            }
-            let created = self
-                .store
-                .insert_suggestion(&s.kind, &s.title, &s.body, s.action.as_ref())
-                .await?;
-            run.suggestions_added += 1;
-            if let Some(target) = target.as_deref() {
-                self.emitter.emit_suggestion_created(target, &created);
-            }
-        }
-
+        // Mood belongs to the companion that just learned. It was a single global
+        // `companion_state` row until 2026-08, which made the whole family share
+        // one mood — the last run to finish overwrote everyone's.
         if let Some(mood) = &output.mood {
-            self.store.set_state("mood", mood).await?;
-            if let Some(target) = target.as_deref() {
-                self.emitter.emit_mood_changed(target, mood);
-            }
+            self.store.set_companion_state(&owner, MOOD_KEY, mood).await?;
+            self.emitter.emit_mood_changed(&owner, mood);
         }
         run.summary = output.diary;
 
-        // XP: 1 per event + 5 per new memory — a shared achievement, granted
-        // to every companion in the roster (spec ruling 2: the family grows
-        // together on the shared learning loop).
+        // XP: 1 per event + 5 per new memory, credited to the companion that did
+        // the learning. It used to be granted to EVERY companion on the theory
+        // that one shared loop was a family achievement; with a loop per companion
+        // that would hand every sibling XP for work they did not do.
         let _ = self
             .store
-            .add_xp_all(
-                &self.registry.ids().await,
-                run.events_processed + run.memories_added * 5,
-            )
+            .add_companion_xp(&owner, run.events_processed + run.memories_added * 5)
             .await;
 
-        self.store.set_state("learn_cursor_ts", &new_cursor.to_string()).await?;
-        if let Some(target) = target.as_deref() {
-            self.emitter.emit_learn_finished(target, &run);
-        }
+        self.store
+            .set_companion_state(&owner, LEARN_CURSOR_KEY, &new_cursor.to_string())
+            .await?;
+        self.emitter.emit_learn_finished(&owner, &run);
         Ok(run)
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collector::{CollectedEvent, append_event};
-    use crate::profile::SharedCompanionConfig;
+    use crate::collector::{CollectedEvent, EVOLVE_CURSOR_KEY, append_event};
+    use crate::profile::CompanionLearnConfig;
     use nomifun_api_types::WebSocketMessage;
     use nomifun_realtime::BroadcastEventBus;
     use tokio::sync::RwLock;
@@ -345,29 +411,41 @@ mod tests {
         }
     }
 
-    /// Learner over a temp dir with one registered companion (so the shared XP
-    /// grant has someone to land on). Returns the learner + that companion's id.
+    fn test_learn_config() -> CompanionLearnConfig {
+        CompanionLearnConfig {
+            enabled: true,
+            interval_minutes: 60,
+            model: Some(nomifun_common::ProviderWithModel {
+                provider_id: nomifun_common::ProviderId::new().into_string(),
+                model: "test-model".into(),
+                use_model: None,
+            }),
+        }
+    }
+
+    /// Learner over a temp dir with one registered companion whose 定时学习 is
+    /// configured. Returns the learner + that companion's id.
     async fn make_learner(dir: &std::path::Path, reply: &str) -> (Learner, String) {
-        let mut config = SharedCompanionConfig::default();
-        config.learn.model = Some(nomifun_common::ProviderWithModel {
-            provider_id: nomifun_common::ProviderId::new().into_string(),
-            model: "test-model".into(),
-            use_model: None,
-        });
         let registry = Arc::new(
             CompanionRegistry::scan(dir.join("companions"), dir.join("shared"))
                 .unwrap(),
         );
         let companion = registry.create("测试宠", "ink").await.unwrap();
+        registry
+            .patch(
+                &companion.companion_id,
+                serde_json::json!({"learn": serde_json::to_value(test_learn_config()).unwrap()}),
+            )
+            .await
+            .unwrap();
         let learner = Learner {
             companion_dir: dir.to_path_buf(),
-            config: Arc::new(RwLock::new(config)),
             store: CompanionStore::open_memory().await.unwrap(),
             registry,
             completer: Arc::new(CannedCompleter(reply.to_owned())),
             emitter: CompanionEventEmitter::new(Arc::new(BroadcastEventBus::new(16)), "owner-a"),
             event_store_lock: Arc::new(RwLock::new(())),
-            run_lock: Arc::new(Mutex::new(())),
+            run_locks: Arc::new(CompanionRunLocks::new()),
         };
         (learner, companion.companion_id)
     }
@@ -387,97 +465,277 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_once_applies_learn_output() {
+    async fn run_for_applies_learn_output_to_that_companion() {
         let dir = tempfile::tempdir().unwrap();
         seed_event(dir.path());
         let reply = r#"{"memories":[{"kind":"profile","content":"主人是 Rust 工程师","importance":0.9}],
-            "suggestions":[{"kind":"insight","title":"洞察","body":"最近常调编译错误"}],
             "mood":"content","diary":"今天陪主人修了 bug～"}"#;
         let (learner, companion_id) = make_learner(dir.path(), reply).await;
-        let run = learner.run_once().await.unwrap();
+        let run = learner.run_for(&companion_id).await.unwrap();
         assert_eq!(run.status, "ok");
         assert_eq!(run.events_processed, 1);
         assert_eq!(run.memories_added, 1);
-        // 1 real suggestion + 1 first-memory milestone
-        assert_eq!(run.suggestions_added, 2);
-        assert_eq!(learner.store.get_state("mood").await.unwrap().unwrap(), "content");
-        assert!(learner.store.get_state_i64("learn_cursor_ts").await.unwrap() > 0);
-        // Shared XP grant lands on every registered companion (1 event + 1*5).
+        // Mood and cursor are this companion's own rows, not global ones.
+        assert_eq!(
+            learner.store.get_companion_state(&companion_id, MOOD_KEY).await.unwrap().as_deref(),
+            Some("content")
+        );
+        assert_eq!(learner.store.get_state(MOOD_KEY).await.unwrap(), None);
+        assert!(
+            learner.store.get_companion_state_i64(&companion_id, LEARN_CURSOR_KEY).await.unwrap() > 0
+        );
+        assert_eq!(learner.store.get_state_i64(LEARN_CURSOR_KEY).await.unwrap(), 0);
+        // XP goes to the companion that learned (1 event + 1*5).
         assert_eq!(learner.store.get_companion_state_i64(&companion_id, "xp").await.unwrap(), 6);
-        assert_eq!(learner.store.get_state_i64("xp").await.unwrap(), 0);
         // Cursor advanced: a second run sees no events.
-        let run2 = learner.run_once().await.unwrap();
+        let run2 = learner.run_for(&companion_id).await.unwrap();
         assert_eq!(run2.status, "no_events");
     }
 
+    /// XP used to be granted to EVERY companion on the theory that one shared
+    /// learn loop was a family achievement. With a loop per companion that would
+    /// credit siblings for work they never did — and nothing else guards it.
     #[tokio::test]
-    async fn run_once_skips_duplicate_pending_suggestions() {
+    async fn learning_credits_only_the_companion_that_learned() {
         let dir = tempfile::tempdir().unwrap();
         seed_event(dir.path());
-        let reply = r#"{"suggestions":[{"kind":"insight","title":"最近常调编译错误","body":"建议看看构建脚本"}]}"#;
-        let (learner, _) = make_learner(dir.path(), reply).await;
+        let reply = r#"{"memories":[{"kind":"profile","content":"主人写 Rust","importance":0.9}],
+            "mood":"proud","diary":"d"}"#;
+        let (learner, learned) = make_learner(dir.path(), reply).await;
+        let idle = learner.registry.create("旁观者", "ink").await.unwrap().companion_id;
 
-        let run1 = learner.run_once().await.unwrap();
-        assert_eq!(run1.suggestions_added, 1);
-        assert_eq!(learner.store.count_suggestions("new").await.unwrap(), 1);
-        let first = &learner.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
-        let (first_suggestion_id, first_created_at) =
-            (first.suggestion_id.clone(), first.created_at);
-
-        // Same model output over a new event batch: the pending suggestion
-        // blocks the duplicate, and the dedup hit touches it (created_at
-        // bumped) instead of silently dropping the repeated evidence.
-        // (Sleep keeps the new event's ms timestamp past the advanced
-        // cursor and guarantees a strictly larger touch timestamp.)
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        seed_event(dir.path());
-        let run2 = learner.run_once().await.unwrap();
-        assert_eq!(run2.status, "ok");
-        assert_eq!(run2.suggestions_added, 0);
-        assert_eq!(learner.store.count_suggestions("new").await.unwrap(), 1);
-        let touched = &learner.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
+        assert_eq!(learner.run_for(&learned).await.unwrap().status, "ok");
+        assert_eq!(learner.store.get_companion_state_i64(&learned, "xp").await.unwrap(), 6);
         assert_eq!(
-            touched.suggestion_id, first_suggestion_id,
-            "dedup must keep the existing suggestion"
+            learner.store.get_companion_state_i64(&idle, "xp").await.unwrap(),
+            0,
+            "a companion that did not run must not be credited"
         );
-        assert!(
-            touched.created_at > first_created_at,
-            "dedup hit must touch the existing suggestion ({} -> {})",
-            first_created_at,
-            touched.created_at
+        assert_eq!(
+            learner.store.get_companion_state(&idle, MOOD_KEY).await.unwrap(),
+            None,
+            "one companion's mood must not become everyone's"
         );
+        // The idle companion's cursor is untouched, so the same events are still
+        // waiting for it if its own loop is ever enabled.
+        assert_eq!(
+            learner.store.get_companion_state_i64(&idle, LEARN_CURSOR_KEY).await.unwrap(),
+            0
+        );
+    }
 
-        // Once decided, the same suggestion may be raised again.
-        let pending = learner.store.list_suggestions(Some("new"), 10).await.unwrap();
-        learner
+    /// 记忆有主人之后，模型回传的 id 不能再无条件生效：`reinforce_memories` /
+    /// `archive_memories` 只按 memory_id 定位行，所以一个从事件流里抄来的、属于
+    /// **别的伙伴**的 id 会静默改掉别人的记忆。这里把两条列表都钉住。
+    #[tokio::test]
+    async fn run_for_ignores_memory_ids_outside_this_companions_own_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (learner, owner) = make_learner(dir.path(), "{}").await;
+        let stranger = learner.registry.create("别的伙伴", "ink").await.unwrap().companion_id;
+
+        // 一条属于 stranger 的活跃记忆 + 一条属于 owner 的活跃记忆。
+        let theirs = learner
             .store
-            .decide_suggestion(&pending[0].suggestion_id, false)
+            .insert_memory_scoped("profile", "别的伙伴的画像", &[], 0.9, "chat", MemoryScope::Companion(stranger))
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        seed_event(dir.path());
-        let run3 = learner.run_once().await.unwrap();
-        assert_eq!(run3.suggestions_added, 1);
+        let mine = learner
+            .store
+            .insert_memory_scoped("profile", "我记得主人写 Rust", &[], 0.9, "chat", MemoryScope::Companion(owner.clone()))
+            .await
+            .unwrap();
+
+        // 模型把两条 id 都塞进 supersede/reinforce：只有自己的那条可以生效。
+        let reply = format!(
+            r#"{{"memories":[],"supersede_memory_ids":["{}"],"reinforce_memory_ids":["{}"],"mood":"content","diary":"d"}}"#,
+            theirs.memory_id, theirs.memory_id
+        );
+        let learner = Learner { completer: Arc::new(CannedCompleter(reply)), ..learner };
+        assert_eq!(learner.run_for(&owner).await.unwrap().status, "ok");
+        let untouched = learner.store.get_memory(&theirs.memory_id).await.unwrap().unwrap();
+        assert_eq!(untouched.status, "active", "another companion's memory must not be archived");
+        assert_eq!(
+            untouched.strength, theirs.strength,
+            "another companion's memory must not be reinforced"
+        );
+
+        // 自己的那条照常生效（过滤没有把功能一起关掉）。
+        let reply = format!(
+            r#"{{"memories":[],"supersede_memory_ids":["{}"],"mood":"content","diary":"d"}}"#,
+            mine.memory_id
+        );
+        let learner = Learner { completer: Arc::new(CannedCompleter(reply)), ..learner };
+        learner.store.set_companion_state(&owner, LEARN_CURSOR_KEY, "0").await.unwrap();
+        assert_eq!(learner.run_for(&owner).await.unwrap().status, "ok");
+        assert_eq!(
+            learner.store.get_memory(&mine.memory_id).await.unwrap().unwrap().status,
+            "archived",
+            "the companion's own memory is still supersedable"
+        );
     }
 
     #[tokio::test]
-    async fn run_once_records_error_on_garbage_output() {
+    async fn run_for_records_error_on_garbage_output() {
         let dir = tempfile::tempdir().unwrap();
         seed_event(dir.path());
-        let (learner, _) = make_learner(dir.path(), "我不会输出 JSON").await;
-        let run = learner.run_once().await.unwrap();
+        let (learner, id) = make_learner(dir.path(), "我不会输出 JSON").await;
+        let run = learner.run_for(&id).await.unwrap();
         assert_eq!(run.status, "error");
         assert!(run.error.is_some());
     }
 
     #[tokio::test]
-    async fn run_once_skips_when_model_unconfigured() {
+    async fn run_for_skips_when_model_unconfigured() {
         let dir = tempfile::tempdir().unwrap();
         seed_event(dir.path());
-        let (learner, _) = make_learner(dir.path(), "{}").await;
-        learner.config.write().await.learn.model = Default::default();
-        let run = learner.run_once().await.unwrap();
+        let (learner, id) = make_learner(dir.path(), "{}").await;
+        learner
+            .registry
+            .patch(&id, serde_json::json!({"learn": {"model": null}}))
+            .await
+            .unwrap();
+        let run = learner.run_for(&id).await.unwrap();
         assert_eq!(run.status, "model_unconfigured");
+    }
+
+    /// A companion can be deleted while a tick is already queued for it. The run
+    /// must then write nothing, burn no token, and above all not advance any
+    /// cursor — the events belong to whoever is still enabled.
+    #[tokio::test]
+    async fn run_for_an_unknown_companion_writes_nothing_and_keeps_the_cursor() {
+        struct ExplodingCompleter;
+        #[async_trait::async_trait]
+        impl CompanionCompleter for ExplodingCompleter {
+            async fn complete(&self, _: &str, _: &str, _: &str, _: &str, _: u32) -> Result<String, AppError> {
+                panic!("the learner must not call the model for a companion that is gone");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (learner, only) = make_learner(dir.path(), "{}").await;
+        learner.registry.remove(&only).await.unwrap();
+        let learner = Learner { completer: Arc::new(ExplodingCompleter), ..learner };
+
+        assert!(matches!(
+            learner.run_for(&only).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert_eq!(learner.store.count_memories("active", None).await.unwrap(), 0);
+        assert_eq!(
+            learner.store.get_companion_state_i64(&only, LEARN_CURSOR_KEY).await.unwrap(),
+            0
+        );
+
+        // 建好新伙伴之后，同一批事件确实还会被学习（游标是每伙伴的，没被烧掉）。
+        let reply = r#"{"memories":[{"kind":"profile","content":"主人在写 Rust","importance":0.9}],
+            "mood":"content","diary":"补上了"}"#;
+        let learner = Learner { completer: Arc::new(CannedCompleter(reply.to_owned())), ..learner };
+        let owner = learner.registry.create("迟到的伙伴", "ink").await.unwrap().companion_id;
+        learner
+            .registry
+            .patch(
+                &owner,
+                serde_json::json!({"learn": serde_json::to_value(test_learn_config()).unwrap()}),
+            )
+            .await
+            .unwrap();
+        let run = learner.run_for(&owner).await.unwrap();
+        assert_eq!(run.status, "ok");
+        assert_eq!(run.memories_added, 1);
+        let mine = learner
+            .store
+            .list_memories(&MemoryFilter {
+                scope_companion_id: Some(owner.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].scope_companion_id.as_deref(), Some(owner.as_str()));
+    }
+
+    /// 休眠时段 gates the scheduled tick, not `run_for` — an explicit "run now"
+    /// from the UI is the owner asking, and must still work. The gate itself lives
+    /// on the profile so both loops and the renderer share one definition.
+    #[tokio::test]
+    async fn quiet_hours_gate_the_schedule_but_not_an_explicit_run() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (learner, id) = make_learner(dir.path(), r#"{"memories":[],"mood":"calm","diary":"d"}"#).await;
+        // A window covering the entire day: whatever the wall clock says, this
+        // companion is asleep.
+        learner
+            .registry
+            .patch(&id, serde_json::json!({"appearance": {"quiet_start": "00:00", "quiet_end": "23:59"}}))
+            .await
+            .unwrap();
+        let profile = learner.registry.get(&id).await.unwrap();
+        assert!(
+            profile.appearance.in_quiet_hours_now()
+                || chrono::Local::now().format("%H:%M").to_string() == "23:59",
+            "an all-day window must read as quiet"
+        );
+        // The explicit path still runs.
+        assert_eq!(learner.run_for(&id).await.unwrap().status, "ok");
+    }
+
+    /// Two companions, each with its own cursor over the SAME event spool: the
+    /// second one must still see events the first has already consumed.
+    #[tokio::test]
+    async fn each_companion_reads_the_spool_from_its_own_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let reply = r#"{"memories":[{"kind":"profile","content":"主人写 Rust","importance":0.9}],"mood":"ok","diary":"d"}"#;
+        let (learner, first) = make_learner(dir.path(), reply).await;
+        let second = learner.registry.create("第二只", "ink").await.unwrap().companion_id;
+        learner
+            .registry
+            .patch(
+                &second,
+                serde_json::json!({"learn": serde_json::to_value(test_learn_config()).unwrap()}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(learner.run_for(&first).await.unwrap().events_processed, 1);
+        assert_eq!(
+            learner.run_for(&second).await.unwrap().events_processed,
+            1,
+            "the second companion's cursor is its own; the first consuming the batch must not hide it"
+        );
+        assert_eq!(learner.store.count_memories("active", Some(&first)).await.unwrap(), 1);
+        assert_eq!(learner.store.count_memories("active", Some(&second)).await.unwrap(), 1);
+    }
+
+    /// The boot migration that gives every companion the old install-wide
+    /// cursors. Seeding to 0 instead would make every companion re-distill the
+    /// whole retained history on first launch: duplicate memories, unexpected bill.
+    #[tokio::test]
+    async fn per_companion_cursors_are_seeded_from_the_retired_global_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (learner, id) = make_learner(dir.path(), "{}").await;
+        let store = &learner.store;
+        store.set_state(LEARN_CURSOR_KEY, "900").await.unwrap();
+        store.set_state(EVOLVE_CURSOR_KEY, "400").await.unwrap();
+        store.set_state(MOOD_KEY, "happy").await.unwrap();
+        let other = learner.registry.create("第二只", "ink").await.unwrap().companion_id;
+
+        let ids = vec![id.clone(), other.clone()];
+        assert!(store.seed_companion_state_from_global(&ids).await.unwrap() > 0);
+        for who in &ids {
+            assert_eq!(store.get_companion_state_i64(who, LEARN_CURSOR_KEY).await.unwrap(), 900);
+            assert_eq!(store.get_companion_state_i64(who, EVOLVE_CURSOR_KEY).await.unwrap(), 400);
+            assert_eq!(store.get_companion_state(who, MOOD_KEY).await.unwrap().as_deref(), Some("happy"));
+        }
+
+        // Idempotent: a companion that has moved on keeps ITS value.
+        store.set_companion_state(&id, LEARN_CURSOR_KEY, "1500").await.unwrap();
+        store.seed_companion_state_from_global(&ids).await.unwrap();
+        assert_eq!(store.get_companion_state_i64(&id, LEARN_CURSOR_KEY).await.unwrap(), 1500);
+        assert_eq!(store.get_companion_state_i64(&other, LEARN_CURSOR_KEY).await.unwrap(), 900);
     }
 
     #[derive(Default)]
@@ -490,20 +748,16 @@ mod tests {
         }
     }
 
+    /// Every live event a run emits is scoped to the companion that ran — never to
+    /// a separately resolved "default" companion, which is what used to make one
+    /// window report another's learning.
     #[tokio::test]
-    async fn learn_events_scoped_to_default_companion() {
+    async fn learn_events_are_scoped_to_the_companion_that_ran() {
         let dir = tempfile::tempdir().unwrap();
         seed_event(dir.path());
         let reply = r#"{"memories":[{"kind":"profile","content":"主人是 Rust 工程师","importance":0.9}],
-            "suggestions":[{"kind":"insight","title":"洞察","body":"最近常调编译错误"}],
             "mood":"content","diary":"今天陪主人修了 bug～"}"#;
 
-        let mut config = SharedCompanionConfig::default();
-        config.learn.model = Some(nomifun_common::ProviderWithModel {
-            provider_id: nomifun_common::ProviderId::new().into_string(),
-            model: "test-model".into(),
-            use_model: None,
-        });
         let registry = Arc::new(
             CompanionRegistry::scan(
                 dir.path().join("companions"),
@@ -513,24 +767,28 @@ mod tests {
         );
         let _a = registry.create("甲", "ink").await.unwrap();
         let b = registry.create("乙", "ink").await.unwrap();
-        config.default_companion_id = Some(b.companion_id.clone()); // 默认体 = 乙
+        registry
+            .patch(
+                &b.companion_id,
+                serde_json::json!({"learn": serde_json::to_value(test_learn_config()).unwrap()}),
+            )
+            .await
+            .unwrap();
 
         let bc = Arc::new(RecordingBroadcaster::default());
         let learner = Learner {
             companion_dir: dir.path().to_path_buf(),
-            config: Arc::new(RwLock::new(config)),
             store: CompanionStore::open_memory().await.unwrap(),
             registry,
             completer: Arc::new(CannedCompleter(reply.to_owned())),
             emitter: CompanionEventEmitter::new(bc.clone(), "owner-a"),
             event_store_lock: Arc::new(RwLock::new(())),
-            run_lock: Arc::new(Mutex::new(())),
+            run_locks: Arc::new(CompanionRunLocks::new()),
         };
-        learner.run_once().await.unwrap();
+        learner.run_for(&b.companion_id).await.unwrap();
 
         let events = bc.events.lock().unwrap().clone();
         for name in [
-            "companion.suggestion-created",
             "companion.mood-changed",
             "companion.learn-finished",
             "companion.learn-started",
@@ -541,7 +799,7 @@ mod tests {
                 assert_eq!(
                     e.data.get("companion_id").and_then(|v| v.as_str()),
                     Some(b.companion_id.as_str()),
-                    "{name} 必须 scope 到默认体 乙"
+                    "{name} 必须 scope 到真正跑了这一轮的 乙"
                 );
             }
         }
@@ -559,7 +817,6 @@ mod tests {
             "events_processed",
             "memories_added",
             "status",
-            "suggestions_added",
             "summary",
         ]
         .into_iter()

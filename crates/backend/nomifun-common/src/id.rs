@@ -313,10 +313,6 @@ define_entity_id!(
     CompanionMemoryId
 );
 define_entity_id!(
-    /// Globally unique companion suggestion identifier.
-    CompanionSuggestionId
-);
-define_entity_id!(
     /// Globally unique companion collected-event identifier.
     CompanionEventId
 );

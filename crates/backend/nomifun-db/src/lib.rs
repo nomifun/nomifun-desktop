@@ -52,7 +52,7 @@ pub use repository::SqliteCustomerServiceRepository;
 pub use repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
     ConversationTurnAdmissionState,
-    ConversationRowUpdate, MessageRowUpdate, MessageSearchRow, SortOrder,
+    ConversationRowUpdate, MessageDayBucket, MessageRowUpdate, MessageSearchRow, SortOrder,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
     RequirementConversationTurnAuthority,
     TurnArtifactMessageCommit, TurnLifecycleTransition, TurnReceiptCompletion,

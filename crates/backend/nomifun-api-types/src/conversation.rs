@@ -241,6 +241,14 @@ pub struct ListMessagesQuery {
     /// whole transcript. The first ("load latest") page omits it.
     #[serde(default, deserialize_with = "deserialize_optional_message_cursor")]
     pub cursor: Option<String>,
+    /// LOCAL calendar day (`YYYYMMDD`). When present, returns exactly that day's
+    /// visible messages oldest-first and both offset and keyset pagination are
+    /// unused (`page_size` only caps the day). The day boundary is the server's
+    /// local timezone — the same one that partitions companion session digests —
+    /// so a companion history reader never has to re-derive days in the browser.
+    /// Mutually exclusive with `cursor`.
+    #[serde(default, deserialize_with = "deserialize_optional_local_day")]
+    pub day: Option<String>,
 }
 
 /// Body for
@@ -467,6 +475,26 @@ where
             })?;
             nomifun_common::MessageId::try_from(message_id).map_err(serde::de::Error::custom)?;
             Ok(cursor)
+        })
+        .transpose()
+}
+
+/// A local calendar day is exactly 8 ASCII digits (`YYYYMMDD`), the same key
+/// shape the companion domain stores as `session_day`. Anything else fails
+/// closed here so the query can never reach SQL as a free-form string.
+fn deserialize_optional_local_day<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .filter(|day| !day.is_empty())
+        .map(|day| {
+            if day.len() == 8 && day.bytes().all(|byte| byte.is_ascii_digit()) {
+                Ok(day)
+            } else {
+                Err(serde::de::Error::custom("day must be a YYYYMMDD calendar day"))
+            }
         })
         .transpose()
 }

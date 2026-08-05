@@ -32,26 +32,15 @@ pub enum MemoryStatusFilter {
     All,
 }
 
-/// Ownership filter: restrict hits to shared rows or to one companion's
-/// private rows. Orthogonal to `MemorySearchQuery::companion_id`, which is the
-/// *visibility* scope (shared + that companion's own private).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemoryScopeFilter {
-    /// Only shared (`scope_kind = 'user'`) memories.
-    Shared,
-    /// Only the named companion's private memories.
-    Companion(String),
-}
-
 /// One full-text memory search. `queries` are OR-merged (deduped by memory).
 #[derive(Debug, Clone)]
 pub struct MemorySearchQuery {
     pub queries: Vec<String>,
     pub kind: Option<String>,
-    pub scope: Option<MemoryScopeFilter>,
     pub status: MemoryStatusFilter,
-    /// Visibility scope: shared memories plus this companion's own private
-    /// ones. `None` = cross-companion view (every memory).
+    /// Visibility scope: this companion's own memories plus any vestigial
+    /// unowned row the boot migration has not re-homed yet. `None` = every
+    /// memory (the owner's administrative view).
     pub companion_id: Option<CompanionId>,
     pub limit: usize,
 }
@@ -61,7 +50,6 @@ impl Default for MemorySearchQuery {
         Self {
             queries: Vec::new(),
             kind: None,
-            scope: None,
             status: MemoryStatusFilter::Active,
             companion_id: None,
             limit: 20,
@@ -119,7 +107,6 @@ struct FilterClause {
     sql: String,
     kind: Option<String>,
     status: Option<&'static str>,
-    scope_owner: Option<String>,
     visible_to: Option<String>,
 }
 
@@ -137,25 +124,13 @@ fn build_filter(q: &MemorySearchQuery) -> Result<FilterClause, AppError> {
     if status.is_some() {
         sql.push_str(" AND m.status = ?");
     }
-    let scope_owner = match &q.scope {
-        None => None,
-        Some(MemoryScopeFilter::Shared) => {
-            sql.push_str(" AND m.scope_kind = 'user'");
-            None
-        }
-        Some(MemoryScopeFilter::Companion(owner)) => {
-            CompanionId::try_from(owner.as_str()).map_err(|error| {
-                AppError::BadRequest(format!("invalid memory scope filter companion id: {error}"))
-            })?;
-            sql.push_str(" AND m.scope_kind = 'companion' AND m.scope_companion_id = ?");
-            Some(owner.clone())
-        }
-    };
+    // Same visibility rule as `store::MEMORY_VISIBILITY_PREDICATE` (aliased `m.`
+    // here): the companion's own memories plus the not-yet-re-homed unowned ones.
     let visible_to = q.companion_id.as_ref().map(|companion_id| {
         sql.push_str(" AND (m.scope_kind = 'user' OR m.scope_companion_id = ?)");
         companion_id.as_str().to_owned()
     });
-    Ok(FilterClause { sql, kind, status, scope_owner, visible_to })
+    Ok(FilterClause { sql, kind, status, visible_to })
 }
 
 fn bind_filter<'q>(
@@ -167,9 +142,6 @@ fn bind_filter<'q>(
     }
     if let Some(status) = filter.status {
         query = query.bind(status);
-    }
-    if let Some(owner) = &filter.scope_owner {
-        query = query.bind(owner);
     }
     if let Some(visible_to) = &filter.visible_to {
         query = query.bind(visible_to);
@@ -390,10 +362,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kind_scope_and_visibility_filters() {
+    async fn kind_and_visibility_filters() {
         let store = CompanionStore::open_memory().await.unwrap();
         let owner = companion_fixture(1);
         let stranger = companion_fixture(2);
+        // One vestigial unowned row (a pre-re-homing legacy memory) + one owned.
         store.insert_memory("preference", "主人喜欢手冲咖啡", &[], 0.8, "manual").await.unwrap();
         store
             .insert_memory_scoped("task", "帮主人试三种咖啡豆", &[], 0.8, "chat", MemoryScope::Companion(owner.clone()))
@@ -406,18 +379,8 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].memory.kind, "task");
 
-        // scope filter: shared-only / private-of-owner
-        let q_shared = MemorySearchQuery { scope: Some(MemoryScopeFilter::Shared), ..query(&["咖啡"]) };
-        assert_eq!(store.search_memories(q_shared).await.unwrap().len(), 1);
-        let q_private = MemorySearchQuery {
-            scope: Some(MemoryScopeFilter::Companion(owner.clone())),
-            ..query(&["咖啡"])
-        };
-        let hits = store.search_memories(q_private).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].memory.scope_companion_id.as_deref(), Some(owner.as_str()));
-
-        // visibility: the owner sees shared + own private; a stranger sees shared only.
+        // visibility: the owner sees its own + the unowned row; a stranger sees
+        // only the unowned one — never another companion's memory.
         let visible = MemorySearchQuery {
             companion_id: Some(CompanionId::try_from(owner.as_str()).unwrap()),
             ..query(&["咖啡"])
@@ -427,7 +390,9 @@ mod tests {
             companion_id: Some(CompanionId::try_from(stranger.as_str()).unwrap()),
             ..query(&["咖啡"])
         };
-        assert_eq!(store.search_memories(strangers).await.unwrap().len(), 1);
+        let hits = store.search_memories(strangers).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory.content, "主人喜欢手冲咖啡");
     }
 
     #[tokio::test]

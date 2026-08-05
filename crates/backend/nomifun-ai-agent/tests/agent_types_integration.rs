@@ -122,7 +122,7 @@ fn make_nomi_config() -> NomiResolvedConfig {
         browser_unrestricted_approval: false,
         browser_visual_fallback: false,
         goal: None,
-        browser_secret_vault: None,
+        persistent_login_key: None,
         owner_token: None,
         install_embedded_agent_execution: true,
         allowed_tools: Vec::new(),

@@ -1,7 +1,8 @@
 //! `nomifun-companion` — the desktop-companion domain: a roster of companions sharing one
-//! memory hub (opt-in event collection + scheduled LLM learning that distills
-//! events into memories + suggestions), per-companion persona companion chats over
-//! the real agent engine, and the companion config/status API surface.
+//! memory hub (opt-in event collection + per-companion scheduled LLM learning
+//! that distills those events into memories that companion owns), per-companion
+//! persona companion chats over the real agent engine, and the companion
+//! config/status API surface.
 //!
 //! Layering: `profile` is the per-companion/shared config split; `registry` is the
 //! companion roster;
@@ -42,11 +43,11 @@ mod skill_io;
 pub use events::CompanionEventEmitter;
 pub use figures::FigureMeta;
 pub use memory_search::{
-    CompanionMemoryRow, MemoryScopeFilter, MemorySearchHit, MemorySearchQuery, MemoryStatusFilter,
+    CompanionMemoryRow, MemorySearchHit, MemorySearchQuery, MemoryStatusFilter,
 };
 pub use profile::{
-    CompanionProfileConfig, CompanionSkillConfig, CompanionWindowConfig, CustomFigureMeta,
-    HeadBox, SharedArchiveConfig, SharedCompanionConfig, SharedLearnConfig,
+    CompanionEvolveConfig, CompanionLearnConfig, CompanionProfileConfig, CompanionSkillConfig,
+    CompanionWindowConfig, CustomFigureMeta, HeadBox, SharedArchiveConfig, SharedCompanionConfig,
 };
 pub use registry::CompanionRegistry;
 pub use routes::{companion_public_routes, companion_routes};
@@ -54,8 +55,7 @@ pub use service::CompanionService;
 pub use state::CompanionRouterState;
 pub use store::CompanionStore;
 pub use summon_support::{
-    SUMMON_CONTEXT_BUDGET, SUMMON_MEMORY_SUGGESTION_KIND, SummonContextResolver, SummonMemorySink,
-    SummonSuggestionSink, resolve_summon_context,
+    SUMMON_CONTEXT_BUDGET, SummonContextResolver, SummonMemorySink, resolve_summon_context,
 };
 
 /// Shared multi-companion artifacts (under the backend data dir): shared

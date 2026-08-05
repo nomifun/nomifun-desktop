@@ -42,7 +42,6 @@ export type EntityKind =
   | 'companion-event'
   | 'companion-skill'
   | 'companion-memory'
-  | 'companion-suggestion'
   | 'companion-session-window'
   | 'skill-pattern'
   | 'figure'
@@ -95,7 +94,6 @@ export type CompanionId = EntityId<'companion'>;
 export type CompanionEventId = EntityId<'companion-event'>;
 export type CompanionSkillId = EntityId<'companion-skill'>;
 export type CompanionMemoryId = EntityId<'companion-memory'>;
-export type CompanionSuggestionId = EntityId<'companion-suggestion'>;
 export type CompanionSessionWindowId = EntityId<'companion-session-window'>;
 export type SkillPatternId = EntityId<'skill-pattern'>;
 export type FigureId = EntityId<'figure'>;
@@ -209,8 +207,6 @@ export const parseCompanionSkillId = (value: unknown): CompanionSkillId =>
   parseEntityId('companion-skill', value);
 export const parseCompanionMemoryId = (value: unknown): CompanionMemoryId =>
   parseEntityId('companion-memory', value);
-export const parseCompanionSuggestionId = (value: unknown): CompanionSuggestionId =>
-  parseEntityId('companion-suggestion', value);
 export const parseCompanionSessionWindowId = (value: unknown): CompanionSessionWindowId =>
   parseEntityId('companion-session-window', value);
 export const parseSkillPatternId = (value: unknown): SkillPatternId =>
