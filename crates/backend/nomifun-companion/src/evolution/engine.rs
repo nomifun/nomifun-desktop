@@ -385,7 +385,6 @@ impl EvolutionEngine {
         let skill = CompanionSkill {
             companion_skill_id: CompanionSkillId::new().into_string(),
             skill_name: name.clone(),
-            scope_kind: "companion".into(),
             scope_companion_id: Some(owner.to_owned()),
             status: if auto { "active".into() } else { "draft".into() },
             source: "mined".into(),
@@ -511,7 +510,6 @@ impl EvolutionEngine {
             .insert_skill(&CompanionSkill {
                 companion_skill_id: CompanionSkillId::new().into_string(),
                 skill_name: name.clone(),
-                scope_kind: "companion".into(),
                 scope_companion_id: Some(owner.to_owned()),
                 status: "draft".into(),
                 source: "demonstrated".into(),
@@ -698,7 +696,7 @@ mod tests {
         assert!(run.patterns_found >= 1, "expected a mined pattern");
         assert_eq!(run.drafts_created, 1);
         // 注册表一条 draft 技能
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].status, "draft");
         assert_eq!(skills[0].source, "mined");
@@ -729,7 +727,7 @@ mod tests {
         let (engine, cid) = make_engine(dir.path(), draft, false).await;
         let run = engine.run_once().await.unwrap();
         assert_eq!(run.drafts_created, 0);
-        assert_eq!(engine.store.list_skills(&cid, false).await.unwrap().len(), 0);
+        assert_eq!(engine.store.list_skills(&cid).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -787,7 +785,7 @@ mod tests {
         engine.config.write().await.evolve.auto_activate = true;
         let run = engine.run_once().await.unwrap();
         assert_eq!(run.drafts_created, 1);
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].status, "active", "high-confidence pattern should auto-activate");
         assert!(dir.path().join("skills/companion").join(&cid).join("auto-skill").join("SKILL.md").exists());
@@ -808,7 +806,7 @@ mod tests {
 
         assert_eq!(run.patterns_found, 0);
         assert_eq!(run.drafts_created, 0);
-        assert!(engine.store.list_skills(&cid, false).await.unwrap().is_empty());
+        assert!(engine.store.list_skills(&cid).await.unwrap().is_empty());
     }
 
     struct VersioningCompleter;
@@ -851,7 +849,6 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "grep-read-edit".into(),
-                scope_kind: "companion".into(),
                 scope_companion_id: Some(cid.clone()),
                 status: "active".into(),
                 source: "mined".into(),
@@ -870,7 +867,7 @@ mod tests {
             .unwrap();
 
         engine.run_once().await.unwrap();
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         // No duplicate created; the similar existing skill was improved in place + version bumped.
         assert_eq!(skills.len(), 1, "should evolve in place, not duplicate");
         assert_eq!(skills[0].skill_name, "grep-read-edit");
@@ -887,7 +884,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(name.as_deref(), Some("demo-flow"));
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].source, "demonstrated", "demonstrated skills are exempt from decay");
         assert_eq!(skills[0].status, "draft", "demonstration always produces a reviewable draft");
@@ -930,7 +927,7 @@ mod tests {
         assert!(!dp.contains("实际操作过程"), "degraded draft must carry no transcript section: {dp}");
         // The pattern steps still drive the draft.
         assert!(dp.contains("grep"), "steps still present: {dp}");
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         assert_eq!(skills.len(), 1);
     }
 }

@@ -17,6 +17,35 @@ notes at a high level rather than a complete historical log.
   that summed memories/suggestions/skills across **all** companions while
   rendering inside a single companion's card.
 
+- **Breaking / irreversible data change.** Companion memory is now strictly
+  per-companion: every memory row belongs to exactly one companion, only its
+  owner's rows are injected into that companion's prompts, and 记忆&知识库 lists
+  the selected companion's memories only. 共享记忆 is gone as a product concept —
+  there is no shared/all-companions scope left to write, and no way, in the UI or
+  the API, to re-home a memory from one companion to another. **On the first
+  launch after upgrading, memories that used to be shared by the whole family are
+  re-homed onto a single companion**: the explicit default companion if it is
+  still in the roster, otherwise the oldest one. Nothing is deleted or duplicated
+  (ids, content, timestamps, strength and pinned/archived state are preserved),
+  but every *other* companion permanently loses sight of them and this cannot be
+  undone — if you want a particular companion to inherit the history, make it the
+  default companion **before** launching this build. Deleting a companion now
+  destroys the memories filed under it, and no bundle can bring them back (the
+  companion bundle carries settings and growth only). A zero-companion install
+  remains supported: rows stay unowned until a companion exists again and are
+  re-homed at a later launch, and a learning run with an empty roster exits early
+  instead of writing an ownerless memory. Importing a memory bundle re-homes
+  every row onto the local owner, since companion ids are not stable across
+  machines. The UI/API contract version was bumped accordingly
+  (`PUT /api/companion/memories/{id}` no longer accepts `scope_kind` /
+  `scope_companion_id`, `scope_companion_id` on `POST /api/companion/memories`
+  now names the owner instead of meaning "private", `scope_kind` is gone from the
+  memory shape the UI consumes, and `memories_active` / `memories_archived` plus
+  the digest's `memories_added` are per-companion counts rather than install-wide
+  totals). Collection and learning **configuration** is unchanged and still
+  install-wide: one schedule, one learn model, one set of event sources for the
+  whole machine.
+
 - **Breaking / no downgrade.** The 建议 (Suggestions) feature is removed
   entirely — the `/nomi` tab, the desktop-pet unread badge, the detached
   suggestion popup window (`/nomi-memory-panel`), the learner's suggestion

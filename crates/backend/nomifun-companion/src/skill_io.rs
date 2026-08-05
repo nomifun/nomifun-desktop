@@ -67,17 +67,55 @@ pub(crate) async fn create_skill(
     write_skill(paths, scope, draft, &input.name, &content).await
 }
 
-pub(crate) async fn copy_skill(
+/// Filesystem half of the 共享技能 removal: move the `SKILL.md` of a re-homed
+/// skill out of the legacy shared tree (`{user_skills_dir}/shared/{name}`) into
+/// its owner's tree, so that `validate_store` below still finds every row's body
+/// where it expects it.
+///
+/// Driven by the FILESYSTEM, not by "did the migration just run": for each owned
+/// row whose expected directory is missing while a legacy shared directory of
+/// that name is present, the body is moved. That makes it idempotent, a no-op on
+/// the overwhelmingly common install that never had a shared skill, and
+/// self-healing if the process dies between the database re-home
+/// ([`crate::store::backfill_skill_owner`]) and this.
+///
+/// Rows still unowned (a name collision the backfill skipped) keep pointing at
+/// the shared tree and are deliberately left alone.
+pub(crate) async fn rehome_unowned_skill_dirs(
     paths: &SkillPaths,
-    from: &SkillScope,
-    to: &SkillScope,
-    name: &str,
+    skills: &[CompanionSkill],
 ) -> Result<(), AppError> {
-    let source = resolve_dir(paths, from, false, name)?;
-    let content = tokio::fs::read_to_string(source.join(SKILL_MANIFEST_FILE))
-        .await
-        .map_err(|error| AppError::Internal(format!("read source skill: {error}")))?;
-    write_skill(paths, to, false, name, &content).await
+    for skill in skills.iter().filter(|s| s.scope_companion_id.is_some()) {
+        let expected = expected_path(paths, skill)?;
+        if tokio::fs::symlink_metadata(&expected).await.is_ok() {
+            continue;
+        }
+        let legacy = resolve_dir(paths, &SkillScope::Shared, false, &skill.skill_name)?;
+        match tokio::fs::symlink_metadata(&legacy).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            // Absent, or something that is not a real directory: leave it for
+            // `validate_store` to report rather than moving a surprise.
+            _ => continue,
+        }
+        if let Some(parent) = expected.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                AppError::Internal(format!("create re-homed skill root: {error}"))
+            })?;
+        }
+        std::fs::rename(&legacy, &expected).map_err(|error| {
+            AppError::Internal(format!(
+                "re-home shared skill '{}' to {}: {error}",
+                skill.skill_name,
+                expected.display()
+            ))
+        })?;
+        tracing::info!(
+            skill = %skill.skill_name,
+            path = %expected.display(),
+            "moved a shared skill body into its owner's tree"
+        );
+    }
+    Ok(())
 }
 
 /// Atomically move a reviewed draft body into the active tree. The caller
@@ -153,6 +191,8 @@ pub(crate) fn rollback_promotion(draft: &Path, active: &Path) -> Result<(), AppE
         .map_err(|error| AppError::Internal(format!("rollback skill promotion: {error}")))
 }
 
+/// Where a row's body must live: under its owner's tree, or — for a row the
+/// re-homing migration has not claimed yet — the legacy shared tree.
 fn expected_path(paths: &SkillPaths, skill: &CompanionSkill) -> Result<PathBuf, AppError> {
     let scope = skill
         .scope_companion_id
@@ -324,7 +364,6 @@ mod tests {
         CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
             skill_name: name.into(),
-            scope_kind: "companion".into(),
             scope_companion_id: Some(owner.into()),
             status: status.into(),
             source: "mined".into(),
@@ -375,5 +414,53 @@ mod tests {
             .await
             .unwrap();
         assert!(validate_store(&paths, &rows).await.is_err());
+    }
+
+    /// The filesystem half of the 共享技能 removal. A legacy install has the body
+    /// under `{user_skills_dir}/shared/{name}`; once the row is re-homed onto its
+    /// owner the boot inventory audit expects it under that owner's tree, so
+    /// without this move EVERY such install would fail `validate_store` at launch.
+    #[tokio::test]
+    async fn rehoming_moves_a_shared_body_into_its_owner_tree_and_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        let owner = nomifun_common::CompanionId::new().into_string();
+        create_skill(&paths, &SkillScope::Shared, false, &input("legacy"))
+            .await
+            .unwrap();
+        // The database row has already been re-homed by `backfill_skill_owner`.
+        let rows = vec![row(&owner, "legacy", "active")];
+        assert!(
+            validate_store(&paths, &rows).await.is_err(),
+            "the audit must reject the row until its body moves"
+        );
+
+        rehome_unowned_skill_dirs(&paths, &rows).await.unwrap();
+        validate_store(&paths, &rows).await.unwrap();
+        let moved =
+            skill_service::skill_dir_for(&paths, &SkillScope::Companion(owner.clone()), "legacy", false).unwrap();
+        assert!(moved.join(SKILL_MANIFEST_FILE).is_file(), "body must live under its owner");
+        let legacy = skill_service::skill_dir_for(&paths, &SkillScope::Shared, "legacy", false).unwrap();
+        assert!(!legacy.exists(), "the shared copy is MOVED, never left behind as a duplicate");
+
+        // A second boot must not touch the already-correct body.
+        rehome_unowned_skill_dirs(&paths, &rows).await.unwrap();
+        validate_store(&paths, &rows).await.unwrap();
+
+        // A row the backfill left unowned (name collision) keeps its shared body.
+        let mut unowned = row(&owner, "kept", "active");
+        unowned.scope_companion_id = None;
+        create_skill(&paths, &SkillScope::Shared, false, &input("kept"))
+            .await
+            .unwrap();
+        let rows = vec![row(&owner, "legacy", "active"), unowned];
+        rehome_unowned_skill_dirs(&paths, &rows).await.unwrap();
+        validate_store(&paths, &rows).await.unwrap();
+        assert!(
+            skill_service::skill_dir_for(&paths, &SkillScope::Shared, "kept", false)
+                .unwrap()
+                .join(SKILL_MANIFEST_FILE)
+                .is_file()
+        );
     }
 }

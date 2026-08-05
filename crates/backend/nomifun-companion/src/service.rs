@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomifun_common::{
-    AppError, CompanionId, CompanionSkillId, ProviderId, ProviderUsage, ProviderUsageFeature,
+    AppError, CompanionId, ProviderId, ProviderUsage, ProviderUsageFeature,
     ProviderWithModel, SharedProviderLifecycleBarrier,
 };
 use nomifun_db::IProviderRepository;
@@ -32,7 +32,9 @@ use crate::store::{
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
 use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 
-/// Map the nullable stored owner to the extension skill scope.
+/// Map the stored owner to the extension skill scope. `None` is only the
+/// vestigial legacy row the boot re-homing has not claimed, whose body still
+/// lives in the shared tree.
 fn scope_for(scope_companion_id: Option<&str>) -> SkillScope {
     scope_companion_id
         .map(|id| SkillScope::Companion(id.to_owned()))
@@ -92,19 +94,17 @@ pub struct CompanionStatus {
     pub mood: String,
     pub memories_active: i64,
     pub memories_archived: i64,
-    /// This companion's active (usable) skills — drives the "专精 N 技能" expertise badge.
-    pub skills_active: i64,
     pub model_configured: bool,
     pub collect_any_enabled: bool,
 }
 
-/// "What I learned this week" digest. Skills are per-companion; memories are
-/// global because the memory hub is shared by the whole companion roster.
+/// "What I learned this week" digest for ONE companion: the skills it distilled
+/// and the memories it recorded in the window. How many of those skills are
+/// currently active was the 专精 badge's number and is deliberately not here.
 #[derive(Debug, Serialize)]
 pub struct CompanionWeeklyDigest {
     pub since_ms: i64,
     pub skills_learned: i64,
-    pub skills_active_new: i64,
     pub memories_added: i64,
     pub new_skill_names: Vec<String>,
 }
@@ -321,15 +321,15 @@ impl CompanionService {
         //
         // The owner is resolved from the roster that was just scanned, BEFORE the
         // store opens, because opening it runs the one-time re-homing of the
-        // vestigial shared memories onto that companion. It is always a live
-        // roster member, so the reference audit right below still passes.
-        let memory_owner = {
+        // vestigial shared memories and skills onto that companion. It is always a
+        // live roster member, so the reference audit right below still passes.
+        let row_owner = {
             let default_companion_id = config.read().await.default_companion_id.clone();
             registry
-                .resolve_memory_owner(default_companion_id.as_deref())
+                .resolve_row_owner(default_companion_id.as_deref())
                 .await
         };
-        let store = CompanionStore::open(&shared_dir, memory_owner.as_deref()).await?;
+        let store = CompanionStore::open(&shared_dir, row_owner.as_deref()).await?;
         store.validate_companion_references(&live_companion_ids).await?;
         collector::validate_event_store(&shared_dir)?;
         let startup_config = config.read().await.clone();
@@ -346,6 +346,9 @@ impl CompanionService {
         let live_figure_ids = crate::figures::id_set(&figures_dir)?;
         registry.validate_figure_references(&live_figure_ids).await?;
         let skills = store.list_all_skills().await?;
+        // The rows were re-homed by the store's boot migration; their bodies still
+        // sit in the legacy shared tree, and the audit right below is fail-closed.
+        crate::skill_io::rehome_unowned_skill_dirs(&skill_paths, &skills).await?;
         crate::skill_io::validate_store(&skill_paths, &skills).await?;
         let emitter = CompanionEventEmitter::new(bus.clone(), authoritative_user_id.to_string());
 
@@ -479,11 +482,12 @@ impl CompanionService {
 
     /// Build the `CompanionSkillSink` the agent factory needs — gives companion_session
     /// conversations the `companion_skill` tool + the per-turn when_to_use injection
-    /// over this companion's self-evolved + shared skills (design §7).
+    /// over the owning companion's self-evolved skills (design §7).
     pub fn skill_sink(&self) -> Arc<dyn nomifun_ai_agent::CompanionSkillSink> {
         Arc::new(CompanionSkillStoreSink {
             store: self.store.clone(),
             config: self.config.clone(),
+            registry: self.registry.clone(),
             skill_paths: self.skill_paths.clone(),
         })
     }
@@ -870,7 +874,6 @@ impl CompanionService {
             // companion: count only what THIS companion can read.
             memories_active: self.store.count_memories("active", Some(id)).await?,
             memories_archived: self.store.count_memories("archived", Some(id)).await?,
-            skills_active: self.store.count_active_skills(id).await?,
             model_configured: profile.model.is_some(),
             collect_any_enabled: cfg.collect.any_enabled(),
         })
@@ -878,14 +881,12 @@ impl CompanionService {
 
     /// Aggregate "what I learned this week" for the Overview digest card.
     pub async fn weekly_digest(&self, companion_id: &str, since_ms: i64) -> Result<CompanionWeeklyDigest, AppError> {
-        let skills_learned = self.store.count_skills_since(companion_id, since_ms, None).await?;
-        let skills_active_new = self.store.count_skills_since(companion_id, since_ms, Some("active")).await?;
+        let skills_learned = self.store.count_skills_since(companion_id, since_ms).await?;
         let memories_added = self.store.count_memories_since(since_ms, companion_id).await?;
         let new_skill_names = self.store.list_skill_names_since(companion_id, since_ms, 12).await?;
         Ok(CompanionWeeklyDigest {
             since_ms,
             skills_learned,
-            skills_active_new,
             memories_added,
             new_skill_names,
         })
@@ -1241,7 +1242,6 @@ impl CompanionService {
             // vestigial unowned ones, so the unscoped count IS the honest total.
             memories_active: self.store.count_memories("active", None).await?,
             memories_archived: self.store.count_memories("archived", None).await?,
-            skills_active: 0,
             model_configured: false,
             collect_any_enabled: cfg.collect.any_enabled(),
         })
@@ -1394,7 +1394,7 @@ impl CompanionService {
     pub async fn resolve_memory_owner(&self) -> Option<String> {
         let default_companion_id = self.config.read().await.default_companion_id.clone();
         self.registry
-            .resolve_memory_owner(default_companion_id.as_deref())
+            .resolve_row_owner(default_companion_id.as_deref())
             .await
     }
 
@@ -1482,14 +1482,13 @@ impl CompanionService {
     pub async fn list_companion_skill_page(
         &self,
         companion_id: &str,
-        include_shared: bool,
         status: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<CompanionSkillViewPage, AppError> {
         let page = self
             .store
-            .list_skill_page(companion_id, include_shared, status, limit, offset)
+            .list_skill_page(companion_id, status, limit, offset)
             .await?;
         Ok(CompanionSkillViewPage {
             items: self.skill_views(page.items).await?,
@@ -1715,90 +1714,6 @@ impl CompanionService {
             call_ids,
         };
         self.evolution.draft_from_episode(steps, anchor, companion_id).await
-    }
-
-    /// Gift a skill from one companion to another (互教): copy the SKILL.md into the recipient's
-    /// scope + insert a `source="gifted"` row. Rejects self-gift and recipient name collisions
-    /// (the insert UPSERT would otherwise silently overwrite the recipient's same-named skill).
-    pub async fn gift_companion_skill(
-        &self,
-        from_companion_id: &str,
-        companion_skill_id: &str,
-        to_companion_id: &str,
-    ) -> Result<CompanionSkill, AppError> {
-        if from_companion_id == to_companion_id {
-            return Err(AppError::BadRequest("不能赠送给自己".into()));
-        }
-        let src = self
-            .store
-            .get_owned_skill(from_companion_id, companion_skill_id)
-            .await?
-            .ok_or_else(|| {
-                AppError::NotFound(format!(
-                    "companion skill {companion_skill_id} not found"
-                ))
-            })?;
-        if self
-            .store
-            .find_owned_skill_by_name(to_companion_id, &src.skill_name)
-            .await?
-            .is_some()
-        {
-            return Err(AppError::BadRequest(format!(
-                "对方已有同名技能「{}」",
-                src.skill_name
-            )));
-        }
-        crate::skill_io::copy_skill(
-            &self.skill_paths,
-            &SkillScope::Companion(from_companion_id.to_owned()),
-            &SkillScope::Companion(to_companion_id.to_owned()),
-            &src.skill_name,
-        )
-        .await?;
-        let now = nomifun_common::now_ms();
-        let gifted = CompanionSkill {
-            companion_skill_id: CompanionSkillId::new().into_string(),
-            skill_name: src.skill_name.clone(),
-            scope_kind: "companion".into(),
-            scope_companion_id: Some(to_companion_id.to_owned()),
-            status: "active".into(),
-            source: "gifted".into(),
-            confidence: src.confidence,
-            provenance_event_ids: vec![],
-            strength: 1.0,
-            version: 1,
-            skill_pattern_id: None,
-            usage_count: 0,
-            last_used_at: None,
-            created_at: now,
-            updated_at: now,
-            signature: String::new(),
-        };
-        if let Err(error) = self.store.insert_skill(&gifted).await {
-            let target = skill_service::skill_dir_for(
-                &self.skill_paths,
-                &SkillScope::Companion(to_companion_id.to_owned()),
-                &src.skill_name,
-                false,
-            )
-            .map_err(|path_error| {
-                AppError::Internal(format!("resolve gifted skill for rollback: {path_error}"))
-            })?;
-            crate::fsio::remove_path_entry(&target).map_err(|cleanup_error| {
-                AppError::Internal(format!(
-                    "{error}; additionally failed to remove orphaned gifted skill {}: {cleanup_error}",
-                    target.display()
-                ))
-            })?;
-            return Err(error);
-        }
-        self.emitter.emit_skill_learned(
-            to_companion_id,
-            &gifted.companion_skill_id,
-            &gifted.skill_name,
-        );
-        Ok(gifted)
     }
 
     // ----- learning -----
@@ -2085,7 +2000,6 @@ mod tests {
             .insert_skill(&crate::store::CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "demo".into(),
-                scope_kind: "companion".into(),
                 scope_companion_id: Some(cid.clone()),
                 status: "draft".into(),
                 source: "mined".into(),
@@ -2168,7 +2082,6 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: name.into(),
-                scope_kind: "companion".into(),
                 scope_companion_id: Some(cid.to_owned()),
                 status: "draft".into(),
                 source: "mined".into(),
@@ -2199,7 +2112,6 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "beta".into(),
-                scope_kind: "companion".into(),
                 scope_companion_id: Some(cid.clone()),
                 status: "draft".into(),
                 source: "mined".into(),
@@ -2216,7 +2128,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(svc.list_companion_skill_page(&cid, false, None, 100, 0).await.is_err());
+        assert!(svc.list_companion_skill_page(&cid, None, 100, 0).await.is_err());
     }
 
     #[tokio::test]
@@ -2228,7 +2140,7 @@ mod tests {
         seed_draft_skill(&svc, &cid, "beta").await;
 
         let page = svc
-            .list_companion_skill_page(&cid, false, Some("draft"), 1, 0)
+            .list_companion_skill_page(&cid, Some("draft"), 1, 0)
             .await
             .unwrap();
 
@@ -2308,7 +2220,6 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "rej-sig".into(),
-                scope_kind: "companion".into(),
                 scope_companion_id: Some(cid.clone()),
                 status: "draft".into(),
                 source: "mined".into(),
@@ -2343,7 +2254,6 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "recent".into(),
-                scope_kind: "companion".into(),
                 scope_companion_id: Some(cid.clone()),
                 status: "active".into(),
                 source: "mined".into(),
@@ -2362,7 +2272,6 @@ mod tests {
             .unwrap();
         let digest = svc.weekly_digest(&cid, now - 7 * 86_400_000).await.unwrap();
         assert_eq!(digest.skills_learned, 1);
-        assert_eq!(digest.skills_active_new, 1);
         assert!(digest.new_skill_names.contains(&"recent".to_string()));
     }
 
@@ -2375,14 +2284,18 @@ mod tests {
         assert!(svc.draft_skill_from_session(&cid, &conversation_fixture(90)).await.is_err());
     }
 
+    /// 赠送 (cross-companion gift) is gone, and with it every cross-companion
+    /// skill read: a companion's list is exactly its own rows. This is the
+    /// regression net for the list query — a resurrected `OR scope_kind = 'user'`
+    /// or a copy path would show up here as a second row.
     #[tokio::test]
-    async fn gift_copies_skill_to_recipient_and_guards() {
+    async fn a_companions_skill_list_is_exactly_its_own() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let a = svc.registry.create("A", "ink").await.unwrap().companion_id;
         let b = svc.registry.create("B", "ink").await.unwrap().companion_id;
         let input = nomifun_extension::skill_service::SkillDraftInput {
-            name: "share-me".into(),
+            name: "mine".into(),
             description: "d".into(),
             when_to_use: None,
             allowed_tools: None,
@@ -2391,35 +2304,35 @@ mod tests {
         };
         skill_service::create_skill(&svc.skill_paths, &SkillScope::Companion(a.clone()), false, &input).await.unwrap();
         let now = nomifun_common::now_ms();
-        svc.store
-            .insert_skill(&CompanionSkill {
+        let mut skill = CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
-                skill_name: "share-me".into(),
-                scope_kind: "companion".into(),
-                scope_companion_id: Some(a.clone()),
-                status: "active".into(),
-                source: "mined".into(),
-                confidence: 0.7,
-                provenance_event_ids: vec![],
-                strength: 1.0,
-                version: 1,
-                skill_pattern_id: None,
-                usage_count: 0,
-                last_used_at: None,
-                created_at: now,
-                updated_at: now,
-                signature: String::new(),
-            })
-            .await
-            .unwrap();
-        assert!(svc.gift_companion_skill(&a, &svc.store.find_owned_skill_by_name(&a, "share-me").await.unwrap().unwrap().companion_skill_id, &a).await.is_err(), "self-gift rejected");
-        let source_skill_id = svc.store.find_owned_skill_by_name(&a, "share-me").await.unwrap().unwrap().companion_skill_id;
-        let g = svc.gift_companion_skill(&a, &source_skill_id, &b).await.unwrap();
-        assert_eq!(g.scope_companion_id.as_deref(), Some(b.as_str()));
-        assert_eq!(g.source, "gifted");
-        assert_eq!(svc.store.find_owned_skill_by_name(&b, "share-me").await.unwrap().unwrap().status, "active");
-        assert!(svc.skill_paths.user_skills_dir.join("companion").join(&b).join("share-me").join("SKILL.md").exists());
-        assert!(svc.gift_companion_skill(&a, &source_skill_id, &b).await.is_err(), "name collision rejected");
+            skill_name: "mine".into(),
+            scope_companion_id: Some(a.clone()),
+            status: "active".into(),
+            source: "mined".into(),
+            confidence: 0.7,
+            provenance_event_ids: vec![],
+            strength: 1.0,
+            version: 1,
+            skill_pattern_id: None,
+            usage_count: 0,
+            last_used_at: None,
+            created_at: now,
+            updated_at: now,
+            signature: String::new(),
+        };
+        svc.store.insert_skill(&skill).await.unwrap();
+
+        let mine = svc.list_companion_skill_page(&a, None, 50, 0).await.unwrap();
+        assert_eq!(mine.total, 1);
+        assert_eq!(mine.items[0].skill.skill_name, "mine");
+        let theirs = svc.list_companion_skill_page(&b, None, 50, 0).await.unwrap();
+        assert_eq!(theirs.total, 0, "another companion's skill must never be listed: {:?}", theirs.items);
+
+        // And there is no way to write an ownerless (shared) row any more.
+        skill.companion_skill_id = nomifun_common::generate_id();
+        skill.scope_companion_id = None;
+        assert!(svc.store.insert_skill(&skill).await.is_err(), "an ownerless skill must be refused");
     }
 
     #[tokio::test]

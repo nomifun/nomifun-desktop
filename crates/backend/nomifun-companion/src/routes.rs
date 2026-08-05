@@ -74,10 +74,6 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
             "/api/companion/companions/{companion_id}/skills/from-session",
             post(draft_skill_from_session),
         )
-        .route(
-            "/api/companion/companions/{companion_id}/skills/{companion_skill_id}/gift",
-            post(gift_companion_skill),
-        )
         .route("/api/companion/learn/run", post(run_learn))
         .route("/api/companion/events/stats", get(event_stats))
         .route("/api/companion/events/storage", get(event_storage))
@@ -339,9 +335,10 @@ async fn merge_memories(
     )))
 }
 
+/// A companion's own skills. There is deliberately no cross-companion
+/// parameter: 共享技能 is gone, so the owner in the path IS the whole scope.
 #[derive(Deserialize)]
 struct ListSkillsQuery {
-    include_shared: Option<bool>,
     status: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -358,7 +355,6 @@ async fn list_companion_skills(
         .service
         .list_companion_skill_page(
             &companion_id,
-            q.include_shared.unwrap_or(true),
             status.as_deref(),
             q.limit.unwrap_or(100),
             q.offset.unwrap_or(0),
@@ -492,30 +488,6 @@ async fn draft_skill_from_session(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(ApiResponse::ok(
         state.service.draft_skill_from_session(&companion_id, &req.conversation_id).await?,
-    )))
-}
-
-#[derive(Deserialize)]
-struct GiftSkillRequest {
-    to_companion_id: String,
-}
-
-async fn gift_companion_skill(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path((companion_id, companion_skill_id)): Path<(String, String)>,
-    body: Result<Json<GiftSkillRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<CompanionSkill>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .gift_companion_skill(
-                &companion_id,
-                &companion_skill_id,
-                &req.to_companion_id,
-            )
-            .await?,
     )))
 }
 

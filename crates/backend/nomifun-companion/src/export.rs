@@ -573,7 +573,7 @@ fn rehome_imported_memories(
     default_companion_id: Option<&str>,
 ) {
     let live: HashSet<&str> = roster.iter().map(|p| p.companion_id.as_str()).collect();
-    let local_owner = crate::registry::memory_owner_of(roster.iter(), default_companion_id);
+    let local_owner = crate::registry::row_owner_of(roster.iter(), default_companion_id);
     for memory in memories {
         let owned_locally = memory
             .scope_companion_id
