@@ -371,7 +371,7 @@ const NomiWorkspacePage: React.FC = () => {
     </>
   ) : (
     <div className='flex-1 flex flex-col items-center justify-center gap-14px py-64px px-24px text-center'>
-      <span className='flex items-center justify-center w-72px h-72px rd-full bg-fill-2 text-[rgb(var(--primary-6))]'>
+      <span className='flex items-center justify-center w-72px h-72px rd-full bg-fill-2 text-primary-6'>
         <AddOne theme='outline' size='30' fill='currentColor' strokeWidth={3} />
       </span>
       <span className='text-16px font-500 text-t-primary'>

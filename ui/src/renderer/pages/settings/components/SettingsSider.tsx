@@ -6,6 +6,7 @@ import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSe
 import {
   Computer,
   Cpu,
+  DataLock,
   Earth,
   Info,
   Puzzle,
@@ -22,6 +23,7 @@ import { buildSettingsNavItems } from './settingsNavigation';
 /** Builtin settings tab IDs in display order (must match router paths). */
 export const BUILTIN_TAB_IDS = [
   'system',
+  'privacy',
   'execution-engines',
   'browser-use',
   'computer-use',
@@ -68,6 +70,12 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
         path: 'execution-engines',
       },
       system: { id: 'system', label: t('settings.system'), icon: <System />, path: 'system' },
+      privacy: {
+        id: 'privacy',
+        label: t('settings.privacy.nav', { defaultValue: '数据采集' }),
+        icon: <DataLock />,
+        path: 'privacy',
+      },
       'browser-use': {
         id: 'browser-use',
         label: t('settings.browserUseNav'),

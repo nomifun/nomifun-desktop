@@ -63,7 +63,7 @@ const MemoryListRow: React.FC<MemoryListRowProps> = ({
     <>
       {parseSnippetSegments(memory.snippet).map((segment, index) =>
         segment.hit ? (
-          <b key={index} className='font-600 text-[rgb(var(--primary-6))]'>
+          <b key={index} className='font-600 text-primary-6'>
             {segment.text}
           </b>
         ) : (
@@ -95,7 +95,7 @@ const MemoryListRow: React.FC<MemoryListRowProps> = ({
       }}
       className={[
         'inline-flex cursor-pointer items-center text-t-tertiary transition-colors',
-        danger ? 'hover:text-[rgb(var(--danger-6))]' : 'hover:text-[rgb(var(--primary-6))]',
+        danger ? 'hover:text-danger-6' : 'hover:text-primary-6',
       ].join(' ')}
     >
       {icon}
@@ -145,7 +145,7 @@ const MemoryListRow: React.FC<MemoryListRowProps> = ({
             theme='filled'
             size='12'
             fill='currentColor'
-            className='mr-4px inline-flex text-[rgb(var(--primary-6))]'
+            className='mr-4px inline-flex text-primary-6'
             style={{ verticalAlign: -1 }}
           />
         )}

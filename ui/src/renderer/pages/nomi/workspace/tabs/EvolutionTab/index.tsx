@@ -48,7 +48,7 @@ const EvolutionTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onA
 
   // Config unreadable: say so and offer a retry, rather than rendering a tab
   // whose learning and skill sections have silently vanished.
-  if (!config.learn || !config.evolve || !config.sources) {
+  if (!config.learn || !config.evolve) {
     return (
       <div className='flex flex-col items-center gap-10px py-40px text-center'>
         <span className='text-13px leading-19px text-t-secondary'>

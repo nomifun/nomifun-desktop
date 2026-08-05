@@ -107,8 +107,8 @@ describe('SegmentedTabs attention dot', () => {
       React.createElement(SegmentedTabs, { items, activeKey: 'a', onChange: () => {}, size: 'sm' })
     );
     // One dot, on the second segment.
-    expect(html.split('rd-full bg-[rgb(var(--primary-6))]').length - 1).toBe(1);
-    expect(html.indexOf('技能')).toBeLessThan(html.indexOf('rd-full bg-[rgb(var(--primary-6))]'));
+    expect(html.split('rd-full bg-primary-6').length - 1).toBe(1);
+    expect(html.indexOf('技能')).toBeLessThan(html.indexOf('rd-full bg-primary-6'));
   });
 
   test('the dot is decorative, not announced', () => {

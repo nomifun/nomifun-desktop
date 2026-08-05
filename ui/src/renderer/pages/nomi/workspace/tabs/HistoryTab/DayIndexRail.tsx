@@ -79,7 +79,7 @@ const DayIndexRail: React.FC<DayIndexRailProps> = ({
               </span>
               {entry.digests.length > 0 && (
                 <span
-                  className='h-5px w-5px shrink-0 rd-full bg-[rgb(var(--primary-6))]'
+                  className='h-5px w-5px shrink-0 rd-full bg-primary-6'
                   title={t('nomi.history.digestMark', { defaultValue: '这一天有日记' })}
                 />
               )}

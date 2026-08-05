@@ -73,7 +73,7 @@ const DangerZoneSection: React.FC<Props> = ({ companionId, companionName }) => {
               size='14'
               fill='currentColor'
               strokeWidth={3}
-              className='line-height-0 shrink-0 text-[rgb(var(--danger-6))]'
+              className='line-height-0 shrink-0 text-danger-6'
             />
           }
           title={t('nomi.settings.deleteCompanion', { defaultValue: '删除伙伴' })}

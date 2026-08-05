@@ -32,7 +32,7 @@ export const SkillStatusBadge: React.FC<{ status: ICompanionSkill['status'] }> =
   const { t } = useTranslation();
   if (status === 'draft') {
     return (
-      <span className={`${PILL} bg-[rgba(var(--warning-6),0.14)] text-[rgb(var(--warning-6))]`}>
+      <span className={`${PILL} bg-[rgba(var(--warning-6),0.14)] text-warning-6`}>
         {t('nomi.skills.statusDraftLabel', { defaultValue: '草稿' })}
       </span>
     );
@@ -45,7 +45,7 @@ export const SkillStatusBadge: React.FC<{ status: ICompanionSkill['status'] }> =
     );
   }
   return (
-    <span className={`${PILL} bg-[rgba(var(--success-6),0.14)] text-[rgb(var(--success-6))]`}>
+    <span className={`${PILL} bg-[rgba(var(--success-6),0.14)] text-success-6`}>
       {t('nomi.skills.statusActive', { defaultValue: '已启用' })}
     </span>
   );
@@ -54,7 +54,7 @@ export const SkillStatusBadge: React.FC<{ status: ICompanionSkill['status'] }> =
 export const SkillMissingBadge: React.FC = () => {
   const { t } = useTranslation();
   return (
-    <span className={`${PILL} bg-[rgba(var(--danger-6),0.12)] text-[rgb(var(--danger-6))]`}>
+    <span className={`${PILL} bg-[rgba(var(--danger-6),0.12)] text-danger-6`}>
       {t('nomi.skills.configMissing', { defaultValue: '未安装' })}
     </span>
   );

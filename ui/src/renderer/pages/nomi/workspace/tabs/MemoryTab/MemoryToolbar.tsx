@@ -15,7 +15,7 @@ import { MEMORY_KINDS, MEMORY_STATUS_FILTERS, type MemoryStatusFilter } from './
 
 /** Pill search field — matches the round search input used across the app. */
 const SEARCH_PILL_CLASS =
-  'w-240px max-w-full [&_.arco-input-inner-wrapper]:!rounded-full [&_.arco-input-inner-wrapper]:!border [&_.arco-input-inner-wrapper]:!border-solid [&_.arco-input-inner-wrapper]:!border-[var(--color-border-2)] [&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)] [&_.arco-input-inner-wrapper-focus]:!border-[rgb(var(--primary-6))]';
+  'w-240px max-w-full [&_.arco-input-inner-wrapper]:!rounded-full [&_.arco-input-inner-wrapper]:!border [&_.arco-input-inner-wrapper]:!border-solid [&_.arco-input-inner-wrapper]:!border-[var(--color-border-2)] [&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)] [&_.arco-input-inner-wrapper-focus]:!border-primary-6';
 
 interface MemoryToolbarProps {
   q: string;

@@ -175,6 +175,23 @@ describe('house style', () => {
     expect(offenders(({ raw }) => /\bborder-b-(?:base|light)\b/.test(raw))).toEqual([]);
   });
 
+  test('colour ramps go through the project rule, not an arbitrary rgb()', () => {
+    // Measured with the real generator: `text-[rgb(var(--danger-6))]` compiles to
+    //   color: rgb(var(--danger-6) / var(--un-text-opacity))
+    // because UnoCSS injects slash-alpha into arbitrary colour values. The ramp
+    // variables are COMMA-separated triplets (`--red-6: 245,63,63`), so
+    // `rgb(245,63,63 / 1)` is unparseable and the browser drops the declaration —
+    // the element silently keeps its inherited colour. The project's own rule
+    // (`text-danger-6`) emits a valid `color: rgb(var(--danger-6))`.
+    //
+    // Only the bare `rgb(var(--ramp-N))` form is affected. An explicit
+    // `rgba(var(--ramp-N), 0.12)` carries its own alpha, so nothing is injected and
+    // it stays valid — those are deliberately not matched here.
+    expect(
+      offenders(({ raw }) => /\b(?:text|bg|border)-\[rgb\(var\(--(?:primary|danger|success|warning)-[1-9]\)\)\]/.test(raw))
+    ).toEqual([]);
+  });
+
   test('icons come from @icon-park/react only', () => {
     expect(offenders(({ raw }) => raw.includes('@arco-design/web-react/icon'))).toEqual([]);
   });

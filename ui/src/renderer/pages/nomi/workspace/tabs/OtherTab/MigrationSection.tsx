@@ -162,7 +162,7 @@ const MigrationSection: React.FC<Props> = ({ companionId, companionName }) => {
                   size='14'
                   fill='currentColor'
                   strokeWidth={3}
-                  className='line-height-0 mt-1px shrink-0 text-[rgb(var(--warning-6))]'
+                  className='line-height-0 mt-1px shrink-0 text-warning-6'
                 />
                 <div className='min-w-0'>
                   <div>

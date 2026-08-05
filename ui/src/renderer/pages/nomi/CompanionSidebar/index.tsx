@@ -122,7 +122,7 @@ const CompanionRow: React.FC<CompanionRowProps> = ({
               event.stopPropagation();
               onRequestDelete(companion);
             }}
-            className='flex items-center justify-center w-20px h-20px rd-6px text-t-tertiary hover:!text-[rgb(var(--danger-6))] hover:bg-[var(--color-bg-1)] transition-colors cursor-pointer'
+            className='flex items-center justify-center w-20px h-20px rd-6px text-t-tertiary hover:!text-danger-6 hover:bg-[var(--color-bg-1)] transition-colors cursor-pointer'
           >
             <Delete theme='outline' size='13' fill='currentColor' />
           </div>

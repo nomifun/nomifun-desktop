@@ -6,12 +6,14 @@
 
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Message, Switch } from '@arco-design/web-react';
+import { Right } from '@icon-park/react';
 import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import InstallWideNote from './InstallWideNote';
 import LearningModelRow from './LearningModelRow';
 import NumberSetting from './NumberSetting';
-import { LEARNING_SOURCE_KEYS, type EvolutionConfigHandle, type LearningSources } from './useEvolutionConfig';
+import type { EvolutionConfigHandle } from './useEvolutionConfig';
 
 const SWITCH_PROPS = { size: 'small' as const, className: 'compact-dark-switch shrink-0' };
 
@@ -21,45 +23,48 @@ interface Props {
   needsModel: boolean;
 }
 
-/** The three learning-source toggles, grouped under one row (one idea: 数据范围). */
-const SourceToggles: React.FC<{
-  sources: LearningSources;
-  patchSources: EvolutionConfigHandle['patchSources'];
-}> = ({ sources, patchSources }) => {
+/**
+ * Pointer to 设置 › 数据采集, which owns every `collect.*` field.
+ *
+ * This row used to be three switches writing `collect.tool_calls` /
+ * `chat_user_messages` / `requirements` — the same global fields the settings page
+ * edits. Two surfaces writing one global value is worse than one, so this tab only
+ * links now. It is deliberately NOT a per-companion source selector: no such field
+ * exists on the profile yet.
+ */
+const CollectionLink: React.FC = () => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const open = () => {
+    void navigate('/settings/privacy');
+  };
   return (
-    <div className='flex flex-col gap-10px'>
-      {LEARNING_SOURCE_KEYS.map((key) => (
-        <div key={key} className='flex min-w-0 items-center gap-12px'>
-          <div className='min-w-0 flex-1'>
-            <div className='text-13px leading-19px font-500 text-t-primary'>
-              {t(`nomi.collect.sources.${key}.name`)}
-            </div>
-            <div className='mt-1px text-12px leading-18px text-t-tertiary'>
-              {t(`nomi.collect.sources.${key}.desc`)}
-            </div>
-          </div>
-          <Switch
-            {...SWITCH_PROPS}
-            checked={sources[key]}
-            onChange={(checked) => {
-              void patchSources({ [key]: checked }).catch((e) => Message.error(String(e)));
-            }}
-          />
-        </div>
-      ))}
+    <div
+      role='button'
+      tabIndex={0}
+      onClick={open}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          open();
+        }
+      }}
+      className='flex cursor-pointer items-center gap-4px text-12px leading-18px text-primary-6 hover:opacity-80'
+    >
+      <span>{t('nomi.evolution.openCollectionSettings', { defaultValue: '前往数据采集设置' })}</span>
+      <Right theme='outline' size='12' fill='currentColor' strokeWidth={3} className='line-height-0 shrink-0' />
     </div>
   );
 };
 
 /**
  * 学习配置 — whether this companion reviews your work records on a schedule,
- * how often, with which model, and which recorded sources it may read.
+ * how often, and with which model.
  */
 const LearningSection: React.FC<Props> = ({ config, needsModel }) => {
   const { t } = useTranslation();
-  const { learn, sources, patchLearn, patchSources } = config;
-  if (!learn || !sources) return null;
+  const { learn, patchLearn } = config;
+  if (!learn) return null;
 
   return (
     <NomiSettingSection
@@ -117,11 +122,12 @@ const LearningSection: React.FC<Props> = ({ config, needsModel }) => {
         />
         <LearningModelRow learn={learn} patchLearn={patchLearn} missing={needsModel} />
         <NomiSettingRow
-          title={t('nomi.evolution.sourcesTitle', { defaultValue: '学习数据范围' })}
-          description={t('nomi.evolution.sourcesDesc', {
-            defaultValue: '选择哪些工作记录会被记下来当作学习素材。关掉一项后不再新增这类记录，已经记下的仍会参与学习。',
+          title={t('nomi.evolution.collectionScopeTitle', { defaultValue: '学习素材来自哪里' })}
+          description={t('nomi.evolution.collectionScopeDesc', {
+            defaultValue:
+              '伙伴只能学到这台设备记录下来的工作数据。记什么、留多久是应用级设置，对所有伙伴共同生效。',
           })}
-          footer={<SourceToggles sources={sources} patchSources={patchSources} />}
+          controls={<CollectionLink />}
         />
       </NomiSettingList>
     </NomiSettingSection>

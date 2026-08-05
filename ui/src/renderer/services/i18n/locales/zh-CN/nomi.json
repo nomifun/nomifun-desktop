@@ -203,6 +203,9 @@
   "evolution": {
     "loadFailed": "暂时读不到学习与进化设置。",
     "installWideNote": "这组设置目前对所有伙伴共同生效，后续版本会改为按伙伴单独配置。",
+    "collectionScopeTitle": "学习素材来自哪里",
+    "collectionScopeDesc": "伙伴只能学到这台设备记录下来的工作数据。记什么、留多久是应用级设置，对所有伙伴共同生效。",
+    "openCollectionSettings": "前往数据采集设置",
     "learningDesc": "伙伴会定期回顾你的工作记录，从中提炼记忆和经验。",
     "learnEnabledDesc": "关闭后不再进行周期性学习，已提炼的记忆和技能保持不变。",
     "modelDesc": "用来回顾记录、提炼记忆与技能的对话模型。",
@@ -210,8 +213,6 @@
     "modelStale": "当前选择的 {{model}} 已不在可用模型清单里，学习会失败，请重新选择。",
     "interval": "学习周期",
     "intervalDesc": "每隔多久回顾一次新记录。",
-    "sourcesTitle": "学习数据范围",
-    "sourcesDesc": "选择哪些工作记录会被记下来当作学习素材。关掉一项后不再新增这类记录，已经记下的仍会参与学习。",
     "skillTitle": "技能生成配置",
     "skillDesc": "把你反复重复的多步操作沉淀成可复用技能，使用上面的学习模型。",
     "skillEnabledDesc": "关闭后不再生成新技能，已有技能仍然可用。",
@@ -287,26 +288,6 @@
   },
   "figures": {
     "back": "返回伙伴"
-  },
-  "collect": {
-    "sources": {
-      "tool_calls": {
-        "name": "工具调用",
-        "desc": "工作会话里调用了哪些工具（仅工具名与参数形状，不含具体内容）"
-      },
-      "chat_user_messages": {
-        "name": "会话提问内容",
-        "desc": "你在各个会话里发送的提问文本"
-      },
-      "requirements": {
-        "name": "需求平台内容",
-        "desc": "你创建的需求标题、描述与标签"
-      },
-      "terminal_sessions": {
-        "name": "终端会话元数据",
-        "desc": "终端会话的创建/退出记录（不含输出内容）"
-      }
-    }
   },
   "evolve": {
     "enabled": "开启技能进化"
