@@ -16,9 +16,11 @@ notes at a high level rather than a complete historical log.
   the first. There is no directional divide-style utility (`divide-y-solid` emits
   nothing), so `divide-x-0` is the fix. `ring-2` set only a ring *colour* custom
   property — no width, no box-shadow — so those focus rings did not exist; `ring-2px`
-  is the width spelling. `outline-2` was worse than missing: it overrode the browser's
-  own focus ring colour with `--bg-2`, the page background in both themes, actively
-  camouflaging the indicator on a `border-0` button that had no other affordance.
+  is the width spelling. `outline-2` failed the same way — no width, and nothing in
+  this project sets an `outline-style`, so the indicator did not render at all; it
+  additionally overrode the colour with the `--bg-2` step, close enough to the panel
+  behind it to camouflage what little was left, on a `border-0` button that had no
+  other affordance.
   On the border side, `border-N`/`b-N` is a legitimate *colour* when another token
   supplies a real width (`border border-solid border-3`) and broken when it is the
   only border token; 34 of the latter now carry an explicit unit. Rule ordering
