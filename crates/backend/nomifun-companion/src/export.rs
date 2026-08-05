@@ -9,7 +9,11 @@
 //! - companion bundle (`kind: "companion"`): `companion.json` (full profile), `state.json`
 //!   (`{"xp": …}`), `knowledge_refs.json` (`{"names": […]}` — binding names
 //!   are collected by the frontend; this crate never touches the knowledge
-//!   domain, and binding reconstruction after import is the frontend's job).
+//!   domain, and binding reconstruction after import is the frontend's job),
+//!   plus — that is the whole point of exporting a companion rather than a
+//!   name — its own `memories.jsonl` (default on), its `skills.jsonl` with one
+//!   `skills/{companion_skill_id}.md` body each (opt-in), and `figure.webp`
+//!   whenever the companion wears a custom figure.
 //!
 //! Import uses the shared `nomifun_common::zip_safe` hardening (also used by
 //! the knowledge/skill importers): component-sanitized entry paths
@@ -20,25 +24,67 @@
 //! Memory import is staged and committed in one SQLite transaction. Event files
 //! use no-clobber publication and an existing same-name file is idempotent only
 //! when both its SHA-256 and bytes are identical.
+//!
+//! A companion bundle is a CLONE, not a merge: the import mints a fresh
+//! companion id and re-homes every carried memory and skill onto it (with fresh
+//! row ids), because an id from another machine means nothing here and an
+//! orphaned owner reference hard-fails the next boot.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nomifun_common::{AppError, TimestampMs, now_ms, validate_uuidv7, zip_safe};
+use nomifun_extension::skill_service::{SkillPaths, SkillScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::profile::CompanionProfileConfig;
 use crate::registry::CompanionRegistry;
 use crate::service::CompanionService;
-use crate::store::{CompanionMemory, CompanionStore};
+use crate::store::{CompanionMemory, CompanionSkill, CompanionStore};
 
 /// v3 is a hard export/import baseline. Any other package version is rejected.
 pub const EXPORT_FORMAT: &str = "nomifun-export";
 pub const EXPORT_KIND_MEMORY: &str = "memory";
 pub const EXPORT_KIND_COMPANION: &str = "companion";
 pub const EXPORT_VERSION: u32 = 3;
+
+/// Zip entry holding a companion's custom figure image (always the stored WebP).
+const FIGURE_ENTRY: &str = "figure.webp";
+/// Zip directory holding one `{companion_skill_id}.md` body per exported skill.
+/// Keyed by id, not by skill name: an id is a canonical UUID and can never
+/// sanitize into a surprising entry path.
+const SKILL_BODY_DIR: &str = "skills";
+
+/// What a companion bundle carries beyond its settings, which are always in it.
+#[derive(Debug, Clone, Copy)]
+pub struct CompanionBundleScope {
+    pub memories: bool,
+    pub skills: bool,
+}
+
+impl Default for CompanionBundleScope {
+    /// Memories travel with a companion by default — a companion that arrives
+    /// remembering nothing is a stranger wearing its name. Skills are opt-in:
+    /// they are executable bodies, so the owner has to say so.
+    fn default() -> Self {
+        Self { memories: true, skills: false }
+    }
+}
+
+/// Filesystem homes a companion EXPORT reads beside the store: the per-companion
+/// home (`figure.webp`), the shared figure library it may borrow an image from,
+/// and the skill tree that holds every `SKILL.md` body. (An import takes the
+/// per-companion home from the roster instead, so the image always lands beside
+/// the profile that points at it.)
+#[derive(Debug, Clone)]
+pub struct CompanionBundleHomes {
+    pub companions_dir: PathBuf,
+    pub figures_dir: PathBuf,
+    pub skill_paths: Arc<SkillPaths>,
+}
 
 /// Result of a successful export, returned to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -50,8 +96,10 @@ pub struct ExportSummary {
     /// Uncompressed size of the packaged payload.
     pub total_bytes: u64,
     pub dest_path: String,
-    /// Memory rows in the package (0 for companion bundles).
+    /// Memory rows in the package.
     pub memories: u64,
+    /// Skill rows in the package (companion bundles that opted in).
+    pub skills: u64,
     /// Always zero. Kept on the v3 response wire for compatibility; learning
     /// run history is no longer recorded or exported.
     pub learn_runs: u64,
@@ -77,6 +125,12 @@ pub enum ImportOutcome {
         /// Echoed back verbatim from `knowledge_refs.json` so the frontend
         /// can rebuild knowledge bindings.
         knowledge_names: Vec<String>,
+        /// Memory rows re-homed onto the new companion.
+        memories: u64,
+        /// Skill rows (bodies included) re-homed onto the new companion.
+        skills: u64,
+        /// The bundle carried a custom figure and the new companion now wears it.
+        figure: bool,
     },
 }
 
@@ -171,6 +225,11 @@ pub trait CompanionRoster: Send + Sync {
         patch: serde_json::Value,
     ) -> Result<CompanionProfileConfig, AppError>;
     async fn remove_companion(&self, companion_id: &str) -> Result<(), AppError>;
+    /// Where this roster keeps per-companion homes — the durable
+    /// `{companions_dir}/{companion_id}/` an imported `figure.webp` belongs in.
+    /// Asking the roster keeps the image beside the very profile that points at
+    /// it, instead of trusting a separately-passed path to agree.
+    fn companions_dir(&self) -> &Path;
 }
 
 #[async_trait::async_trait]
@@ -191,6 +250,9 @@ impl CompanionRoster for CompanionService {
     async fn remove_companion(&self, companion_id: &str) -> Result<(), AppError> {
         CompanionService::delete_companion(self, companion_id).await
     }
+    fn companions_dir(&self) -> &Path {
+        CompanionService::companions_dir(self)
+    }
 }
 
 #[async_trait::async_trait]
@@ -210,6 +272,9 @@ impl CompanionRoster for CompanionRegistry {
     }
     async fn remove_companion(&self, companion_id: &str) -> Result<(), AppError> {
         self.remove(companion_id).await.map(|_| ())
+    }
+    fn companions_dir(&self) -> &Path {
+        CompanionRegistry::companions_dir(self)
     }
 }
 
@@ -322,38 +387,82 @@ pub async fn export_memory_bundle(
         total_bytes,
         dest_path: dest_path.to_string_lossy().to_string(),
         memories: memories_count,
+        skills: 0,
         learn_runs: 0,
         event_files,
     })
 }
 
-/// Package one companion (full profile + per-companion xp + knowledge binding names) into
-/// a zip at `dest_path`. `knowledge_names` is supplied by the caller — the
-/// binding list crosses domains and is collected on the frontend.
+/// Package one companion into a zip at `dest_path`: its full profile, its
+/// per-companion xp, the knowledge binding names the caller collected, and —
+/// unless the scope says otherwise — the things that actually make it *this*
+/// companion: its own memories, its skills (rows + `SKILL.md` bodies) and the
+/// custom figure it wears.
+///
+/// `knowledge_names` is supplied by the caller — the binding list crosses
+/// domains and is collected on the frontend.
 pub async fn export_companion_bundle(
     store: &CompanionStore,
+    homes: &CompanionBundleHomes,
     profile: &CompanionProfileConfig,
     dest_path: &Path,
     knowledge_names: &[String],
+    scope: CompanionBundleScope,
 ) -> Result<ExportSummary, AppError> {
     if !dest_path.is_absolute() {
         return Err(AppError::BadRequest("dest_path must be absolute".into()));
     }
     let xp = store.get_companion_state_i64(&profile.companion_id, "xp").await?;
+    let memories = if scope.memories {
+        store.dump_memories_for_companion(&profile.companion_id).await?
+    } else {
+        Vec::new()
+    };
+    let mut skills = Vec::new();
+    if scope.skills {
+        for skill in store.list_skills(&profile.companion_id).await? {
+            let body = crate::skill_io::read_skill_body(&homes.skill_paths, &skill).await?;
+            skills.push((skill, body));
+        }
+    }
+    let figure = companion_figure_bytes(homes, profile)?;
 
     let dest = dest_path.to_path_buf();
     let profile = profile.clone();
     let refs = KnowledgeRefsPayload {
         names: knowledge_names.to_vec(),
     };
+    let memories_count = memories.len() as u64;
+    let skills_count = skills.len() as u64;
     let (file_count, total_bytes) = tokio::task::spawn_blocking(move || {
         atomic_zip(&dest, |zip| {
             let mut total_bytes = 0u64;
+            let mut file_count = 3u64;
             add_json_entry(zip, "manifest.json", &manifest_for(EXPORT_KIND_COMPANION))?;
             total_bytes += add_json_entry(zip, "companion.json", &profile)?;
             total_bytes += add_json_entry(zip, "state.json", &CompanionStatePayload { xp })?;
             total_bytes += add_json_entry(zip, "knowledge_refs.json", &refs)?;
-            Ok((3u64, total_bytes))
+            if scope.memories {
+                total_bytes += add_jsonl_entry(zip, "memories.jsonl", &memories)?;
+                file_count += 1;
+            }
+            if scope.skills {
+                let rows: Vec<&CompanionSkill> = skills.iter().map(|(skill, _)| skill).collect();
+                total_bytes += add_jsonl_entry(zip, "skills.jsonl", &rows)?;
+                file_count += 1;
+                for (skill, body) in &skills {
+                    let name = format!("{SKILL_BODY_DIR}/{}.md", skill.companion_skill_id);
+                    add_raw_entry(zip, &name, body.as_bytes())?;
+                    total_bytes += body.len() as u64;
+                    file_count += 1;
+                }
+            }
+            if let Some(bytes) = &figure {
+                add_raw_entry(zip, FIGURE_ENTRY, bytes)?;
+                total_bytes += bytes.len() as u64;
+                file_count += 1;
+            }
+            Ok((file_count, total_bytes))
         })
     })
     .await
@@ -364,10 +473,34 @@ pub async fn export_companion_bundle(
         file_count,
         total_bytes,
         dest_path: dest_path.to_string_lossy().to_string(),
-        memories: 0,
+        memories: memories_count,
+        skills: skills_count,
         learn_runs: 0,
         event_files: 0,
     })
+}
+
+/// The image bytes this companion's appearance points at, when it wears a custom
+/// figure: its private `figure.webp`, or the library image it borrows. A bundle
+/// always carries the PIXELS and never a library id — an id is local to one
+/// machine, so the imported copy owns its own image instead of inheriting a
+/// reference that would hard-fail the next boot's figure audit.
+///
+/// A referenced-but-missing image yields `None` rather than an error: that
+/// install is already inconsistent (its own boot audit says so), and refusing to
+/// export would only take the rest of the companion down with it.
+fn companion_figure_bytes(
+    homes: &CompanionBundleHomes,
+    profile: &CompanionProfileConfig,
+) -> Result<Option<Vec<u8>>, AppError> {
+    let Some(figure) = profile.appearance.custom_figure.as_ref() else {
+        return Ok(None);
+    };
+    let bytes = match figure.figure_id.as_deref() {
+        Some(figure_id) => crate::figures::read_image(&homes.figures_dir, figure_id)?,
+        None => crate::figure::read_figure(&homes.companions_dir, &profile.companion_id)?,
+    };
+    Ok(bytes.map(|(bytes, _mtime)| bytes))
 }
 
 /// Atomic zip write: parent dirs created, payload written to a securely-created
@@ -449,10 +582,11 @@ fn add_raw_entry(zip: &mut zip::ZipWriter<std::fs::File>, name: &str, bytes: &[u
 pub async fn import_bundle(
     store: &CompanionStore,
     roster: &dyn CompanionRoster,
+    skill_paths: &SkillPaths,
     shared_dir: &Path,
     src_path: &Path,
 ) -> Result<ImportOutcome, AppError> {
-    import_bundle_inner(store, roster, shared_dir, src_path, None, None).await
+    import_bundle_inner(store, roster, skill_paths, shared_dir, src_path, None, None).await
 }
 
 /// Production import variant. ZIP extraction and package parsing happen
@@ -463,6 +597,7 @@ pub async fn import_bundle(
 pub(crate) async fn import_bundle_with_event_lock(
     store: &CompanionStore,
     roster: &dyn CompanionRoster,
+    skill_paths: &SkillPaths,
     shared_dir: &Path,
     src_path: &Path,
     event_store_lock: crate::collector::SharedEventStoreLock,
@@ -471,6 +606,7 @@ pub(crate) async fn import_bundle_with_event_lock(
     import_bundle_inner(
         store,
         roster,
+        skill_paths,
         shared_dir,
         src_path,
         Some(event_store_lock),
@@ -482,6 +618,7 @@ pub(crate) async fn import_bundle_with_event_lock(
 async fn import_bundle_inner(
     store: &CompanionStore,
     roster: &dyn CompanionRoster,
+    skill_paths: &SkillPaths,
     shared_dir: &Path,
     src_path: &Path,
     event_store_lock: Option<crate::collector::SharedEventStoreLock>,
@@ -505,6 +642,7 @@ async fn import_bundle_inner(
     let result = import_extracted(
         store,
         roster,
+        skill_paths,
         shared_dir,
         src_path,
         &extract_dir,
@@ -520,6 +658,7 @@ async fn import_bundle_inner(
 async fn import_extracted(
     store: &CompanionStore,
     roster: &dyn CompanionRoster,
+    skill_paths: &SkillPaths,
     shared_dir: &Path,
     src_path: &Path,
     extract_dir: &Path,
@@ -544,7 +683,7 @@ async fn import_extracted(
             )
             .await
         }
-        EXPORT_KIND_COMPANION => import_companion_bundle(store, roster, extract_dir).await,
+        EXPORT_KIND_COMPANION => import_companion_bundle(store, roster, skill_paths, extract_dir).await,
         other => Err(AppError::BadRequest(format!("导入包类型不支持: {other}"))),
     }
 }
@@ -699,10 +838,20 @@ async fn import_memory_bundle(
 
 /// Recreate a packaged companion through the live roster: `create` (validated name,
 /// deduplicated against existing companions) + `patch` (persona/model/appearance),
-/// then the per-companion xp. Any failure after creation rolls the new companion back.
+/// then the per-companion xp, then everything the bundle carried — its memories,
+/// its skills (rows + `SKILL.md` bodies) and its custom figure.
+///
+/// This is a CLONE. The new companion id is local and fresh, so every carried row
+/// is re-homed onto it and given a fresh row id: a memory id from another machine
+/// would collide with local dedup, and a surviving foreign owner would hard-fail
+/// the next boot ([`crate::store::CompanionStore::validate_companion_references`]).
+///
+/// Any failure after creation rolls the new companion back — DB rows, skill
+/// bodies and figure alike.
 async fn import_companion_bundle(
     store: &CompanionStore,
     roster: &dyn CompanionRoster,
+    skill_paths: &SkillPaths,
     extract_dir: &Path,
 ) -> Result<ImportOutcome, AppError> {
     let companion_bytes = std::fs::read(extract_dir.join("companion.json"))
@@ -717,6 +866,13 @@ async fn import_companion_bundle(
     let state: CompanionStatePayload = read_json_strict(&extract_dir.join("state.json"), "state.json")?;
     let refs: KnowledgeRefsPayload =
         read_json_strict(&extract_dir.join("knowledge_refs.json"), "knowledge_refs.json")?;
+    // Optional payloads: a bundle written before companions carried anything but
+    // their settings has none of these, and must still import.
+    let mut memories =
+        parse_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", false)?;
+    let skills = parse_jsonl::<CompanionSkill>(&extract_dir.join("skills.jsonl"), "skills.jsonl", false)?;
+    let bodies = read_skill_bodies(extract_dir, &skills)?;
+    let figure = read_packaged_figure(extract_dir)?;
 
     let existing: HashSet<String> = roster.list_companions().await.into_iter().map(|p| p.name).collect();
     let base_name = match profile.name.trim() {
@@ -726,19 +882,53 @@ async fn import_companion_bundle(
     let final_name = dedup_name(&existing, base_name);
 
     let created = roster.create_companion(&final_name, &profile.character).await?;
+    let memories_count = memories.len() as u64;
+    let skills_count = skills.len() as u64;
     let setup = async {
-        roster
-            .patch_companion(
-                &created.companion_id,
-                serde_json::json!({
-                    "persona": profile.persona,
-                    "model": profile.model,
-                    "appearance": profile.appearance,
-                }),
+        // The image lands before the profile that points at it: a durable
+        // appearance referencing a figure that is not on disk hard-fails the next
+        // registry scan.
+        if let Some(bytes) = &figure {
+            crate::figure::validate_figure_bytes(bytes)?;
+            crate::fsio::save_bytes_atomic(
+                &roster.companions_dir().join(&created.companion_id),
+                crate::figure::FIGURE_FILE,
+                bytes,
             )
+            .map_err(|error| AppError::Internal(format!("save imported figure: {error}")))?;
+        }
+        roster
+            .patch_companion(&created.companion_id, imported_patch(&profile, figure.is_some())?)
             .await?;
         if state.xp != 0 {
             store.set_companion_state(&created.companion_id, "xp", &state.xp.to_string()).await?;
+        }
+        if !memories.is_empty() {
+            // Reuse the memory bundle's owner rule with a roster of exactly the
+            // new companion: every carried row therefore re-homes onto it, even
+            // one whose exported owner happens to exist locally (that other
+            // companion's memories are not this clone's).
+            rehome_imported_memories(
+                &mut memories,
+                std::slice::from_ref(&created),
+                Some(&created.companion_id),
+            );
+            for memory in memories.iter_mut() {
+                memory.memory_id = nomifun_common::CompanionMemoryId::new().into_string();
+            }
+            let transaction = store.begin_memory_import(&memories).await?;
+            transaction.commit().await?;
+        }
+        for (skill, body) in rehome_imported_skills(skills, &bodies, &created.companion_id)? {
+            crate::skill_io::write_skill(
+                skill_paths,
+                &SkillScope::Companion(created.companion_id.clone()),
+                skill.status == "draft",
+                &skill.skill_name,
+                &body,
+            )
+            .await?;
+            store.insert_skill(&skill).await?;
         }
         Ok::<(), AppError>(())
     }
@@ -752,6 +942,16 @@ async fn import_companion_bundle(
                 "rollback of failed companion import left stale store rows"
             );
         }
+        // Skill bodies are not covered by the roster's own delete in every
+        // implementation, so drop the tree explicitly: a body without its row
+        // hard-fails the next boot's inventory audit.
+        if let Err(cleanup) = crate::skill_io::remove_companion_trees(skill_paths, &created.companion_id) {
+            tracing::warn!(
+                companion_id = %created.companion_id,
+                error = %cleanup,
+                "rollback of failed companion import left stale skill bodies"
+            );
+        }
         if let Err(del) = roster.remove_companion(&created.companion_id).await {
             tracing::warn!(companion_id = %created.companion_id, error = %del, "rollback of failed companion import left a stale companion");
         }
@@ -762,7 +962,147 @@ async fn import_companion_bundle(
         companion_id: created.companion_id,
         name: final_name,
         knowledge_names: refs.names,
+        memories: memories_count,
+        skills: skills_count,
+        figure: figure.is_some(),
     })
+}
+
+/// The RFC 7396 patch that turns a freshly created companion into the packaged
+/// one: persona, appearance, and the chat model only when the bundle actually
+/// carried one. A `null` model would be read as DELETE and leave the merged
+/// profile without the field at all, so a companion exported before its model was
+/// configured must not send the key.
+fn imported_patch(
+    profile: &CompanionProfileConfig,
+    has_figure: bool,
+) -> Result<serde_json::Value, AppError> {
+    let mut patch = serde_json::Map::new();
+    patch.insert(
+        "persona".to_owned(),
+        serde_json::to_value(&profile.persona)
+            .map_err(|error| AppError::Internal(format!("serialize imported persona: {error}")))?,
+    );
+    patch.insert(
+        "appearance".to_owned(),
+        localized_appearance(profile, has_figure)?,
+    );
+    if let Some(model) = &profile.model {
+        patch.insert(
+            "model".to_owned(),
+            serde_json::to_value(model)
+                .map_err(|error| AppError::Internal(format!("serialize imported model: {error}")))?,
+        );
+    }
+    Ok(serde_json::Value::Object(patch))
+}
+
+/// The appearance the imported copy may durably keep.
+///
+/// A custom figure only survives when the bundle actually carried its pixels, and
+/// then always as a companion-OWNED image (`figure_id` cleared — a library id from
+/// another machine points at nothing here). Without pixels the whole
+/// `custom_figure` is dropped: keeping it would make the next registry scan
+/// hard-fail on a missing local figure, which is exactly how an old bundle used to
+/// brick a fresh install.
+fn localized_appearance(
+    profile: &CompanionProfileConfig,
+    has_figure: bool,
+) -> Result<serde_json::Value, AppError> {
+    let mut appearance = profile.appearance.clone();
+    match (&mut appearance.custom_figure, has_figure) {
+        (Some(figure), true) => figure.figure_id = None,
+        (slot @ Some(_), false) => {
+            tracing::info!(
+                companion_id = %profile.companion_id,
+                "imported bundle references a custom figure but carries no image; importing without it"
+            );
+            *slot = None;
+        }
+        (None, _) => {}
+    }
+    serde_json::to_value(&appearance)
+        .map_err(|error| AppError::Internal(format!("serialize imported appearance: {error}")))
+}
+
+/// The packaged figure image, if any. Absent is normal (most companions wear a
+/// built-in character, and an old bundle carried no image at all).
+fn read_packaged_figure(extract_dir: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    let path = extract_dir.join(FIGURE_ENTRY);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::Internal(format!("读取 {FIGURE_ENTRY} 失败: {error}"))),
+    }
+}
+
+/// Every packaged skill's `SKILL.md`, keyed by the id it was exported under. A
+/// row without its body is a broken package, not a skill we silently drop.
+fn read_skill_bodies(
+    extract_dir: &Path,
+    skills: &[CompanionSkill],
+) -> Result<HashMap<String, String>, AppError> {
+    let mut bodies = HashMap::new();
+    for skill in skills {
+        let path = extract_dir
+            .join(SKILL_BODY_DIR)
+            .join(format!("{}.md", skill.companion_skill_id));
+        let body = std::fs::read_to_string(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                AppError::BadRequest(format!(
+                    "导出包缺少技能 {} 的 {}/{}.md",
+                    skill.skill_name, SKILL_BODY_DIR, skill.companion_skill_id
+                ))
+            } else {
+                AppError::Internal(format!("读取技能正文 {} 失败: {error}", path.display()))
+            }
+        })?;
+        bodies.insert(skill.companion_skill_id.clone(), body);
+    }
+    Ok(bodies)
+}
+
+/// Re-home every packaged skill onto the freshly created local companion: new row
+/// id (an id from another machine may already be taken here), the new owner, and
+/// no `skill_pattern_id` — that pattern was mined on the source machine and does
+/// not exist locally, so `insert_skill` would reject the reference.
+///
+/// Duplicate skill names inside one bundle are impossible per owner (the store
+/// enforces one name per companion), so the later row is dropped rather than
+/// failing the whole import on a package the exporter should never have written.
+fn rehome_imported_skills(
+    skills: Vec<CompanionSkill>,
+    bodies: &HashMap<String, String>,
+    owner: &str,
+) -> Result<Vec<(CompanionSkill, String)>, AppError> {
+    let mut seen_names = HashSet::new();
+    let mut out = Vec::new();
+    for mut skill in skills {
+        if !matches!(skill.status.as_str(), "draft" | "active" | "archived") {
+            return Err(AppError::BadRequest(format!(
+                "skills.jsonl 技能状态无效: {}",
+                skill.status
+            )));
+        }
+        let Some(body) = bodies.get(&skill.companion_skill_id).cloned() else {
+            return Err(AppError::Internal(format!(
+                "imported skill {} lost its body",
+                skill.companion_skill_id
+            )));
+        };
+        if !seen_names.insert(skill.skill_name.clone()) {
+            tracing::warn!(
+                skill = %skill.skill_name,
+                "imported bundle carries the same skill name twice; keeping the first"
+            );
+            continue;
+        }
+        skill.companion_skill_id = nomifun_common::CompanionSkillId::new().into_string();
+        skill.scope_companion_id = Some(owner.to_owned());
+        skill.skill_pattern_id = None;
+        out.push((skill, body));
+    }
+    Ok(out)
 }
 
 /// Parse one jsonl file into rows, strictly: any malformed line fails the
@@ -1079,7 +1419,7 @@ fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<Stri
         }
 
         if entry.is_dir() {
-            if rel != Path::new("events") {
+            if rel != Path::new("events") && rel != Path::new(SKILL_BODY_DIR) {
                 return Err(AppError::BadRequest(format!(
                     "不是 NomiFun 导出包（包含不支持的条目: {entry_name}）"
                 )));
@@ -1095,6 +1435,10 @@ fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<Stri
             || rel == Path::new("state.json")
             || rel == Path::new("companion.json")
             || rel == Path::new("knowledge_refs.json")
+            || rel == Path::new("skills.jsonl")
+            || rel == Path::new(FIGURE_ENTRY)
+            || (rel.parent() == Some(Path::new(SKILL_BODY_DIR))
+                && rel.extension().is_some_and(|ext| ext == "md"))
             || (rel.parent() == Some(Path::new("events")) && rel.extension().is_some_and(|ext| ext == "jsonl"));
         if !allowed {
             return Err(AppError::BadRequest(format!(
@@ -1146,20 +1490,29 @@ fn validate_manifest(manifest: &ExportManifest, destination: &Path) -> Result<St
     };
     let present = |name: &str| destination.join(name).is_file();
     let valid_shape = match kind.as_str() {
+        // A memory bundle is the shared hub and nothing else: no companion
+        // identity, no skills, no figure.
         EXPORT_KIND_MEMORY => {
             present("memories.jsonl")
                 && present("learn_runs.jsonl")
                 && present("state.json")
                 && !present("companion.json")
                 && !present("knowledge_refs.json")
+                && !present("skills.jsonl")
+                && !present(FIGURE_ENTRY)
+                && !destination.join(SKILL_BODY_DIR).exists()
         }
+        // A companion bundle always carries its settings; `memories.jsonl`,
+        // `skills.jsonl` + `skills/`, and `figure.webp` are optional payloads
+        // (export scope, or a bundle written before they existed). Raw events and
+        // the legacy learn-run marker belong to the memory hub, never here.
         EXPORT_KIND_COMPANION => {
             present("companion.json")
                 && present("state.json")
                 && present("knowledge_refs.json")
-                && !present("memories.jsonl")
                 && !present("learn_runs.jsonl")
                 && !destination.join("events").exists()
+                && (present("skills.jsonl") || !destination.join(SKILL_BODY_DIR).exists())
         }
         _ => false,
     };
@@ -1207,6 +1560,23 @@ fn dedup_name(existing: &HashSet<String>, name: &str) -> String {
 mod tests {
     use super::*;
     use crate::registry::CompanionRegistry;
+
+    /// A real skill tree under the test root — the same layout the app resolves,
+    /// so an imported `SKILL.md` lands exactly where the boot audit looks.
+    fn skill_paths(root: &Path) -> SkillPaths {
+        nomifun_extension::skill_service::resolve_skill_paths(root, root)
+    }
+
+    /// The homes a companion EXPORT reads: `{root}/{companions}` for a
+    /// per-companion figure (matching [`scan_registry`]), the figure library, and
+    /// the skill tree.
+    fn export_homes(root: &Path, companions: &str) -> CompanionBundleHomes {
+        CompanionBundleHomes {
+            companions_dir: root.join(companions),
+            figures_dir: root.join("figures"),
+            skill_paths: Arc::new(skill_paths(root)),
+        }
+    }
 
     fn memory_fixture(sequence: u64) -> String {
         let raw = format!("0190f5fe-7c00-7a00-8abc-{sequence:012}");
@@ -1334,7 +1704,7 @@ mod tests {
         let store_b = CompanionStore::open_memory().await.unwrap();
         store_b.set_state("mood", "calm").await.unwrap();
         let roster_b = scan_registry(dir.path(), "companions-b");
-        let outcome = import_bundle(&store_b, &roster_b, &shared_b, &zip_path).await.unwrap();
+        let outcome = import_bundle(&store_b, &roster_b, &skill_paths(dir.path()), &shared_b, &zip_path).await.unwrap();
         assert_eq!(
             outcome,
             ImportOutcome::Memory {
@@ -1351,7 +1721,7 @@ mod tests {
 
         // Re-import with byte-identical events: the archived row and event file
         // are idempotently skipped.
-        let outcome = import_bundle(&store_b, &roster_b, &shared_b, &zip_path).await.unwrap();
+        let outcome = import_bundle(&store_b, &roster_b, &skill_paths(dir.path()), &shared_b, &zip_path).await.unwrap();
         assert_eq!(
             outcome,
             ImportOutcome::Memory {
@@ -1368,7 +1738,7 @@ mod tests {
             nomifun_common::generate_id()
         );
         std::fs::write(&landed, &local_event).unwrap();
-        let error = import_bundle(&store_b, &roster_b, &shared_b, &zip_path)
+        let error = import_bundle(&store_b, &roster_b, &skill_paths(dir.path()), &shared_b, &zip_path)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("event import conflict"), "{error}");
@@ -1414,7 +1784,7 @@ mod tests {
         );
 
         let store = CompanionStore::open_memory().await.unwrap();
-        let outcome = import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
+        let outcome = import_bundle(&store, &roster, &skill_paths(dir.path()), &dir.path().join("shared"), &archive)
             .await
             .unwrap();
         assert_eq!(outcome, ImportOutcome::Memory { imported: 3, skipped_duplicates: 0 });
@@ -1479,7 +1849,7 @@ mod tests {
                 ("state.json", r#"{"mood":null}"#),
             ],
         );
-        let outcome = import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
+        let outcome = import_bundle(&store, &roster, &skill_paths(dir.path()), &dir.path().join("shared"), &archive)
             .await
             .unwrap();
         assert_eq!(
@@ -1494,7 +1864,7 @@ mod tests {
 
         // Re-importing the same bundle IS a duplicate (same id, same re-homed
         // shape), so idempotency is untouched by the owner scoping.
-        let again = import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
+        let again = import_bundle(&store, &roster, &skill_paths(dir.path()), &dir.path().join("shared"), &archive)
             .await
             .unwrap();
         assert_eq!(again, ImportOutcome::Memory { imported: 0, skipped_duplicates: 1 });
@@ -1524,7 +1894,7 @@ mod tests {
         );
 
         let store = CompanionStore::open_memory().await.unwrap();
-        import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
+        import_bundle(&store, &roster, &skill_paths(dir.path()), &dir.path().join("shared"), &archive)
             .await
             .unwrap();
         let restored = store.dump_memories_all().await.unwrap();
@@ -1584,6 +1954,7 @@ mod tests {
         let outcome = import_bundle(
             &store,
             &roster,
+            &skill_paths(dir.path()),
             &dir.path().join("shared"),
             &archive,
         )
@@ -1630,7 +2001,7 @@ mod tests {
             .await
             .unwrap();
         let roster_b = scan_registry(dir.path(), "companions-b");
-        let error = import_bundle(&store_b, &roster_b, &dir.path().join("shared-b"), &zip_path)
+        let error = import_bundle(&store_b, &roster_b, &skill_paths(dir.path()), &dir.path().join("shared-b"), &zip_path)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("memory import ID collision"));
@@ -1683,11 +2054,20 @@ mod tests {
         store_a.add_companion_xp(&profile.companion_id, 57).await.unwrap();
 
         let zip_path = dir.path().join("companion.zip");
-        let summary = export_companion_bundle(&store_a, &profile, &zip_path, &["库甲".into(), "库乙".into()])
-            .await
-            .unwrap();
+        let summary = export_companion_bundle(
+            &store_a,
+            &export_homes(dir.path(), "companions-a"),
+            &profile,
+            &zip_path,
+            &["库甲".into(), "库乙".into()],
+            CompanionBundleScope { memories: false, skills: false },
+        )
+        .await
+        .unwrap();
         assert_eq!(summary.kind, "companion");
-        assert_eq!(summary.file_count, 3);
+        assert_eq!(summary.file_count, 3, "settings only: no memories, skills or figure");
+        assert_eq!(summary.memories, 0);
+        assert_eq!(summary.skills, 0);
         assert!(!dir.path().join("companion.zip.tmp").exists());
 
         // Target roster already has a companion with the same name.
@@ -1695,17 +2075,21 @@ mod tests {
         let reg_b = scan_registry(dir.path(), "companions-b");
         reg_b.create("毛球", "mochi").await.unwrap();
 
-        let outcome = import_bundle(&store_b, &reg_b, &dir.path().join("shared-b"), &zip_path)
+        let outcome = import_bundle(&store_b, &reg_b, &skill_paths(dir.path()), &dir.path().join("shared-b"), &zip_path)
             .await
             .unwrap();
         let ImportOutcome::Companion {
             companion_id,
             name,
             knowledge_names,
+            memories,
+            skills,
+            figure,
         } = outcome
         else {
             panic!("expected companion outcome");
         };
+        assert_eq!((memories, skills, figure), (0, 0, false));
         assert_eq!(name, "毛球 (2)");
         assert_eq!(knowledge_names, vec!["库甲".to_string(), "库乙".to_string()]);
         assert_ne!(
@@ -1725,13 +2109,290 @@ mod tests {
         assert_eq!(store_b.get_companion_state_i64(&companion_id, "xp").await.unwrap(), 57);
 
         // Importing again suffixes further.
-        let outcome = import_bundle(&store_b, &reg_b, &dir.path().join("shared-b"), &zip_path)
+        let outcome = import_bundle(&store_b, &reg_b, &skill_paths(dir.path()), &dir.path().join("shared-b"), &zip_path)
             .await
             .unwrap();
         let ImportOutcome::Companion { name, .. } = outcome else {
             panic!("expected companion outcome");
         };
         assert_eq!(name, "毛球 (3)");
+    }
+
+    /// A real 7×5 lossless WebP (VP8L), the same fixture `figure.rs` uses.
+    fn webp_bytes() -> Vec<u8> {
+        vec![
+            0x52, 0x49, 0x46, 0x46, 0x1E, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50,
+            0x38, 0x4C, 0x11, 0x00, 0x00, 0x00, 0x2F, 0x06, 0x00, 0x01, 0x00, 0x07, 0x50, 0x8A,
+            0x2A, 0xD4, 0xA3, 0xFF, 0x81, 0x88, 0xE8, 0x7F, 0x00, 0x00,
+        ]
+    }
+
+    fn custom_figure_appearance() -> serde_json::Value {
+        serde_json::json!({
+            "companion_enabled": true,
+            "companion_x": null,
+            "companion_y": null,
+            "quiet_start": "",
+            "quiet_end": "",
+            "custom_figure": {"aspect": 1.4, "head_box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "size_tier": "m"},
+        })
+    }
+
+    /// Seed one companion-owned skill: the row plus the `SKILL.md` body where the
+    /// boot inventory audit expects it.
+    async fn seed_skill(
+        store: &CompanionStore,
+        paths: &SkillPaths,
+        owner: &str,
+        name: &str,
+        status: &str,
+    ) -> CompanionSkill {
+        let body = format!(
+            "---\nname: {name}\ndescription: 导出用技能\n---\n\n# {name}\n\n照着做就行。\n"
+        );
+        crate::skill_io::write_skill(
+            paths,
+            &SkillScope::Companion(owner.to_owned()),
+            status == "draft",
+            name,
+            &body,
+        )
+        .await
+        .unwrap();
+        let skill = CompanionSkill {
+            companion_skill_id: nomifun_common::CompanionSkillId::new().into_string(),
+            skill_name: name.to_owned(),
+            scope_companion_id: Some(owner.to_owned()),
+            status: status.to_owned(),
+            source: "mined".into(),
+            confidence: 0.8,
+            provenance_event_ids: vec![],
+            strength: 1.0,
+            version: 1,
+            skill_pattern_id: None,
+            usage_count: 3,
+            last_used_at: Some(9),
+            created_at: 1,
+            updated_at: 2,
+            signature: String::new(),
+        };
+        store.insert_skill(&skill).await.unwrap();
+        skill
+    }
+
+    /// The whole point of 导出伙伴: the bundle carries what makes it *this*
+    /// companion, and the import re-homes every carried row onto the FRESH local
+    /// id — the boot-critical part, since an orphaned owner reference hard-fails
+    /// `validate_companion_references` and a stray skill body hard-fails the skill
+    /// inventory audit.
+    #[tokio::test]
+    async fn companion_bundle_carries_memories_skills_and_figure_and_rehomes_them() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store_a = CompanionStore::open_memory().await.unwrap();
+        let paths_a = skill_paths(&dir.path().join("a"));
+        let reg_a = scan_registry(dir.path(), "companions-a");
+        let source = reg_a.create("毛球", "custom").await.unwrap();
+        let profile = reg_a
+            .patch(
+                &source.companion_id,
+                serde_json::json!({
+                    "model": {"provider_id": provider_fixture(2), "model": "claude-fable-5"},
+                    "appearance": custom_figure_appearance(),
+                }),
+            )
+            .await
+            .unwrap();
+        crate::fsio::save_bytes_atomic(
+            &dir.path().join("companions-a").join(&source.companion_id),
+            crate::figure::FIGURE_FILE,
+            &webp_bytes(),
+        )
+        .unwrap();
+
+        // Two memories owned by this companion, one owned by nobody (a vestigial
+        // shared row) that must NOT travel with it.
+        let mut owned = raw_memory(&memory_fixture(61), "preference", "主人怕苦", "active");
+        owned.scope_kind = "companion".into();
+        owned.scope_companion_id = Some(source.companion_id.clone());
+        let mut archived = raw_memory(&memory_fixture(62), "episode", "上周一起改了导出", "archived");
+        archived.scope_kind = "companion".into();
+        archived.scope_companion_id = Some(source.companion_id.clone());
+        let stranger = raw_memory(&memory_fixture(63), "knowledge", "谁也不拥有的旧行", "active");
+        for memory in [&owned, &archived, &stranger] {
+            store_a.insert_memory_raw(memory).await.unwrap();
+        }
+        let active_skill = seed_skill(&store_a, &paths_a, &source.companion_id, "deploy", "active").await;
+        seed_skill(&store_a, &paths_a, &source.companion_id, "draft-idea", "draft").await;
+
+        let homes_a = CompanionBundleHomes {
+            companions_dir: dir.path().join("companions-a"),
+            figures_dir: dir.path().join("figures-a"),
+            skill_paths: Arc::new(skill_paths(&dir.path().join("a"))),
+        };
+        let zip_path = dir.path().join("full.zip");
+        let summary = export_companion_bundle(
+            &store_a,
+            &homes_a,
+            &profile,
+            &zip_path,
+            &[],
+            CompanionBundleScope { memories: true, skills: true },
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.memories, 2, "only this companion's memories travel");
+        assert_eq!(summary.skills, 2);
+        // settings(3) + memories.jsonl + skills.jsonl + 2 bodies + figure.webp
+        assert_eq!(summary.file_count, 8);
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+        assert!(archive.by_name("memories.jsonl").is_ok());
+        assert!(archive.by_name("figure.webp").is_ok());
+        assert!(
+            archive
+                .by_name(&format!("skills/{}.md", active_skill.companion_skill_id))
+                .is_ok()
+        );
+
+        // Import onto a machine that has never seen this companion.
+        let store_b = CompanionStore::open_memory().await.unwrap();
+        let paths_b = skill_paths(&dir.path().join("b"));
+        let reg_b = scan_registry(dir.path(), "companions-b");
+        let outcome = import_bundle(&store_b, &reg_b, &paths_b, &dir.path().join("shared-b"), &zip_path)
+            .await
+            .unwrap();
+        let ImportOutcome::Companion { companion_id, memories, skills, figure, .. } = outcome else {
+            panic!("expected companion outcome");
+        };
+        assert_eq!((memories, skills, figure), (2, 2, true));
+        assert_ne!(companion_id, source.companion_id);
+
+        // Every memory belongs to the NEW companion, with a fresh row id.
+        let landed = store_b.dump_memories_for_companion(&companion_id).await.unwrap();
+        assert_eq!(landed.len(), 2);
+        let mut contents: Vec<&str> = landed.iter().map(|m| m.content.as_str()).collect();
+        contents.sort();
+        assert_eq!(contents, vec!["上周一起改了导出", "主人怕苦"]);
+        assert!(
+            landed.iter().any(|m| m.status == "archived"),
+            "an archived memory stays archived: {landed:?}"
+        );
+        assert!(
+            landed.iter().all(|m| m.memory_id != owned.memory_id && m.memory_id != archived.memory_id),
+            "a cloned companion gets fresh memory ids"
+        );
+        assert_eq!(store_b.dump_memories_all().await.unwrap().len(), 2, "nothing else came along");
+
+        // Every skill belongs to it too, and its body sits where the boot audit looks.
+        let imported_skills = store_b.list_skills(&companion_id).await.unwrap();
+        assert_eq!(imported_skills.len(), 2);
+        for skill in &imported_skills {
+            assert_eq!(skill.scope_companion_id.as_deref(), Some(companion_id.as_str()));
+            assert_ne!(skill.companion_skill_id, active_skill.companion_skill_id);
+            assert!(
+                crate::skill_io::read_skill_body(&paths_b, skill)
+                    .await
+                    .unwrap()
+                    .contains(&skill.skill_name)
+            );
+        }
+        crate::skill_io::validate_store(&paths_b, &store_b.list_all_skills().await.unwrap())
+            .await
+            .expect("the imported skill tree must survive the boot inventory audit");
+
+        // The figure landed beside the new profile and is owned, not borrowed.
+        let imported = reg_b.get(&companion_id).await.unwrap();
+        let landed_figure = imported.appearance.custom_figure.as_ref().unwrap();
+        assert_eq!(landed_figure.figure_id, None, "a library id from another machine means nothing here");
+        assert_eq!(landed_figure.size_tier, "m");
+        assert_eq!(
+            crate::figure::read_figure(reg_b.companions_dir(), &companion_id).unwrap().unwrap().0,
+            webp_bytes()
+        );
+
+        // BOOT-CRITICAL: the next launch's reference audit passes.
+        store_b
+            .validate_companion_references(&[companion_id].into_iter().collect())
+            .await
+            .unwrap();
+    }
+
+    /// A bundle written by the OLD exporter — four entries, no memories, no
+    /// skills, no image — must still import. When such a bundle claims a custom
+    /// figure it has no pixels for, the figure is dropped instead of leaving a
+    /// profile that points at a missing image (which hard-fails the registry scan
+    /// on the next boot).
+    #[tokio::test]
+    async fn legacy_settings_only_bundle_still_imports_and_never_keeps_a_pixelless_figure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = CompanionStore::open_memory().await.unwrap();
+        let paths = skill_paths(dir.path());
+        let reg = scan_registry(dir.path(), "companions");
+        let mut legacy = CompanionProfileConfig::new("老包伙伴", "custom", 7);
+        legacy.appearance = serde_json::from_value(custom_figure_appearance()).unwrap();
+
+        let archive = dir.path().join("legacy-companion.zip");
+        write_test_zip(
+            &archive,
+            &[
+                ("manifest.json", &manifest_json(3, EXPORT_KIND_COMPANION)),
+                ("companion.json", &serde_json::to_string(&legacy).unwrap()),
+                ("state.json", r#"{"xp":42}"#),
+                ("knowledge_refs.json", r#"{"names":["旧库"]}"#),
+            ],
+        );
+
+        let outcome = import_bundle(&store, &reg, &paths, &dir.path().join("shared"), &archive)
+            .await
+            .unwrap();
+        let ImportOutcome::Companion { companion_id, name, knowledge_names, memories, skills, figure } = outcome
+        else {
+            panic!("expected companion outcome");
+        };
+        assert_eq!(name, "老包伙伴");
+        assert_eq!(knowledge_names, vec!["旧库".to_string()]);
+        assert_eq!((memories, skills, figure), (0, 0, false));
+        assert_eq!(store.get_companion_state_i64(&companion_id, "xp").await.unwrap(), 42);
+        let imported = reg.get(&companion_id).await.unwrap();
+        assert!(
+            imported.appearance.custom_figure.is_none(),
+            "a figure with no image must not survive the import"
+        );
+        assert!(crate::figure::read_figure(reg.companions_dir(), &companion_id).unwrap().is_none());
+        // The same audits the next boot runs.
+        reg.validate_figure_references(&HashSet::new()).await.unwrap();
+        store
+            .validate_companion_references(&[companion_id].into_iter().collect())
+            .await
+            .unwrap();
+    }
+
+    /// A memory bundle must stay the shared hub: companion-only payloads are not
+    /// silently accepted into it.
+    #[tokio::test]
+    async fn memory_bundle_rejects_companion_only_payloads() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = CompanionStore::open_memory().await.unwrap();
+        let roster = scan_registry(dir.path(), "companions");
+        for (label, entry) in [
+            ("skills", ("skills.jsonl", "")),
+            ("figure", ("figure.webp", "not-an-image")),
+        ] {
+            let path = dir.path().join(format!("memory-with-{label}.zip"));
+            write_test_zip(
+                &path,
+                &[
+                    ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
+                    ("memories.jsonl", ""),
+                    ("learn_runs.jsonl", ""),
+                    ("state.json", r#"{"mood":null}"#),
+                    entry,
+                ],
+            );
+            let error = import_bundle(&store, &roster, &skill_paths(dir.path()), &dir.path().join("shared"), &path)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("文件集合"), "{label}: {error}");
+        }
     }
 
     #[tokio::test]
@@ -1754,17 +2415,17 @@ mod tests {
                 ("state.json", r#"{"mood":null}"#),
             ],
         );
-        let err = import_bundle(&store, &roster, &shared, &wrong_format).await.unwrap_err();
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &wrong_format).await.unwrap_err();
         assert!(err.to_string().contains("不是 NomiFun 导出包"), "{err}");
 
         let wrong_kind = dir.path().join("kind.zip");
         write_test_zip(&wrong_kind, &[("manifest.json", &manifest_json(3, "knowledge-base"))]);
-        let err = import_bundle(&store, &roster, &shared, &wrong_kind).await.unwrap_err();
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &wrong_kind).await.unwrap_err();
         assert!(err.to_string().contains("导入包类型不支持"), "{err}");
 
         let too_new = dir.path().join("future.zip");
         write_test_zip(&too_new, &[("manifest.json", &manifest_json(4, EXPORT_KIND_MEMORY))]);
-        let err = import_bundle(&store, &roster, &shared, &too_new).await.unwrap_err();
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &too_new).await.unwrap_err();
         assert!(err.to_string().contains("导入包版本过新"), "{err}");
 
         for (name, manifest) in [
@@ -1791,7 +2452,7 @@ mod tests {
                     ("state.json", r#"{"mood":null}"#),
                 ],
             );
-            let err = import_bundle(&store, &roster, &shared, &path).await.unwrap_err();
+            let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &path).await.unwrap_err();
             assert!(
                 err.to_string().contains("manifest.json") || err.to_string().contains("版本过旧"),
                 "{name}: {err}"
@@ -1811,18 +2472,18 @@ mod tests {
                 ("state.json", r#"{"mood":null}"#),
             ],
         );
-        let err = import_bundle(&store, &roster, &shared, &unknown_manifest_field)
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &unknown_manifest_field)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown field"), "{err}");
 
         let not_zip = dir.path().join("garbage.zip");
         std::fs::write(&not_zip, "definitely not a zip").unwrap();
-        let err = import_bundle(&store, &roster, &shared, &not_zip).await.unwrap_err();
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &not_zip).await.unwrap_err();
         assert!(err.to_string().contains("不是 NomiFun 导出包"), "{err}");
 
         let missing = dir.path().join("missing.zip");
-        let err = import_bundle(&store, &roster, &shared, &missing).await.unwrap_err();
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &missing).await.unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
 
         // A memory package without memories.jsonl is rejected explicitly.
@@ -1835,7 +2496,7 @@ mod tests {
                 ("state.json", r#"{"mood":null}"#),
             ],
         );
-        let err = import_bundle(&store, &roster, &shared, &incomplete).await.unwrap_err();
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &incomplete).await.unwrap_err();
         assert!(err.to_string().contains("文件集合"), "{err}");
         assert_eq!(store.dump_memories_all().await.unwrap().len(), 0);
         assert!(roster.list().await.is_empty());
@@ -1859,7 +2520,7 @@ mod tests {
                 ("learn_runs.jsonl", ""),
             ],
         );
-        let error = import_bundle(&store, &roster, &shared, &memory_state_missing)
+        let error = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &memory_state_missing)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("文件集合"), "{error}");
@@ -1875,7 +2536,7 @@ mod tests {
                 ("state.json", r#"{"mood":null,"extra":true}"#),
             ],
         );
-        let error = import_bundle(&store, &roster, &shared, &memory_state_unknown)
+        let error = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &memory_state_unknown)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("unknown field"), "{error}");
@@ -1889,7 +2550,7 @@ mod tests {
                 ("knowledge_refs.json", r#"{"names":[]}"#),
             ],
         );
-        let error = import_bundle(&store, &roster, &shared, &companion_state_missing)
+        let error = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &companion_state_missing)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("文件集合"), "{error}");
@@ -1905,7 +2566,7 @@ mod tests {
                 ("knowledge_refs.json", r#"{"names":[]}"#),
             ],
         );
-        let error = import_bundle(&store, &roster, &shared, &companion_state_unknown)
+        let error = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &companion_state_unknown)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("unknown field"), "{error}");
@@ -1921,7 +2582,7 @@ mod tests {
                 ("knowledge_refs.json", r#"{"names":[],"extra":true}"#),
             ],
         );
-        let error = import_bundle(&store, &roster, &shared, &refs_unknown)
+        let error = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &refs_unknown)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("unknown field"), "{error}");
@@ -1955,7 +2616,7 @@ mod tests {
             ],
         );
 
-        let error = import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
+        let error = import_bundle(&store, &roster, &skill_paths(dir.path()), &dir.path().join("shared"), &archive)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("memory import ID collision"), "{error}");
@@ -1981,7 +2642,7 @@ mod tests {
                 ("../evil.jsonl", "escaped"),
             ],
         );
-        let err = import_bundle(&store, &roster, &shared, &evil).await.unwrap_err();
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &evil).await.unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
         assert!(!dir.path().join("evil.jsonl").exists());
 
@@ -1996,7 +2657,7 @@ mod tests {
                 ("events/payload.exe", "MZ"),
             ],
         );
-        let err = import_bundle(&store, &roster, &shared, &exe).await.unwrap_err();
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &exe).await.unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
 
         let stray = dir.path().join("stray.zip");
@@ -2010,7 +2671,7 @@ mod tests {
                 ("extra.txt", "?"),
             ],
         );
-        let err = import_bundle(&store, &roster, &shared, &stray).await.unwrap_err();
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &shared, &stray).await.unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
         assert_eq!(store.dump_memories_all().await.unwrap().len(), 0);
     }
@@ -2032,7 +2693,7 @@ mod tests {
                 ("state.json", r#"{"mood":null}"#),
             ],
         );
-        let err = import_bundle(&store, &roster, &dir.path().join("shared"), &corrupt)
+        let err = import_bundle(&store, &roster, &skill_paths(dir.path()), &dir.path().join("shared"), &corrupt)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("第 2 行"), "{err}");
@@ -2090,6 +2751,7 @@ mod tests {
         let error = import_bundle_with_event_lock(
             &store,
             &roster,
+            &skill_paths(dir.path()),
             &shared,
             &archive,
             event_lock,
@@ -2135,6 +2797,7 @@ mod tests {
         let outcome = import_bundle_with_event_lock(
             &store,
             &roster,
+            &skill_paths(dir.path()),
             &shared,
             &archive,
             event_lock,

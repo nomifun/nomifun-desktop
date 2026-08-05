@@ -252,6 +252,8 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 - 删除死代码：`useCompanionShared`、`pages/nomi` 下三处 Arco 图标引用改为 icon-park。
 - 新增 `workspace/shell.structure.test.ts`（标签注册表 / URL 契约 / 删除不变量，经变异测试确认有效）与 `shellPrimitives.test.ts`。
 - 契约版本 4 → 5；CHANGELOG 记录降级不可逆。
+- §5.4 聊天历史按天：`GET /api/companion/companions/{id}/history/days` 落地（服务端按本地日分桶，只读解析会话、从不铸造），消息按天读取走既有 `GET /api/conversations/{id}/messages` 新增的 `day` 参数；客户端分页分组、「加载更早」与"索引只到某天"的脚注全部删除。
+- §5.5 导出范围：companion 包补齐 `memories.jsonl`（默认开）、`skills.jsonl` + `skills/{id}.md`（可选）与 `figure.webp`（伙伴用自定义形象时随包走）；`file_count` / `memories` / 新增 `skills` 均为实算；导入把每条记忆与技能改归到新铸造的伙伴 id 上（新行 id），范围复选框已启用（设定始终勾选且禁用）。契约版本 7 → 8。
 
 **验证证据**
 
@@ -273,7 +275,5 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 2. 技能专精的后端残余：`giftSkill` 路由与共享作用域技能行仍存在（UI 已不再调用，`include_shared: false`）。
 3. 进化配置改为按伙伴（§5.1）：目前 `EvolutionTab` 通过 `useEvolutionConfig.ts` 适配器读写装机级共享配置，并在每个分区标注"当前对所有伙伴生效"。该文件顶部注明了迁移接缝位置。
 4. 采集配置迁出到应用设置 · 隐私（§5.2）。
-5. 聊天历史的后端按天索引接口（§5.4）；当前为客户端分页分组 + 显式「加载更早」。
-6. 导出范围补齐（§5.5）；当前范围复选框中后端无法兑现的项已禁用并标注。
-7. 文档：`docs/guides/companions*.md` 与 README 头条卖点仍在描述"共享记忆中枢"，需随第 1 项一起改。
+5. 文档：`docs/guides/companions*.md` 与 README 头条卖点仍在描述"共享记忆中枢"，需随第 1 项一起改。
 

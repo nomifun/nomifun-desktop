@@ -30,8 +30,8 @@ notes at a high level rather than a complete historical log.
   but every *other* companion permanently loses sight of them and this cannot be
   undone — if you want a particular companion to inherit the history, make it the
   default companion **before** launching this build. Deleting a companion now
-  destroys the memories filed under it, and no bundle can bring them back (the
-  companion bundle carries settings and growth only). A zero-companion install
+  destroys the memories filed under it, so export the companion first if you want
+  to keep them (the companion bundle now carries its memories by default). A zero-companion install
   remains supported: rows stay unowned until a companion exists again and are
   re-homed at a later launch, and a learning run with an empty roster exits early
   instead of writing an ownerless memory. Importing a memory bundle re-homes
@@ -45,6 +45,35 @@ notes at a high level rather than a complete historical log.
   totals). Collection and learning **configuration** is unchanged and still
   install-wide: one schedule, one learn model, one set of event sources for the
   whole machine.
+
+- 聊天历史 (`/nomi` → 聊天历史) now reads a **server-side** day index:
+  `GET /api/companion/companions/{id}/history/days` returns every local calendar
+  day the companion's conversation holds visible messages on (plus every day with
+  an archive digest), and `GET /api/conversations/{id}/messages` takes a new
+  `day=YYYYMMDD` parameter that returns exactly that day, oldest-first. The day
+  boundary is now computed once, on the server, in the same timezone that
+  partitions archive digests — so the digest marker can no longer land on the
+  wrong day near midnight, and a browser in a different timezone from the backend
+  no longer mislabels days. The day rail is therefore complete: 「加载更早」 and
+  the "the index only reaches {day}" footnote are gone. The reader still never
+  mints a session, so it works for a companion with no model configured.
+
+- 导出伙伴 now actually exports the companion. The bundle carries its
+  `memories.jsonl` (on by default), optionally its skills (rows plus their
+  `SKILL.md` bodies), and the custom figure image whenever the companion wears
+  one; settings and growth progress are always included. `POST
+  /api/companion/export/companions/{id}` gained `include_memories` (default
+  `true`) and `include_skills` (default `false`), the response's `file_count` and
+  `memories` are computed rather than hardcoded, and it reports a new `skills`
+  count. Import re-homes every carried memory and skill onto the freshly minted
+  companion id with fresh row ids, so a bundle from another machine can no longer
+  leave a foreign owner behind (which would hard-fail the next boot's reference
+  audit). Two latent import bugs are fixed on the way: a companion exported
+  before its chat model was configured no longer fails to import, and a bundle
+  claiming a custom figure it has no image for now drops the figure instead of
+  producing an install that refuses to boot. Bundles written by the previous
+  build (four entries, no memories) still import. The UI/API contract version was
+  bumped accordingly.
 
 - **Breaking / no downgrade.** The 建议 (Suggestions) feature is removed
   entirely — the `/nomi` tab, the desktop-pet unread badge, the detached

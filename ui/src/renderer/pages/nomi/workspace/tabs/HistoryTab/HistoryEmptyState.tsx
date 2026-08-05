@@ -16,7 +16,6 @@ interface HistoryEmptyStateProps {
   onRetry?: () => void;
   title: string;
   description: string;
-  retryLabel?: string;
 }
 
 /**
@@ -25,7 +24,7 @@ interface HistoryEmptyStateProps {
  * 400 for a companion with no model configured). History simply appears after
  * the first real conversation.
  */
-const HistoryEmptyState: React.FC<HistoryEmptyStateProps> = ({ onRetry, title, description, retryLabel }) => {
+const HistoryEmptyState: React.FC<HistoryEmptyStateProps> = ({ onRetry, title, description }) => {
   const { t } = useTranslation();
 
   return (
@@ -48,7 +47,7 @@ const HistoryEmptyState: React.FC<HistoryEmptyStateProps> = ({ onRetry, title, d
           }}
           className='mt-2px cursor-pointer rd-full bg-[rgba(var(--primary-6),0.12)] px-18px py-9px text-13px font-700 text-[var(--color-text-1)] shadow-[0_6px_18px_rgba(var(--primary-6),0.14)] outline-none transition-colors hover:bg-[rgba(var(--primary-6),0.18)]'
         >
-          {retryLabel ?? t('nomi.history.retry', { defaultValue: '重试' })}
+          {t('nomi.history.retry', { defaultValue: '重试' })}
         </div>
       )}
     </div>

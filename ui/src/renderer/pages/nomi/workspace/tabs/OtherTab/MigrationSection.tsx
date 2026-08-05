@@ -6,7 +6,7 @@
 
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Message } from '@arco-design/web-react';
+import { Button, Checkbox, Message } from '@arco-design/web-react';
 import { Attention, Computer } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
@@ -36,6 +36,11 @@ const MigrationSection: React.FC<Props> = ({ companionId, companionName }) => {
   const { t } = useTranslation();
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
+  // What the bundle carries beyond 设定 (always in). Memories travel by default —
+  // a companion that arrives remembering nothing is a stranger wearing its name;
+  // skills are opt-in because their bodies are executable.
+  const [includeMemories, setIncludeMemories] = useState(true);
+  const [includeSkills, setIncludeSkills] = useState(false);
   /** Knowledge-base names from an imported bundle with no local match. */
   const [unmatched, setUnmatched] = useState<string[]>([]);
 
@@ -49,6 +54,8 @@ const MigrationSection: React.FC<Props> = ({ companionId, companionName }) => {
         companion_id: companionId,
         dest_path: dest,
         knowledge_names: knowledgeNames,
+        include_memories: includeMemories,
+        include_skills: includeSkills,
       });
       Message.success(t('nomi.migrate.exportCompanionOk', { path: res.dest_path }));
     } catch (e) {
@@ -136,12 +143,25 @@ const MigrationSection: React.FC<Props> = ({ companionId, companionName }) => {
           description={t('nomi.other.exportDesc', {
             companionName,
             defaultValue:
-              '把「{{companionName}}」打包成 .zip 迁移包，在另一台设备导入即可恢复。包内只有设定、成长进度与已绑定的知识库名单：记忆、技能、聊天记录与自定义形象图片都不在其中。',
+              '把「{{companionName}}」打包成 .zip 迁移包，在另一台设备导入即可恢复。设定、成长进度、已绑定的知识库名单和自定义形象图片始终在包内；记忆和技能由你决定。聊天记录不在包内。',
           })}
           controls={
             <Button type='primary' loading={exporting} onClick={() => void runExport()}>
               {t('nomi.migrate.exportCompanion', { defaultValue: '导出迁移包' })}
             </Button>
+          }
+          footer={
+            <div className='flex flex-wrap items-center gap-16px text-13px'>
+              <Checkbox checked disabled>
+                {t('nomi.other.exportScopeSettings', { defaultValue: '设定（始终包含）' })}
+              </Checkbox>
+              <Checkbox checked={includeMemories} onChange={setIncludeMemories}>
+                {t('nomi.other.exportScopeMemories', { defaultValue: '记忆' })}
+              </Checkbox>
+              <Checkbox checked={includeSkills} onChange={setIncludeSkills}>
+                {t('nomi.other.exportScopeSkills', { defaultValue: '技能（含 SKILL.md 正文）' })}
+              </Checkbox>
+            </div>
           }
         />
         <NomiSettingRow

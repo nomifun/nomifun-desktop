@@ -6,7 +6,7 @@
 //! companion data" stays a file-scoped operation and companion writes never contend with
 //! conversation traffic.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use nomifun_common::{
     AppError, CompanionId, CompanionMemoryId,
@@ -417,23 +417,6 @@ impl CompanionStore {
             },
         })
     }
-}
-
-/// Boot-time registration of the live file-backed store and the shared dir
-/// it was opened on. `CompanionService` keeps its store/dirs private and exposes no
-/// accessor (and service.rs is owned by other workstreams), so the
-/// export/import routes need a crate-visible handle to the *live* pool —
-/// [`CompanionStore::open`] records it here. First-wins is correct: production
-/// calls `open` exactly once (the shared `memory.db` in `CompanionService::start`);
-/// tests pass their stores to the export functions explicitly and never read
-/// this.
-static LIVE_STORE: std::sync::OnceLock<(PathBuf, CompanionStore)> = std::sync::OnceLock::new();
-
-/// The live file-backed store plus its shared dir, when one was opened in
-/// this process. `None` means the production store has not been opened; boot
-/// fails closed rather than substituting an in-memory database.
-pub fn live_store() -> Option<(&'static Path, &'static CompanionStore)> {
-    LIVE_STORE.get().map(|(dir, store)| (dir.as_path(), store))
 }
 
 const SCHEMA: &str = r#"
@@ -1735,10 +1718,7 @@ impl CompanionStore {
             .await
             .map_err(db_err)?;
         validate_baseline_schema(&pool).await?;
-        let store = Self { pool };
-        // Record the live store for the export/import routes (see LIVE_STORE).
-        let _ = LIVE_STORE.set((companion_dir.to_path_buf(), store.clone()));
-        Ok(store)
+        Ok(Self { pool })
     }
 
     /// In-memory store for tests. The db lives inside the pool's single
@@ -2672,6 +2652,24 @@ impl CompanionStore {
         rows.iter().map(row_to_window).collect()
     }
 
+    /// Every LOCAL day (`YYYYMMDD`) this companion has at least one archived
+    /// digest for, newest first. The complete set — unlike [`Self::list_digests`]
+    /// this is not row-capped, because a day index must not claim a day has no
+    /// diary merely because the digest fell outside a page.
+    pub async fn archived_digest_days(&self, companion_id: &str) -> Result<Vec<String>, AppError> {
+        validate_companion_id(companion_id, "session-window companion_id")?;
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT session_day FROM companion_session_windows \
+             WHERE companion_id = ? AND status = 'archived' \
+             ORDER BY session_day DESC",
+        )
+        .bind(companion_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows.into_iter().map(|(day,)| day).collect())
+    }
+
     /// Digests whose LOCAL start day falls in `[since_day, until_day]` (inclusive,
     /// `YYYYMMDD` string compare). Either bound may be empty to leave it open.
     pub async fn digests_in_range(&self, companion_id: &str, since_day: &str, until_day: &str) -> Result<Vec<SessionWindow>, AppError> {
@@ -2732,6 +2730,40 @@ impl CompanionStore {
                 .fetch_all(&self.pool)
                 .await
                 .map_err(db_err)?;
+            let Some(last) = rows.last() else { break };
+            let next_cursor: String = last.get("memory_id");
+            CompanionMemoryId::try_from(next_cursor.as_str())
+                .map_err(|error| invalid_disk_id("memory id", &next_cursor, error))?;
+            cursor = next_cursor;
+            out.extend(rows.iter().map(row_to_memory).collect::<Result<Vec<_>, _>>()?);
+        }
+        Ok(out)
+    }
+
+    /// Exactly the memories ONE companion owns (all statuses, archived included),
+    /// same id-cursor streaming as [`Self::dump_memories_all`]. Owner-exact on
+    /// purpose: unlike the read path's visibility predicate this never picks up a
+    /// vestigial unowned row, because a companion bundle must carry that
+    /// companion's memories and nobody else's.
+    pub async fn dump_memories_for_companion(
+        &self,
+        companion_id: &str,
+    ) -> Result<Vec<CompanionMemory>, AppError> {
+        validate_companion_id(companion_id, "memory scope_companion_id")?;
+        let mut out = Vec::new();
+        let mut cursor = String::new();
+        loop {
+            let rows = sqlx::query(
+                "SELECT * FROM companion_memories \
+                 WHERE scope_kind = 'companion' AND scope_companion_id = ? AND memory_id > ? \
+                 ORDER BY memory_id LIMIT ?",
+            )
+            .bind(companion_id)
+            .bind(&cursor)
+            .bind(Self::DUMP_PAGE)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
             let Some(last) = rows.last() else { break };
             let next_cursor: String = last.get("memory_id");
             CompanionMemoryId::try_from(next_cursor.as_str())

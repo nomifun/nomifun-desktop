@@ -1817,6 +1817,11 @@ export const database = {
         // persisted message. When
         // set (incl. ''), the backend ignores page/offset pagination.
         cursor?: string;
+        // One LOCAL calendar day (`YYYYMMDD`), oldest-first and complete: the
+        // backend decides the day boundary (the same one that partitions
+        // companion session digests), so a reader never re-derives days in a
+        // browser whose timezone may differ. Mutually exclusive with `cursor`.
+        day?: string;
       }
     >((p) => {
       const params = new URLSearchParams();
@@ -1827,6 +1832,7 @@ export const database = {
       // Send even an empty cursor (the "newest window" request) — distinct from
       // omitting it, which selects offset pagination.
       if (p.cursor !== undefined) params.set('cursor', p.cursor);
+      if (p.day) params.set('day', p.day);
       return `/api/conversations/${p.conversation_id}/messages?${params.toString()}`;
     }),
     (page) => ({ ...page, items: page.items.map(fromApiStoredMessage) })
@@ -4413,6 +4419,19 @@ export interface ICompanionDayDigest {
   token_estimate: number;
 }
 
+/** One day of a companion's readable history (聊天历史 的日期索引), newest first.
+ *  Server-side and complete: `day` is the backend's LOCAL calendar day, the same
+ *  key `ICompanionDayDigest.session_day` uses, so the digest marker can never
+ *  attach to the wrong day near midnight. */
+export interface ICompanionHistoryDay {
+  /** Local calendar day, `YYYYMMDD`. */
+  day: string;
+  /** Visible messages persisted that day. */
+  message_count: number;
+  /** 会话归档 left a diary on that day. */
+  has_digest: boolean;
+}
+
 /** 伙伴的唯一专属会话 — 一条真实的 `type='nomi'` 会话。每个伙伴生命周期内恒一条。 */
 export interface ICompanionThread {
   conversation_id: ConversationId;
@@ -4904,6 +4923,15 @@ export const companion = {
     }),
     (raw): ICompanionDayDigest[] => raw.map(fromApiCompanionDayDigest)
   ),
+  /** The companion's complete history day index (聊天历史 左侧日期栏). Read-only:
+   *  never mints a session, and a companion that has never chatted returns []. */
+  listHistoryDays: withResponseMap(
+    httpGet<unknown[], { companion_id: CompanionId }>(
+      (p) => `/api/companion/companions/${p.companion_id}/history/days`
+    ),
+    (raw): ICompanionHistoryDay[] =>
+      raw.map((entry) => asWireObject(entry, 'companion history day') as unknown as ICompanionHistoryDay)
+  ),
   /** Learn-by-demonstration: draft a skill from a work session's tool sequence. Returns the name. */
   draftFromSession: httpPost<string | null, { companion_id: CompanionId; conversation_id: ConversationId }>(
     (p) => `/api/companion/companions/${p.companion_id}/skills/from-session`,
@@ -5022,11 +5050,25 @@ export const companion = {
   ),
   // ── Import / export (spec §4.8) ──
   exportMemory: httpPost<ICompanionExportResult, { dest_path: string; include_events: boolean }>('/api/companion/export/memory'),
-  exportCompanion: httpPost<ICompanionExportResult, { companion_id: CompanionId; dest_path: string; knowledge_names?: string[] }>(
+  /** Export one companion. Its settings are always included; `include_memories`
+   *  defaults to true and `include_skills` to false, and a custom figure travels
+   *  whenever the companion wears one. */
+  exportCompanion: httpPost<
+    ICompanionExportResult,
+    {
+      companion_id: CompanionId;
+      dest_path: string;
+      knowledge_names?: string[];
+      include_memories?: boolean;
+      include_skills?: boolean;
+    }
+  >(
     (p) => `/api/companion/export/companions/${p.companion_id}`,
     (p) => ({
       dest_path: p.dest_path,
       knowledge_names: p.knowledge_names ?? [],
+      include_memories: p.include_memories ?? true,
+      include_skills: p.include_skills ?? false,
     })
   ),
   /** Import a memory/companion bundle; the backend dispatches on manifest.kind. */

@@ -241,14 +241,8 @@
     "yesterday": "Yesterday",
     "digestMark": "This day has a diary",
     "messageCount": "{{count}} messages",
-    "loadEarlier": "Load earlier",
-    "loadingEarlier": "Loading…",
-    "loadEarlierFailed": "Load failed — tap to retry",
-    "allLoaded": "All history loaded ({{count}} readable messages).",
-    "partialHint": "{{count}} readable messages read so far; the day index only reaches {{day}}. Use “Load earlier” for earlier days.",
     "selectDay": "Pick a day on the left to start reading.",
     "emptyDay": "No messages to show for this day.",
-    "partialDayHint": "Only the later part of this day is loaded — use “Load earlier” on the left for the rest.",
     "roleUser": "Me",
     "roleCompanion": "Companion",
     "systemNote": "System note",
@@ -257,21 +251,22 @@
     "digestTitle": "Diary for this day",
     "emptyTitle": "No chat history yet",
     "emptyHint": "Once you exchange a first message with this companion, the conversation shows up here day by day.",
-    "noReadableTitle": "Nothing readable in this stretch",
-    "noReadableHint": "The records read so far hold only system messages. Keep going back to find the real conversation.",
     "loadFailedTitle": "Couldn't load history",
     "loadFailedHint": "This companion's conversation records couldn't be read — the backend may be temporarily unavailable. Try again shortly.",
     "retry": "Retry",
     "onThisDayHint": "Session diaries from the same day ({{day}}) in past years",
     "onThisDayArchiveNote": "Diaries come from “Session archiving” (a global setting that applies to every companion, off by default); without it this stays empty.",
     "onThisDayFailed": "Couldn't read past-year diaries — the backend may be temporarily unavailable.",
-    "onThisDayFailedHint": "Leaving and coming back retries it."
+    "onThisDayFailedHint": "Leaving and coming back retries it.",
+    "dayIndexSummary": "{{days}} days · {{count}} messages — that is all of it.",
+    "dayLoadFailed": "This day did not load — tap to retry",
+    "dayTruncatedHint": "This day is long; showing only its earliest {{count}} messages."
   },
   "other": {
     "migrateSection": "Migration",
     "migrateSectionDesc": "Pack this companion up for another device, or restore a companion from a bundle.",
     "exportTitle": "Export companion",
-    "exportDesc": "Pack “{{companionName}}” into a .zip bundle and import it on another device to restore it. The bundle holds only its settings, growth progress and the names of its bound knowledge bases — memories, skills, chat history and custom figure images are not in it.",
+    "exportDesc": "Pack “{{companionName}}” into a .zip bundle and import it on another device to restore it. Its settings, growth progress, bound knowledge-base names and custom figure image are always in the bundle; memories and skills are up to you. Chat history is not included.",
     "importTitle": "Import companion",
     "importDesc": "Pick a companion bundle (.zip) to create a new companion here and rebind its knowledge bases by name.",
     "importAction": "Choose a bundle",
@@ -280,11 +275,14 @@
     "dangerSectionDesc": "Nothing here can be undone — confirm before you run it.",
     "deleteHint": "Permanently deletes “{{companionName}}” along with its memories, skills, growth progress and chat history.",
     "deleteConfirmTitle": "Delete “{{companionName}}”?",
-    "deleteConfirmBody": "“{{companionName}}”’s settings, every memory it holds under Memory, its skills, growth progress and chat history are all deleted permanently and cannot be recovered. The bundle above stores only settings and growth progress — memories and chat history are not in it, so exporting first will not keep them.",
-    "deleteConfirmOk": "Delete permanently"
+    "deleteConfirmBody": "“{{companionName}}”’s settings, every memory it holds under Memory, its skills, growth progress and chat history are all deleted permanently and cannot be recovered. The bundle above can carry its settings, memories and skills, but chat history is not in it, so exporting first will not keep that.",
+    "deleteConfirmOk": "Delete permanently",
+    "exportScopeSettings": "Settings (always included)",
+    "exportScopeMemories": "Memories",
+    "exportScopeSkills": "Skills (with SKILL.md bodies)"
   },
   "danger": {
-    "deleteConfirmBody": "This permanently deletes “{{companionName}}” together with all of its memories, skills, growth progress and chat history, and cannot be undone. Note: the migration bundle stores only settings and growth progress — memories are not in it, so exporting first will not keep them."
+    "deleteConfirmBody": "This permanently deletes “{{companionName}}” together with all of its memories, skills, growth progress and chat history, and cannot be undone. Note: the migration bundle can carry settings, memories and skills, but chat history is not in it, so exporting first will not keep that."
   },
   "figures": {
     "back": "Back to companions"

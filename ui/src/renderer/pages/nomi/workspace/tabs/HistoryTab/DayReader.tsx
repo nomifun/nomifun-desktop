@@ -7,21 +7,18 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
+import { Spin } from '@arco-design/web-react';
 import DigestCard from './DigestCard';
 import ReaderPanel from './ReaderPanel';
 import { formatClock, formatDayKey, isToday, isYesterday } from './historyFormat';
 import type { HistoryEntry } from './historyFormat';
-import type { HistoryDay } from './useChatHistory';
+import type { DayContent, HistoryDay } from './useChatHistory';
 
 interface DayReaderProps {
   day: HistoryDay;
+  content: DayContent;
   /** Display name for the companion side of the transcript. */
   companionName: string;
-  /**
-   * This is the oldest loaded day and older windows still exist, so the day is
-   * only partly here. Say it — a truncated day that looks complete is a lie.
-   */
-  partial?: boolean;
 }
 
 /** One reader line. Plain text only — the full chat renderer stays out of here. */
@@ -79,14 +76,60 @@ const EntryLine: React.FC<{ entry: HistoryEntry; companionName: string }> = ({ e
 /**
  * The selected day, in order: its digest (when 会话归档 produced one) as a summary
  * above the raw messages, then the messages themselves.
+ *
+ * The header count comes from the day index, so the rail and the reader can never
+ * disagree; rendering fewer LINES than that is normal — a tool call with no name
+ * or an empty status ping carries nothing a human re-reads.
  */
-const DayReader: React.FC<DayReaderProps> = ({ day, companionName, partial = false }) => {
+const DayReader: React.FC<DayReaderProps> = ({ day, content, companionName }) => {
   const { t } = useTranslation();
   const relative = isToday(day.day)
     ? t('nomi.history.today', { defaultValue: '今天' })
     : isYesterday(day.day)
       ? t('nomi.history.yesterday', { defaultValue: '昨天' })
       : null;
+
+  const body = (() => {
+    if (content.loading) {
+      return (
+        <div className='flex justify-center py-32px'>
+          <Spin />
+        </div>
+      );
+    }
+    if (content.failed) {
+      return (
+        <div
+          role='button'
+          tabIndex={0}
+          onClick={content.retry}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              content.retry();
+            }
+          }}
+          className='cursor-pointer py-24px text-center text-13px text-primary-6 outline-none'
+        >
+          {t('nomi.history.dayLoadFailed', { defaultValue: '这一天没读出来，点此重试' })}
+        </div>
+      );
+    }
+    if (content.entries.length === 0) {
+      return (
+        <div className='py-24px text-center text-13px text-t-tertiary'>
+          {t('nomi.history.emptyDay', { defaultValue: '这一天没有可显示的消息。' })}
+        </div>
+      );
+    }
+    return (
+      <div className='flex flex-col gap-8px'>
+        {content.entries.map((entry) => (
+          <EntryLine key={entry.key} entry={entry} companionName={companionName} />
+        ))}
+      </div>
+    );
+  })();
 
   return (
     <ReaderPanel
@@ -97,32 +140,23 @@ const DayReader: React.FC<DayReaderProps> = ({ day, companionName, partial = fal
             <span className='rd-full bg-primary-1 px-8px py-1px text-11px text-primary-6'>{relative}</span>
           )}
           <span className='ml-auto shrink-0 text-11px text-t-tertiary'>
-            {t('nomi.history.messageCount', { defaultValue: '{{count}} 条', count: day.entries.length })}
+            {t('nomi.history.messageCount', { defaultValue: '{{count}} 条', count: day.messageCount })}
           </span>
         </>
       }
     >
-      {day.digests.map((digest) => (
+      {content.digests.map((digest) => (
         <DigestCard key={digest.session_window_id} digest={digest} />
       ))}
-      {partial && (
+      {content.truncated && (
         <div className='text-11px leading-16px text-t-tertiary'>
-          {t('nomi.history.partialDayHint', {
-            defaultValue: '这一天只加载了后半段，更早的消息要先在左侧点「加载更早」。',
+          {t('nomi.history.dayTruncatedHint', {
+            defaultValue: '这一天太长了，只显示最早的 {{count}} 条。',
+            count: content.entries.length,
           })}
         </div>
       )}
-      {day.entries.length === 0 ? (
-        <div className='py-24px text-center text-13px text-t-tertiary'>
-          {t('nomi.history.emptyDay', { defaultValue: '这一天没有可显示的消息。' })}
-        </div>
-      ) : (
-        <div className='flex flex-col gap-8px'>
-          {day.entries.map((entry) => (
-            <EntryLine key={entry.key} entry={entry} companionName={companionName} />
-          ))}
-        </div>
-      )}
+      {body}
     </ReaderPanel>
   );
 };

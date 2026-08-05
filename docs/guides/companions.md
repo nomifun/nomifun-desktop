@@ -50,8 +50,8 @@ that are still one-per-install live in the **install-wide** tabs:
    bindings are removed together; if you delete the default companion, the
    default role moves on to the next one. Since every memory belongs to one
    companion, deleting a companion permanently destroys the memories filed under
-   it, and no bundle can bring them back (the companion bundle carries settings
-   and growth only, and there is no memory-export UI per companion). Deleting
+   it — export that companion first if you want to keep them (its bundle carries
+   its memories by default). Deleting
    down to zero companions is allowed — collection and learning keep running,
    but with nobody to own new memories a learning run stops early instead of
    writing them.
@@ -196,7 +196,7 @@ dialog):
 | Bundle | Contents | Import semantics |
 | --- | --- | --- |
 | **Memory bundle** | Every companion's long-term memories in one file + mood; **optionally** the raw event data (checkbox) | **Merged with dedup** into local memories (original timestamps and sources preserved). Ownership is **re-homed on import**: companion ids are not stable across machines, so every imported memory lands on the owner companion (explicit default if present, else the oldest) unless its original owner id happens to exist locally. Dedup compares within one owner only |
-| **Companion bundle** | One companion's persona / character / settings / XP + the **name list** of its bound knowledge bases (`knowledge_refs`) | Creates a new companion under a fresh id, name conflicts get a "(2)" suffix; knowledge refs are matched **by name** against local bases to rebuild bindings — unmatched names are listed so you can import those knowledge bundles first and bind manually |
+| **Companion bundle** | One companion's persona / character / settings / XP + the **name list** of its bound knowledge bases (`knowledge_refs`), plus its own **memories** (`memories.jsonl`, on by default), optionally its **skills** (rows + `SKILL.md` bodies), and its **custom figure image** when it wears one | Creates a new companion under a fresh id, name conflicts get a "(2)" suffix; every carried memory and skill is **re-homed onto that new id with a fresh row id** (a companion bundle is a clone, not a merge), the figure becomes companion-owned, and knowledge refs are matched **by name** against local bases to rebuild bindings — unmatched names are listed so you can import those knowledge bundles first and bind manually |
 | **Knowledge-base bundle** | Base metadata + the md file tree verbatim | Lands as a new knowledge base, name conflicts get "(2)" |
 
 Migration steps:
@@ -222,11 +222,12 @@ Migration steps:
   content verbatim** — it is **not** exported by default; it only
   enters the memory bundle when you explicitly tick "include raw event
   data".
-- **Neither memories nor chat history travel with the companion bundle**:
-  memories live in `shared/memory.db` and companion conversation logs live in
-  the main database, while the companion bundle carries only persona, settings,
-  and growth. Memories move only through the memory bundle (which is
-  install-wide, not per companion); chat logs stay on the original machine.
+- **Chat history never travels**: companion conversation logs live in the main
+  database and stay on the original machine. Memories and skills DO travel with
+  the companion bundle, but only the ones that companion owns, and only when the
+  export scope says so (记忆 is ticked by default, 技能 is not — skill bodies are
+  executable, so exporting them is an explicit choice). The install-wide memory
+  bundle remains the way to move every companion's memories at once.
 
 ## Automatic migration of legacy data
 
@@ -291,8 +292,10 @@ To verify a multi-companion setup end to end, walk through in order:
 | One companion's memories / add a memory | `GET /api/companion/memories?scope_companion_id={companionId}`, `POST /api/companion/memories` (`scope_companion_id` = the owner; omitted lets the server resolve it) |
 | Edit a memory (content / pin / status only — never its owner) | `PUT /api/companion/memories/{memoryId}` |
 | Per-companion companion threads | `GET /api/companion/companions/{companionId}/companion/threads`, `…/companion/active` |
+| A companion's chat-history day index | `GET /api/companion/companions/{companionId}/history/days` → `[{day, message_count, has_digest}]`, newest first (local days; read-only, never mints a session) |
+| One day of a conversation | `GET /api/conversations/{conversationId}/messages?day=YYYYMMDD` (oldest-first, server-bounded) |
 | Export memory bundle | `POST /api/companion/export/memory` (`{dest_path, include_events}`) |
-| Export companion bundle | `POST /api/companion/export/companions/{companionId}` |
+| Export companion bundle | `POST /api/companion/export/companions/{companionId}` (`{dest_path, knowledge_names, include_memories = true, include_skills = false}`) |
 | Import memory / companion bundle | `POST /api/companion/import` (dispatched by manifest.kind) |
 | Export / import knowledge-base bundle | `POST /api/knowledge/bases/{id}/export`, `POST /api/knowledge/bases/import` |
 | Bind a companion to a channel | `POST /api/channel/settings/companion` |
