@@ -221,8 +221,11 @@ const AssetCard: React.FC<AssetCardProps> = ({
         'border-[var(--color-border-2)] bg-[var(--color-bg-2)] box-border',
         'transition-all duration-150',
         'hover:border-[var(--color-border-3)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.14)] hover:-translate-y-1px',
-        selected ? 'ring-2 ring-[rgba(var(--primary-6),1)] !border-primary-6' : '',
-        dragging ? 'opacity-45 ring-2 ring-[rgba(var(--primary-6),0.5)]' : '',
+        // `ring-2` set only `--un-ring-color` — the numeric suffix hits the theme's numeric colour
+        // keys, never a width — so the selected/dragging highlight painted nothing. `ring-2px` is
+        // the width spelling and is what emits the box-shadow chain.
+        selected ? 'ring-2px ring-[rgba(var(--primary-6),1)] !border-primary-6' : '',
+        dragging ? 'opacity-45 ring-2px ring-[rgba(var(--primary-6),0.5)]' : '',
       ].join(' ')}
     >
       {selectBox}

@@ -283,14 +283,20 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 - **旧导出包仍可导入的端到端实测**：从上面这个已迁移的装机用 `POST /api/companion/export/memory` 导出真包，再把 `memories.jsonl` 每行补回 `scope_kind` 改造成 0.3.8 形状。两代包都导入成功（`skipped_duplicates: 5`——顺带证明退役字段被丢弃而不是混进了 `PartialEq`，否则会报 ID 冲突）；删掉其中一条记忆后再导入 0.3.8 形状的包，`imported: 1`、该行带着主人回来了、并且立刻能被 FTS 检索到。
 - **§5.1 迁移端到端实测**：真实 `NomiFun-dev` 数据目录（1 个伙伴、v3 store）复制到 `/tmp`，装机级 `learn` 设为「开启 / 25 分钟」、`evolve` 设为「开启 / 45 分钟 / 激进 / min_distinct_sessions=6」，全局游标设为非零、`mood='curious'`，用真实 `nomifun-web` 启动：正常启动；该伙伴 profile 拿到逐字相同的 learn/evolve；两个游标等于旧全局值（不是 0）；mood 为 `curious`；`GET /api/companion/config` 里再没有 `learn`/`evolve`。随后改掉该伙伴的三项设置并推进它的游标，**第二次启动没有任何重播种日志，改动全部保留**。UI 侧用无头 Firefox 打开 `#/nomi?tab=evolution`：三个分区全部渲染、装机级标注为零；点开关后经 API 确认只落在该伙伴 profile 上，第二个伙伴的 `interval_minutes=600` 与共享配置逐字未变。
 
-**未完成（按优先级）**
+**原「未完成」七项 —— 全部已完成**
+
+这一节曾是本次重构的延后清单，七项都附了「不做的理由」。后续复审时，其中**两条理由被证明是假的**（第 3 项声称保留全局游标行是为了回退到旧版本，但同一次升级已经 `DROP TABLE companion_suggestions`，而旧版校验精确表集、缺表即拒绝启动，回退本来就不可能；第 2 项声称物理删列收益为零风险极高，但换成「两列收成一列可空」的设计后，重建变成无条件、不再需要前置条件，反而**更简单也更安全**）。保留这段记录，是因为「保守延后」的理由本身也需要被复核。
 
 1. ~~伙伴包尚未携带 mood~~ —— **已完成**（见「已完成」末三条）。
 2. ~~`companion_memories.scope_kind` 与 `companion_skills.scope_kind` 的物理删除（表重建）~~ —— **已完成**（见「已完成」末条）。
 3. ~~`companion_state` 里的全局游标与 mood 行故意保留、不再读取，以便回退到旧版本仍能找到它们~~ —— **已完成**：那个理由是假的（见「已完成」末条），六行已删。
 4. ~~`memory_merge_suggestions` 仍扫描全部伙伴的记忆再由客户端过滤~~ —— **已完成**（见「已完成」末三条）。
 5. ~~四个记忆写入口仍按 `memory_id` 寻址而不校验 owner~~ —— **已完成**（见「已完成」末三条）。
-6. 死写法的**存量**清理：`ui/src` 下 95 个文件 / 276 处仍在用那三种写法（实测：ramp 79 文件 228 处、`border-border-N` 17 文件 40 处、`border-b-base` / `border-b-light` 4 文件 8 处，不含测试文件），它们的红字其实不是红的。根因与门禁已在本次铲除（见「已完成」末条），但一次性替换会同时改变 276 处渲染颜色、需要逐一目测明暗两套主题，故独立成一次改动；配方与基线见 `styles/MIGRATION.md` 与 `scripts/check-dead-css-utilities.mjs`。清理时必须同步改 `knowledgeCreateCtaContrast.test.ts` 与 `scheduledTaskLayout.test.ts`——这两个测试反过来断言了破写法**存在**。
+6. ~~死写法的**存量**清理：`ui/src` 下 95 个文件 / 276 处仍在用那三种写法~~ —— **已完成，且实测范围远大于此**。ramp 族实清 **293 处 / 98 文件**（比预估多 17 处，落在棘轮正则永远看不见的形状里：`ring-`、`outline-`、`border-t-`、`!border-b-`，以及 arcoblue/purple/orange/cyan/gray 这些非语义色板）；另有 8 处带斜杠透明度的变体必须改成显式 `rgba(var(--success-6),0.12)`，因为项目规则是 `[`-锚定的，顺手收成 `bg-success-6/12` 会产出**零 CSS**——而 `MIGRATION.md` 自己原来推荐的 sed 配方恰好会产出这个错，配方已改。`knowledgeCreateCtaContrast.test.ts` 与 `scheduledTaskLayout.test.ts` 这两个反过来断言破写法存在的测试，已改成用真实生成器编译并断言颜色可解析（各自经反证失效验证）。存量清零后 `BASELINE` 删除，门禁从棘轮变为一刀切禁令。
+
+   **清扫过程中发现这远不止「三种写法」，根因是同一个**：`uno.config.ts` 把背景色阶以**数字键**并入 `theme.colors`，于是凡是 UnoCSS 允许「颜色与长度共用同一槽位」的前缀（`border-` `b-` `ring-` `ring-offset-` `outline-` `divide-`），数字后缀就被读成颜色。加上本仓**没有任何 border 全局重置**（唯一 preflight 是 `* { color: inherit }`），派生出的失效可归为三类：(i) 编译出零 CSS；(ii) 编译出错误的属性；(iii) 编译正确但缺少配套类、或配套类上错了轴。逐个实测确认并修复的族见 CHANGELOG，其中属于**可见产品缺陷**的有：三处选中标签的下划线根本不存在（Preview 工具栏、Markdown 查看器、预设编辑抽屉）、检查更新转圈的两个圈一直什么都没画、8 个 `divide-y` 里的 7 个让设置面板行分隔线完全消失、`ring-N` 让若干处键盘焦点环从不绘制、两个 `h-1px` 菜单分隔条完全隐形、PDF 失败提示与 cron 校验提示的红字是继承色。另有 15 处「假 3px 边框」：方向性宽度配了**非方向性**的 `border-solid`，四条边都上了 style 而只有一条有宽度，另三边回落到 CSS 初始的 `medium`（浏览器实测 `T:3px R:3px B:1px L:3px`）——而当时的门禁注释写明了这条规则却在实现里放行了它。
+
+   门禁随之从 4 类禁令扩到 7 类（自检 31→68 例），并改为**逐个 class 列表**分析（必须知道哪些类落在同一元素上）、用**白名单**识别颜色（未知 token 不假定为颜色）、把 `border-*-0` 判为宽度归零而非违规。但正则永远追不上「(i) 零 CSS」这一类——找出这些族靠的是机械扫描，其中有些已经活了好几个月。因此最终形态改为**生成器兜底**：把源码里每个 class token 喂给真实 UnoCSS 生成器，凡产出零 CSS 即失败，允许清单从那 40 个手写样式表里**自动推导**并逐类打印排除计数以便审计。
 7. ~~`uno.config.ts:51-55` 的不可达 `borderColors` 块与 `styles/MIGRATION.md` 里错误的 `border-b-base` 指引仍在~~ —— **已完成**（见「已完成」末条）。
 
 **本次交付中发现并修掉的静默失效（值得记住的两类）**

@@ -84,7 +84,10 @@ const PDFPreview: React.FC<PDFPreviewProps> = ({ file_path, content, hideToolbar
       <div className='flex items-center justify-center h-full'>
         {messageContextHolder}
         <div className='text-center'>
-          <div className='text-16px text-t-error mb-8px'>❌ {error}</div>
+          {/* textColors 里没有 t-error（只有 t-primary/secondary/tertiary/quaternary/
+              disabled），所以这条失败提示原来是继承来的正文色。语义状态色叫 danger。
+              `text-t-error` is not a token; the semantic state colour is `danger`. */}
+          <div className='text-16px text-danger mb-8px'>❌ {error}</div>
           <div className='text-12px text-t-secondary'>{t('preview.pdf.unableDisplay')}</div>
         </div>
       </div>

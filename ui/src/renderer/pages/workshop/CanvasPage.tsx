@@ -224,7 +224,7 @@ const CanvasPage: React.FC = () => {
             className={[
               'min-w-0 max-w-360px flex-none text-15px font-700 text-[var(--color-text-1)]',
               'bg-transparent border-none outline-none',
-              'border-b border-solid !border-b-[rgba(var(--primary-6),1)] px-1px py-2px',
+              'border-b border-b-solid !border-b-[rgba(var(--primary-6),1)] px-1px py-2px',
             ].join(' ')}
           />
         ) : (

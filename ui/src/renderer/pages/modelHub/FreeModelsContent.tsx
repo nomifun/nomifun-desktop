@@ -228,7 +228,7 @@ const FreeModelsContent: React.FC = () => {
                 loading={pendingAction === 'refresh'}
                 disabled={!status || serviceBusy || healthBusy}
                 onClick={() => void run(refresh, 'settings.modelHub.free.refreshSuccess', true)}
-                className='rd-100px border-1 border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
+                className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
               >
                 {t('settings.modelHub.free.refresh')}
               </Button>
@@ -516,7 +516,13 @@ const FreeModelsContent: React.FC = () => {
                               className={classNames(
                                 'shrink-0 flex items-center gap-5px rd-6px px-3px -mx-3px outline-none',
                                 modelAvailable && !healthBusy
-                                  ? 'cursor-pointer hover:text-t-primary focus-visible:ring-2 focus-visible:ring-[rgba(var(--primary-6),0.28)]'
+                                  ? // `outline-none` above removes the native focus ring, so this ring IS the
+                                    // keyboard focus affordance. `ring-2` set only `--un-ring-color` — a numeric
+                                    // suffix resolves against the theme's numeric colour keys — so the width
+                                    // stayed 0 (no box-shadow at all) and, because `.ring-2` is emitted after
+                                    // `.ring-[…]`, it also overrode the intended colour with `var(--bg-2)`.
+                                    // `ring-2px` is the width spelling and emits the full box-shadow chain.
+                                    'cursor-pointer hover:text-t-primary focus-visible:ring-2px focus-visible:ring-[rgba(var(--primary-6),0.28)]'
                                   : 'cursor-default'
                               )}
                               onClick={() => {

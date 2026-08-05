@@ -514,7 +514,7 @@ const RemoteAgentManagement: React.FC = () => {
           size='small'
           icon={<Plus size='16' />}
           onClick={handleAdd}
-          className='rd-100px border-1 border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
+          className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
         >
           {t('settings.remoteAgent.add')}
         </Button>
@@ -531,7 +531,7 @@ const RemoteAgentManagement: React.FC = () => {
             size='small'
             icon={<Plus size='16' />}
             onClick={handleAdd}
-            className='rd-100px border-1 border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
+            className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
           >
             {t('settings.remoteAgent.emptyAction')}
           </Button>

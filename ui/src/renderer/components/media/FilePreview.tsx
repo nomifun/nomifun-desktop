@@ -115,7 +115,10 @@ const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = fa
   if (isImage) {
     return (
       <div className='relative inline-block'>
-        <div className='rd-8px overflow-hidden border-1 border-solid b-color-border-2'>
+        {/* border-1px 是宽度（`border-1` 只是 --bg-1 颜色），border-arco-2 才是存在的
+            边框色（`b-color-border-2` 查一个叫 color-border-2 的颜色，产出 0 条 CSS）。
+            Before this, the thumbnail frame was a 3px `medium` border in --bg-1. */}
+        <div className='rd-8px overflow-hidden border-1px border-solid border-arco-2'>
           <Image
             src={imageUrl}
             alt={file_name}
@@ -129,7 +132,7 @@ const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = fa
         </div>
         {!readonly && onRemove && (
           <div
-            className='absolute -top-4px -right-4px w-16px h-16px rd-50% bg-white dark:bg-gray-700 cursor-pointer flex items-center justify-center shadow-md hover:shadow-lg transition-all z-10 border-1 border-solid border-gray-200 dark:border-gray-600'
+            className='absolute -top-4px -right-4px w-16px h-16px rd-50% bg-white dark:bg-gray-700 cursor-pointer flex items-center justify-center shadow-md hover:shadow-lg transition-all z-10 border-1px border-solid border-gray-200 dark:border-gray-600'
             onClick={handleRemove}
           >
             <Close theme='filled' size='10' fill='#666' />
@@ -157,7 +160,7 @@ const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = fa
       </div>
       {!readonly && onRemove && (
         <div
-          className='absolute -top-4px -right-4px w-16px h-16px rd-50% bg-white dark:bg-gray-700 cursor-pointer flex items-center justify-center shadow-md hover:shadow-lg transition-all z-10 border-1 border-solid border-gray-200 dark:border-gray-600'
+          className='absolute -top-4px -right-4px w-16px h-16px rd-50% bg-white dark:bg-gray-700 cursor-pointer flex items-center justify-center shadow-md hover:shadow-lg transition-all z-10 border-1px border-solid border-gray-200 dark:border-gray-600'
           onClick={handleRemove}
         >
           <Close theme='filled' size='10' fill='#666' />

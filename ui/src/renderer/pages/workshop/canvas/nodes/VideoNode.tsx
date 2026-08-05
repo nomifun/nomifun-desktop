@@ -76,7 +76,7 @@ function VideoNodeImpl({ id, data, selected }: NodeProps<VideoFlowNode>) {
               />
               {status === 'loading' && (
                 <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
-                  <span className='h-18px w-18px animate-spin rounded-full border-2 border-solid border-white/30 border-t-white' />
+                  <span className='h-18px w-18px animate-spin rounded-full border-2px border-solid border-white/30 border-t-white' />
                 </div>
               )}
               {status === 'error' && (

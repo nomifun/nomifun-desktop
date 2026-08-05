@@ -288,13 +288,17 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
       </div>
 
       {/* WebUI 引导提示 / WebUI hint */}
-      <div className='rd-10px border border-line bg-fill-1 px-10px py-8px text-12px text-t-secondary leading-relaxed'>
+      {/* theme 里没有名为 line 的颜色，`border-line` 产出 0 条 CSS；再加上本仓库没有
+          全局 border reset，这一屏的每个提示框其实都是「无色无样式」的隐形边框。
+          There is no `line` colour and no global border reset: every hint box on this
+          panel had an invisible border until the colour and the style were spelled out. */}
+      <div className='rd-10px border border-solid border-arco-2 bg-fill-1 px-10px py-8px text-12px text-t-secondary leading-relaxed'>
         {t('settings.webui.featureRemoteDesc')}
       </div>
 
       {/* 桌面端生命周期未实现提示 / Desktop lifecycle-unavailable notice */}
       {!lifecycleSupported && (
-        <div className='rd-10px border border-line bg-fill-1 px-10px py-8px text-12px text-warning leading-relaxed'>
+        <div className='rd-10px border border-solid border-arco-2 bg-fill-1 px-10px py-8px text-12px text-warning leading-relaxed'>
           {t('settings.webui.desktopLifecycleUnavailable')}
         </div>
       )}
@@ -359,7 +363,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
       {running && initialPassword && (
         <div className='flex flex-col gap-6px'>
           <div className='text-12px font-500 text-t-tertiary px-2px'>{t('settings.webui.initialPassword')}</div>
-          <div className='inline-flex items-center gap-8px rd-100px border border-line bg-fill-1 px-10px py-4px min-w-0'>
+          <div className='inline-flex items-center gap-8px rd-100px border border-solid border-arco-2 bg-fill-1 px-10px py-4px min-w-0'>
             <span className='text-13px text-t-primary truncate flex-1'>{initialPassword}</span>
             <Tooltip content={t('common.copy')}>
               <Button
@@ -382,7 +386,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         {/* 账号 / Account */}
         <div className='flex items-center justify-between gap-12px'>
           <span className='text-13px text-t-secondary shrink-0'>{t('settings.webui.username')}:</span>
-          <div className='inline-flex items-center gap-6px rd-100px border border-line bg-fill-1 px-10px py-4px min-w-0'>
+          <div className='inline-flex items-center gap-6px rd-100px border border-solid border-arco-2 bg-fill-1 px-10px py-4px min-w-0'>
             <span className='text-13px text-t-primary truncate'>{displayUsername}</span>
             <Tooltip content={t('common.copy')}>
               <Button
@@ -410,7 +414,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         {/* 密码 / Password */}
         <div className='flex items-center justify-between gap-12px'>
           <span className='text-13px text-t-secondary shrink-0'>{t('settings.webui.initialPassword')}:</span>
-          <div className='inline-flex items-center gap-6px rd-100px border border-line bg-fill-1 px-10px py-4px min-w-0'>
+          <div className='inline-flex items-center gap-6px rd-100px border border-solid border-arco-2 bg-fill-1 px-10px py-4px min-w-0'>
             <span className='text-13px text-t-primary truncate'>{displayPassword}</span>
             <Tooltip content={t('settings.webui.resetPasswordTooltip')}>
               <Button
@@ -429,7 +433,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
       {/* 二维码登录（仅生命周期可用、服务器运行且允许远程访问时显示）/ QR Code Login */}
       {lifecycleSupported && status?.running && status.allowRemote && (
         <div className='flex flex-col gap-6px'>
-          <div className='border-t border-line' />
+          <div className='border-t border-t-solid border-arco-2' />
           <div className='text-12px font-500 text-t-tertiary px-2px'>{t('settings.webui.qrLogin')}</div>
           <div className='text-12px text-t-tertiary px-2px'>{t('settings.webui.qrLoginHint')}</div>
 
@@ -471,7 +475,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
             )}
 
             {/* 二维码显示区域 / QR Code display area */}
-            <div className='p-12px bg-fill-1 border border-line rd-10px'>
+            <div className='p-12px bg-fill-1 border border-solid border-arco-2 rd-10px'>
               {qrLoading ? (
                 <div className='w-140px h-140px flex items-center justify-center'>
                   <span className='text-13px text-t-tertiary'>{t('common.loading')}</span>

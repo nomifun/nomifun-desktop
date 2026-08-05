@@ -365,7 +365,7 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
     <div className='flex flex-col gap-12px'>
       <div
         onClick={() => inputRef.current?.click()}
-        className='group flex flex-col items-center justify-center gap-12px h-260px rd-16px cursor-pointer transition-all duration-200 border-2 border-solid border-[var(--color-border-2)] bg-gradient-to-b from-[var(--color-fill-1)] to-[var(--color-fill-2)] hover:border-[var(--color-primary)]'
+        className='group flex flex-col items-center justify-center gap-12px h-260px rd-16px cursor-pointer transition-all duration-200 border-2px border-solid border-[var(--color-border-2)] bg-gradient-to-b from-[var(--color-fill-1)] to-[var(--color-fill-2)] hover:border-[var(--color-primary)]'
       >
         <span
           className='flex items-center justify-center w-64px h-64px rd-full text-30px transition-all duration-200 bg-primary-1 text-primary-6 group-hover:scale-105'

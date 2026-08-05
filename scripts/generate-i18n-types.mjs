@@ -20,9 +20,10 @@
  * Must run under `bun`, not bare `node` (package.json already does: `check:i18n`,
  * `gen:i18n`). The plural-aware parity rule is imported from the renderer's
  * TypeScript source so this gate and the per-namespace locale tests cannot answer
- * the same question differently; node 22 rejects that import with
- * ERR_UNKNOWN_FILE_EXTENSION, and one shared rule is worth more than a bare-node
- * entry point nothing in this repo uses.
+ * the same question differently, and one shared rule is worth more than a bare-node
+ * entry point nothing in this repo uses. A runtime that cannot load `.ts` is told
+ * exactly that, plus which bun command to run, instead of dying inside the module
+ * loader — see `importParityRule`.
  *
  * Rules (mirrors the historical generator output):
  * - Namespaces and their order come from locales/en-US/index.ts (runtime truth).
@@ -40,7 +41,53 @@ import { fileURLToPath } from 'node:url';
 // per-namespace locale tests must reach the same verdict, and their literal
 // key-for-key comparison used to contradict this gate outright — it demanded plural
 // variants i18next can never resolve (see the module's own header).
-import { diffLocaleKeys } from '../ui/src/renderer/services/i18n/localeKeyParity.ts';
+const PARITY_RULE = '../ui/src/renderer/services/i18n/localeKeyParity.ts';
+
+/**
+ * Loader failures that all mean one thing: this runtime will not read the `.ts`
+ * module above. node 22 without type stripping raises the first; a node compiled
+ * without TypeScript support raises the second even when `--experimental-strip-types`
+ * is passed; the last two are type stripping refusing a particular file. Anything
+ * else is a real fault in the rule itself and must not be dressed up as this one.
+ */
+const NO_TYPESCRIPT_SUPPORT = new Set([
+  'ERR_UNKNOWN_FILE_EXTENSION',
+  'ERR_NO_TYPESCRIPT',
+  'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX',
+  'ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING',
+]);
+
+/**
+ * Import the shared parity rule, translating "this runtime cannot load TypeScript"
+ * into one actionable line.
+ *
+ * The import is dynamic purely so that translation is reachable at all: a static
+ * import of a `.ts` module is resolved before any statement in this file runs, so
+ * `node scripts/generate-i18n-types.mjs` used to die inside the module loader with an
+ * ERR_UNKNOWN_FILE_EXTENSION stack that named a renderer file and never mentioned
+ * bun — and no guard at the top of this file could have printed ahead of it.
+ *
+ * Deliberately not a `typeof Bun` check: any runtime that can load `.ts` should just
+ * work, so only the ones that demonstrably cannot are turned away.
+ */
+async function importParityRule() {
+  try {
+    return await import(PARITY_RULE);
+  } catch (error) {
+    if (!NO_TYPESCRIPT_SUPPORT.has(error?.code)) throw error;
+    console.error(
+      `scripts/generate-i18n-types.mjs must run under bun (this runtime cannot load\n` +
+        `TypeScript: ${error.code}). It imports the plural-aware parity rule from\n` +
+        `ui/src/renderer/services/i18n/localeKeyParity.ts so this gate and the locale\n` +
+        `tests cannot answer the same question differently.\n\n` +
+        `  bun run gen:i18n      # write ui/src/renderer/services/i18n/i18n-keys.d.ts\n` +
+        `  bun run check:i18n    # verify it, plus cross-language key parity`,
+    );
+    process.exit(1);
+  }
+}
+
+const { diffLocaleKeys } = await importParityRule();
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const i18nDir = path.join(repoRoot, 'ui', 'src', 'renderer', 'services', 'i18n');

@@ -58,7 +58,13 @@ export const FilterTrigger = React.forwardRef<HTMLButtonElement, FilterTriggerPr
       aria-label={value ? `${label}: ${value}${valueIconLabel ? `, ${valueIconLabel}` : ''}` : label}
       aria-pressed={active || undefined}
       className={[
-        'inline-flex h-32px max-w-full cursor-pointer items-center gap-6px rounded-6px border-0 px-8px text-13px transition-colors focus-visible:outline-2 focus-visible:outline-[rgba(var(--primary-6),1)]',
+        // This is a `border-0` button with no other focus affordance, so the outline IS the keyboard
+        // focus indicator. `outline-2` set outline-COLOUR, not width: the numeric suffix resolves
+        // against the theme's numeric colour keys, so it overrode the UA focus ring's colour with
+        // --bg-2 (#f2f3f5 light / #262626 dark) — the page background, invisible in both themes.
+        // `outline-2px` is the width spelling, and `outline-solid` is required because nothing else
+        // in this project sets an outline-style.
+        'inline-flex h-32px max-w-full cursor-pointer items-center gap-6px rounded-6px border-0 px-8px text-13px transition-colors focus-visible:outline-2px focus-visible:outline-solid focus-visible:outline-[rgba(var(--primary-6),1)] focus-visible:outline-offset-1px',
         active
           ? '!bg-primary-1 !text-primary-6'
           : 'bg-transparent text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',

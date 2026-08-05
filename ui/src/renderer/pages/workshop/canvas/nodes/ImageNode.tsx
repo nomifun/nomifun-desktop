@@ -134,7 +134,7 @@ function ImageNodeImpl({ id, data, selected }: NodeProps<ImageFlowNode>) {
             </div>
           ) : (
             <div className='flex h-full w-full items-center justify-center'>
-              <span className='h-18px w-18px animate-spin rounded-full border-2 border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
+              <span className='h-18px w-18px animate-spin rounded-full border-2px border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
             </div>
           )}
         </NodeCard>
