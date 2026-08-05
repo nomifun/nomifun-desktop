@@ -48,13 +48,17 @@ const backgroundColors = {
 };
 
 // ==================== 边框颜色 / Border Colors ====================
-const borderColors = {
-  'b-base': 'var(--border-base)', // border-b-base - 基础边框
-  'b-light': 'var(--border-light)', // border-b-light - 浅色边框
-  'b-1': 'var(--bg-3)', // border-b-1 - 基于 bg-3
-  'b-2': 'var(--bg-4)', // border-b-2 - 基于 bg-4
-  'b-3': 'var(--bg-5)', // border-b-3 - 基于 bg-5
-};
+// ⚠️ 这里曾有一个 borderColors = { 'b-base', 'b-light', 'b-1'... } 配置块，已删除：
+//    它永远不可达。UnoCSS 解析 `border-b-*` 时先吃掉 `-b-`（bottom 方向），再去
+//    theme.colors 里查剩下的键，所以 `border-b-base` 命中的是 backgroundColors.base，
+//    输出 `border-bottom-color: var(--bg-base)`，而不是 `var(--border-base)`。
+//    删除前后整站产出 CSS 逐字节相同（见 ui/src/renderer/styles/MIGRATION.md 的
+//    「-b- 方向陷阱」一节）。
+// ⚠️ A borderColors block used to live here and was deleted: it was unreachable.
+//    UnoCSS consumes `-b-` as the bottom direction before looking the remainder up
+//    in theme.colors, so `border-b-base` resolves against backgroundColors.base.
+//    要给元素上「基础边框色」，用 `border-[var(--border-base)]`。
+//    For a base border color use `border-[var(--border-base)]`.
 
 // ==================== 品牌色 / Brand Colors ====================
 const brandColors = {
@@ -157,7 +161,6 @@ export default defineConfig({
       ...textColors,
       ...semanticColors,
       ...backgroundColors,
-      ...borderColors,
       ...brandColors,
       ...aouColors,
       ...componentColors,

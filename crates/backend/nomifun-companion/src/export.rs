@@ -7,7 +7,8 @@
 //!   `learn_runs.jsonl` compatibility marker
 //!   (`{"mood": …}`), optional raw `events/*.jsonl` day files.
 //! - companion bundle (`kind: "companion"`): `companion.json` (full profile), `state.json`
-//!   (`{"xp": …}`), `knowledge_refs.json` (`{"names": […]}` — binding names
+//!   (`{"xp": …, "mood": …}` — mood is optional, a bundle written before it
+//!   existed still imports), `knowledge_refs.json` (`{"names": […]}` — binding names
 //!   are collected by the frontend; this crate never touches the knowledge
 //!   domain, and binding reconstruction after import is the frontend's job),
 //!   plus — that is the whole point of exporting a companion rather than a
@@ -194,11 +195,19 @@ struct LegacyLearnRun {
     _summary: Option<String>,
 }
 
-/// `state.json` of a companion bundle.
+/// `state.json` of a companion bundle: the runtime state that belongs to THIS
+/// companion rather than to its settings.
+///
+/// `mood` became per-companion in 2026-08 (`companion_runtime_state`), so it
+/// travels with the companion. Optional, not required: a bundle written before
+/// this field existed carries only `xp` and must still import — which is also why
+/// this is not the memory bundle's [`RequiredOptionalString`].
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompanionStatePayload {
     xp: i64,
+    #[serde(default)]
+    mood: Option<String>,
 }
 
 /// `knowledge_refs.json` of a companion bundle.
@@ -399,7 +408,8 @@ pub async fn export_memory_bundle(
 }
 
 /// Package one companion into a zip at `dest_path`: its full profile, its
-/// per-companion xp, the knowledge binding names the caller collected, and —
+/// per-companion runtime state (xp + mood), the knowledge binding names the
+/// caller collected, and —
 /// unless the scope says otherwise — the things that actually make it *this*
 /// companion: its own memories, its skills (rows + `SKILL.md` bodies) and the
 /// custom figure it wears.
@@ -418,6 +428,11 @@ pub async fn export_companion_bundle(
         return Err(AppError::BadRequest("dest_path must be absolute".into()));
     }
     let xp = store.get_companion_state_i64(&profile.companion_id, "xp").await?;
+    // A companion that has never been through a learn run has no mood row; the
+    // bundle then says so (null) and the importing machine keeps its default.
+    let mood = store
+        .get_companion_state(&profile.companion_id, crate::store::MOOD_KEY)
+        .await?;
     let memories = if scope.memories {
         store.dump_memories_for_companion(&profile.companion_id).await?
     } else {
@@ -445,7 +460,7 @@ pub async fn export_companion_bundle(
             let mut file_count = 3u64;
             add_json_entry(zip, "manifest.json", &manifest_for(EXPORT_KIND_COMPANION))?;
             total_bytes += add_json_entry(zip, "companion.json", &profile)?;
-            total_bytes += add_json_entry(zip, "state.json", &CompanionStatePayload { xp })?;
+            total_bytes += add_json_entry(zip, "state.json", &CompanionStatePayload { xp, mood })?;
             total_bytes += add_json_entry(zip, "knowledge_refs.json", &refs)?;
             if scope.memories {
                 total_bytes += add_jsonl_entry(zip, "memories.jsonl", &memories)?;
@@ -848,7 +863,8 @@ async fn import_memory_bundle(
 
 /// Recreate a packaged companion through the live roster: `create` (validated name,
 /// deduplicated against existing companions) + `patch` (persona/model/appearance),
-/// then the per-companion xp, then everything the bundle carried — its memories,
+/// then its per-companion runtime state (xp + mood), then everything the bundle
+/// carried — its memories,
 /// its skills (rows + `SKILL.md` bodies) and its custom figure.
 ///
 /// This is a CLONE. The new companion id is local and fresh, so every carried row
@@ -912,6 +928,15 @@ async fn import_companion_bundle(
             .await?;
         if state.xp != 0 {
             store.set_companion_state(&created.companion_id, "xp", &state.xp.to_string()).await?;
+        }
+        // Mood rides along with the companion (unlike the memory bundle's field,
+        // which is always null and has always been ignored — see
+        // `MemoryStatePayload`). No length rule beyond non-empty: a mood word is
+        // whatever a learn run would have written locally.
+        if let Some(mood) = state.mood.as_deref().map(str::trim).filter(|mood| !mood.is_empty()) {
+            store
+                .set_companion_state(&created.companion_id, crate::store::MOOD_KEY, mood)
+                .await?;
         }
         if !memories.is_empty() {
             // Reuse the memory bundle's owner rule with a roster of exactly the
@@ -2044,7 +2069,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn companion_bundle_roundtrip_keeps_xp_suffixes_name_and_echoes_refs() {
+    async fn companion_bundle_roundtrip_keeps_xp_and_mood_suffixes_name_and_echoes_refs() {
         let dir = tempfile::TempDir::new().unwrap();
         let store_a = CompanionStore::open_memory().await.unwrap();
         let reg_a = scan_registry(dir.path(), "companions-a");
@@ -2062,6 +2087,11 @@ mod tests {
             .await
             .unwrap();
         store_a.add_companion_xp(&profile.companion_id, 57).await.unwrap();
+        // Mood is this companion's own runtime state, so the bundle carries it too.
+        store_a
+            .set_companion_state(&profile.companion_id, crate::store::MOOD_KEY, "proud")
+            .await
+            .unwrap();
 
         let zip_path = dir.path().join("companion.zip");
         let summary = export_companion_bundle(
@@ -2117,6 +2147,15 @@ mod tests {
         assert_eq!(imported.model, profile.model);
         assert_eq!(imported.appearance, profile.appearance);
         assert_eq!(store_b.get_companion_state_i64(&companion_id, "xp").await.unwrap(), 57);
+        assert_eq!(
+            store_b
+                .get_companion_state(&companion_id, crate::store::MOOD_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("proud"),
+            "the companion's mood travels with it"
+        );
 
         // Importing again suffixes further.
         let outcome = import_bundle(&store_b, &reg_b, &skill_paths(dir.path()), &dir.path().join("shared-b"), &zip_path)
@@ -2362,6 +2401,12 @@ mod tests {
         assert_eq!(knowledge_names, vec!["旧库".to_string()]);
         assert_eq!((memories, skills, figure), (0, 0, false));
         assert_eq!(store.get_companion_state_i64(&companion_id, "xp").await.unwrap(), 42);
+        // `state.json` predates the mood field entirely: it must still import, and
+        // the local machine's default (no row) must stand.
+        assert_eq!(
+            store.get_companion_state(&companion_id, crate::store::MOOD_KEY).await.unwrap(),
+            None
+        );
         let imported = reg.get(&companion_id).await.unwrap();
         assert!(
             imported.appearance.custom_figure.is_none(),

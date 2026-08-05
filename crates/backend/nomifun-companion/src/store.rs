@@ -70,6 +70,88 @@ impl MemoryScope {
     }
 }
 
+/// Who is mutating a memory row — the enforcement side of "a memory can only be
+/// changed by its owner". Every mutator that addresses a row by `memory_id` takes
+/// one, and it is REQUIRED: an `Option<&str>` owner would read as "no check"
+/// wherever it is `None`, which is precisely how the invariant stayed unenforced
+/// while the callers happened to only know their own ids.
+///
+/// The cross-companion escape is therefore a named variant, not an absent value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryActor {
+    /// One companion. It may only mutate rows it can READ — its own plus the
+    /// vestigial unowned ones — i.e. exactly [`MEMORY_VISIBILITY_PREDICATE`]:
+    /// a companion that can see a row in its own list can act on it, and can
+    /// touch nothing else.
+    Companion(String),
+    /// Every row, whoever owns it. The machine owner's administrative surface
+    /// only (`nomi_memory_*` over MCP), which has no companion identity to scope
+    /// to and lists across the whole install by design. Never reachable from a
+    /// companion workspace.
+    AnyOwner,
+}
+
+impl MemoryActor {
+    /// Validate the embedded id once, at the entry of each public mutator.
+    fn validate(&self) -> Result<(), AppError> {
+        match self {
+            MemoryActor::AnyOwner => Ok(()),
+            MemoryActor::Companion(id) => validate_companion_id(id, "memory actor companion_id"),
+        }
+    }
+
+    /// Row-level twin of [`MEMORY_VISIBILITY_PREDICATE`]: true iff this actor may
+    /// reach a row carrying this owner pair. `visibility_rule_matches_sql` keeps
+    /// the two in lockstep.
+    fn can_reach(&self, scope_kind: &str, scope_companion_id: Option<&str>) -> bool {
+        match self {
+            MemoryActor::AnyOwner => true,
+            MemoryActor::Companion(id) => scope_kind == "user" || scope_companion_id == Some(id.as_str()),
+        }
+    }
+}
+
+/// The one error a memory address failure produces — whether the row is absent
+/// or owned by somebody else. `NotFound` rather than `Forbidden` on purpose: a
+/// companion has no business learning that another companion's row exists, so
+/// the response can never be used as an existence oracle. What it must never be
+/// is a silent no-op reported as success.
+fn memory_not_found(memory_id: &str) -> AppError {
+    AppError::NotFound(format!("memory '{memory_id}' not found"))
+}
+
+/// Address one memory row for mutation by `actor`, enforcing the ownership
+/// invariant, and hand back what the FTS mirror needs (`rowid` + the OLD
+/// indexed content, verbatim, for the `delete` command).
+///
+/// - `Ok(Some(..))` — the row exists and this actor may mutate it.
+/// - `Ok(None)` — no such row on the install at all. Each caller decides what
+///   that means (an error for update/batch/merge, a no-op for delete).
+/// - `Err(NotFound)` — the row exists but belongs to another companion.
+async fn locate_memory_for_mutation<'e, E>(
+    executor: E,
+    memory_id: &str,
+    actor: &MemoryActor,
+) -> Result<Option<(i64, String)>, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let row = sqlx::query(
+        "SELECT id, content, scope_kind, scope_companion_id FROM companion_memories WHERE memory_id = ?",
+    )
+    .bind(memory_id)
+    .fetch_optional(executor)
+    .await
+    .map_err(db_err)?;
+    let Some(row) = row else { return Ok(None) };
+    let scope_kind: String = row.get("scope_kind");
+    let scope_companion_id: Option<String> = row.get("scope_companion_id");
+    if !actor.can_reach(&scope_kind, scope_companion_id.as_deref()) {
+        return Err(memory_not_found(memory_id));
+    }
+    Ok(Some((row.get("id"), row.get("content"))))
+}
+
 /// The vestigial `scope_kind` of an unowned row. Only a bundle written before
 /// the field existed can omit it; such a row is treated as unowned and re-homed
 /// on import (or by the boot migration).
@@ -2215,17 +2297,21 @@ impl CompanionStore {
         Ok(row.get("n"))
     }
 
-    /// Edit content / pin / lifecycle. Ownership is deliberately NOT editable:
-    /// 共享记忆概念删除后，一条记忆的主人在写入时就定了，改文字不能改归属。
+    /// Edit content / pin / lifecycle of a row `actor` owns. Ownership is
+    /// deliberately NOT editable: 共享记忆概念删除后，一条记忆的主人在写入时就定了，
+    /// 改文字不能改归属 —— and per [`MemoryActor`] another companion's row is not
+    /// addressable here at all.
     pub async fn update_memory(
         &self,
         memory_id: &str,
         content: Option<&str>,
         pinned: Option<bool>,
         status: Option<&str>,
+        actor: &MemoryActor,
     ) -> Result<(), AppError> {
         CompanionMemoryId::try_from(memory_id)
             .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
+        actor.validate()?;
         // Validate + redact edited content symmetrically with insert_memory_scoped:
         // a user/agent edit must not bypass the empty-content guard or secret
         // redaction that the insert path enforces.
@@ -2241,20 +2327,12 @@ impl CompanionStore {
         };
         let now = now_ms();
         let mut tx = self.pool.begin().await.map_err(db_err)?;
-        // Content edits must re-index: capture the OLD indexed content first
-        // (the fts5 'delete' command needs it verbatim).
-        let old_indexed: Option<(i64, String)> = if redacted.is_some() {
-            let row = sqlx::query("SELECT id, content FROM companion_memories WHERE memory_id = ?")
-                .bind(memory_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err)?;
-            match row {
-                Some(row) => Some((row.get("id"), row.get("content"))),
-                None => return Err(AppError::NotFound(format!("memory '{memory_id}' not found"))),
-            }
-        } else {
-            None
+        // The ownership gate and the FTS bookkeeping are the same lookup: it
+        // yields the rowid and the OLD indexed content (the fts5 'delete' command
+        // needs it verbatim), and rejects a row this actor does not own.
+        let located = locate_memory_for_mutation(&mut *tx, memory_id, actor).await?;
+        let Some((rowid, old_content)) = located else {
+            return Err(memory_not_found(memory_id));
         };
         let result = sqlx::query(
             "UPDATE companion_memories SET
@@ -2273,9 +2351,10 @@ impl CompanionStore {
         .await
         .map_err(db_err)?;
         if result.rows_affected() == 0 {
-            return Err(AppError::NotFound(format!("memory '{memory_id}' not found")));
+            return Err(memory_not_found(memory_id));
         }
-        if let (Some((rowid, old_content)), Some(new_content)) = (old_indexed, redacted.as_deref()) {
+        // Content edits must re-index against the pre-edit text.
+        if let Some(new_content) = redacted.as_deref() {
             fts_index_delete(&mut *tx, rowid, &old_content).await?;
             fts_index_insert(&mut *tx, rowid, new_content).await?;
         }
@@ -2283,17 +2362,15 @@ impl CompanionStore {
         Ok(())
     }
 
-    pub async fn delete_memory(&self, memory_id: &str) -> Result<(), AppError> {
+    /// Permanently delete a row `actor` owns. Deleting a memory that does not
+    /// exist stays an idempotent no-op (historical semantics); deleting one that
+    /// belongs to ANOTHER companion is a `NotFound` error, never a quiet success.
+    pub async fn delete_memory(&self, memory_id: &str, actor: &MemoryActor) -> Result<(), AppError> {
         CompanionMemoryId::try_from(memory_id)
             .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
+        actor.validate()?;
         let mut tx = self.pool.begin().await.map_err(db_err)?;
-        let row = sqlx::query("SELECT id, content FROM companion_memories WHERE memory_id = ?")
-            .bind(memory_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_err)?;
-        let Some(row) = row else {
-            // Deleting a missing memory stays a no-op (historical semantics).
+        let Some((rowid, content)) = locate_memory_for_mutation(&mut *tx, memory_id, actor).await? else {
             return Ok(());
         };
         sqlx::query("DELETE FROM companion_memories WHERE memory_id = ?")
@@ -2301,14 +2378,20 @@ impl CompanionStore {
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
-        fts_index_delete(&mut *tx, row.get("id"), row.get("content")).await?;
+        fts_index_delete(&mut *tx, rowid, &content).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(())
     }
 
     /// Apply one [`MemoryBatchAction`] to every id in a SINGLE transaction —
-    /// atomic: any invalid/missing id rolls the whole batch back.
-    pub async fn batch_update_memories(&self, ids: &[String], action: &MemoryBatchAction) -> Result<(), AppError> {
+    /// atomic: any invalid/missing id, or any id `actor` does not own, rolls the
+    /// whole batch back.
+    pub async fn batch_update_memories(
+        &self,
+        ids: &[String],
+        action: &MemoryBatchAction,
+        actor: &MemoryActor,
+    ) -> Result<(), AppError> {
         if ids.is_empty() {
             return Err(AppError::BadRequest("batch ids must not be empty".into()));
         }
@@ -2316,6 +2399,7 @@ impl CompanionStore {
             CompanionMemoryId::try_from(id.as_str())
                 .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
         }
+        actor.validate()?;
         if let MemoryBatchAction::Reclassify { kind } = action
             && !MEMORY_KINDS.contains(&kind.as_str())
         {
@@ -2324,15 +2408,19 @@ impl CompanionStore {
         let now = now_ms();
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         for id in ids {
-            let affected = match action {
+            // Ownership first: a foreign id errors out here and (by dropping the
+            // tx) rolls back whatever the batch already applied.
+            let Some((rowid, content)) = locate_memory_for_mutation(&mut *tx, id, actor).await? else {
+                return Err(memory_not_found(id));
+            };
+            match action {
                 MemoryBatchAction::Archive => {
                     sqlx::query("UPDATE companion_memories SET status = 'archived', updated_at = ? WHERE memory_id = ?")
                         .bind(now)
                         .bind(id)
                         .execute(&mut *tx)
                         .await
-                        .map_err(db_err)?
-                        .rows_affected()
+                        .map_err(db_err)?;
                 }
                 MemoryBatchAction::Restore => {
                     sqlx::query("UPDATE companion_memories SET status = 'active', updated_at = ? WHERE memory_id = ?")
@@ -2340,8 +2428,7 @@ impl CompanionStore {
                         .bind(id)
                         .execute(&mut *tx)
                         .await
-                        .map_err(db_err)?
-                        .rows_affected()
+                        .map_err(db_err)?;
                 }
                 MemoryBatchAction::Reclassify { kind } => {
                     sqlx::query("UPDATE companion_memories SET kind = ?, updated_at = ? WHERE memory_id = ?")
@@ -2350,32 +2437,16 @@ impl CompanionStore {
                         .bind(id)
                         .execute(&mut *tx)
                         .await
-                        .map_err(db_err)?
-                        .rows_affected()
+                        .map_err(db_err)?;
                 }
                 MemoryBatchAction::Delete => {
-                    let row = sqlx::query("SELECT id, content FROM companion_memories WHERE memory_id = ?")
+                    sqlx::query("DELETE FROM companion_memories WHERE memory_id = ?")
                         .bind(id)
-                        .fetch_optional(&mut *tx)
+                        .execute(&mut *tx)
                         .await
                         .map_err(db_err)?;
-                    match row {
-                        None => 0,
-                        Some(row) => {
-                            sqlx::query("DELETE FROM companion_memories WHERE memory_id = ?")
-                                .bind(id)
-                                .execute(&mut *tx)
-                                .await
-                                .map_err(db_err)?;
-                            fts_index_delete(&mut *tx, row.get("id"), row.get("content")).await?;
-                            1
-                        }
-                    }
+                    fts_index_delete(&mut *tx, rowid, &content).await?;
                 }
-            };
-            if affected == 0 {
-                // Dropping the tx rolls back the whole batch.
-                return Err(AppError::NotFound(format!("memory '{id}' not found")));
             }
         }
         tx.commit().await.map_err(db_err)?;
@@ -2385,9 +2456,15 @@ impl CompanionStore {
     /// Merge-assistant执行：insert the user-confirmed merged memory and archive
     /// the source group in one transaction. Sources keep their content (提留痕)
     /// and gain a `superseded_by:{merged_id}` audit tag. The group must be ≥2
-    /// active memories sharing one scope; the merged memory inherits that
-    /// scope, the max importance/strength and any pin.
-    pub async fn merge_memories(&self, group: &[String], merged_content: &str, kind: &str) -> Result<CompanionMemory, AppError> {
+    /// active memories that `actor` owns and that share one scope; the merged
+    /// memory inherits that scope, the max importance/strength and any pin.
+    pub async fn merge_memories(
+        &self,
+        group: &[String],
+        merged_content: &str,
+        kind: &str,
+        actor: &MemoryActor,
+    ) -> Result<CompanionMemory, AppError> {
         if group.len() < 2 {
             return Err(AppError::BadRequest("merge group must contain at least two memories".into()));
         }
@@ -2395,6 +2472,7 @@ impl CompanionStore {
             CompanionMemoryId::try_from(id.as_str())
                 .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
         }
+        actor.validate()?;
         if !MEMORY_KINDS.contains(&kind) {
             return Err(AppError::BadRequest(format!("invalid memory kind '{kind}'")));
         }
@@ -2412,8 +2490,14 @@ impl CompanionStore {
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(db_err)?
-                .ok_or_else(|| AppError::NotFound(format!("memory '{id}' not found")))?;
+                .ok_or_else(|| memory_not_found(id))?;
             let memory = row_to_memory(&row)?;
+            // Ownership gate, same rule as every other mutator: a companion can
+            // only merge rows it can see. The mixed-owner check below then keeps
+            // an AnyOwner caller from welding two companions' memories together.
+            if !actor.can_reach(&memory.scope_kind, memory.scope_companion_id.as_deref()) {
+                return Err(memory_not_found(id));
+            }
             if memory.status != "active" {
                 return Err(AppError::BadRequest(format!(
                     "memory '{id}' is not active; only active memories can be merged"
@@ -2801,6 +2885,10 @@ impl CompanionStore {
     /// Every `companion_memories` row (all statuses, archived included), streamed
     /// out via an id cursor so an arbitrarily large table never needs one
     /// giant query. Ordered by id (stable across calls).
+    ///
+    /// The memory BUNDLE export is the only production caller left: it packages
+    /// the whole hub by definition. Nothing that answers a request for one
+    /// companion may use this — see [`Self::dump_active_memories_visible_to`].
     pub async fn dump_memories_all(&self) -> Result<Vec<CompanionMemory>, AppError> {
         let mut out = Vec::new();
         let mut cursor = String::new();
@@ -2845,6 +2933,43 @@ impl CompanionStore {
             .fetch_all(&self.pool)
             .await
             .map_err(db_err)?;
+            let Some(last) = rows.last() else { break };
+            let next_cursor: String = last.get("memory_id");
+            CompanionMemoryId::try_from(next_cursor.as_str())
+                .map_err(|error| invalid_disk_id("memory id", &next_cursor, error))?;
+            cursor = next_cursor;
+            out.extend(rows.iter().map(row_to_memory).collect::<Result<Vec<_>, _>>()?);
+        }
+        Ok(out)
+    }
+
+    /// Every ACTIVE memory one companion can SEE — its own plus the vestigial
+    /// unowned rows, i.e. [`MEMORY_VISIBILITY_PREDICATE`] — for the merge-assistant
+    /// dry run. Same id-cursor streaming as [`Self::dump_memories_all`].
+    ///
+    /// Scoped in SQL rather than filtered by the caller on purpose: the merge
+    /// surface belongs to ONE companion, so another companion's memory text must
+    /// never leave the process for it, and only the active layer is mergeable.
+    pub async fn dump_active_memories_visible_to(
+        &self,
+        companion_id: &str,
+    ) -> Result<Vec<CompanionMemory>, AppError> {
+        validate_companion_id(companion_id, "memory scope_companion_id")?;
+        let sql = format!(
+            "SELECT * FROM companion_memories \
+             WHERE status = 'active' AND memory_id > ?{MEMORY_VISIBILITY_PREDICATE} \
+             ORDER BY memory_id LIMIT ?"
+        );
+        let mut out = Vec::new();
+        let mut cursor = String::new();
+        loop {
+            let rows = sqlx::query(&sql)
+                .bind(&cursor)
+                .bind(companion_id)
+                .bind(Self::DUMP_PAGE)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(db_err)?;
             let Some(last) = rows.last() else { break };
             let next_cursor: String = last.get("memory_id");
             CompanionMemoryId::try_from(next_cursor.as_str())
@@ -4450,7 +4575,7 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
 
         // update(content) re-indexes: old term gone, new term found
         store
-            .update_memory(&m.memory_id, Some("主人现在只喝浅烘焙手冲"), None, None)
+            .update_memory(&m.memory_id, Some("主人现在只喝浅烘焙手冲"), None, None, &MemoryActor::AnyOwner)
             .await
             .unwrap();
         assert_eq!(fts_count(&store.pool).await, 1);
@@ -4461,13 +4586,13 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
         store.archive_memories(std::slice::from_ref(&m.memory_id)).await.unwrap();
         assert_eq!(fts_count(&store.pool).await, 1);
         store
-            .update_memory(&m.memory_id, None, None, Some("active"))
+            .update_memory(&m.memory_id, None, None, Some("active"), &MemoryActor::AnyOwner)
             .await
             .unwrap();
         assert_eq!(fts_count(&store.pool).await, 1);
 
         // delete removes the index entry
-        store.delete_memory(&m.memory_id).await.unwrap();
+        store.delete_memory(&m.memory_id, &MemoryActor::AnyOwner).await.unwrap();
         assert_eq!(fts_count(&store.pool).await, 0);
 
         // raw import path also indexes
@@ -4500,6 +4625,210 @@ CREATE INDEX idx_companion_suggestions_status ON companion_suggestions(status, c
         store.delete_companion_rows(&owner).await.unwrap();
         assert_eq!(fts_count(&store.pool).await, 1);
         assert_eq!(fts_match_count(&store.pool, "流水线").await, 1);
+    }
+
+    /// The ownership invariant, at the layer that can actually enforce it:
+    /// companion B can neither edit, delete, batch-archive nor merge companion
+    /// A's memories, and each attempt is a clean `NotFound` — never a no-op
+    /// reported as success. Drop the actor check from any of the four mutators and
+    /// the matching pair of assertions here flips.
+    #[tokio::test]
+    async fn memory_mutations_reject_another_companions_rows() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        let a = companion_fixture(41);
+        let b = companion_fixture(42);
+        let actor_a = MemoryActor::Companion(a.clone());
+        let actor_b = MemoryActor::Companion(b.clone());
+        let own = |owner: &str, content: &str| {
+            let owner = owner.to_owned();
+            let content = content.to_owned();
+            let store = &store;
+            async move {
+                store
+                    .insert_memory_scoped(
+                        "preference",
+                        &content,
+                        &[],
+                        0.8,
+                        "manual",
+                        MemoryScope::Companion(owner),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let edit = own(&a, "主人喜欢深烘焙咖啡").await;
+        let doomed = own(&a, "主人周三下午开周会").await;
+        let batched = own(&a, "主人在学萨克斯").await;
+        // Normalized-similar pair (containment) so the merge group is legal.
+        let dup_one = own(&a, "主人养了一只叫豆豆的猫").await;
+        let dup_two = own(&a, "主人养了一只叫豆豆的猫，很黏人").await;
+
+        let forbidden = |error: AppError, what: &str| match error {
+            AppError::NotFound(_) => {}
+            other => panic!("{what} by a non-owner must be NotFound, got {other:?}"),
+        };
+
+        // ── B is refused all four ──
+        forbidden(
+            store
+                .update_memory(&edit.memory_id, Some("篡改"), None, None, &actor_b)
+                .await
+                .expect_err("B must not edit A's memory"),
+            "update",
+        );
+        assert_eq!(
+            store.get_memory(&edit.memory_id).await.unwrap().unwrap().content,
+            "主人喜欢深烘焙咖啡",
+            "a refused edit must not have landed"
+        );
+        forbidden(
+            store
+                .delete_memory(&doomed.memory_id, &actor_b)
+                .await
+                .expect_err("B must not delete A's memory"),
+            "delete",
+        );
+        assert!(
+            store.get_memory(&doomed.memory_id).await.unwrap().is_some(),
+            "a refused delete must not have landed"
+        );
+        forbidden(
+            store
+                .batch_update_memories(
+                    std::slice::from_ref(&batched.memory_id),
+                    &MemoryBatchAction::Archive,
+                    &actor_b,
+                )
+                .await
+                .expect_err("B must not batch-archive A's memory"),
+            "batch archive",
+        );
+        assert_eq!(
+            store.get_memory(&batched.memory_id).await.unwrap().unwrap().status,
+            "active",
+            "a refused batch must not have landed"
+        );
+        let group = vec![dup_one.memory_id.clone(), dup_two.memory_id.clone()];
+        forbidden(
+            store
+                .merge_memories(&group, "主人的猫叫豆豆，很黏人", "preference", &actor_b)
+                .await
+                .expect_err("B must not merge A's memories"),
+            "merge",
+        );
+        assert_eq!(
+            store.count_memories("active", Some(&a)).await.unwrap(),
+            5,
+            "a refused merge must not have inserted a merged row"
+        );
+
+        // ── A can still do all four to its own ──
+        store
+            .update_memory(&edit.memory_id, Some("主人现在只喝浅烘焙"), None, None, &actor_a)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_memory(&edit.memory_id).await.unwrap().unwrap().content,
+            "主人现在只喝浅烘焙"
+        );
+        store.delete_memory(&doomed.memory_id, &actor_a).await.unwrap();
+        assert!(store.get_memory(&doomed.memory_id).await.unwrap().is_none());
+        store
+            .batch_update_memories(
+                std::slice::from_ref(&batched.memory_id),
+                &MemoryBatchAction::Archive,
+                &actor_a,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_memory(&batched.memory_id).await.unwrap().unwrap().status,
+            "archived"
+        );
+        let merged = store
+            .merge_memories(&group, "主人的猫叫豆豆，很黏人", "preference", &actor_a)
+            .await
+            .unwrap();
+        assert_eq!(merged.scope_companion_id.as_deref(), Some(a.as_str()));
+
+        // ── The administrative escape is the only cross-owner path ──
+        let stranger = own(&b, "别的伙伴的私事").await;
+        store
+            .update_memory(&stranger.memory_id, Some("机主改的"), None, None, &MemoryActor::AnyOwner)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_memory(&stranger.memory_id).await.unwrap().unwrap().content,
+            "机主改的"
+        );
+    }
+
+    /// A vestigial unowned row (`('user', NULL)`) is mutable by any companion,
+    /// exactly as it is READABLE by any companion: it means "not yet assigned",
+    /// so a companion that sees it in its own list must be able to act on it.
+    /// The new dump behind the merge assistant follows the same rule.
+    #[tokio::test]
+    async fn unowned_rows_stay_reachable_and_scoped_dumps_match_the_read_rule() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        let a = companion_fixture(43);
+        let b = companion_fixture(44);
+        let actor_a = MemoryActor::Companion(a.clone());
+
+        let unowned = store
+            .insert_memory("profile", "主人是 Rust 工程师", &[], 0.9, "learn")
+            .await
+            .unwrap();
+        let mine = store
+            .insert_memory_scoped("task", "帮主人盯 CI 构建", &[], 0.8, "chat", MemoryScope::Companion(a.clone()))
+            .await
+            .unwrap();
+        let theirs = store
+            .insert_memory_scoped("task", "别的伙伴的私事", &[], 0.8, "chat", MemoryScope::Companion(b))
+            .await
+            .unwrap();
+
+        // The merge-assistant feed carries only what A can read — never another
+        // companion's memory CONTENT.
+        let visible: Vec<String> = store
+            .dump_active_memories_visible_to(&a)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|memory| memory.memory_id)
+            .collect();
+        assert!(visible.contains(&unowned.memory_id) && visible.contains(&mine.memory_id));
+        assert!(
+            !visible.contains(&theirs.memory_id),
+            "another companion's memory must not be dumped: {visible:?}"
+        );
+
+        // Archived rows are not mergeable, so they are not in the feed either.
+        store
+            .batch_update_memories(
+                std::slice::from_ref(&mine.memory_id),
+                &MemoryBatchAction::Archive,
+                &actor_a,
+            )
+            .await
+            .unwrap();
+        let visible: Vec<String> = store
+            .dump_active_memories_visible_to(&a)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|memory| memory.memory_id)
+            .collect();
+        assert_eq!(visible, vec![unowned.memory_id.clone()]);
+
+        // And an unowned row is still mutable by whoever can see it.
+        store
+            .update_memory(&unowned.memory_id, None, Some(true), None, &actor_a)
+            .await
+            .unwrap();
+        assert!(store.get_memory(&unowned.memory_id).await.unwrap().unwrap().pinned);
+        store.delete_memory(&unowned.memory_id, &actor_a).await.unwrap();
+        assert!(store.get_memory(&unowned.memory_id).await.unwrap().is_none());
     }
 
     /// Regression net for the re-homing migration: an UNOWNED (`('user', NULL)`)

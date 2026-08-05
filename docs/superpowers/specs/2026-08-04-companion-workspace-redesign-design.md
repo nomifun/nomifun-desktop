@@ -261,22 +261,29 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 - **偏离本 spec 的一处修正**：§4.2 原写着删除 `smart_collaboration` 与 `bridge_to_memory_dir`。实施时核实发现两者都是活功能——前者门控 `nomi_delegate` 是否注入伙伴系统提示，后者仍被 `companion.rs` 读取且可由 agent 工具写入。它们与"共享记忆"无关，因此保留。当初把它们列进删除清单是本 spec 的判断失误。
 - **§5.1 进化配置改为按伙伴（原未完成项 3）**：`learn` / `evolve` 从 `SharedCompanionConfig` 迁到 `CompanionProfileConfig`。每个伙伴自带节奏、模型、`companion_runtime_state` 里的独立事件游标，学习/挖矿产出（记忆、技能、XP、mood）全部归它自己；`EvolutionTab` 改走 `patchCompanion`，两处「当前对所有伙伴生效」标注与 `InstallWideNote.tsx`、`ownsLearningOutput` 一并删除。休眠时段现在同时门控这两条后台循环（IM 自动回复不门控）。启动迁移把现有装机级值播种到每个伙伴、把全局 `learn_cursor_ts` / `evolve_cursor_ts` / `mood` 播种到每个伙伴（播成 0 会让每个伙伴重蒸馏整段历史）；加列/建表一个没有，`INSERT OR IGNORE` 保证幂等且不覆盖已改过的值。保留期水位线改为「所有启用了消费者的伙伴的最小游标」，未建游标行的伙伴贡献 0（最大保护）。`skill_pattern_stats` / `evolution_feedback` 按设计保持装机级。契约版本 8 → 9。
 
+- **§11 未完成项 5 —— 记忆归属在存储层强制**：`update_memory` / `delete_memory` / `batch_update_memories` / `merge_memories` 全部要求一个 `MemoryActor`。这是必填枚举而不是 `Option<owner>`：可选主人在每个调用点都读作"不校验"，而那正是这条不变量此前失守的原因。跨伙伴逃逸口是一个**有名字的**变体 `MemoryActor::AnyOwner`，只有机主的 MCP 面（`nomi_memory_update` / `nomi_memory_delete`，本来就没有伙伴身份）用它。`Companion(id)` 能改的行 = 它能读的行，与读路径的 `MEMORY_VISIBILITY_PREDICATE` 逐字同构（自己的 + 尚未归属的遗留行）。不匹配一律 `NotFound`（不是 `Forbidden`：别的伙伴的行连"存在"都不该被探测出来），绝不静默无操作后报成功；删除不存在的记忆仍是幂等 no-op。REST 四个写入口因此都要求 `scope_companion_id`（`DELETE` 走 query），契约版本 9 → 10。测试经变异验证：把 `can_reach` 改成恒真，`memory_mutations_reject_another_companions_rows` 立刻失败。
+- **§11 未完成项 4 —— 合并建议收窄到服务端**：`memory_merge_suggestions` 改用新的 `dump_active_memories_visible_to(companion_id)`（SQL 里就带上可见性谓词，且只取 active 层），路由要求 `scope_companion_id`，`MergeAssistantPane.tsx` 里的客户端过滤随之删除。此前的做法功能正确但把别的伙伴的记忆**正文**送到了一个只属于单个伙伴的界面。路由测试断言另一个伙伴的记忆正文根本不出现在响应体里。`dump_memories_all` 现在只剩导出路径（`export_memory_bundle`）一个调用方。
+- **§11 未完成项 1 —— 伙伴包携带 mood**：`CompanionStatePayload` 加 `mood: Option<String>`（`#[serde(default)]`，所以此前写出的包没有这个字段也照样导入），导出读 `companion_runtime_state`，导入写回新铸造的伙伴 id 上。记忆包的 `state.json` 里那个 mood 字段保持恒为 null、导入侧继续忽略——没有复活那条路径。
+- **§11 未完成项 7 —— 死写法的根因已铲除，并加了棘轮门禁**：`uno.config.ts` 里那个不可达的 `borderColors` 块删除（原地留注释说明为什么不可再加回来）；`styles/MIGRATION.md` 重写，把三种死写法（`{text,bg,border}-[rgb(var(--RAMP-N))]`、`border-border-N`、`border-b-base` / `border-b-light`）连同实测产出与替代写法写在最前面，并给出机械清理配方。新增 `scripts/check-dead-css-utilities.mjs` 接进 `bun run check`：不在基线的文件出现任一写法即失败，基线文件条数变多即失败，基线文件清零则要求删掉那一行（这张表只能变短），部分清理只提示不失败。删除 `borderColors` 前后产出 CSS 逐字节相同（用真实 `createGenerator` 跑全站 + 探针类，两侧各 133,216 字节，`cmp` 一致）——`border-b-base` 两侧都产出 `border-bottom-color: var(--bg-base)`，证明那 5 个键从未被命中。
+
 **验证证据**
 
-- `bun run check` 全 8 个子门通过；`bun test --cwd ui` 1667 通过 / 1 失败（该失败在干净树上同样存在，为测试间污染，非本次引入）；`cargo nextest run -p nomifun-companion` 261/261；`cargo nextest run -p nomifun-gateway` 141/141；`cargo check --workspace --all-targets` 干净；`bun run build:ui` 通过。
+- `bun run check` 全门通过（本次多了第 5 门 `check:dead-css`，共 9 个子门）；`bun test --cwd ui` 1673 通过 / 1 失败（该失败在干净树上同样存在，为测试间污染，非本次引入）；`cargo nextest run -p nomifun-companion` 264/264；`cargo nextest run -p nomifun-gateway` 141/141；`cargo check --workspace --all-targets` 干净；`bun run build:ui` 通过（`nomifun-build.json` 的 `api_contract_version` 为 10）。
+- **归属校验的变异验证**（集成核对时逐个做的，不是只读代码）：`can_reach` 恒真 → 三个测试同时失败；不匹配时把 `Err(NotFound)` 换成 `Ok(None)`（即"静默无操作后报成功"）→ `B must not delete A's memory` 失败，说明删除路径没有静默成功的口子；四个写入口各自单独绕过 actor（传 `AnyOwner`）→ 每次都恰好打中对应那一条断言（edit / delete / batch-archive / merge）；把 `dump_active_memories_visible_to` 的可见性谓词改成恒真 → 合并建议泄漏测试失败。每次都已还原，`store.rs` 与还原前 md5 一致。
+- **棘轮门禁实证**：新文件引入死写法 → `bun run check` 在 `check:dead-css` 处退出 1 并点名文件与行号；基线文件条数 1 → 2 → 失败并打印「基线 1 → 现在 2」；基线文件清零 → 失败并要求把该行从 BASELINE 删掉。`--self-test` 21/21。
 - **迁移端到端实测**：把真实 0.3.8 期数据目录（含 `companion_suggestions` 表）复制出来、植入一条金丝雀记忆，用真实 `nomifun-web` 启动 —— 后端正常启动（无启动即砖）、表已删除、金丝雀记忆逐字保留、external-content FTS5 索引仍能检索到它、`/api/companion/suggestions` 返回 404。
 - **UI 视觉实测**（补做）：本机有 `geckodriver`，用 WebDriver 驱动无头 Firefox 打开干净 dev server（`--insecure-no-auth` + 三个测试伙伴），逐一渲染七个标签与形象库视图并截图确认。此过程抓到并修掉了一个真 bug（见下）。
 - **§5.1 迁移端到端实测**：真实 `NomiFun-dev` 数据目录（1 个伙伴、v3 store）复制到 `/tmp`，装机级 `learn` 设为「开启 / 25 分钟」、`evolve` 设为「开启 / 45 分钟 / 激进 / min_distinct_sessions=6」，全局游标设为非零、`mood='curious'`，用真实 `nomifun-web` 启动：正常启动；该伙伴 profile 拿到逐字相同的 learn/evolve；两个游标等于旧全局值（不是 0）；mood 为 `curious`；`GET /api/companion/config` 里再没有 `learn`/`evolve`。随后改掉该伙伴的三项设置并推进它的游标，**第二次启动没有任何重播种日志，改动全部保留**。UI 侧用无头 Firefox 打开 `#/nomi?tab=evolution`：三个分区全部渲染、装机级标注为零；点开关后经 API 确认只落在该伙伴 profile 上，第二个伙伴的 `interval_minutes=600` 与共享配置逐字未变。
 
 **未完成（按优先级）**
 
-1. 伙伴包尚未携带 mood：`CompanionStatePayload` 只有 `xp`。mood 从来没有跨机迁移过（记忆包里的 mood 一直被导入侧忽略），所以不是回归，但既然它现在是伙伴的属性，随包走会更自然。
+1. ~~伙伴包尚未携带 mood~~ —— **已完成**（见「已完成」末三条）。
 2. `companion_memories.scope_kind` 与 `companion_skills.scope_kind` 的物理删除（表重建）—— 见 §7，故意延后：SQLite 不允许 DROP 被 CHECK 引用的列，`validate_baseline_schema` 比对精确有序列清单，重建做错会让所有既有装机启动即砖，而收益为零（两列现在恒为 `'companion'`）。
 3. `companion_state` 里的全局游标与 mood 行故意保留、不再读取，以便回退到旧版本仍能找到它们。可在下一个版本清理。
-4. `memory_merge_suggestions` 仍扫描全部伙伴的记忆再由客户端过滤。改归属后功能正确（合并组按 owner 分桶），但它把其他伙伴的记忆正文送到了前端，值得收窄到服务端。
-5. `update_memory` / `delete_memory` / `batch_memories` / `merge_memories` 仍按 `memory_id` 寻址而不校验 owner。目前不可从 UI 触发（工作区只知道自己的 id，MCP 面是机主的），但"记忆只能被它的主人改"这条不变量并未在存储层强制。
-6. 全仓约 10 个既有文件仍在用 `text-[rgb(var(--ramp-N))]`（`ContextUsageRing`、`KnowledgeControl`、`ConversationTerminalPanel` 等），它们的红字其实不是红的。本次只修了重构范围内的 30 处并加了守卫；其余是独立的清理。
-7. `uno.config.ts:51-55` 的不可达 `borderColors` 块与 `styles/MIGRATION.md` 里错误的 `border-b-base` 指引仍在（§4.5 列过，未做）。
+4. ~~`memory_merge_suggestions` 仍扫描全部伙伴的记忆再由客户端过滤~~ —— **已完成**（见「已完成」末三条）。
+5. ~~四个记忆写入口仍按 `memory_id` 寻址而不校验 owner~~ —— **已完成**（见「已完成」末三条）。
+6. 死写法的**存量**清理：`ui/src` 下 95 个文件 / 276 处仍在用那三种写法（实测：ramp 79 文件 228 处、`border-border-N` 17 文件 40 处、`border-b-base` / `border-b-light` 4 文件 8 处，不含测试文件），它们的红字其实不是红的。根因与门禁已在本次铲除（见「已完成」末条），但一次性替换会同时改变 276 处渲染颜色、需要逐一目测明暗两套主题，故独立成一次改动；配方与基线见 `styles/MIGRATION.md` 与 `scripts/check-dead-css-utilities.mjs`。清理时必须同步改 `knowledgeCreateCtaContrast.test.ts` 与 `scheduledTaskLayout.test.ts`——这两个测试反过来断言了破写法**存在**。
+7. ~~`uno.config.ts:51-55` 的不可达 `borderColors` 块与 `styles/MIGRATION.md` 里错误的 `border-b-base` 指引仍在~~ —— **已完成**（见「已完成」末条）。
 
 **本次交付中发现并修掉的静默失效（值得记住的两类）**
 
