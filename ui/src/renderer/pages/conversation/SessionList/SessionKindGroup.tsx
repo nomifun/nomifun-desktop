@@ -63,7 +63,7 @@ const SessionKindGroup: React.FC<SessionKindGroupProps> = ({
   return (
     <div className='min-w-0'>
       <div
-        className='group/kind flex items-center gap-4px h-26px pl-22px pr-8px cursor-pointer select-none rd-6px hover:bg-fill-2 transition-colors min-w-0'
+        className='group/kind flex items-center gap-4px h-24px pl-22px pr-8px cursor-pointer select-none rd-6px hover:bg-fill-2 transition-colors min-w-0'
         onClick={() => {
           if (batchMode && !selectionDisabled) {
             onToggleSelection?.();
@@ -140,7 +140,7 @@ const SessionKindGroup: React.FC<SessionKindGroupProps> = ({
             <button
               type='button'
               aria-expanded={showAll}
-              className='ml-64px mt-1px mb-2px inline-flex h-20px w-fit max-w-full appearance-none items-center border-none bg-transparent p-0 text-left text-12px leading-20px text-t-secondary transition-colors cursor-pointer select-none hover:text-t-primary focus:outline-none focus-visible:text-t-primary'
+              className='ml-64px mb-1px inline-flex h-20px w-fit max-w-full appearance-none items-center border-none bg-transparent p-0 text-left text-12px leading-20px text-t-secondary transition-colors cursor-pointer select-none hover:text-t-primary focus:outline-none focus-visible:text-t-primary'
               onClick={(e) => {
                 e.stopPropagation();
                 onToggleShowAll();

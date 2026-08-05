@@ -32,11 +32,11 @@ interface SiderSectionHeaderProps {
 const SiderSectionHeader: React.FC<SiderSectionHeaderProps> = ({ label, collapsed, collapsedRule = true }) => {
   if (collapsed) {
     if (!collapsedRule) return null;
-    return <div className='shrink-0 mt-6px mb-2px h-1px bg-[var(--color-border-2)] mx-6px' />;
+    return <div className='shrink-0 mt-4px mb-1px h-1px bg-[var(--color-border-2)] mx-6px' />;
   }
 
   return (
-    <div className='shrink-0 mt-8px mb-2px px-12px h-22px flex items-center text-12px font-[500] leading-none text-t-tertiary select-none'>
+    <div className='shrink-0 mt-5px mb-1px px-12px h-18px flex items-center text-12px font-[500] leading-none text-t-tertiary select-none'>
       {label}
     </div>
   );

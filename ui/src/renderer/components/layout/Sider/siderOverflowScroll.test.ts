@@ -12,6 +12,6 @@ const source = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 describe('application sider overflow handling', () => {
   test('scrolls the navigation body while keeping the settings group pinned', () => {
     expect(source.includes("'flex-1 min-h-0 overflow-y-auto overflow-x-hidden'")).toBe(true);
-    expect(source.includes("'shrink-0 mt-auto pt-8px flex flex-col gap-2px")).toBe(true);
+    expect(source.includes("'shrink-0 mt-auto pt-5px flex flex-col gap-1px")).toBe(true);
   });
 });
