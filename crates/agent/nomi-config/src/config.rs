@@ -349,12 +349,6 @@ pub struct BrowserConfig {
     pub enabled: bool,
     #[serde(default)]
     pub headless: bool,
-    /// Optional origin allowlist for Browser operations, derived alongside the
-    /// shared secret vault's `allowed_origins`. It is enforced by the managed
-    /// tool/policy path before Hub execution. Empty = allow all.
-    /// Defense-in-depth, not a sole security boundary.
-    #[serde(default)]
-    pub allowed_origins: Vec<String>,
     /// **F1-sec: evaluate「全权模式」开关**（E3 裁决⑨，default-deny）。`false`（默认）→ 引擎的
     /// `evaluate` 动作返 `Unsupported`（最高危逃生舱默认封死）。`true` → evaluate 放行（仍受「与持久
     /// 登录互斥」约束）。上层（backend factory）把用户在 System Settings 显式 opt-in 的
@@ -408,7 +402,6 @@ impl Default for BrowserConfig {
         Self {
             enabled: false,
             headless: false,
-            allowed_origins: Vec::new(),
             full_power: false,
             persistent_login: false,
             site_memory: false,
@@ -793,7 +786,7 @@ pub fn app_data_dir() -> PathBuf {
 ///
 /// The main-process `BrowserSessionHub` owns the actual Host/profile lifecycle.
 /// Durable identity/workspace roots remain siblings under [`app_data_dir`]
-/// (`browser-state`, `browser-profiles`, `login-profile`, `browser-secrets`) so
+/// (`browser-state`, `browser-profiles`, `login-profile`) so
 /// backup can include managed identity data without copying Chromium caches or
 /// downloaded binaries. This helper does not grant an Agent runtime browser
 /// ownership.
@@ -1057,11 +1050,6 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
     let browser = BrowserConfig {
         enabled: global.tools.browser.enabled || project.tools.browser.enabled,
         headless: global.tools.browser.headless || project.tools.browser.headless,
-        allowed_origins: if !project.tools.browser.allowed_origins.is_empty() {
-            project.tools.browser.allowed_origins
-        } else {
-            global.tools.browser.allowed_origins
-        },
         // F1-sec: 全权模式——任一层开启即开（与 enabled/headless 同 OR 合并语义）。运行时由 backend
         // factory 经 client_preferences LIVE 覆写（config.tools.browser.full_power），这里只是 toml 合并。
         full_power: global.tools.browser.full_power || project.tools.browser.full_power,

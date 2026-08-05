@@ -3,7 +3,8 @@
 //!
 //! Package layouts (zip root), enveloped by a strict `manifest.json`:
 //! - memory bundle (`kind: "memory"`): `memories.jsonl` (every companion_memories
-//!   row, archived included), `learn_runs.jsonl`, `state.json`
+//!   row, archived included), `state.json`, and an empty legacy
+//!   `learn_runs.jsonl` compatibility marker
 //!   (`{"mood": …}`), optional raw `events/*.jsonl` day files.
 //! - companion bundle (`kind: "companion"`): `companion.json` (full profile), `state.json`
 //!   (`{"xp": …}`), `knowledge_refs.json` (`{"names": […]}` — binding names
@@ -24,14 +25,14 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use nomifun_common::{AppError, TimestampMs, now_ms, zip_safe};
+use nomifun_common::{AppError, TimestampMs, now_ms, validate_uuidv7, zip_safe};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::profile::CompanionProfileConfig;
 use crate::registry::CompanionRegistry;
 use crate::service::CompanionService;
-use crate::store::{CompanionLearnRun, CompanionMemory, CompanionStore};
+use crate::store::{CompanionMemory, CompanionStore};
 
 /// v3 is a hard export/import baseline. Any other package version is rejected.
 pub const EXPORT_FORMAT: &str = "nomifun-export";
@@ -51,7 +52,8 @@ pub struct ExportSummary {
     pub dest_path: String,
     /// Memory rows in the package (0 for companion bundles).
     pub memories: u64,
-    /// Learn-run rows in the package (0 for companion bundles).
+    /// Always zero. Kept on the v3 response wire for compatibility; learning
+    /// run history is no longer recorded or exported.
     pub learn_runs: u64,
     /// Raw `events/*.jsonl` files in the package (0 unless requested).
     pub event_files: u64,
@@ -111,6 +113,31 @@ struct RequiredOptionalString(Option<String>);
 #[serde(deny_unknown_fields)]
 struct MemoryStatePayload {
     mood: RequiredOptionalString,
+}
+
+/// Closed schema for the retired v3 `learn_runs.jsonl` payload. New exports
+/// write an empty compatibility marker; old packages are still validated, then
+/// their historical rows are deliberately discarded rather than re-persisted.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyLearnRun {
+    learn_run_id: String,
+    #[serde(rename = "started_at")]
+    _started_at: TimestampMs,
+    #[serde(rename = "finished_at")]
+    _finished_at: Option<TimestampMs>,
+    #[serde(rename = "status")]
+    _status: String,
+    #[serde(rename = "events_processed")]
+    _events_processed: i64,
+    #[serde(rename = "memories_added")]
+    _memories_added: i64,
+    #[serde(rename = "suggestions_added")]
+    _suggestions_added: i64,
+    #[serde(rename = "error")]
+    _error: Option<String>,
+    #[serde(rename = "summary")]
+    _summary: Option<String>,
 }
 
 /// `state.json` of a companion bundle.
@@ -188,8 +215,8 @@ impl CompanionRoster for CompanionRegistry {
 
 // ── Export ──────────────────────────────────────────────────────────
 
-/// Package the shared memory hub (memories + learn runs + mood, optionally
-/// the raw event day files) into a zip at `dest_path`, written atomically via
+/// Package the shared memory hub (memories + mood, optionally the raw event
+/// day files) into a zip at `dest_path`, written atomically via
 /// a same-directory tempfile + persist.
 pub async fn export_memory_bundle(
     store: &CompanionStore,
@@ -201,19 +228,19 @@ pub async fn export_memory_bundle(
         return Err(AppError::BadRequest("dest_path must be absolute".into()));
     }
     let memories = store.dump_memories_all().await?;
-    let learn_runs = store.dump_learn_runs_all().await?;
     let mood = store.get_state("mood").await?;
 
     let dest = dest_path.to_path_buf();
     let events_dir = include_events.then(|| shared_dir.join("events"));
     let memories_count = memories.len() as u64;
-    let learn_runs_count = learn_runs.len() as u64;
     let (file_count, total_bytes, event_files) = tokio::task::spawn_blocking(move || {
         atomic_zip(&dest, |zip| {
             let mut total_bytes = 0u64;
             add_json_entry(zip, "manifest.json", &manifest_for(EXPORT_KIND_MEMORY))?;
             total_bytes += add_jsonl_entry(zip, "memories.jsonl", &memories)?;
-            total_bytes += add_jsonl_entry(zip, "learn_runs.jsonl", &learn_runs)?;
+            // v3 importers require this entry. It intentionally contains no
+            // rows now that learning-run history has been retired.
+            add_raw_entry(zip, "learn_runs.jsonl", &[])?;
             total_bytes += add_json_entry(
                 zip,
                 "state.json",
@@ -295,7 +322,7 @@ pub async fn export_memory_bundle(
         total_bytes,
         dest_path: dest_path.to_string_lossy().to_string(),
         memories: memories_count,
-        learn_runs: learn_runs_count,
+        learn_runs: 0,
         event_files,
     })
 }
@@ -415,13 +442,50 @@ fn add_raw_entry(zip: &mut zip::ZipWriter<std::fs::File>, name: &str, bytes: &[u
 
 // ── Import ──────────────────────────────────────────────────────────
 
-/// Import a package created by [`export_memory_bundle`] or
-/// [`export_companion_bundle`], dispatching on the manifest `kind`.
+/// Test-only import entry point without the production event-store gate. Live
+/// callers must use [`import_bundle_with_event_lock`] through the service so
+/// the configured hard capacity remains an invariant.
+#[cfg(test)]
 pub async fn import_bundle(
     store: &CompanionStore,
     roster: &dyn CompanionRoster,
     shared_dir: &Path,
     src_path: &Path,
+) -> Result<ImportOutcome, AppError> {
+    import_bundle_inner(store, roster, shared_dir, src_path, None, None).await
+}
+
+/// Production import variant. ZIP extraction and package parsing happen
+/// outside the gate; memory-event destination preflight, publication and
+/// rollback are serialized with the collector. The current capacity policy is
+/// read only after taking that gate, and an over-cap import is rejected before
+/// either event files or memory rows are published.
+pub(crate) async fn import_bundle_with_event_lock(
+    store: &CompanionStore,
+    roster: &dyn CompanionRoster,
+    shared_dir: &Path,
+    src_path: &Path,
+    event_store_lock: crate::collector::SharedEventStoreLock,
+    config: crate::collector::SharedConfig,
+) -> Result<ImportOutcome, AppError> {
+    import_bundle_inner(
+        store,
+        roster,
+        shared_dir,
+        src_path,
+        Some(event_store_lock),
+        Some(config),
+    )
+    .await
+}
+
+async fn import_bundle_inner(
+    store: &CompanionStore,
+    roster: &dyn CompanionRoster,
+    shared_dir: &Path,
+    src_path: &Path,
+    event_store_lock: Option<crate::collector::SharedEventStoreLock>,
+    config: Option<crate::collector::SharedConfig>,
 ) -> Result<ImportOutcome, AppError> {
     if !src_path.is_file() {
         return Err(AppError::BadRequest(format!(
@@ -438,7 +502,16 @@ pub async fn import_bundle(
         .await
         .map_err(|e| AppError::Internal(format!("failed to create import temp dir: {e}")))?;
 
-    let result = import_extracted(store, roster, shared_dir, src_path, &extract_dir).await;
+    let result = import_extracted(
+        store,
+        roster,
+        shared_dir,
+        src_path,
+        &extract_dir,
+        event_store_lock.as_ref(),
+        config.as_ref(),
+    )
+    .await;
     let _ = tokio::fs::remove_dir_all(&extract_dir).await;
     let _ = tokio::fs::remove_dir(&tmp_root).await; // best-effort, only when empty
     result
@@ -450,6 +523,8 @@ async fn import_extracted(
     shared_dir: &Path,
     src_path: &Path,
     extract_dir: &Path,
+    event_store_lock: Option<&crate::collector::SharedEventStoreLock>,
+    config: Option<&crate::collector::SharedConfig>,
 ) -> Result<ImportOutcome, AppError> {
     let src = src_path.to_path_buf();
     let dest = extract_dir.to_path_buf();
@@ -458,7 +533,16 @@ async fn import_extracted(
         .map_err(|e| AppError::Internal(format!("import task join error: {e}")))??;
 
     match kind.as_str() {
-        EXPORT_KIND_MEMORY => import_memory_bundle(store, shared_dir, extract_dir).await,
+        EXPORT_KIND_MEMORY => {
+            import_memory_bundle(
+                store,
+                shared_dir,
+                extract_dir,
+                event_store_lock,
+                config,
+            )
+            .await
+        }
         EXPORT_KIND_COMPANION => import_companion_bundle(store, roster, extract_dir).await,
         other => Err(AppError::BadRequest(format!("导入包类型不支持: {other}"))),
     }
@@ -475,14 +559,35 @@ async fn import_memory_bundle(
     store: &CompanionStore,
     shared_dir: &Path,
     extract_dir: &Path,
+    event_store_lock: Option<&crate::collector::SharedEventStoreLock>,
+    config: Option<&crate::collector::SharedConfig>,
 ) -> Result<ImportOutcome, AppError> {
     let memories = parse_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", true)?;
-    let learn_runs =
-        parse_jsonl::<CompanionLearnRun>(&extract_dir.join("learn_runs.jsonl"), "learn_runs.jsonl", true)?;
+    let legacy_learn_runs =
+        parse_jsonl::<LegacyLearnRun>(&extract_dir.join("learn_runs.jsonl"), "learn_runs.jsonl", true)?;
+    for run in &legacy_learn_runs {
+        validate_uuidv7(&run.learn_run_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid legacy learn-run id: {error}")))?;
+    }
     let _state: MemoryStatePayload = read_json_strict(&extract_dir.join("state.json"), "state.json")?;
+    let _event_guard = match event_store_lock {
+        Some(lock) => Some(lock.write().await),
+        None => None,
+    };
+    let storage_policy = match config {
+        Some(config) => Some(config.read().await.clone()),
+        None => None,
+    };
     let event_plan = plan_event_import(&extract_dir.join("events"), &shared_dir.join("events"))?;
+    if let Some(config) = &storage_policy {
+        ensure_event_import_fits_capacity(
+            shared_dir,
+            &event_plan,
+            config.collect.event_max_storage_mb,
+        )?;
+    }
 
-    let transaction = store.begin_memory_import(&memories, &learn_runs).await?;
+    let transaction = store.begin_memory_import(&memories).await?;
     let stats = transaction.stats();
     let published = match publish_event_import(&event_plan) {
         Ok(published) => published,
@@ -492,10 +597,40 @@ async fn import_memory_bundle(
         }
     };
     match transaction.commit().await {
-        Ok(_) => Ok(ImportOutcome::Memory {
-            imported: stats.imported,
-            skipped_duplicates: stats.skipped_duplicates,
-        }),
+        Ok(_) => {
+            // Keep the event-store write gate through the immediate retention
+            // pass. Cleanup is maintenance after an already-committed import:
+            // it is deliberately best-effort so callers never receive a
+            // failure after both memory rows and event files became durable.
+            if let Some(config) = &storage_policy {
+                match crate::collector::active_consumer_watermark(store, config).await {
+                    Ok(protected_after_ts) => {
+                        if let Err(error) = crate::collector::prune_event_store(
+                            shared_dir,
+                            config.collect.event_retention_days,
+                            config.collect.event_max_storage_mb,
+                            protected_after_ts,
+                            0,
+                        ) {
+                            tracing::warn!(
+                                error = %error,
+                                "companion event cleanup after committed memory import failed; will retry"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "companion event cleanup could not read consumer cursors after committed memory import; will retry"
+                        );
+                    }
+                }
+            }
+            Ok(ImportOutcome::Memory {
+                imported: stats.imported,
+                skipped_duplicates: stats.skipped_duplicates,
+            })
+        }
         Err(error) => {
             published.rollback();
             Err(error)
@@ -736,10 +871,61 @@ fn plan_event_import(package_dir: &Path, destination_dir: &Path) -> Result<Vec<E
     Ok(plan)
 }
 
+fn ensure_event_import_fits_capacity(
+    shared_dir: &Path,
+    plan: &[EventImportPlan],
+    max_storage_mb: u32,
+) -> Result<(), AppError> {
+    // A memory-only package must not inspect or be blocked by historical raw
+    // event storage. There are no event bytes to reserve or publish.
+    if plan.is_empty() {
+        return Ok(());
+    }
+    let current_bytes = crate::collector::event_storage_total_bytes(shared_dir)?;
+    let incoming_bytes = plan.iter().try_fold(0u64, |total, entry| {
+        let bytes = std::fs::metadata(&entry.source)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "inspect imported event file {}: {error}",
+                    entry.source.display()
+                ))
+            })?
+            .len();
+        total.checked_add(bytes).ok_or_else(|| {
+            AppError::BadRequest("imported event files exceed the supported size range".into())
+        })
+    })?;
+    let projected_bytes = current_bytes.checked_add(incoming_bytes).ok_or_else(|| {
+        AppError::BadRequest("imported event files exceed the supported size range".into())
+    })?;
+    let max_bytes = u64::from(max_storage_mb) * 1024 * 1024;
+    if projected_bytes > max_bytes {
+        return Err(AppError::BadRequest(format!(
+            "imported raw events would use {projected_bytes} bytes, exceeding the configured {max_storage_mb} MiB event-storage limit"
+        )));
+    }
+    Ok(())
+}
+
 /// Publish staged event files without overwriting anything. A hard link is an
 /// atomic no-clobber operation and keeps the extracted staging directory alive
 /// until the import transaction is committed or rolled back.
 fn publish_event_import(plan: &[EventImportPlan]) -> Result<PublishedEvents, AppError> {
+    publish_event_import_with_sync(plan, crate::fsio::sync_dir)
+}
+
+fn publish_event_import_with_sync(
+    plan: &[EventImportPlan],
+    sync_destination: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<PublishedEvents, AppError> {
+    publish_event_import_with_io(plan, sync_destination, |path| std::fs::read(path))
+}
+
+fn publish_event_import_with_io(
+    plan: &[EventImportPlan],
+    sync_destination: impl FnOnce(&Path) -> std::io::Result<()>,
+    mut read_file: impl FnMut(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<PublishedEvents, AppError> {
     let Some(destination_dir) = plan.first().and_then(|entry| entry.target.parent()) else {
         return Ok(PublishedEvents { targets: Vec::new() });
     };
@@ -751,14 +937,25 @@ fn publish_event_import(plan: &[EventImportPlan]) -> Result<PublishedEvents, App
         match std::fs::hard_link(&entry.source, &entry.target) {
             Ok(()) => published.targets.push(entry.target.clone()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let local = std::fs::read(&entry.target).map_err(|read_error| {
-                    AppError::Internal(format!(
-                        "读取并发创建的 event 文件 {} 失败: {read_error}",
-                        entry.target.display()
-                    ))
-                })?;
-                let imported = std::fs::read(&entry.source)
-                    .map_err(|read_error| AppError::Internal(format!("读取导入 event 文件失败: {read_error}")))?;
+                let local = match read_file(&entry.target) {
+                    Ok(local) => local,
+                    Err(read_error) => {
+                        published.rollback();
+                        return Err(AppError::Internal(format!(
+                            "读取并发创建的 event 文件 {} 失败: {read_error}",
+                            entry.target.display()
+                        )));
+                    }
+                };
+                let imported = match read_file(&entry.source) {
+                    Ok(imported) => imported,
+                    Err(read_error) => {
+                        published.rollback();
+                        return Err(AppError::Internal(format!(
+                            "读取导入 event 文件失败: {read_error}"
+                        )));
+                    }
+                };
                 if sha256_bytes(&local) != sha256_bytes(&imported) || local != imported {
                     published.rollback();
                     return Err(AppError::Conflict(format!(
@@ -776,8 +973,12 @@ fn publish_event_import(plan: &[EventImportPlan]) -> Result<PublishedEvents, App
             }
         }
     }
-    crate::fsio::sync_dir(destination_dir)
-        .map_err(|error| AppError::Internal(format!("fsync imported events directory: {error}")))?;
+    if let Err(error) = sync_destination(destination_dir) {
+        published.rollback();
+        return Err(AppError::Internal(format!(
+            "fsync imported events directory: {error}"
+        )));
+    }
     Ok(published)
 }
 
@@ -1004,6 +1205,17 @@ mod tests {
         )
     }
 
+    fn event_jsonl(ts: i64) -> String {
+        let event = crate::collector::CollectedEvent {
+            event_id: nomifun_common::generate_id(),
+            ts,
+            source: "chat_user_messages".into(),
+            name: "message.userCreated".into(),
+            data: serde_json::json!({"content": "import fixture"}),
+        };
+        format!("{}\n", serde_json::to_string(&event).unwrap())
+    }
+
     fn sorted_json(memories: &mut Vec<CompanionMemory>) -> serde_json::Value {
         memories.sort_by(|a, b| a.memory_id.cmp(&b.memory_id));
         serde_json::to_value(&*memories).unwrap()
@@ -1030,27 +1242,12 @@ mod tests {
             store_a.insert_memory_raw(m).await.unwrap();
         }
         store_a.set_state("mood", "happy").await.unwrap();
-        let learn_run_id = nomifun_common::CompanionLearnRunId::new().into_string();
-        store_a
-            .insert_learn_run(&CompanionLearnRun {
-                learn_run_id: learn_run_id.clone(),
-                started_at: 10,
-                finished_at: Some(20),
-                status: "ok".into(),
-                events_processed: 5,
-                memories_added: 2,
-                suggestions_added: 1,
-                error: None,
-                summary: Some("学到了".into()),
-            })
-            .await
-            .unwrap();
 
         let zip_path = dir.path().join("out").join("memory.zip");
         let summary = export_memory_bundle(&store_a, &shared_a, &zip_path, true).await.unwrap();
         assert_eq!(summary.kind, "memory");
         assert_eq!(summary.memories, 3);
-        assert_eq!(summary.learn_runs, 1);
+        assert_eq!(summary.learn_runs, 0);
         assert_eq!(summary.event_files, 1);
         assert_eq!(summary.file_count, 4);
         assert!(summary.total_bytes > 0);
@@ -1058,6 +1255,12 @@ mod tests {
         assert!(
             !dir.path().join("out").join("memory.zip.tmp").exists(),
             "tmp must be renamed away"
+        );
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+        assert_eq!(
+            archive.by_name("learn_runs.jsonl").unwrap().size(),
+            0,
+            "the v3 compatibility marker must never contain history rows"
         );
 
         // Import into a fresh machine: full fidelity, mood untouched.
@@ -1077,12 +1280,11 @@ mod tests {
         let mut restored = store_b.dump_memories_all().await.unwrap();
         assert_eq!(sorted_json(&mut restored), sorted_json(&mut originals));
         assert_eq!(store_b.get_state("mood").await.unwrap().as_deref(), Some("calm"));
-        assert!(store_b.learn_run_exists(&learn_run_id).await.unwrap());
         let landed = shared_b.join("events").join("20260601.jsonl");
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), format!("{event_line}\n"));
 
-        // Re-import with byte-identical events: everything (incl. the archived
-        // row and event file) is idempotently skipped.
+        // Re-import with byte-identical events: the archived row and event file
+        // are idempotently skipped.
         let outcome = import_bundle(&store_b, &roster_b, &shared_b, &zip_path).await.unwrap();
         assert_eq!(
             outcome,
@@ -1092,7 +1294,6 @@ mod tests {
             }
         );
         assert_eq!(store_b.dump_memories_all().await.unwrap().len(), 3);
-        assert_eq!(store_b.dump_learn_runs_all().await.unwrap().len(), 1);
 
         // A same-name event is never silently preferred. Different hash or
         // bytes is a hard conflict and leaves both DB and local file unchanged.
@@ -1106,8 +1307,58 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("event import conflict"), "{error}");
         assert_eq!(store_b.dump_memories_all().await.unwrap().len(), 3);
-        assert_eq!(store_b.dump_learn_runs_all().await.unwrap().len(), 1);
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), local_event);
+    }
+
+    #[tokio::test]
+    async fn legacy_memory_bundle_validates_then_discards_learn_history() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = CompanionStore::open_memory().await.unwrap();
+        let roster = scan_registry(dir.path(), "companions");
+        let archive = dir.path().join("legacy-memory.zip");
+        let memory_id = memory_fixture(77);
+        let legacy_memory = raw_memory(&memory_id, "preference", "旧备份中的有效记忆", "active");
+        let memory_row = format!("{}\n", serde_json::to_string(&legacy_memory).unwrap());
+        let legacy_row = format!(
+            "{{\"learn_run_id\":\"{}\",\"started_at\":1,\"finished_at\":2,\"status\":\"ok\",\"events_processed\":3,\"memories_added\":1,\"suggestions_added\":1,\"error\":null,\"summary\":\"legacy diary\"}}\n",
+            nomifun_common::generate_id()
+        );
+        write_test_zip(
+            &archive,
+            &[
+                ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
+                ("memories.jsonl", &memory_row),
+                ("learn_runs.jsonl", &legacy_row),
+                ("state.json", r#"{"mood":null}"#),
+            ],
+        );
+
+        let outcome = import_bundle(
+            &store,
+            &roster,
+            &dir.path().join("shared"),
+            &archive,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ImportOutcome::Memory {
+                imported: 1,
+                skipped_duplicates: 0,
+            }
+        );
+        assert_eq!(
+            store.get_memory(&memory_id).await.unwrap().unwrap().content,
+            "旧备份中的有效记忆"
+        );
+        let retired_table_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'companion_learn_runs'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(retired_table_count, 0, "legacy rows must never recreate the retired table");
     }
 
     #[tokio::test]
@@ -1434,41 +1685,24 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
         let roster = scan_registry(dir.path(), "companions");
-        let conflict_id = nomifun_common::CompanionLearnRunId::new().into_string();
-        store
-            .insert_learn_run(&CompanionLearnRun {
-                learn_run_id: conflict_id.clone(),
-                started_at: 1,
-                finished_at: Some(2),
-                status: "local".into(),
-                events_processed: 0,
-                memories_added: 0,
-                suggestions_added: 0,
-                error: None,
-                summary: Some("local".into()),
-            })
-            .await
-            .unwrap();
+        let conflict_id = memory_fixture(51);
+        let local = raw_memory(&conflict_id, "knowledge", "本机原内容", "active");
+        store.insert_memory_raw(&local).await.unwrap();
 
-        let imported_memory = raw_memory(&memory_fixture(50), "knowledge", "先写入事务再触发冲突", "active");
-        let imported_run = CompanionLearnRun {
-            learn_run_id: conflict_id,
-            started_at: 9,
-            finished_at: Some(10),
-            status: "imported".into(),
-            events_processed: 1,
-            memories_added: 1,
-            suggestions_added: 0,
-            error: None,
-            summary: Some("不同内容".into()),
-        };
+        let imported_first = raw_memory(&memory_fixture(50), "knowledge", "先写入事务再触发冲突", "active");
+        let imported_conflict = raw_memory(&conflict_id, "knowledge", "导入包不同内容", "active");
+        let memory_lines = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&imported_first).unwrap(),
+            serde_json::to_string(&imported_conflict).unwrap()
+        );
         let archive = dir.path().join("rollback.zip");
         write_test_zip(
             &archive,
             &[
                 ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
-                ("memories.jsonl", &format!("{}\n", serde_json::to_string(&imported_memory).unwrap())),
-                ("learn_runs.jsonl", &format!("{}\n", serde_json::to_string(&imported_run).unwrap())),
+                ("memories.jsonl", &memory_lines),
+                ("learn_runs.jsonl", ""),
                 ("state.json", r#"{"mood":null}"#),
             ],
         );
@@ -1476,12 +1710,9 @@ mod tests {
         let error = import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("learn-run import ID collision"), "{error}");
-        assert!(
-            store.dump_memories_all().await.unwrap().is_empty(),
-            "rows staged before the conflict must be rolled back"
-        );
-        assert_eq!(store.dump_learn_runs_all().await.unwrap().len(), 1);
+        assert!(error.to_string().contains("memory import ID collision"), "{error}");
+        assert!(store.get_memory(&imported_first.memory_id).await.unwrap().is_none());
+        assert_eq!(store.dump_memories_all().await.unwrap(), vec![local]);
     }
 
     #[tokio::test]
@@ -1562,6 +1793,193 @@ mod tests {
             0,
             "a corrupt package must not leave a partial import"
         );
+    }
+
+    #[test]
+    fn empty_event_import_plan_skips_storage_inspection() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let events_dir = dir.path().join("events");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        std::fs::write(events_dir.join("not-a-day-file.txt"), "historical anomaly").unwrap();
+
+        ensure_event_import_fits_capacity(dir.path(), &[], 16).unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_import_rejects_event_overflow_before_memory_or_event_commit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = dir.path().join("shared");
+        let events_dir = shared.join("events");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        let existing = events_dir.join("20260601.jsonl");
+        std::fs::File::create(&existing)
+            .unwrap()
+            .set_len(16 * 1024 * 1024)
+            .unwrap();
+
+        let memory = raw_memory(&memory_fixture(80), "knowledge", "must stay uncommitted", "active");
+        let memory_line = format!("{}\n", serde_json::to_string(&memory).unwrap());
+        let incoming_event = event_jsonl(nomifun_common::now_ms());
+        let archive = dir.path().join("over-cap.zip");
+        write_test_zip(
+            &archive,
+            &[
+                ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
+                ("memories.jsonl", &memory_line),
+                ("learn_runs.jsonl", ""),
+                ("state.json", r#"{"mood":null}"#),
+                ("events/20260602.jsonl", &incoming_event),
+            ],
+        );
+
+        let store = CompanionStore::open_memory().await.unwrap();
+        let roster = scan_registry(dir.path(), "companions");
+        let mut config = crate::profile::SharedCompanionConfig::default();
+        config.collect.event_max_storage_mb = 16;
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
+        let event_lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+
+        let error = import_bundle_with_event_lock(
+            &store,
+            &roster,
+            &shared,
+            &archive,
+            event_lock,
+            config,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(_)), "{error:?}");
+        assert!(error.to_string().contains("16 MiB"), "{error}");
+        assert!(store.dump_memories_all().await.unwrap().is_empty());
+        assert!(!events_dir.join("20260602.jsonl").exists());
+        assert_eq!(std::fs::metadata(existing).unwrap().len(), 16 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn managed_import_prunes_expired_events_immediately_after_commit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = dir.path().join("shared");
+        let memory = raw_memory(&memory_fixture(81), "knowledge", "commit before cleanup", "active");
+        let memory_line = format!("{}\n", serde_json::to_string(&memory).unwrap());
+        let old_event = event_jsonl(1);
+        let archive = dir.path().join("expired-events.zip");
+        write_test_zip(
+            &archive,
+            &[
+                ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
+                ("memories.jsonl", &memory_line),
+                ("learn_runs.jsonl", ""),
+                ("state.json", r#"{"mood":null}"#),
+                ("events/20200101.jsonl", &old_event),
+            ],
+        );
+
+        let store = CompanionStore::open_memory().await.unwrap();
+        let roster = scan_registry(dir.path(), "companions");
+        let mut config = crate::profile::SharedCompanionConfig::default();
+        config.learn.enabled = false;
+        config.evolve.enabled = false;
+        config.collect.event_retention_days = 7;
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
+        let event_lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+
+        let outcome = import_bundle_with_event_lock(
+            &store,
+            &roster,
+            &shared,
+            &archive,
+            event_lock,
+            config,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ImportOutcome::Memory {
+                imported: 1,
+                skipped_duplicates: 0,
+            }
+        );
+        assert_eq!(store.dump_memories_all().await.unwrap(), vec![memory]);
+        assert!(!shared.join("events/20200101.jsonl").exists());
+    }
+
+    #[test]
+    fn event_publication_read_failures_rollback_earlier_links() {
+        for fail_imported_read in [false, true] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let staging = dir.path().join("staging");
+            let destination = dir.path().join("events");
+            std::fs::create_dir_all(&staging).unwrap();
+            std::fs::create_dir_all(&destination).unwrap();
+            let source_one = staging.join("20260601.jsonl");
+            let source_two = staging.join("20260602.jsonl");
+            let target_one = destination.join("20260601.jsonl");
+            let target_two = destination.join("20260602.jsonl");
+            std::fs::write(&source_one, event_jsonl(1)).unwrap();
+            let second_bytes = event_jsonl(2);
+            std::fs::write(&source_two, &second_bytes).unwrap();
+            std::fs::write(&target_two, &second_bytes).unwrap();
+            let plan = vec![
+                EventImportPlan {
+                    source: source_one,
+                    target: target_one.clone(),
+                },
+                EventImportPlan {
+                    source: source_two.clone(),
+                    target: target_two.clone(),
+                },
+            ];
+            let failed_path = if fail_imported_read {
+                source_two.clone()
+            } else {
+                target_two.clone()
+            };
+
+            let error = publish_event_import_with_io(
+                &plan,
+                |_| Ok(()),
+                |path| {
+                    if path == failed_path {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "injected read failure",
+                        ))
+                    } else {
+                        std::fs::read(path)
+                    }
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("injected read failure"), "{error}");
+            assert!(!target_one.exists(), "an earlier hard link must be rolled back");
+            assert_eq!(std::fs::read(&target_two).unwrap(), second_bytes.as_bytes());
+        }
+    }
+
+    #[test]
+    fn event_publication_sync_failure_rolls_back_all_links() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("staging/20260601.jsonl");
+        let target = dir.path().join("events/20260601.jsonl");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, event_jsonl(1)).unwrap();
+        let plan = vec![EventImportPlan {
+            source: source.clone(),
+            target: target.clone(),
+        }];
+
+        let error = publish_event_import_with_sync(&plan, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected sync failure",
+            ))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("injected sync failure"), "{error}");
+        assert!(source.exists(), "rollback must not remove staged source files");
+        assert!(!target.exists(), "published hard links must be rolled back");
     }
 
     #[test]

@@ -219,6 +219,14 @@ const normalizeCapacity = (raw: unknown): IBrowserCapacityOverview | null => {
     queued: firstNumber(value, 'queued'),
     max_active: firstNumber(value, 'max_active', 'active_limit'),
     max_open_lanes: firstNumber(value, 'max_open_lanes', 'open_lane_limit'),
+    global_memory_pressure_threshold_bytes: firstNumber(
+      value,
+      'global_memory_pressure_threshold_bytes'
+    ),
+    max_task_memory_bytes: firstNumber(value, 'max_task_memory_bytes'),
+    max_task_active_operations: firstNumber(value, 'max_task_active_operations'),
+    max_task_open_lanes: firstNumber(value, 'max_task_open_lanes'),
+    max_task_tabs: firstNumber(value, 'max_task_tabs'),
     recommended_concurrency: firstNumber(value, 'recommended_concurrency'),
     reason_code: nullableString(value, 'reason_code'),
   };

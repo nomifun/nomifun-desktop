@@ -290,12 +290,10 @@ pub struct SharedEvolveConfig {
     pub min_pattern_count: i64,
     /// A pattern must appear across at least this many distinct sessions.
     pub min_distinct_sessions: usize,
-    /// Also reflect on single complex work sessions (not just repeated patterns) — design §5.5 任务后反思.
-    pub reflect_enabled: bool,
     /// Auto-activate a drafted skill (skip human review) when confidence ≥ `auto_threshold`.
     /// Default off (gated): the user opts into high-confidence auto-activation.
     pub auto_activate: bool,
-    /// Confidence cutoff for `auto_activate` (repetition-derived; single-session reflections stay below it).
+    /// Confidence cutoff for `auto_activate`.
     pub auto_threshold: f64,
     /// Skill strength half-life in days (decay clock = time since last use). Used skills reinforce.
     pub skill_half_life_days: f64,
@@ -311,7 +309,6 @@ impl Default for SharedEvolveConfig {
             model: None,
             min_pattern_count: 3,
             min_distinct_sessions: 2,
-            reflect_enabled: true,
             auto_activate: false,
             auto_threshold: 0.85,
             skill_half_life_days: 45.0,
@@ -423,21 +420,67 @@ impl SharedCompanionConfig {
     }
 
     /// Load from `{dir}/config.json` (dir is the shared dir). Only a missing
-    /// file uses defaults; unreadable or malformed data fails closed.
+    /// file uses defaults; unreadable or malformed data fails closed. Removed
+    /// settings are stripped once during load so pre-removal installs
+    /// can upgrade without weakening unknown-field validation for current data.
     pub fn load(dir: &Path) -> Result<Self, nomifun_common::AppError> {
         let path = Self::config_path(dir);
-        crate::fsio::load_json_missing_or_default(&path).map_err(|error| {
+        let loaded = crate::fsio::load_json_optional::<serde_json::Value>(&path).map_err(|error| {
             nomifun_common::AppError::Internal(format!(
                 "load shared companion config {}: {error}",
                 path.display()
             ))
-        })
+        })?;
+        let Some(mut value) = loaded else {
+            return Ok(Self::default());
+        };
+        let mut removed_legacy_settings = value
+            .get_mut("evolve")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|evolve| evolve.remove("reflect_enabled"))
+            .is_some();
+        if let Some(collect) = value
+            .get_mut("collect")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for key in [
+                "chat_assistant_replies",
+                "cron_runs",
+                "conversation_lifecycle",
+            ] {
+                removed_legacy_settings |= collect.remove(key).is_some();
+            }
+        }
+        let config: Self = serde_json::from_value(value).map_err(|error| {
+            nomifun_common::AppError::Internal(format!(
+                "load shared companion config {}: {error}",
+                path.display()
+            ))
+        })?;
+        config.collect.validate_storage_policy().map_err(|error| {
+            nomifun_common::AppError::Internal(format!(
+                "load shared companion config {}: {error}",
+                path.display()
+            ))
+        })?;
+        if removed_legacy_settings {
+            config.save(dir).map_err(|error| {
+                nomifun_common::AppError::Internal(format!(
+                    "migrate shared companion config {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        Ok(config)
     }
 
     /// Atomically persist to `{dir}/config.json` (unique temp file + rename).
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         validate_persisted_model(self.learn.model.as_ref()).map_err(std::io::Error::other)?;
         validate_persisted_model(self.evolve.model.as_ref()).map_err(std::io::Error::other)?;
+        self.collect
+            .validate_storage_policy()
+            .map_err(std::io::Error::other)?;
         crate::fsio::save_json_atomic(dir, "config.json", self)
     }
 }
@@ -634,6 +677,87 @@ mod tests {
         let again = SharedCompanionConfig::load(dir.path()).unwrap();
         assert_eq!(again, cfg);
         assert!(again.learn.model.is_some());
+    }
+
+    #[test]
+    fn shared_load_removes_retired_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(SharedCompanionConfig::default()).unwrap();
+        value["evolve"]["reflect_enabled"] = serde_json::json!(true);
+        value["collect"]["chat_assistant_replies"] = serde_json::json!(true);
+        value["collect"]["cron_runs"] = serde_json::json!(true);
+        value["collect"]["conversation_lifecycle"] = serde_json::json!(true);
+        std::fs::write(
+            SharedCompanionConfig::config_path(dir.path()),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = SharedCompanionConfig::load(dir.path()).unwrap();
+        assert_eq!(loaded, SharedCompanionConfig::default());
+        let migrated: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(SharedCompanionConfig::config_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        assert!(migrated["evolve"].get("reflect_enabled").is_none());
+        assert!(migrated["collect"].get("chat_assistant_replies").is_none());
+        assert!(migrated["collect"].get("cron_runs").is_none());
+        assert!(migrated["collect"].get("conversation_lifecycle").is_none());
+    }
+
+    #[test]
+    fn shared_load_backfills_event_storage_policy_for_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(SharedCompanionConfig::default()).unwrap();
+        value["collect"]["chat_user_messages"] = serde_json::json!(true);
+        value["collect"].as_object_mut().unwrap().remove("event_retention_days");
+        value["collect"].as_object_mut().unwrap().remove("event_max_storage_mb");
+        std::fs::write(
+            SharedCompanionConfig::config_path(dir.path()),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = SharedCompanionConfig::load(dir.path()).unwrap();
+        assert!(loaded.collect.chat_user_messages);
+        assert_eq!(
+            loaded.collect.event_retention_days,
+            crate::config::DEFAULT_EVENT_RETENTION_DAYS
+        );
+        assert_eq!(
+            loaded.collect.event_max_storage_mb,
+            crate::config::DEFAULT_EVENT_MAX_STORAGE_MB
+        );
+    }
+
+    #[test]
+    fn shared_load_rejects_an_out_of_range_event_storage_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(SharedCompanionConfig::default()).unwrap();
+        value["collect"]["event_max_storage_mb"] = serde_json::json!(15);
+        std::fs::write(
+            SharedCompanionConfig::config_path(dir.path()),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        assert!(SharedCompanionConfig::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn shared_config_still_rejects_unknown_evolution_settings() {
+        let result = serde_json::from_value::<SharedCompanionConfig>(serde_json::json!({
+            "evolve": {"unknown_setting": true}
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shared_config_still_rejects_unknown_collection_settings() {
+        let result = serde_json::from_value::<SharedCompanionConfig>(serde_json::json!({
+            "collect": {"unknown_setting": true}
+        }));
+        assert!(result.is_err());
     }
 
     #[test]

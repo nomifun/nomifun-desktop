@@ -1,5 +1,5 @@
 //! The companion's dedicated sqlite store (`{companion_dir}/memory.db`): memories,
-//! suggestions, companion-chat history, learn-run history, and a small
+//! suggestions, companion-chat history, and a small
 //! key-value state table (xp/mood/cursor/rolling chat summary).
 //!
 //! Deliberately a separate db file from the main app database so "clear all
@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use nomifun_common::{
-    AppError, CompanionId, CompanionLearnRunId, CompanionMemoryId,
+    AppError, CompanionId, CompanionMemoryId,
     CompanionSessionWindowId, CompanionSkillPatternId, CompanionSuggestionId, ConversationId,
     TimestampMs, now_ms, validate_uuidv7,
 };
@@ -139,21 +139,6 @@ pub struct SessionWindow {
     /// JSON blob of structured highlights (topics/decisions/mood/todos).
     pub highlights: Option<String>,
     pub token_estimate: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompanionLearnRun {
-    pub learn_run_id: String,
-    pub started_at: TimestampMs,
-    pub finished_at: Option<TimestampMs>,
-    pub status: String,
-    pub events_processed: i64,
-    pub memories_added: i64,
-    pub suggestions_added: i64,
-    pub error: Option<String>,
-    /// nomi's one-line diary for this run, shown on the overview tab.
-    pub summary: Option<String>,
 }
 
 /// One durable mined-pattern sample. This fixed JSON structure replaces the
@@ -321,7 +306,6 @@ impl CompanionStore {
     pub(crate) async fn begin_memory_import(
         &self,
         memories: &[CompanionMemory],
-        learn_runs: &[CompanionLearnRun],
     ) -> Result<MemoryImportTransaction<'_>, AppError> {
         for memory in memories {
             CompanionMemoryId::try_from(memory.memory_id.as_str())
@@ -336,11 +320,6 @@ impl CompanionStore {
                 }
             }
         }
-        for run in learn_runs {
-            CompanionLearnRunId::try_from(run.learn_run_id.as_str())
-                .map_err(|error| AppError::BadRequest(format!("invalid imported learn-run id: {error}")))?;
-        }
-
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         let mut imported = 0u64;
         let mut skipped_duplicates = 0u64;
@@ -410,40 +389,6 @@ impl CompanionStore {
             .map_err(db_err)?;
             fts_index_insert(&mut *tx, row.get("id"), &memory.content).await?;
             imported += 1;
-        }
-
-        for run in learn_runs {
-            let existing = sqlx::query("SELECT * FROM companion_learn_runs WHERE learn_run_id = ?")
-                .bind(&run.learn_run_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err)?;
-            if let Some(row) = existing {
-                let local = row_to_learn_run(&row)?;
-                if local == *run {
-                    continue;
-                }
-                return Err(AppError::Conflict(format!(
-                    "learn-run import ID collision for {}: local and imported content differ",
-                    run.learn_run_id
-                )));
-            }
-            sqlx::query(
-                "INSERT INTO companion_learn_runs(learn_run_id, started_at, finished_at, status, events_processed, memories_added, suggestions_added, error, summary)
-                 VALUES(?,?,?,?,?,?,?,?,?)",
-            )
-            .bind(&run.learn_run_id)
-            .bind(run.started_at)
-            .bind(run.finished_at)
-            .bind(&run.status)
-            .bind(run.events_processed)
-            .bind(run.memories_added)
-            .bind(run.suggestions_added)
-            .bind(&run.error)
-            .bind(&run.summary)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?;
         }
 
         Ok(MemoryImportTransaction {
@@ -527,24 +472,6 @@ CREATE TABLE IF NOT EXISTS companion_suggestions (
   decided_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_companion_suggestions_status ON companion_suggestions(status, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS companion_learn_runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  learn_run_id TEXT NOT NULL UNIQUE CHECK (
-    length(learn_run_id) = 36
-    AND lower(learn_run_id) = learn_run_id
-    AND learn_run_id GLOB '????????-????-7???-[89ab]???-????????????'
-    AND replace(learn_run_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-  ),
-  started_at INTEGER NOT NULL,
-  finished_at INTEGER,
-  status TEXT NOT NULL,
-  events_processed INTEGER NOT NULL DEFAULT 0,
-  memories_added INTEGER NOT NULL DEFAULT 0,
-  suggestions_added INTEGER NOT NULL DEFAULT 0,
-  error TEXT,
-  summary TEXT
-);
 
 CREATE TABLE IF NOT EXISTS companion_state (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -877,24 +804,6 @@ const BASELINE_TABLES: &[TableContract] = &[
         ],
         uuidv7_columns: &["suggestion_id"],
         unique_indexes: &[UniqueIndexContract { columns: &["suggestion_id"], origin: "u", partial: false }],
-        required_sql_fragments: &[],
-    },
-    TableContract {
-        name: "companion_learn_runs",
-        columns: &[
-            ColumnContract { name: "id", declared_type: "INTEGER", not_null: false, primary_key_position: 1 },
-            ColumnContract { name: "learn_run_id", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "started_at", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "finished_at", declared_type: "INTEGER", not_null: false, primary_key_position: 0 },
-            ColumnContract { name: "status", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "events_processed", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "memories_added", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "suggestions_added", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
-            ColumnContract { name: "error", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
-            ColumnContract { name: "summary", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
-        ],
-        uuidv7_columns: &["learn_run_id"],
-        unique_indexes: &[UniqueIndexContract { columns: &["learn_run_id"], origin: "u", partial: false }],
         required_sql_fragments: &[],
     },
     TableContract {
@@ -1479,10 +1388,10 @@ async fn create_baseline_schema(pool: &SqlitePool) -> Result<(), AppError> {
 
 /// Idempotent in-place upgrade of an existing v3 store to the current v3
 /// baseline: add the nullable embedding columns and the external-content FTS5
-/// index when missing, and rebuild the index when its row count desyncs from
-/// the main table (crash between a main-table write and its index write).
-/// Never rewrites rows — user memories are preserved verbatim. Non-v3 stores
-/// are left untouched for `validate_baseline_schema` to reject.
+/// index when missing, rebuild the index when its row count desyncs from the
+/// main table, and remove the retired learn-run history table. User memories
+/// are preserved verbatim. Non-v3 stores are left untouched for
+/// `validate_baseline_schema` to reject.
 async fn upgrade_schema_in_place(pool: &SqlitePool) -> Result<(), AppError> {
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
@@ -1546,6 +1455,12 @@ async fn upgrade_schema_in_place(pool: &SqlitePool) -> Result<(), AppError> {
             .await
             .map_err(db_err)?;
     }
+    // Learning cadence and event progress live in companion_state; historical
+    // run rows were presentation-only and are intentionally retired.
+    sqlx::raw_sql("DROP TABLE IF EXISTS companion_learn_runs")
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
     Ok(())
 }
 
@@ -1653,25 +1568,6 @@ fn row_to_companion_thread(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionThr
         title: row.get("title"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
-    })
-}
-
-fn row_to_learn_run(
-    row: &sqlx::sqlite::SqliteRow,
-) -> Result<CompanionLearnRun, AppError> {
-    let learn_run_id: String = row.get("learn_run_id");
-    CompanionLearnRunId::try_from(learn_run_id.as_str())
-        .map_err(|error| invalid_disk_id("learn-run id", &learn_run_id, error))?;
-    Ok(CompanionLearnRun {
-        learn_run_id,
-        started_at: row.get("started_at"),
-        finished_at: row.get("finished_at"),
-        status: row.get("status"),
-        events_processed: row.get("events_processed"),
-        memories_added: row.get("memories_added"),
-        suggestions_added: row.get("suggestions_added"),
-        error: row.get("error"),
-        summary: row.get("summary"),
     })
 }
 
@@ -1922,7 +1818,7 @@ impl CompanionStore {
     }
 
     /// Grant the same XP delta to every listed companion (shared achievements like
-    /// learn runs and accepted suggestions).
+    /// successful learning passes and accepted suggestions).
     pub async fn add_xp_all(&self, companion_ids: &[String], delta: i64) -> Result<(), AppError> {
         for companion_id in companion_ids {
             self.add_companion_xp(companion_id, delta).await?;
@@ -2974,39 +2870,6 @@ impl CompanionStore {
         }
     }
 
-    // ----- learn runs -----
-
-    pub async fn insert_learn_run(&self, run: &CompanionLearnRun) -> Result<(), AppError> {
-        CompanionLearnRunId::try_from(run.learn_run_id.as_str())
-            .map_err(|error| AppError::BadRequest(format!("invalid companion learn-run id: {error}")))?;
-        sqlx::query(
-            "INSERT INTO companion_learn_runs(learn_run_id, started_at, finished_at, status, events_processed, memories_added, suggestions_added, error, summary)
-             VALUES(?,?,?,?,?,?,?,?,?)",
-        )
-        .bind(&run.learn_run_id)
-        .bind(run.started_at)
-        .bind(run.finished_at)
-        .bind(&run.status)
-        .bind(run.events_processed)
-        .bind(run.memories_added)
-        .bind(run.suggestions_added)
-        .bind(&run.error)
-        .bind(&run.summary)
-        .execute(&self.pool)
-        .await
-        .map_err(db_err)?;
-        Ok(())
-    }
-
-    pub async fn list_learn_runs(&self, limit: i64) -> Result<Vec<CompanionLearnRun>, AppError> {
-        let rows = sqlx::query("SELECT * FROM companion_learn_runs ORDER BY started_at DESC LIMIT ?")
-            .bind(limit.clamp(1, 200))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_err)?;
-        rows.iter().map(row_to_learn_run).collect()
-    }
-
     // ----- export/import support (spec §4.8) -----
 
     /// Page size for the full-table dump cursors below.
@@ -3031,28 +2894,6 @@ impl CompanionStore {
                 .map_err(|error| invalid_disk_id("memory id", &next_cursor, error))?;
             cursor = next_cursor;
             out.extend(rows.iter().map(row_to_memory).collect::<Result<Vec<_>, _>>()?);
-        }
-        Ok(out)
-    }
-
-    /// Every `companion_learn_runs` row via the same id cursor as
-    /// [`dump_memories_all`]. Ordered by id.
-    pub async fn dump_learn_runs_all(&self) -> Result<Vec<CompanionLearnRun>, AppError> {
-        let mut out = Vec::new();
-        let mut cursor = String::new();
-        loop {
-            let rows = sqlx::query("SELECT * FROM companion_learn_runs WHERE learn_run_id > ? ORDER BY learn_run_id LIMIT ?")
-                .bind(&cursor)
-                .bind(Self::DUMP_PAGE)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(db_err)?;
-            let Some(last) = rows.last() else { break };
-            let next_cursor: String = last.get("learn_run_id");
-            CompanionLearnRunId::try_from(next_cursor.as_str())
-                .map_err(|error| invalid_disk_id("learn-run id", &next_cursor, error))?;
-            cursor = next_cursor;
-            out.extend(rows.iter().map(row_to_learn_run).collect::<Result<Vec<_>, _>>()?);
         }
         Ok(out)
     }
@@ -3114,17 +2955,6 @@ impl CompanionStore {
         fts_index_insert(&mut *tx, row.get("id"), &mem.content).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(())
-    }
-
-    pub async fn learn_run_exists(&self, id: &str) -> Result<bool, AppError> {
-        CompanionLearnRunId::try_from(id)
-            .map_err(|error| AppError::BadRequest(format!("invalid learn-run id: {error}")))?;
-        let row = sqlx::query("SELECT 1 AS x FROM companion_learn_runs WHERE learn_run_id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(db_err)?;
-        Ok(row.is_some())
     }
 
     // ----- companion threads -----
@@ -4221,7 +4051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_suggestion_and_learn_run_use_named_unique_ids() {
+    async fn memory_and_suggestion_use_named_unique_ids() {
         let store = CompanionStore::open_memory().await.unwrap();
         let memory = store
             .insert_memory("knowledge", "Rust", &[], 0.8, "manual")
@@ -4240,19 +4070,6 @@ mod tests {
         assert!(newly_decided);
         assert_eq!(decided.suggestion_id, suggestion.suggestion_id);
 
-        let run = CompanionLearnRun {
-            learn_run_id: CompanionLearnRunId::new().into_string(),
-            started_at: 1,
-            finished_at: Some(2),
-            status: "ok".into(),
-            events_processed: 1,
-            memories_added: 1,
-            suggestions_added: 1,
-            error: None,
-            summary: None,
-        };
-        store.insert_learn_run(&run).await.unwrap();
-        assert!(store.learn_run_exists(&run.learn_run_id).await.unwrap());
     }
 
     #[tokio::test]
@@ -4392,6 +4209,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v3_upgrade_drops_learn_history_and_preserves_learning_and_evolution_state() {
+        let root = tempfile::tempdir().unwrap();
+        let database_path = root.path().join("memory.db");
+        let memory_id = CompanionMemoryId::new().into_string();
+        let companion_id = companion_fixture(91);
+        let skill_id = nomifun_common::generate_id();
+        {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(&database_path)
+                        .create_if_missing(true),
+                )
+                .await
+                .unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&pool).await.unwrap();
+            sqlx::raw_sql(FTS_SCHEMA).execute(&pool).await.unwrap();
+            sqlx::raw_sql(
+                r#"
+CREATE TABLE companion_learn_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  learn_run_id TEXT NOT NULL UNIQUE,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  status TEXT NOT NULL,
+  events_processed INTEGER NOT NULL DEFAULT 0,
+  memories_added INTEGER NOT NULL DEFAULT 0,
+  suggestions_added INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  summary TEXT
+);
+"#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::raw_sql(&format!("PRAGMA user_version = {STORE_VERSION}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
+                 VALUES(?, 'preference', '保留的学习记忆', '[]', 0.8, 0.8, 0, 'learn', 'active', 1, 1, 1, 'user', NULL)",
+            )
+            .bind(&memory_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO companion_skills(companion_skill_id, skill_name, scope_kind, scope_companion_id, status, source, confidence, provenance_event_ids, strength, version, created_at, updated_at, signature)
+                 VALUES(?, 'preserved-skill', 'companion', ?, 'active', 'mined', 0.9, '[]', 1.0, 1, 1, 1, 'grep-read')",
+            )
+            .bind(&skill_id)
+            .bind(&companion_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            for (key, value) in [
+                ("last_learn_ts", "101"),
+                ("learn_cursor_ts", "102"),
+                ("last_evolve_ts", "201"),
+                ("evolve_cursor_ts", "202"),
+                ("mood", "happy"),
+            ] {
+                sqlx::query("INSERT INTO companion_state(state_key, value) VALUES(?, ?)")
+                    .bind(key)
+                    .bind(value)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO companion_runtime_state(companion_id, state_key, value) VALUES(?, 'xp', '17')",
+            )
+            .bind(&companion_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO companion_learn_runs(learn_run_id, started_at, finished_at, status, events_processed, memories_added, suggestions_added, summary)
+                 VALUES(?, 1, 2, 'ok', 3, 1, 1, 'legacy diary')",
+            )
+            .bind(nomifun_common::generate_id())
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        let store = CompanionStore::open(root.path()).await.unwrap();
+        let retired_table_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'companion_learn_runs'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(retired_table_count, 0);
+        assert_eq!(
+            store.get_memory(&memory_id).await.unwrap().unwrap().content,
+            "保留的学习记忆"
+        );
+        let preserved_skill = store.get_skill(&skill_id).await.unwrap().unwrap();
+        assert_eq!(preserved_skill.skill_name, "preserved-skill");
+        assert_eq!(preserved_skill.status, "active");
+        assert_eq!(preserved_skill.scope_companion_id.as_deref(), Some(companion_id.as_str()));
+        for (key, expected) in [
+            ("last_learn_ts", 101),
+            ("learn_cursor_ts", 102),
+            ("last_evolve_ts", 201),
+            ("evolve_cursor_ts", 202),
+        ] {
+            assert_eq!(store.get_state_i64(key).await.unwrap(), expected, "state key {key}");
+        }
+        assert_eq!(store.get_state("mood").await.unwrap().as_deref(), Some("happy"));
+        assert_eq!(store.get_companion_state_i64(&companion_id, "xp").await.unwrap(), 17);
+
+        // The removal migration is idempotent and the strict baseline remains openable.
+        drop(store);
+        CompanionStore::open(root.path()).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn fts_index_rebuilds_when_out_of_sync() {
         let root = tempfile::tempdir().unwrap();
         {
@@ -4498,7 +4438,7 @@ mod tests {
             scope_kind: "user".into(),
             scope_companion_id: None,
         };
-        let tx = store.begin_memory_import(std::slice::from_ref(&imported), &[]).await.unwrap();
+        let tx = store.begin_memory_import(std::slice::from_ref(&imported)).await.unwrap();
         tx.commit().await.unwrap();
         assert_eq!(fts_match_count(&store.pool, "跨机导入").await, 1);
     }

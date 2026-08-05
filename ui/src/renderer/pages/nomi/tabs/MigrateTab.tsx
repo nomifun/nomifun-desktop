@@ -6,8 +6,10 @@
 
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Alert, Button, Checkbox, Empty, Message, Select } from '@arco-design/web-react';
+import { Alert, Button, Checkbox, Empty, Message } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
+import { NomiSettingList, NomiSettingRow } from '@/renderer/components/base/NomiSettingLayout';
 import { httpRequest, isBackendHttpError } from '@/common/adapter/httpBridge';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import type { ICompanionExportResult, ICompanionWithStatus } from '@/common/adapter/ipcBridge';
@@ -212,66 +214,85 @@ const MigrateTab: React.FC<Props> = ({ companions }) => {
   return (
     <div className='flex flex-col gap-16px py-8px'>
       {/* 1. memory hub */}
-      <section className='bg-fill-2 rd-10px px-14px py-12px'>
-        <div className='text-14px text-t-primary font-500'>{t('nomi.migrate.memoryTitle')}</div>
-        <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.migrate.memoryDesc')}</div>
-        <div className='flex items-center gap-16px mt-10px flex-wrap'>
-          <Checkbox
-            checked={includeEvents}
-            className='migrate-events-checkbox'
-            onChange={(checked: boolean) => setIncludeEvents(checked)}
-          >
-            <span className='text-13px text-t-secondary'>{t('nomi.migrate.includeEvents')}</span>
-          </Checkbox>
-          <Button type='primary' loading={exportingMemory} onClick={() => void exportMemory()}>
-            {t('nomi.migrate.exportMemory')}
-          </Button>
-        </div>
-      </section>
+      <NomiSettingList>
+        <NomiSettingRow
+          title={t('nomi.migrate.memoryTitle')}
+          description={t('nomi.migrate.memoryDesc')}
+          controls={
+            <>
+              <Checkbox
+                checked={includeEvents}
+                className='migrate-events-checkbox'
+                onChange={(checked: boolean) => setIncludeEvents(checked)}
+              >
+                <span className='text-13px text-t-secondary'>{t('nomi.migrate.includeEvents')}</span>
+              </Checkbox>
+              <Button type='primary' loading={exportingMemory} onClick={() => void exportMemory()}>
+                {t('nomi.migrate.exportMemory')}
+              </Button>
+            </>
+          }
+        />
+      </NomiSettingList>
 
       {/* 2. companion bundle */}
-      <section className='bg-fill-2 rd-10px px-14px py-12px'>
-        <div className='text-14px text-t-primary font-500'>{t('nomi.migrate.companionTitle')}</div>
-        <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.migrate.companionDesc')}</div>
-        <div className='flex items-center gap-12px mt-10px flex-wrap'>
-          <Select
-            style={{ width: 220 }}
-            placeholder={t('nomi.migrate.companionPlaceholder')}
-            value={effectiveCompanionId}
-            options={companions.map((p) => ({ label: p.name, value: p.companion_id }))}
-            onChange={(v: string) => setSelectedCompanionId(v)}
-          />
-          <Button type='primary' disabled={!effectiveCompanionId} loading={exportingCompanion} onClick={() => void exportCompanion()}>
-            {t('nomi.migrate.exportCompanion')}
-          </Button>
-        </div>
-      </section>
+      <NomiSettingList>
+        <NomiSettingRow
+          title={t('nomi.migrate.companionTitle')}
+          description={t('nomi.migrate.companionDesc')}
+          controls={
+            <>
+              <NomiSelect
+                contentFit
+                contentMaxWidth={240}
+                placeholder={t('nomi.migrate.companionPlaceholder')}
+                value={effectiveCompanionId}
+                options={companions.map((p) => ({ label: p.name, value: p.companion_id }))}
+                onChange={(v: string) => setSelectedCompanionId(v)}
+              />
+              <Button
+                type='primary'
+                disabled={!effectiveCompanionId}
+                loading={exportingCompanion}
+                onClick={() => void exportCompanion()}
+              >
+                {t('nomi.migrate.exportCompanion')}
+              </Button>
+            </>
+          }
+        />
+      </NomiSettingList>
 
       {/* 3. import */}
-      <section className='bg-fill-2 rd-10px px-14px py-12px'>
-        <div className='text-14px text-t-primary font-500'>{t('nomi.migrate.importTitle')}</div>
-        <div className='text-12px text-t-tertiary mt-2px'>{t('nomi.migrate.importDesc')}</div>
-        <div className='flex items-center gap-12px mt-10px flex-wrap'>
-          <Button loading={importingBundle} onClick={() => void importBundle()}>
-            {t('nomi.migrate.importBundle')}
-          </Button>
-          <Button loading={importingKb} onClick={() => void importKnowledge()}>
-            {t('nomi.migrate.importKnowledge')}
-          </Button>
-        </div>
-        {unmatchedNames.length > 0 && (
-          <Alert
-            type='warning'
-            className='mt-10px'
-            content={
-              <div>
-                <div>{t('nomi.migrate.unmatchedTitle')}</div>
-                <div className='mt-4px font-500'>{unmatchedNames.join(', ')}</div>
-              </div>
-            }
-          />
-        )}
-      </section>
+      <NomiSettingList>
+        <NomiSettingRow
+          title={t('nomi.migrate.importTitle')}
+          description={t('nomi.migrate.importDesc')}
+          controls={
+            <>
+              <Button loading={importingBundle} onClick={() => void importBundle()}>
+                {t('nomi.migrate.importBundle')}
+              </Button>
+              <Button loading={importingKb} onClick={() => void importKnowledge()}>
+                {t('nomi.migrate.importKnowledge')}
+              </Button>
+            </>
+          }
+          footer={
+            unmatchedNames.length > 0 ? (
+              <Alert
+                type='warning'
+                content={
+                  <div>
+                    <div>{t('nomi.migrate.unmatchedTitle')}</div>
+                    <div className='mt-4px font-500'>{unmatchedNames.join(', ')}</div>
+                  </div>
+                }
+              />
+            ) : undefined
+          }
+        />
+      </NomiSettingList>
     </div>
   );
 };

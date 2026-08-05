@@ -7,21 +7,36 @@ use std::sync::Arc;
 
 use nomifun_ai_agent::nomi_config;
 use nomifun_ai_agent::{one_shot_completion, resolve_provider_config, user_message};
-use nomifun_common::{AppError, CompanionLearnRunId, now_ms};
+use nomifun_common::{AppError, now_ms};
 use nomifun_db::IProviderRepository;
+use serde::Serialize;
 use tokio::sync::Mutex;
 
-use crate::collector::{SharedConfig, read_events_since};
+use crate::collector::{SharedConfig, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
 use crate::prompt::{self, LEARN_MAX_TOKENS};
 use crate::registry::CompanionRegistry;
-use crate::store::{MemoryFilter, CompanionLearnRun, CompanionStore};
+use crate::store::{MemoryFilter, CompanionStore};
 
 const MAX_EVENTS_PER_RUN: usize = 300;
 const TICK_SECONDS: u64 = 60;
 /// After this many consecutive scheduled runs fail to parse, the batch is
 /// abandoned (cursor advanced) instead of re-burning tokens forever.
 const PARSE_FAIL_GIVE_UP_RUNS: i64 = 3;
+
+/// Ephemeral outcome of one learning pass. It is returned to an explicit
+/// caller and broadcast to live companion surfaces, but is deliberately not
+/// persisted as run history.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompanionLearnResult {
+    pub status: String,
+    pub events_processed: i64,
+    pub memories_added: i64,
+    pub suggestions_added: i64,
+    pub error: Option<String>,
+    /// Nomi's one-line diary for this pass, used by the live companion bubble.
+    pub summary: Option<String>,
+}
 
 /// LLM seam so tests can run the learner without a live provider.
 /// (Companion chat runs on the real agent engine; this trait only serves
@@ -77,6 +92,7 @@ pub struct Learner {
     pub registry: Arc<CompanionRegistry>,
     pub completer: Arc<dyn CompanionCompleter>,
     pub emitter: CompanionEventEmitter,
+    pub event_store_lock: SharedEventStoreLock,
     /// Re-entrancy guard shared between the tick loop and "run now".
     pub run_lock: Arc<Mutex<()>>,
 }
@@ -107,8 +123,8 @@ impl Learner {
         });
     }
 
-    /// One learning run. Returns the persisted run record.
-    pub async fn run_once(&self) -> Result<CompanionLearnRun, AppError> {
+    /// Execute one learning pass and return its transient result.
+    pub async fn run_once(&self) -> Result<CompanionLearnResult, AppError> {
         let Ok(_guard) = self.run_lock.try_lock() else {
             return Err(AppError::Conflict("a learn run is already in progress".into()));
         };
@@ -117,10 +133,7 @@ impl Learner {
         self.store.set_state("last_learn_ts", &started_at.to_string()).await?;
 
         let model = { self.config.read().await.learn.model.clone() };
-        let mut run = CompanionLearnRun {
-            learn_run_id: CompanionLearnRunId::new().into_string(),
-            started_at,
-            finished_at: None,
+        let mut run = CompanionLearnResult {
             status: "ok".into(),
             events_processed: 0,
             memories_added: 0,
@@ -131,18 +144,16 @@ impl Learner {
 
         let Some(model) = model else {
             run.status = "model_unconfigured".into();
-            run.finished_at = Some(now_ms());
-            self.store.insert_learn_run(&run).await?;
             return Ok(run);
         };
 
         let cursor = self.store.get_state_i64("learn_cursor_ts").await?;
-        let (events, truncated) =
-            read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?;
+        let (events, truncated) = {
+            let _event_guard = self.event_store_lock.read().await;
+            read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?
+        };
         if events.is_empty() {
             run.status = "no_events".into();
-            run.finished_at = Some(now_ms());
-            self.store.insert_learn_run(&run).await?;
             return Ok(run);
         }
         run.events_processed = events.len() as i64;
@@ -210,7 +221,6 @@ impl Learner {
         let Some(output) = parsed else {
             run.status = "error".into();
             run.error = Some(last_err);
-            run.finished_at = Some(now_ms());
             // Provider failure is transient: keep the cursor so the same
             // events retry once the provider recovers. Parse failure is the
             // model misformatting — retry the batch a few scheduled runs,
@@ -226,7 +236,6 @@ impl Learner {
                     self.store.set_state("learn_parse_fail_streak", &streak.to_string()).await?;
                 }
             }
-            self.store.insert_learn_run(&run).await?;
             if let Some(target) = target.as_deref() {
                 self.emitter.emit_learn_finished(target, &run);
             }
@@ -311,8 +320,6 @@ impl Learner {
             .await;
 
         self.store.set_state("learn_cursor_ts", &new_cursor.to_string()).await?;
-        run.finished_at = Some(now_ms());
-        self.store.insert_learn_run(&run).await?;
         if let Some(target) = target.as_deref() {
             self.emitter.emit_learn_finished(target, &run);
         }
@@ -359,6 +366,7 @@ mod tests {
             registry,
             completer: Arc::new(CannedCompleter(reply.to_owned())),
             emitter: CompanionEventEmitter::new(Arc::new(BroadcastEventBus::new(16)), "owner-a"),
+            event_store_lock: Arc::new(RwLock::new(())),
             run_lock: Arc::new(Mutex::new(())),
         };
         (learner, companion.companion_id)
@@ -515,6 +523,7 @@ mod tests {
             registry,
             completer: Arc::new(CannedCompleter(reply.to_owned())),
             emitter: CompanionEventEmitter::new(bc.clone(), "owner-a"),
+            event_store_lock: Arc::new(RwLock::new(())),
             run_lock: Arc::new(Mutex::new(())),
         };
         learner.run_once().await.unwrap();
@@ -536,5 +545,25 @@ mod tests {
                 );
             }
         }
+
+        let finished = events
+            .iter()
+            .find(|event| event.name == "companion.learn-finished")
+            .unwrap();
+        let payload = finished.data.as_object().unwrap();
+        let actual_keys: std::collections::BTreeSet<&str> =
+            payload.keys().map(String::as_str).collect();
+        let expected_keys: std::collections::BTreeSet<&str> = [
+            "companion_id",
+            "error",
+            "events_processed",
+            "memories_added",
+            "status",
+            "suggestions_added",
+            "summary",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual_keys, expected_keys, "live result must not expose persisted run fields");
     }
 }

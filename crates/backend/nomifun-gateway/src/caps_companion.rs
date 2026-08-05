@@ -254,25 +254,7 @@ struct CollectConfigPatch {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
-    chat_assistant_replies: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present"
-    )]
     requirements: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present"
-    )]
-    cron_runs: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present"
-    )]
-    conversation_lifecycle: Option<bool>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -341,12 +323,6 @@ struct SharedEvolvePatch {
         deserialize_with = "deserialize_present"
     )]
     min_distinct_sessions: Option<usize>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present"
-    )]
-    reflect_enabled: Option<bool>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

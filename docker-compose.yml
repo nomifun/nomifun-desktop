@@ -46,6 +46,11 @@ services:
       # Set NOMIFUN_HTTPS=true (e.g. when fronted by the caddy service below) so
       # the session cookie gets the Secure flag.
       - NOMIFUN_HTTPS
+      # Extra browser origins accepted for the realtime WebSocket handshake
+      # (comma-separated, e.g. https://nomi.example.com). Only needed behind a
+      # reverse proxy / tunnel that forwards neither the original Host nor
+      # X-Forwarded-Host — see docs/guides/web-server-deployment.md.
+      - NOMIFUN_ALLOWED_ORIGINS
 
   # --- Optional: TLS + reverse proxy for internet exposure --------------------
   # To use it: (1) edit Caddyfile with your domain, (2) set NOMIFUN_HTTPS=true

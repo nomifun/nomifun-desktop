@@ -1,5 +1,19 @@
 /* Arco Design custom overrides - non-theme related */
 
+/* Keep the companion quiet-hours range picker calm when one side is active. */
+.nomi-quiet-hours-picker.arco-picker-focused,
+.nomi-quiet-hours-picker.arco-picker-focused:hover {
+  background-color: var(--color-bg-1) !important;
+  border-color: rgba(var(--primary-rgb), 0.42) !important;
+  box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.08);
+}
+
+.nomi-quiet-hours-picker.arco-picker-focused .arco-picker-input-active input,
+.nomi-quiet-hours-picker.arco-picker-focused:hover .arco-picker-input-active input {
+  background: rgba(var(--primary-rgb), 0.06) !important;
+  border-radius: 4px;
+}
+
 /* Arco's arco.css puts 'Inter' first in font-family, which causes very thin
    text on systems that have Inter installed. Override to use system fonts. */
 html,
@@ -7,6 +21,23 @@ body {
   font-family:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+}
+
+/* Global tooltip typography contract. Every Arco Tooltip, including `mini`,
+   consumes the same compact font metrics and inner spacing. */
+:root {
+  --nomi-tooltip-font-size: 12px;
+  --nomi-tooltip-line-height: 16px;
+  --nomi-tooltip-padding-block: 3px;
+  --nomi-tooltip-padding-inline: 7px;
+}
+
+.arco-tooltip-content {
+  padding: var(--nomi-tooltip-padding-block) var(--nomi-tooltip-padding-inline) !important;
+  font-family: inherit;
+  font-size: var(--nomi-tooltip-font-size) !important;
+  font-weight: 400;
+  line-height: var(--nomi-tooltip-line-height) !important;
 }
 
 /* Override Arco Design component backgrounds to white in light mode */
@@ -296,6 +327,151 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
 .knowledge-detail-tabs .arco-tabs-nav-ink,
 .knowledge-detail-tabs .arco-tabs-header-ink {
   background-color: rgb(var(--primary-6)) !important;
+}
+
+/* The two large panes own one complete outline. Using an inset stroke keeps it
+   exactly 1px without changing layout or accumulating with section dividers. */
+.knowledge-doc-panel-frame {
+  border: 0 !important;
+  box-shadow: inset 0 0 0 1px var(--color-border-2);
+}
+
+/* Section chrome is deliberately one-sided: no implicit top/left/right edges. */
+.knowledge-doc-divider-bottom {
+  border: 0 !important;
+  border-bottom: 1px solid var(--color-border-2) !important;
+}
+
+.knowledge-doc-divider-top {
+  border: 0 !important;
+  border-top: 1px solid var(--color-border-2) !important;
+}
+
+.knowledge-doc-icon-button.arco-btn {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0 !important;
+  color: var(--color-text-2) !important;
+}
+
+.knowledge-doc-icon-button.arco-btn:hover,
+.knowledge-doc-icon-button.arco-btn:focus-visible {
+  color: var(--color-text-1) !important;
+  background: var(--color-fill-2) !important;
+}
+
+.knowledge-doc-model-trigger.arco-btn {
+  max-width: 100%;
+  height: 28px;
+  padding: 0 5px !important;
+  color: var(--color-text-2) !important;
+  font-size: 11px !important;
+}
+
+.knowledge-doc-model-trigger.arco-btn:hover,
+.knowledge-doc-model-trigger.arco-btn:focus-visible {
+  color: var(--color-text-1) !important;
+  background: var(--color-fill-2) !important;
+}
+
+.knowledge-doc-content-edit {
+  padding: 10px 14px 12px;
+}
+
+.knowledge-doc-source-editor.arco-textarea,
+.knowledge-doc-source-editor.arco-textarea:hover,
+.knowledge-doc-source-editor.arco-textarea:focus,
+.knowledge-doc-source-editor.arco-textarea-focus {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 4px 6px 8px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--color-text-1) !important;
+  line-height: 1.65;
+}
+
+.knowledge-doc-tree .arco-tree-node {
+  padding: 0;
+}
+
+.knowledge-doc-tree .arco-tree-node-title {
+  min-height: 24px;
+  box-sizing: border-box;
+  padding: 2px 4px !important;
+  border-radius: 5px;
+  color: var(--color-text-1);
+  font-size: 13px;
+  font-weight: 450;
+  line-height: 18px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.knowledge-doc-tree .arco-tree-node-title:hover {
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
+.knowledge-doc-tree .arco-tree-node-selected .arco-tree-node-title,
+.knowledge-doc-tree .arco-tree-node-title-selected {
+  background: var(--color-fill-3) !important;
+  color: var(--color-text-1) !important;
+  font-weight: 500;
+}
+
+.knowledge-doc-tree .arco-tree-node-switcher {
+  width: 17px;
+  min-width: 17px;
+  height: 24px;
+  margin-right: 1px;
+  color: var(--color-text-3);
+  line-height: 24px;
+}
+
+.knowledge-doc-tree .arco-tree-node-switcher-icon,
+.knowledge-doc-tree .knowledge-tree-switcher-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.knowledge-doc-tree .knowledge-tree-switcher-chevron {
+  opacity: 0.78;
+}
+
+.knowledge-doc-tree .arco-tree-node-indent-block::before,
+.knowledge-doc-tree .arco-tree-node-list-line::before {
+  border-color: var(--color-border-2) !important;
+  opacity: 0.68;
+}
+
+.knowledge-tree-node-menu.arco-dropdown-menu {
+  width: max-content !important;
+  min-width: 96px !important;
+  padding: 3px 4px !important;
+  border-radius: 8px;
+  font-size: 12px !important;
+}
+
+.knowledge-tree-node-menu.arco-dropdown-menu .arco-dropdown-menu-item {
+  height: 28px !important;
+  min-height: 28px !important;
+  padding: 0 8px !important;
+  border-radius: 6px;
+  color: var(--color-text-1);
+  font-size: 12px !important;
+  font-weight: 400;
+  line-height: 28px !important;
+}
+
+.knowledge-tree-node-menu.arco-dropdown-menu .arco-dropdown-menu-item:hover,
+.knowledge-tree-node-menu.arco-dropdown-menu .arco-dropdown-menu-item:focus-visible,
+.knowledge-tree-node-menu.arco-dropdown-menu .arco-dropdown-menu-item.arco-dropdown-menu-active {
+  background: var(--color-fill-2);
 }
 
 .knowledge-detail-settings-input,

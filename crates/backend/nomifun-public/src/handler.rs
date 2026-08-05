@@ -41,6 +41,7 @@ fn browser_operation_scope(
     }
 }
 
+#[cfg(test)]
 fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
@@ -48,6 +49,7 @@ fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn domain_scope_from_query(query: Option<&str>) -> Option<Vec<String>> {
     let query = query?;
     if let Some(domains) = query_value(query, "domains") {
@@ -154,12 +156,18 @@ async fn attach_remote_browser_identity(
     allowed_operations: BTreeSet<BrowserOperationKind>,
 ) -> Result<CallerCtx, serde_json::Value> {
     registry
-        .attach_trusted_identity_scoped(
+        .attach_trusted_remote_identity_scoped(
             &mut caller,
+            &session_id,
+            // rmcp generated this id and the RemoteSessionManager validated
+            // it against its live server-side session map. It therefore acts
+            // as both the exact cleanup runtime and the current protocol's
+            // logical Remote task/connection boundary. A future transport
+            // that supports several runtimes for one task can pass the same
+            // server-pinned connection id with distinct runtime ids here.
             &session_id,
             None,
             u64::MAX,
-            nomifun_gateway::browser_registry::BrowserAttachmentAuthority::RemoteMcpSession,
             allowed_operations,
         )
         .await
@@ -363,6 +371,7 @@ mod tests {
     #[cfg(feature = "browser-use")]
     use nomifun_browser_platform::{
         BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserLaneDriver,
+        BrowserProfileFootprint,
         BrowserOperation, BrowserOperationResult, BrowserPlatformError, BrowserSessionHub,
         DriverOperationContext, HostLaunchRequest, HostLifecycleState, HubConfig,
         LaneLaunchRequest, ManualClock,
@@ -456,6 +465,32 @@ mod tests {
 
         fn epoch(&self) -> u64 {
             self.epoch
+        }
+
+        // This fake manages no on-disk profile, so report a completed
+        // zero measurement. Inheriting the trait default would instead
+        // mean "could not measure", which fences Primary fail-closed.
+        // Desugared to match this impl's hand-written future style.
+        fn profile_footprint<'a, 'async_trait>(
+            &'a self,
+            _stop_after_bytes: u64,
+            _stop_after_entries: u64,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Option<BrowserProfileFootprint>,
+                            BrowserPlatformError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(Some(BrowserProfileFootprint::EMPTY)) })
         }
 
         fn state(&self) -> HostLifecycleState {

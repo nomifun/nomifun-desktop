@@ -70,7 +70,15 @@ All companions share one set of memory facilities under
 
 - **Collection** — a single pipeline subscribes to the global event
   bus, gathers your working data according to the collect switches,
-  and writes `shared/events/YYYYMMDD.jsonl`.
+  and writes `shared/events/YYYYMMDD.jsonl`. Raw events default to a
+  **30-day target retention and a hard 64 MiB capacity**. Expired files are
+  removed after every enabled learning/evolution consumer has processed them;
+  the capacity boundary always wins and may evict the oldest unprocessed day.
+  Data Sources lets you configure 7–365 days and 16–512 MiB and shows current
+  usage plus the stored date range. There is no raw-row viewer or manual-clear
+  action. A memory bundle containing raw events must fit the current hard cap
+  before anything is imported; after a successful import, the same retention
+  cleanup runs immediately.
 - **Learning** — a single learner incrementally distills events into
   long-term memories on the configured interval, stored in
   `shared/memory.db`. The learning pipeline uses the **learn model
@@ -169,7 +177,7 @@ dialog):
 
 | Bundle | Contents | Import semantics |
 | --- | --- | --- |
-| **Memory bundle** | All long-term memories + learning history + mood; **optionally** the raw event data (checkbox) | **Merged with dedup** into local memories (original timestamps and sources preserved) |
+| **Memory bundle** | All long-term memories + mood; **optionally** the raw event data (checkbox) | **Merged with dedup** into local memories (original timestamps and sources preserved) |
 | **Companion bundle** | One companion's persona / character / settings / XP + the **name list** of its bound knowledge bases (`knowledge_refs`) | Creates a new companion under a fresh id, name conflicts get a "(2)" suffix; knowledge refs are matched **by name** against local bases to rebuild bindings — unmatched names are listed so you can import those knowledge bundles first and bind manually |
 | **Knowledge-base bundle** | Base metadata + the md file tree verbatim | Lands as a new knowledge base, name conflicts get "(2)" |
 

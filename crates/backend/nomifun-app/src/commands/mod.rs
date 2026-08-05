@@ -28,7 +28,10 @@ pub use backup::{run_backup, run_restore};
 pub use doctor::run_doctor;
 pub use gateway_stdio::run_gateway_stdio;
 pub use knowledge_stdio::run_knowledge_stdio;
-pub use mcp_stdio::run_mcp_stdio_subcommand_if_present;
+pub use mcp_stdio::{
+    build_mcp_stdio_runtime, is_mcp_stdio_cli_command,
+    run_mcp_stdio_subcommand_if_present,
+};
 pub use open_stdio::run_open_stdio;
 pub use requirement_stdio::run_requirement_stdio;
 pub use server::run_server;

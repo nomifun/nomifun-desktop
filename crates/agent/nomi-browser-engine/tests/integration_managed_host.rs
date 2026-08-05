@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nomi_browser_engine::{
-    BrowserEngine, EngineConfig, FirewallConfig, LaneEngineConfig, ManagedBrowserHost,
+    BrowserEngine, BrowserError, EngineConfig, FirewallConfig, LaneEngineConfig,
+    ManagedBrowserHost, TaskDownloadReservation, TaskDownloadReservationAuthority,
+    TaskTabReservation, TaskTabReservationAuthority,
 };
 use nomi_browser_engine::profile::{COMMITTED_OWNERSHIP_RECORD_FILE, OWNERSHIP_MARKER_FILE};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,6 +16,85 @@ use tokio::sync::{mpsc, oneshot};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CROSS_LANE_COUNT: usize = 4;
 const CLUSTER_ATTEMPT_LANE_COUNT: usize = 16;
+
+/// Stand-in for the platform Hub's cross-Host task authorities.
+///
+/// One managed Chromium Host serves Lanes belonging to *many* independent task
+/// families; the per-task Lane budget lives in the Hub scheduler, not in the
+/// engine (hence `TaskTabReservationAuthority::release_lane`'s no-op default
+/// for platform authorities). Acceptance tests below assert Host-level
+/// multiplexing and process/RSS behavior, so they supply a permissive Hub
+/// stand-in here. The task tab/download budgets themselves are unit-tested
+/// against the real implementations in `nomi-browser-engine`'s standalone
+/// scope and in `nomifun-browser-platform`'s Hub.
+struct HubStandInTaskAuthority;
+
+struct HubStandInTabReservation;
+
+impl TaskTabReservation for HubStandInTabReservation {}
+
+#[async_trait::async_trait]
+impl TaskTabReservationAuthority for HubStandInTaskAuthority {
+    async fn reserve(
+        &self,
+        _task_resource_key: &str,
+        _lane_id: &str,
+        _reservation_key: &str,
+    ) -> Result<Arc<dyn TaskTabReservation>, BrowserError> {
+        Ok(Arc::new(HubStandInTabReservation))
+    }
+}
+
+struct HubStandInDownloadReservation;
+
+impl TaskDownloadReservation for HubStandInDownloadReservation {
+    fn update_progress(
+        &self,
+        _received_bytes: u64,
+        _total_bytes: Option<u64>,
+    ) -> Result<(), BrowserError> {
+        Ok(())
+    }
+
+    fn prepare_complete(&self, _actual_bytes: u64) -> Result<(), BrowserError> {
+        Ok(())
+    }
+
+    fn finalize_complete(&self) {}
+}
+
+#[async_trait::async_trait]
+impl TaskDownloadReservationAuthority for HubStandInTaskAuthority {
+    async fn reserve(
+        &self,
+        _task_resource_key: &str,
+        _lane_id: &str,
+        _download_key: &str,
+    ) -> Result<Arc<dyn TaskDownloadReservation>, BrowserError> {
+        Ok(Arc::new(HubStandInDownloadReservation))
+    }
+}
+
+/// Lane config for a platform-managed Host, with one logical task family per
+/// Lane.
+///
+/// The standalone engine path deliberately binds one Host to one task scope and
+/// caps it at `STANDALONE_MAX_LIVE_LANES_PER_SCOPE`, which is the product's
+/// per-task Lane budget. Acceptance tests that need many Lanes on one Host are
+/// modelling *several independent tasks* sharing a Host — the production
+/// arrangement — so they use the platform-managed constructor and pass the
+/// trusted task key plus authorities the way the platform adapter does.
+fn platform_lane_config(lane_id: &str) -> LaneEngineConfig {
+    let authority = Arc::new(HubStandInTaskAuthority);
+    LaneEngineConfig {
+        task_resource_key: Some(format!("acceptance-task:{lane_id}")),
+        task_tab_reservation_authority: Some(authority.clone()),
+        task_download_reservation_authority: Some(authority),
+        // `max_task_tabs` comes from the default (the product's per-task tab
+        // budget), which already satisfies the platform-managed guard.
+        ..LaneEngineConfig::default()
+    }
+}
 
 struct FixtureRequest {
     path: String,
@@ -214,13 +295,29 @@ fn sample_process_forest(
         true,
         ProcessRefreshKind::nothing().with_memory(),
     );
+    let started_at_by_pid = system
+        .processes()
+        .values()
+        .map(|process| (process.pid().as_u32(), process.start_time()))
+        .collect::<HashMap<_, _>>();
     let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
     for process in system.processes().values() {
         if let Some(parent) = process.parent() {
-            children_by_parent
-                .entry(parent.as_u32())
-                .or_default()
-                .push(process.pid().as_u32());
+            let parent_pid = parent.as_u32();
+            // Windows keeps an orphan's stale parent PID. If that numeric PID
+            // is later reused by a test Chrome process, a parent-only walk
+            // incorrectly counts the unrelated orphan tree and later reports
+            // it as Chrome residue. Reject edges where the child predates the
+            // current process occupying its recorded parent PID.
+            let parent_is_not_newer = started_at_by_pid
+                .get(&parent_pid)
+                .is_none_or(|started_at| process.start_time() >= *started_at);
+            if parent_is_not_newer {
+                children_by_parent
+                    .entry(parent_pid)
+                    .or_default()
+                    .push(process.pid().as_u32());
+            }
         }
     }
 
@@ -704,7 +801,7 @@ async fn managed_host_real_chromium_acceptance_matrix() {
     #[cfg_attr(not(windows), allow(unused_variables))]
     let primary_profile = temp.path().join("primary-profile");
     let primary_host = Arc::new(
-        ManagedBrowserHost::launch(managed_config(temp.path(), "primary-profile", false))
+        ManagedBrowserHost::launch_platform_managed(managed_config(temp.path(), "primary-profile", false))
             .await
             .unwrap(),
     );
@@ -728,7 +825,10 @@ async fn managed_host_real_chromium_acceptance_matrix() {
     for index in 0..CROSS_LANE_COUNT {
         lanes.push(
             primary_host
-                .open_lane(format!("overlap-{index}"), LaneEngineConfig::default())
+                .open_lane(
+                    format!("overlap-{index}"),
+                    platform_lane_config(&format!("overlap-{index}")),
+                )
                 .await
                 .unwrap(),
         );
@@ -789,7 +889,7 @@ async fn managed_host_real_chromium_acceptance_matrix() {
     // Same-lane serialization: the second request cannot reach the server
     // while the first navigation holds the lane operation gate.
     let serial_lane = primary_host
-        .open_lane("serial", LaneEngineConfig::default())
+        .open_lane("serial", platform_lane_config("serial"))
         .await
         .unwrap();
     let serial_started = Instant::now();
@@ -837,11 +937,11 @@ async fn managed_host_real_chromium_acceptance_matrix() {
     // Two Primary lanes use the exact same host and stable profile, so a
     // cookie written by one must be visible immediately in the other.
     let primary_a = primary_host
-        .open_lane("primary-a", LaneEngineConfig::default())
+        .open_lane("primary-a", platform_lane_config("primary-a"))
         .await
         .unwrap();
     let primary_b = primary_host
-        .open_lane("primary-b", LaneEngineConfig::default())
+        .open_lane("primary-b", platform_lane_config("primary-b"))
         .await
         .unwrap();
     let set_primary_url = fixture.url("/set-primary");
@@ -881,7 +981,7 @@ async fn managed_host_real_chromium_acceptance_matrix() {
     #[cfg_attr(not(windows), allow(unused_variables))]
     let anonymous_profile = temp.path().join("anonymous-profile");
     let anonymous_host = Arc::new(
-        ManagedBrowserHost::launch(managed_config(temp.path(), "anonymous-profile", true))
+        ManagedBrowserHost::launch_platform_managed(managed_config(temp.path(), "anonymous-profile", true))
             .await
             .unwrap(),
     );
@@ -902,7 +1002,7 @@ async fn managed_host_real_chromium_acceptance_matrix() {
         "Primary and Anonymous identity domains require separate host processes"
     );
     let anonymous = anonymous_host
-        .open_lane("anonymous", LaneEngineConfig::default())
+        .open_lane("anonymous", platform_lane_config("anonymous"))
         .await
         .unwrap();
     let anonymous_echo_url = fixture.url("/anonymous-echo");
@@ -1087,9 +1187,13 @@ async fn managed_host_sixteen_lane_real_chromium_acceptance() {
     #[cfg_attr(not(windows), allow(unused_variables))]
     let profile = temp.path().join(profile_name);
     let host = Arc::new(
-        ManagedBrowserHost::launch(managed_config(temp.path(), profile_name, false))
-            .await
-            .unwrap(),
+        ManagedBrowserHost::launch_platform_managed(managed_config(
+            temp.path(),
+            profile_name,
+            false,
+        ))
+        .await
+        .unwrap(),
     );
     assert!(host.epoch() > 0);
     let host_pid = host
@@ -1110,7 +1214,7 @@ async fn managed_host_sixteen_lane_real_chromium_acceptance() {
         lanes.push(
             host.open_lane(
                 format!("cluster-attempt-{index}"),
-                LaneEngineConfig::default(),
+                platform_lane_config(&format!("cluster-attempt-{index}")),
             )
             .await
             .unwrap(),
@@ -1309,9 +1413,13 @@ async fn run_rss_workload(
         let profile_name = format!("rss-round-{round}-{}-{host_index}", layout.label());
         profiles.push(temp_root.join(&profile_name));
         hosts.push(Arc::new(
-            ManagedBrowserHost::launch(managed_config(temp_root, &profile_name, false))
-                .await
-                .unwrap(),
+            ManagedBrowserHost::launch_platform_managed(managed_config(
+                temp_root,
+                &profile_name,
+                false,
+            ))
+            .await
+            .unwrap(),
         ));
     }
     let root_pids = hosts
@@ -1347,12 +1455,10 @@ async fn run_rss_workload(
     match layout {
         RssHostLayout::Shared => {
             for lane_index in 0..CROSS_LANE_COUNT {
+                let lane_id = format!("rss-shared-{round}-{lane_index}");
                 lanes.push(
                     hosts[0]
-                        .open_lane(
-                            format!("rss-shared-{round}-{lane_index}"),
-                            LaneEngineConfig::default(),
-                        )
+                        .open_lane(lane_id.clone(), platform_lane_config(&lane_id))
                         .await
                         .unwrap(),
                 );
@@ -1360,13 +1466,11 @@ async fn run_rss_workload(
         }
         RssHostLayout::Independent => {
             for (lane_index, host) in hosts.iter().enumerate() {
+                let lane_id = format!("rss-independent-{round}-{lane_index}");
                 lanes.push(
-                    host.open_lane(
-                        format!("rss-independent-{round}-{lane_index}"),
-                        LaneEngineConfig::default(),
-                    )
-                    .await
-                    .unwrap(),
+                    host.open_lane(lane_id.clone(), platform_lane_config(&lane_id))
+                        .await
+                        .unwrap(),
                 );
             }
         }

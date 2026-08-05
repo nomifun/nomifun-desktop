@@ -16,22 +16,26 @@
 //!
 //! 错误：本模块自有 [`TransportError`]（定义在 `session.rs`），不耦合 `BrowserError`。
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use chromiumoxide::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams;
+use chromiumoxide::cdp::js_protocol::runtime::{
+    ReleaseObjectGroupParams, RunIfWaitingForDebuggerParams,
+};
 use chromiumoxide::cdp::browser_protocol::fetch::{
     EnableParams as FetchEnableParams, EventRequestPaused,
 };
 use chromiumoxide::cdp::browser_protocol::target::{
-    EventAttachedToTarget, SetAutoAttachParams,
+    CloseTargetParams, DetachFromTargetParams, EventAttachedToTarget, GetTargetsParams,
+    SetAutoAttachParams,
 };
 use chromiumoxide::types::{CallId, Command, MethodCall, MethodType};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
@@ -39,10 +43,29 @@ use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStre
 pub use crate::session::{
     CdpEvent, CommandResult, SessionRegistry, TransportError, ROOT_SESSION,
 };
+use crate::session::{
+    ReliableEventTaskBudget, ReliableTaskEventReceiver, TaskSessionAdmission,
+};
 
 /// 每条 CDP 命令的默认超时（对冲上游 hang；DESIGN §5/§22）。Task A 的 `Progress` 是
 /// 更上层的取消地基；本传输层至少给每命令一个独立 deadline，绝不无限等回包。
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Top-level pages stay paused only long enough for the trusted Host router to
+/// correlate a create nonce/opener. Unknown pages are then locally closed.
+const TASK_SESSION_AUTHORITY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Cancellation/panic fallback for action object-group cleanup. Normal actions
+/// await `Runtime.releaseObjectGroup` before returning, so this queue only
+/// carries abnormal cleanup debt. It is deliberately small and per connection:
+/// exceeding it poisons that exact Host instead of retaining an unbounded set
+/// of remote handles or detached Tokio tasks.
+pub(crate) const DEFERRED_OBJECT_GROUP_RELEASE_CAPACITY: usize = 64;
+
+/// Hard wire-size limits for a single CDP JSON message. Screenshots and DOM
+/// snapshots can be large, but an unlimited WebSocket/pipe frame lets a broken
+/// renderer grow the host process without bound before JSON parsing starts.
+pub const MAX_CDP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CDP_WS_FRAME_BYTES: usize = MAX_CDP_MESSAGE_BYTES;
 
 /// WS 写半边类型别名（split 后的 sink）。
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>;
@@ -82,6 +105,33 @@ struct ConnectionInner {
     ///   无拦截——那是出口防火墙的无声逃逸。恢复路径是重启 host（cdp.rs 的
     ///   watchdog 会在防火墙任务非 abort 死亡时把整条连接 fail 掉）。
     fetch_firewall_armed: AtomicBool,
+    /// Supervised read-loop ownership. Explicit shutdown joins it; dropping
+    /// the last connection clone aborts it so no detached task can retain the
+    /// registry indefinitely.
+    read_loop: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    /// One fixed worker owns cancellation/panic fallback releases. A Drop path
+    /// only inserts into this bounded/coalescing queue; it never spawns a task.
+    object_group_releases: Arc<ObjectGroupReleaseDispatcher>,
+    object_group_release_loop: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DeferredObjectGroupRelease {
+    session_id: String,
+    group: String,
+}
+
+#[derive(Default)]
+struct ObjectGroupReleaseState {
+    queued: VecDeque<DeferredObjectGroupRelease>,
+    queued_keys: HashSet<DeferredObjectGroupRelease>,
+    active: Option<DeferredObjectGroupRelease>,
+}
+
+#[derive(Default)]
+struct ObjectGroupReleaseDispatcher {
+    state: StdMutex<ObjectGroupReleaseState>,
+    wake: Notify,
 }
 
 /// Removes a registered callback when a `send` future is cancelled or dropped
@@ -99,21 +149,229 @@ impl Drop for PendingCommand {
     }
 }
 
+fn ensure_message_size(len: usize) -> Result<(), TransportError> {
+    if len > MAX_CDP_MESSAGE_BYTES {
+        Err(TransportError::Protocol(format!(
+            "CDP message exceeds hard limit: {len} bytes > {MAX_CDP_MESSAGE_BYTES} bytes"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+impl ConnectionInner {
+    async fn close_sink(&self) {
+        let mut sink = self.sink.lock().await;
+        match &mut *sink {
+            TransportSink::Ws(ws) => {
+                let _ = tokio::time::timeout(Duration::from_secs(1), ws.close()).await;
+            }
+            #[cfg(unix)]
+            TransportSink::Pipe(pipe) => {
+                use tokio::io::AsyncWriteExt;
+                let _ = tokio::time::timeout(Duration::from_secs(1), pipe.shutdown()).await;
+            }
+        }
+    }
+}
+
+impl ObjectGroupReleaseDispatcher {
+    fn enqueue(&self, release: DeferredObjectGroupRelease) -> Result<(), ()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active.as_ref() == Some(&release) || state.queued_keys.contains(&release) {
+            return Ok(());
+        }
+        if state.queued.len() + usize::from(state.active.is_some())
+            >= DEFERRED_OBJECT_GROUP_RELEASE_CAPACITY
+        {
+            return Err(());
+        }
+        state.queued_keys.insert(release.clone());
+        state.queued.push_back(release);
+        drop(state);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    fn take_next(&self) -> Option<DeferredObjectGroupRelease> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let release = state.queued.pop_front()?;
+        state.queued_keys.remove(&release);
+        state.active = Some(release.clone());
+        Some(release)
+    }
+
+    fn finish_active(&self, release: &DeferredObjectGroupRelease) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active.as_ref() == Some(release) {
+            state.active = None;
+        }
+    }
+
+    fn clear(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.queued.clear();
+        state.queued_keys.clear();
+        state.active = None;
+        drop(state);
+        self.wake.notify_one();
+    }
+
+    #[cfg(test)]
+    fn counts(&self) -> (usize, usize) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.queued.len(), usize::from(state.active.is_some()))
+    }
+}
+
+impl Drop for ConnectionInner {
+    fn drop(&mut self) {
+        self.registry.fail_connection();
+        let release_loop = self
+            .object_group_release_loop
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(handle) = release_loop.take() {
+            handle.abort();
+        }
+        let read_loop = self
+            .read_loop
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(handle) = read_loop.take() {
+            handle.abort();
+        }
+    }
+}
+
 impl Connection {
+    fn spawn_object_group_release_loop(inner: &Arc<ConnectionInner>) {
+        let weak_inner = Arc::downgrade(inner);
+        let dispatcher = Arc::clone(&inner.object_group_releases);
+        let handle = tokio::spawn(async move {
+            loop {
+                let Some(inner) = weak_inner.upgrade() else {
+                    dispatcher.clear();
+                    return;
+                };
+                if inner.registry.is_connection_closed() {
+                    dispatcher.clear();
+                    return;
+                }
+                drop(inner);
+
+                let Some(release) = dispatcher.take_next() else {
+                    // `Notify` stores a permit when enqueue races this await,
+                    // so checking the queue before waiting cannot lose a wake.
+                    dispatcher.wake.notified().await;
+                    continue;
+                };
+
+                let Some(inner) = weak_inner.upgrade() else {
+                    dispatcher.finish_active(&release);
+                    dispatcher.clear();
+                    return;
+                };
+                let conn = Connection { inner };
+                let result = conn
+                    .send::<ReleaseObjectGroupParams>(
+                        &release.session_id,
+                        &ReleaseObjectGroupParams::new(release.group.clone()),
+                    )
+                    .await;
+                dispatcher.finish_active(&release);
+
+                match result {
+                    Ok(_) | Err(TransportError::Closed) | Err(TransportError::SessionClosed)
+                    | Err(TransportError::SessionCrashed) => {}
+                    Err(error) => {
+                        tracing::error!(
+                            target: "nomi_browser_engine::transport",
+                            session_id = %release.session_id,
+                            group = %release.group,
+                            error = %error,
+                            "deferred Runtime.releaseObjectGroup failed; retiring exact browser Host"
+                        );
+                        conn.inner.registry.poison_connection(error);
+                    }
+                }
+            }
+        });
+        inner
+            .object_group_release_loop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(handle);
+    }
+
+    /// Enqueue a cancellation/panic fallback release without allocating a
+    /// Tokio task. Duplicate `(session, group)` keys coalesce. Saturation or a
+    /// dead worker poisons this connection so the Host/process cleanup path is
+    /// the authoritative final proof instead of silently leaking remote state.
+    pub(crate) fn defer_object_group_release(&self, session_id: &str, group: &str) {
+        if self.inner.registry.is_connection_closed() {
+            return;
+        }
+        let worker_dead = self
+            .inner
+            .object_group_release_loop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished);
+        if worker_dead {
+            self.inner.registry.poison_connection(TransportError::Protocol(
+                "deferred object-group release worker terminated unexpectedly".to_owned(),
+            ));
+            return;
+        }
+
+        let release = DeferredObjectGroupRelease {
+            session_id: session_id.to_owned(),
+            group: group.to_owned(),
+        };
+        if self.inner.object_group_releases.enqueue(release).is_err() {
+            self.inner.registry.poison_connection(TransportError::Protocol(format!(
+                "deferred object-group release limit exceeded ({DEFERRED_OBJECT_GROUP_RELEASE_CAPACITY})"
+            )));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deferred_object_group_release_counts(&self) -> (usize, usize) {
+        self.inner.object_group_releases.counts()
+    }
+
     /// 连接到给定的 CDP browser WebSocket URL（如
     /// `ws://127.0.0.1:9222/devtools/browser/<id>`），启动后台 read loop，并返回
     /// 已就绪的 [`Connection`]。
     ///
-    /// WS 帧上限**显式设为 `None`**（解除 tungstenite 默认 64MiB/16MiB），否则大 DOM /
-    /// 截图会静默断连（DESIGN §5）。CDP 是 ws:// localhost，无需 TLS。
+    /// WS 重组消息与单帧分别使用显式硬上限，避免畸形 renderer 在 JSON 解析前无限扩张
+    /// transport 缓冲；上限仍为正常大 DOM / 截图保留空间。CDP 是 ws:// localhost，无需 TLS。
     ///
     /// **注意**：本方法只建连接 + 起 read loop，**不**自动 setAutoAttach。调用方在拿到
     /// 连接后显式调 [`Connection::enable_auto_attach`]（编排顺序见该方法 doc）。
     pub async fn connect(ws_url: &str) -> Result<Self, TransportError> {
-        // 解除帧上限：max_message_size/max_frame_size = None（勿硬编码 256MB）。
+        // Bound both the reassembled message and individual frames. The
+        // explicit limits are shared with the pipe parser and outgoing path.
         let config = WebSocketConfig::default()
-            .max_message_size(None)
-            .max_frame_size(None);
+            .max_message_size(Some(MAX_CDP_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_CDP_WS_FRAME_BYTES));
 
         let (ws, _resp) = tokio::time::timeout(
             DEFAULT_COMMAND_TIMEOUT,
@@ -132,30 +390,74 @@ impl Connection {
             next_id: AtomicUsize::new(1),
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
             fetch_firewall_armed: AtomicBool::new(false),
+            read_loop: StdMutex::new(None),
+            object_group_releases: Arc::new(ObjectGroupReleaseDispatcher::default()),
+            object_group_release_loop: StdMutex::new(None),
         });
 
-        // 后台 read loop：每条文本喂纯路由；WS 关闭/出错 → fail_connection 解除所有挂起。
+        // 后台 read loop：每条文本喂纯路由；WS 关闭/出错 → poison + fatal signal。
         let reg_for_loop = Arc::clone(&registry);
-        tokio::spawn(async move {
-            while let Some(msg) = stream.next().await {
+        let mut fatal_for_loop = registry.subscribe_fatal();
+        let weak_inner = Arc::downgrade(&inner);
+        let read_loop = tokio::spawn(async move {
+            let mut terminal_error = None;
+            loop {
+                let msg = tokio::select! {
+                    biased;
+                    changed = fatal_for_loop.changed() => {
+                        if changed.is_ok() {
+                            terminal_error = fatal_for_loop.borrow().clone();
+                        }
+                        break;
+                    }
+                    msg = stream.next() => msg,
+                };
+                let Some(msg) = msg else {
+                    break;
+                };
                 match msg {
                     Ok(WsMessage::Text(text)) => {
+                        if let Err(error) = ensure_message_size(text.len()) {
+                            terminal_error = Some(error);
+                            break;
+                        }
                         if let Err(e) = reg_for_loop.dispatch_message(&text) {
-                            // 单条畸形消息不应拖垮连接；记录后继续。
-                            tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "dropped malformed CDP message");
+                            terminal_error = Some(e);
+                            break;
                         }
                     }
-                    Ok(WsMessage::Binary(_)) => {
-                        // CDP over WS 是文本 JSON；二进制帧不该出现，忽略。
+                    Ok(WsMessage::Binary(bytes)) => {
+                        terminal_error = Some(TransportError::Protocol(format!(
+                            "unexpected binary CDP WebSocket message ({} bytes)",
+                            bytes.len()
+                        )));
+                        break;
                     }
-                    Ok(WsMessage::Close(_)) | Err(_) => break,
+                    Ok(WsMessage::Close(_)) => {
+                        terminal_error = Some(TransportError::Closed);
+                        break;
+                    }
+                    Err(error) => {
+                        terminal_error = Some(TransportError::Protocol(format!(
+                            "CDP WebSocket read failed: {error}"
+                        )));
+                        break;
+                    }
                     // Ping/Pong/Frame：tungstenite 自动处理 ping/pong，这里无需动作。
                     _ => {}
                 }
             }
-            // 连接结束（对端关闭 / 读错误）：解除所有挂起命令为 Closed。
-            reg_for_loop.fail_connection();
+            // Explicit shutdown marks the registry closed before closing the
+            // sink, so it is not misreported as an abnormal read-loop exit.
+            if !reg_for_loop.is_connection_closed() {
+                reg_for_loop.poison_connection(terminal_error.unwrap_or(TransportError::Closed));
+            }
+            if let Some(inner) = weak_inner.upgrade() {
+                inner.close_sink().await;
+            }
         });
+        *inner.read_loop.lock().unwrap() = Some(read_loop);
+        Self::spawn_object_group_release_loop(&inner);
 
         Ok(Self { inner })
     }
@@ -186,43 +488,90 @@ impl Connection {
             next_id: AtomicUsize::new(1),
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
             fetch_firewall_armed: AtomicBool::new(false),
+            read_loop: StdMutex::new(None),
+            object_group_releases: Arc::new(ObjectGroupReleaseDispatcher::default()),
+            object_group_release_loop: StdMutex::new(None),
         });
 
-        // 后台 read loop:从管道累积字节,按 NUL 切帧,每帧喂纯路由;EOF/出错 → fail_connection。
+        // 后台 read loop:逐字节按 NUL 切帧，未终止帧不得越过硬上限。
         let reg_for_loop = Arc::clone(&registry);
-        tokio::spawn(async move {
+        let mut fatal_for_loop = registry.subscribe_fatal();
+        let weak_inner = Arc::downgrade(&inner);
+        let read_loop = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
             let mut chunk = vec![0u8; 64 * 1024];
-            loop {
-                match receiver.read(&mut chunk).await {
-                    Ok(0) => break, // EOF:chrome 关闭管道(进程退出)。
+            let mut terminal_error = None;
+            'read_loop: loop {
+                let read_result = tokio::select! {
+                    biased;
+                    changed = fatal_for_loop.changed() => {
+                        if changed.is_ok() {
+                            terminal_error = fatal_for_loop.borrow().clone();
+                        }
+                        break;
+                    }
+                    result = receiver.read(&mut chunk) => result,
+                };
+                match read_result {
+                    Ok(0) => {
+                        terminal_error = Some(if buf.is_empty() {
+                            TransportError::Closed
+                        } else {
+                            TransportError::Protocol(format!(
+                                "truncated CDP pipe message at EOF ({} bytes)",
+                                buf.len()
+                            ))
+                        });
+                        break;
+                    }
                     Ok(n) => {
-                        buf.extend_from_slice(&chunk[..n]);
-                        // 按 NUL 切出完整帧(一次 read 可能含多帧或半帧)。
-                        while let Some(pos) = buf.iter().position(|&b| b == 0) {
-                            let frame: Vec<u8> = buf.drain(..=pos).collect();
-                            let text = &frame[..frame.len() - 1]; // 去结尾 NUL。
-                            match std::str::from_utf8(text) {
-                                Ok(s) => {
-                                    if let Err(e) = reg_for_loop.dispatch_message(s) {
-                                        tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "dropped malformed CDP message (pipe)");
+                        for &byte in &chunk[..n] {
+                            if byte == 0 {
+                                match std::str::from_utf8(&buf) {
+                                    Ok(s) => {
+                                        if let Err(e) = reg_for_loop.dispatch_message(s) {
+                                            terminal_error = Some(e);
+                                            break 'read_loop;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        terminal_error = Some(TransportError::Protocol(format!(
+                                            "non-UTF-8 CDP pipe message: {e}"
+                                        )));
+                                        break 'read_loop;
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "non-utf8 CDP pipe frame; dropped");
+                                buf.clear();
+                            } else {
+                                if buf.len() >= MAX_CDP_MESSAGE_BYTES {
+                                    terminal_error = Some(TransportError::Protocol(format!(
+                                        "CDP pipe message exceeds hard limit of \
+                                         {MAX_CDP_MESSAGE_BYTES} bytes"
+                                    )));
+                                    break 'read_loop;
                                 }
+                                buf.push(byte);
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "pipe read error; closing connection");
+                        terminal_error = Some(TransportError::Protocol(format!(
+                            "CDP pipe read failed: {e}"
+                        )));
                         break;
                     }
                 }
             }
-            reg_for_loop.fail_connection();
+            if !reg_for_loop.is_connection_closed() {
+                reg_for_loop.poison_connection(terminal_error.unwrap_or(TransportError::Closed));
+            }
+            if let Some(inner) = weak_inner.upgrade() {
+                inner.close_sink().await;
+            }
         });
+        *inner.read_loop.lock().unwrap() = Some(read_loop);
+        Self::spawn_object_group_release_loop(&inner);
 
         Ok(Self { inner })
     }
@@ -245,6 +594,14 @@ impl Connection {
     /// 共享路由注册表的句柄（供订阅事件 / 查询 session 状态）。
     pub fn registry(&self) -> &Arc<SessionRegistry> {
         &self.inner.registry
+    }
+
+    /// Sticky signal for abnormal protocol/read-loop termination. Normal
+    /// explicit [`shutdown`](Self::shutdown) closes without publishing here.
+    pub fn subscribe_fatal(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<TransportError>> {
+        self.inner.registry.subscribe_fatal()
     }
 
     /// 订阅某 method（可选限定 session）的事件流。详见
@@ -273,6 +630,24 @@ impl Connection {
             self.inner.fetch_firewall_armed.store(true, Ordering::Release);
         }
         self.inner.registry.subscribe_reliable(method, session_id)
+    }
+
+    /// Temporary task-owned lossless subscription.  Unlike Host-owned
+    /// firewall/router consumers, every queued copy also consumes the trusted
+    /// task's aggregate cross-Host authority.
+    pub(crate) fn subscribe_reliable_for_task(
+        &self,
+        method: impl Into<String>,
+        session_id: Option<&str>,
+        task_budget: &Arc<ReliableEventTaskBudget>,
+    ) -> Result<ReliableTaskEventReceiver, TransportError> {
+        let method = method.into();
+        if method == EventRequestPaused::IDENTIFIER {
+            self.inner.fetch_firewall_armed.store(true, Ordering::Release);
+        }
+        self.inner
+            .registry
+            .subscribe_reliable_for_task(method, session_id, task_budget)
     }
 
     /// 在指定 session 上发一条 CDP 命令并等回包（带每命令超时）。
@@ -375,9 +750,39 @@ impl Connection {
     pub async fn handle_attached(&self, event: &EventAttachedToTarget) -> Result<(), TransportError> {
         let sid: String = event.session_id.clone().into();
         let ttype = event.target_info.r#type.clone();
+        let target_id: String = event.target_info.target_id.clone().into();
 
-        // 1) 先登记子 session（先装好路由，再放行）。
-        self.inner.registry.register_session(&sid, &ttype);
+        // 1) The read loop has already registered the complete attach envelope
+        // (including trustworthy parent-session lineage) before broadcasting
+        // this event. A production Host router enables task quota routing; in
+        // that mode this worker must never perform the historical second
+        // unscoped registration, because doing so would resurrect a session
+        // rejected by a per-family/Lane quota.
+        if self.inner.registry.task_session_quota_routing_enabled() {
+            let admission = self
+                .inner
+                .registry
+                .wait_for_task_session_admission(&sid, TASK_SESSION_AUTHORITY_TIMEOUT)
+                .await;
+            if admission == TaskSessionAdmission::Rejected {
+                if let Err(error) = self
+                    .close_quota_rejected_attached_target(&sid, &target_id)
+                    .await
+                {
+                    // Local cleanup could not prove the exact target absent.
+                    // Publish a fatal signal so the existing Host cleanup
+                    // authority subsumes it; never merely log and continue.
+                    self.inner.registry.poison_connection(error.clone());
+                    return Err(error);
+                }
+                return Ok(());
+            }
+            debug_assert_eq!(admission, TaskSessionAdmission::Admitted);
+        } else {
+            // Low-level diagnostic connections have no Host target router and
+            // retain the legacy Host-global-only behavior.
+            self.inner.registry.register_session(&sid, &ttype);
+        }
 
         // 2) 在放行 target 前安装出口防火墙——**但仅当 Fetch.requestPaused 已有可靠
         //    订阅者**（F1）。无订阅者时的事件被静默丢弃且 CDP 不会重发 requestPaused，
@@ -436,6 +841,58 @@ impl Connection {
         Ok(())
     }
 
+    /// Detach the refused CDP session and terminate only its exact target. A
+    /// successful close response or root inventory absence is authoritative;
+    /// anything else escalates through the Host fatal supervisor.
+    async fn close_quota_rejected_attached_target(
+        &self,
+        session_id: &str,
+        target_id: &str,
+    ) -> Result<(), TransportError> {
+        self.inner.registry.fail_session(session_id, false);
+
+        let detach = DetachFromTargetParams::builder()
+            .session_id(session_id.to_owned())
+            .build();
+        let detach_result = self
+            .send::<DetachFromTargetParams>(ROOT_SESSION, &detach)
+            .await;
+        let close_result = self
+            .send::<CloseTargetParams>(
+                ROOT_SESSION,
+                &CloseTargetParams::new(target_id.to_owned()),
+            )
+            .await;
+        // Chromium's historical `success` field is deprecated and was
+        // documented as always true. It proves command acceptance, not that
+        // the renderer/worker target is absent. Always inventory the exact
+        // target before returning its quota authority.
+        let inventory = self
+            .send::<GetTargetsParams>(ROOT_SESSION, &GetTargetsParams::default())
+            .await?;
+        let target_still_present = inventory
+            .get("targetInfos")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                TransportError::Protocol(
+                    "Target.getTargets response missing targetInfos during quota cleanup".into(),
+                )
+            })?
+            .iter()
+            .any(|info| {
+                info.get("targetId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(target_id)
+            });
+        if !target_still_present {
+            return Ok(());
+        }
+
+        Err(TransportError::Protocol(format!(
+            "quota-rejected target remained live after exact detach/close; detach={detach_result:?}, close={close_result:?}"
+        )))
+    }
+
     /// 后台运行 attach 处理循环：持续消费 `Target.attachedToTarget`（全 session 通配），
     /// 对每个事件调 [`Connection::handle_attached`]。返回的 `JoinHandle` 可在连接关闭时丢弃。
     ///
@@ -466,15 +923,30 @@ impl Connection {
     /// pipe shutdown cannot complete.
     pub async fn shutdown(&self) {
         self.inner.registry.fail_connection();
-        let mut sink = self.inner.sink.lock().await;
-        match &mut *sink {
-            TransportSink::Ws(ws) => {
-                let _ = tokio::time::timeout(Duration::from_secs(1), ws.close()).await;
-            }
-            #[cfg(unix)]
-            TransportSink::Pipe(pipe) => {
-                use tokio::io::AsyncWriteExt;
-                let _ = tokio::time::timeout(Duration::from_secs(1), pipe.shutdown()).await;
+        self.inner.object_group_releases.clear();
+        let release_loop = self
+            .inner
+            .object_group_release_loop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(mut handle) = release_loop
+            && tokio::time::timeout(Duration::from_secs(1), &mut handle)
+                .await
+                .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
+        }
+        self.inner.close_sink().await;
+        let read_loop = self.inner.read_loop.lock().unwrap().take();
+        if let Some(mut handle) = read_loop {
+            if tokio::time::timeout(Duration::from_secs(1), &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+                let _ = handle.await;
             }
         }
     }
@@ -513,6 +985,7 @@ impl Connection {
 
         let text = serde_json::to_string(&call)
             .map_err(|e| TransportError::Protocol(format!("serialize MethodCall failed: {e}")))?;
+        ensure_message_size(text.len())?;
 
         let mut sink = self.inner.sink.lock().await;
         match &mut *sink {
@@ -565,7 +1038,18 @@ mod tests {
                     serde_json::from_str(&text).expect("fake received valid json");
                 let id = request["id"].as_u64().expect("fake request has id");
                 // 回包须回显 sessionId，否则子 session 命令的回调路由不到。
-                let mut response = serde_json::json!({ "id": id, "result": {} });
+                let result = match request["method"].as_str() {
+                    Some(CloseTargetParams::IDENTIFIER) => {
+                        // This legacy field is deliberately true even though
+                        // quota cleanup must still request exact inventory.
+                        serde_json::json!({ "success": true })
+                    }
+                    Some(GetTargetsParams::IDENTIFIER) => {
+                        serde_json::json!({ "targetInfos": [] })
+                    }
+                    _ => serde_json::json!({}),
+                };
+                let mut response = serde_json::json!({ "id": id, "result": result });
                 if let Some(session_id) = request.get("sessionId") {
                     response["sessionId"] = session_id.clone();
                 }
@@ -580,11 +1064,406 @@ mod tests {
         (format!("ws://{address}"), server)
     }
 
+    async fn reliable_overflow_fake_ws_server() -> (
+        String,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind overflow fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let _ = release_rx.await;
+            for index in 0..=crate::session::RELIABLE_EVENT_CAPACITY {
+                let event = serde_json::json!({
+                    "method": EventRequestPaused::IDENTIFIER,
+                    "params": { "index": index }
+                });
+                if websocket
+                    .send(WsMessage::Text(event.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            while websocket.next().await.is_some() {}
+        });
+        (format!("ws://{address}"), release_tx, server)
+    }
+
+    async fn quota_cleanup_failure_fake_ws_server() -> (
+        String,
+        tokio::task::JoinHandle<Vec<String>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quota-cleanup fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut methods = Vec::new();
+            while let Some(Ok(WsMessage::Text(text))) = websocket.next().await {
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                let method = request["method"].as_str().unwrap().to_owned();
+                let response = match method.as_str() {
+                    DetachFromTargetParams::IDENTIFIER => serde_json::json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "synthetic detach failure" }
+                    }),
+                    CloseTargetParams::IDENTIFIER => serde_json::json!({
+                        "id": id,
+                        "result": { "success": false }
+                    }),
+                    GetTargetsParams::IDENTIFIER => serde_json::json!({
+                        "id": id,
+                        "result": {
+                            "targetInfos": [{ "targetId": "stuck-worker-target" }]
+                        }
+                    }),
+                    other => panic!("unexpected quota cleanup command {other}"),
+                };
+                methods.push(method);
+                websocket
+                    .send(WsMessage::Text(response.to_string().into()))
+                    .await
+                    .expect("fake sends quota cleanup response");
+            }
+            methods
+        });
+        (format!("ws://{address}"), server)
+    }
+
+    async fn nonresponding_fake_ws_server() -> (
+        String,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind cancellation fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            if matches!(websocket.next().await, Some(Ok(WsMessage::Text(_)))) {
+                let _ = seen_tx.send(());
+            }
+            while websocket.next().await.is_some() {}
+        });
+        (format!("ws://{address}"), seen_rx, server)
+    }
+
     fn page_attach_event(session_id: &str) -> EventAttachedToTarget {
         let event_json = format!(
             r#"{{"sessionId":"{session_id}","targetInfo":{{"targetId":"T-{session_id}","type":"page","title":"","url":"","attached":true,"canAccessOpener":false}},"waitingForDebugger":true}}"#
         );
         serde_json::from_str(&event_json).expect("valid attach event")
+    }
+
+    fn service_worker_attach_event(
+        session_id: &str,
+        target_id: &str,
+    ) -> EventAttachedToTarget {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": session_id,
+            "targetInfo": {
+                "targetId": target_id,
+                "type": "service_worker",
+                "title": "",
+                "url": "https://attacker.invalid/sw.js",
+                "attached": true,
+                "canAccessOpener": false
+            },
+            "waitingForDebugger": true
+        }))
+        .expect("valid service-worker attach event")
+    }
+
+    #[test]
+    fn cdp_wire_message_size_has_an_explicit_hard_limit() {
+        assert!(ensure_message_size(MAX_CDP_MESSAGE_BYTES).is_ok());
+        let error = ensure_message_size(MAX_CDP_MESSAGE_BYTES + 1)
+            .expect_err("one byte over the wire limit must be rejected");
+        assert!(matches!(error, TransportError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn explicit_shutdown_joins_read_loop_without_fatal_signal() {
+        let (ws_url, server) = recording_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+        let fatal = conn.subscribe_fatal();
+
+        conn.shutdown().await;
+
+        assert!(fatal.borrow().is_none());
+        assert!(conn.inner.read_loop.lock().unwrap().is_none());
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("fake server must observe transport shutdown")
+            .expect("fake server joins");
+    }
+
+    #[tokio::test]
+    async fn dropping_last_connection_closes_external_registry_receivers() {
+        let (ws_url, server) = recording_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+        let registry = Arc::clone(conn.registry());
+        let mut events = registry.subscribe("Page.lifecycleEvent", None);
+
+        drop(conn);
+
+        assert!(registry.is_connection_closed());
+        assert!(matches!(
+            events.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Closed)
+        ));
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("dropping the transport must close the fake socket")
+            .expect("fake server joins");
+    }
+
+    #[tokio::test]
+    async fn cancelled_send_future_removes_its_pending_callback() {
+        let (ws_url, seen, server) = nonresponding_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+        let sender = conn.clone();
+        let send_task = tokio::spawn(async move {
+            let params = SetAutoAttachParams::builder()
+                .auto_attach(true)
+                .wait_for_debugger_on_start(true)
+                .flatten(true)
+                .build()
+                .unwrap();
+            sender.send::<SetAutoAttachParams>(ROOT_SESSION, &params).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), seen)
+            .await
+            .expect("fake server must receive the command")
+            .expect("command observation sender remains live");
+        assert_eq!(conn.registry().pending_callback_count(), 1);
+
+        send_task.abort();
+        let _ = send_task.await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            conn.registry().pending_callback_count(),
+            0,
+            "PendingCommand::drop must unregister a cancelled send"
+        );
+
+        conn.shutdown().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("fake server must observe cancellation-test shutdown")
+            .expect("fake server joins");
+    }
+
+    #[tokio::test]
+    async fn external_registry_poison_wakes_and_stops_read_loop() {
+        let (ws_url, server) = recording_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+        let expected = TransportError::Protocol("forced invariant failure".to_owned());
+        let fatal = conn.subscribe_fatal();
+
+        conn.registry().poison_connection(expected.clone());
+
+        assert_eq!(fatal.borrow().as_ref(), Some(&expected));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let finished = conn
+                    .inner
+                    .read_loop
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished);
+                if finished {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fatal signal must stop the supervised read loop");
+        conn.shutdown().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("fake server must observe fatal sink shutdown")
+            .expect("fake server joins");
+    }
+
+    #[tokio::test]
+    async fn reliable_overflow_emits_fatal_and_stops_the_read_loop() {
+        let (ws_url, release, server) = reliable_overflow_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+        let _events = conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None);
+        let mut fatal = conn.subscribe_fatal();
+        release.send(()).expect("release overflow producer");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if fatal.borrow().is_some() {
+                    break;
+                }
+                fatal.changed().await.expect("fatal sender remains live");
+            }
+        })
+        .await
+        .expect("overflow must publish a fatal signal");
+        assert!(matches!(
+            fatal.borrow().as_ref(),
+            Some(TransportError::Protocol(_))
+        ));
+        assert!(conn.registry().is_connection_closed());
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let finished = conn
+                    .inner
+                    .read_loop
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished);
+                if finished {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fatal overflow must stop the read loop");
+
+        conn.shutdown().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("fake server must observe fail-closed sink shutdown")
+            .expect("fake server joins");
+    }
+
+    #[tokio::test]
+    async fn quota_rejected_service_worker_is_detached_and_closed_without_double_register() {
+        let (ws_url, server) = recording_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+        let registry = conn.registry();
+        registry.enable_task_session_quota_routing();
+
+        for index in 0..crate::session::MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST {
+            assert_eq!(
+                registry.register_attached(
+                    ROOT_SESSION,
+                    format!("existing-sw-{index}"),
+                    format!("existing-sw-target-{index}"),
+                    "service_worker",
+                    None,
+                ),
+                TaskSessionAdmission::Admitted
+            );
+        }
+        let event = service_worker_attach_event("overflow-sw", "overflow-sw-target");
+        assert_eq!(
+            registry.register_attached(
+                ROOT_SESSION,
+                "overflow-sw",
+                "overflow-sw-target",
+                "service_worker",
+                None,
+            ),
+            TaskSessionAdmission::Rejected
+        );
+
+        conn.handle_attached(&event)
+            .await
+            .expect("exact rejected-target cleanup succeeds");
+        assert!(
+            !registry.has_session("overflow-sw"),
+            "the attach worker must not resurrect the rejected session"
+        );
+        assert!(!registry.is_connection_closed());
+
+        conn.shutdown().await;
+        let requests = server.await.expect("fake server joins");
+        let methods = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            vec![
+                DetachFromTargetParams::IDENTIFIER,
+                CloseTargetParams::IDENTIFIER,
+                GetTargetsParams::IDENTIFIER,
+            ],
+            "a refused worker is never Fetch-armed or released, and its exact absence is proven"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_rejection_cleanup_failure_publishes_host_fatal_authority() {
+        let (ws_url, server) = quota_cleanup_failure_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+        let registry = conn.registry();
+        registry.enable_task_session_quota_routing();
+        let fatal = conn.subscribe_fatal();
+
+        for index in 0..crate::session::MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST {
+            registry.register_attached(
+                ROOT_SESSION,
+                format!("existing-stuck-sw-{index}"),
+                format!("existing-stuck-target-{index}"),
+                "service_worker",
+                None,
+            );
+        }
+        let event = service_worker_attach_event("stuck-worker", "stuck-worker-target");
+        assert_eq!(
+            registry.register_attached(
+                ROOT_SESSION,
+                "stuck-worker",
+                "stuck-worker-target",
+                "service_worker",
+                None,
+            ),
+            TaskSessionAdmission::Rejected
+        );
+
+        let error = conn
+            .handle_attached(&event)
+            .await
+            .expect_err("a still-present target requires authoritative Host cleanup");
+        assert!(matches!(error, TransportError::Protocol(_)));
+        assert!(registry.is_connection_closed());
+        assert!(matches!(
+            fatal.borrow().as_ref(),
+            Some(TransportError::Protocol(_))
+        ));
+
+        conn.shutdown().await;
+        let methods = server.await.expect("failure fake server joins");
+        assert_eq!(
+            methods,
+            vec![
+                DetachFromTargetParams::IDENTIFIER,
+                CloseTargetParams::IDENTIFIER,
+                GetTargetsParams::IDENTIFIER,
+            ]
+        );
     }
 
     /// **F18 回归**：无任何 `Fetch.requestPaused` 可靠订阅者（`Launched::connect`

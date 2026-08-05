@@ -35,6 +35,10 @@ pub const KNOWLEDGE_CAPABILITY_DOMAIN: &str = "nomifun-knowledge-mcp-v2";
 /// closed.
 pub const REQUIREMENT_EXACT_CLAIM_CONTRACT_VERSION: u8 = 2;
 pub const BROWSER_CAPABILITY_DOMAIN: &str = "nomifun-browser-mcp-v1";
+/// Structural safety fuse for concurrently retained Browser MCP runtimes in
+/// one user-visible task family. This is not a process-global concurrency cap:
+/// each `(user, conversation)` receives an independent allowance.
+pub const MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY: usize = 16;
 
 pub const REQUIREMENT_COMPLETE_TOOL: &str = "requirement_complete";
 pub const REQUIREMENT_UPDATE_STATUS_TOOL: &str = "requirement_update_status";
@@ -976,7 +980,11 @@ impl BrowserMcpConfig {
         // distinct, so issuing one must not revoke its siblings.
         let (token, renewal_proof) = self
             .issuer
-            .activate_concurrent(BROWSER_CAPABILITY_DOMAIN, &claims)?;
+            .activate_concurrent_bounded(
+                BROWSER_CAPABILITY_DOMAIN,
+                &claims,
+                MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY,
+            )?;
         let lease = LoopbackCapabilityLease::new(
             self.issuer.clone(),
             BROWSER_CAPABILITY_DOMAIN,
@@ -1570,6 +1578,113 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn browser_mcp_config_caps_one_task_family_and_drop_restores_capacity() {
+        let cfg = BrowserMcpConfig::from_issuer(
+            41_000,
+            test_issuer(),
+            "/usr/bin/nomicore".into(),
+        );
+        let mut children = Vec::with_capacity(MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY);
+        for index in 0..MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY {
+            children.push(
+                cfg.issue_for_conversation(
+                    TEST_USER_ID,
+                    OTHER_USER_ID,
+                    Some(&format!("agent-{index}")),
+                )
+                .unwrap(),
+            );
+        }
+
+        assert_eq!(
+            cfg.issue_for_conversation(TEST_USER_ID, OTHER_USER_ID, Some("overflow"))
+                .unwrap_err(),
+            LoopbackCapabilityError::CapacityExceeded
+        );
+
+        drop(children.pop());
+        children.push(
+            cfg.issue_for_conversation(TEST_USER_ID, OTHER_USER_ID, Some("replacement"))
+                .expect("dropping the final lease guard must restore exact task capacity"),
+        );
+        assert_eq!(
+            children.len(),
+            MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY
+        );
+    }
+
+    #[test]
+    fn browser_mcp_task_capacity_is_isolated_by_user_and_conversation() {
+        let cfg = BrowserMcpConfig::from_issuer(
+            41_000,
+            test_issuer(),
+            "/usr/bin/nomicore".into(),
+        );
+        let saturated = (0..MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY)
+            .map(|index| {
+                cfg.issue_for_conversation(
+                    TEST_USER_ID,
+                    OTHER_USER_ID,
+                    Some(&format!("saturated-{index}")),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let other_conversation = cfg
+            .issue_for_conversation(TEST_USER_ID, TEST_USER_ID, Some("other-conversation"))
+            .expect("one conversation must not consume another conversation's capacity");
+        let other_user = cfg
+            .issue_for_conversation(OTHER_USER_ID, OTHER_USER_ID, Some("other-user"))
+            .expect("one user must not consume another user's capacity");
+
+        assert_eq!(saturated.len(), MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY);
+        drop(other_conversation);
+        drop(other_user);
+    }
+
+    #[test]
+    fn browser_mcp_task_capacity_is_atomic_under_concurrent_issuance() {
+        let cfg = Arc::new(BrowserMcpConfig::from_issuer(
+            41_000,
+            test_issuer(),
+            "/usr/bin/nomicore".into(),
+        ));
+        let attempt_count = MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY + 8;
+        let barrier = Arc::new(std::sync::Barrier::new(attempt_count));
+        let mut handles = Vec::with_capacity(attempt_count);
+        for index in 0..attempt_count {
+            let cfg = Arc::clone(&cfg);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                cfg.issue_for_conversation(
+                    TEST_USER_ID,
+                    OTHER_USER_ID,
+                    Some(&format!("racing-{index}")),
+                )
+            }));
+        }
+
+        let mut accepted = Vec::new();
+        let mut capacity_rejections = 0;
+        for handle in handles {
+            match handle.join().expect("issuance thread panicked") {
+                Ok(child) => accepted.push(child),
+                Err(LoopbackCapabilityError::CapacityExceeded) => capacity_rejections += 1,
+                Err(error) => panic!("unexpected concurrent issuance error: {error}"),
+            }
+        }
+
+        assert_eq!(
+            accepted.len(),
+            MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY,
+            "the atomic issuer lock must never exceed the per-task runtime family bound"
+        );
+        assert_eq!(capacity_rejections, attempt_count - accepted.len());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Opt-in event collector. Subscribes to the global broadcast bus and appends
 //! normalized JSONL records to `{companion_dir}/events/YYYYMMDD.jsonl` for the
-//! sources the user has enabled. Assistant replies are accumulated per
+//! sources the user has enabled. Companion replies are accumulated per
 //! `(conversation_id, msg_id)` from `message.stream` content chunks and only
 //! flushed on `turn.completed` — the bus has no single "assistant reply
 //! finished" event carrying the full text.
@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 use nomifun_api_types::WebSocketMessage;
 use nomifun_common::{AppError, CompanionEventId, CompanionId, now_ms, validate_uuidv7};
 use serde::{Deserialize, Serialize};
@@ -18,10 +19,16 @@ use crate::profile::SharedCompanionConfig;
 
 const MAX_FIELD_CHARS: usize = 2000;
 const MAX_REPLY_CHARS: usize = 4000;
+/// Defense in depth for abnormal live-bus payloads. Normal collection records
+/// are only a few KiB after the field-level truncation. Legacy/imported JSONL
+/// remains readable so the new policy never strands existing learning data.
+const MAX_EVENT_LINE_BYTES: usize = 64 * 1024;
+const EVENT_PRUNE_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
 /// Global cap on concurrently buffered assistant replies. A `turn.completed`
 /// lost to a Lagged bus receiver orphans its buffers; without a cap they
-/// accumulate for the life of the process (companion_dialogues defaults ON, so
-/// every conversation buffers). Oldest-created entries are evicted first.
+/// accumulate for the life of the process. `companion_dialogues` defaults ON,
+/// so concurrent companion conversations may buffer. Oldest-created entries
+/// are evicted first.
 const MAX_REPLY_BUFFERS: usize = 64;
 
 /// One normalized JSONL record.
@@ -36,6 +43,27 @@ pub struct CollectedEvent {
     pub data: serde_json::Value,
 }
 
+/// Lightweight filesystem status for the collection settings page. Date
+/// bounds come from validated day-file names and therefore require no payload
+/// scan.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EventStorageStatus {
+    pub total_bytes: u64,
+    pub max_bytes: u64,
+    pub file_count: u64,
+    pub oldest_day: Option<String>,
+    pub newest_day: Option<String>,
+    pub retention_days: u32,
+    pub max_storage_mb: u32,
+}
+
+#[derive(Debug, Clone)]
+struct EventFileInfo {
+    path: PathBuf,
+    day: NaiveDate,
+    bytes: u64,
+}
+
 fn deserialize_event_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -47,10 +75,15 @@ where
 
 /// Shared live view of the cross-companion config (updated on every config write).
 pub type SharedConfig = Arc<RwLock<SharedCompanionConfig>>;
+/// Serializes all event-file mutations and snapshots. The config update path,
+/// collector, learner/evolution readers and import/export routes share this
+/// exact lock, so scan-delete-append sequences cannot race each other.
+pub type SharedEventStoreLock = Arc<RwLock<()>>;
 
 pub struct Collector {
     companion_dir: PathBuf,
     config: SharedConfig,
+    event_store_lock: SharedEventStoreLock,
     /// Companion-thread membership + XP. Companion conversations are nomi
     /// talking — they must never feed the learner (self-learning loop), but
     /// each completed companion turn earns XP.
@@ -69,20 +102,6 @@ fn truncate_chars(s: &str, max: usize) -> String {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}…")
     }
-}
-
-/// Truncate every top-level string field of a JSON object to `max` chars (non-objects
-/// returned unchanged). Used for `cron_runs`, whose payload (`job_id`/`status`/`error`)
-/// carries an `error` field that can be an arbitrarily long traceback/model error.
-fn truncate_json_strings(mut value: serde_json::Value, max: usize) -> serde_json::Value {
-    if let Some(obj) = value.as_object_mut() {
-        for v in obj.values_mut() {
-            if let serde_json::Value::String(s) = v {
-                *v = serde_json::Value::String(truncate_chars(s, max));
-            }
-        }
-    }
-    value
 }
 
 /// Normalized SHAPE of a tool's args: sorted `"key:type"` for each top-level key,
@@ -128,7 +147,7 @@ fn events_dir(companion_dir: &Path) -> PathBuf {
 /// Day-stamped file name like `20260611.jsonl` (local time — the user reads
 /// the "today" stat in their own timezone; rotation granularity only).
 fn day_file_name(ts_ms: i64) -> String {
-    use chrono::{Local, TimeZone};
+    use chrono::TimeZone;
     let dt = Local
         .timestamp_millis_opt(ts_ms)
         .single()
@@ -136,11 +155,278 @@ fn day_file_name(ts_ms: i64) -> String {
     format!("{}.jsonl", dt.format("%Y%m%d"))
 }
 
+fn event_file_day(path: &Path) -> Result<NaiveDate, AppError> {
+    validate_event_file_name(path)?;
+    let name = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::Internal(format!("invalid event file name: {}", path.display())))?;
+    NaiveDate::parse_from_str(name, "%Y%m%d").map_err(|error| {
+        AppError::Internal(format!(
+            "invalid event file date {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn event_file_infos(companion_dir: &Path) -> Result<Vec<EventFileInfo>, AppError> {
+    event_files(companion_dir)?
+        .into_iter()
+        .map(|path| {
+            let day = event_file_day(&path)?;
+            let bytes = std::fs::metadata(&path).map_err(|error| {
+                AppError::Internal(format!(
+                    "inspect companion event file {}: {error}",
+                    path.display()
+                ))
+            })?.len();
+            Ok(EventFileInfo { path, day, bytes })
+        })
+        .collect()
+}
+
+fn storage_status_from_infos(
+    infos: &[EventFileInfo],
+    retention_days: u32,
+    max_storage_mb: u32,
+) -> EventStorageStatus {
+    EventStorageStatus {
+        total_bytes: infos.iter().map(|info| info.bytes).sum(),
+        max_bytes: u64::from(max_storage_mb) * 1024 * 1024,
+        file_count: infos.len() as u64,
+        oldest_day: infos.first().map(|info| info.day.format("%Y-%m-%d").to_string()),
+        newest_day: infos.last().map(|info| info.day.format("%Y-%m-%d").to_string()),
+        retention_days,
+        max_storage_mb,
+    }
+}
+
+pub fn event_storage_status(
+    companion_dir: &Path,
+    retention_days: u32,
+    max_storage_mb: u32,
+) -> Result<EventStorageStatus, AppError> {
+    let infos = event_file_infos(companion_dir)?;
+    Ok(storage_status_from_infos(
+        &infos,
+        retention_days,
+        max_storage_mb,
+    ))
+}
+
+pub(crate) fn event_storage_total_bytes(companion_dir: &Path) -> Result<u64, AppError> {
+    event_file_infos(companion_dir)?
+        .into_iter()
+        .try_fold(0u64, |total, info| {
+            total.checked_add(info.bytes).ok_or_else(|| {
+                AppError::Internal("companion event storage byte count overflowed u64".into())
+            })
+        })
+}
+
+/// Fast write-path enforcement: inspect file metadata only and reserve space
+/// for the next record. Time-based cleanup is intentionally left to startup,
+/// policy changes and the six-hour maintenance tick so event-bus collection
+/// never reparses historical JSONL on every append.
+fn enforce_event_capacity(
+    companion_dir: &Path,
+    max_storage_mb: u32,
+    reserve_bytes: u64,
+) -> Result<(), AppError> {
+    let max_bytes = u64::from(max_storage_mb) * 1024 * 1024;
+    if reserve_bytes > max_bytes {
+        return Err(AppError::Internal(format!(
+            "one collected event ({reserve_bytes} bytes) exceeds the {max_storage_mb} MB storage cap"
+        )));
+    }
+
+    let mut infos = event_file_infos(companion_dir)?;
+    let mut total_bytes: u64 = infos.iter().map(|info| info.bytes).sum();
+    let mut removed_any = false;
+    while total_bytes.saturating_add(reserve_bytes) > max_bytes && !infos.is_empty() {
+        let oldest = infos.remove(0);
+        match std::fs::remove_file(&oldest.path) {
+            Ok(()) => removed_any = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::Internal(format!(
+                    "remove over-cap companion event file {}: {error}",
+                    oldest.path.display()
+                )));
+            }
+        }
+        total_bytes = total_bytes.saturating_sub(oldest.bytes);
+    }
+    if total_bytes.saturating_add(reserve_bytes) > max_bytes {
+        return Err(AppError::Internal(format!(
+            "companion event storage cannot reserve {reserve_bytes} bytes below its {max_storage_mb} MB cap"
+        )));
+    }
+    if removed_any {
+        let dir = events_dir(companion_dir);
+        if dir.exists() {
+            crate::fsio::sync_dir(&dir).map_err(|error| {
+                AppError::Internal(format!(
+                    "sync companion event directory {} after capacity pruning: {error}",
+                    dir.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Old files past the time policy are deleted only when every enabled
+/// background consumer has advanced beyond them. The byte limit is a hard
+/// safety boundary and therefore deletes oldest-first regardless of cursors.
+/// `reserve_bytes` lets the writer make room before appending a new record, so
+/// a successful managed write never crosses the configured cap.
+pub fn prune_event_store(
+    companion_dir: &Path,
+    retention_days: u32,
+    max_storage_mb: u32,
+    protected_after_ts: Option<i64>,
+    reserve_bytes: u64,
+) -> Result<EventStorageStatus, AppError> {
+    prune_event_store_at(
+        companion_dir,
+        Local::now().date_naive(),
+        retention_days,
+        max_storage_mb,
+        protected_after_ts,
+        reserve_bytes,
+    )
+}
+
+fn prune_event_store_at(
+    companion_dir: &Path,
+    today: NaiveDate,
+    retention_days: u32,
+    max_storage_mb: u32,
+    protected_after_ts: Option<i64>,
+    reserve_bytes: u64,
+) -> Result<EventStorageStatus, AppError> {
+    let max_bytes = u64::from(max_storage_mb) * 1024 * 1024;
+    if reserve_bytes > max_bytes {
+        return Err(AppError::Internal(format!(
+            "one collected event ({reserve_bytes} bytes) exceeds the {max_storage_mb} MB storage cap"
+        )));
+    }
+
+    let cutoff = today - ChronoDuration::days(i64::from(retention_days.saturating_sub(1)));
+    let mut kept = Vec::new();
+    let mut removed_any = false;
+    for info in event_file_infos(companion_dir)? {
+        let expired = info.day < cutoff;
+        let fully_consumed = if expired {
+            match protected_after_ts {
+                None => true,
+                Some(cursor) => match parse_event_file(&info.path) {
+                    Ok(events) => events.iter().all(|event| event.ts <= cursor),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            path = %info.path.display(),
+                            "companion retention kept an unreadable expired event file"
+                        );
+                        false
+                    }
+                },
+            }
+        } else {
+            false
+        };
+        if expired && fully_consumed {
+            match std::fs::remove_file(&info.path) {
+                Ok(()) => removed_any = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        path = %info.path.display(),
+                        "companion retention could not remove an expired event file; will retry"
+                    );
+                    kept.push(info);
+                }
+            }
+        } else {
+            kept.push(info);
+        }
+    }
+
+    let mut total_bytes: u64 = kept.iter().map(|info| info.bytes).sum();
+    while total_bytes.saturating_add(reserve_bytes) > max_bytes && !kept.is_empty() {
+        let oldest = kept.remove(0);
+        match std::fs::remove_file(&oldest.path) {
+            Ok(()) => removed_any = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::Internal(format!(
+                    "remove over-cap companion event file {}: {error}",
+                    oldest.path.display()
+                )));
+            }
+        }
+        total_bytes = total_bytes.saturating_sub(oldest.bytes);
+    }
+    if total_bytes.saturating_add(reserve_bytes) > max_bytes {
+        return Err(AppError::Internal(format!(
+            "companion event storage cannot reserve {reserve_bytes} bytes below its {max_storage_mb} MB cap"
+        )));
+    }
+    if removed_any {
+        let dir = events_dir(companion_dir);
+        if dir.exists() {
+            crate::fsio::sync_dir(&dir).map_err(|error| {
+                AppError::Internal(format!(
+                    "sync companion event directory {} after pruning: {error}",
+                    dir.display()
+                ))
+            })?;
+        }
+    }
+    Ok(storage_status_from_infos(
+        &kept,
+        retention_days,
+        max_storage_mb,
+    ))
+}
+
+pub async fn active_consumer_watermark(
+    store: &crate::store::CompanionStore,
+    config: &SharedCompanionConfig,
+) -> Result<Option<i64>, AppError> {
+    let mut cursors = Vec::with_capacity(2);
+    if config.learn.enabled {
+        cursors.push(store.get_state_i64("learn_cursor_ts").await?);
+    }
+    if config.evolve.enabled {
+        cursors.push(store.get_state_i64("evolve_cursor_ts").await?);
+    }
+    Ok(cursors.into_iter().min())
+}
+
 impl Collector {
+    #[cfg(test)]
     pub fn new(companion_dir: PathBuf, config: SharedConfig, store: crate::store::CompanionStore) -> Self {
+        Self::with_event_store_lock(
+            companion_dir,
+            config,
+            store,
+            Arc::new(RwLock::new(())),
+        )
+    }
+
+    pub(crate) fn with_event_store_lock(
+        companion_dir: PathBuf,
+        config: SharedConfig,
+        store: crate::store::CompanionStore,
+        event_store_lock: SharedEventStoreLock,
+    ) -> Self {
         Self {
             companion_dir,
             config,
+            event_store_lock,
             store,
             reply_buffers: HashMap::new(),
             reply_buffer_order: VecDeque::new(),
@@ -199,8 +485,13 @@ impl Collector {
         let mut public_rx = bus.subscribe();
         let mut user_rx = bus.subscribe_user();
         tokio::spawn(async move {
+            let mut prune_interval = tokio::time::interval(std::time::Duration::from_secs(
+                EVENT_PRUNE_INTERVAL_SECONDS,
+            ));
+            prune_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
+                    _ = prune_interval.tick() => self.prune_now().await,
                     result = public_rx.recv() => match result {
                         Ok(msg) => self.handle(&msg).await,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -226,6 +517,39 @@ impl Collector {
                 }
             }
         });
+    }
+
+    async fn prune_now(&self) {
+        let event_guard = self.event_store_lock.clone().write_owned().await;
+        let config = self.config.read().await.clone();
+        let protected_after_ts = match active_consumer_watermark(&self.store, &config).await {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                tracing::warn!(error = %error, "companion collector failed to read retention cursors");
+                return;
+            }
+        };
+        let companion_dir = self.companion_dir.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _event_guard = event_guard;
+            prune_event_store(
+                &companion_dir,
+                config.collect.event_retention_days,
+                config.collect.event_max_storage_mb,
+                protected_after_ts,
+                0,
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "companion collector automatic pruning failed");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "companion collector pruning task failed");
+            }
+        }
     }
 
     /// Mutable access to one reply buffer, creating it under the global
@@ -254,7 +578,8 @@ impl Collector {
     }
 
     async fn handle(&mut self, msg: &WebSocketMessage<serde_json::Value>) {
-        let collect = { self.config.read().await.collect.clone() };
+        let config = self.config.read().await.clone();
+        let collect = &config.collect;
         match msg.name.as_str() {
             "message.userCreated" if collect.chat_user_messages || collect.companion_dialogues => {
                 // Hidden messages (system-injected prompts, cron kickoffs) are
@@ -281,7 +606,7 @@ impl Collector {
                             "companion_id": companion_id,
                             "content": truncate_chars(msg.data.get("content").and_then(|c| c.as_str()).unwrap_or(""), MAX_FIELD_CHARS),
                         });
-                        self.append("companion_dialogues", "companion.user_message", data);
+                        self.append("companion_dialogues", "companion.user_message", data).await;
                     }
                     return;
                 }
@@ -292,9 +617,9 @@ impl Collector {
                     "conversation_id": msg.data.get("conversation_id"),
                     "content": truncate_chars(msg.data.get("content").and_then(|c| c.as_str()).unwrap_or(""), MAX_FIELD_CHARS),
                 });
-                self.append("chat_user_messages", &msg.name, data);
+                self.append("chat_user_messages", &msg.name, data).await;
             }
-            "message.stream" if collect.chat_assistant_replies || collect.companion_dialogues || collect.tool_calls => {
+            "message.stream" if collect.companion_dialogues || collect.tool_calls => {
                 // Accumulate visible content chunks; flushed on turn.completed.
                 let kind = msg.data.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 // Tool-call signal (design §5.1): the primary skill-mining input.
@@ -329,7 +654,7 @@ impl Collector {
                         "conversation_id": msg.data.get("conversation_id"),
                         "call_id": d.and_then(|x| x.get("call_id")).and_then(|c| c.as_str()).unwrap_or(""),
                     });
-                    self.append("tool_calls", "tool.call", data);
+                    self.append("tool_calls", "tool.call", data).await;
                     return;
                 }
                 if kind != "content" && kind != "text" {
@@ -348,6 +673,10 @@ impl Collector {
                 // as owner intent (the indirect feedback loop). Mirrors the
                 // userCreated origin filter; drop anything already buffered.
                 if payload_origin(&msg.data).is_some() {
+                    self.reply_buffers.remove(&key);
+                    return;
+                }
+                if !collect.companion_dialogues || !self.is_companion_event(&msg.data).await {
                     self.reply_buffers.remove(&key);
                     return;
                 }
@@ -426,35 +755,14 @@ impl Collector {
                             "companion_id": companion_id,
                             "content": truncate_chars(&text, MAX_REPLY_CHARS),
                         });
-                        self.append("companion_dialogues", "companion.reply", data);
+                        self.append("companion_dialogues", "companion.reply", data).await;
                     }
                     return;
                 }
-                if !collect.chat_assistant_replies {
-                    // Only this conversation's buffers — another (companion)
-                    // conversation may still have a companion_dialogues flush
-                    // pending.
-                    self.reply_buffers.retain(|(c, _), _| c != conv);
-                    return;
-                }
-                let drained: Vec<(String, String)> = self
-                    .reply_buffers
-                    .iter()
-                    .filter(|((c, _), _)| c == conv)
-                    .map(|((c, m), _)| (c.clone(), m.clone()))
-                    .collect();
-                for key in drained {
-                    if let Some(text) = self.reply_buffers.remove(&key) {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
-                        let data = serde_json::json!({
-                            "conversation_id": key.0,
-                            "content": truncate_chars(&text, MAX_REPLY_CHARS),
-                        });
-                        self.append("chat_assistant_replies", "assistant.reply", data);
-                    }
-                }
+                // Work-session model replies are not a collection source. Drop
+                // only this conversation's speculative buffers; another
+                // companion conversation may still have a reply flush pending.
+                self.reply_buffers.retain(|(c, _), _| c != conv);
             }
             "requirement.created" if collect.requirements => {
                 // Agent-created requirements (gateway tools, autowork) are
@@ -472,13 +780,7 @@ impl Collector {
                     ),
                     "tag": msg.data.get("tag"),
                 });
-                self.append("requirements", &msg.name, data);
-            }
-            "cron.job-executed" if collect.cron_runs => {
-                self.append("cron_runs", &msg.name, truncate_json_strings(msg.data.clone(), MAX_FIELD_CHARS));
-            }
-            "conversation.listChanged" if collect.conversation_lifecycle => {
-                self.append("conversation_lifecycle", &msg.name, msg.data.clone());
+                self.append("requirements", &msg.name, data).await;
             }
             "terminal.created" | "terminal.exit" | "terminal.removed" if collect.terminal_sessions => {
                 // Metadata only — never PTY output content.
@@ -486,13 +788,18 @@ impl Collector {
                     "terminal_id": msg.data.get("terminal_id"),
                     "exit_code": msg.data.get("exit_code")
                 });
-                self.append("terminal_sessions", &msg.name, data);
+                self.append("terminal_sessions", &msg.name, data).await;
             }
             _ => {}
         }
     }
 
-    fn append(&self, source: &str, name: &str, data: serde_json::Value) {
+    async fn append(
+        &self,
+        source: &str,
+        name: &str,
+        data: serde_json::Value,
+    ) {
         let event = CollectedEvent {
             event_id: CompanionEventId::new().into_string(),
             ts: now_ms(),
@@ -500,31 +807,109 @@ impl Collector {
             name: name.to_owned(),
             data,
         };
-        if let Err(e) = append_event(&self.companion_dir, &event) {
-            tracing::warn!(error = %e, source, "companion collector failed to append event");
+        let line = match serialize_event_line(&event) {
+            Ok(line) => line,
+            Err(error) => {
+                tracing::warn!(error = %error, source, "companion collector rejected event");
+                return;
+            }
+        };
+        let event_guard = self.event_store_lock.clone().write_owned().await;
+        // Read the policy only after entering the event-store critical section.
+        // Config PATCH takes the same lock before publishing a new policy, so a
+        // writer can never append under a stale, larger capacity.
+        let max_storage_mb = self.config.read().await.collect.event_max_storage_mb;
+        let companion_dir = self.companion_dir.clone();
+        let event_ts = event.ts;
+        let result = tokio::task::spawn_blocking(move || {
+            let _event_guard = event_guard;
+            append_serialized_event_managed(
+                &companion_dir,
+                event_ts,
+                &line,
+                max_storage_mb,
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, source, "companion collector failed to append event");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, source, "companion collector append task failed");
+            }
         }
     }
 }
 
-/// Append one event to the day file. Standalone so the learner/tests reuse it.
+/// Test-only seed helper. Production writes must go through the managed
+/// collector path so the hard capacity cannot be bypassed.
+#[cfg(test)]
 pub fn append_event(companion_dir: &Path, event: &CollectedEvent) -> std::io::Result<()> {
-    use std::io::Write;
+    let line = serialize_event_line(event)?;
+    append_serialized_event(companion_dir, event.ts, &line)
+}
+
+fn serialize_event_line(event: &CollectedEvent) -> std::io::Result<Vec<u8>> {
     validate_uuidv7(&event.event_id)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let mut line = serde_json::to_vec(event)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    line.push(b'\n');
+    if line.len() > MAX_EVENT_LINE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "serialized companion event is {} bytes; maximum is {MAX_EVENT_LINE_BYTES}",
+                line.len()
+            ),
+        ));
+    }
+    Ok(line)
+}
+
+fn append_serialized_event(
+    companion_dir: &Path,
+    event_ts: i64,
+    line: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
     let dir = events_dir(companion_dir);
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(day_file_name(event.ts));
+    let path = dir.join(day_file_name(event_ts));
     let created = !path.exists();
-    let mut line = serde_json::to_string(event)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    line.push('\n');
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(line.as_bytes())?;
-    file.sync_data()?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    let original_len = file.metadata()?.len();
+    if let Err(write_error) = file.write_all(line).and_then(|_| file.sync_data()) {
+        let rollback = if created {
+            drop(file);
+            std::fs::remove_file(&path).and_then(|_| crate::fsio::sync_dir(&dir))
+        } else {
+            file.set_len(original_len).and_then(|_| file.sync_data())
+        };
+        if let Err(rollback_error) = rollback {
+            return Err(std::io::Error::other(format!(
+                "append failed: {write_error}; restoring the previous event file also failed: {rollback_error}"
+            )));
+        }
+        return Err(write_error);
+    }
     if created {
         crate::fsio::sync_dir(&dir)?;
     }
     Ok(())
+}
+
+fn append_serialized_event_managed(
+    companion_dir: &Path,
+    event_ts: i64,
+    line: &[u8],
+    max_storage_mb: u32,
+) -> Result<(), AppError> {
+    enforce_event_capacity(companion_dir, max_storage_mb, line.len() as u64)?;
+    append_serialized_event(companion_dir, event_ts, line)
+        .map_err(|error| AppError::Internal(format!("append companion event: {error}")))
 }
 
 fn event_files(companion_dir: &Path) -> Result<Vec<PathBuf>, AppError> {
@@ -580,13 +965,21 @@ fn validate_event_file_name(path: &Path) -> Result<(), AppError> {
             "companion event file name must be YYYYMMDD.jsonl: {name:?}"
         )));
     }
+    NaiveDate::parse_from_str(day, "%Y%m%d").map_err(|error| {
+        AppError::Internal(format!(
+            "companion event file name contains an invalid calendar date {name:?}: {error}"
+        ))
+    })?;
     Ok(())
 }
 
 fn parse_event_file(path: &Path) -> Result<Vec<CollectedEvent>, AppError> {
     validate_event_file_name(path)?;
     let raw = std::fs::read(path).map_err(|error| {
-        AppError::Internal(format!("read companion event file {}: {error}", path.display()))
+        AppError::Internal(format!(
+            "read companion event file {}: {error}",
+            path.display()
+        ))
     })?;
     if !raw.ends_with(b"\n") {
         return Err(AppError::Internal(format!(
@@ -712,15 +1105,10 @@ pub fn event_stats(
     Ok(stats)
 }
 
-/// Delete every collected event file.
-pub fn clear_events(companion_dir: &Path) -> std::io::Result<()> {
-    let dir = events_dir(companion_dir);
-    crate::fsio::remove_path_entry(&dir)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn companion_fixture(sequence: u64) -> String {
         let raw = format!("0190f5fe-7c00-7a00-8abc-{sequence:012}");
@@ -764,33 +1152,6 @@ mod tests {
         assert!(!serialized.contains("SECRET_TOKEN"), "secret value must never be persisted: {serialized}");
         assert!(serialized.contains("pattern:string"));
         assert!(serialized.contains("path:string"));
-    }
-
-    #[tokio::test]
-    async fn cron_runs_truncates_long_error_payload() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        let mut config = SharedCompanionConfig::default();
-        config.collect.cron_runs = true;
-        let mut collector = Collector::new(dir.path().to_path_buf(), Arc::new(RwLock::new(config)), store);
-
-        let long_err = "x".repeat(MAX_FIELD_CHARS * 3);
-        collector
-            .handle(&WebSocketMessage::new(
-                "cron.job-executed",
-                serde_json::json!({"job_id": "j1", "status": "failed", "error": long_err}),
-            ))
-            .await;
-
-        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].source, "cron_runs");
-        assert_eq!(events[0].data["job_id"], "j1");
-        assert_eq!(events[0].data["status"], "failed");
-        // error truncated to the field cap (+ ellipsis), not the raw 3× blob.
-        let err = events[0].data["error"].as_str().unwrap();
-        assert!(err.chars().count() <= MAX_FIELD_CHARS + 1, "cron error must be truncated, got {} chars", err.chars().count());
-        assert!(err.ends_with('…'));
     }
 
     #[tokio::test]
@@ -842,6 +1203,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_work_sources_are_not_collected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let conversation = conversation_fixture(22);
+        let config = SharedCompanionConfig::default();
+        let mut collector = Collector::new(
+            dir.path().to_path_buf(),
+            Arc::new(RwLock::new(config)),
+            store,
+        );
+
+        collector
+            .handle(&WebSocketMessage::new(
+                "message.stream",
+                serde_json::json!({
+                    "conversation_id": &conversation,
+                    "msg_id": "m1",
+                    "type": "content",
+                    "data": "work-session model reply",
+                }),
+            ))
+            .await;
+        collector
+            .handle(&WebSocketMessage::new(
+                "turn.completed",
+                serde_json::json!({"conversation_id": &conversation}),
+            ))
+            .await;
+        collector
+            .handle(&WebSocketMessage::new(
+                "cron.job-executed",
+                serde_json::json!({"job_id": "j1", "status": "ok"}),
+            ))
+            .await;
+        collector
+            .handle(&WebSocketMessage::new(
+                "conversation.listChanged",
+                serde_json::json!({"conversation_id": &conversation}),
+            ))
+            .await;
+
+        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
+        assert!(events.is_empty());
+        assert!(collector.reply_buffers.is_empty());
+    }
+
+    #[tokio::test]
     async fn companion_turns_earn_xp_and_skip_collection_when_companion_dialogues_off() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
@@ -852,7 +1260,6 @@ mod tests {
         store.insert_companion_thread(&companion_conversation, &companion, "聊天").await.unwrap();
         let mut config = SharedCompanionConfig::default();
         config.collect.chat_user_messages = true;
-        config.collect.chat_assistant_replies = true;
         config.collect.companion_dialogues = false;
         let mut collector = Collector::new(
             dir.path().to_path_buf(),
@@ -899,7 +1306,7 @@ mod tests {
         assert_eq!(store.get_state_i64("xp").await.unwrap(), 0);
         assert_eq!(store.get_companion_state_i64(&other_companion, "xp").await.unwrap(), 0);
 
-        // Normal conversation turn: reply collected, no XP.
+        // Normal work-session model replies are not collected; no XP either.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
@@ -913,7 +1320,7 @@ mod tests {
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
         assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
     }
 
@@ -1078,13 +1485,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn origin_marked_turn_replies_are_never_collected() {
+    async fn origin_marked_and_work_turn_replies_are_never_collected() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
         let work_conversation = conversation_fixture(2);
         let cron_conversation = conversation_fixture(4);
-        let mut config = SharedCompanionConfig::default();
-        config.collect.chat_assistant_replies = true;
+        let config = SharedCompanionConfig::default();
         let mut collector = Collector::new(
             dir.path().to_path_buf(),
             Arc::new(RwLock::new(config)),
@@ -1092,8 +1498,7 @@ mod tests {
         );
 
         // Companion-driven work turn: every stream fragment carries origin="companion"
-        // (stamped by the relay) — nothing may be buffered or flushed, even
-        // with chat_assistant_replies on.
+        // (stamped by the relay) — nothing may be buffered or flushed.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
@@ -1108,7 +1513,7 @@ mod tests {
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert!(events.is_empty(), "companion-driven replies must not become assistant.reply");
+        assert!(events.is_empty(), "companion-driven replies must not become work-reply events");
 
         // Defense in depth: chunks already buffered (e.g. before a Lagged
         // skip) are dropped the moment an origin-marked fragment or
@@ -1129,7 +1534,7 @@ mod tests {
         assert!(events.is_empty(), "origin-marked turn must drop buffered replies unflushed");
         assert!(collector.reply_buffers.is_empty());
 
-        // origin: null → owner-driven turn, collected as before.
+        // origin: null → an owner-driven work turn, also not collected.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
@@ -1144,9 +1549,8 @@ mod tests {
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].name, "assistant.reply");
-        assert_eq!(events[0].data["content"], "修好了");
+        assert!(events.is_empty());
+        assert!(collector.reply_buffers.is_empty());
     }
 
     #[tokio::test]
@@ -1155,8 +1559,8 @@ mod tests {
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
         let conversation_a = conversation_fixture(11);
         let conversation_b = conversation_fixture(12);
-        let mut config = SharedCompanionConfig::default();
-        config.collect.chat_assistant_replies = true;
+        let companion = companion_fixture(11);
+        let config = SharedCompanionConfig::default();
         let mut collector = Collector::new(
             dir.path().to_path_buf(),
             Arc::new(RwLock::new(config)),
@@ -1168,24 +1572,27 @@ mod tests {
             .handle(&WebSocketMessage::new(
                 "message.stream",
                 serde_json::json!({"conversation_id": conversation_a, "msg_id": "m1", "type": "content",
-                                   "data": "好的 [CRON_CREATE {\"name\":\"备份\"}]"}),
+                                   "data": "好的 [CRON_CREATE {\"name\":\"备份\"}]",
+                                   "companion": true, "companion_id": &companion}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
                 serde_json::json!({"conversation_id": conversation_a, "msg_id": "m1", "type": "content",
-                                   "data": {"content": "好的"}, "hidden": false, "replace": true}),
+                                   "data": {"content": "好的"}, "hidden": false, "replace": true,
+                                   "companion": true, "companion_id": &companion}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": conversation_a}),
+                serde_json::json!({"conversation_id": conversation_a, "companion": true, "companion_id": &companion}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
         assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, "companion_dialogues");
         assert_eq!(events[0].data["content"], "好的", "collected reply must be the cleaned text");
 
         // Hidden override (middleware emptied the whole reply): the raw
@@ -1194,20 +1601,22 @@ mod tests {
             .handle(&WebSocketMessage::new(
                 "message.stream",
                 serde_json::json!({"conversation_id": conversation_b, "msg_id": "m2", "type": "content",
-                                   "data": "[CRON_DELETE job_1]"}),
+                                   "data": "[CRON_DELETE job_1]",
+                                   "companion": true, "companion_id": &companion}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
                 serde_json::json!({"conversation_id": conversation_b, "msg_id": "m2", "type": "content",
-                                   "data": {"content": ""}, "hidden": true, "replace": true}),
+                                   "data": {"content": ""}, "hidden": true, "replace": true,
+                                   "companion": true, "companion_id": &companion}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": conversation_b}),
+                serde_json::json!({"conversation_id": conversation_b, "companion": true, "companion_id": &companion}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
@@ -1218,8 +1627,7 @@ mod tests {
     async fn reply_buffers_enforce_global_entry_cap() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        let mut config = SharedCompanionConfig::default();
-        config.collect.chat_assistant_replies = true;
+        let config = SharedCompanionConfig::default();
         let mut collector = Collector::new(
             dir.path().to_path_buf(),
             Arc::new(RwLock::new(config)),
@@ -1234,7 +1642,8 @@ mod tests {
                 .handle(&WebSocketMessage::new(
                     "message.stream",
                     serde_json::json!({"conversation_id": conversation_id, "msg_id": "m", "type": "content",
-                                       "data": format!("回复 {i}")}),
+                                       "data": format!("回复 {i}"), "companion": true,
+                                       "companion_id": companion_fixture(i as u64 + 100)}),
                 ))
                 .await;
         }
@@ -1254,7 +1663,11 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": conversation_fixture(total as u64 + 99)}),
+                serde_json::json!({
+                    "conversation_id": conversation_fixture(total as u64 + 99),
+                    "companion": true,
+                    "companion_id": companion_fixture(total as u64 + 99),
+                }),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 200).unwrap();
@@ -1331,7 +1744,7 @@ mod tests {
     }
 
     #[test]
-    fn append_read_stats_clear_roundtrip() {
+    fn append_read_stats_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..5 {
             append_event(
@@ -1361,9 +1774,6 @@ mod tests {
         let stats = event_stats(dir.path()).unwrap();
         assert_eq!(stats.get("chat_user_messages").unwrap().1, 5);
 
-        clear_events(dir.path()).unwrap();
-        let (none, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert!(none.is_empty());
     }
 
     #[test]
@@ -1446,8 +1856,8 @@ mod tests {
                 &CollectedEvent {
                     event_id: nomifun_common::generate_id(),
                     ts: base + i,
-                    source: "cron_runs".into(),
-                    name: "cron.job-executed".into(),
+                    source: "terminal_sessions".into(),
+                    name: "terminal.exit".into(),
                     data: serde_json::json!({"n": i}),
                 },
             )
@@ -1491,5 +1901,235 @@ mod tests {
         assert!(truncated);
         let (rest, _) = read_events_since(dir.path(), events.last().unwrap().ts, 10).unwrap();
         assert_eq!(rest.len(), 3);
+    }
+
+    fn write_day_event(companion_dir: &Path, day: NaiveDate, ts: i64) -> PathBuf {
+        let dir = events_dir(companion_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.jsonl", day.format("%Y%m%d")));
+        let line = serialize_event_line(&CollectedEvent {
+            event_id: nomifun_common::generate_id(),
+            ts,
+            source: "tool_calls".into(),
+            name: "tool.call".into(),
+            data: serde_json::json!({"name": "read"}),
+        })
+        .unwrap();
+        std::fs::write(&path, line).unwrap();
+        path
+    }
+
+    fn create_sized_day_file(companion_dir: &Path, day: NaiveDate, bytes: u64) -> PathBuf {
+        let dir = events_dir(companion_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.jsonl", day.format("%Y%m%d")));
+        std::fs::File::create(&path).unwrap().set_len(bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn retention_boundary_waits_until_an_expired_file_is_consumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+        let expired = write_day_event(dir.path(), today - ChronoDuration::days(30), 200);
+        let boundary = write_day_event(dir.path(), today - ChronoDuration::days(29), 300);
+
+        let protected = prune_event_store_at(dir.path(), today, 30, 64, Some(199), 0).unwrap();
+        assert_eq!(protected.file_count, 2);
+        assert!(expired.exists(), "an unconsumed expired day must remain available to learning");
+
+        let pruned = prune_event_store_at(dir.path(), today, 30, 64, Some(200), 0).unwrap();
+        assert_eq!(pruned.file_count, 1);
+        assert!(!expired.exists());
+        assert!(boundary.exists(), "the inclusive 30-day boundary must be retained");
+        assert_eq!(pruned.oldest_day.as_deref(), Some("2026-07-06"));
+
+        let no_consumer = write_day_event(dir.path(), today - ChronoDuration::days(31), 400);
+        prune_event_store_at(dir.path(), today, 30, 64, None, 0).unwrap();
+        assert!(!no_consumer.exists(), "disabled consumers must not pin expired raw events");
+    }
+
+    #[test]
+    fn expired_file_is_kept_until_every_event_in_that_file_is_consumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+        let expired_day = today - ChronoDuration::days(30);
+        let expired = write_day_event(dir.path(), expired_day, 100);
+        let second_line = serialize_event_line(&CollectedEvent {
+            event_id: nomifun_common::generate_id(),
+            ts: 200,
+            source: "tool_calls".into(),
+            name: "tool.call".into(),
+            data: serde_json::json!({"name": "write"}),
+        })
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&expired)
+            .unwrap()
+            .write_all(&second_line)
+            .unwrap();
+
+        prune_event_store_at(dir.path(), today, 30, 64, Some(150), 0).unwrap();
+        assert!(
+            expired.exists(),
+            "one consumed event must not allow an expired daily file with a later event to be removed"
+        );
+
+        prune_event_store_at(dir.path(), today, 30, 64, Some(200), 0).unwrap();
+        assert!(!expired.exists(), "the daily file can be removed after its latest event is consumed");
+    }
+
+    #[test]
+    fn unreadable_expired_file_does_not_block_soft_maintenance_when_capacity_is_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+        let event_dir = events_dir(dir.path());
+        std::fs::create_dir_all(&event_dir).unwrap();
+        let unreadable = event_dir.join("20260601.jsonl");
+        std::fs::write(&unreadable, b"not-json\n").unwrap();
+
+        let status = prune_event_store_at(dir.path(), today, 30, 64, Some(i64::MAX), 0).unwrap();
+        assert_eq!(status.file_count, 1);
+        assert!(unreadable.exists());
+    }
+
+    #[test]
+    fn hard_capacity_reserve_deletes_oldest_files_without_parsing_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+        // Create in reverse chronological order so directory/creation order
+        // cannot accidentally stand in for the filename date ordering.
+        let newest = create_sized_day_file(dir.path(), today, 4 * 1024 * 1024);
+        let middle = create_sized_day_file(dir.path(), today - ChronoDuration::days(1), 4 * 1024 * 1024);
+        let oldest = create_sized_day_file(dir.path(), today - ChronoDuration::days(2), 9 * 1024 * 1024);
+
+        prune_event_store_at(dir.path(), today, 365, 16, Some(0), 1).unwrap();
+        assert!(!oldest.exists());
+        assert!(middle.exists());
+        assert!(newest.exists());
+        assert!(event_storage_status(dir.path(), 30, 16).unwrap().total_bytes <= 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn capacity_rejects_an_oversized_reservation_before_deleting_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+        let existing = create_sized_day_file(dir.path(), today, 32);
+
+        assert!(enforce_event_capacity(dir.path(), 16, 16 * 1024 * 1024 + 1).is_err());
+        assert!(existing.exists());
+        assert_eq!(std::fs::metadata(existing).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn exact_capacity_reservation_does_not_evict_the_current_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+        let existing = create_sized_day_file(dir.path(), today, 16 * 1024 * 1024 - 1);
+
+        enforce_event_capacity(dir.path(), 16, 1).unwrap();
+        assert!(existing.exists());
+    }
+
+    #[test]
+    fn managed_append_finishes_at_or_below_the_hard_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let event_ts = now_ms();
+        let line = serialize_event_line(&CollectedEvent {
+            event_id: nomifun_common::generate_id(),
+            ts: event_ts,
+            source: "tool_calls".into(),
+            name: "tool.call".into(),
+            data: serde_json::json!({"name": "read"}),
+        })
+        .unwrap();
+        let event_dir = events_dir(dir.path());
+        std::fs::create_dir_all(&event_dir).unwrap();
+        std::fs::File::create(event_dir.join(day_file_name(event_ts)))
+            .unwrap()
+            .set_len(16 * 1024 * 1024 - line.len() as u64)
+            .unwrap();
+
+        append_serialized_event_managed(dir.path(), event_ts, &line, 16).unwrap();
+        assert_eq!(
+            event_storage_status(dir.path(), 30, 16).unwrap().total_bytes,
+            16 * 1024 * 1024
+        );
+    }
+
+    #[tokio::test]
+    async fn active_watermark_uses_only_enabled_consumers_and_takes_the_minimum() {
+        let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        store.set_state("learn_cursor_ts", "900").await.unwrap();
+        store.set_state("evolve_cursor_ts", "400").await.unwrap();
+        let mut config = SharedCompanionConfig::default();
+
+        assert_eq!(active_consumer_watermark(&store, &config).await.unwrap(), None);
+        config.learn.enabled = true;
+        assert_eq!(active_consumer_watermark(&store, &config).await.unwrap(), Some(900));
+        config.evolve.enabled = true;
+        assert_eq!(active_consumer_watermark(&store, &config).await.unwrap(), Some(400));
+        config.evolve.enabled = false;
+        assert_eq!(active_consumer_watermark(&store, &config).await.unwrap(), Some(900));
+    }
+
+    #[test]
+    fn strict_validation_rejects_missing_and_invalid_date_files_while_live_writes_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let event_dir = events_dir(dir.path());
+        std::fs::create_dir_all(&event_dir).unwrap();
+        assert!(validate_event_file(&event_dir.join("20260804.jsonl")).is_err());
+
+        std::fs::write(event_dir.join("20260230.jsonl"), b"{}\n").unwrap();
+        let invalid_date = validate_event_store(dir.path()).unwrap_err().to_string();
+        assert!(invalid_date.contains("invalid calendar date"), "{invalid_date}");
+        std::fs::remove_file(event_dir.join("20260230.jsonl")).unwrap();
+
+        let oversized = CollectedEvent {
+            event_id: nomifun_common::generate_id(),
+            ts: now_ms(),
+            source: "chat_user_messages".into(),
+            name: "message.userCreated".into(),
+            data: serde_json::json!({"content": "x".repeat(MAX_EVENT_LINE_BYTES)}),
+        };
+        let mut legacy_line = serde_json::to_vec(&oversized).unwrap();
+        legacy_line.push(b'\n');
+        std::fs::write(event_dir.join("20260804.jsonl"), legacy_line).unwrap();
+        assert_eq!(read_recent_events(dir.path(), 1).unwrap().len(), 1);
+        assert!(append_event(dir.path(), &oversized).is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_managed_appends_remain_complete_and_parseable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let collector = Arc::new(Collector::new(
+            dir.path().to_path_buf(),
+            Arc::new(RwLock::new(SharedCompanionConfig::default())),
+            store,
+        ));
+        let mut tasks = Vec::new();
+        for index in 0..64 {
+            let collector = collector.clone();
+            tasks.push(tokio::spawn(async move {
+                collector
+                    .append(
+                        "tool_calls",
+                        "tool.call",
+                        serde_json::json!({"name": format!("tool-{index}")}),
+                    )
+                    .await;
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let (events, truncated) = read_events_since(dir.path(), 0, 100).unwrap();
+        assert_eq!(events.len(), 64);
+        assert!(!truncated);
+        let status = event_storage_status(dir.path(), 30, 64).unwrap();
+        assert!(status.total_bytes <= status.max_bytes);
     }
 }

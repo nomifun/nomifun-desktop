@@ -91,7 +91,6 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 知识库 | `/api/knowledge/*` | 已鉴权 | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
 | 伙伴 | `/api/companion/*` | 已鉴权 | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | WebUI/public 能力 companion token | `/api/webui/companions/{id}/access-token` | 已鉴权 / 本地 WebUI admin 流 | [`router/companion_token_routes.rs`](../../crates/backend/nomifun-app/src/router/companion_token_routes.rs) |
-| Browser-use secrets | `/api/browser-secrets/*` | 已鉴权 | [`nomifun-secret/src/routes.rs`](../../crates/backend/nomifun-secret/src/routes.rs) |
 | 浏览器平台管理（Agent-only 受管浏览器） | `/api/browser/*` | 已鉴权；改变状态的 HTTP 请求受 CSRF 保护；仅安装 owner 可用的路由另有权限门禁 | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs)、[`router/browser_login.rs`](../../crates/backend/nomifun-app/src/router/browser_login.rs) |
 | 文件系统 | `/api/fs/*` | 已鉴权 | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
 | Office 预览 | `/api/word-preview/*`、`/api/excel-preview/*`、`/api/ppt-preview/*`、`/api/preview-history/*`、`/api/star-office/detect` | 已鉴权 | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |

@@ -613,13 +613,8 @@ impl NomiAgentManager {
                 config_extra.install_embedded_agent_execution,
             )
             .approval_manager(approval_manager.clone());
-        // Thread the application-shared browser secret vault (path +
-        // machine-bound key) to the Hub-backed Browser tool policy. It resolves
-        // registered `secret:NAME` values under origin checks and derives the
-        // egress allowlist from `allowed_origins`; it is not a profile or
-        // per-runtime browser owner. None keeps the compatibility empty store.
-        if let Some(vault) = config_extra.browser_secret_vault {
-            bootstrap = bootstrap.browser_secret_source(vault.vault_path, vault.key);
+        if let Some(key) = config_extra.persistent_login_key {
+            bootstrap = bootstrap.persistent_login_key(key);
         }
         // Phase D: when the user opted into takeover/approval (`agent.browserUse.takeover`),
         // give bootstrap a desktop approval gate sharing the session's confirmation store +
@@ -2633,7 +2628,7 @@ mod tests {
             browser_unrestricted_approval: false,
             browser_visual_fallback: false,
             goal: None,
-            browser_secret_vault: None,
+            persistent_login_key: None,
             owner_token: None,
             install_embedded_agent_execution: true,
             allowed_tools: Vec::new(),

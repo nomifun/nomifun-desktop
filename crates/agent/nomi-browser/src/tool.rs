@@ -10,11 +10,9 @@
 //! the full action space: `execute` parses the tool input into a
 //! [`nomi_browser_engine::ActSpec`] and dispatches it through
 //! `BrowserEngine::act` (click/type/set_value/hover/select/press_key/scroll/
-//! …/back/forward/reload/switch_*/tabs), with `secret:NAME` interception (the
-//! value is resolved through an origin-bound vault and injected as
-//! [`nomi_browser_engine::TypeInput::Secret`] — it never reaches the LLM).
+//! …/back/forward/reload/switch_*/tabs).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -40,8 +38,6 @@ use nomifun_browser_platform::{
     BrowserOperationKind, BrowserOperationResult, BrowserPlatformError, CloseResult,
     LaneLifecycleState, OpenLaneOutcome,
 };
-use nomifun_secret::SecretStore;
-
 use crate::extract::{self, ExtractModel, ExtractModelRef, ExtractSchema};
 use crate::managed::{
     BrowserLaneClientPort, canonical_browser_action, close_all_lanes, close_lane,
@@ -56,6 +52,20 @@ use crate::redline::{self, ActionContext, ApprovalTier};
 /// facade skips SoM and uses the raw-bbox fallback instead. Also bounds the per-label palette
 /// cycling and keeps the annotated PNG legible.
 const MAX_SOM_LABELS: usize = 50;
+
+fn ensure_extract_schema_bound(schema: &Value) -> Result<(), ToolResult> {
+    if let Err(error) =
+        nomi_browser_engine::actions::validate_extract_schema_capacity(schema)
+    {
+        return Err(ToolResult::error(format!(
+            "The extract schema exceeds the per-operation capacity ({error:?}; serialized byte limit={}, depth limit={}, node limit={}).",
+            nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_BYTES,
+            nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_DEPTH,
+            nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_NODES,
+        )));
+    }
+    Ok(())
+}
 
 /// One authority for capture/save ordering of a shared persistent-login vault.
 ///
@@ -126,41 +136,6 @@ enum PersistLoginOutcome {
     SaveFailed,
 }
 
-/// **P3-X2: per-pet secret vault source** threaded into [`BrowserTool`] so it can
-/// lazily load the registered credentials (and derive the firewall domain
-/// allowlist) on the first action.
-///
-/// Carries the shared vault file path (`{data_dir}/browser-secrets/shared/secrets.json`,
-/// resolved by `nomifun_secret::shared_vault_path`; browser identity
-/// globally shared — ignores its key and routes to the one shared vault) + the
-/// machine-bound 32-byte key (the app's `encryption_key`, the same one the registration
-/// endpoint used to encrypt the values). `Clone` so it can ride through `NomiResolvedConfig`
-/// → bootstrap (the `SecretStore` itself is intentionally NOT carried — it is
-/// non-`Clone`/non-`Debug` and is loaded lazily at engine-build time so a freshly-registered
-/// secret is picked up).
-#[derive(Clone)]
-pub struct BrowserSecretSource {
-    /// The shared secret vault file path.
-    pub vault_path: PathBuf,
-    /// The machine-bound AES-256-GCM key (`encryption_key`, 32 bytes).
-    pub key: [u8; nomifun_secret::KEY_SIZE],
-}
-
-impl std::fmt::Debug for BrowserSecretSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never print the key.
-        f.debug_struct("BrowserSecretSource")
-            .field("vault_path", &self.vault_path)
-            .field("key", &"<redacted>")
-            .finish()
-    }
-}
-
-/// `secret:NAME` 引用前缀（裁决⑦）。`type`/`set_value` 的 `text` 以此开头时，facade **拦截**
-/// 该引用：经 [`SecretStore::resolve`] 在 origin 门通过后取真值，包成 [`TypeInput::Secret`] 注入引擎
-/// （值经 `Input.insertText` 写入，**绝不**进 LLM 输出 / ref 表 / 日志）。
-const SECRET_PREFIX: &str = "secret:";
-
 /// **P3-GW2: 带外确认 sentinel key**（裁决④）。`Tool::execute(&self, input)` 的签名不携带会话上下文，
 /// 故「这次不可逆动作已获带外确认」这一事实只能经 `input` 传进 facade。本 reserved key 是那条路径：
 /// `out_of_band_confirmed` 当且仅当 `input[OUT_OF_BAND_CONFIRMED_KEY] == true` 时返 `true`，让
@@ -203,9 +178,8 @@ find_elements: find elements by CSS `selector` and register fresh refs. get_drop
 list a `<select>`'s options by `ref`. cursor / tabs: inspect clickable elements / open tabs.\n\
 - wait: pause `ms` milliseconds. wait_for: wait until a condition holds.\n\n\
 Write actions (change the page — verify with a follow-up `observe`):\n\
-- click: click the element `ref`. hover: hover it. type: type `text` into element `ref` \
-(set `text` to \"secret:NAME\" to inject a stored credential without it ever passing through this \
-conversation). set_value: set a control's `value` directly. select_option: pick `options` in a \
+- click: click the element `ref`. hover: hover it. type: type `text` into element `ref`. \
+set_value: set a control's `value` directly. select_option: pick `options` in a \
 `<select>` `ref`. press_key: press `keys` (e.g. \"Enter\", \"Control+a\"). scroll: scroll \
 `direction` by `amount`. scroll_to_text: scroll until `text` is visible. upload_file: set a file \
 input `ref` to `file_path` (bypasses the OS file dialog). download: download `url` into a sandboxed \
@@ -224,6 +198,25 @@ Usage notes:\n\
 or UI change rather than reusing an old ref.\n\
 - The browser launches lazily on the first action; if it cannot start, the action returns an \
 error explaining why (do not retry blindly).";
+
+/// Trusted task owner for standalone Browser facades.
+///
+/// Construct this in the host/runtime layer, never from tool JSON. Clone the
+/// same value into every facade and restart belonging to one task; create a new
+/// value only for a genuinely distinct task. The opaque engine scope is not
+/// exposed through the Browser schema.
+#[derive(Clone, Debug)]
+pub struct StandaloneBrowserTask {
+    scope: nomi_browser_engine::StandaloneResourceScope,
+}
+
+impl StandaloneBrowserTask {
+    pub fn new() -> Self {
+        Self {
+            scope: nomi_browser_engine::StandaloneResourceScope::new(),
+        }
+    }
+}
 
 /// Browser automation tool. Holds the lazily-constructed engine and the config
 /// needed to construct it. `new` does NOT launch a browser; the engine is built
@@ -290,6 +283,10 @@ pub struct BrowserTool {
     /// It serializes the complete effect across every facade that targets the
     /// same path, and advances throttling only after a successful durable save.
     persist_login_coordinator: Arc<PersistLoginCoordinator>,
+    /// Trusted structural resource scope for this standalone facade. It is
+    /// created once and reused across lazy engine restarts; model input has no
+    /// field or builder path that can replace it.
+    standalone_resource_scope: nomi_browser_engine::StandaloneResourceScope,
     /// Lazily-initialized browser engine. `Some(Err)` caches an unavailable
     /// backend (chrome not resolvable, launch/connect failure) so we don't
     /// retry per call — the same failure-cache discipline as `ComputerTool`'s
@@ -328,55 +325,8 @@ pub struct BrowserTool {
     engine_build_gate: tokio::sync::Mutex<()>,
     /// The most recent `observe` snapshot, kept for provenance/diagnostics and
     /// resolving `[ref=f<seq>e<n>]` actions against the generation they were
-    /// produced for. F1 also reads its `url` as the **current origin** for the
-    /// `secret:NAME` origin gate (see [`Self::current_origin`]).
+    /// produced for.
     pub(crate) last_snapshot: Mutex<Option<Observation>>,
-    /// **F1: origin-bound credential vault** for `secret:NAME` injection (裁决⑦).
-    /// When a `type`/`set_value` `text` is `secret:NAME`, the facade resolves it
-    /// here against the current origin (eTLD+1 fail-closed) and injects the value
-    /// as [`TypeInput::Secret`] — the plaintext never reaches the LLM, the ref
-    /// table, or logs.
-    ///
-    /// **Registration source is a P3/user-config concern** (TODO below): P2 wires
-    /// the *interception path and origin gate* completely, but ships an empty
-    /// store, so a `secret:NAME` with no matching registration fails closed
-    /// (Blocked) rather than leaking. Tests inject a populated store via
-    /// [`Self::with_secret_store`].
-    secret_store: Mutex<Option<SecretStore>>,
-    /// **P3-X2: per-pet secret vault source** (vault file path + machine-bound key).
-    /// When set and [`Self::secret_store`] is empty, [`Self::engine`] lazily loads the
-    /// per-pet [`SecretStore`] from the vault on the first action — so `secret:NAME`
-    /// resolves against the credentials the user registered (origin gate still
-    /// fail-closed) and the store's [`SecretStore::allowed_etld1_union`] feeds
-    /// `FirewallConfig.allow_etld1` (裁决⑤ 共用真值: one per-pet config, two uses).
-    ///
-    /// `None` (CLI REPL / `BrowserConfig`-only callers / tests) → no source; the
-    /// store stays whatever `secret_store` holds (empty by default → `secret:NAME`
-    /// fails closed, current behavior). Loaded lazily (not at construction) so a
-    /// secret registered after the session starts is still picked up on first use,
-    /// and so building the tool never touches disk.
-    secret_source: Option<BrowserSecretSource>,
-    /// **P3-X2: the firewall config to inject into the engine** (裁决⑤/D1). Built at
-    /// engine-construction time from [`Self::secret_source`]'s loaded store: the
-    /// secret's per-pet `allowed_origins` become `FirewallConfig.allow_etld1`. Cached
-    /// so it's computed once (alongside the store load). `None` until first
-    /// `engine()` → falls back to `FirewallConfig::default()` (unrestricted egress,
-    /// current behavior) when no secret source / no registered origins.
-    firewall_override: Mutex<Option<nomi_browser_engine::FirewallConfig>>,
-    /// **F6 (裁决⑤ managed parity): the egress allowlist the shared managed HOST
-    /// actually enforces.** In managed-lane mode the engine was launched by
-    /// `ManagedBrowserHost` from the composition-root template, so this facade's
-    /// [`Self::firewall_override`] never reaches the engine; the allowlist that
-    /// gates egress is the one the host was LAUNCHED with. The platform adapter
-    /// records that launch-time value here at lane open. `secret:NAME` injection
-    /// on a managed facade ([`Self::managed_engine_injected`]) additionally
-    /// requires the current origin's eTLD+1 to be covered by this list — so a
-    /// plaintext credential is only ever injected while the firewall that is
-    /// supposed to contain it is genuinely enforced (fail-closed: `None` = the
-    /// host was launched without a vault-derived allowlist → never inject).
-    /// Standalone facades keep `None` and are unaffected (their engine firewall
-    /// derives from the same store snapshot they inject from).
-    pub(crate) managed_enforced_allow_etld1: Option<Vec<String>>,
     /// **F1-sec: 本会话的 tool-execution 审批闸是否被旁路**（`yolo || companion-forced-yolo ||
     /// auto_approve`，裁决⑧）。这是 redline 门 [`redline::enforce_redline`] 的关键入参——决定
     /// 「审批旁路会话里的不可逆动作」是否 hard-deny。
@@ -441,21 +391,19 @@ pub struct BrowserTool {
     /// factory host_default=true 实现）。本值在 [`Self::engine`] 构造引擎时灌进
     /// [`nomi_browser_engine::EngineConfig::evaluate_persistent_login`]，由引擎层 evaluate 互斥门消费。
     evaluate_persistent_login: bool,
+    /// Machine-bound key used only for the encrypted persistent-login snapshot.
+    persistent_login_key: Option<[u8; nomi_browser_engine::vault::KEY_SIZE]>,
     /// **P3: LLM-driven extraction model seam** (optional). When `Some`, the facade's
     /// Extract action passes the engine's deterministic payload through
     /// [`extract::extract_structured`] to produce validated structured JSON. When `None`
     /// (default, graceful degradation), the deterministic payload is returned unchanged
     /// (today's P2 behavior, zero regression).
     ///
-    /// Injected by bootstrap/factory via [`Self::with_extract_model`] — mirrors how
-    /// `secret_source`/`runtime_mode` are threaded.
+    /// Injected by bootstrap/factory via [`Self::with_extract_model`].
     // Wired by bootstrap: `SessionExtractModel` (reuses the session `LlmProvider`); the engine
     // stays LLM-free, the adapter lives at the bootstrap/facade layer.
     extract_model: ExtractModelRef,
-    /// **Known-secret exact-blackout registry** (shared with engine via `Arc`).
-    /// The facade inserts each resolved `secret:NAME` plaintext (len >= 4) here;
-    /// the engine's debug serializers read it and `String::replace` each value with
-    /// `[KNOWN_SECRET_REDACTED]` before heuristic passes. Session-scoped, in-memory only.
+    /// Exact-blackout registry shared with the engine's debug serializers.
     known_secret_values: nomi_browser_engine::KnownSecretValues,
     /// **Takeover: must-re-observe flag**. Set to `true` after a takeover resolves
     /// (the user may have navigated during the takeover — pre-takeover `f<seq>e<n>` refs
@@ -588,7 +536,7 @@ impl BrowserTool {
         evaluate_persistent_login: bool,
         workspace_dir: Option<PathBuf>,
         runtime_mode: Option<Arc<ToolApprovalManager>>,
-        secret_source: Option<BrowserSecretSource>,
+        persistent_login_key: Option<[u8; nomi_browser_engine::vault::KEY_SIZE]>,
     ) -> Self {
         let mut t = Self::new_standalone(config);
         t.session_bypasses_approval = session_bypasses_approval;
@@ -596,8 +544,19 @@ impl BrowserTool {
         t.evaluate_persistent_login = evaluate_persistent_login;
         t.workspace_dir = workspace_dir;
         t.runtime_mode = runtime_mode;
-        t.secret_source = secret_source;
+        t.persistent_login_key = persistent_login_key;
         t
+    }
+
+    /// Bind several trusted standalone facades to one structural task budget.
+    /// The scope is an opaque in-process capability and is intentionally not
+    /// represented in the Browser tool schema or model-controlled JSON.
+    fn with_standalone_resource_scope(
+        mut self,
+        scope: nomi_browser_engine::StandaloneResourceScope,
+    ) -> Self {
+        self.standalone_resource_scope = scope;
+        self
     }
 
     /// Bind this Agent-facing facade to a trusted main-process Browser
@@ -652,11 +611,6 @@ impl BrowserTool {
 
     /// Construct with an explicit data directory (used by tests and any caller
     /// that wants to control the engine's data layout). Does NOT launch.
-    ///
-    /// **TODO(F1-sec / P3)**: thread the per-pet [`SecretStore`] in here (built
-    /// from user-configured credentials, keyed by the app's machine-bound
-    /// `encryption_key`). P2 ships `None` (empty vault → `secret:NAME` fails
-    /// closed); the interception path + origin gate are complete and wired.
     pub fn with_data_dir(data_dir: PathBuf, headful: bool) -> Self {
         // 并发隔离：每个 facade 分配进程内唯一 user-data-dir（<data_dir>/profiles/<token>），
         // 使任意两个并发存活引擎绝不共享 profile（根治 Chromium 进程单例碰撞）。
@@ -679,6 +633,11 @@ impl BrowserTool {
             // 仅有 data_dir 的调用方 / 测试保持 Managed（现行为，零回归）。
             chrome_source: ChromeSource::Managed,
             persist_login_coordinator,
+            // Legacy callers do not supply a trusted task owner, so they all
+            // share the process compatibility budget. A real task factory may
+            // replace this with one freshly minted scope and must clone that
+            // same opaque capability into every facade/restart for the task.
+            standalone_resource_scope: nomi_browser_engine::StandaloneResourceScope::default(),
             engine: Mutex::new(None),
             // Standalone compatibility constructor: no Hub capability is bound.
             lane_client: None,
@@ -688,14 +647,6 @@ impl BrowserTool {
             // 并发隔离：per-facade 引擎构造锁（详见字段文档）。
             engine_build_gate: tokio::sync::Mutex::new(()),
             last_snapshot: Mutex::new(None),
-            secret_store: Mutex::new(None),
-            // P3-X2: 默认无 secret 源（CLI / BrowserConfig-only / 测试）。bootstrap 经 `with_policy`
-            // 传 per-pet 源；引擎首动作时从 vault 懒加载 store + 派生 allow_etld1。
-            secret_source: None,
-            firewall_override: Mutex::new(None),
-            // F6: standalone facades never carry a host-enforced allowlist; the
-            // platform adapter sets it when building managed lane facades.
-            managed_enforced_allow_etld1: None,
             // Default: a normal (non-bypassing) session. Bootstrap overrides this via
             // `with_policy` with `config.tools.auto_approve`. Tests set it directly.
             session_bypasses_approval: false,
@@ -711,11 +662,12 @@ impl BrowserTool {
             // overrides via `with_policy` with the LIVE `agent.browserUse.persistentLogin` pref
             // (host_default=true → product ON).
             evaluate_persistent_login: false,
+            persistent_login_key: None,
             // P3: 默认无抽取模型（graceful degradation → 返确定性载荷）。bootstrap/factory 经
             // `with_extract_model` 注入真实适配器。
             extract_model: None,
-            // Known-secret blackout: shared Arc created here, clone goes into EngineConfig.
-            known_secret_values: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            // Known-secret blackout: bounded shared registry; clone goes into EngineConfig.
+            known_secret_values: nomi_browser_engine::KnownSecretValues::default(),
             // Takeover: initially no re-observe needed.
             must_re_observe: AtomicBool::new(false),
             // Takeover controller: default OFF (fail-closed). Irreversible actions
@@ -736,6 +688,22 @@ impl BrowserTool {
         }
     }
 
+    /// Construct a standalone facade bound to a trusted task owner.
+    ///
+    /// Multiple facades created with the same `task` aggregate against one
+    /// Host/Lane/tab budget; rebuilding a facade or its lazy engine does not
+    /// mint new capacity. The legacy [`Self::with_data_dir`] constructor has no
+    /// task authority and therefore remains in the single process-wide
+    /// compatibility scope.
+    pub fn with_data_dir_for_task(
+        task: &StandaloneBrowserTask,
+        data_dir: PathBuf,
+        headful: bool,
+    ) -> Self {
+        Self::with_data_dir(data_dir, headful)
+            .with_standalone_resource_scope(task.scope.clone())
+    }
+
     /// Construct a Browser facade for a managed host without taking ownership
     /// of any browser profile or data directory.
     ///
@@ -749,7 +717,7 @@ impl BrowserTool {
         evaluate_persistent_login: bool,
         workspace_dir: Option<PathBuf>,
         runtime_mode: Option<Arc<ToolApprovalManager>>,
-        secret_source: Option<BrowserSecretSource>,
+        persistent_login_key: Option<[u8; nomi_browser_engine::vault::KEY_SIZE]>,
     ) -> Self {
         Self {
             description: format!("{DESCRIPTION}{}", capabilities_note(&default_capabilities())),
@@ -763,6 +731,10 @@ impl BrowserTool {
             headful: !config.headless,
             chrome_source: ChromeSource::Managed,
             persist_login_coordinator: Arc::new(PersistLoginCoordinator::new()),
+            // Managed facades cannot launch standalone Chromium, but retain the
+            // compatibility scope so accidentally removing the managed-only
+            // fence cannot create one fresh structural budget per facade.
+            standalone_resource_scope: nomi_browser_engine::StandaloneResourceScope::default(),
             engine: Mutex::new(None),
             lane_client: None,
             managed_only: true,
@@ -770,17 +742,14 @@ impl BrowserTool {
             managed_lane_counter: AtomicU64::new(0),
             engine_build_gate: tokio::sync::Mutex::new(()),
             last_snapshot: Mutex::new(None),
-            secret_store: Mutex::new(None),
-            secret_source,
-            firewall_override: Mutex::new(None),
-            managed_enforced_allow_etld1: None,
             session_bypasses_approval,
             runtime_mode,
             unrestricted_approval: config.unrestricted_approval,
             evaluate_full_power,
             evaluate_persistent_login,
+            persistent_login_key,
             extract_model: None,
-            known_secret_values: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            known_secret_values: nomi_browser_engine::KnownSecretValues::default(),
             must_re_observe: AtomicBool::new(false),
             takeover_controller: crate::takeover::TakeoverController::new(),
             site_memory: None,
@@ -828,12 +797,31 @@ impl BrowserTool {
     /// Cache an observation produced by the platform adapter so BrowserTool's
     /// origin-bound secret gate and irreversible-action classifier see exactly
     /// the same snapshot as the engine operation result.
-    pub(crate) fn cache_managed_observation(&self, observation: Observation) {
-        *self
-            .last_snapshot
-            .lock()
-            .expect("last_snapshot poisoned") = Some(observation);
+    pub(crate) fn cache_managed_observation(
+        &self,
+        observation: Observation,
+    ) -> Result<(), nomi_browser_engine::observe::ObservationCapacityError> {
+        if let Err(error) = observation.validate_retained_bytes() {
+            // Never leave an older generation available after a rejected
+            // observe.  The engine has revoked the new generation's refs; this
+            // clears the facade half and forces a fresh bounded observation.
+            self.invalidate_cached_observation();
+            return Err(error);
+        }
+        *self.last_snapshot.lock().expect("last_snapshot poisoned") = Some(observation);
         self.clear_must_re_observe();
+        Ok(())
+    }
+
+    /// Revoke the facade-side origin/ref authority after an observation is
+    /// rejected anywhere after the engine call (serialization, response
+    /// decoration, or cache validation).
+    pub(crate) fn invalidate_cached_observation(&self) {
+        self.last_snapshot
+            .lock()
+            .expect("last_snapshot poisoned")
+            .take();
+        self.set_must_re_observe();
     }
 
     /// Validate and classify an adapter action through the existing BrowserTool
@@ -848,11 +836,22 @@ impl BrowserTool {
         input: &Value,
         trusted_out_of_band_confirmation: bool,
     ) -> Result<ActSpec, String> {
-        // In managed mode the engine is already installed, so `engine()` does
-        // not run its normal pre-launch vault bootstrap. Load the same trusted
-        // secret source here before resolving a possible `secret:NAME`.
-        self.ensure_secret_store_and_firewall();
-        let mut sanitized = input.clone();
+        // Extract retains only its schema. Validate that field before cloning
+        // and deliberately omit unrelated model fields so a huge ignored value
+        // cannot be duplicated by this policy layer.
+        let mut sanitized = if action == "extract" {
+            let mut object = serde_json::Map::new();
+            if let Some(schema) = input
+                .get("schema")
+                .filter(|value| value.is_object() || value.is_array())
+            {
+                ensure_extract_schema_bound(schema).map_err(|result| result.content)?;
+                object.insert("schema".to_owned(), schema.clone());
+            }
+            Value::Object(object)
+        } else {
+            input.clone()
+        };
         if let Some(object) = sanitized.as_object_mut() {
             object.remove(OUT_OF_BAND_CONFIRMED_KEY);
             if trusted_out_of_band_confirmation {
@@ -914,13 +913,12 @@ impl BrowserTool {
         self
     }
 
-    /// **P3-X2 builder**: set the per-pet secret vault source on a tool built via
-    /// [`Self::with_data_dir`] (the gateway `BrowserRegistry` path, which constructs
-    /// the tool directly rather than through bootstrap). When set, [`Self::engine`]
-    /// lazily loads the [`SecretStore`] from the vault and derives the firewall
-    /// `allow_etld1` from its registered origins (裁决⑤).
-    pub fn secret_source(mut self, source: BrowserSecretSource) -> Self {
-        self.secret_source = Some(source);
+    /// Provide the application data key used to encrypt persistent-login snapshots.
+    pub fn persistent_login_key(
+        mut self,
+        key: [u8; nomi_browser_engine::vault::KEY_SIZE],
+    ) -> Self {
+        self.persistent_login_key = Some(key);
         self
     }
 
@@ -1036,7 +1034,6 @@ impl BrowserTool {
             role,
             accessible_name,
             selector: None, // Facade level has no CSS selector; engine internals needed.
-            from_secret: false,
         };
         store.record(entry);
     }
@@ -1080,60 +1077,6 @@ impl BrowserTool {
         }
         out.push_str("</data>");
         out
-    }
-
-    /// **F1 seam**: construct the tool with a pre-populated [`SecretStore`] so the
-    /// `secret:NAME` interception path (origin gate → `TypeInput::Secret`) can be
-    /// exercised end-to-end. Production wiring of the store's *contents* is a
-    /// P3/user-config concern; this lets tests (and any caller that already holds
-    /// a vault) inject one without changing the dispatch path.
-    pub fn with_secret_store(data_dir: PathBuf, headful: bool, store: SecretStore) -> Self {
-        let t = Self::with_data_dir(data_dir, headful);
-        *t.secret_store.lock().expect("secret_store poisoned") = Some(store);
-        t
-    }
-
-    /// **F6 test seam**: inject a pre-populated [`SecretStore`] into an already
-    /// constructed (e.g. managed) facade so sibling-module tests can exercise
-    /// the origin/egress gates without going through a vault file on disk.
-    #[cfg(test)]
-    pub(crate) fn inject_secret_store_for_tests(&self, store: SecretStore) {
-        *self.secret_store.lock().expect("secret_store poisoned") = Some(store);
-    }
-
-    /// **P3-X2: lazily load the per-pet secret store + derive the firewall config**
-    /// (called once on the engine slow path, before constructing `EngineConfig`).
-    ///
-    /// If [`Self::secret_store`] is empty and a [`Self::secret_source`] is set, loads
-    /// the [`SecretStore`] from the per-pet vault (machine-bound key; a missing/corrupt
-    /// vault degrades to an empty store — see `nomifun_secret::load_secret_store`). Then
-    /// derives the [`nomi_browser_engine::FirewallConfig`] for this session: the secret's
-    /// per-pet `allowed_origins` (its `allowed_etld1_union`) become `allow_etld1`
-    /// (裁决⑤ 共用真值). The firewall starts from `default()` (IP block + cross-origin
-    /// POST gate on) and only adds the domain allowlist — an empty store / no source
-    /// leaves `allow_etld1` empty = unrestricted egress (current behavior, zero
-    /// regression). Both results are cached so they're computed once.
-    fn ensure_secret_store_and_firewall(&self) {
-        // Populate the store from the per-pet vault if empty + a source is set. A
-        // pre-injected store (tests via `with_secret_store`) is left as-is.
-        {
-            let mut guard = self.secret_store.lock().expect("secret_store poisoned");
-            if guard.is_none()
-                && let Some(src) = &self.secret_source
-            {
-                *guard = Some(nomifun_secret::load_secret_store(&src.vault_path, src.key));
-            }
-        }
-        // Derive the firewall config from whichever store is present (裁决⑤).
-        let mut allow_etld1: Vec<String> = Vec::new();
-        if let Some(store) = self.secret_store.lock().expect("secret_store poisoned").as_ref() {
-            allow_etld1 = store.allowed_etld1_union();
-        }
-        let fw = nomi_browser_engine::FirewallConfig {
-            allow_etld1,
-            ..nomi_browser_engine::FirewallConfig::default()
-        };
-        *self.firewall_override.lock().expect("firewall_override poisoned") = Some(fw);
     }
 
     /// Lazily construct (and cache) the browser engine. The error string is
@@ -1189,15 +1132,6 @@ impl BrowserTool {
         if let Some(cached) = self.engine.lock().expect("engine poisoned").as_ref() {
             return cached.clone();
         }
-        // P3-X2: load the per-pet secret store from the vault (if a source is set) and
-        // derive the firewall domain allowlist before building the engine config.
-        self.ensure_secret_store_and_firewall();
-        let firewall = self
-            .firewall_override
-            .lock()
-            .expect("firewall_override poisoned")
-            .clone()
-            .unwrap_or_default();
         // Slow path: build the engine while holding ONLY the async build gate (not the
         // sync cache mutex) across the await — the gate guarantees single-flight, so no
         // second launch races this facade's user-data-dir.
@@ -1206,7 +1140,7 @@ impl BrowserTool {
         // 首次启动即全新，故几乎总会 seed 一次；SessionLost 自愈重启时目录已在则不重复注入）时，从加密
         // vault 播种登录态。**每实例隔离后，跨会话登录态的唯一权威来源就是共享加密 vault**（不再依赖共享
         // 磁盘 profile）。首启空目录 → 注入 vault 恢复登录；已存在（同 facade 二次构造）→ 磁盘为准不覆盖。
-        // key 复用 secret vault 的机器绑定 key。坏/缺 vault → None（优雅降级）。
+        // 坏/缺 key 或 vault → None（优雅降级）。
         let storage_state = if self.evaluate_persistent_login && !self.profile_dir.exists() {
             self.persist_login_key().and_then(|key| {
                 load_storage_state(&shared_storage_state_path(&self.persistent_data_dir), &key)
@@ -1242,11 +1176,7 @@ impl BrowserTool {
             evaluate_full_power: self.evaluate_full_power,
             // SD-6：持久登录 LIVE 值（默认 false=code-level default-deny；产品 ON 由 factory 灌入）。
             evaluate_persistent_login: self.evaluate_persistent_login,
-            // P3-X2 注入链：firewall 现从 per-pet secret 的 allowed_origins 派生 allow_etld1（裁决⑤
-            // 共用真值）——见 `ensure_secret_store_and_firewall`。空 secret 源 / 无注册域 → allow_etld1
-            // 空 = 不限制出口域（现行为，零回归）；IP 封禁 + 跨域 POST 门控仍随 default() 开。D1 的
-            // TODO(X2) 已闭合：真值不再恒 default()，而是来自用户注册的 secret。
-            firewall,
+            firewall: nomi_browser_engine::FirewallConfig::default(),
             storage_state,
             // P3-D2 / SD-5 出口审批通道：被防火墙门控（GatePost）的跨域 POST / 未授权域出口在引擎层
             // **悬挂等裁决**。**Phase D 接线**：当 facade 被注入 approval gate（`with_approval_gate`，
@@ -1261,6 +1191,7 @@ impl BrowserTool {
             // Known-secret blackout: share the facade's secret set with the engine so debug
             // serializers can exact-blackout resolved secrets.
             known_secret_values: self.known_secret_values.clone(),
+            standalone_resource_scope: self.standalone_resource_scope.clone(),
         })
         .await
         .map_err(|e| e.to_string());
@@ -1272,12 +1203,9 @@ impl BrowserTool {
         guard.as_ref().unwrap().clone()
     }
 
-    /// The machine-bound key for the persistent-login vault. Reuses the SAME key the
-    /// secret vault uses (both are the app's machine-bound `encryption_key`, threaded via
-    /// [`BrowserSecretSource`]). `None` when no source is wired (CLI / tests) → persistent
-    /// login save/restore is skipped (the on-disk profile still persists natively).
-    fn persist_login_key(&self) -> Option<[u8; nomifun_secret::KEY_SIZE]> {
-        self.secret_source.as_ref().map(|s| s.key)
+    /// The machine-bound key for the persistent-login vault.
+    fn persist_login_key(&self) -> Option<[u8; nomi_browser_engine::vault::KEY_SIZE]> {
+        self.persistent_login_key
     }
 
     /// Capture and durably save persistent login as part of the browser tool
@@ -1306,7 +1234,7 @@ impl BrowserTool {
         &self,
         generation: u64,
         vault_path: &Path,
-        key: &[u8; nomifun_secret::KEY_SIZE],
+        key: &[u8; nomi_browser_engine::vault::KEY_SIZE],
         capture: impl std::future::Future<
             Output = Result<nomi_browser_engine::StorageState, BrowserError>,
         >,
@@ -1596,6 +1524,13 @@ impl BrowserTool {
         };
         match engine.observe(&opts).await {
             Ok(obs) => {
+                if obs.validate_retained_bytes().is_err() {
+                    self.invalidate_cached_observation();
+                    return ToolResult::error(
+                        "Observe failed: the page observation exceeded the per-task byte limit. \
+                         Simplify the page or reduce observe depth, then run a fresh observe.",
+                    );
+                }
                 let truncated = if obs.truncated {
                     " (tree truncated to the depth cap — deeper nodes were dropped)"
                 } else {
@@ -1621,10 +1556,21 @@ impl BrowserTool {
                 } else {
                     format!("{header}{}\n{hints}", obs.yaml)
                 };
-
-                *self.last_snapshot.lock().expect("last_snapshot poisoned") = Some(obs);
-                // A fresh observe clears the must-re-observe flag (refs are now valid).
-                self.clear_must_re_observe();
+                if nomi_browser_engine::observe::ensure_observation_bytes(text.len()).is_err()
+                    || nomi_browser_engine::observe::serialized_json_bytes_bounded(&text).is_err()
+                {
+                    self.invalidate_cached_observation();
+                    return ToolResult::error(
+                        "Observe failed: the page observation exceeded the per-task byte limit. \
+                         Simplify the page or reduce observe depth, then run a fresh observe.",
+                    );
+                }
+                if self.cache_managed_observation(obs).is_err() {
+                    return ToolResult::error(
+                        "Observe failed: the page observation exceeded the per-task byte limit. \
+                         Simplify the page or reduce observe depth, then run a fresh observe.",
+                    );
+                }
                 ToolResult::text(text)
             }
             Err(e) => self.engine_failure("Observe failed", e),
@@ -1703,148 +1649,9 @@ impl BrowserTool {
         ToolResult::text(capabilities_note(&caps))
     }
 
-    /// **F1: the current origin for the `secret:NAME` gate** (裁决⑦).
-    ///
-    /// The [`SecretStore`] resolves a credential only when the *current origin*'s
-    /// eTLD+1 is among the secret's allowed origins. The facade's source of truth
-    /// for "what page are we on" is the most recent `observe`'s `url` — which is
-    /// exactly the right discipline: a `secret:NAME` reference can only resolve
-    /// after the agent has `observe`d the page it intends to type into, and a
-    /// stale/missing snapshot yields `None` → the gate fails closed (Blocked).
-    ///
-    /// **TODO(F1-sec)**: DESIGN §16/§230 calls for a *utility-world re-verification*
-    /// of `document.location` at dispatch time (so the origin cannot drift between
-    /// observe and act). That live re-check needs an engine-side hook the
-    /// `BrowserEngine` trait does not expose yet; F1 uses the cached observe URL
-    /// (fail-closed by construction) and leaves the live re-verify to F1-sec.
-    fn current_origin(&self) -> Option<String> {
-        self.last_snapshot
-            .lock()
-            .expect("last_snapshot poisoned")
-            .as_ref()
-            .and_then(|s| s.url.clone())
-    }
-
-    /// **F6 recovery guidance** for the managed secret egress-allowlist gate,
-    /// embedded verbatim in the rejection produced by
-    /// [`Self::resolve_type_input`]. The platform adapter's `execute_act`
-    /// matches on this exact sentence to recognize the rejection class and
-    /// surface the actionable recovery path instead of its generic
-    /// managed-policy hint — keep producer and consumer using this one const.
-    pub(crate) const SECRET_EGRESS_ALLOWLIST_RECOVERY: &'static str =
-        "Close all browser lanes (browser_close_all) or restart the app so the \
-         browser relaunches with the updated allowlist, then retry.";
-
-    /// **F1: resolve a `type`/`set_value` text into a [`TypeInput`]**, intercepting
-    /// `secret:NAME` references (裁决⑦, the security-critical path).
-    ///
-    /// - Plain text → [`TypeInput::Literal`] (logged/echoed normally).
-    /// - `secret:NAME` → look up the current origin (last observe URL) and resolve
-    ///   `NAME` through the [`SecretStore`] origin gate:
-    ///   - origin matches the secret's allowed eTLD+1 → [`TypeInput::Secret`] (the
-    ///     plaintext is injected via `Input.insertText`; it **never** enters the
-    ///     LLM output, the ref table, or logs — `TypeInput::Secret`'s Debug is
-    ///     redacted, and the engine's verify anchors omit the value);
-    ///   - origin does not match / unknown name / no store / no current origin →
-    ///     **fail-closed** `Err(blocked ToolResult)` (never falls back to typing
-    ///     the literal string `secret:NAME`, never leaks the value).
-    ///
-    /// Returns `Ok(TypeInput)` to inject, or `Err(ToolResult)` the caller returns
-    /// verbatim (a blocked/parameter error). **Never** logs the resolved value.
-    fn resolve_type_input(&self, text: &str) -> Result<TypeInput, ToolResult> {
-        let Some(name) = parse_secret_ref(text) else {
-            // Ordinary literal text — not a secret reference.
-            return Ok(TypeInput::Literal(text.to_string()));
-        };
-
-        // `secret:NAME` reference → must resolve through the origin-bound vault.
-        let Some(origin) = self.current_origin() else {
-            return Err(ToolResult::error(format!(
-                "Cannot inject secret {name:?}: no current page origin is known. \
-                 Run `observe` on the page you intend to type into first, then retry — \
-                 a credential is only released for the origin it is bound to (fail-closed)."
-            )));
-        };
-
-        let guard = self.secret_store.lock().expect("secret_store poisoned");
-        let resolved = guard.as_ref().and_then(|store| store.resolve(name, &origin));
-        match resolved {
-            Some(value) => {
-                // F6 (裁决⑤ shared truth): on a managed lane the egress firewall
-                // was fixed when the shared host LAUNCHED. Only inject when that
-                // actually-enforced allowlist covers this page's domain, so the
-                // credential can never land on a page whose egress the firewall
-                // is not restricting (e.g. a secret registered after the host
-                // started). Fail-closed with an explicit recovery path.
-                if self.managed_engine_injected
-                    && !self.managed_egress_allowlist_covers(&origin)
-                {
-                    return Err(ToolResult::error(format!(
-                        "Secret {name:?} cannot be injected: the shared browser is not \
-                         enforcing an egress allowlist that covers {origin:?} (it started \
-                         before this credential's domain was registered). The value was NOT \
-                         typed (fail-closed). {}",
-                        Self::SECRET_EGRESS_ALLOWLIST_RECOVERY
-                    )));
-                }
-                // SECURITY: the plaintext is carried only inside TypeInput::Secret
-                // (Debug-redacted) to the engine, which injects it via insertText.
-                // We do NOT log `value` here. Only the (non-secret) name is traced.
-                tracing::debug!(
-                    target: "nomi_browser::secret",
-                    name = %name,
-                    "resolved secret for the current origin; injecting via insertText (value never enters the LLM/logs)"
-                );
-                // Known-secret blackout: insert the resolved plaintext into the shared set
-                // so the engine's debug serializers can exact-blackout it in any captured
-                // console/network/error output. Only values with len >= 4 to avoid
-                // over-matching trivial strings (e.g. empty, "a", "ab", "abc").
-                let plaintext = value.into_inner();
-                if plaintext.len() >= 4
-                    && let Ok(mut set) = self.known_secret_values.lock()
-                {
-                    set.insert(plaintext.clone());
-                }
-                Ok(TypeInput::Secret(plaintext))
-            }
-            // Fail-closed: unknown name, unbound origin, or no store. Never type the
-            // literal `secret:NAME`, never leak. This holds in yolo/companion too —
-            // the gate is a property of the vault, not an tool-execution approval.
-            None => Err(ToolResult::error(format!(
-                "Secret {name:?} is not available for the current origin {origin:?} \
-                 (fail-closed: unknown name, or the secret is bound to a different domain). \
-                 The value was NOT typed. No secret is configured here unless one was registered \
-                 for this exact registrable domain."
-            ))),
-        }
-    }
-
-    /// **F6 (裁决⑤ managed parity)**: does the managed host's actually-enforced
-    /// egress allowlist ([`Self::managed_enforced_allow_etld1`]) cover `origin`'s
-    /// registrable domain? Entries and the origin are both normalized through
-    /// [`nomifun_secret::etld_plus_one`] — the same PSL machinery the engine's
-    /// `domain_policy` uses — so the answer matches what the firewall enforces.
-    /// `None` list / unparsable origin → `false` (fail-closed).
-    fn managed_egress_allowlist_covers(&self, origin: &str) -> bool {
-        let Some(enforced) = self.managed_enforced_allow_etld1.as_ref() else {
-            return false;
-        };
-        let Some(origin_e1) = nomifun_secret::etld_plus_one(origin) else {
-            return false;
-        };
-        enforced
-            .iter()
-            .filter_map(|entry| nomifun_secret::etld_plus_one(entry))
-            .any(|entry| entry == origin_e1)
-    }
-
     /// **F1: parse the tool `input` into an [`ActSpec`]**, validating required
     /// parameters **before** the engine (and thus the browser) is ever
     /// constructed (裁决: 缺参在启动浏览器前返错).
-    ///
-    /// `secret:NAME` interception happens here for `type`/`set_value`: the `text`/
-    /// `value` is run through [`Self::resolve_type_input`] (the origin gate), so a
-    /// blocked secret short-circuits with `Err(ToolResult)` before any launch.
     ///
     /// Returns `Ok(ActSpec)` ready for `engine.act`, or `Err(ToolResult)` — a
     /// non-panicking parameter/blocked error the caller returns verbatim. This is
@@ -1881,34 +1688,15 @@ impl BrowserTool {
             "hover" => ActSpec::Hover { r#ref: req_str("ref")? },
             "type" => {
                 let r#ref = req_str("ref")?;
-                let text = req_str("text")?;
-                // secret:NAME interception (origin gate) happens here — before launch.
-                let text = self.resolve_type_input(&text)?;
+                let text = TypeInput::Literal(req_str("text")?);
                 ActSpec::Type { r#ref, text }
             }
             "set_value" => {
                 let r#ref = req_str("ref")?;
-                // set_value also honors secret:NAME (writing a credential to a
-                // controlled component). Resolve to a string the engine fills.
-                let value_raw = req_str("value")?;
-                match self.resolve_type_input(&value_raw)? {
-                    TypeInput::Literal(s) => ActSpec::SetValue {
-                        r#ref,
-                        value: s,
-                        secret: false,
-                    },
-                    // A secret destined for set_value: the engine's SetValue takes a
-                    // plain String (it goes to insertText/fill, not the LLM), but the
-                    // plaintext must not surface. `secret: true` mirrors
-                    // TypeInput::Secret — it redacts the spec's Debug AND makes the
-                    // engine suppress the verify before/after anchors (so F2 surfacing
-                    // the Effect never leaks the credential). The value is still the
-                    // plaintext (insertText needs it); only Debug/anchors are gated.
-                    TypeInput::Secret(s) => ActSpec::SetValue {
-                        r#ref,
-                        value: s,
-                        secret: true,
-                    },
+                ActSpec::SetValue {
+                    r#ref,
+                    value: req_str("value")?,
+                    secret: false,
                 }
             }
             "select_option" => ActSpec::SelectOption {
@@ -1977,7 +1765,10 @@ impl BrowserTool {
                 // (the normal case) or fall back to an empty object when absent — extract still
                 // returns a structured page representation, just without a field spec to guide it.
                 let schema = match input.get("schema") {
-                    Some(v) if v.is_object() || v.is_array() => v.clone(),
+                    Some(v) if v.is_object() || v.is_array() => {
+                        ensure_extract_schema_bound(v)?;
+                        v.clone()
+                    }
                     // Missing/null/non-structured schema: default to {} (extract still works,
                     // returning the deterministic page representation; the model can extract freely).
                     _ => serde_json::json!({}),
@@ -2711,22 +2502,6 @@ fn enter_submits_form_signal(keys: Option<&str>) -> bool {
     lower == "enter" || lower == "return"
 }
 
-/// **F1-sec: parse a `secret:NAME` reference** (裁决⑦). Returns `Some(name)` when
-/// `text` is exactly `secret:` followed by a non-empty name; `None` for ordinary
-/// text. The match is on the literal prefix only — a bare `"secret:"` (no name)
-/// is *not* a reference (returns `None`, treated as literal text) so it can never
-/// resolve to an unnamed credential. Pure (no I/O), so the secret-detection logic
-/// is unit-testable.
-fn parse_secret_ref(text: &str) -> Option<&str> {
-    let name = text.strip_prefix(SECRET_PREFIX)?;
-    if name.is_empty() {
-        // `"secret:"` with no name is not a credential reference.
-        None
-    } else {
-        Some(name)
-    }
-}
-
 /// **F2 verify-after-act: render the engine's [`Effect`] as a model-facing note**
 /// (pure, unit-testable). Appended to every action's [`ToolResult`] text so the
 /// model sees whether the action *actually* changed the page — `never assume
@@ -2982,8 +2757,8 @@ impl Tool for BrowserTool {
                 "max_depth": { "type": "integer", "description": "Max accessibility-tree depth to serialize (observe action), default 12 — lower it for huge pages" },
                 "diff": { "type": "boolean", "description": "Use the injected-side diff for this observe (observe action), default true" },
                 // text input
-                "text": { "type": "string", "description": "Text to type (type action) or to find (scroll_to_text / wait_for text_visible). For `type`, use \"secret:NAME\" to inject a stored credential bound to the current origin WITHOUT the value passing through this conversation" },
-                "value": { "type": "string", "description": "Value to set on a control (set_value action); also accepts \"secret:NAME\"" },
+                "text": { "type": "string", "description": "Text to type (type action) or to find (scroll_to_text / wait_for text_visible)" },
+                "value": { "type": "string", "description": "Value to set on a control (set_value action)" },
                 // keys / scroll
                 "keys": { "type": "string", "description": "Key or combo to press (press_key action), e.g. \"Enter\", \"Control+a\", \"Tab\"" },
                 "direction": {
@@ -3119,20 +2894,11 @@ impl Tool for BrowserTool {
             "hover" => format!("hover [ref={ref}]"),
             "type" => {
                 let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                if parse_secret_ref(text).is_some() {
-                    // NEVER echo the resolved secret; describe only the reference.
-                    format!("type a stored secret into [ref={ref}] (value hidden)")
-                } else {
-                    format!("type {:?} into [ref={ref}]", nomi_tools::truncate_utf8(text, 40))
-                }
+                format!("type {:?} into [ref={ref}]", nomi_tools::truncate_utf8(text, 40))
             }
             "set_value" => {
                 let value = input.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                if parse_secret_ref(value).is_some() {
-                    format!("set [ref={ref}] to a stored secret (value hidden)")
-                } else {
-                    format!("set [ref={ref}] = {:?}", nomi_tools::truncate_utf8(value, 40))
-                }
+                format!("set [ref={ref}] = {:?}", nomi_tools::truncate_utf8(value, 40))
             }
             "select_option" => format!("select option(s) on [ref={ref}]"),
             "press_key" => {
@@ -3252,6 +3018,45 @@ pub(crate) mod tests {
         BrowserTool::new(&BrowserConfig::default())
     }
 
+    #[test]
+    fn oversized_observation_is_never_cached_and_clears_prior_authority() {
+        let tool = tool();
+        tool.cache_managed_observation(Observation {
+            generation: nomi_browser_engine::SnapshotGen(1),
+            yaml: "<data>small</data>".into(),
+            entries: vec![],
+            url: Some("https://example.test".into()),
+            truncated: false,
+            current_page_is_post: false,
+            boxes: HashMap::new(),
+        })
+        .expect("small observation fits");
+        assert!(tool.last_snapshot.lock().unwrap().is_some());
+
+        let error = tool
+            .cache_managed_observation(Observation {
+                generation: nomi_browser_engine::SnapshotGen(2),
+                yaml: "x".repeat(
+                    nomi_browser_engine::observe::MAX_OBSERVATION_RETAINED_BYTES + 1,
+                ),
+                entries: vec![],
+                url: None,
+                truncated: false,
+                current_page_is_post: false,
+                boxes: HashMap::new(),
+            })
+            .expect_err("oversized observation must fail closed");
+        assert_eq!(
+            error.limit,
+            nomi_browser_engine::observe::MAX_OBSERVATION_RETAINED_BYTES
+        );
+        assert!(
+            tool.last_snapshot.lock().unwrap().is_none(),
+            "a rejected generation must not leave an older ref/origin snapshot authoritative"
+        );
+        assert!(tool.needs_re_observe());
+    }
+
 
     fn login_state(value: &str) -> nomi_browser_engine::StorageState {
         nomi_browser_engine::StorageState {
@@ -3267,10 +3072,7 @@ pub(crate) mod tests {
         let mut tool = BrowserTool::with_data_dir(data_dir.join("browser-data"), false)
             .persistent_data_dir(data_dir.to_path_buf());
         tool.evaluate_persistent_login = true;
-        tool.secret_source = Some(BrowserSecretSource {
-            vault_path: data_dir.join("unused-secret-vault"),
-            key: [0x42; nomifun_secret::KEY_SIZE],
-        });
+        tool.persistent_login_key = Some([0x42; nomi_browser_engine::vault::KEY_SIZE]);
         tool
     }
 
@@ -3291,7 +3093,7 @@ pub(crate) mod tests {
                 .persist_login_generation(
                     generation,
                     &task_path,
-                    &[0x42; nomifun_secret::KEY_SIZE],
+                    &[0x42; nomi_browser_engine::vault::KEY_SIZE],
                     async move {
                         task_started.notify_one();
                         task_release.notified().await;
@@ -3313,7 +3115,7 @@ pub(crate) mod tests {
         release_capture.notify_one();
         assert_eq!(task.await.expect("persist task"), PersistLoginOutcome::Saved);
         assert_eq!(
-            load_storage_state(&vault_path, &[0x42; nomifun_secret::KEY_SIZE]),
+            load_storage_state(&vault_path, &[0x42; nomi_browser_engine::vault::KEY_SIZE]),
             Some(login_state("awaited")),
             "the awaited effect must be durable before it returns"
         );
@@ -3336,7 +3138,7 @@ pub(crate) mod tests {
                 .persist_login_generation(
                     generation,
                     &task_path,
-                    &[0x42; nomifun_secret::KEY_SIZE],
+                    &[0x42; nomi_browser_engine::vault::KEY_SIZE],
                     async move {
                         task_started.notify_one();
                         task_release.notified().await;
@@ -3433,6 +3235,23 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl BrowserLaneClientPort for FakeLaneClient {
+        fn task_resource_key(&self) -> String {
+            format!("tool-fake-task:{:p}", self)
+        }
+
+        fn handoff_bound_lane_cleanup(
+            &self,
+            lane_id: BrowserLaneId,
+        ) -> Result<(), BrowserPlatformError> {
+            self.closes.lock().unwrap().push(lane_id.clone());
+            self.lanes
+                .lock()
+                .unwrap()
+                .retain(|lane| lane.lane_id != lane_id);
+            self.close_called.notify_one();
+            Ok(())
+        }
+
         async fn open(
             &self,
             lane_name: Option<&str>,
@@ -3746,17 +3565,12 @@ pub(crate) mod tests {
         // F23: the native surface must reject the SAME trusted-owner set the
         // shared ManagedBrowserFacade rejects — including the surface/routing
         // fields that used to be accepted only here (contract drift).
-        for (field, value) in [
-            ("user_id", json!("model-chosen-owner")),
-            ("surface", json!("gateway")),
-            ("browser_surface", json!("gateway")),
-            ("lane_key", json!("other-runtime/default")),
-        ] {
+        for field in crate::TRUSTED_OWNER_INPUT_FIELDS {
             let result = tool
                 .execute(json!({
                     "action": "navigate",
                     "url": "https://example.test/",
-                    field: value,
+                    (*field): "model-controlled",
                 }))
                 .await;
 
@@ -4113,7 +3927,7 @@ pub(crate) mod tests {
             .persist_login_generation(
                 first_generation,
                 &vault_path,
-                &[0x42; nomifun_secret::KEY_SIZE],
+                    &[0x42; nomi_browser_engine::vault::KEY_SIZE],
                 async { Ok(login_state("first")) },
             )
             .await;
@@ -4125,7 +3939,7 @@ pub(crate) mod tests {
             .persist_login_generation(
                 second_generation,
                 &vault_path,
-                &[0x42; nomifun_secret::KEY_SIZE],
+                    &[0x42; nomi_browser_engine::vault::KEY_SIZE],
                 async { Ok(login_state("retry")) },
             )
             .await;
@@ -4135,7 +3949,7 @@ pub(crate) mod tests {
             "a failed save must remain immediately retryable instead of being swallowed for 60 seconds"
         );
         assert_eq!(
-            load_storage_state(&vault_path, &[0x42; nomifun_secret::KEY_SIZE]),
+            load_storage_state(&vault_path, &[0x42; nomi_browser_engine::vault::KEY_SIZE]),
             Some(login_state("retry"))
         );
     }
@@ -4151,7 +3965,7 @@ pub(crate) mod tests {
             tool.persist_login_generation(
                 first_generation,
                 &vault_path,
-                &[0x42; nomifun_secret::KEY_SIZE],
+                    &[0x42; nomi_browser_engine::vault::KEY_SIZE],
                 async { Err(BrowserError::Other("capture failed".to_owned())) },
             )
             .await,
@@ -4163,7 +3977,7 @@ pub(crate) mod tests {
             tool.persist_login_generation(
                 second_generation,
                 &vault_path,
-                &[0x42; nomifun_secret::KEY_SIZE],
+                    &[0x42; nomi_browser_engine::vault::KEY_SIZE],
                 async { Ok(login_state("retry-after-capture")) },
             )
             .await,
@@ -4184,7 +3998,7 @@ pub(crate) mod tests {
             tool.persist_login_generation(
                 newer,
                 &vault_path,
-                &[0x42; nomifun_secret::KEY_SIZE],
+                    &[0x42; nomi_browser_engine::vault::KEY_SIZE],
                 async { Ok(login_state("newer")) },
             )
             .await,
@@ -4194,14 +4008,14 @@ pub(crate) mod tests {
             tool.persist_login_generation(
                 older,
                 &vault_path,
-                &[0x42; nomifun_secret::KEY_SIZE],
+                    &[0x42; nomi_browser_engine::vault::KEY_SIZE],
                 async { Ok(login_state("older")) },
             )
             .await,
             PersistLoginOutcome::Superseded
         );
         assert_eq!(
-            load_storage_state(&vault_path, &[0x42; nomifun_secret::KEY_SIZE]),
+            load_storage_state(&vault_path, &[0x42; nomi_browser_engine::vault::KEY_SIZE]),
             Some(login_state("newer")),
             "late completion from an older request must not replace the newest vault"
         );
@@ -4222,7 +4036,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn crawl_many_cancellation_during_open_closes_lane_by_deterministic_name() {
+    async fn crawl_many_cancellation_during_open_does_not_publish_name_cleanup() {
         let client = Arc::new(FakeLaneClient::default());
         client
             .block_open_after_insert
@@ -4246,12 +4060,16 @@ pub(crate) mod tests {
         task.abort();
         let join_error = task.await.expect_err("parent crawl task should be cancelled");
         assert!(join_error.is_cancelled());
-        tokio::time::timeout(Duration::from_secs(2), client.close_called.notified())
-            .await
-            .expect("RAII cleanup should resolve and close the partially-opened Lane");
-        assert!(client.lanes.lock().unwrap().is_empty());
-        assert_eq!(client.closes.lock().unwrap().len(), 1);
+        assert!(
+            client.closes.lock().unwrap().is_empty(),
+            "a cancelled open has no sealed Lane id, so managed code must not rescan a reusable name"
+        );
         assert!(client.operations.lock().unwrap().is_empty());
+        // This fake deliberately inserts before its pending await and has no
+        // BrowserSessionHub admission guard. Production cleanup belongs to the
+        // Hub's LaneStartWaiter/abandoned_lane_starts authority; the facade
+        // must not manufacture a second, name-based cleanup authority here.
+        client.lanes.lock().unwrap().clear();
     }
 
     #[tokio::test]
@@ -5006,6 +4824,65 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn standalone_task_owner_shares_budget_across_facades_and_separates_tasks() {
+        let data = std::env::temp_dir().join("bt-standalone-task-scope");
+        let task_a = StandaloneBrowserTask::new();
+        let task_b = StandaloneBrowserTask::new();
+        let a_first = BrowserTool::with_data_dir_for_task(&task_a, data.clone(), false);
+        let a_second = BrowserTool::with_data_dir_for_task(&task_a, data.clone(), false);
+        let b_first = BrowserTool::with_data_dir_for_task(&task_b, data, false);
+
+        assert!(
+            a_first
+                .standalone_resource_scope
+                .shares_budget_with(&a_second.standalone_resource_scope),
+            "every facade and restart for one trusted task must share structural capacity"
+        );
+        assert!(
+            !a_first
+                .standalone_resource_scope
+                .shares_budget_with(&b_first.standalone_resource_scope),
+            "distinct trusted tasks must not share the standalone 4/4/16 budget"
+        );
+    }
+
+    #[test]
+    fn legacy_facades_without_a_task_owner_share_the_compatibility_scope() {
+        let data = std::env::temp_dir().join("bt-legacy-compatibility-scope");
+        let first = BrowserTool::with_data_dir(data.clone(), false);
+        let second = BrowserTool::with_data_dir(data, false);
+        assert!(
+            first
+                .standalone_resource_scope
+                .shares_budget_with(&second.standalone_resource_scope),
+            "legacy no-owner constructors must not mint one fresh budget per facade"
+        );
+    }
+
+    #[test]
+    fn standalone_task_scope_is_absent_from_model_input_schema() {
+        let schema = BrowserTool::with_data_dir_for_task(
+            &StandaloneBrowserTask::new(),
+            std::env::temp_dir().join("bt-task-scope-schema"),
+            false,
+        )
+        .input_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("Browser input schema properties");
+        for field in crate::TRUSTED_OWNER_INPUT_FIELDS {
+            assert!(
+                !properties.contains_key(*field),
+                "trusted owner field `{field}` must be absent from the model schema: {schema}"
+            );
+        }
+        let schema = schema.to_string();
+        assert!(!schema.contains("resource_scope"), "{schema}");
+        assert!(!schema.contains("task_scope"), "{schema}");
+        assert!(!schema.contains("StandaloneBrowserTask"), "{schema}");
+    }
+
     #[tokio::test]
     async fn managed_constructor_owns_no_profile_and_never_initializes_standalone_engine() {
         let workspace = std::env::temp_dir().join("bt-managed-workspace");
@@ -5074,66 +4951,6 @@ pub(crate) mod tests {
         assert_eq!(t.workspace_dir.as_deref(), Some(ws.as_path()));
         // data_dir 不被 workspace 覆盖（二者正交：data_dir=chrome/user-data-dir 父，workspace=下载落点）。
         assert_eq!(t.data_dir, data);
-    }
-
-    // ── P3-X2: secret_source → 懒加载 store + 派生 firewall allow_etld1（裁决⑤共用真值，纯逻辑）──
-
-    #[test]
-    fn ensure_secret_store_and_firewall_loads_vault_and_derives_allowlist() {
-        // 注册 secret 到 per-pet vault（机器绑定 key），用 secret_source 指向它 → 引擎构造前的
-        // ensure_secret_store_and_firewall 应：(1) 懒加载 store（secret:NAME 可解析）、(2) 从其
-        // allowed_origins 派生 firewall.allow_etld1。
-        let dir = tempfile::tempdir().expect("tempdir");
-        let key = [0x42u8; nomifun_secret::KEY_SIZE];
-        let vault_path = nomifun_secret::shared_vault_path(dir.path());
-        let mut store = nomifun_secret::SecretStore::new(key);
-        store.register("pw", "the-secret", vec!["x.com".into()]).unwrap();
-        store.register("tok", "ghp", vec!["github.com".into()]).unwrap();
-        nomifun_secret::save_secret_store(&store, &vault_path).expect("save vault");
-
-        let t = BrowserTool::with_data_dir(dir.path().join("bdata"), false)
-            .secret_source(BrowserSecretSource { vault_path, key });
-        // Before: no store / no firewall override (lazy).
-        assert!(t.secret_store.lock().unwrap().is_none());
-        t.ensure_secret_store_and_firewall();
-        // After: store loaded → resolve works (origin-gated, fail-closed off-domain).
-        {
-            let guard = t.secret_store.lock().unwrap();
-            let loaded = guard.as_ref().expect("store loaded from vault");
-            assert_eq!(loaded.resolve("pw", "https://login.x.com").unwrap().expose(), "the-secret");
-            assert!(loaded.resolve("pw", "https://evil.com").is_none(), "origin gate stays fail-closed");
-        }
-        // And: firewall.allow_etld1 == the union of registered allowed_origins (裁决⑤).
-        let fw = t.firewall_override.lock().unwrap().clone().expect("firewall derived");
-        assert_eq!(fw.allow_etld1, vec!["github.com".to_string(), "x.com".to_string()]);
-        // The other firewall guards stay at their defaults (IP block + cross-origin POST gate).
-        let def = nomi_browser_engine::FirewallConfig::default();
-        assert_eq!(fw.block_private_ips, def.block_private_ips);
-        assert_eq!(fw.gate_cross_origin_post, def.gate_cross_origin_post);
-    }
-
-    #[test]
-    fn ensure_secret_store_and_firewall_no_source_keeps_default_firewall() {
-        // 无 secret 源（CLI / 测试默认）→ store 仍空、firewall.allow_etld1 空 = 不限制出口域（零回归）。
-        let t = BrowserTool::with_data_dir(std::env::temp_dir().join("bt-x2-nosrc"), false);
-        t.ensure_secret_store_and_firewall();
-        assert!(t.secret_store.lock().unwrap().is_none(), "no source → store stays empty");
-        let fw = t.firewall_override.lock().unwrap().clone().expect("firewall set");
-        assert!(fw.allow_etld1.is_empty(), "no registered origins → unrestricted egress (zero regression)");
-        assert_eq!(fw, nomi_browser_engine::FirewallConfig::default(), "firewall == default when no secrets");
-    }
-
-    #[test]
-    fn ensure_secret_store_and_firewall_missing_vault_degrades_gracefully() {
-        // secret_source 指向不存在的 vault（首次注册前）→ 空 store + 空 allowlist（绝不 panic）。
-        let dir = tempfile::tempdir().expect("tempdir");
-        let vault_path = nomifun_secret::shared_vault_path(dir.path());
-        let t = BrowserTool::with_data_dir(dir.path().join("bdata"), false)
-            .secret_source(BrowserSecretSource { vault_path, key: [0x42; nomifun_secret::KEY_SIZE] });
-        t.ensure_secret_store_and_firewall();
-        // Empty store loaded (not None — a source WAS set), allowlist empty.
-        assert!(t.secret_store.lock().unwrap().as_ref().is_some_and(|s| s.is_empty()));
-        assert!(t.firewall_override.lock().unwrap().as_ref().unwrap().allow_etld1.is_empty());
     }
 
     #[test]
@@ -5273,12 +5090,10 @@ pub(crate) mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // F1: facade 全动作 dispatch + schema enum + 参数池 + describe + secret 接线。
-    // 纯逻辑（build_act_spec 解析 / 缺参在启动浏览器前返错 / secret:NAME origin 门 /
-    // 值不入输出 / schema enum / describe IRREVERSIBLE）。无真浏览器。
+    // F1: facade 全动作 dispatch + schema enum + 参数池 + describe。
+    // 纯逻辑（build_act_spec 解析 / 缺参在启动浏览器前返错 /
+    // schema enum / describe IRREVERSIBLE）。无真浏览器。
     // ════════════════════════════════════════════════════════════════════════
-
-    use nomifun_secret::SecretStore;
 
     /// helper：把 `build_act_spec` 的 `Err(ToolResult)` 当作「缺参/被拒」，断言它是错误且含某子串。
     fn assert_spec_err(t: &BrowserTool, action: &str, input: Value, must_contain: &str) {
@@ -5440,6 +5255,18 @@ pub(crate) mod tests {
         ));
     }
 
+    #[test]
+    fn extract_schema_byte_limit_is_checked_before_clone_or_browser_launch() {
+        let t = tool();
+        let oversized = json!({
+            "字段": "😀".repeat(nomi_browser_engine::actions::MAX_EXTRACT_SCHEMA_BYTES)
+        });
+        let error = t
+            .build_act_spec("extract", &json!({"action": "extract", "schema": oversized}))
+            .expect_err("oversized extraction schema must fail closed");
+        assert!(error.content.contains("serialized byte limit"), "{}", error.content);
+    }
+
     // ── 缺参在启动浏览器前返错（build_act_spec 纯逻辑，never launches）──
 
     #[test]
@@ -5492,246 +5319,6 @@ pub(crate) mod tests {
         assert!(t.engine.lock().unwrap().is_none());
     }
 
-    // ── secret:NAME 解析（纯函数）──
-
-    #[test]
-    fn parse_secret_ref_recognizes_prefix_and_extracts_name() {
-        assert_eq!(parse_secret_ref("secret:my_password"), Some("my_password"));
-        assert_eq!(parse_secret_ref("secret:GH_TOKEN"), Some("GH_TOKEN"));
-        // ordinary text is NOT a secret ref
-        assert_eq!(parse_secret_ref("hello world"), None);
-        assert_eq!(parse_secret_ref("my secret: value"), None); // prefix not at start
-        assert_eq!(parse_secret_ref("SECRET:upper"), None); // case-sensitive prefix
-        // bare "secret:" with no name is NOT a reference (never resolves to nothing)
-        assert_eq!(parse_secret_ref("secret:"), None);
-    }
-
-    // ── secret:NAME origin 门：匹配→Secret 注入；不匹配/无门→Blocked，且值不出现在输出 ──
-
-    fn store_with_secret(name: &str, value: &str, origin: &str) -> SecretStore {
-        let mut s = SecretStore::ephemeral().expect("ephemeral store");
-        s.register(name, value, vec![origin.to_string()]).unwrap();
-        s
-    }
-
-    #[test]
-    fn resolve_type_input_plain_text_is_literal_not_secret() {
-        let t = tool();
-        match t.resolve_type_input("just typing this") {
-            Ok(TypeInput::Literal(s)) => assert_eq!(s, "just typing this"),
-            other => panic!("plain text must be Literal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_type_input_secret_matching_origin_injects_secret() {
-        // last observe url = https://shop.example.com/cart (from seed_snapshot).
-        // Secret bound to example.com → subdomain shop.example.com matches.
-        let store = store_with_secret("pw", "hunter2-PLAINTEXT", "example.com");
-        let t = BrowserTool::with_secret_store(std::env::temp_dir().join("bt-f1"), false, store);
-        seed_snapshot(&t, "f0e1", "textbox", "Password");
-
-        let resolved = t.resolve_type_input("secret:pw");
-        match &resolved {
-            Ok(TypeInput::Secret(_)) => { /* expected; do not read the value out */ }
-            other => panic!("matching-origin secret must inject TypeInput::Secret, got {other:?}"),
-        }
-        // SECURITY: the plaintext must NOT appear in the Debug of the TypeInput (redacted).
-        let dbg = format!("{:?}", resolved.unwrap());
-        assert!(
-            !dbg.contains("hunter2-PLAINTEXT"),
-            "secret plaintext leaked into Debug: {dbg}"
-        );
-        assert!(dbg.contains("redacted") || dbg.contains("Secret"), "{dbg}");
-    }
-
-    #[test]
-    fn resolve_type_input_secret_wrong_origin_is_blocked_and_does_not_leak() {
-        // Secret bound to other-bank.com, but the current page is shop.example.com →
-        // fail-closed: returns an error ToolResult and NEVER the value/literal.
-        let store = store_with_secret("pw", "hunter2-PLAINTEXT", "other-bank.com");
-        let t = BrowserTool::with_secret_store(std::env::temp_dir().join("bt-f1b"), false, store);
-        seed_snapshot(&t, "f0e1", "textbox", "Password"); // url = shop.example.com
-
-        match t.resolve_type_input("secret:pw") {
-            Ok(ti) => panic!("wrong-origin secret must be blocked, got Ok({ti:?})"),
-            Err(tr) => {
-                assert!(tr.is_error, "wrong-origin secret must be an error");
-                // Must not leak the plaintext NOR silently type the literal "secret:pw".
-                assert!(!tr.content.contains("hunter2-PLAINTEXT"), "leaked plaintext: {}", tr.content);
-                assert!(
-                    tr.content.to_lowercase().contains("fail-closed")
-                        || tr.content.to_lowercase().contains("not available"),
-                    "block message should explain the fail-closed gate: {}",
-                    tr.content
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn resolve_type_input_secret_no_store_is_blocked() {
-        // No vault configured (P2 production default) → secret:NAME fails closed.
-        let t = tool();
-        seed_snapshot(&t, "f0e1", "textbox", "Password");
-        match t.resolve_type_input("secret:pw") {
-            Ok(ti) => panic!("no-store secret must be blocked, got Ok({ti:?})"),
-            Err(tr) => assert!(tr.is_error),
-        }
-    }
-
-    #[test]
-    fn resolve_type_input_secret_no_origin_is_blocked() {
-        // No observe yet → no current origin → cannot resolve → fail closed.
-        let store = store_with_secret("pw", "v", "example.com");
-        let t = BrowserTool::with_secret_store(std::env::temp_dir().join("bt-f1c"), false, store);
-        // no seed_snapshot → current_origin() is None
-        match t.resolve_type_input("secret:pw") {
-            Ok(ti) => panic!("no-origin secret must be blocked, got Ok({ti:?})"),
-            Err(tr) => {
-                assert!(tr.is_error);
-                assert!(
-                    tr.content.contains("observe") || tr.content.to_lowercase().contains("origin"),
-                    "should guide to observe first: {}",
-                    tr.content
-                );
-            }
-        }
-    }
-
-    // ── F6 (裁决⑤ managed parity): managed facades only inject a secret when the
-    //    HOST-enforced egress allowlist covers the page's registrable domain ──
-
-    /// Build a managed-lane facade (as the platform adapter does) with a
-    /// populated store, the seeded snapshot origin, and an explicit
-    /// host-enforced allowlist state.
-    fn managed_secret_tool(enforced: Option<Vec<String>>) -> BrowserTool {
-        let mut t = managed_engine_tool(Arc::new(FakeRecordingEngine));
-        t.managed_enforced_allow_etld1 = enforced;
-        *t.secret_store.lock().unwrap() =
-            Some(store_with_secret("pw", "hunter2-PLAINTEXT", "example.com"));
-        seed_snapshot(&t, "f0e1", "textbox", "Password"); // url = shop.example.com
-        t
-    }
-
-    #[test]
-    fn managed_secret_injects_when_host_enforced_allowlist_covers_origin() {
-        let t = managed_secret_tool(Some(vec!["example.com".into()]));
-        match t.resolve_type_input("secret:pw") {
-            Ok(TypeInput::Secret(_)) => {}
-            other => panic!("covered origin must inject TypeInput::Secret, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn managed_secret_blocked_when_host_allowlist_misses_origin_and_does_not_leak() {
-        // The host launched BEFORE this credential's domain was registered:
-        // its enforced allowlist does not cover shop.example.com → fail-closed
-        // with a recovery path, never injecting into an un-firewalled page.
-        for enforced in [Some(vec![]), Some(vec!["other-bank.com".into()]), None] {
-            let t = managed_secret_tool(enforced.clone());
-            match t.resolve_type_input("secret:pw") {
-                Ok(ti) => panic!(
-                    "uncovered origin must be blocked (enforced={enforced:?}), got Ok({ti:?})"
-                ),
-                Err(tr) => {
-                    assert!(tr.is_error);
-                    assert!(
-                        !tr.content.contains("hunter2-PLAINTEXT"),
-                        "leaked plaintext: {}",
-                        tr.content
-                    );
-                    assert!(
-                        tr.content.contains("egress allowlist"),
-                        "block message should explain the enforcement gap: {}",
-                        tr.content
-                    );
-                    assert!(
-                        tr.content.contains("browser_close_all") || tr.content.contains("restart"),
-                        "block message should give a recovery path: {}",
-                        tr.content
-                    );
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn managed_prepare_act_enforces_host_allowlist_gate_end_to_end() {
-        // The platform adapter path (prepare_managed_act → build_act_spec →
-        // resolve_type_input) must hit the same gate: covered origin builds the
-        // spec, uncovered origin is rejected before any engine dispatch.
-        let covered = managed_secret_tool(Some(vec!["example.com".into()]));
-        covered
-            .prepare_managed_act("type", &json!({"ref": "f0e1", "text": "secret:pw"}), false)
-            .await
-            .expect("covered origin must build the managed act spec");
-
-        let uncovered = managed_secret_tool(Some(vec![]));
-        let error = uncovered
-            .prepare_managed_act("type", &json!({"ref": "f0e1", "text": "secret:pw"}), false)
-            .await
-            .expect_err("uncovered origin must fail closed");
-        assert!(!error.contains("hunter2-PLAINTEXT"), "leaked plaintext: {error}");
-        assert!(error.contains("egress allowlist"), "{error}");
-    }
-
-    #[test]
-    fn standalone_secret_injection_ignores_managed_enforcement_field() {
-        // Standalone facades derive the engine firewall from the same store
-        // snapshot they inject from — the managed gate must not apply.
-        let store = store_with_secret("pw", "hunter2-PLAINTEXT", "example.com");
-        let t = BrowserTool::with_secret_store(std::env::temp_dir().join("bt-f6-standalone"), false, store);
-        seed_snapshot(&t, "f0e1", "textbox", "Password");
-        assert!(t.managed_enforced_allow_etld1.is_none());
-        assert!(matches!(t.resolve_type_input("secret:pw"), Ok(TypeInput::Secret(_))));
-    }
-
-    #[test]
-    fn build_act_spec_type_secret_does_not_leak_value_into_spec_debug() {
-        // The resolved ActSpec::Type carries TypeInput::Secret — its Debug is redacted,
-        // so even dbg!-ing the whole spec never prints the plaintext.
-        let store = store_with_secret("pw", "TOP-SECRET-PLAINTEXT", "example.com");
-        let t = BrowserTool::with_secret_store(std::env::temp_dir().join("bt-f1d"), false, store);
-        seed_snapshot(&t, "f0e1", "textbox", "Password");
-        let spec = t
-            .build_act_spec("type", &json!({"action":"type","ref":"f0e1","text":"secret:pw"}))
-            .expect("matching-origin secret should build a spec");
-        let dbg = format!("{spec:?}");
-        assert!(
-            !dbg.contains("TOP-SECRET-PLAINTEXT"),
-            "ActSpec Debug leaked the secret plaintext: {dbg}"
-        );
-    }
-
-    /// **A 安全红线：set_value 的 `secret:NAME` 解析后 ActSpec Debug 不泄漏明文 + 标 secret=true**。
-    /// build_act_spec 走 resolve_type_input → matching-origin secret → `SetValue { secret: true }`；
-    /// 其手写 Debug 把 value 脱敏（即便 dbg! 整个 spec）——F2 会把 effect 透进 ToolResult，这里堵死
-    /// set_value secret 的 Debug/日志泄漏面（anchor 抑制在引擎层另测）。
-    #[test]
-    fn build_act_spec_set_value_secret_does_not_leak_and_flags_secret() {
-        let store = store_with_secret("pw", "TOP-SECRET-SETVALUE", "example.com");
-        let t = BrowserTool::with_secret_store(std::env::temp_dir().join("bt-f2sv"), false, store);
-        seed_snapshot(&t, "f0e1", "textbox", "Password");
-        let spec = t
-            .build_act_spec(
-                "set_value",
-                &json!({"action":"set_value","ref":"f0e1","value":"secret:pw"}),
-            )
-            .expect("matching-origin secret should build a set_value spec");
-        // The spec must carry secret: true (drives engine anchor suppression).
-        assert!(
-            matches!(spec, ActSpec::SetValue { secret: true, .. }),
-            "set_value secret:NAME must build SetValue{{ secret: true }}, got {spec:?}"
-        );
-        // Debug must not leak the resolved plaintext.
-        let dbg = format!("{spec:?}");
-        assert!(
-            !dbg.contains("TOP-SECRET-SETVALUE"),
-            "set_value ActSpec Debug leaked the secret plaintext: {dbg}"
-        );
-    }
-
     /// **A：set_value with plain (non-secret) text → `SetValue { secret: false }`** (regression).
     #[test]
     fn build_act_spec_set_value_plain_is_not_secret() {
@@ -5780,20 +5367,16 @@ pub(crate) mod tests {
         assert!(note.contains("changed=true"), "still surfaces changed: {note}");
     }
 
-    // ── describe: 全动作 + IRREVERSIBLE 讲后果 + secret 不回显 ──
+    // ── describe: 全动作 + IRREVERSIBLE 讲后果 ──
 
     #[test]
-    fn describe_covers_actions_and_hides_secret() {
+    fn describe_covers_actions() {
         let t = tool();
         assert_eq!(t.describe(&json!({"action":"click","ref":"f0e1"})), "Browser: click [ref=f0e1]");
         assert_eq!(
             t.describe(&json!({"action":"type","ref":"f0e1","text":"hi"})),
             "Browser: type \"hi\" into [ref=f0e1]"
         );
-        // secret reference must never echo the resolved value or the raw "secret:pw".
-        let d = t.describe(&json!({"action":"type","ref":"f0e1","text":"secret:pw"}));
-        assert!(d.contains("stored secret") && d.contains("hidden"), "{d}");
-        assert!(!d.contains("secret:pw"), "describe must not echo the secret reference verbatim: {d}");
         // simple coverage of a few more.
         assert_eq!(t.describe(&json!({"action":"back"})), "Browser: go back");
         assert!(t.describe(&json!({"action":"scroll","direction":"down"})).contains("scroll viewport down"));
@@ -5853,29 +5436,20 @@ pub(crate) mod tests {
         );
     }
 
-    // ── #[ignore] 真 Chrome：经 facade execute 跑 click + type(含 secret:NAME 路径，验值不泄) ──
+    // ── #[ignore] 真 Chrome：经 facade execute 跑 click ──
     //
     //   set NOMIFUN_CHROME_BINARY 后:
-    //   cargo nextest run -p nomi-browser -- --run-ignored --ignored facade_act_click_and_secret_type_real
+    //   cargo nextest run -p nomi-browser -- --run-ignored --ignored facade_act_click_real
     #[tokio::test]
     #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 -- --run-ignored"]
-    async fn facade_act_click_and_secret_type_real() {
+    async fn facade_act_click_real() {
         // A data: URL with a form field + a button, so click/type are exercisable.
         let html = "data:text/html,<html><body>\
             <input id=u type=text aria-label=Username>\
             <input id=p type=password aria-label=Password>\
             <button id=b>Show more</button>\
             </body></html>";
-        let store = store_with_secret("pw", "real-injected-secret-plaintext", "example.com");
-        // Use a real (non-example) origin won't match; for the real test we navigate
-        // to the data: URL whose origin is "null" — so the secret path will fail
-        // closed (correct!). To exercise the *successful* secret path against a real
-        // origin you'd register for that origin; here we assert the gate holds.
-        let t = BrowserTool::with_secret_store(
-            std::env::temp_dir().join("bt-f1-real"),
-            false,
-            store,
-        );
+        let t = BrowserTool::with_data_dir(std::env::temp_dir().join("bt-f1-real"), false);
 
         let nav = t.execute(json!({"action": "navigate", "url": html})).await;
         assert!(!nav.is_error, "{}", nav.content);
@@ -5899,16 +5473,6 @@ pub(crate) mod tests {
             );
         }
 
-        // secret:NAME against the data: (null) origin → fail-closed Blocked, and the
-        // plaintext must never appear in the tool output.
-        let typed = t
-            .execute(json!({"action": "type", "ref": "f0e0", "text": "secret:pw"}))
-            .await;
-        assert!(
-            !typed.content.contains("real-injected-secret-plaintext"),
-            "secret plaintext must never reach the tool output: {}",
-            typed.content
-        );
     }
 
     // ── P3-G2 #[ignore] 真 Chrome：构造带真 per-pet workspace 的 facade → download → 文件落
@@ -6344,7 +5908,7 @@ pub(crate) mod tests {
                 false, // evaluate_persistent_login
                 None,  // workspace_dir
                 None,  // runtime_mode
-                None,  // secret_source
+                None,  // persistent_login_key
             );
             // Enable takeover + force Cancelled resolution.
             t.takeover_controller.enabled = true;
@@ -6377,7 +5941,7 @@ pub(crate) mod tests {
                 false, // evaluate_persistent_login
                 None,  // workspace_dir
                 None,  // runtime_mode
-                None,  // secret_source
+                None,  // persistent_login_key
             );
             // Enable takeover + force Confirmed resolution.
             t.takeover_controller.enabled = true;
@@ -6580,7 +6144,7 @@ pub(crate) mod tests {
             false,
             false,
             false,
-            Arc::new(Mutex::new(HashSet::new())),
+            nomi_browser_engine::KnownSecretValues::default(),
         )
     }
 
