@@ -145,8 +145,9 @@ pub struct MemoryListPage {
 }
 
 /// Cluster active memories into suspected-duplicate groups (same kind + same
-/// scope, contents pairwise similar to an existing member). Groups of one are
-/// dropped — there is nothing to merge.
+/// OWNER, contents pairwise similar to an existing member). Groups of one are
+/// dropped — there is nothing to merge. Grouping by owner is what stops the
+/// merge assistant from ever offering to fuse two companions' memories into one.
 fn group_similar_memories(memories: Vec<CompanionMemory>) -> Vec<MemoryMergeGroup> {
     let mut groups: Vec<Vec<CompanionMemory>> = Vec::new();
     for memory in memories {
@@ -317,7 +318,18 @@ impl CompanionService {
         // The persistent v3 side-store is authoritative. Never hide a corrupt,
         // locked, or pre-v3 database behind a throwaway in-memory replacement:
         // doing so would make writes appear successful and then disappear.
-        let store = CompanionStore::open(&shared_dir).await?;
+        //
+        // The owner is resolved from the roster that was just scanned, BEFORE the
+        // store opens, because opening it runs the one-time re-homing of the
+        // vestigial shared memories onto that companion. It is always a live
+        // roster member, so the reference audit right below still passes.
+        let memory_owner = {
+            let default_companion_id = config.read().await.default_companion_id.clone();
+            registry
+                .resolve_memory_owner(default_companion_id.as_deref())
+                .await
+        };
+        let store = CompanionStore::open(&shared_dir, memory_owner.as_deref()).await?;
         store.validate_companion_references(&live_companion_ids).await?;
         collector::validate_event_store(&shared_dir)?;
         let startup_config = config.read().await.clone();
@@ -458,6 +470,7 @@ impl CompanionService {
         Arc::new(crate::companion::CompanionStoreSink {
             store: self.store.clone(),
             config: self.config.clone(),
+            registry: self.registry.clone(),
             emitter: self.emitter.clone(),
             companion_dir: self.shared_dir.clone(),
             event_store_lock: self.event_store_lock.clone(),
@@ -853,8 +866,10 @@ impl CompanionService {
             xp,
             level: level_for_xp(xp),
             mood: self.store.get_state("mood").await?.unwrap_or_else(|| "content".into()),
-            memories_active: self.store.count_memories("active").await?,
-            memories_archived: self.store.count_memories("archived").await?,
+            // Memory is owned per companion, and this snapshot is rendered per
+            // companion: count only what THIS companion can read.
+            memories_active: self.store.count_memories("active", Some(id)).await?,
+            memories_archived: self.store.count_memories("archived", Some(id)).await?,
             skills_active: self.store.count_active_skills(id).await?,
             model_configured: profile.model.is_some(),
             collect_any_enabled: cfg.collect.any_enabled(),
@@ -865,7 +880,7 @@ impl CompanionService {
     pub async fn weekly_digest(&self, companion_id: &str, since_ms: i64) -> Result<CompanionWeeklyDigest, AppError> {
         let skills_learned = self.store.count_skills_since(companion_id, since_ms, None).await?;
         let skills_active_new = self.store.count_skills_since(companion_id, since_ms, Some("active")).await?;
-        let memories_added = self.store.count_memories_since(since_ms).await?;
+        let memories_added = self.store.count_memories_since(since_ms, companion_id).await?;
         let new_skill_names = self.store.list_skill_names_since(companion_id, since_ms, 12).await?;
         Ok(CompanionWeeklyDigest {
             since_ms,
@@ -1222,8 +1237,10 @@ impl CompanionService {
             xp: 0,
             level: level_for_xp(0),
             mood: self.store.get_state("mood").await?.unwrap_or_else(|| "content".into()),
-            memories_active: self.store.count_memories("active").await?,
-            memories_archived: self.store.count_memories("archived").await?,
+            // No companion exists to own anything: the only rows left are
+            // vestigial unowned ones, so the unscoped count IS the honest total.
+            memories_active: self.store.count_memories("active", None).await?,
+            memories_archived: self.store.count_memories("archived", None).await?,
             skills_active: 0,
             model_configured: false,
             collect_any_enabled: cfg.collect.any_enabled(),
@@ -1265,7 +1282,6 @@ impl CompanionService {
         let query = MemorySearchQuery {
             queries: vec![q.to_owned()],
             kind,
-            scope: None,
             status,
             companion_id,
             limit: 500,
@@ -1371,7 +1387,26 @@ impl CompanionService {
     ) -> Result<Vec<crate::store::SessionWindow>, AppError> {
         self.store.digests_on_day_of_year(companion_id, mmdd, exclude_day, limit).await
     }
-    pub async fn add_memory(&self, kind: &str, content: &str, tags: &[String], scope: MemoryScope) -> Result<CompanionMemory, AppError> {
+    /// The single owner every ownerless memory write lands on: the explicit
+    /// default companion, else the oldest companion, else `None` on an empty
+    /// roster (no legal owner — the caller must refuse rather than write an
+    /// orphan). 共享记忆已删除，所以任何写入方都必须先问过这里。
+    pub async fn resolve_memory_owner(&self) -> Option<String> {
+        let default_companion_id = self.config.read().await.default_companion_id.clone();
+        self.registry
+            .resolve_memory_owner(default_companion_id.as_deref())
+            .await
+    }
+
+    /// Add a memory owned by `companion_id`, or by the resolved owner when the
+    /// caller has no companion of its own (the MCP owner-agent write path).
+    pub async fn add_memory(
+        &self,
+        kind: &str,
+        content: &str,
+        tags: &[String],
+        companion_id: Option<&str>,
+    ) -> Result<CompanionMemory, AppError> {
         if !crate::store::MEMORY_KINDS.contains(&kind) {
             return Err(AppError::BadRequest(format!("invalid memory kind '{kind}'")));
         }
@@ -1379,32 +1414,44 @@ impl CompanionService {
         if content.is_empty() {
             return Err(AppError::BadRequest("memory content is empty".into()));
         }
-        // Dedup-merge (parity with the companion sink's save_memory): a
-        // similar active memory is reinforced and returned instead of
-        // inserting a near-duplicate. This guards the gateway
-        // `nomi_memory_save` path, which previously inserted blindly.
-        // Only for shared adds — a private add must not be silently folded into
-        // an existing (possibly shared, or another companion's) memory.
-        if scope == MemoryScope::Shared {
-            if let Some(id) = self.store.find_similar_active(kind, content).await? {
-                self.store.reinforce_memories(std::slice::from_ref(&id)).await?;
-                if let Some(existing) = self.store.get_memory(&id).await? {
-                    return Ok(existing);
-                }
+        // A memory may only be owned by a LIVE companion: an unknown owner would
+        // become an orphaned reference and hard-fail the next boot.
+        let owner = match companion_id {
+            Some(companion_id) => {
+                self.get_companion(companion_id).await?;
+                companion_id.to_owned()
+            }
+            None => self.resolve_memory_owner().await.ok_or_else(|| {
+                AppError::BadRequest("还没有伙伴，无法保存记忆：请先创建一个伙伴。".into())
+            })?,
+        };
+        // Dedup-merge (parity with the companion sink's save): a similar active
+        // memory OF THIS OWNER is reinforced and returned instead of inserting a
+        // near-duplicate. Owner-scoped, so one companion's add is never folded
+        // into another companion's memory.
+        if let Some(id) = self.store.find_similar_active(kind, content, &owner).await? {
+            self.store.reinforce_memories(std::slice::from_ref(&id)).await?;
+            if let Some(existing) = self.store.get_memory(&id).await? {
+                return Ok(existing);
             }
         }
-        let mem = self.store.insert_memory_scoped(kind, content, tags, 0.8, "manual", scope).await?;
+        let mem = self
+            .store
+            .insert_memory_scoped(kind, content, tags, 0.8, "manual", MemoryScope::Companion(owner))
+            .await?;
         self.emitter.emit_memory_created(&mem);
         Ok(mem)
     }
 
+    /// Edit a memory's content / pin / lifecycle. Ownership is immutable: there
+    /// is no re-homing wire any more, so an edit can never move a memory between
+    /// companions.
     pub async fn update_memory(
         &self,
         memory_id: &str,
         content: Option<&str>,
         pinned: Option<bool>,
         status: Option<&str>,
-        scope: Option<MemoryScope>,
     ) -> Result<(), AppError> {
         if let Some(status) = status {
             if status != "active" && status != "archived" {
@@ -1412,7 +1459,7 @@ impl CompanionService {
             }
         }
         self.store
-            .update_memory(memory_id, content, pinned, status, scope)
+            .update_memory(memory_id, content, pinned, status)
             .await?;
         // Notify open surfaces with the post-edit row (best-effort; a missing
         // row already errored above).
@@ -2743,26 +2790,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
 
+        // No companion at all: there is no legal owner, so the add refuses
+        // instead of writing an ownerless row.
+        let ownerless = svc.add_memory("preference", "主人喜欢深色主题", &[], None).await;
+        assert!(
+            matches!(&ownerless, Err(AppError::BadRequest(message)) if message.contains("还没有伙伴")),
+            "{ownerless:?}"
+        );
+
+        let a = svc.create_companion("甲", "ink").await.unwrap().companion_id;
+        let b = svc.create_companion("乙", "ink").await.unwrap().companion_id;
+
         let first = svc
-            .add_memory("preference", "主人喜欢深色主题", &["ui".into()], MemoryScope::Shared)
+            .add_memory("preference", "主人喜欢深色主题", &["ui".into()], Some(&a))
             .await
             .unwrap();
-        assert_eq!(svc.store.count_memories("active").await.unwrap(), 1);
+        assert_eq!(first.scope_companion_id.as_deref(), Some(a.as_str()));
+        assert_eq!(svc.store.count_memories("active", Some(&a)).await.unwrap(), 1);
 
         // Same content (modulo case/whitespace) merges: reinforced, no new row.
-        let again = svc.add_memory("preference", " 主人喜欢深色主题 ", &[], MemoryScope::Shared).await.unwrap();
+        let again = svc.add_memory("preference", " 主人喜欢深色主题 ", &[], Some(&a)).await.unwrap();
         assert_eq!(again.memory_id, first.memory_id);
-        assert_eq!(svc.store.count_memories("active").await.unwrap(), 1);
+        assert_eq!(svc.store.count_memories("active", Some(&a)).await.unwrap(), 1);
         assert!(again.strength > first.strength, "dedup hit must reinforce the existing memory");
 
         // Genuinely different content still inserts.
-        let other = svc.add_memory("preference", "主人喜欢浅色代码字体", &[], MemoryScope::Shared).await.unwrap();
+        let other = svc.add_memory("preference", "主人喜欢浅色代码字体", &[], Some(&a)).await.unwrap();
         assert_ne!(other.memory_id, first.memory_id);
-        assert_eq!(svc.store.count_memories("active").await.unwrap(), 2);
+        assert_eq!(svc.store.count_memories("active", Some(&a)).await.unwrap(), 2);
 
-        // Validation untouched.
-        assert!(svc.add_memory("bogus", "x", &[], MemoryScope::Shared).await.is_err());
-        assert!(svc.add_memory("task", "   ", &[], MemoryScope::Shared).await.is_err());
+        // The dedup guard is OWNER-scoped: 乙 saying the same thing gets its own
+        // row instead of being silently folded into 甲's memory.
+        let bs = svc.add_memory("preference", "主人喜欢深色主题", &[], Some(&b)).await.unwrap();
+        assert_ne!(bs.memory_id, first.memory_id);
+        assert_eq!(bs.scope_companion_id.as_deref(), Some(b.as_str()));
+        assert_eq!(svc.store.count_memories("active", Some(&b)).await.unwrap(), 1);
+
+        // Omitting the companion resolves the owner (oldest = 甲) rather than
+        // writing a shared row.
+        let resolved = svc.add_memory("task", "帮主人订咖啡豆", &[], None).await.unwrap();
+        assert_eq!(resolved.scope_companion_id.as_deref(), Some(a.as_str()));
+
+        // Validation untouched, and an unknown owner is rejected before any write
+        // (an orphaned reference would hard-fail the next boot).
+        assert!(svc.add_memory("bogus", "x", &[], Some(&a)).await.is_err());
+        assert!(svc.add_memory("task", "   ", &[], Some(&a)).await.is_err());
+        assert!(svc.add_memory("task", "无主人", &[], Some(MALFORMED_COMPANION_ID)).await.is_err());
     }
 
     #[tokio::test]

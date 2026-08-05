@@ -536,6 +536,7 @@ async fn import_extracted(
         EXPORT_KIND_MEMORY => {
             import_memory_bundle(
                 store,
+                roster,
                 shared_dir,
                 extract_dir,
                 event_store_lock,
@@ -548,6 +549,53 @@ async fn import_extracted(
     }
 }
 
+/// Re-home every imported memory onto a LOCAL owner, in place.
+///
+/// Companion ids are never stable across machines — `import_companion_bundle`
+/// allocates a fresh id — so after a cross-machine transfer every exported
+/// private row carries an owner that means nothing here. This is BOOT-CRITICAL:
+/// `CompanionStore::validate_companion_references` hard-fails startup on any
+/// orphaned companion reference and runs unconditionally from
+/// `CompanionService::new`, so importing a bundle with a foreign owner would
+/// brick the next launch.
+///
+/// - owner that IS a live local companion → kept verbatim
+/// - foreign owner, or a vestigial unowned row → the resolved local owner
+/// - empty roster (no legal owner at all) → parked as unowned (`('user', NULL)`),
+///   which stays legal at the DB level and gets re-homed by the boot migration as
+///   soon as a companion exists
+///
+/// Nothing is ever dropped: an imported memory always survives, the only
+/// question is whose it becomes.
+fn rehome_imported_memories(
+    memories: &mut [CompanionMemory],
+    roster: &[CompanionProfileConfig],
+    default_companion_id: Option<&str>,
+) {
+    let live: HashSet<&str> = roster.iter().map(|p| p.companion_id.as_str()).collect();
+    let local_owner = crate::registry::memory_owner_of(roster.iter(), default_companion_id);
+    for memory in memories {
+        let owned_locally = memory
+            .scope_companion_id
+            .as_deref()
+            .is_some_and(|owner| live.contains(owner));
+        if owned_locally {
+            continue;
+        }
+        match &local_owner {
+            Some(owner) => {
+                memory.scope_kind = "companion".to_owned();
+                memory.scope_companion_id = Some(owner.clone());
+            }
+            None => {
+                // No legal owner yet — park it rather than lose it or brick boot.
+                memory.scope_kind = "user".to_owned();
+                memory.scope_companion_id = None;
+            }
+        }
+    }
+}
+
 /// Merge a memory bundle into the local store. Both jsonl files are parsed
 /// fully before a SQLite transaction is opened. Event files are also
 /// preflighted before the transaction: a same-name local file must have both
@@ -557,12 +605,23 @@ async fn import_extracted(
 /// attempt. The packaged mood is deliberately ignored.
 async fn import_memory_bundle(
     store: &CompanionStore,
+    roster: &dyn CompanionRoster,
     shared_dir: &Path,
     extract_dir: &Path,
     event_store_lock: Option<&crate::collector::SharedEventStoreLock>,
     config: Option<&crate::collector::SharedConfig>,
 ) -> Result<ImportOutcome, AppError> {
-    let memories = parse_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", true)?;
+    let mut memories =
+        parse_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", true)?;
+    let default_companion_id = match config {
+        Some(config) => config.read().await.default_companion_id.clone(),
+        None => None,
+    };
+    rehome_imported_memories(
+        &mut memories,
+        &roster.list_companions().await,
+        default_companion_id.as_deref(),
+    );
     let legacy_learn_runs =
         parse_jsonl::<LegacyLearnRun>(&extract_dir.join("learn_runs.jsonl"), "learn_runs.jsonl", true)?;
     for run in &legacy_learn_runs {
@@ -1154,6 +1213,13 @@ mod tests {
         nomifun_common::CompanionMemoryId::try_from(raw.as_str()).unwrap().into_string()
     }
 
+    /// A canonical companion id that does NOT exist in the local roster — what an
+    /// exported private memory from another machine carries.
+    fn companion_fixture(sequence: u64) -> String {
+        let raw = format!("0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::CompanionId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
     fn provider_fixture(sequence: u64) -> String {
         let raw = format!("0190f5fe-7c00-7a00-8abc-{sequence:012}");
         nomifun_common::ProviderId::try_from(raw.as_str()).unwrap().into_string()
@@ -1308,6 +1374,188 @@ mod tests {
         assert!(error.to_string().contains("event import conflict"), "{error}");
         assert_eq!(store_b.dump_memories_all().await.unwrap().len(), 3);
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), local_event);
+    }
+
+    /// BOOT-CRITICAL: companion ids are not stable across machines, so every
+    /// imported memory must end up owned by a LIVE local companion (or parked as
+    /// unowned when there is none). A surviving foreign owner would make
+    /// `validate_companion_references` hard-fail the next launch.
+    #[tokio::test]
+    async fn memory_import_rehomes_foreign_and_unowned_rows_onto_the_local_owner() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let roster = scan_registry(dir.path(), "companions");
+        let oldest = roster.create_companion("甲", "ink").await.unwrap().companion_id;
+        let second = roster.create_companion("乙", "ink").await.unwrap().companion_id;
+
+        // Three rows: one owned by a companion that only exists on the SOURCE
+        // machine, one vestigial unowned row, one owned by a live local companion.
+        let foreign_owner = companion_fixture(999);
+        let mut foreign = raw_memory(&memory_fixture(11), "knowledge", "源机器私有记忆", "active");
+        foreign.scope_kind = "companion".into();
+        foreign.scope_companion_id = Some(foreign_owner.clone());
+        let unowned = raw_memory(&memory_fixture(12), "preference", "源机器共享记忆", "active");
+        let mut local = raw_memory(&memory_fixture(13), "episode", "本机伙伴乙的记忆", "archived");
+        local.scope_kind = "companion".into();
+        local.scope_companion_id = Some(second.clone());
+        let rows: String = [&foreign, &unowned, &local]
+            .iter()
+            .map(|m| format!("{}\n", serde_json::to_string(m).unwrap()))
+            .collect();
+
+        let archive = dir.path().join("foreign-memory.zip");
+        write_test_zip(
+            &archive,
+            &[
+                ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
+                ("memories.jsonl", &rows),
+                ("learn_runs.jsonl", ""),
+                ("state.json", r#"{"mood":null}"#),
+            ],
+        );
+
+        let store = CompanionStore::open_memory().await.unwrap();
+        let outcome = import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ImportOutcome::Memory { imported: 3, skipped_duplicates: 0 });
+
+        // Nothing was dropped, and every row now has a local owner.
+        let restored = store.dump_memories_all().await.unwrap();
+        assert_eq!(restored.len(), 3);
+        let owner_of = |memory_id: &str| {
+            restored
+                .iter()
+                .find(|m| m.memory_id == memory_id)
+                .map(|m| (m.scope_kind.clone(), m.scope_companion_id.clone()))
+                .unwrap()
+        };
+        assert_eq!(
+            owner_of(&memory_fixture(11)),
+            ("companion".to_owned(), Some(oldest.clone())),
+            "a foreign owner must be re-homed onto the resolved local owner"
+        );
+        assert_eq!(
+            owner_of(&memory_fixture(12)),
+            ("companion".to_owned(), Some(oldest.clone())),
+            "an unowned row must be re-homed too"
+        );
+        assert_eq!(
+            owner_of(&memory_fixture(13)),
+            ("companion".to_owned(), Some(second.clone())),
+            "a row already owned by a live local companion is kept verbatim"
+        );
+
+        // The whole point: the next boot's reference audit passes.
+        let live: HashSet<String> = [oldest, second].into_iter().collect();
+        store.validate_companion_references(&live).await.unwrap();
+    }
+
+    /// 共享记忆删除后，导入去重必须按主人算。一条要落到甲名下的导入记忆，不能因为
+    /// **乙**恰好有一条相似记忆就被当成重复静默丢掉 —— 甲永远拿不到它，而那条"重复"
+    /// 的记忆根本不属于甲。这与写入路径的 `find_similar_active` 是同一条规则。
+    #[tokio::test]
+    async fn memory_import_dedup_is_owner_scoped_not_install_wide() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let roster = scan_registry(dir.path(), "companions");
+        let oldest = roster.create_companion("甲", "ink").await.unwrap().companion_id;
+        let other = roster.create_companion("乙", "ink").await.unwrap().companion_id;
+
+        let store = CompanionStore::open_memory().await.unwrap();
+        // 乙 already holds this exact fact. It is 乙's, and only 乙's.
+        let mut owned_by_other = raw_memory(&memory_fixture(41), "preference", "主人喜欢深烘焙咖啡豆", "active");
+        owned_by_other.scope_kind = "companion".into();
+        owned_by_other.scope_companion_id = Some(other.clone());
+        store.insert_memory_raw(&owned_by_other).await.unwrap();
+
+        // The bundle carries the same fact from another machine; it re-homes onto 甲.
+        let incoming = raw_memory(&memory_fixture(42), "preference", "主人喜欢深烘焙咖啡豆", "active");
+        let archive = dir.path().join("cross-owner-memory.zip");
+        write_test_zip(
+            &archive,
+            &[
+                ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
+                ("memories.jsonl", &format!("{}\n", serde_json::to_string(&incoming).unwrap())),
+                ("learn_runs.jsonl", ""),
+                ("state.json", r#"{"mood":null}"#),
+            ],
+        );
+        let outcome = import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ImportOutcome::Memory { imported: 1, skipped_duplicates: 0 },
+            "another companion's similar memory must not swallow this import"
+        );
+        let restored = store.dump_memories_all().await.unwrap();
+        assert_eq!(restored.len(), 2, "both owners keep their own copy: {restored:?}");
+        let landed = restored.iter().find(|m| m.memory_id == memory_fixture(42)).unwrap();
+        assert_eq!(landed.scope_companion_id.as_deref(), Some(oldest.as_str()));
+
+        // Re-importing the same bundle IS a duplicate (same id, same re-homed
+        // shape), so idempotency is untouched by the owner scoping.
+        let again = import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
+            .await
+            .unwrap();
+        assert_eq!(again, ImportOutcome::Memory { imported: 0, skipped_duplicates: 1 });
+        assert_eq!(store.dump_memories_all().await.unwrap().len(), 2);
+    }
+
+    /// With no companion at all there is no legal owner: an imported private row
+    /// is PARKED as unowned rather than kept foreign (which would brick boot) or
+    /// dropped (which would lose the memory). The boot migration re-homes it as
+    /// soon as a companion exists.
+    #[tokio::test]
+    async fn memory_import_parks_rows_as_unowned_when_the_roster_is_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let roster = scan_registry(dir.path(), "companions");
+        let mut foreign = raw_memory(&memory_fixture(21), "knowledge", "源机器私有记忆", "active");
+        foreign.scope_kind = "companion".into();
+        foreign.scope_companion_id = Some(companion_fixture(998));
+        let archive = dir.path().join("orphan-memory.zip");
+        write_test_zip(
+            &archive,
+            &[
+                ("manifest.json", &manifest_json(3, EXPORT_KIND_MEMORY)),
+                ("memories.jsonl", &format!("{}\n", serde_json::to_string(&foreign).unwrap())),
+                ("learn_runs.jsonl", ""),
+                ("state.json", r#"{"mood":null}"#),
+            ],
+        );
+
+        let store = CompanionStore::open_memory().await.unwrap();
+        import_bundle(&store, &roster, &dir.path().join("shared"), &archive)
+            .await
+            .unwrap();
+        let restored = store.dump_memories_all().await.unwrap();
+        assert_eq!(restored.len(), 1, "the memory must survive");
+        assert_eq!(restored[0].scope_kind, "user");
+        assert_eq!(restored[0].scope_companion_id, None);
+        store.validate_companion_references(&HashSet::new()).await.unwrap();
+    }
+
+    /// A bundle written without the scope fields at all still imports (the two
+    /// fields default to the vestigial unowned pair instead of failing
+    /// `deny_unknown_fields`/missing-field validation).
+    #[test]
+    fn memory_rows_without_scope_fields_still_parse() {
+        let row = serde_json::json!({
+            "memory_id": memory_fixture(31),
+            "kind": "preference",
+            "content": "没有 scope 字段的旧包",
+            "tags": [],
+            "importance": 0.8,
+            "strength": 0.8,
+            "pinned": false,
+            "source": "manual",
+            "status": "active",
+            "created_at": 1,
+            "updated_at": 1,
+            "last_reinforced_at": 1
+        });
+        let memory: CompanionMemory = serde_json::from_value(row).unwrap();
+        assert_eq!(memory.scope_kind, "user");
+        assert_eq!(memory.scope_companion_id, None);
     }
 
     #[tokio::test]

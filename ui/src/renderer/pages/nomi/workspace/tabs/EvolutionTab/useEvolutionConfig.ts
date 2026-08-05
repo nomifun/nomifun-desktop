@@ -19,10 +19,10 @@
  * so the migration is a rewrite of this file alone:
  *   - swap the two ipcBridge calls for `getCompanion` / `patchCompanion`,
  *   - key the fetch on `companionId` (already accepted),
- *   - flip `installWide` to false and `ownsGeneratedSkills` to true — the UI reads
+ *   - flip `installWide` to false and `ownsLearningOutput` to true — the UI reads
  *     those flags to decide whether to print the "applies to all companions" /
- *     "mined skills land on the default companion" notes, so both honest
- *     disclosures disappear by themselves once the values really are
+ *     "what the loop produces lands on the default companion" notes, so both
+ *     honest disclosures disappear by themselves once the values really are
  *     per-companion.
  * No section component needs to change.
  */
@@ -68,12 +68,13 @@ export interface EvolutionConfigHandle {
   /** True while these values are stored install-wide (pre-migration). */
   installWide: boolean;
   /**
-   * True when auto-mined skills would actually land on THIS companion. The
-   * backend files every mined skill under the default companion
-   * (`registry.resolve_default`), so on any other companion the 技能生成 section
-   * must say so rather than imply the skills appear on its own 技能 tab.
+   * True when what the background loop produces would actually land on THIS
+   * companion. The backend files every mined skill AND every distilled memory
+   * under one resolved owner (the default companion, else the oldest), so on any
+   * other companion both sections must say so rather than imply the skills and
+   * memories show up on its own 技能 / 记忆 tabs.
    */
-  ownsGeneratedSkills: boolean;
+  ownsLearningOutput: boolean;
   retry: () => void;
   patchLearn: (patch: Partial<EvolutionLearnConfig>) => Promise<void>;
   patchEvolve: (patch: Partial<EvolutionEvolveConfig>) => Promise<void>;
@@ -176,7 +177,7 @@ export const useEvolutionConfig = (companionId: CompanionId | null): EvolutionCo
     // Only claim "not this companion" when the pointer positively says so: the
     // first companion ever created becomes the default, so a null pointer means
     // "nothing to warn about" rather than "some other companion owns them".
-    ownsGeneratedSkills:
+    ownsLearningOutput:
       config?.default_companion_id == null || companionId == null || config.default_companion_id === companionId,
     retry,
     patchLearn,

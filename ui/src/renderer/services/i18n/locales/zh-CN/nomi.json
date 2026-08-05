@@ -145,9 +145,7 @@
     "deleteRowHint": "永久删除这条记忆，无法恢复。",
     "composeSubtitle": "只属于这个伙伴，别的伙伴看不到",
     "composeKindHint": "分类决定这条记忆在检索时的权重与衰减方式。",
-    "mergeSubtitle": "把说的是同一件事的记忆并成一条",
-    "installWideNote": "这条记忆是装机级的：这台电脑上的每个伙伴都会检索到它。在这里修改、归档或删除会同时影响所有伙伴。",
-    "installWideShort": "装机级记忆：这台电脑上的所有伙伴都会受影响。"
+    "mergeSubtitle": "把说的是同一件事的记忆并成一条"
   },
   "memories": {
     "kindAll": "全部类型",
@@ -217,6 +215,7 @@
     "skillTitle": "技能生成配置",
     "skillDesc": "把你反复重复的多步操作沉淀成可复用技能，使用上面的学习模型。",
     "skillEnabledDesc": "关闭后不再生成新技能，已有技能仍然可用。",
+    "learnNotOwnerNote": "这组设置目前对所有伙伴共同生效；定时学习提炼出的记忆会归到默认伙伴名下，不会出现在这个伙伴的记忆页。",
     "skillNotOwnerNote": "这组设置目前对所有伙伴共同生效；自动生成的技能会归到默认伙伴名下，不会出现在这个伙伴的技能页。",
     "minSessions": "最少出现会话数",
     "minSessionsDesc": "同一套操作至少在这么多个会话里出现过，才会被沉淀成技能。",
@@ -284,7 +283,7 @@
     "deleteConfirmOk": "永久删除"
   },
   "danger": {
-    "deleteConfirmBody": "将永久删除 {{companionName}} 及其全部记忆、技能与设定。此操作不可撤销，建议先在「其他 → 迁移」里导出备份。"
+    "deleteConfirmBody": "将永久删除「{{companionName}}」及其全部记忆、技能、成长进度与聊天记录，无法恢复。注意：迁移包只保存设定与成长进度，记忆不在包内，先导出也留不下它们。"
   },
   "figures": {
     "back": "返回伙伴"

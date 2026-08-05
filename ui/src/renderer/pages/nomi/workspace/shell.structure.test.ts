@@ -139,9 +139,7 @@ describe('deleted features stay deleted', () => {
 
   test('no shared-memory scope selector', () => {
     // What was deleted is the *control*: the 共享/私有 radio, the owner picker and the
-    // 此伙伴可见/全部伙伴 view switch. Reading `scope_kind` is still legitimate — the
-    // backend has not dropped the column, and MemoryDetailPane deliberately reads it
-    // to label install-wide rows honestly. This pins the selector, not the field.
+    // 此伙伴可见/全部伙伴 view switch.
     expect(
       offenders(({ code }) =>
         /scopeShared|scopePrivateOf|scopePickCompanion|scopeFilterSelf|scopeFilterAll|scopeMode|scopeSelector/.test(code)
@@ -149,10 +147,18 @@ describe('deleted features stay deleted', () => {
     ).toEqual([]);
   });
 
-  test('memory writes never choose a scope', () => {
-    // Every write belongs to the selected companion; a `scope_kind:` property in a
-    // request payload would mean the selector came back in another form.
-    expect(offenders(({ code }) => /scope_kind\s*:/.test(code))).toEqual([]);
+  test('the 共享记忆 concept is gone from the workspace entirely', () => {
+    // 共享记忆 was deleted as a product concept: memory is strictly per-companion.
+    // `scope_kind` is the DB discriminator that used to encode it ('user' = shared)
+    // and is now a vestigial always-'companion' column, so NO workspace surface may
+    // read it — not to filter, not to badge. Ownership questions are answered by
+    // `scope_companion_id` alone.
+    expect(offenders(({ code }) => /scope_kind/.test(code))).toEqual([]);
+    // The install-wide memory read-outs went with it (their i18n keys are deleted
+    // too, so a leftover call would render the defaultValue and silently lie).
+    // `nomi.evolution.installWideNote` is a DIFFERENT concept (learn/evolve config
+    // is still shared) and deliberately not matched here.
+    expect(offenders(({ code }) => /nomi\.memory\.installWide/.test(code))).toEqual([]);
   });
 
   test('no cross-companion 共享 domain switch', () => {

@@ -145,9 +145,7 @@
     "deleteRowHint": "Permanently delete this memory. This cannot be undone.",
     "composeSubtitle": "Only for this companion — no other companion sees it",
     "composeKindHint": "The kind decides how this memory is weighted and how it decays during recall.",
-    "mergeSubtitle": "Fold memories that say the same thing into one",
-    "installWideNote": "This memory is install-wide: every companion on this computer can recall it. Editing, archiving or deleting it here affects all of them.",
-    "installWideShort": "Install-wide memory: every companion on this computer is affected."
+    "mergeSubtitle": "Fold memories that say the same thing into one"
   },
   "memories": {
     "kindAll": "All kinds",
@@ -217,6 +215,7 @@
     "skillTitle": "Skill generation",
     "skillDesc": "Distills your repeated multi-step actions into reusable skills, using the learning model above.",
     "skillEnabledDesc": "When off, no new skills are generated; existing skills keep working.",
+    "learnNotOwnerNote": "These settings currently apply to every companion; memories distilled by scheduled learning land under the default companion and won't show up in this companion's Memory tab.",
     "skillNotOwnerNote": "These settings currently apply to every companion; auto-generated skills land under the default companion and won't show up in this companion's Skills tab.",
     "minSessions": "Minimum sessions",
     "minSessionsDesc": "The same sequence of actions has to show up in at least this many sessions before it becomes a skill.",
@@ -284,7 +283,7 @@
     "deleteConfirmOk": "Delete permanently"
   },
   "danger": {
-    "deleteConfirmBody": "This permanently deletes {{companionName}} together with all of its memories, skills and settings. It cannot be undone — consider exporting a backup under Other → Migration first."
+    "deleteConfirmBody": "This permanently deletes “{{companionName}}” together with all of its memories, skills, growth progress and chat history, and cannot be undone. Note: the migration bundle stores only settings and growth progress — memories are not in it, so exporting first will not keep them."
   },
   "figures": {
     "back": "Back to companions"

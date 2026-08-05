@@ -42,7 +42,7 @@ mod skill_io;
 pub use events::CompanionEventEmitter;
 pub use figures::FigureMeta;
 pub use memory_search::{
-    CompanionMemoryRow, MemoryScopeFilter, MemorySearchHit, MemorySearchQuery, MemoryStatusFilter,
+    CompanionMemoryRow, MemorySearchHit, MemorySearchQuery, MemoryStatusFilter,
 };
 pub use profile::{
     CompanionProfileConfig, CompanionSkillConfig, CompanionWindowConfig, CustomFigureMeta,
