@@ -20,7 +20,8 @@ const createInitStyle = (
   customCss?: string,
   isMobile?: boolean,
   fontSize?: string,
-  lineHeight?: string
+  lineHeight?: string,
+  compact = false
 ) => {
   const style = document.createElement('style');
   // Inject external CSS variables into Shadow DOM for dark mode support
@@ -33,6 +34,62 @@ const createInitStyle = (
   const resolvedFontSize = fontSize ?? (isMobile ? '14px' : '16px');
   const resolvedLineHeight = lineHeight ?? (isMobile ? '19.6px' : '28px');
   const usesExplicitTypography = Boolean(fontSize || lineHeight);
+  const compactTypographyCss = compact
+    ? `
+  * {
+    font-size: 14px;
+    line-height: 22px;
+  }
+  .markdown-shadow-body h1 {
+    margin: 0 0 12px;
+    font-size: 22px;
+    line-height: 30px;
+  }
+  .markdown-shadow-body h2 {
+    margin: 16px 0 7px;
+    font-size: 18px;
+    line-height: 26px;
+  }
+  .markdown-shadow-body h3 {
+    margin: 14px 0 6px;
+    font-size: 16px;
+    line-height: 24px;
+  }
+  .markdown-shadow-body h4,
+  .markdown-shadow-body h5,
+  .markdown-shadow-body h6 {
+    margin: 12px 0 5px;
+    font-size: 14px;
+    line-height: 22px;
+  }
+  .markdown-shadow-body p {
+    margin-block-start: 8px;
+    margin-block-end: 8px;
+  }
+  .markdown-shadow-body ol,
+  .markdown-shadow-body ul {
+    margin-block-start: 7px;
+    margin-block-end: 7px;
+    padding-inline-start: 20px;
+  }
+  .markdown-shadow-body li {
+    margin-block-start: 2px;
+    margin-block-end: 2px;
+  }
+  .markdown-shadow-body hr {
+    margin: 16px 0;
+  }
+  .markdown-shadow-body blockquote {
+    margin: 10px 0;
+    padding-left: 10px;
+    border-left-width: 2px;
+  }
+  .markdown-shadow-body pre {
+    margin-block-start: 6px;
+    margin-block-end: 6px;
+  }
+  `
+    : '';
 
   style.innerHTML = `
   /* Shadow DOM CSS variable definitions */
@@ -205,6 +262,8 @@ const createInitStyle = (
     }
   }
 
+  ${compactTypographyCss}
+
   /* User Custom CSS (injected into Shadow DOM) */
   ${customCss || ''}
   `;
@@ -265,10 +324,12 @@ const ShadowView = ({
   children,
   fontSize,
   lineHeight,
+  compact = false,
 }: {
   children: React.ReactNode;
   fontSize?: string;
   lineHeight?: string;
+  compact?: boolean;
 }) => {
   const [root, setRoot] = useState<ShadowRoot | null>(null);
   const styleRef = React.useRef<HTMLStyleElement | null>(null);
@@ -321,7 +382,7 @@ const ShadowView = ({
       if (styleRef.current) {
         styleRef.current.remove();
       }
-      const newStyle = createInitStyle(currentTheme, cssVars, customCss, isMobile, fontSize, lineHeight);
+      const newStyle = createInitStyle(currentTheme, cssVars, customCss, isMobile, fontSize, lineHeight, compact);
       styleRef.current = newStyle;
       shadowRoot.appendChild(newStyle);
 
@@ -332,7 +393,7 @@ const ShadowView = ({
         shadowRoot.adoptedStyleSheets = [...shadowRoot.adoptedStyleSheets, katexSheet];
       }
     },
-    [customCss, fontSize, isMobile, lineHeight]
+    [compact, customCss, fontSize, isMobile, lineHeight]
   );
 
   React.useEffect(() => {
