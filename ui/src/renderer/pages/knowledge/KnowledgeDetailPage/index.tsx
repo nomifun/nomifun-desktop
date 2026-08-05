@@ -38,6 +38,9 @@ import {
   Tree,
 } from '@arco-design/web-react';
 import {
+  ExpandDown,
+  ExpandUp,
+  FileFocus,
   Delete,
   EditTwo,
   FolderOpen,
@@ -468,6 +471,8 @@ const KnowledgeDetailPage: React.FC = () => {
   const [selectedFolderPath, setSelectedFolderPath] = useState('');
   const [selectedTreeKey, setSelectedTreeKey] = useState<string | null>(null);
   const [fileSearch, setFileSearch] = useState('');
+  const [treeAction, setTreeAction] = useState<'reveal' | 'expand' | null>(null);
+  const treeScrollRef = React.useRef<HTMLDivElement>(null);
   const isTreeSearch = fileSearch.trim().length > 0;
 
   const source = getBaseSource(base);
@@ -578,6 +583,73 @@ const KnowledgeDetailPage: React.FC = () => {
     },
     [id]
   );
+
+  const scrollCurrentTreeNodeIntoView = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const container = treeScrollRef.current;
+        const selectedNode = container?.querySelector<HTMLElement>('.arco-tree-node-selected');
+        if (!container || !selectedNode) return;
+
+        const containerRect = container.getBoundingClientRect();
+        const nodeRect = selectedNode.getBoundingClientRect();
+        const centeredTop =
+          container.scrollTop + nodeRect.top - containerRect.top - (container.clientHeight - nodeRect.height) / 2;
+        container.scrollTo({ top: Math.max(0, centeredTop), behavior: 'smooth' });
+      });
+    });
+  }, []);
+
+  const handleRevealCurrentFile = useCallback(async () => {
+    if (!selectedPath) {
+      Message.info(t('knowledge.selectFile'));
+      return;
+    }
+
+    setTreeAction('reveal');
+    try {
+      const parentPath = parentDirOfKnowledgePath(selectedPath);
+      const ancestorKeys = knowledgeFolderPathChain(parentPath);
+      setFileSearch('');
+      await reloadTreePath(parentPath);
+      setExpandedTreeKeys((prev) => [...new Set([...prev, ...ancestorKeys])]);
+      setSelectedTreeKey(selectedPath);
+      scrollCurrentTreeNodeIntoView();
+    } catch (e) {
+      Message.error(String(e));
+    } finally {
+      setTreeAction(null);
+    }
+  }, [reloadTreePath, scrollCurrentTreeNodeIntoView, selectedPath, t]);
+
+  const handleExpandAllTreeNodes = useCallback(async () => {
+    if (!id) return;
+
+    setTreeAction('expand');
+    try {
+      const loadAllChildren = async (nodes: IKnowledgeTreeEntry[]): Promise<IKnowledgeTreeEntry[]> =>
+        Promise.all(
+          nodes.map(async (node) => {
+            if (!node.is_dir) return node;
+            const children = await ipcBridge.knowledge.listTree.invoke({
+              knowledge_base_id: id,
+              path: node.rel_path,
+            });
+            return { ...node, children: await loadAllChildren(children) };
+          })
+        );
+
+      const rootNodes = await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: id });
+      const fullTree = await loadAllChildren(rootNodes);
+      setFileSearch('');
+      setTreeData(fullTree);
+      setExpandedTreeKeys(collectKnowledgeDirKeys(fullTree));
+    } catch (e) {
+      Message.error(String(e));
+    } finally {
+      setTreeAction(null);
+    }
+  }, [id]);
 
   const openNewFileModal = (folderOverride?: string) => {
     const folder = folderOverride ?? (selectedFolderPath || parentDirOfKnowledgePath(selectedPath));
@@ -809,6 +881,21 @@ const KnowledgeDetailPage: React.FC = () => {
     () => (isTreeSearch ? collectKnowledgeDirKeys(displayedTreeData) : expandedTreeKeys),
     [displayedTreeData, expandedTreeKeys, isTreeSearch]
   );
+  const loadedTreeDirectoryKeys = useMemo(() => collectKnowledgeDirKeys(treeData), [treeData]);
+  const isEntireTreeExpanded = useMemo(
+    () =>
+      loadedTreeDirectoryKeys.length > 0 &&
+      loadedTreeDirectoryKeys.every((key) => expandedTreeKeys.includes(key)),
+    [expandedTreeKeys, loadedTreeDirectoryKeys]
+  );
+
+  const handleToggleEntireTree = useCallback(() => {
+    if (isEntireTreeExpanded && !isTreeSearch) {
+      setExpandedTreeKeys([]);
+      return;
+    }
+    void handleExpandAllTreeNodes();
+  }, [handleExpandAllTreeNodes, isEntireTreeExpanded, isTreeSearch]);
 
   // Build breadcrumb segments from selected path
   const breadcrumbSegments = useMemo(() => {
@@ -1005,6 +1092,30 @@ const KnowledgeDetailPage: React.FC = () => {
                     icon={<Upload theme='outline' size='15' />}
                     onClick={() => Message.info(t('knowledge.detail.docs.uploadTodo', { defaultValue: '上传功能开发中' }))}
                   />
+                  <div className='ml-auto flex items-center gap-2px'>
+                    <KnowledgeIconButton
+                      label={t('knowledge.detail.docs.revealCurrentFile', { defaultValue: '自动显示当前文件' })}
+                      icon={<FileFocus theme='outline' size='15' />}
+                      loading={treeAction === 'reveal'}
+                      onClick={() => void handleRevealCurrentFile()}
+                    />
+                    <KnowledgeIconButton
+                      label={
+                        isEntireTreeExpanded && !isTreeSearch
+                          ? t('knowledge.detail.docs.collapseAll', { defaultValue: '全部折叠' })
+                          : t('knowledge.detail.docs.expandAll', { defaultValue: '全部展开' })
+                      }
+                      icon={
+                        isEntireTreeExpanded && !isTreeSearch ? (
+                          <ExpandUp theme='outline' size='15' />
+                        ) : (
+                          <ExpandDown theme='outline' size='15' />
+                        )
+                      }
+                      loading={treeAction === 'expand'}
+                      onClick={handleToggleEntireTree}
+                    />
+                  </div>
                 </div>
 
                 {/* Search box */}
@@ -1019,7 +1130,10 @@ const KnowledgeDetailPage: React.FC = () => {
                 </div>
 
                 {/* File tree */}
-                <div className='knowledge-doc-tree-scroll min-h-0 flex-1 overflow-y-auto px-7px py-8px'>
+                <div
+                  ref={treeScrollRef}
+                  className='knowledge-doc-tree-scroll min-h-0 flex-1 overflow-y-auto px-7px py-8px'
+                >
                   <Spin loading={loading} className='w-full'>
                     {displayedTreeData.length === 0 ? (
                       <Empty
@@ -1236,17 +1350,22 @@ const KnowledgeDetailPage: React.FC = () => {
                       </div>
                     </div>
                     {/* Content area */}
-                    <div className='flex-1 overflow-y-auto p-20px'>
+                    <div
+                      className={classNames(
+                        'knowledge-doc-content flex-1 overflow-y-auto',
+                        editMode ? 'knowledge-doc-content-edit' : 'p-16px'
+                      )}
+                    >
                       <Spin loading={fileLoading} className='w-full'>
                         {editMode ? (
                           <Input.TextArea
                             value={draft}
                             onChange={setDraft}
                             autoSize={{ minRows: 18, maxRows: 40 }}
-                            className='font-mono text-13px'
+                            className='knowledge-doc-source-editor font-mono text-13px'
                           />
                         ) : (
-                          <Markdown>{content}</Markdown>
+                          <Markdown compact>{content}</Markdown>
                         )}
                       </Spin>
                     </div>
