@@ -41,8 +41,25 @@
     "connected": "已连接",
     "connecting": "连接中…",
     "reconnecting": "重连中…",
+    "idle": "未建立链路",
+    "degraded": "正在重建远程 shell…",
+    "dropped": "链路已断",
+    "closed": "已关闭",
     "unknown": "未连接",
     "error": "连接错误"
+  },
+  "pill": {
+    "endpoint": "登录地址",
+    "hostKey": "主机密钥",
+    "hostKeyUnpinned": "尚未固定",
+    "sudoStored": "已为该主机保存 sudo 密码。",
+    "sudoMissing": "未保存 sudo 密码 —— 该主机需免密 sudo。",
+    "attempt": "第 {{attempt}} 次拨号",
+    "retryIn": "{{seconds}} 秒后重试",
+    "detail": "详情",
+    "noLink": "该会话尚未与主机建立链路。",
+    "droppedHint": "链路恢复前命令无法送达该主机。若迟迟不恢复，请检查凭据与主机密钥。",
+    "unconfirmedExit": "无法确认远程 shell 已退出 —— 主机上可能仍有进程在跑。"
   },
   "test": {
     "running": "正在测试连接…",
