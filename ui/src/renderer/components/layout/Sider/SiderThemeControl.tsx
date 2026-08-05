@@ -35,7 +35,7 @@ const pickAccent = (css: string): string | null => {
 
 const footerButtonClass = (collapsed: boolean, isMobile: boolean, active: boolean) =>
   classNames(
-    'h-34px shrink-0 flex items-center justify-center cursor-pointer rd-0.5rem transition-colors',
+    'h-32px shrink-0 flex items-center justify-center cursor-pointer rd-0.5rem transition-colors',
     collapsed ? 'w-full' : 'w-36px',
     isMobile && 'sider-footer-btn-mobile',
     active ? '!bg-primary-1 !text-primary-6' : 'text-t-secondary hover:bg-fill-2 hover:text-t-primary active:bg-fill-3'

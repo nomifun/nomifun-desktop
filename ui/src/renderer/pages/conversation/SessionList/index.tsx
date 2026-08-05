@@ -671,8 +671,8 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
           onToggleExpanded={ui.toggleCompanionGroup}
         />
 
-        <div data-testid='workpath-section-toolbar' className='px-2px pb-6px'>
-          <div className='h-22px px-2px flex items-center justify-between gap-8px select-none'>
+        <div data-testid='workpath-section-toolbar' className='px-2px pb-3px'>
+          <div className='h-20px px-2px flex items-center justify-between gap-8px select-none'>
             <span className='text-13px text-t-tertiary font-[500] leading-none tracking-wide truncate'>
               {t('sessionList.workpathSection')}
             </span>
