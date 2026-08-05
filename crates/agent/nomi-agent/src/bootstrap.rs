@@ -319,6 +319,11 @@ pub struct AgentBootstrap {
     /// path and cannot lazily launch a private Chromium process.
     #[cfg(feature = "browser-use")]
     browser_lane_client: Option<nomi_browser::BrowserLaneClient>,
+    /// When present, the session is bound to a remote SSH host: the remote tool
+    /// family takes over the `Read`/`Write`/`Edit`/`Bash`/`Grep`/`Glob` names
+    /// instead of the local implementations. The connection lives behind this
+    /// backend; the model never sees credentials or host identity.
+    ssh_session: Option<Arc<dyn crate::ssh_backend::SshBackend>>,
 }
 
 impl AgentBootstrap {
@@ -338,6 +343,7 @@ impl AgentBootstrap {
             approval_gate: None,
             #[cfg(feature = "browser-use")]
             browser_lane_client: None,
+            ssh_session: None,
         }
     }
 
@@ -405,6 +411,15 @@ impl AgentBootstrap {
         self
     }
 
+    /// Bind this session to a remote SSH host. The remote tool family takes over
+    /// the native `Read`/`Write`/`Edit`/`Bash`/`Grep`/`Glob` names, so the model
+    /// operates the remote host through its ordinary vocabulary. Credentials and
+    /// host identity live behind the backend and never reach model input.
+    pub fn ssh_session(mut self, backend: Arc<dyn crate::ssh_backend::SshBackend>) -> Self {
+        self.ssh_session = Some(backend);
+        self
+    }
+
     /// Add extra directories to scan for skills.
     pub fn extra_skill_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.extra_skill_dirs = dirs;
@@ -448,43 +463,54 @@ impl AgentBootstrap {
                 Some(std::path::PathBuf::from(wr))
             }
         };
-        registry.register(Box::new(nomi_tools::read::ReadTool::new(
-            file_cache.clone(),
-            Some(cwd_path.to_path_buf()),
-        )));
-        registry.register(Box::new(
-            nomi_tools::write::WriteTool::new(file_cache.clone())
-                .with_write_root(write_root.clone())
-                .with_cwd(Some(cwd_path.to_path_buf())),
-        ));
-        registry.register(Box::new(
-            nomi_tools::edit::EditTool::new(file_cache.clone())
-                .with_write_root(write_root.clone())
-                .with_cwd(Some(cwd_path.to_path_buf())),
-        ));
-        registry.register(Box::new(
-            nomi_tools::apply_patch::ApplyPatchTool::new(file_cache)
-                .with_write_root(write_root.clone())
-                .with_cwd(Some(cwd_path.to_path_buf())),
-        ));
-        // Experimental `Lsp` code-navigation tool: registered only when at least
-        // one language server is configured (default off → no behaviour change).
-        {
-            let mut lsp_map: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
-            for entry in &self.config.tools.lsp_servers {
-                if entry.command.is_empty() {
-                    continue;
-                }
-                for ext in &entry.extensions {
-                    lsp_map.insert(ext.trim_start_matches('.').to_ascii_lowercase(), entry.command.clone());
-                }
+        // SSH-bound session: the remote tool family takes over Read/Write/Edit/
+        // Bash/Grep/Glob; the local filesystem/exec tools (incl. ApplyPatch, Lsp,
+        // exec_command, write_stdin) are skipped so nothing operates the local
+        // machine by mistake. Otherwise register the local family as usual.
+        let ssh_backend = self.ssh_session.clone();
+        if let Some(ssh) = ssh_backend.clone() {
+            for tool in crate::ssh_tools::remote_tool_family(ssh) {
+                registry.register(tool);
             }
-            if !lsp_map.is_empty() {
-                registry.register(Box::new(nomi_tools::lsp::LspTool::new(
-                    lsp_map,
-                    cwd_path.to_path_buf(),
-                )));
+        } else {
+            registry.register(Box::new(nomi_tools::read::ReadTool::new(
+                file_cache.clone(),
+                Some(cwd_path.to_path_buf()),
+            )));
+            registry.register(Box::new(
+                nomi_tools::write::WriteTool::new(file_cache.clone())
+                    .with_write_root(write_root.clone())
+                    .with_cwd(Some(cwd_path.to_path_buf())),
+            ));
+            registry.register(Box::new(
+                nomi_tools::edit::EditTool::new(file_cache.clone())
+                    .with_write_root(write_root.clone())
+                    .with_cwd(Some(cwd_path.to_path_buf())),
+            ));
+            registry.register(Box::new(
+                nomi_tools::apply_patch::ApplyPatchTool::new(file_cache)
+                    .with_write_root(write_root.clone())
+                    .with_cwd(Some(cwd_path.to_path_buf())),
+            ));
+            // Experimental `Lsp` code-navigation tool: registered only when at least
+            // one language server is configured (default off → no behaviour change).
+            {
+                let mut lsp_map: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for entry in &self.config.tools.lsp_servers {
+                    if entry.command.is_empty() {
+                        continue;
+                    }
+                    for ext in &entry.extensions {
+                        lsp_map.insert(ext.trim_start_matches('.').to_ascii_lowercase(), entry.command.clone());
+                    }
+                }
+                if !lsp_map.is_empty() {
+                    registry.register(Box::new(nomi_tools::lsp::LspTool::new(
+                        lsp_map,
+                        cwd_path.to_path_buf(),
+                    )));
+                }
             }
         }
         // Native `remember` tool: persist durable project/user memories mid-session
@@ -504,31 +530,38 @@ impl AgentBootstrap {
                 nomi_process_runtime::SandboxPolicy::UnrestrictedLocalOwner
             },
         };
-        registry.register(Box::new(nomi_tools::bash::BashTool::new(
-            Arc::clone(&process_supervisor),
-            cwd_path.to_path_buf(),
-            process_capability.clone(),
-        )));
-        registry.register(Box::new(nomi_tools::grep::GrepTool::new(
-            cwd_path.to_path_buf(),
-        )));
-        registry.register(Box::new(nomi_tools::glob::GlobTool::new(
-            cwd_path.to_path_buf(),
-        )));
+        // Local shell/exec tools operate the local machine, so they are skipped
+        // in an SSH-bound session (the remote Bash/Grep/Glob family already took
+        // over those names above). The supervisor itself is still constructed —
+        // later wiring (`with_process_supervisor`, `set_process_supervisor`)
+        // depends on it regardless of session kind.
+        if ssh_backend.is_none() {
+            registry.register(Box::new(nomi_tools::bash::BashTool::new(
+                Arc::clone(&process_supervisor),
+                cwd_path.to_path_buf(),
+                process_capability.clone(),
+            )));
+            registry.register(Box::new(nomi_tools::grep::GrepTool::new(
+                cwd_path.to_path_buf(),
+            )));
+            registry.register(Box::new(nomi_tools::glob::GlobTool::new(
+                cwd_path.to_path_buf(),
+            )));
 
-        // Numeric-session schemas share the same supervisor as Bash. The
-        // ProcessStore is only a numeric-id adapter; it owns no OS process.
-        let process_store = Arc::new(nomi_tools::process_store::ProcessStore::new());
-        registry.register(Box::new(nomi_tools::exec_command::ExecCommandTool::new(
-            Arc::clone(&process_supervisor),
-            Arc::clone(&process_store),
-            cwd_path.to_path_buf(),
-            process_capability.clone(),
-        )));
-        registry.register(Box::new(nomi_tools::write_stdin::WriteStdinTool::new(
-            Arc::clone(&process_supervisor),
-            Arc::clone(&process_store),
-        )));
+            // Numeric-session schemas share the same supervisor as Bash. The
+            // ProcessStore is only a numeric-id adapter; it owns no OS process.
+            let process_store = Arc::new(nomi_tools::process_store::ProcessStore::new());
+            registry.register(Box::new(nomi_tools::exec_command::ExecCommandTool::new(
+                Arc::clone(&process_supervisor),
+                Arc::clone(&process_store),
+                cwd_path.to_path_buf(),
+                process_capability.clone(),
+            )));
+            registry.register(Box::new(nomi_tools::write_stdin::WriteStdinTool::new(
+                Arc::clone(&process_supervisor),
+                Arc::clone(&process_store),
+            )));
+        }
 
         let mut mcp_managers: Vec<Arc<McpManager>> = Vec::new();
         let mcp_manager = if !self.config.mcp.servers.is_empty() {
