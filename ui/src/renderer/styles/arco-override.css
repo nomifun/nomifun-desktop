@@ -375,6 +375,26 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
   background: var(--color-fill-2) !important;
 }
 
+.knowledge-doc-content-edit {
+  padding: 10px 14px 12px;
+}
+
+.knowledge-doc-source-editor.arco-textarea,
+.knowledge-doc-source-editor.arco-textarea:hover,
+.knowledge-doc-source-editor.arco-textarea:focus,
+.knowledge-doc-source-editor.arco-textarea-focus {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 4px 6px 8px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--color-text-1) !important;
+  line-height: 1.65;
+}
+
 .knowledge-doc-tree .arco-tree-node {
   padding: 0;
 }
