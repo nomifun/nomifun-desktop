@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nomifun_common::OnConversationDelete;
+use nomifun_ai_agent::{SshBackendProvider, SshLeaseRelease};
 use nomifun_ssh::dto::CreateSshHostRequest;
 use nomifun_ssh::{SshDialError, SshLinkKey, SshLinkPhase, SshTeardown};
 
@@ -286,6 +287,62 @@ async fn close_link_publishes_closed_with_a_reaped_teardown() {
         harness.pool.subscribe(&link_key).is_none(),
         "a closed link must not linger in the pool"
     );
+}
+
+/// The seam the agent factory calls, against a real host: one pooled link, tools
+/// that work through it, and a lease that reports rather than closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_lease_keeps_the_link_and_reports_the_close_only_afterwards() {
+    const NAME: &str = "a_released_lease_keeps_the_link_and_reports_the_close_only_afterwards";
+    let sshd = sshd_or_skip!(NAME);
+    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
+    let id = harness.add_fixture_host(&sshd).await;
+    let link_key = key("conv-1", &id);
+
+    if harness.open_or_skip(NAME, "conv-1", &id, "/").await.is_none() {
+        return;
+    }
+    let provider: Arc<dyn SshBackendProvider> = Arc::new(harness.pool.clone());
+    let binding = provider
+        .connect(&harness.user_id, "conv-1", id.as_str(), "/")
+        .await
+        .expect("the seam must hand back the conversation's pooled link");
+    assert_eq!(
+        harness.pool.active_link_count(),
+        1,
+        "the seam must reuse the link the session already had, not dial a second one"
+    );
+    let echoed = binding
+        .backend
+        .run_command("echo lease_ok", 30_000)
+        .await
+        .expect("the seam's backend must reach the host");
+    assert!(echoed.stdout.contains("lease_ok"), "{:?}", echoed.stdout);
+
+    // A model switch destroys the runtime and releases its lease. Releasing is not
+    // closing: the operator's shell — and its cwd — must still be there.
+    match binding.lease.release().await {
+        SshLeaseRelease::Retained { .. } => {}
+        other => panic!("releasing a live lease must retain the link, got {other:?}"),
+    }
+    assert!(
+        harness.pool.is_pooled(&link_key),
+        "the released link must still belong to the conversation"
+    );
+
+    // Only when the pool itself closes the link does the same lease report
+    // forensics — and then it reports the pool's proof, not a guess.
+    match harness.pool.close_link(&link_key).await {
+        SshTeardown::Reaped { .. } => {}
+        other => panic!("a healthy link closes reaped, got {other:?}"),
+    }
+    match binding.lease.release().await {
+        SshLeaseRelease::Reaped { detail } => assert!(
+            detail.contains("exit"),
+            "a reaped release must carry the pool's evidence: {detail}"
+        ),
+        other => panic!("a proven close must release as reaped, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

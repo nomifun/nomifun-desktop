@@ -2,8 +2,6 @@
 //! probe. Mounted under the instance-owner guard by the app router (mirrors
 //! `remote_agent_routes`). Every handler scopes to `CurrentUser.id`, so a
 //! cross-owner id is indistinguishable from NotFound.
-use std::sync::Arc;
-
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, State};
@@ -13,14 +11,18 @@ use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, SshHostId};
 
 use crate::dto::{CreateSshHostRequest, SshHostResponse, UpdateSshHostRequest};
+use crate::pool::SshConnectionPool;
 use crate::service::{SshHostService, SshServiceError};
 
-/// Router state: just the host-book service (cheap to clone).
+/// Router state: the host book plus the process connection pool (both cheap
+/// handles). The pool is the same one the agent factory dials through, so a probe
+/// here and a session there cannot disagree about a host.
 #[derive(Clone)]
 pub struct SshHostRouterState {
     pub service: SshHostService,
-    /// Connection prober for test-connection (optional; None → probe unsupported).
-    pub provider: Option<Arc<dyn nomifun_ai_agent::SshBackendProvider>>,
+    /// `None` → this server has no SSH support wired, and test-connection is
+    /// refused rather than answered with a guess.
+    pub pool: Option<SshConnectionPool>,
 }
 
 pub fn ssh_host_routes(state: SshHostRouterState) -> Router {
@@ -113,7 +115,8 @@ async fn delete_one(
 #[serde(rename_all = "camelCase")]
 struct TestConnectionResult {
     ok: bool,
-    /// Present on success: the host's SHA256 fingerprint (also persisted).
+    /// Why, in the operator's terms — the probe's own detail, so a failure names
+    /// the setting to fix instead of a generic "could not connect".
     message: String,
 }
 
@@ -122,30 +125,17 @@ async fn test_connection(
     Extension(user): Extension<CurrentUser>,
     Path(ssh_host_id): Path<SshHostId>,
 ) -> Result<Json<ApiResponse<TestConnectionResult>>, AppError> {
-    let Some(provider) = &state.provider else {
+    let Some(pool) = &state.pool else {
         return Err(AppError::BadRequest(
             "SSH support is not configured on this server".into(),
         ));
     };
-    // Connect with the remote $HOME (".") and run a trivial probe. A dropped
-    // connection is closed when the returned backend is dropped at scope end.
-    match provider
-        .connect(user.id.as_str(), ssh_host_id.as_str(), ".")
-        .await
-    {
-        Ok(backend) => match backend.run_command("true", 15_000).await {
-            Ok(_) => Ok(Json(ApiResponse::ok(TestConnectionResult {
-                ok: true,
-                message: "connection succeeded".into(),
-            }))),
-            Err(e) => Ok(Json(ApiResponse::ok(TestConnectionResult {
-                ok: false,
-                message: format!("connected but probe failed: {e}"),
-            }))),
-        },
-        Err(e) => Ok(Json(ApiResponse::ok(TestConnectionResult {
-            ok: false,
-            message: e,
-        }))),
-    }
+    // The pool's probe dials, runs one trivial command and closes with the same
+    // forensics a session close uses — so "test" proves the connection instead of
+    // leaving a socket behind for the runtime to trip over.
+    let outcome = pool.probe(user.id.as_str(), &ssh_host_id).await;
+    Ok(Json(ApiResponse::ok(TestConnectionResult {
+        ok: outcome.ok,
+        message: outcome.detail,
+    })))
 }
