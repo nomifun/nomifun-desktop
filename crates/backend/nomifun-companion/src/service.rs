@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomifun_common::{
-    AppError, CompanionId, ProviderId, ProviderUsage, ProviderUsageFeature,
-    ProviderWithModel, SharedProviderLifecycleBarrier,
+    AppError, CompanionId, ProviderId, ProviderUsage, ProviderUsageFeature, SharedProviderLifecycleBarrier,
 };
 use nomifun_db::IProviderRepository;
 use serde::Serialize;
@@ -39,28 +38,6 @@ fn scope_for(scope_companion_id: Option<&str>) -> SkillScope {
     scope_companion_id
         .map(|id| SkillScope::Companion(id.to_owned()))
         .unwrap_or(SkillScope::Shared)
-}
-
-async fn validate_provider_reference(
-    provider_repo: Option<&Arc<dyn IProviderRepository>>,
-    model: Option<&ProviderWithModel>,
-    label: &str,
-) -> Result<(), AppError> {
-    let (Some(provider_repo), Some(model)) = (provider_repo, model) else {
-        return Ok(());
-    };
-    if provider_repo
-        .find_by_id(&model.provider_id)
-        .await
-        .map_err(|error| AppError::Internal(format!("check {label} provider: {error}")))?
-        .is_none()
-    {
-        return Err(AppError::NotFound(format!(
-            "provider '{}' referenced by {label} not found",
-            model.provider_id
-        )));
-    }
-    Ok(())
 }
 
 /// A skill registry row + its SKILL.md `description` (frontmatter), flattened for the UI list.
@@ -235,7 +212,6 @@ pub struct CompanionService {
     /// Delete-cascade hooks, late-wired by the app assembly (same pattern as
     /// `companion`). Empty when never set (tests).
     cleanup_hooks: std::sync::OnceLock<Vec<Arc<dyn CompanionCleanupHook>>>,
-    provider_repo: Option<Arc<dyn IProviderRepository>>,
     provider_lifecycle: Option<SharedProviderLifecycleBarrier>,
 }
 
@@ -281,7 +257,11 @@ impl CompanionService {
         let companions_dir = data_dir.join(crate::COMPANION_COMPANIONS_REL_DIR);
         let models_dir = data_dir.join(crate::COMPANION_MODELS_REL_DIR);
         let figures_dir = data_dir.join(crate::COMPANION_FIGURES_REL_DIR);
-        let config: SharedConfig = Arc::new(RwLock::new(SharedCompanionConfig::load(&shared_dir)?));
+        // 学习 / 进化 moved off this file onto each companion. The retired blocks are
+        // read out here and consumed by the boot migration below; the file is only
+        // rewritten without them once that has durably succeeded.
+        let loaded_config = SharedCompanionConfig::load_migrating(&shared_dir)?;
+        let config: SharedConfig = Arc::new(RwLock::new(loaded_config.config));
         let event_store_lock: SharedEventStoreLock = Arc::new(RwLock::new(()));
         let registry = Arc::new(CompanionRegistry::scan_with_provider_lifecycle(
             companions_dir,
@@ -289,6 +269,24 @@ impl CompanionService {
             provider_repo.clone(),
             provider_lifecycle.clone(),
         )?);
+        // Boot migration, part 1 of 2: every existing companion inherits the
+        // retired install-wide 学习/进化 values, so nobody's behaviour changes on
+        // upgrade. Must precede the provider audit and the retention pass below,
+        // both of which read the per-companion config.
+        registry
+            .seed_learn_evolve_from_retired(&loaded_config.retired_learn_evolve)
+            .await?;
+        if loaded_config.needs_rewrite {
+            config
+                .read()
+                .await
+                .save(&shared_dir)
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "rewrite shared companion config without the retired learn/evolve blocks: {error}"
+                    ))
+                })?;
+        }
         let live_companion_ids = registry
             .ids()
             .await
@@ -311,18 +309,6 @@ impl CompanionService {
         } else {
             None
         };
-        validate_provider_reference(
-            provider_repo.as_ref(),
-            config.read().await.learn.model.as_ref(),
-            "shared learn",
-        )
-        .await?;
-        validate_provider_reference(
-            provider_repo.as_ref(),
-            config.read().await.evolve.model.as_ref(),
-            "shared evolve",
-        )
-        .await?;
         registry.validate_provider_references_under_guard().await?;
         drop(_provider_guard);
         // The persistent v3 side-store is authoritative. Never hide a corrupt,
@@ -341,10 +327,18 @@ impl CompanionService {
         };
         let store = CompanionStore::open(&shared_dir, row_owner.as_deref()).await?;
         store.validate_companion_references(&live_companion_ids).await?;
+        // Boot migration, part 2 of 2: the runtime state that became per-companion
+        // with the settings — above all the two event cursors. A companion left at
+        // the absent-row default of 0 would re-distill the whole retained history
+        // on its first run (duplicate memories, unexpected LLM bill), and would
+        // also pin the retention watermark to 0 forever.
+        store
+            .seed_companion_state_from_global(&registry.ids().await)
+            .await?;
         collector::validate_event_store(&shared_dir)?;
         let startup_config = config.read().await.clone();
         let protected_after_ts =
-            collector::active_consumer_watermark(&store, &startup_config).await?;
+            collector::active_consumer_watermark(&store, &registry.list().await).await?;
         collector::prune_event_store(
             &shared_dir,
             startup_config.collect.event_retention_days,
@@ -366,18 +360,20 @@ impl CompanionService {
             shared_dir.clone(),
             config.clone(),
             store.clone(),
+            registry.clone(),
             event_store_lock.clone(),
         )
         .spawn(bus);
 
+        // One lock map shared by both loops' "run now" entry points and their
+        // ticks, keyed by companion so one companion's run cannot serialize another's.
         let learner = Arc::new(Learner {
             companion_dir: shared_dir.clone(),
-            config: config.clone(),
             store: store.clone(),
             registry: registry.clone(),
             completer: completer.clone(),
             emitter: emitter.clone(),
-            run_lock: Arc::new(Mutex::new(())),
+            run_locks: Arc::new(crate::learner::CompanionRunLocks::new()),
             event_store_lock: event_store_lock.clone(),
         });
         learner.clone().spawn();
@@ -387,7 +383,6 @@ impl CompanionService {
         // collector event stream + completer with the learner but runs its own tick.
         let evolution = Arc::new(EvolutionEngine {
             companion_dir: shared_dir.clone(),
-            config: config.clone(),
             store: store.clone(),
             registry: registry.clone(),
             completer: completer.clone(),
@@ -397,7 +392,7 @@ impl CompanionService {
             // (the conversation service is built after this). Noop = drafts degrade to
             // tool-name steps until then.
             transcript: std::sync::RwLock::new(Arc::new(NoopTranscriptSource)),
-            run_lock: Arc::new(Mutex::new(())),
+            run_locks: Arc::new(crate::learner::CompanionRunLocks::new()),
             event_store_lock: event_store_lock.clone(),
         });
         evolution.clone().spawn();
@@ -420,7 +415,6 @@ impl CompanionService {
             companion: tokio::sync::OnceCell::new(),
             archiver: std::sync::OnceLock::new(),
             cleanup_hooks: std::sync::OnceLock::new(),
-            provider_repo,
             provider_lifecycle,
         }))
     }
@@ -520,8 +514,9 @@ impl CompanionService {
         self.registry.list().await
     }
 
-    /// Every desktop-companion reference to `provider_id`: per-companion chat
-    /// model + the shared learn/evolve models. Malformed provider IDs never match.
+    /// Every desktop-companion reference to `provider_id`: per companion, its chat
+    /// model plus its own 学习 / 进化 models (one install-wide pair until 2026-08).
+    /// Malformed provider IDs never match.
     /// The provider deletion coordinator invokes this while holding the shared
     /// lifecycle write guard; all parent checks below therefore observe the
     /// same deletion-critical snapshot.
@@ -542,45 +537,22 @@ impl CompanionService {
         }
         let mut out = Vec::new();
         for p in self.list_companions().await {
-            if p.model.as_ref().is_some_and(|model| model.provider_id == provider_id.as_str()) {
-                out.push(ProviderUsage {
-                    feature: ProviderUsageFeature::DesktopCompanion,
-                    label: p.name.clone(),
-                    target_id: Some(p.companion_id.clone()),
-                });
+            for (model, what) in [
+                (p.model.as_ref(), None),
+                (p.learn.model.as_ref(), Some("学习模型")),
+                (p.evolve.model.as_ref(), Some("进化模型")),
+            ] {
+                if model.is_some_and(|model| model.provider_id == provider_id.as_str()) {
+                    out.push(ProviderUsage {
+                        feature: ProviderUsageFeature::DesktopCompanion,
+                        label: match what {
+                            None => p.name.clone(),
+                            Some(what) => format!("{}·{what}", p.name),
+                        },
+                        target_id: Some(p.companion_id.clone()),
+                    });
+                }
             }
-        }
-        let shared = self.get_config().await;
-        if let Err(error) = self.validate_shared_provider_models(&shared).await {
-            return vec![ProviderUsage {
-                feature: ProviderUsageFeature::DesktopCompanion,
-                label: format!("桌面伙伴共享 Provider 引用审计失败（{error}）"),
-                target_id: None,
-            }];
-        }
-        if shared
-            .learn
-            .model
-            .as_ref()
-            .is_some_and(|model| model.provider_id == provider_id.as_str())
-        {
-            out.push(ProviderUsage {
-                feature: ProviderUsageFeature::DesktopCompanion,
-                label: "共享学习模型".into(),
-                target_id: None,
-            });
-        }
-        if shared
-            .evolve
-            .model
-            .as_ref()
-            .is_some_and(|model| model.provider_id == provider_id.as_str())
-        {
-            out.push(ProviderUsage {
-                feature: ProviderUsageFeature::DesktopCompanion,
-                label: "共享进化模型".into(),
-                target_id: None,
-            });
         }
         out
     }
@@ -589,6 +561,25 @@ impl CompanionService {
     /// default companion (shared config saved + broadcast).
     pub async fn create_companion(&self, name: &str, character: &str) -> Result<CompanionProfileConfig, AppError> {
         let profile = self.registry.create(name, character).await?;
+        // A brand-new companion starts reading the shared event spool from NOW.
+        // Left at the absent-row default of 0 it would distill the entire retained
+        // history on its first run — weeks of the owner's events re-summarised into
+        // duplicate memories, on the owner's token budget — and would hold the
+        // retention watermark at 0 until it caught up.
+        for key in [collector::LEARN_CURSOR_KEY, collector::EVOLVE_CURSOR_KEY] {
+            if let Err(error) = self
+                .store
+                .seed_companion_state(&profile.companion_id, key, &nomifun_common::now_ms().to_string())
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    companion_id = %profile.companion_id,
+                    key,
+                    "seed new companion event cursor failed; it will start from the oldest retained event"
+                );
+            }
+        }
         let updated_shared = {
             let mut cfg = self.config.write().await;
             if cfg.default_companion_id.is_none() {
@@ -855,8 +846,8 @@ impl CompanionService {
         crate::skill_io::remove_companion_trees(&self.skill_paths, companion_id)
     }
 
-    /// One companion's status: per-companion xp/level, shared mood + memory
-    /// counters, that companion's companion model flag.
+    /// One companion's status: its own xp/level/mood, its own memory counters,
+    /// that companion's companion model flag.
     pub async fn companion_status(&self, id: &str) -> Result<CompanionStatus, AppError> {
         let profile = self.get_companion(id).await?;
         let cfg = self.config.read().await.clone();
@@ -865,7 +856,13 @@ impl CompanionService {
             companion_id: Some(profile.companion_id),
             xp,
             level: level_for_xp(xp),
-            mood: self.store.get_state("mood").await?.unwrap_or_else(|| "content".into()),
+            // Mood is this companion's own since 2026-08 (it was one global row, so
+            // whichever loop finished last set the whole family's mood).
+            mood: self
+                .store
+                .get_companion_state(id, crate::store::MOOD_KEY)
+                .await?
+                .unwrap_or_else(|| "content".into()),
             // Memory is owned per companion, and this snapshot is rendered per
             // companion: count only what THIS companion can read.
             memories_active: self.store.count_memories("active", Some(id)).await?,
@@ -1096,7 +1093,6 @@ impl CompanionService {
                 .collect
                 .validate_storage_policy()
                 .map_err(AppError::BadRequest)?;
-            self.validate_shared_provider_models(&merged).await?;
             self.validate_default_companion_reference(&merged).await?;
             let storage_policy_changed = cfg.collect.event_retention_days
                 != merged.collect.event_retention_days
@@ -1113,7 +1109,9 @@ impl CompanionService {
             (merged, storage_policy_changed)
         };
         if storage_policy_changed {
-            match collector::active_consumer_watermark(&self.store, &merged).await {
+            match collector::active_consumer_watermark(&self.store, &self.registry.list().await)
+                .await
+            {
                 Ok(protected_after_ts) => {
                     if let Err(error) = collector::prune_event_store(
                         &self.shared_dir,
@@ -1140,16 +1138,6 @@ impl CompanionService {
         Ok(merged)
     }
 
-    async fn validate_shared_provider_models(
-        &self,
-        config: &SharedCompanionConfig,
-    ) -> Result<(), AppError> {
-        self.validate_provider_model(config.learn.model.as_ref(), "shared learn")
-            .await?;
-        self.validate_provider_model(config.evolve.model.as_ref(), "shared evolve")
-            .await
-    }
-
     async fn validate_default_companion_reference(
         &self,
         config: &SharedCompanionConfig,
@@ -1166,19 +1154,13 @@ impl CompanionService {
         Ok(())
     }
 
-    async fn validate_provider_model(
-        &self,
-        model: Option<&ProviderWithModel>,
-        label: &str,
-    ) -> Result<(), AppError> {
-        validate_provider_reference(self.provider_repo.as_ref(), model, label).await
-    }
 
     /// First-launch consent: apply self-evolution default-ON exactly once (design §9, 默认开).
-    /// Turns work-source collection + learn + evolve ON via `patch_config` (atomic save + emit +
-    /// live Arc propagation), guarded by a one-time global KV flag so it NEVER re-applies and
-    /// never re-enables after the user later turns things off. Raw `Default` impls stay `false`
-    /// (existing users are never silently enabled by a serde back-fill).
+    /// Turns work-source collection ON via `patch_config` (atomic save + emit + live Arc
+    /// propagation) and 学习 + 进化 ON for every companion in the roster, guarded by a
+    /// one-time global KV flag so it NEVER re-applies and never re-enables after the user
+    /// later turns things off. Raw `Default` impls stay `false` (existing users are never
+    /// silently enabled by a serde back-fill).
     pub async fn apply_default_on_consent(&self) -> Result<SharedCompanionConfig, AppError> {
         const CONSENT_KEY: &str = "self_evolution_consent";
         if self.store.get_state(CONSENT_KEY).await?.is_some() {
@@ -1191,20 +1173,25 @@ impl CompanionService {
                 "tool_calls": true,
                 "chat_user_messages": true,
                 "requirements": true
-            },
-            "learn": { "enabled": true },
-            "evolve": { "enabled": true }
+            }
         });
         let cfg = self.patch_config(patch).await?;
+        self.set_learning_enabled_for_every_companion(true).await?;
         self.store.set_state(CONSENT_KEY, "1").await?;
         Ok(cfg)
     }
 
     /// Master kill switch (design §9, 一键全关): stop ALL collection (incl. `companion_dialogues`,
-    /// which `any_enabled()` deliberately excludes), learning, and evolution in one atomic write.
-    /// Leaves models/intervals intact so re-enable needs no reconfiguration, and does NOT clear the
-    /// consent flag (a user who explicitly disabled is never silently re-enabled). Already-
-    /// collected events remain governed by the automatic retention and capacity policy.
+    /// which `any_enabled()` deliberately excludes) plus every companion's learning and
+    /// evolution. Leaves models/intervals intact so re-enable needs no reconfiguration, and
+    /// does NOT clear the consent flag (a user who explicitly disabled is never silently
+    /// re-enabled). Already-collected events remain governed by the automatic retention and
+    /// capacity policy.
+    ///
+    /// The two halves cannot be one atomic write any more — collection is one shared
+    /// file, learning is N profiles. Collection is turned off FIRST so the worst
+    /// interleaving leaves loops running over a spool nothing is adding to, rather
+    /// than collection running with no consumer to advance the retention watermark.
     pub async fn disable_all(&self) -> Result<SharedCompanionConfig, AppError> {
         let patch = serde_json::json!({
             "collect": {
@@ -1213,11 +1200,27 @@ impl CompanionService {
                 "terminal_sessions": false,
                 "tool_calls": false,
                 "companion_dialogues": false
-            },
-            "learn": { "enabled": false },
-            "evolve": { "enabled": false }
+            }
         });
-        self.patch_config(patch).await
+        let cfg = self.patch_config(patch).await?;
+        self.set_learning_enabled_for_every_companion(false).await?;
+        Ok(cfg)
+    }
+
+    /// Flip `learn.enabled` + `evolve.enabled` on every companion, emitting one
+    /// profile-updated event each so live surfaces follow.
+    async fn set_learning_enabled_for_every_companion(
+        &self,
+        enabled: bool,
+    ) -> Result<(), AppError> {
+        let patch = serde_json::json!({
+            "learn": { "enabled": enabled },
+            "evolve": { "enabled": enabled }
+        });
+        for companion_id in self.registry.ids().await {
+            self.patch_companion(&companion_id, patch.clone()).await?;
+        }
+        Ok(())
     }
 
     // ----- status -----
@@ -1233,7 +1236,8 @@ impl CompanionService {
             companion_id: None,
             xp: 0,
             level: level_for_xp(0),
-            mood: self.store.get_state("mood").await?.unwrap_or_else(|| "content".into()),
+            // No companion exists to have a mood of its own.
+            mood: "content".into(),
             // No companion exists to own anything: the only rows left are
             // vestigial unowned ones, so the unscoped count IS the honest total.
             memories_active: self.store.count_memories("active", None).await?,
@@ -1770,8 +1774,15 @@ impl CompanionService {
 
     // ----- learning -----
 
-    pub async fn run_learn_now(&self) -> Result<CompanionLearnResult, AppError> {
-        self.learner.run_once().await
+    /// "Run now" for ONE companion: it distills from its own cursor into its own
+    /// memories. Companion-scoped rather than a single global run because the run
+    /// lock is per companion — asking A to learn must not be refused just because
+    /// B's scheduled tick is mid-flight.
+    pub async fn run_learn_now(
+        &self,
+        companion_id: &str,
+    ) -> Result<CompanionLearnResult, AppError> {
+        self.learner.run_for(companion_id).await
     }
 
     // ----- events -----
@@ -2002,6 +2013,158 @@ mod tests {
         .unwrap()
     }
 
+    /// THE upgrade test. An install that had learning on at a non-default
+    /// interval, evolution on in 激进 mode, and non-zero global cursors must come
+    /// out of boot with EXACTLY that behaviour on every companion — and with the
+    /// cursors carried over, not reset to 0 (which would re-distill the whole
+    /// retained event history on the next tick).
+    ///
+    /// Booting twice must change nothing.
+    #[tokio::test]
+    async fn boot_seeds_every_companion_from_the_retired_install_wide_config_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared_dir = dir.path().join(crate::COMPANION_SHARED_REL_DIR);
+
+        // Two companions written the pre-migration way: no learn/evolve keys.
+        let companions_dir = dir.path().join(crate::COMPANION_COMPANIONS_REL_DIR);
+        let mut ids = Vec::new();
+        for (index, name) in ["甲", "乙"].iter().enumerate() {
+            let profile = CompanionProfileConfig::new(name, "ink", index as u64 + 1);
+            let mut raw = serde_json::to_value(&profile).unwrap();
+            let object = raw.as_object_mut().unwrap();
+            object.remove("learn");
+            object.remove("evolve");
+            let home = companions_dir.join(&profile.companion_id);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(
+                CompanionProfileConfig::config_path(&home),
+                serde_json::to_vec_pretty(&raw).unwrap(),
+            )
+            .unwrap();
+            ids.push(profile.companion_id);
+        }
+        std::fs::write(
+            shared_dir.join(crate::registry::SEQ_STATE_FILE),
+            br#"{"last_companion_seq": 2}"#,
+        )
+        .unwrap_or_else(|_| {
+            std::fs::create_dir_all(&shared_dir).unwrap();
+            std::fs::write(
+                shared_dir.join(crate::registry::SEQ_STATE_FILE),
+                br#"{"last_companion_seq": 2}"#,
+            )
+            .unwrap()
+        });
+
+        // A pre-migration shared config with non-default install-wide settings.
+        let mut shared = serde_json::to_value(SharedCompanionConfig::default()).unwrap();
+        shared["collect"]["tool_calls"] = serde_json::json!(true);
+        shared["learn"] = serde_json::json!({
+            "enabled": true, "interval_minutes": 30, "model": null
+        });
+        shared["evolve"] = serde_json::json!({
+            "enabled": true, "interval_minutes": 45, "model": null,
+            "min_pattern_count": 4, "min_distinct_sessions": 5,
+            "auto_activate": true, "auto_threshold": 0.7,
+            "skill_half_life_days": 30.0, "skill_archive_threshold": 0.1
+        });
+        std::fs::write(
+            SharedCompanionConfig::config_path(&shared_dir),
+            serde_json::to_vec_pretty(&shared).unwrap(),
+        )
+        .unwrap();
+
+        // Non-zero global cursors + a mood, as any real install has.
+        {
+            let store = CompanionStore::open(&shared_dir, Some(&ids[0])).await.unwrap();
+            store.set_state(collector::LEARN_CURSOR_KEY, "17000").await.unwrap();
+            store.set_state(collector::EVOLVE_CURSOR_KEY, "9000").await.unwrap();
+            store.set_state(crate::store::MOOD_KEY, "sleepy").await.unwrap();
+        }
+
+        let svc = service(dir.path()).await;
+        for id in &ids {
+            let profile = svc.get_companion(id).await.unwrap();
+            assert!(profile.learn.enabled, "learning must stay ON for {id}");
+            assert_eq!(profile.learn.interval_minutes, 30, "the owner's cadence survives");
+            assert!(profile.evolve.enabled);
+            assert!(profile.evolve.auto_activate, "激进 survives");
+            assert_eq!(profile.evolve.min_distinct_sessions, 5);
+            assert_eq!(profile.evolve.interval_minutes, 45);
+            // The tuning knobs carry over verbatim too.
+            assert_eq!(profile.evolve.min_pattern_count, 4);
+
+            assert_eq!(
+                svc.store.get_companion_state_i64(id, collector::LEARN_CURSOR_KEY).await.unwrap(),
+                17000,
+                "a companion seeded at 0 would re-distill the whole event history"
+            );
+            assert_eq!(
+                svc.store.get_companion_state_i64(id, collector::EVOLVE_CURSOR_KEY).await.unwrap(),
+                9000
+            );
+            assert_eq!(svc.companion_status(id).await.unwrap().mood, "sleepy");
+        }
+        // The shared file no longer carries the moved blocks.
+        let rewritten: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(SharedCompanionConfig::config_path(&shared_dir)).unwrap(),
+        )
+        .unwrap();
+        assert!(rewritten.get("learn").is_none());
+        assert!(rewritten.get("evolve").is_none());
+        assert_eq!(rewritten["collect"]["tool_calls"], serde_json::json!(true));
+
+        // Retention still protects both companions from their own lag.
+        assert_eq!(
+            collector::active_consumer_watermark(&svc.store, &svc.list_companions().await)
+                .await
+                .unwrap(),
+            Some(9000)
+        );
+
+        // The owner then changes one companion's mind.
+        svc.patch_companion(&ids[0], serde_json::json!({"learn": {"enabled": false}}))
+            .await
+            .unwrap();
+        svc.store
+            .set_companion_state(&ids[0], collector::LEARN_CURSOR_KEY, "99000")
+            .await
+            .unwrap();
+        drop(svc);
+
+        // Second boot: nothing is re-seeded, nothing is clobbered.
+        let again = service(dir.path()).await;
+        assert!(!again.get_companion(&ids[0]).await.unwrap().learn.enabled);
+        assert_eq!(
+            again.store.get_companion_state_i64(&ids[0], collector::LEARN_CURSOR_KEY).await.unwrap(),
+            99000
+        );
+        assert!(again.get_companion(&ids[1]).await.unwrap().learn.enabled);
+        assert_eq!(
+            again.store.get_companion_state_i64(&ids[1], collector::LEARN_CURSOR_KEY).await.unwrap(),
+            17000
+        );
+    }
+
+    /// A companion created after the migration starts reading the spool from NOW.
+    /// At the absent-row default of 0 its first run would re-summarise the entire
+    /// retained history of a machine it has never seen.
+    #[tokio::test]
+    async fn a_new_companion_starts_its_cursors_at_now_not_at_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let before = nomifun_common::now_ms();
+        let companion = svc.create_companion("新来的", "ink").await.unwrap();
+        for key in [collector::LEARN_CURSOR_KEY, collector::EVOLVE_CURSOR_KEY] {
+            let cursor = svc
+                .store
+                .get_companion_state_i64(&companion.companion_id, key)
+                .await
+                .unwrap();
+            assert!(cursor >= before, "{key} must start at creation time, got {cursor}");
+        }
+    }
+
     #[tokio::test]
     async fn start_rejects_missing_authoritative_owner() {
         let dir = tempfile::tempdir().unwrap();
@@ -2034,26 +2197,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn providers_in_use_detects_shared_learn_model() {
+    async fn providers_in_use_detects_a_companions_learn_model() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let provider_id = provider_fixture(2);
-        svc.patch_config(serde_json::json!({"learn":{"model":{"provider_id": provider_id,"model":"m"}}})).await.unwrap();
+        let companion = svc.create_companion("学习者", "ink").await.unwrap();
+        svc.patch_companion(
+            &companion.companion_id,
+            serde_json::json!({"learn":{"model":{"provider_id": provider_id,"model":"m"}}}),
+        )
+        .await
+        .unwrap();
         let hits = svc.providers_in_use(&provider_id).await;
-        assert!(hits.iter().any(|u| matches!(u.feature, nomifun_common::ProviderUsageFeature::DesktopCompanion)));
+        // The reference is now attributable to a companion, so deletion can name it.
+        assert!(hits.iter().any(|u| {
+            matches!(u.feature, nomifun_common::ProviderUsageFeature::DesktopCompanion)
+                && u.label == "学习者·学习模型"
+                && u.target_id.as_deref() == Some(companion.companion_id.as_str())
+        }), "{hits:?}");
     }
 
     #[tokio::test]
-    async fn providers_in_use_detects_shared_evolve_model() {
+    async fn providers_in_use_detects_a_companions_evolve_model() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let provider_id = provider_fixture(3);
-        svc.patch_config(serde_json::json!({"evolve":{"model":{"provider_id": provider_id,"model":"m"}}})).await.unwrap();
+        let companion = svc.create_companion("进化者", "ink").await.unwrap();
+        svc.patch_companion(
+            &companion.companion_id,
+            serde_json::json!({"evolve":{"model":{"provider_id": provider_id,"model":"m"}}}),
+        )
+        .await
+        .unwrap();
         let hits = svc.providers_in_use(&provider_id).await;
-        assert!(
-            hits.iter()
-                .any(|u| u.label == "共享进化模型" && u.target_id.is_none())
-        );
+        assert!(hits.iter().any(|u| {
+            u.label == "进化者·进化模型"
+                && u.target_id.as_deref() == Some(companion.companion_id.as_str())
+        }), "{hits:?}");
     }
 
     #[tokio::test]
@@ -2424,39 +2604,60 @@ mod tests {
         assert!(svc.store.insert_skill(&skill).await.is_err(), "an ownerless skill must be refused");
     }
 
+    /// The kill switch now spans two stores — one shared collect file and N
+    /// profiles — so it must turn EVERY companion's loops off, not just the
+    /// default one, and still preserve each companion's models and interval.
     #[tokio::test]
-    async fn disable_all_turns_everything_off_but_keeps_models() {
+    async fn disable_all_turns_everything_off_on_every_companion_but_keeps_models() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let provider_id = provider_fixture(4);
         svc.patch_config(serde_json::json!({
-            "collect": { "tool_calls": true, "chat_user_messages": true, "companion_dialogues": true },
-            "learn": { "enabled": true, "interval_minutes": 30, "model": { "provider_id": provider_id, "model": "m" } },
-            "evolve": { "enabled": true, "model": { "provider_id": provider_id, "model": "m" } }
+            "collect": { "tool_calls": true, "chat_user_messages": true, "companion_dialogues": true }
         }))
         .await
         .unwrap();
+        let mut ids = Vec::new();
+        for name in ["甲", "乙"] {
+            let companion = svc.create_companion(name, "ink").await.unwrap();
+            svc.patch_companion(
+                &companion.companion_id,
+                serde_json::json!({
+                    "learn": { "enabled": true, "interval_minutes": 30, "model": { "provider_id": provider_id, "model": "m" } },
+                    "evolve": { "enabled": true, "model": { "provider_id": provider_id, "model": "m" } }
+                }),
+            )
+            .await
+            .unwrap();
+            ids.push(companion.companion_id);
+        }
 
         svc.disable_all().await.unwrap();
-        let cfg = svc.config.read().await;
-        assert!(!cfg.collect.tool_calls);
-        assert!(!cfg.collect.chat_user_messages);
-        assert!(!cfg.collect.companion_dialogues, "kill switch must turn OFF companion_dialogues");
-        assert!(!cfg.learn.enabled);
-        assert!(!cfg.evolve.enabled);
-        // models + interval preserved so re-enable needs no reconfig
-        assert_eq!(cfg.learn.model.as_ref().unwrap().provider_id, provider_id);
-        assert_eq!(cfg.learn.interval_minutes, 30);
-        assert_eq!(cfg.evolve.model.as_ref().unwrap().provider_id, provider_id);
+        {
+            let cfg = svc.config.read().await;
+            assert!(!cfg.collect.tool_calls);
+            assert!(!cfg.collect.chat_user_messages);
+            assert!(!cfg.collect.companion_dialogues, "kill switch must turn OFF companion_dialogues");
+        }
+        for id in &ids {
+            let profile = svc.get_companion(id).await.unwrap();
+            assert!(!profile.learn.enabled, "every companion's learning must stop");
+            assert!(!profile.evolve.enabled, "every companion's evolution must stop");
+            // models + interval preserved so re-enable needs no reconfig
+            assert_eq!(profile.learn.model.as_ref().unwrap().provider_id, provider_id);
+            assert_eq!(profile.learn.interval_minutes, 30);
+            assert_eq!(profile.evolve.model.as_ref().unwrap().provider_id, provider_id);
+        }
     }
 
     #[tokio::test]
     async fn consent_applies_once_and_never_reenables_after_disable() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
+        let companion = svc.create_companion("甲", "ink").await.unwrap().companion_id;
         // fresh: work sources + learn + evolve all off (Default untouched)
         assert!(!svc.config.read().await.collect.tool_calls);
-        assert!(!svc.config.read().await.learn.enabled);
+        assert!(!svc.get_companion(&companion).await.unwrap().learn.enabled);
 
         // first-launch consent → default-on applied + flag set
         svc.apply_default_on_consent().await.unwrap();
@@ -2465,8 +2666,11 @@ mod tests {
             assert!(cfg.collect.tool_calls);
             assert!(cfg.collect.chat_user_messages);
             assert!(cfg.collect.requirements);
-            assert!(cfg.learn.enabled);
-            assert!(cfg.evolve.enabled);
+        }
+        {
+            let profile = svc.get_companion(&companion).await.unwrap();
+            assert!(profile.learn.enabled);
+            assert!(profile.evolve.enabled);
         }
         assert_eq!(svc.store.get_state("self_evolution_consent").await.unwrap().as_deref(), Some("1"));
 
@@ -2477,7 +2681,7 @@ mod tests {
         // re-consent must be an idempotent no-op (flag set) — NEVER silently re-enable
         svc.apply_default_on_consent().await.unwrap();
         assert!(!svc.config.read().await.collect.tool_calls, "must not re-enable after explicit disable");
-        assert!(!svc.config.read().await.learn.enabled);
+        assert!(!svc.get_companion(&companion).await.unwrap().learn.enabled);
     }
 
     #[tokio::test]
@@ -2493,7 +2697,7 @@ mod tests {
         // watermark field — it lives in the registry's own state file)…
         svc.patch_config(serde_json::json!({
             "default_companion_id": a.companion_id.clone(),
-            "learn": {"enabled": true},
+            "collect": {"tool_calls": true},
         }))
         .await
         .unwrap();

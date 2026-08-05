@@ -10,7 +10,6 @@ import { useTranslation } from 'react-i18next';
 import { Message, Switch } from '@arco-design/web-react';
 import { CheckOne } from '@icon-park/react';
 import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
-import InstallWideNote from './InstallWideNote';
 import NumberSetting from './NumberSetting';
 import type { EvolutionConfigHandle } from './useEvolutionConfig';
 
@@ -83,25 +82,9 @@ const SkillGenerationSection: React.FC<Props> = ({ config }) => {
   return (
     <NomiSettingSection
       title={t('nomi.evolution.skillTitle', { defaultValue: '技能生成配置' })}
-      description={
-        <>
-          {t('nomi.evolution.skillDesc', {
-            defaultValue: '把你反复重复的多步操作沉淀成可复用技能，使用上面的学习模型。',
-          })}
-          {config.installWide && (
-            <InstallWideNote
-              text={
-                config.ownsLearningOutput
-                  ? undefined
-                  : t('nomi.evolution.skillNotOwnerNote', {
-                      defaultValue:
-                        '这组设置目前对所有伙伴共同生效；自动生成的技能会归到默认伙伴名下，不会出现在这个伙伴的技能页。',
-                    })
-              }
-            />
-          )}
-        </>
-      }
+      description={t('nomi.evolution.skillDesc', {
+        defaultValue: '把你反复重复的多步操作沉淀成这个伙伴自己的技能，使用上面的学习模型。',
+      })}
     >
       <NomiSettingList>
         <NomiSettingRow

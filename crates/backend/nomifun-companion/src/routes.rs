@@ -78,7 +78,10 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
             "/api/companion/companions/{companion_id}/skills/from-session",
             post(draft_skill_from_session),
         )
-        .route("/api/companion/learn/run", post(run_learn))
+        .route(
+            "/api/companion/companions/{companion_id}/learn/run",
+            post(run_learn),
+        )
         .route("/api/companion/events/stats", get(event_stats))
         .route("/api/companion/events/storage", get(event_storage))
         .route("/api/companion/consent", post(apply_consent))
@@ -507,11 +510,17 @@ async fn draft_skill_from_session(
     )))
 }
 
+/// Run ONE companion's 定时学习 pass now. Companion-scoped since the loop is:
+/// the run lock lives per companion, so asking A to learn is never refused
+/// because B happens to be mid-run.
 async fn run_learn(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
+    Path(companion_id): Path<String>,
 ) -> Result<Json<ApiResponse<CompanionLearnResult>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.run_learn_now().await?)))
+    Ok(Json(ApiResponse::ok(
+        state.service.run_learn_now(&companion_id).await?,
+    )))
 }
 
 async fn event_stats(
@@ -1033,14 +1042,33 @@ mod tests {
     #[tokio::test]
     async fn learn_endpoint_returns_only_a_transient_result_and_history_route_is_retired() {
         let dir = tempfile::tempdir().unwrap();
-        let (app, _) = test_app(dir.path()).await;
+        let (app, service) = test_app(dir.path()).await;
+        let companion_id = service
+            .create_companion("学习者", "ink")
+            .await
+            .unwrap()
+            .companion_id;
 
-        let response = app
+        // The run is companion-scoped: the install-wide route is gone.
+        let unscoped = app
             .clone()
             .oneshot(
                 Request::post("/api/companion/learn/run")
                     .body(Body::empty())
                     .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unscoped.status(), StatusCode::NOT_FOUND);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/companion/companions/{companion_id}/learn/run"
+                ))
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();

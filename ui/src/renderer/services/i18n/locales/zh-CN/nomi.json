@@ -202,11 +202,10 @@
   },
   "evolution": {
     "loadFailed": "暂时读不到学习与进化设置。",
-    "installWideNote": "这组设置目前对所有伙伴共同生效，后续版本会改为按伙伴单独配置。",
     "collectionScopeTitle": "学习素材来自哪里",
-    "collectionScopeDesc": "伙伴只能学到这台设备记录下来的工作数据。记什么、留多久是应用级设置，对所有伙伴共同生效。",
+    "collectionScopeDesc": "伙伴只能学到这台设备记录下来的工作数据。记什么、留多久属于这台设备，所有伙伴共用同一份记录。",
     "openCollectionSettings": "前往数据采集设置",
-    "learningDesc": "伙伴会定期回顾你的工作记录，从中提炼记忆和经验。",
+    "learningDesc": "这个伙伴会按下面的节奏回顾你的工作记录，把提炼出的记忆记在自己名下。",
     "learnEnabledDesc": "关闭后不再进行周期性学习，已提炼的记忆和技能保持不变。",
     "modelDesc": "用来回顾记录、提炼记忆与技能的对话模型。",
     "modelMissing": "还没有选择模型，学习与技能生成都不会运行。",
@@ -214,10 +213,8 @@
     "interval": "学习周期",
     "intervalDesc": "每隔多久回顾一次新记录。",
     "skillTitle": "技能生成配置",
-    "skillDesc": "把你反复重复的多步操作沉淀成可复用技能，使用上面的学习模型。",
+    "skillDesc": "把你反复重复的多步操作沉淀成这个伙伴自己的技能，使用上面的学习模型。",
     "skillEnabledDesc": "关闭后不再生成新技能，已有技能仍然可用。",
-    "learnNotOwnerNote": "这组设置目前对所有伙伴共同生效；定时学习提炼出的记忆会归到默认伙伴名下，不会出现在这个伙伴的记忆页。",
-    "skillNotOwnerNote": "这组设置目前对所有伙伴共同生效；自动生成的技能会归到默认伙伴名下，不会出现在这个伙伴的技能页。",
     "minSessions": "最少出现会话数",
     "minSessionsDesc": "同一套操作至少在这么多个会话里出现过，才会被沉淀成技能。",
     "sessionsUnit": "个会话",
@@ -228,9 +225,9 @@
     "preferenceAggressive": "激进",
     "preferenceAggressiveDesc": "把握较大的新技能直接启用，其余仍存为草稿（随时可在技能页停用）。",
     "quietTitle": "休眠时段",
-    "quietSectionDesc": "给这个伙伴安排一段安静时间，只影响它主动找你的方式。",
+    "quietSectionDesc": "给这个伙伴安排一段安静时间：时段内它不主动找你，后台学习也一起歇着。",
     "quietRange": "休眠时段",
-    "quietRangeDesc": "时段内桌面伙伴不再弹气泡打扰你，未读提醒仍会累计到它的角标上；学习和技能生成照常进行。留空表示全天都可以打扰。"
+    "quietRangeDesc": "时段内桌面伙伴不再弹气泡打扰你，未读提醒仍会累计到它的角标上；定时学习和技能生成也会跳过，等睡醒再继续。收到消息仍会正常回复。留空表示全天都可以打扰。"
   },
   "history": {
     "sectionTitle": "聊天历史",

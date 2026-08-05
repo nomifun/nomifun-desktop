@@ -6,9 +6,11 @@ them separately, and give each its own name, character, persona, and
 chat model. Each companion can also be bound to its own **dedicated knowledge
 bases** (turning it into a finance companion, a literature companion, a coding companion,
 …), and **every memory belongs to exactly one companion** — what one companion
-learns is its own, and no other companion can see it. Collection and learning
-still run as a single install-wide pipeline, but every memory it produces is
-filed under one owner. Memories, companions, and knowledge bases can each be
+learns is its own, and no other companion can see it. **Learning and skill
+evolution are per companion too**: each one has its own schedule, its own learn
+model, its own position in the event stream, and files everything it distills
+under itself. Only *collection* — which events this machine records at all —
+stays install-wide. Memories, companions, and knowledge bases can each be
 packed into a `.zip` bundle for export/import, making machine-to-machine
 migration painless.
 
@@ -21,7 +23,7 @@ migration painless.
 The top of the Desktop Companion page is the **companion switcher bar**: one card per companion
 (character thumbnail + name + level) plus a **New companion** button. The
 selected companion drives the **companion-domain** tabs below; the few settings
-that are still one-per-install live in the **install-wide** tabs:
+that are genuinely one-per-machine live in the **install-wide** tabs:
 
 | Domain | Tab | Contents |
 | --- | --- | --- |
@@ -30,8 +32,9 @@ that are still one-per-install live in the **install-wide** tabs:
 | | Chat | That companion's own companion threads |
 | | Model & Knowledge | Chat model picker / **knowledge bindings** |
 | | Remote | That companion's IM bots (bound per companion — see the [channels guide](./channels.md)) |
-| | Settings | Name / character / persona / quiet hours / delete companion |
-| Install-wide (one per install) | Collect · Learn | The single collection + learning pipeline: one set of event sources, one schedule, one learn model for the whole machine. Editing it from any companion changes it for all of them |
+| | Evolution | **That companion's own** scheduled learning + skill generation + quiet hours |
+| | Settings | Name / character / persona / delete companion |
+| Install-wide (one per install) | Data Sources (in Settings › Privacy) | Which events this machine records at all, and how long they are kept. One set of switches for the whole device — every companion learns from the same recording |
 | | Migrate | Export / import migration bundles (see below) |
 
 ## Creating and managing companions
@@ -52,9 +55,9 @@ that are still one-per-install live in the **install-wide** tabs:
    companion, deleting a companion permanently destroys the memories filed under
    it — export that companion first if you want to keep them (its bundle carries
    its memories by default). Deleting
-   down to zero companions is allowed — collection and learning keep running,
-   but with nobody to own new memories a learning run stops early instead of
-   writing them.
+   down to zero companions is allowed — collection keeps running, but with no
+   companion left there is no learning loop at all (the schedule belongs to the
+   companion), so events simply accumulate until you create one.
 
 On disk each companion is a directory — `{data_dir}/companion/companions/{companion_id}/config.json`,
 **the directory is the source of truth** — which is also the unit the
@@ -77,9 +80,9 @@ rows only, and there is no way — in the UI or the API — to move a memory fro
 companion to another. What A learned, only A knows.
 
 The *facilities* under `{data_dir}/companion/shared/` are still one per install
-(one config, one event tree, one `memory.db` file holding every companion's rows
-side by side, each row tagged with its owner) — but the pipeline's **output** is
-always filed under a single owner:
+(one collection config, one event tree, one `memory.db` file holding every
+companion's rows and runtime state side by side, each tagged with its owner) —
+but both the **settings** and the **output** are per companion:
 
 - **Collection** — a single pipeline subscribes to the global event
   bus, gathers your working data according to the collect switches,
@@ -92,31 +95,40 @@ always filed under a single owner:
   action. A memory bundle containing raw events must fit the current hard cap
   before anything is imported; after a successful import, the same retention
   cleanup runs immediately.
-- **Learning** — a single learner incrementally distills events into
-  long-term memories on the configured interval, stored in
-  `shared/memory.db`. The learning pipeline uses the **learn model
-  from the shared config** (independent of each companion's chat model — one
-  pipeline, one budget). Its schedule, model, and event sources are
-  **install-wide**: there is one loop for the whole machine, and editing it from
-  any companion's tab changes it for all of them.
-- **Who owns what the learner writes** — the memories a learning run produces are
-  filed under the **owner companion**: the explicit default companion if it is
-  still in the roster, otherwise the oldest companion. Only that companion will
-  ever see them. Memories saved during a chat instead belong to the companion in
-  that conversation.
+- **Learning** — **each companion runs its own learner**, on its own interval,
+  with its own learn model (independent of that companion's chat model), from its
+  own position in the shared event stream. Everything a run distills — memories,
+  XP, mood — is filed under the companion whose settings drove it, so only that
+  companion will ever see it. Configure it in that companion's **Evolution** tab;
+  the settings you see there apply to nothing else. Memories saved during a chat
+  belong to the companion in that conversation, as before.
+- **Skill generation** — same shape: each companion mines its own repeated
+  multi-step work into its own skills, with its own 保守/激进 preference. The
+  pattern statistics and your accept/reject decisions behind it stay install-wide,
+  because a repeated tool sequence is a fact about how *you* work and a rejection
+  is your judgement about that pattern, not about a companion.
+- **Quiet hours** gate the two loops as well as the desktop bubbles: inside the
+  window that companion neither interrupts you nor spends tokens. Incoming IM
+  messages are still answered — going silent on a message would be a surprise.
+- **The event spool is shared, the cursors are not.** Every companion reads the
+  same `shared/events/*.jsonl`, each from its own cursor, so a companion you
+  enable later still sees the events its siblings have already consumed. Raw
+  events are only deleted once **every** companion with a consumer enabled has
+  read past them.
 
 ### XP and mood attribution
 
 | Source | Credited to |
 | --- | --- |
-| Learning-run output (scored by events processed + new memories) | **All companions** (the family grows together) |
+| Learning-run output (scored by events processed + new memories) | Only the companion that ran (it owns the schedule that produced it) |
 | Companion chat turn (+2) | Only the companion in that conversation |
 | Memory saved during chat (+5) | Only that companion |
 
-**Mood is global**: it is produced by learning runs and stored in
-shared state, so all companions share one mood (per-companion mood/personality
-divergence is reserved for a later version). XP and mood are the only things
-still pooled across the family — memory is not.
+**Mood is per companion too**: a learning run sets the mood of the companion that
+ran it. Nothing is pooled across the family any more — not memory, not XP, not
+mood, not the learning schedule. The only genuinely shared things left are the
+raw event recording itself (a property of the machine) and the mined-pattern
+statistics behind skill generation.
 
 ## Binding knowledge bases to a companion
 

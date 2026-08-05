@@ -5,47 +5,34 @@
  */
 
 /**
- * MIGRATION SEAM — the 进化 tab's config adapter.
+ * The 进化 tab's config adapter — one companion's 学习 / 技能进化 settings.
  *
- * The learn / evolve settings this tab edits are TODAY stored in the
- * cross-companion shared config (`GET|PATCH /api/companion/config`, i.e.
- * `ipcBridge.companion.getSharedConfig` / `patchSharedConfig`), so every value
- * here is install-wide: changing it changes it for all companions. A follow-up
- * backend change moves these fields onto the per-companion profile.
+ * These settings used to live on the cross-companion shared config
+ * (`GET|PATCH /api/companion/config`), so every value here was install-wide and
+ * each section had to carry an honest "applies to every companion" note. They are
+ * per companion since 2026-08: this hook reads and writes THIS companion's
+ * profile (`getCompanion` / `patchCompanion`), the loop runs from this
+ * companion's own event cursor, and what it produces — memories, mined skills,
+ * XP, mood — belongs to this companion. Both disclosures are therefore gone,
+ * along with the two flags that gated them.
  *
- * The `collect.*` fields of that same shared config are deliberately NOT read or
- * written here: collection is machine-level and owned solely by
- * `pages/settings/privacy` (设置 › 数据采集). This tab only links there.
- *
- * This module is the ONLY place in the tab that knows the rest is shared. It
- * already exposes a per-companion-shaped API (`useEvolutionConfig(companionId)` →
- * `{ learn, evolve, patchLearn, patchEvolve, loading }`),
- * so the migration is a rewrite of this file alone:
- *   - swap the two ipcBridge calls for `getCompanion` / `patchCompanion`,
- *   - key the fetch on `companionId` (already accepted),
- *   - flip `installWide` to false and `ownsLearningOutput` to true — the UI reads
- *     those flags to decide whether to print the "applies to all companions" /
- *     "what the loop produces lands on the default companion" notes, so both
- *     honest disclosures disappear by themselves once the values really are
- *     per-companion.
- * No section component needs to change.
+ * The `collect.*` fields of the shared config are deliberately NOT read or
+ * written here: collection is machine-level (which events this DEVICE records)
+ * and owned solely by `pages/settings/privacy` (设置 › 数据采集). This tab only
+ * links there.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ipcBridge } from '@/common';
 import type {
   ICompanionEvolveConfig,
-  ICompanionModelRef,
-  ICompanionSharedConfig,
+  ICompanionLearnConfig,
+  ICompanionProfile,
 } from '@/common/adapter/ipcBridge';
 import type { CompanionId } from '@/common/types/ids';
 
 /** Periodic-learning settings (定时学习). */
-export interface EvolutionLearnConfig {
-  enabled: boolean;
-  interval_minutes: number;
-  model: ICompanionModelRef | null;
-}
+export type EvolutionLearnConfig = ICompanionLearnConfig;
 
 /** Skill-generation settings (技能生成). Thresholds stay internal to the tab. */
 export type EvolutionEvolveConfig = ICompanionEvolveConfig;
@@ -56,16 +43,6 @@ export interface EvolutionConfigHandle {
   loading: boolean;
   /** Set when the config could not be read; the tab shows a retry instead of empty sections. */
   error: string | null;
-  /** True while these values are stored install-wide (pre-migration). */
-  installWide: boolean;
-  /**
-   * True when what the background loop produces would actually land on THIS
-   * companion. The backend files every mined skill AND every distilled memory
-   * under one resolved owner (the default companion, else the oldest), so on any
-   * other companion both sections must say so rather than imply the skills and
-   * memories show up on its own 技能 / 记忆 tabs.
-   */
-  ownsLearningOutput: boolean;
   retry: () => void;
   patchLearn: (patch: Partial<EvolutionLearnConfig>) => Promise<void>;
   patchEvolve: (patch: Partial<EvolutionEvolveConfig>) => Promise<void>;
@@ -77,7 +54,7 @@ export interface EvolutionConfigHandle {
  * server's truth and rethrows, so callers can surface the error.
  */
 export const useEvolutionConfig = (companionId: CompanionId | null): EvolutionConfigHandle => {
-  const [config, setConfig] = useState<ICompanionSharedConfig | null>(null);
+  const [profile, setProfile] = useState<ICompanionProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const aliveRef = useRef(true);
@@ -86,10 +63,17 @@ export const useEvolutionConfig = (companionId: CompanionId | null): EvolutionCo
   // retryable error state, because silently leaving `learn`/`evolve` null renders
   // a tab with two sections missing and no explanation.
   const refresh = useCallback(async () => {
-    try {
-      const next = await ipcBridge.companion.getSharedConfig.invoke();
+    if (!companionId) {
       if (aliveRef.current) {
-        setConfig(next);
+        setProfile(null);
+        setLoading(false);
+      }
+      return;
+    }
+    try {
+      const next = await ipcBridge.companion.getCompanion.invoke({ companion_id: companionId });
+      if (aliveRef.current) {
+        setProfile(next);
         setError(null);
       }
     } catch (e) {
@@ -97,19 +81,23 @@ export const useEvolutionConfig = (companionId: CompanionId | null): EvolutionCo
     } finally {
       if (aliveRef.current) setLoading(false);
     }
-  }, []);
+  }, [companionId]);
 
   useEffect(() => {
     aliveRef.current = true;
+    setLoading(true);
     void refresh();
+    // A profile-scoped `companion.config-updated` carries `scope === companion_id`;
+    // only this companion's own writes (from anywhere — the sidebar, MCP, another
+    // window) may refresh this pane.
     const unsub = ipcBridge.companion.onConfigUpdated.on((evt) => {
-      if (evt.scope === 'shared') void refresh();
+      if (companionId && evt.scope === companionId) void refresh();
     });
     return () => {
       aliveRef.current = false;
       unsub();
     };
-  }, [refresh]);
+  }, [companionId, refresh]);
 
   const retry = useCallback(() => {
     setLoading(true);
@@ -118,19 +106,23 @@ export const useEvolutionConfig = (companionId: CompanionId | null): EvolutionCo
 
   const patch = useCallback(
     async (
-      apply: (prev: ICompanionSharedConfig) => ICompanionSharedConfig,
-      request: Parameters<typeof ipcBridge.companion.patchSharedConfig.invoke>[0]
+      apply: (prev: ICompanionProfile) => ICompanionProfile,
+      request: Parameters<typeof ipcBridge.companion.patchCompanion.invoke>[0]['patch']
     ) => {
-      setConfig((prev) => (prev ? apply(prev) : prev));
+      if (!companionId) return;
+      setProfile((prev) => (prev ? apply(prev) : prev));
       try {
-        const saved = await ipcBridge.companion.patchSharedConfig.invoke(request);
-        if (aliveRef.current) setConfig(saved);
+        const saved = await ipcBridge.companion.patchCompanion.invoke({
+          companion_id: companionId,
+          patch: request,
+        });
+        if (aliveRef.current) setProfile(saved);
       } catch (e) {
         void refresh();
         throw e;
       }
     },
-    [refresh]
+    [companionId, refresh]
   );
 
   const patchLearn = useCallback(
@@ -146,16 +138,10 @@ export const useEvolutionConfig = (companionId: CompanionId | null): EvolutionCo
   );
 
   return {
-    learn: config?.learn ?? null,
-    evolve: config?.evolve ?? null,
+    learn: profile?.learn ?? null,
+    evolve: profile?.evolve ?? null,
     loading,
     error,
-    installWide: true,
-    // Only claim "not this companion" when the pointer positively says so: the
-    // first companion ever created becomes the default, so a null pointer means
-    // "nothing to warn about" rather than "some other companion owns them".
-    ownsLearningOutput:
-      config?.default_companion_id == null || companionId == null || config.default_companion_id === companionId,
     retry,
     patchLearn,
     patchEvolve,

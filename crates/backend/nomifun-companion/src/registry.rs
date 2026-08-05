@@ -25,7 +25,9 @@ use nomifun_db::IProviderRepository;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::profile::CompanionProfileConfig;
+use crate::profile::{
+    CompanionEvolveConfig, CompanionLearnConfig, CompanionProfileConfig, RetiredSharedLearnEvolve,
+};
 
 /// Maximum companion display-name length, counted in chars (not bytes) so CJK
 /// names get the same budget as ASCII ones.
@@ -394,6 +396,90 @@ impl CompanionRegistry {
         row_owner_of(self.inner.read().await.values(), default_companion_id)
     }
 
+    /// Boot migration for 学习 / 进化 moving off the install-wide shared config
+    /// onto each companion (2026-08).
+    ///
+    /// Every existing companion inherits the retired install-wide values verbatim,
+    /// so nobody's behaviour changes on upgrade — an install that had learning on
+    /// at 30-minute intervals keeps exactly that, on every companion, instead of
+    /// silently falling back to the `enabled: false` default.
+    ///
+    /// Additive and idempotent by construction:
+    /// - a companion whose `config.json` already carries its own `learn` /
+    ///   `evolve` key is skipped (see
+    ///   [`CompanionProfileConfig::has_persisted_learn_or_evolve`]), so a
+    ///   half-finished previous pass cannot clobber a value the owner has since
+    ///   changed;
+    /// - the caller only rewrites `shared/config.json` without the retired blocks
+    ///   AFTER this returns Ok, so a crash mid-migration replays it next boot.
+    ///
+    /// `interval_minutes` is CLAMPED rather than validated: a legacy out-of-range
+    /// value must not turn into a boot failure, and the profile writer range-checks.
+    pub async fn seed_learn_evolve_from_retired(
+        &self,
+        retired: &RetiredSharedLearnEvolve,
+    ) -> Result<usize, AppError> {
+        if retired.is_empty() {
+            return Ok(0);
+        }
+        let learn: Option<CompanionLearnConfig> = retired
+            .learn
+            .clone()
+            .map(|value| {
+                serde_json::from_value(value).map_err(|error| {
+                    AppError::Internal(format!(
+                        "retired install-wide learn config is unreadable: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let evolve: Option<CompanionEvolveConfig> = retired
+            .evolve
+            .clone()
+            .map(|value| {
+                serde_json::from_value(value).map_err(|error| {
+                    AppError::Internal(format!(
+                        "retired install-wide evolve config is unreadable: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let mut companions = self.inner.write().await;
+        let mut seeded = 0usize;
+        for profile in companions.values_mut() {
+            let dir = self.companions_dir.join(&profile.companion_id);
+            if CompanionProfileConfig::has_persisted_learn_or_evolve(&dir) {
+                continue;
+            }
+            if let Some(learn) = learn.clone() {
+                profile.learn = CompanionLearnConfig {
+                    interval_minutes: learn.effective_interval_minutes(),
+                    ..learn
+                };
+            }
+            if let Some(evolve) = evolve.clone() {
+                profile.evolve = CompanionEvolveConfig {
+                    interval_minutes: evolve.effective_interval_minutes(),
+                    ..evolve
+                };
+            }
+            profile.save(&dir).map_err(|error| {
+                AppError::Internal(format!(
+                    "seed per-companion learn/evolve config for {}: {error}",
+                    profile.companion_id
+                ))
+            })?;
+            seeded += 1;
+        }
+        if seeded > 0 {
+            tracing::info!(
+                companions = seeded,
+                "seeded per-companion 学习/进化 settings from the retired install-wide config"
+            );
+        }
+        Ok(seeded)
+    }
+
     /// Create a companion: validate the name, allocate its short number from the
     /// registry watermark, durably advance the watermark, persist
     /// `{companions_dir}/{companion_id}/config.json`, then insert into the map under the
@@ -473,6 +559,8 @@ impl CompanionRegistry {
         merged.created_at = current.created_at;
         merged.name = validate_name(&merged.name)?;
         validate_provider_model(self.provider_repo.as_ref(), merged.model.as_ref()).await?;
+        validate_provider_model(self.provider_repo.as_ref(), merged.learn.model.as_ref()).await?;
+        validate_provider_model(self.provider_repo.as_ref(), merged.evolve.model.as_ref()).await?;
         merged
             .save(&self.companions_dir.join(&merged.companion_id))
             .map_err(|e| AppError::Internal(format!("save companion profile: {e}")))?;
@@ -509,14 +597,23 @@ impl CompanionRegistry {
     ) -> Result<(), AppError> {
         let profiles: Vec<_> = self.inner.read().await.values().cloned().collect();
         for profile in profiles {
-            validate_provider_model(self.provider_repo.as_ref(), profile.model.as_ref())
-                .await
-                .map_err(|error| {
-                    AppError::Internal(format!(
-                        "companion '{}' has an orphaned provider reference: {error}",
-                        profile.companion_id
-                    ))
-                })?;
+            // All three per-companion Provider references are hard bindings: the
+            // chat model plus this companion's own 学习 / 进化 models, which used
+            // to be one install-wide pair audited by the service.
+            for (model, what) in [
+                (profile.model.as_ref(), "chat"),
+                (profile.learn.model.as_ref(), "learn"),
+                (profile.evolve.model.as_ref(), "evolve"),
+            ] {
+                validate_provider_model(self.provider_repo.as_ref(), model)
+                    .await
+                    .map_err(|error| {
+                        AppError::Internal(format!(
+                            "companion '{}' has an orphaned {what} provider reference: {error}",
+                            profile.companion_id
+                        ))
+                    })?;
+            }
         }
         Ok(())
     }
