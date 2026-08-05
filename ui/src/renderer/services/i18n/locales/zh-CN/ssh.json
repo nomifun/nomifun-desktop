@@ -8,6 +8,11 @@
   },
   "sessionGroup": "SSH 会话",
   "newSession": "新建 SSH 会话",
+  "group": {
+    "hostTooltip": "SSH 主机 {{host}}",
+    "hostUnknown": "未知主机",
+    "hostMissing": "已删除的主机"
+  },
   "form": {
     "addTitle": "添加 SSH 主机",
     "editTitle": "编辑 SSH 主机",
