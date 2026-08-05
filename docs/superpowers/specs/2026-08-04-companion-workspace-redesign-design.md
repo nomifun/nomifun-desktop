@@ -257,7 +257,15 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 
 - `bun run check` 全 8 个子门通过；`bun test --cwd ui` 1661 通过 / 1 失败（该失败在干净树上同样存在，为测试间污染，非本次引入）；`cargo nextest run -p nomifun-companion` 236/236；`cargo check --workspace --all-targets` 干净；`bun run build:ui` 通过。
 - **迁移端到端实测**：把真实 0.3.8 期数据目录（含 `companion_suggestions` 表）复制出来、植入一条金丝雀记忆，用真实 `nomifun-web` 启动 —— 后端正常启动（无启动即砖）、表已删除、金丝雀记忆逐字保留、external-content FTS5 索引仍能检索到它、`/api/companion/suggestions` 返回 404。
-- **未做**：UI 的视觉验证。本机为 Wayland 会话且无截图工具，Firefox headless `--screenshot` 连本地静态页都无法产出，因此新页面的实际观感尚未被人眼或截图确认过——这是本次交付最大的未验证面。
+- **UI 视觉实测**（补做）：本机有 `geckodriver`，用 WebDriver 驱动无头 Firefox 打开干净 dev server（`--insecure-no-auth` + 三个测试伙伴），逐一渲染七个标签与形象库视图并截图确认。此过程抓到并修掉了一个真 bug（见下）。
+
+**首次交付漏掉的缺陷（已修，提交 `72c411a8`）**
+
+`index.tsx` 把 `closeFigures` 的 `useCallback` 写在了 `if (loading) return <Spin/>` **之后**：加载态渲染 18 个 hook、加载完成渲染 19 个，React 抛 `Rendered more hooks than during the previous render`，整页落进路由错误边界——因为名册总是异步加载，**每次打开桌面伙伴都会触发**。
+
+值得记住的是：`typecheck`、单元测试、结构测试、`vite build` 全部通过。**hook 数量分歧需要两次渲染才显现，任何静态检查都抓不到**。因此新增 `workspace/rulesOfHooks.test.ts`：扫描任何写在组件级提前返回之后的 hook，用花括号深度避免嵌套回调里的 `return` 造成误报，并对已知的好/坏样本自检，防止检测器本身失效后静默通过。
+
+教训：这个页面能通过全部门禁却在打开时立刻崩溃。**只有真正把页面渲染出来才算验证过。** `geckodriver` 让这件事可以自动化，应当纳入后续 UI 改动的例行验证。
 
 **未完成（按优先级）**
 
