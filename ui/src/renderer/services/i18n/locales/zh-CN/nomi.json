@@ -241,14 +241,8 @@
     "yesterday": "昨天",
     "digestMark": "这一天有日记",
     "messageCount": "{{count}} 条",
-    "loadEarlier": "加载更早",
-    "loadingEarlier": "正在加载…",
-    "loadEarlierFailed": "加载失败，点此重试",
-    "allLoaded": "已加载全部历史（{{count}} 条可读消息）。",
-    "partialHint": "已读取 {{count}} 条可读消息，日期索引只到 {{day}}。更早的日期需要点「加载更早」。",
     "selectDay": "从左侧选择一天开始阅读。",
     "emptyDay": "这一天没有可显示的消息。",
-    "partialDayHint": "这一天只加载了后半段，更早的消息要先在左侧点「加载更早」。",
     "roleUser": "我",
     "roleCompanion": "伙伴",
     "systemNote": "系统提示",
@@ -257,21 +251,22 @@
     "digestTitle": "当天日记",
     "emptyTitle": "还没有聊天记录",
     "emptyHint": "和这个伙伴聊过第一句之后，对话会按天出现在这里。",
-    "noReadableTitle": "这一段没有可阅读的内容",
-    "noReadableHint": "最近读到的记录里只有系统消息。继续往前翻可以找到真正的对话。",
     "loadFailedTitle": "历史加载失败",
     "loadFailedHint": "没能读到这个伙伴的会话记录，可能是后端暂时不可用。稍后再试一次。",
     "retry": "重试",
     "onThisDayHint": "往年同一天（{{day}}）的会话日记",
     "onThisDayArchiveNote": "日记来自「会话归档」（全局设置，对所有伙伴生效，默认关闭）；没开启时这里始终为空。",
     "onThisDayFailed": "没读到往年的日记，可能是后端暂时不可用。",
-    "onThisDayFailedHint": "切走再回来会重新读取一次。"
+    "onThisDayFailedHint": "切走再回来会重新读取一次。",
+    "dayIndexSummary": "共 {{days}} 天 · {{count}} 条消息，这就是全部。",
+    "dayLoadFailed": "这一天没读出来，点此重试",
+    "dayTruncatedHint": "这一天太长了，只显示最早的 {{count}} 条。"
   },
   "other": {
     "migrateSection": "迁移",
     "migrateSectionDesc": "把这个伙伴打包带到另一台设备，或从迁移包里恢复一个伙伴。",
     "exportTitle": "导出伙伴",
-    "exportDesc": "把「{{companionName}}」打包成 .zip 迁移包，在另一台设备导入即可恢复。包内只有设定、成长进度与已绑定的知识库名单：记忆、技能、聊天记录与自定义形象图片都不在其中。",
+    "exportDesc": "把「{{companionName}}」打包成 .zip 迁移包，在另一台设备导入即可恢复。设定、成长进度、已绑定的知识库名单和自定义形象图片始终在包内；记忆和技能由你决定。聊天记录不在包内。",
     "importTitle": "导入伙伴",
     "importDesc": "选择伙伴迁移包（.zip），会在本机创建一个新伙伴，并按名称恢复它的知识库绑定。",
     "importAction": "选择迁移包",
@@ -280,11 +275,14 @@
     "dangerSectionDesc": "这里的操作不可撤销，执行前请先确认。",
     "deleteHint": "永久删除「{{companionName}}」，连同它的记忆、技能、成长进度与聊天记录。",
     "deleteConfirmTitle": "删除「{{companionName}}」？",
-    "deleteConfirmBody": "「{{companionName}}」的设定、它在「记忆」里的全部记忆、它的技能、成长进度与聊天记录会一起永久删除，无法恢复。上面的迁移包只保存设定与成长进度，记忆和聊天记录不在包内，导出也留不下它们。",
-    "deleteConfirmOk": "永久删除"
+    "deleteConfirmBody": "「{{companionName}}」的设定、它在「记忆」里的全部记忆、它的技能、成长进度与聊天记录会一起永久删除，无法恢复。上面的迁移包可以带走设定、记忆和技能，但聊天记录不在包内，导出也留不下它。",
+    "deleteConfirmOk": "永久删除",
+    "exportScopeSettings": "设定（始终包含）",
+    "exportScopeMemories": "记忆",
+    "exportScopeSkills": "技能（含 SKILL.md 正文）"
   },
   "danger": {
-    "deleteConfirmBody": "将永久删除「{{companionName}}」及其全部记忆、技能、成长进度与聊天记录，无法恢复。注意：迁移包只保存设定与成长进度，记忆不在包内，先导出也留不下它们。"
+    "deleteConfirmBody": "将永久删除「{{companionName}}」及其全部记忆、技能、成长进度与聊天记录，无法恢复。注意：迁移包可以带走设定、记忆和技能，但聊天记录不在包内，先导出也留不下它。"
   },
   "figures": {
     "back": "返回伙伴"

@@ -524,6 +524,7 @@ async fn turn_completion_drains_queue_fifo() {
         order: Some("ASC".into()),
         content_mode: None,
         cursor: None,
+        day: None,
     };
     let messages = stack
         .conversation_svc

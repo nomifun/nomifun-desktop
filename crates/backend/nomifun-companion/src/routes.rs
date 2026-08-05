@@ -17,7 +17,7 @@ use crate::profile::{HeadBox, CompanionProfileConfig, SharedCompanionConfig};
 use crate::memory_search::MemoryStatusFilter;
 use crate::learner::CompanionLearnResult;
 use crate::service::{
-    CompanionSkillContent, CompanionSkillViewPage, CompanionStatus, CompanionWeeklyDigest,
+    CompanionHistoryDay, CompanionSkillContent, CompanionSkillViewPage, CompanionStatus, CompanionWeeklyDigest,
     MemoryListItem, MemoryListPage, MemoryMergeGroup, SourceStats,
 };
 use crate::state::CompanionRouterState;
@@ -62,6 +62,10 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
         .route("/api/companion/companions/{companion_id}/skills", get(list_companion_skills))
         .route("/api/companion/companions/{companion_id}/weekly-digest", get(weekly_digest))
         .route("/api/companion/companions/{companion_id}/digests", get(list_day_digests))
+        .route(
+            "/api/companion/companions/{companion_id}/history/days",
+            get(history_days),
+        )
         .route(
             "/api/companion/companions/{companion_id}/skills/{companion_skill_id}",
             get(get_companion_skill).put(update_companion_skill),
@@ -414,6 +418,18 @@ async fn list_day_digests(
             .await?
     };
     Ok(Json(ApiResponse::ok(digests)))
+}
+
+/// The companion's complete history day index (聊天历史 的日期索引). Read-only: no
+/// session is ever minted, and a companion that has never chatted returns `[]`.
+async fn history_days(
+    State(state): State<CompanionRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(companion_id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<CompanionHistoryDay>>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.history_day_index(&companion_id).await?,
+    )))
 }
 
 async fn get_companion_skill(
@@ -879,15 +895,6 @@ async fn get_active_thread(
 
 // ----- cross-machine bundle export / import (§4.8) -----
 
-/// The live shared store + shared dir for export/import. `CompanionService` keeps
-/// its store private, so the boot-time registration in `crate::store` is the
-/// only crate-visible handle. `None` means the production store was not opened,
-/// so the endpoints refuse to operate.
-fn live_store() -> Result<(&'static std::path::Path, &'static crate::store::CompanionStore), AppError> {
-    crate::store::live_store()
-        .ok_or_else(|| AppError::Internal("伙伴持久化存储尚未初始化，无法导入导出".into()))
-}
-
 #[derive(Deserialize)]
 struct ExportMemoryRequest {
     dest_path: String,
@@ -918,6 +925,18 @@ struct ExportCompanionRequest {
     /// frontend (the companion crate never reaches into the knowledge domain).
     #[serde(default)]
     knowledge_names: Vec<String>,
+    /// Carry this companion's own memories (default on). Its settings are always
+    /// included, and its custom figure travels whenever it wears one.
+    #[serde(default = "default_true")]
+    include_memories: bool,
+    /// Carry its skills — rows plus their `SKILL.md` bodies. Off by default:
+    /// skill bodies are executable, so exporting them is an explicit choice.
+    #[serde(default)]
+    include_skills: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 async fn export_companion(
@@ -927,16 +946,18 @@ async fn export_companion(
     body: Result<Json<ExportCompanionRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<crate::export::ExportSummary>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    // Existence gate: an unknown companion must 404 before any file is written.
-    let profile = state.service.get_companion(&companion_id).await?;
-    let (_, store) = live_store()?;
-    let summary = crate::export::export_companion_bundle(
-        store,
-        &profile,
-        std::path::Path::new(&req.dest_path),
-        &req.knowledge_names,
-    )
-    .await?;
+    let summary = state
+        .service
+        .export_companion_bundle(
+            &companion_id,
+            std::path::Path::new(&req.dest_path),
+            &req.knowledge_names,
+            crate::export::CompanionBundleScope {
+                memories: req.include_memories,
+                skills: req.include_skills,
+            },
+        )
+        .await?;
     Ok(Json(ApiResponse::ok(summary)))
 }
 
@@ -1128,6 +1149,63 @@ mod tests {
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
+    }
+
+    /// The history rail is read-only and complete: no session is ever minted, a
+    /// companion that never chatted is an empty list (not a 400 for an
+    /// unconfigured model, and not a 404), and a day that only has an archived
+    /// digest is still reachable.
+    #[tokio::test]
+    async fn history_days_reads_without_minting_and_keeps_digest_only_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let companion = service.create_companion("小南", "ink").await.unwrap();
+
+        let days = |uri: String| {
+            let app = app.clone();
+            async move { app.oneshot(Request::get(&uri).body(Body::empty()).unwrap()).await.unwrap() }
+        };
+
+        // No conversation yet: an empty index, and nothing was minted.
+        let uri = format!(
+            "/api/companion/companions/{}/history/days",
+            companion.companion_id
+        );
+        let response = days(uri.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["data"], serde_json::json!([]));
+        assert!(
+            service.store.list_companion_threads(None).await.unwrap().is_empty(),
+            "a history read must never create a session"
+        );
+
+        // An archived digest makes its day reachable even with no messages left.
+        let conversation_id = nomifun_common::ConversationId::new().into_string();
+        let window = service
+            .store
+            .ensure_open_window(&companion.companion_id, &conversation_id, 0)
+            .await
+            .unwrap();
+        service
+            .store
+            .close_window(&window.session_window_id, "archived", Some("聊了部署"), None, 12)
+            .await
+            .unwrap();
+        let body = json_body(days(uri).await).await;
+        assert_eq!(
+            body["data"],
+            serde_json::json!([{
+                "day": window.session_day,
+                "message_count": 0,
+                "has_digest": true,
+            }]),
+            "{body}"
+        );
+
+        // An unknown companion is a 404, never an empty index.
+        let missing = nomifun_common::CompanionId::new().into_string();
+        let response = days(format!("/api/companion/companions/{missing}/history/days")).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

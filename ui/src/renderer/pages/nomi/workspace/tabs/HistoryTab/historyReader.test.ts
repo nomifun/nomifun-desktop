@@ -12,14 +12,15 @@ import type { TMessage } from '@/common/chat/chatLib';
 import { parseCompanionId, parseConversationId, parseMessageId } from '@/common/types/ids';
 import DayIndexRail from './DayIndexRail';
 import DayReader from './DayReader';
-import { dayKeyOf, formatDayKey, messageCursorOf, toHistoryEntry } from './historyFormat';
-import type { HistoryDay } from './useChatHistory';
+import { formatDayKey, toHistoryEntry } from './historyFormat';
+import type { DayContent, HistoryDay } from './useChatHistory';
 
 const CONVERSATION_ID = parseConversationId('0198f6b1-0ef0-7000-8000-0000000000aa');
 const COMPANION_ID = parseCompanionId('0198f6b1-0ef0-7000-8000-000000000001');
 const WINDOW_ID = '0198f6b1-0ef0-7000-8000-0000000000bb';
 
-/** 2026-08-04 09:30 local. */
+/** 2026-08-04 local, the day the fixtures below belong to. */
+const DAY = '20260804';
 const at = (hour: number, minute = 0): number => new Date(2026, 7, 4, hour, minute, 0, 0).getTime();
 
 const textMessage = (id: string, position: 'left' | 'right', content: string, when: number): TMessage =>
@@ -41,8 +42,10 @@ describe('history projection', () => {
     expect(user?.role).toBe('user');
     expect(user?.kind).toBe('text');
     expect(companion?.role).toBe('companion');
-    expect(user?.day).toBe(dayKeyOf(at(9, 30)));
-    expect(formatDayKey(user!.day)).toBe('2026-08-04');
+    expect(user?.createdAt).toBe(at(9, 30));
+    // The day is the SERVER's, never re-derived here from a timestamp.
+    expect('day' in (user ?? {})).toBe(false);
+    expect(formatDayKey(DAY)).toBe('2026-08-04');
   });
 
   test('drops hidden rows, empty text and non-readable types', () => {
@@ -73,18 +76,13 @@ describe('history projection', () => {
     expect(entry?.kind).toBe('tool');
     expect(entry?.text).toBe('read_file');
   });
-
-  test('builds the keyset cursor the messages endpoint expects', () => {
-    const message = textMessage('07', 'right', 'hi', at(12));
-    expect(messageCursorOf(message)).toBe(`${at(12)}:${message.message_id}`);
-  });
 });
 
 const digest: ICompanionDayDigest = {
   session_window_id: WINDOW_ID as ICompanionDayDigest['session_window_id'],
   companion_id: COMPANION_ID,
   conversation_id: CONVERSATION_ID,
-  session_day: dayKeyOf(at(9)),
+  session_day: DAY,
   started_at: at(9),
   last_activity_at: at(12),
   closed_at: at(12),
@@ -96,18 +94,27 @@ const digest: ICompanionDayDigest = {
   token_estimate: 120,
 };
 
-const day: HistoryDay = {
-  day: dayKeyOf(at(9)),
+/** One rail entry, exactly as the server's day index reports it. */
+const day: HistoryDay = { day: DAY, messageCount: 2, hasDigest: true };
+
+const content = (overrides: Partial<DayContent> = {}): DayContent => ({
   entries: [
     toHistoryEntry(textMessage('11', 'right', '今天状态怎么样？', at(9, 30)))!,
     toHistoryEntry(textMessage('12', 'left', '一切正常。', at(9, 31)))!,
   ],
   digests: [digest],
-};
+  truncated: false,
+  loading: false,
+  failed: false,
+  retry: () => {},
+  ...overrides,
+});
 
 describe('history reader rendering', () => {
   test('renders the day digest above the day messages', () => {
-    const html = renderToStaticMarkup(React.createElement(DayReader, { day, companionName: '小南' }));
+    const html = renderToStaticMarkup(
+      React.createElement(DayReader, { day, content: content(), companionName: '小南' })
+    );
     expect(html.includes('2026-08-04')).toBe(true);
     expect(html.includes('聊了部署计划，决定先做灰度。')).toBe(true);
     expect(html.includes('今天状态怎么样？')).toBe(true);
@@ -118,53 +125,47 @@ describe('history reader rendering', () => {
     expect(html.includes('sticky top-0')).toBe(true);
   });
 
-  test('day rail marks digest days and offers an explicit 加载更早', () => {
+  test('a failed day read offers a retry instead of an empty day', () => {
     const html = renderToStaticMarkup(
-      React.createElement(DayIndexRail, {
-        days: [day],
-        selectedDay: day.day,
-        onSelect: () => {},
-        hasMore: true,
-        loadingMore: false,
-        onLoadMore: () => {},
-        entryCount: 2,
-        oldestDay: day.day,
+      React.createElement(DayReader, {
+        day,
+        content: content({ entries: [], digests: [], failed: true }),
+        companionName: '小南',
       })
     );
-    expect(html.includes('加载更早')).toBe(true);
+    expect(html.includes('点此重试')).toBe(true);
+    expect(html.includes('这一天没有可显示的消息')).toBe(false);
+  });
+
+  test('a day longer than one read says it is truncated', () => {
+    const complete = renderToStaticMarkup(
+      React.createElement(DayReader, { day, content: content(), companionName: '小南' })
+    );
+    expect(complete.includes('只显示最早的')).toBe(false);
+    const truncated = renderToStaticMarkup(
+      React.createElement(DayReader, { day, content: content({ truncated: true }), companionName: '小南' })
+    );
+    expect(truncated.includes('只显示最早的')).toBe(true);
+  });
+
+  test('the day rail is complete: digest marks, server counts, no 加载更早', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DayIndexRail, {
+        days: [day, { day: '20260803', messageCount: 5, hasDigest: false }],
+        selectedDay: day.day,
+        onSelect: () => {},
+        messageCount: 7,
+      })
+    );
     expect(html.includes('!bg-primary-1 !text-primary-6')).toBe(true);
     expect(html.includes('这一天有日记')).toBe(true);
     expect(html.includes('role="button"')).toBe(true);
-    // The boundary is named, not left as a vague "这一天". Assert only the stable
-    // prose: whether `t()` interpolates the {{day}} placeholder depends on whether
-    // some earlier test in the suite initialised i18next, so asserting the raw
-    // placeholder would make this test order-dependent.
-    expect(html.includes('日期索引只到')).toBe(true);
-  });
-
-  test('a failed 加载更早 says so instead of silently stopping', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(DayIndexRail, {
-        days: [day],
-        selectedDay: day.day,
-        onSelect: () => {},
-        hasMore: true,
-        loadingMore: false,
-        onLoadMore: () => {},
-        entryCount: 2,
-        oldestDay: day.day,
-        loadMoreFailed: true,
-      })
-    );
-    expect(html.includes('加载失败，点此重试')).toBe(true);
-  });
-
-  test('the oldest loaded day admits it is only partly loaded', () => {
-    const complete = renderToStaticMarkup(React.createElement(DayReader, { day, companionName: '小南' }));
-    expect(complete.includes('只加载了后半段')).toBe(false);
-    const partial = renderToStaticMarkup(
-      React.createElement(DayReader, { day, companionName: '小南', partial: true })
-    );
-    expect(partial.includes('只加载了后半段')).toBe(true);
+    expect(html.includes('08-03')).toBe(true);
+    // The index is whole, so the partial-index affordances must be gone.
+    expect(html.includes('加载更早')).toBe(false);
+    expect(html.includes('日期索引只到')).toBe(false);
+    // Assert only the stable prose: whether `t()` interpolates {{count}} depends
+    // on whether an earlier test in the suite initialised i18next.
+    expect(html.includes('这就是全部')).toBe(true);
   });
 });

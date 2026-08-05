@@ -7,11 +7,12 @@
 import dayjs from 'dayjs';
 import type { TMessage } from '@/common/chat/chatLib';
 
-/** Local calendar day key, `YYYYMMDD` — the same shape the backend uses for digests. */
+/**
+ * Local calendar day key, `YYYYMMDD`. Always the BACKEND's day: it is what the
+ * day index and the archive digests are partitioned by, and the browser's own
+ * timezone may differ, so nothing here derives a day from a timestamp.
+ */
 export type DayKey = string;
-
-/** `created_at` is epoch **milliseconds** (backend `now_ms()`). */
-export const dayKeyOf = (createdAtMs: number): DayKey => dayjs(createdAtMs).format('YYYYMMDD');
 
 /** `YYYYMMDD` → `YYYY-MM-DD` (defensive on unexpected shapes). */
 export const formatDayKey = (day: DayKey): string =>
@@ -34,16 +35,6 @@ export const isYesterday = (day: DayKey): boolean => day === dayjs().subtract(1,
 /** `HH:mm` for a message timestamp. */
 export const formatClock = (createdAtMs: number): string => dayjs(createdAtMs).format('HH:mm');
 
-/**
- * Keyset cursor understood by `GET /api/conversations/{id}/messages`:
- * `"<created_at_ms>:<message_id>"`, taken from the OLDEST loaded message.
- */
-export const messageCursorOf = (message: TMessage): string | null => {
-  const id = message.message_id ?? message.msg_id;
-  if (!id) return null;
-  return `${message.created_at ?? 0}:${id}`;
-};
-
 export type HistoryRole = 'user' | 'companion';
 
 /** One renderable line of history. Deliberately lossy — this is a reader, not the chat. */
@@ -51,7 +42,6 @@ export interface HistoryEntry {
   key: string;
   role: HistoryRole;
   createdAt: number;
-  day: DayKey;
   kind: 'text' | 'thinking' | 'tool' | 'note';
   text: string;
 }
@@ -77,7 +67,6 @@ export const toHistoryEntry = (message: TMessage): HistoryEntry | null => {
     key: String(message.message_id ?? message.msg_id ?? message.id),
     role: (message.position === 'right' ? 'user' : 'companion') as HistoryRole,
     createdAt,
-    day: dayKeyOf(createdAt),
   };
 
   switch (message.type) {

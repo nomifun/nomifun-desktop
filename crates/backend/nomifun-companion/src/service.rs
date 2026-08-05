@@ -109,6 +109,16 @@ pub struct CompanionWeeklyDigest {
     pub new_skill_names: Vec<String>,
 }
 
+/// One day of a companion's readable history: the LOCAL calendar day, how many
+/// visible messages it holds, and whether 会话归档 left a diary on it. The day key
+/// is `YYYYMMDD`, identical in shape and timezone to `session_day`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompanionHistoryDay {
+    pub day: String,
+    pub message_count: i64,
+    pub has_digest: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SourceStats {
     pub source: String,
@@ -842,21 +852,7 @@ impl CompanionService {
     /// SQLite rows; if filesystem cleanup fails, the registry profile remains
     /// and the delete can be retried without hiding orphaned files.
     fn remove_companion_skill_trees(&self, companion_id: &str) -> Result<(), AppError> {
-        let companion_id = CompanionId::try_from(companion_id)
-            .map_err(|error| AppError::BadRequest(format!("invalid companion id: {error}")))?;
-        for path in [
-            skill_service::companion_skills_root(&self.skill_paths)
-                .join(companion_id.as_str()),
-            skill_service::drafts_root(&self.skill_paths).join(companion_id.as_str()),
-        ] {
-            crate::fsio::remove_path_entry(&path).map_err(|error| {
-                AppError::Internal(format!(
-                    "remove companion skill tree {}: {error}",
-                    path.display()
-                ))
-            })?;
-        }
-        Ok(())
+        crate::skill_io::remove_companion_trees(&self.skill_paths, companion_id)
     }
 
     /// One companion's status: per-companion xp/level, shared mood + memory
@@ -1359,6 +1355,62 @@ impl CompanionService {
 
     // ----- session-window day digests (伙伴会话归档回看) -----
 
+    /// The complete day index of this companion's history: every LOCAL calendar
+    /// day its conversation holds visible messages on, plus every day that has an
+    /// archived digest, newest first.
+    ///
+    /// Strictly read-only. The conversation is RESOLVED from the stored pointer,
+    /// never minted: `create_companion_thread` 400s for a companion with no model
+    /// configured, and a history reader must never fail for that reason. A
+    /// companion that has never chatted — or whose conversation was deleted
+    /// out-of-band, leaving a dangling pointer — yields an empty index rather
+    /// than an error.
+    pub async fn history_day_index(&self, companion_id: &str) -> Result<Vec<CompanionHistoryDay>, AppError> {
+        // Existence gate: an unknown companion must 404, not read as "no history".
+        self.get_companion(companion_id).await?;
+        let digest_days: std::collections::HashSet<String> = self
+            .store
+            .archived_digest_days(companion_id)
+            .await?
+            .into_iter()
+            .collect();
+        let counts = match crate::companion::active_thread_ptr(&self.store, companion_id).await? {
+            Some(conversation_id) => {
+                match self
+                    .companion()?
+                    .conversations
+                    .message_local_day_index(self.authoritative_user_id.as_ref(), &conversation_id)
+                    .await
+                {
+                    Ok(buckets) => buckets,
+                    // Dangling pointer to a conversation deleted out-of-band: the
+                    // digests this companion already produced are still real history.
+                    Err(AppError::NotFound(_)) => Vec::new(),
+                    Err(error) => return Err(error),
+                }
+            }
+            None => Vec::new(),
+        };
+        // A day carrying only a digest (its messages were cleared) must still be
+        // reachable, so the index is the union of both sources.
+        let mut days: std::collections::BTreeMap<String, i64> = digest_days
+            .iter()
+            .map(|day| (day.clone(), 0))
+            .collect();
+        for bucket in counts {
+            days.insert(bucket.day, bucket.message_count);
+        }
+        Ok(days
+            .into_iter()
+            .rev()
+            .map(|(day, message_count)| CompanionHistoryDay {
+                has_digest: digest_days.contains(&day),
+                day,
+                message_count,
+            })
+            .collect())
+    }
+
     /// Archived day-digests for one companion. `since`/`until` are inclusive
     /// `YYYYMMDD` bounds (empty = open). When both are empty, returns the most
     /// recent `limit` digests (newest first); otherwise the range (ascending).
@@ -1760,6 +1812,42 @@ impl CompanionService {
         .await
     }
 
+    /// The durable per-companion homes (`{companions_dir}/{companion_id}/`).
+    pub(crate) fn companions_dir(&self) -> &std::path::Path {
+        self.registry.companions_dir()
+    }
+
+    /// The filesystem homes a companion export reads beside the store.
+    fn bundle_homes(&self) -> crate::export::CompanionBundleHomes {
+        crate::export::CompanionBundleHomes {
+            companions_dir: self.registry.companions_dir().to_path_buf(),
+            figures_dir: self.figures_dir.clone(),
+            skill_paths: self.skill_paths.clone(),
+        }
+    }
+
+    /// Package one companion, including — unless `scope` says otherwise — the
+    /// memories, skills and custom figure that make it that companion.
+    pub async fn export_companion_bundle(
+        &self,
+        companion_id: &str,
+        dest_path: &std::path::Path,
+        knowledge_names: &[String],
+        scope: crate::export::CompanionBundleScope,
+    ) -> Result<crate::export::ExportSummary, AppError> {
+        // Existence gate: an unknown companion must 404 before any file is written.
+        let profile = self.get_companion(companion_id).await?;
+        crate::export::export_companion_bundle(
+            &self.store,
+            &self.bundle_homes(),
+            &profile,
+            dest_path,
+            knowledge_names,
+            scope,
+        )
+        .await
+    }
+
     pub async fn import_bundle(
         &self,
         src_path: &std::path::Path,
@@ -1767,6 +1855,7 @@ impl CompanionService {
         let outcome = crate::export::import_bundle_with_event_lock(
             &self.store,
             self,
+            &self.skill_paths,
             &self.shared_dir,
             src_path,
             self.event_store_lock.clone(),
