@@ -11,7 +11,12 @@ import { Button, Form, Input, InputNumber, Message, Modal, Select } from '@arco-
 import NomiModal from '@renderer/components/base/NomiModal';
 import { Certificate, Edit, Fingerprint, Key, Lock, Plus, Server, Speed } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import useSWR from 'swr';
+import { conversationTarget } from '@/common/types/ids';
+import { emitter } from '@renderer/utils/emitter';
+import { seedConversationCache } from '@renderer/pages/conversation/utils/conversationCache';
+import { useGuidModelSelection } from '@renderer/pages/guid/hooks/useGuidModelSelection';
 import {
   buildUpdatePayload,
   canTestConnection,
@@ -253,6 +258,8 @@ const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, onClose
 
 const SshHostManagement: React.FC = () => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { current_model } = useGuidModelSelection('nomi');
   const { data: hosts, mutate } = useSWR('ssh-hosts.list', () => ipcBridge.ssh.list.invoke());
   const [modalVisible, setModalVisible] = useState(false);
   const [editHost, setEditHost] = useState<IApiSshHost | undefined>();
@@ -265,6 +272,41 @@ const SshHostManagement: React.FC = () => {
     setEditHost(host);
     setModalVisible(true);
   };
+
+  // Create a nomi conversation bound to this host (extra.ssh_host_id) and jump
+  // to it — the factory connects the host and hands the agent the remote tools.
+  const openSession = useCallback(
+    async (host: IApiSshHost) => {
+      if (!current_model) {
+        Message.warning(t('conversation.noModelConfigured'));
+        return;
+      }
+      try {
+        const conversation = await ipcBridge.conversation.create.invoke({
+          type: 'nomi',
+          name: host.name,
+          model: current_model,
+          extra: {
+            workspace: '',
+            custom_workspace: false,
+            default_files: [],
+            ssh_host_id: host.sshHostId,
+          },
+        });
+        if (!conversation || !conversation.id) {
+          Message.error(t('conversation.createFailed'));
+          return;
+        }
+        emitter.emit('chat.history.refresh');
+        seedConversationCache(conversation);
+        void conversationTarget(conversation.id);
+        await navigate(`/conversation/${conversation.id}`);
+      } catch (e) {
+        Message.error(t('conversation.createFailed'));
+      }
+    },
+    [current_model, navigate, t]
+  );
 
   const handleDelete = useCallback(
     (host: IApiSshHost) => {
@@ -322,11 +364,16 @@ const SshHostManagement: React.FC = () => {
                   {host.sudoPassword ? <span>· sudo</span> : null}
                 </div>
               </div>
-              <div className='flex shrink-0 items-center gap-4px opacity-0 transition-opacity group-hover:opacity-100'>
-                <Button size='small' type='secondary' icon={<Edit theme='outline' size='14' />} onClick={() => openEdit(host)} />
-                <Button size='small' type='secondary' status='danger' onClick={() => handleDelete(host)}>
-                  {t('ssh.delete.ok')}
+              <div className='flex shrink-0 items-center gap-4px'>
+                <Button type='primary' size='small' onClick={() => void openSession(host)}>
+                  {t('ssh.newSession')}
                 </Button>
+                <div className='flex items-center gap-4px opacity-0 transition-opacity group-hover:opacity-100'>
+                  <Button size='small' type='secondary' icon={<Edit theme='outline' size='14' />} onClick={() => openEdit(host)} />
+                  <Button size='small' type='secondary' status='danger' onClick={() => handleDelete(host)}>
+                    {t('ssh.delete.ok')}
+                  </Button>
+                </div>
               </div>
             </div>
           ))}
