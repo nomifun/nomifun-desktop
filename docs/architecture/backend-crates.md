@@ -102,6 +102,7 @@ identifiers remain opaque.
 | Crate | Responsibility |
 | --- | --- |
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal/) | Terminal sessions backed by `portable-pty`, resize, input/output streaming over WS. |
+| [`nomifun-ssh`](../../crates/backend/nomifun-ssh/) | SSH remote sessions: the encrypted, owner-scoped host book (`ssh_hosts`), the connection pool/provider, `/api/ssh-hosts` routes, and the `SshBackend` sink that gives an SSH-bound conversation's agent a remote tool family. Transport lives in the isolated shared `nomi-ssh` crate (`russh`/`russh-sftp`). |
 | [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | Main-process browser ownership, scheduling, and lifecycle authority: `BrowserSessionHub` supplies the ownership, isolation, scheduling, lease, inventory, and cleanup contract shared by Native, Gateway, ACP, remote, and cluster callers. Chromium launch stays behind a host-specific `BrowserHostFactory`. |
 | [`nomifun-model-invoke`](../../crates/backend/nomifun-model-invoke/) | Unified multimodal model invocation layer: typed task requests/results, declarative auth schemes, shared HTTP transport, the protocol-adapter seam + registry, and catalog resolution. Consumed by `nomifun-shell` STT/TTS, `nomifun-creation`, and other model-calling features. |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | OS shell helpers: open files in the system, speech-to-text against Deepgram or OpenAI, clipboard / paste integration. |

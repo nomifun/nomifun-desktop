@@ -5,6 +5,24 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- SSH remote sessions: save a remote Linux host's SSH credentials (password,
+  private key with passphrase, certificate, or the local ssh-agent — all
+  AES-256-GCM encrypted at rest and never returned in plaintext) under a new
+  owner-scoped host book, then open a chat session bound to that host. The
+  agent operates the remote host through its ordinary tools — `Bash`, `Read`,
+  `Edit`, `Write`, `Grep`, `Glob` are transparently backed by a persistent
+  remote shell (cwd/env persist across commands) and SFTP; the local machine
+  is not involved. An optional per-host sudo password is injected at the
+  transport layer on the remote sudo prompt, so the model never sees it. Host
+  keys are learned into the operator's own `~/.ssh/known_hosts` on first
+  connect (TOFU); a changed key blocks the connection. New `/api/ssh-hosts`
+  CRUD + test-connection routes (instance-owner only) and a new `ssh_hosts`
+  table (migration 024). Transport is `russh`/`russh-sftp` in a dependency-
+  isolated `nomi-ssh` crate; the backend host book and connection pool live in
+  `nomifun-ssh`. Security posture matches local execution by design — no extra
+  approval gates or command interception. The UI/API contract version was
+  bumped accordingly.
+
 - WebUI realtime delivery behind reverse proxies: the `/ws` WebSocket
   handshake no longer rejects browsers whose proxy rewrites the `Host` header
   (e.g. nginx's default `proxy_set_header Host $proxy_host`). The

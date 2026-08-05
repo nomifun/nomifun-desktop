@@ -1,0 +1,61 @@
+{
+  "title": "远程主机",
+  "description": "保存的 SSH 主机可被任意会话复用；凭据加密存储于本机。",
+  "empty": {
+    "title": "还没有保存的主机",
+    "description": "添加一台远程 Linux 主机，agent 就能在会话里代你操控它。",
+    "add": "添加主机"
+  },
+  "sessionGroup": "SSH 会话",
+  "newSession": "新建 SSH 会话",
+  "form": {
+    "addTitle": "添加 SSH 主机",
+    "editTitle": "编辑 SSH 主机",
+    "name": "显示名称",
+    "host": "主机",
+    "port": "端口",
+    "username": "用户名",
+    "authType": "认证方式",
+    "authPassword": "密码",
+    "authKey": "私钥",
+    "authCertificate": "证书",
+    "authAgent": "SSH agent",
+    "password": "密码",
+    "privateKey": "私钥",
+    "privateKeyPlaceholder": "粘贴私钥（PEM / OpenSSH），留空则沿用已存的。",
+    "passphrase": "私钥口令",
+    "certificate": "证书",
+    "sudoPassword": "sudo 密码",
+    "sudoHint": "在远程 sudo 提示符处自动注入，agent 永远看不到。免密 sudo 可留空。",
+    "secretKept": "已存有一个值。保持不动即沿用，或输入新值替换。",
+    "test": "测试连接",
+    "save": "保存",
+    "cancel": "取消"
+  },
+  "status": {
+    "connected": "已连接",
+    "connecting": "连接中…",
+    "reconnecting": "重连中…",
+    "unknown": "未连接",
+    "error": "连接错误"
+  },
+  "test": {
+    "running": "正在测试连接…",
+    "ok": "连接成功",
+    "failed": "连接失败：{{message}}"
+  },
+  "delete": {
+    "confirm": "删除此主机？请先移除绑定它的会话。",
+    "ok": "删除",
+    "cancel": "取消"
+  },
+  "sessionsOnline": "{{count}} 个会话在线",
+  "validation": {
+    "nameRequired": "请填写显示名称。",
+    "hostRequired": "请填写主机。",
+    "portRange": "端口须在 1–65535 之间。",
+    "usernameRequired": "请填写用户名。",
+    "passwordRequired": "密码认证需要填写密码。",
+    "privateKeyRequired": "该认证方式需要提供私钥。"
+  }
+}

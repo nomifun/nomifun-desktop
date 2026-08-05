@@ -71,6 +71,7 @@ pub struct ModuleStates {
     pub system: SystemRouterState,
     pub conversation: ConversationRouterState,
     pub remote_agent: RemoteAgentRouterState,
+    pub ssh_host: nomifun_ssh::SshHostRouterState,
     pub agent: AgentRouterState,
 
     pub connection_test: ConnectionTestRouterState,
@@ -558,6 +559,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         system: build_system_state(services),
         conversation,
         remote_agent: build_remote_agent_state(services),
+        ssh_host: build_ssh_host_state(services),
         agent: AgentRouterState {
             agent_registry: services.agent_registry.clone(),
             service: agent_service,
@@ -777,6 +779,28 @@ pub fn build_remote_agent_state(services: &AppServices) -> RemoteAgentRouterStat
     let repo = Arc::new(SqliteRemoteAgentRepository::new(pool));
     RemoteAgentRouterState {
         service: Arc::new(RemoteAgentService::new(repo, encryption_key)),
+    }
+}
+
+/// Build the SSH host-book router state: the encrypted host book plus a
+/// connection provider (for test-connection). Host keys are learned into the
+/// operator's own `~/.ssh/known_hosts`.
+pub fn build_ssh_host_state(services: &AppServices) -> nomifun_ssh::SshHostRouterState {
+    let repo = Arc::new(nomifun_db::SqliteSshHostRepository::new(
+        services.database.pool().clone(),
+    )) as Arc<dyn nomifun_db::ISshHostRepository>;
+    let service = nomifun_ssh::SshHostService::new(repo, services.encryption_key);
+    let known_hosts = dirs::home_dir()
+        .unwrap_or_else(|| services.data_dir.clone())
+        .join(".ssh")
+        .join("known_hosts");
+    let provider = Arc::new(nomifun_ssh::SshConnectionProvider::new(
+        service.clone(),
+        known_hosts,
+    )) as Arc<dyn nomifun_ai_agent::SshBackendProvider>;
+    nomifun_ssh::SshHostRouterState {
+        service,
+        provider: Some(provider),
     }
 }
 
