@@ -1876,6 +1876,12 @@ export interface IApiSshStatus {
   detail: string | null;
   /** Non-null only for `closed`; `false` there means the exit was NOT proven. */
   reaped: boolean | null;
+  /**
+   * Non-null only for `dropped`. `false` means a retry cannot fix it — a
+   * credential was rejected or the host key changed, and a person has to act.
+   * Never infer this from `detail`, which is free-form operator text.
+   */
+  retryable: boolean | null;
   changedAt: number;
 }
 

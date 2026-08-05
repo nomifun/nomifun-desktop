@@ -4454,6 +4454,7 @@ export type I18nKey =
   | 'ssh.newSession'
   | 'ssh.pill.attempt'
   | 'ssh.pill.detail'
+  | 'ssh.pill.droppedActionRequired'
   | 'ssh.pill.droppedHint'
   | 'ssh.pill.endpoint'
   | 'ssh.pill.hostKey'

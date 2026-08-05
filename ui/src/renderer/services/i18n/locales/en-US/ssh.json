@@ -59,6 +59,7 @@
     "detail": "Detail",
     "noLink": "This session has no live link to the host yet.",
     "droppedHint": "Commands cannot reach the host until the link is back. If it does not return on its own, check the credentials and the host key.",
+    "droppedActionRequired": "This link will not come back on its own. Open 「Settings → Remote hosts」 to fix this host's credentials, or — if its host key changed — to review and trust the new key before reconnecting.",
     "unconfirmedExit": "The remote shell could not be confirmed as exited — a process may still be running on the host."
   },
   "test": {

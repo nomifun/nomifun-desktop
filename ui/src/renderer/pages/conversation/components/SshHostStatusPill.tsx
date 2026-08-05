@@ -112,6 +112,10 @@ const SshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) => {
   // shell exited — a stray process may still hold the host. That is a warning,
   // not the neutral end of a session.
   const unconfirmedExit = phase === 'closed' && status?.reaped === false;
+  // `retryable === false` is the backend saying no amount of waiting will fix
+  // this drop: a credential was rejected, or the host key changed under us. The
+  // flag is on the wire precisely so this branch does not have to read `detail`.
+  const dropNeedsAction = phase === 'dropped' && status?.retryable === false;
   // Prefer the fingerprint the live link actually negotiated; fall back to the
   // one pinned in the book.
   const fingerprint = status?.hostFingerprint ?? host.hostFingerprint ?? null;
@@ -153,8 +157,15 @@ const SshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) => {
         </div>
       ) : null}
       {detail ? row(t('ssh.pill.detail'), detail) : null}
-      {phase === 'dropped' ? (
+      {phase === 'dropped' && !dropNeedsAction ? (
         <div className='text-11px text-t-secondary leading-16px'>{t('ssh.pill.droppedHint')}</div>
+      ) : null}
+      {/* A call to action, not a gate: the session stays usable and nothing is
+          modal — a status must never stand between the operator and their work. */}
+      {dropNeedsAction ? (
+        <div className='text-11px text-t-secondary leading-16px'>
+          {t('ssh.pill.droppedActionRequired')}
+        </div>
       ) : null}
       {unconfirmedExit ? (
         <div className='text-11px text-t-secondary leading-16px'>{t('ssh.pill.unconfirmedExit')}</div>
