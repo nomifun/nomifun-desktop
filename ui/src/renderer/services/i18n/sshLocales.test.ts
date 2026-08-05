@@ -37,6 +37,7 @@ const SSH_PILL_KEYS = [
   'pill.detail',
   'pill.noLink',
   'pill.droppedHint',
+  'pill.droppedActionRequired',
   'pill.unconfirmedExit',
 ] as const;
 

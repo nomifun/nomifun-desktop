@@ -23,7 +23,17 @@ const rawStatus = (sshHostId: unknown) => ({
   hostFingerprint: 'SHA256:abc',
   detail: 'transport closed',
   reaped: null,
+  retryable: null,
   changedAt: 1,
+});
+
+const rawTerminalDrop = () => ({
+  ...rawStatus(SSH_HOST_ID),
+  state: 'dropped',
+  attempt: 0,
+  nextRetryInMs: null,
+  detail: 'ssh authentication failed: rejected',
+  retryable: false,
 });
 
 function respondWith(data: unknown): void {
@@ -70,6 +80,25 @@ describe('ssh live-status wire contract', () => {
   test('the live status carries reaped so an unconfirmed exit is visible', () => {
     expect(source.includes('reaped: boolean | null')).toBe(true);
     expect(source.includes('nextRetryInMs: number | null')).toBe(true);
+  });
+
+  test('the live status carries retryable so a terminal drop can ask for action', () => {
+    // The backend's `SshLinkState::Dropped` knows whether a retry could help;
+    // without that bit on the wire the client can only string-match `detail`,
+    // which is exactly how "authentication failed" gets shown as a blip that
+    // will clear itself.
+    expect(source.includes('retryable: boolean | null')).toBe(true);
+  });
+
+  test('a terminal drop survives the snapshot mapper with retryable intact', async () => {
+    try {
+      respondWith([rawTerminalDrop()]);
+      const rows: IApiSshStatus[] = await ssh.statuses.invoke();
+      expect(rows[0]?.state).toBe('dropped');
+      expect(rows[0]?.retryable).toBe(false);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
   test('the live path never reads the host row status column', () => {

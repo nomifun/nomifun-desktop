@@ -88,6 +88,19 @@ describe('SshHostStatusPill structure', () => {
     expect(hookSource.includes('offReconnected()')).toBe(true);
   });
 
+  test('a terminal drop asks for action instead of promising a comeback', () => {
+    // `retryable === false` is the backend saying a person has to change
+    // something (a rejected credential, a host key that changed). Showing the
+    // neutral "it may come back on its own" copy there would be a lie, and the
+    // only other way to tell the two apart — parsing `detail` — is banned above.
+    expect(pillSource.includes('retryable === false')).toBe(true);
+    expect(pillSource.includes("t('ssh.pill.droppedActionRequired')")).toBe(true);
+    // The neutral copy survives for the drops that really are transient.
+    expect(pillSource.includes("t('ssh.pill.droppedHint')")).toBe(true);
+    // Still just a row in the popover: a status may never block the session.
+    expect(pillSource.includes('Modal')).toBe(false);
+  });
+
   test('mounted in the existing nomi headerExtra beside the cron manager', () => {
     expect(conversationSource.includes('<SshHostStatusPill')).toBe(true);
     expect(conversationSource.includes('ssh_host_id')).toBe(true);

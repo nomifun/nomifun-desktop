@@ -130,6 +130,15 @@ pub struct SshStatusEvent {
     /// link, and never omitted there: "we don't know" is `Some(false)`, which is
     /// a teardown failure, not an absent field.
     pub reaped: Option<bool>,
+    /// Whether a retry could plausibly bring this link back. `Some` only for a
+    /// dropped link, and — like `reaped` — never omitted there.
+    ///
+    /// This is the difference between "wait, it is coming back" and "a person has
+    /// to change something" (a rejected credential, a host key that changed). The
+    /// client needs that difference to decide whether to offer a call to action,
+    /// and `detail` is free-form operator text: string-matching it for the answer
+    /// is how "authentication failed" ends up rendered as a transient blip.
+    pub retryable: Option<bool>,
     pub changed_at: TimestampMs,
 }
 
@@ -152,6 +161,7 @@ impl SshStatusEvent {
             host_fingerprint: None,
             detail: None,
             reaped: None,
+            retryable: None,
             changed_at: nomifun_common::now_ms(),
         };
         match state {
@@ -168,7 +178,10 @@ impl SshStatusEvent {
                 event.attempt = *attempt;
                 event.next_retry_in_ms = Some(*next_retry_in_ms);
             }
-            SshLinkState::Dropped { detail, .. } => event.detail = Some(detail.clone()),
+            SshLinkState::Dropped { detail, retryable } => {
+                event.detail = Some(detail.clone());
+                event.retryable = Some(*retryable);
+            }
             SshLinkState::Closed { teardown } => {
                 let (reaped, detail) = match teardown {
                     SshTeardown::Reaped { detail } => (true, detail),
@@ -199,12 +212,14 @@ mod tests {
         assert_eq!(idle.attempt, 0);
         assert_eq!(idle.next_retry_in_ms, None);
         assert_eq!(idle.reaped, None);
+        assert_eq!(idle.retryable, None);
 
         let connecting = event_of(&SshLinkState::Connecting { attempt: 3 });
         assert_eq!(connecting.state, SshLinkPhase::Connecting);
         assert_eq!(connecting.attempt, 3);
         assert_eq!(connecting.next_retry_in_ms, None);
         assert_eq!(connecting.reaped, None);
+        assert_eq!(connecting.retryable, None);
 
         let connected = event_of(&SshLinkState::Connected {
             fingerprint: Some("SHA256:abc".to_string()),
@@ -213,6 +228,7 @@ mod tests {
         assert_eq!(connected.attempt, 0);
         assert_eq!(connected.host_fingerprint.as_deref(), Some("SHA256:abc"));
         assert_eq!(connected.reaped, None);
+        assert_eq!(connected.retryable, None);
 
         let degraded = event_of(&SshLinkState::Degraded {
             detail: "shell stalled".to_string(),
@@ -221,6 +237,7 @@ mod tests {
         assert_eq!(degraded.attempt, 0);
         assert_eq!(degraded.detail.as_deref(), Some("shell stalled"));
         assert_eq!(degraded.reaped, None);
+        assert_eq!(degraded.retryable, None);
 
         let reconnecting = event_of(&SshLinkState::Reconnecting {
             attempt: 4,
@@ -230,7 +247,11 @@ mod tests {
         assert_eq!(reconnecting.attempt, 4);
         assert_eq!(reconnecting.next_retry_in_ms, Some(8_000));
         assert_eq!(reconnecting.reaped, None);
+        assert_eq!(reconnecting.retryable, None);
 
+        // The two drops differ only in `retryable`, and that bit is the whole
+        // difference between "wait" and "go fix your credentials" on the client.
+        // Guessing it back out of `detail` is what the flag exists to prevent.
         let dropped = event_of(&SshLinkState::Dropped {
             detail: "authentication failed".to_string(),
             retryable: false,
@@ -240,6 +261,15 @@ mod tests {
         assert_eq!(dropped.next_retry_in_ms, None);
         assert_eq!(dropped.detail.as_deref(), Some("authentication failed"));
         assert_eq!(dropped.reaped, None);
+        assert_eq!(dropped.retryable, Some(false));
+
+        let retryable_drop = event_of(&SshLinkState::Dropped {
+            detail: "the ssh transport went away".to_string(),
+            retryable: true,
+        });
+        assert_eq!(retryable_drop.state, SshLinkPhase::Dropped);
+        assert_eq!(retryable_drop.retryable, Some(true));
+        assert_eq!(retryable_drop.reaped, None);
 
         let reaped = event_of(&SshLinkState::Closed {
             teardown: SshTeardown::Reaped {
@@ -248,6 +278,7 @@ mod tests {
         });
         assert_eq!(reaped.state, SshLinkPhase::Closed);
         assert_eq!(reaped.reaped, Some(true));
+        assert_eq!(reaped.retryable, None);
         assert_eq!(
             reaped.detail.as_deref(),
             Some("remote shell closed with exit status 0")
@@ -260,6 +291,7 @@ mod tests {
         });
         assert_eq!(lost.state, SshLinkPhase::Closed);
         assert_eq!(lost.reaped, Some(false));
+        assert_eq!(lost.retryable, None);
 
         let already_down = event_of(&SshLinkState::Closed {
             teardown: SshTeardown::AlreadyDown {
@@ -268,6 +300,26 @@ mod tests {
         });
         assert_eq!(already_down.state, SshLinkPhase::Closed);
         assert_eq!(already_down.reaped, Some(false));
+        assert_eq!(already_down.retryable, None);
+    }
+
+    #[test]
+    fn a_dropped_link_always_states_its_retryability() {
+        // `skip_serializing_if` on `retryable` would let a drop reach the client
+        // with the field absent, and an absent flag reads as "unknown" — which is
+        // exactly the guess the client is forbidden to make.
+        for retryable in [true, false] {
+            let value = serde_json::to_value(event_of(&SshLinkState::Dropped {
+                detail: "down".to_string(),
+                retryable,
+            }))
+            .expect("serialize");
+            assert_eq!(
+                value["retryable"],
+                serde_json::Value::Bool(retryable),
+                "a dropped link must carry its retryability: {value}"
+            );
+        }
     }
 
     #[test]
@@ -294,6 +346,7 @@ mod tests {
             "hostFingerprint",
             "detail",
             "reaped",
+            "retryable",
             "changedAt",
         ];
         expected.sort_unstable();
