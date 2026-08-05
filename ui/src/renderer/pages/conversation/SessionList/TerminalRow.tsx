@@ -154,7 +154,7 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
         <div
           id={`terminal-${session.terminal_id}`}
         className={classNames(
-          'chat-history__item h-34px rd-8px flex items-center group cursor-pointer relative overflow-hidden shrink-0 min-w-0 transition-colors justify-start gap-8px pr-16px',
+          'chat-history__item h-32px rd-8px flex items-center group cursor-pointer relative overflow-hidden shrink-0 min-w-0 transition-colors justify-start gap-8px pr-16px',
           indent ? 'pl-34px' : 'pl-10px',
           {
             'hover:bg-fill-3': !selectionMode && !active,
