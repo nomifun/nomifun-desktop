@@ -19,8 +19,8 @@ const MAX_ROWS = 600;
 /**
  * All remote state the tab needs: the global Skill catalog (what CAN be
  * granted), the auto-injected default set, and this companion's own generated
- * skills. `include_shared: false` is deliberate — a companion's list shows only
- * its own skills, never anything belonging to another companion.
+ * skills. The registry list takes no scope argument any more: a generated skill
+ * belongs to exactly one companion, so `companion_id` is the whole scope.
  */
 export const useSkillsTabData = (companionId: CompanionId | null) => {
   const { t } = useTranslation();
@@ -64,7 +64,6 @@ export const useSkillsTabData = (companionId: CompanionId | null) => {
       for (;;) {
         const page = await ipcBridge.companion.listSkills.invoke({
           companion_id: companionId,
-          include_shared: false,
           limit: PAGE,
           offset: items.length,
         });

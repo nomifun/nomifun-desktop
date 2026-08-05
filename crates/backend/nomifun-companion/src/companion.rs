@@ -1062,7 +1062,7 @@ impl CompanionStoreSink {
         }
         let default_companion_id = self.config.read().await.default_companion_id.clone();
         self.registry
-            .resolve_memory_owner(default_companion_id.as_deref())
+            .resolve_row_owner(default_companion_id.as_deref())
             .await
     }
 }
