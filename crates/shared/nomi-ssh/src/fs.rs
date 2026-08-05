@@ -93,8 +93,10 @@ impl RemoteFs {
         }
 
         if let Some(perms) = existing_perms {
-            let mut attrs = russh_sftp::protocol::FileAttributes::default();
-            attrs.permissions = Some(perms);
+            let attrs = russh_sftp::protocol::FileAttributes {
+                permissions: Some(perms),
+                ..Default::default()
+            };
             // Best-effort: a server may reject setstat; the write already succeeded.
             let _ = self.sftp.set_metadata(&tmp, attrs).await;
         }
