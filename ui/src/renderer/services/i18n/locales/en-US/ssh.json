@@ -8,6 +8,11 @@
   },
   "sessionGroup": "SSH sessions",
   "newSession": "New SSH session",
+  "group": {
+    "hostTooltip": "SSH host {{host}}",
+    "hostUnknown": "Unknown host",
+    "hostMissing": "Deleted host"
+  },
   "form": {
     "addTitle": "Add SSH host",
     "editTitle": "Edit SSH host",
