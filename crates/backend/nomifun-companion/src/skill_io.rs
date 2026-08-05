@@ -85,7 +85,7 @@ pub(crate) async fn rehome_unowned_skill_dirs(
     paths: &SkillPaths,
     skills: &[CompanionSkill],
 ) -> Result<(), AppError> {
-    for skill in skills.iter().filter(|s| s.scope_companion_id.is_some()) {
+    for skill in skills.iter().filter(|s| s.companion_id.is_some()) {
         let expected = expected_path(paths, skill)?;
         if tokio::fs::symlink_metadata(&expected).await.is_ok() {
             continue;
@@ -235,7 +235,7 @@ pub(crate) fn remove_companion_trees(
 /// re-homing migration has not claimed yet — the legacy shared tree.
 fn expected_path(paths: &SkillPaths, skill: &CompanionSkill) -> Result<PathBuf, AppError> {
     let scope = skill
-        .scope_companion_id
+        .companion_id
         .as_deref()
         .map_or(SkillScope::Shared, |id| SkillScope::Companion(id.to_owned()));
     resolve_dir(paths, &scope, skill.status == "draft", &skill.skill_name)
@@ -404,7 +404,7 @@ mod tests {
         CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
             skill_name: name.into(),
-            scope_companion_id: Some(owner.into()),
+            companion_id: Some(owner.into()),
             status: status.into(),
             source: "mined".into(),
             confidence: 0.8,
@@ -489,7 +489,7 @@ mod tests {
 
         // A row the backfill left unowned (name collision) keeps its shared body.
         let mut unowned = row(&owner, "kept", "active");
-        unowned.scope_companion_id = None;
+        unowned.companion_id = None;
         create_skill(&paths, &SkillScope::Shared, false, &input("kept"))
             .await
             .unwrap();

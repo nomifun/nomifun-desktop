@@ -102,9 +102,9 @@
 3. **一次性回填**：`upgrade_schema_in_place` 中幂等执行 `UPDATE companion_memories SET scope_kind='companion', scope_companion_id=<owner> WHERE scope_kind='user'`。**改写归属，不复制、不删除**——复制会按名册规模放大行数、破坏 `memory_id` 稳定性，且每份副本独立衰减归档，同一事实会静默分叉。
 4. **移除 wire 与 UI**：`scope_from_parts`、三个路由请求形状的作用域字段、ipcBridge 的作用域字段与参数、`MemoriesTab` 的全部作用域 UI（20 处）、`MemoryScopeFilter` 与 `FilterClause.scope_owner`（已无生产调用方）、6 个 `nomi.memories.scope*` i18n 键。`ui-api-contract-version.txt` 从 4 递增。
 
-延后（Stage 4，见 §7）：物理删除 `scope_kind` 列的表重建。
+Stage 4（**已完成**，见 §7）：表重建，把 `(scope_kind, scope_companion_id)` 收成一列可空的 `companion_id`。
 
-**名册为空时**：保留 `('user', NULL)` 在 DB 层合法（仅从 UI/wire 移除），回填幂等、有伙伴后再次运行即生效。这样"可以删到零个伙伴"这项既有承诺不被打破，且零重建风险。
+**名册为空时**：无主状态在 DB 层仍然合法（收成一列后就是 `companion_id IS NULL`），回填幂等、有伙伴后再次运行即生效。这样"可以删到零个伙伴"这项既有承诺不被打破。
 
 **必须改的文案**：`nomi.settings.deleteCompanionHint` 与 `deleteConfirmBody` 今天承诺"共享记忆不受影响"，改归属后删除伙伴会连带删除其全部记忆——两条文案重写，删除确认里增加"先导出"提示。README 的头条卖点（`README.md:134` / `README.zh-CN.md:133` 的"One brain, many faces… share a common memory hub"）同步改写。
 
@@ -190,7 +190,7 @@ pub enum EvolvePreference { Conservative, Aggressive }
 |---|---|
 | VAD、per-companion ASR、视觉模型选择、TTS 模型、声音音色、物联网 | 全部是未建的后端子系统。`crates/backend/nomifun-device` 不存在；这些在 `docs/superpowers/specs/2026-08-03-xiaozhi-robot-integration-design.md` 里已有获批设计。**渲染无功能的占位控件正是"信息元素多、眼花缭乱"的成因**，因此本次不放假控件；总览的"语音与感知"只放状态行并深链 `/models`。 |
 | per-companion 对话语言 | 代码库有意拒绝按伙伴钉死回复语言（`companion.rs:123-128` 及守护测试 `companion_system_prompt_does_not_force_a_reply_language`）。反转这个设计需要独立决策。 |
-| `scope_kind` 列的物理删除 | 需要 12 步表重建（SQLite 不允许 DROP 被 CHECK 引用的列），且 `validate_baseline_schema` 比对精确有序列清单——漏任一步则**所有既有装机启动失败**。零用户可见收益，风险最大。回填 + wire/UI 移除已达成产品目标，物理列成为恒为 `'companion'` 的残留列。 |
+| ~~`scope_kind` 列的物理删除~~ | **已完成（2026-08-05），见 §11。** 原因不再成立的关键在于把设计换了：不是"删掉 `scope_kind`、把 `scope_companion_id` 改成 NOT NULL"（那会让零伙伴的安装无法表示，而删到零个伙伴是受支持的状态），而是把两列**收成一列可空的 `companion_id`**——`NULL` 就是原来 `('user', NULL)` 表达的意思，只说一次。于是重建变成无条件的、不需要"所有行都已归属"这个前置条件，两条成对 CHECK、两个按 `scope_kind` 建的 partial 索引、以及每次读行时"这对值是不是两种合法组合之一"的校验一起消失。 |
 | 事件按伙伴归属 | tool call / 终端 / 需求事件天然没有伙伴归属，补齐需要全新链路且结果不可靠。 |
 
 **降级不可逆**：`DROP TABLE companion_suggestions` 后回退到 0.3.8 会在启动时因精确表集校验硬失败。沿用 `companion_learn_runs` 退役先例，在 CHANGELOG 中明示。
@@ -240,7 +240,7 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 
 ## 11. 实施状态（2026-08-05）
 
-分支 `feat/companion-workspace-redesign`，12 个提交，未推远端。§4 的四项删除与 §5 的五项后端改动全部落地；契约版本 4 → 9。
+分支 `feat/companion-workspace-redesign`（已并入 `main`，未推远端）。§4 的四项删除与 §5 的五项后端改动全部落地；契约版本 4 → 12。
 
 **已完成**
 
@@ -266,6 +266,12 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 - **§11 未完成项 1 —— 伙伴包携带 mood**：`CompanionStatePayload` 加 `mood: Option<String>`（`#[serde(default)]`，所以此前写出的包没有这个字段也照样导入），导出读 `companion_runtime_state`，导入写回新铸造的伙伴 id 上。记忆包的 `state.json` 里那个 mood 字段保持恒为 null、导入侧继续忽略——没有复活那条路径。
 - **§11 未完成项 7 —— 死写法的根因已铲除，并加了棘轮门禁**：`uno.config.ts` 里那个不可达的 `borderColors` 块删除（原地留注释说明为什么不可再加回来）；`styles/MIGRATION.md` 重写，把三种死写法（`{text,bg,border}-[rgb(var(--RAMP-N))]`、`border-border-N`、`border-b-base` / `border-b-light`）连同实测产出与替代写法写在最前面，并给出机械清理配方。新增 `scripts/check-dead-css-utilities.mjs` 接进 `bun run check`：不在基线的文件出现任一写法即失败，基线文件条数变多即失败，基线文件清零则要求删掉那一行（这张表只能变短），部分清理只提示不失败。删除 `borderColors` 前后产出 CSS 逐字节相同（用真实 `createGenerator` 跑全站 + 探针类，两侧各 133,216 字节，`cmp` 一致）——`border-b-base` 两侧都产出 `border-bottom-color: var(--bg-base)`，证明那 5 个键从未被命中。
 
+- **§11 未完成项 2 + 3 —— 作用域列物理删除，死数据删除**：`(scope_kind, scope_companion_id)` 这对编码收成**一列可空的 `companion_id`**（两张表都是）。之所以能做，是因为换了设计而不是硬上：直接删 `scope_kind` 再把 owner 列改 NOT NULL 会让零伙伴的安装无法表示，而删到零个伙伴是受支持的状态；收成一列可空后，`NULL` 恰好就是 `('user', NULL)` 原本的意思，重建因此**无条件**、不需要"每一行都已归属"这个前置条件。随之删除的还有：两条成对 CHECK、两个按 `scope_kind` 建的 partial 索引（改按 `companion_id IS [NOT] NULL`）、`MemoryScope` 枚举及其 `Unowned` 变体（收成 `Option<String>`）、`row_to_memory` / `row_to_skill` / `begin_memory_import` / `insert_memory_raw` 里"这对值是否两种合法组合之一"的校验、以及 `MEMORY_VISIBILITY_PREDICATE` 里 `scope_kind = 'user'` 那一半（现在是 `companion_id IS NULL OR companion_id = ?`，语义逐字相同）。
+  - **重建怎么做的**：SQLite 不允许 DROP 被表级 CHECK 引用的列，所以是 `upgrade_schema_in_place` 里的一次表重建，且**整个过程在一个事务里**：把两张表 `CREATE TEMP TABLE … AS SELECT …, scope_companion_id AS companion_id, …`、`DROP TABLE`（连带它的索引）、重放 `SCHEMA` 建回表与索引（`SCHEMA` 是唯一的 DDL 事实源，所以重建出来的形状不可能与契约校验要求的基线漂移）、再拷回并丢掉暂存表。逐行**保留原有 `id`**：`companion_memories_fts` 是 external-content FTS5、以 `content_rowid='id'` 为锚，重编号会让每条索引文档指向错的记忆；此外重建过的那一次启动强制跑一遍 `'rebuild'` 兜底。owner 直接取 `scope_companion_id`（旧 CHECK 保证 id 非空 ⟺ kind 为 `'companion'`），而不是 `CASE WHEN scope_kind='companion'`：后者若碰上某个历史版本写出的、CHECK 本不允许的组合，会把主人**抹掉**。
+  - **wire 冻结**：`scope_kind` 不再出现在任何响应里（契约版本 11 → 12），但 owner 字段保留历史线上名 `scope_companion_id`——已经导出的 .zip 和 shipped UI 契约都读它。导入侧 `parse_owned_jsonl` 把旧包里的 `scope_kind` 接受并丢弃；这一步是**摘键**而不是 `#[serde(flatten)]` 包装：flatten 会让 serde 缓冲整行并**静默失效** `deny_unknown_fields`（实测确认），那等于把"容忍一个退役字段名"变成"导入包里任何拼错的字段都放过"。
+  - **死数据删除**：`companion_state` 里六行装机级 `learn_cursor_ts` / `evolve_cursor_ts` / `last_learn_ts` / `last_evolve_ts` / `learn_parse_fail_streak` / `mood` 在 per-companion 播种跑完后删除（幂等）。原先"留着以便回退到旧版本"的理由是假的：同一次升级已经 `DROP TABLE companion_suggestions`，而 0.3.8 校验精确表集、缺表即拒绝启动——回退本来就不可能。**名册为空时一行都不删**：没有伙伴可以播种，这六行就还是主人游标的唯一记录，删掉会让之后新建的第一个伙伴重蒸馏整段历史。
+  - **漂移测试的自我失效已堵住**：schema drift 测试靠字符串替换制造畸形 schema，需要 needle 恰好命中；命中不了时 `replacen` 原样返回，"畸形"用例就变成合法用例——一个永远通过、什么都不测的测试。改动后把每处替换都改走 `mutate_schema` / 固定夹具助手，needle 出现次数不等于 1 直接 panic，并把因这次改动失配的四处 needle 重新对准（`embedding_model` 现在是最后一列、共享名 partial 索引换了谓词）。同时新增两个畸形用例：owner 列缺 UUIDv7 CHECK、私有 owner partial 索引谓词被放宽。
+
 **验证证据**
 
 - `bun run check` 全门通过（本次多了第 5 门 `check:dead-css`，共 9 个子门）；`bun test --cwd ui` 1673 通过 / 1 失败（该失败在干净树上同样存在，为测试间污染，非本次引入）；`cargo nextest run -p nomifun-companion` 264/264；`cargo nextest run -p nomifun-gateway` 141/141；`cargo check --workspace --all-targets` 干净；`bun run build:ui` 通过（`nomifun-build.json` 的 `api_contract_version` 为 10）。
@@ -273,13 +279,15 @@ Wave 1 全增量所以始终绿；Wave 2 交付可见成果；Wave 3 是"已无�
 - **棘轮门禁实证**：新文件引入死写法 → `bun run check` 在 `check:dead-css` 处退出 1 并点名文件与行号；基线文件条数 1 → 2 → 失败并打印「基线 1 → 现在 2」；基线文件清零 → 失败并要求把该行从 BASELINE 删掉。`--self-test` 21/21。
 - **迁移端到端实测**：把真实 0.3.8 期数据目录（含 `companion_suggestions` 表）复制出来、植入一条金丝雀记忆，用真实 `nomifun-web` 启动 —— 后端正常启动（无启动即砖）、表已删除、金丝雀记忆逐字保留、external-content FTS5 索引仍能检索到它、`/api/companion/suggestions` 返回 404。
 - **UI 视觉实测**（补做）：本机有 `geckodriver`，用 WebDriver 驱动无头 Firefox 打开干净 dev server（`--insecure-no-auth` + 三个测试伙伴），逐一渲染七个标签与形象库视图并截图确认。此过程抓到并修掉了一个真 bug（见下）。
+- **作用域列收拢的端到端实测**（这次改动风险全在迁移上，所以证据只认真数据）：真实 `NomiFun-dev` 数据目录复制到 `/tmp`，用 `sqlite3` 按**旧形状**直接植入 5 条记忆（无主 active / 无主 archived / 无主 active+pinned / 有主 active+pinned / 有主 archived，带 tags、importance、strength、三个时间戳）、3 条技能（无主 active / 有主 active / 无主 archived，含各自的 `SKILL.md`）与 7 行 `companion_state`（六行退役键 + `self_evolution_consent`），并同步好 external-content FTS 索引；用真实 `nomifun-web`（`--api-only --insecure-no-auth`）启动：**正常启动**；`PRAGMA table_info` 里两张表都没有 `scope_kind` / `scope_companion_id`、有可空的 `companion_id`；5 条记忆的 `id` 逐行不变（1–5）、content/status/pinned/tags/importance/strength/时间戳逐字保留、三条无主行落户到真实伙伴；3 条技能全部保留并落户，`SKILL.md` 被搬进 owner 目录（技能列表的 `description` 是从搬过去的文件读出来的）；索引重建成 `WHERE companion_id IS NULL` / `IS NOT NULL`；FTS 走 API 仍命中（`?q=曼特宁` 返回带 `<b>` 高亮的那一条，`?q=东京出差` 命中那条 archived 的）；六行退役 `companion_state` 已删、只剩 `self_evolution_consent`，六个键都出现在该伙伴的 `companion_runtime_state` 里且值逐字相同。**第二次启动**：迁移日志一条都没有，且记忆/技能/state/runtime state/FTS 文档数/两张表 DDL/全部索引 DDL 与第一次启动后逐字节相同。
+- **旧导出包仍可导入的端到端实测**：从上面这个已迁移的装机用 `POST /api/companion/export/memory` 导出真包，再把 `memories.jsonl` 每行补回 `scope_kind` 改造成 0.3.8 形状。两代包都导入成功（`skipped_duplicates: 5`——顺带证明退役字段被丢弃而不是混进了 `PartialEq`，否则会报 ID 冲突）；删掉其中一条记忆后再导入 0.3.8 形状的包，`imported: 1`、该行带着主人回来了、并且立刻能被 FTS 检索到。
 - **§5.1 迁移端到端实测**：真实 `NomiFun-dev` 数据目录（1 个伙伴、v3 store）复制到 `/tmp`，装机级 `learn` 设为「开启 / 25 分钟」、`evolve` 设为「开启 / 45 分钟 / 激进 / min_distinct_sessions=6」，全局游标设为非零、`mood='curious'`，用真实 `nomifun-web` 启动：正常启动；该伙伴 profile 拿到逐字相同的 learn/evolve；两个游标等于旧全局值（不是 0）；mood 为 `curious`；`GET /api/companion/config` 里再没有 `learn`/`evolve`。随后改掉该伙伴的三项设置并推进它的游标，**第二次启动没有任何重播种日志，改动全部保留**。UI 侧用无头 Firefox 打开 `#/nomi?tab=evolution`：三个分区全部渲染、装机级标注为零；点开关后经 API 确认只落在该伙伴 profile 上，第二个伙伴的 `interval_minutes=600` 与共享配置逐字未变。
 
 **未完成（按优先级）**
 
 1. ~~伙伴包尚未携带 mood~~ —— **已完成**（见「已完成」末三条）。
-2. `companion_memories.scope_kind` 与 `companion_skills.scope_kind` 的物理删除（表重建）—— 见 §7，故意延后：SQLite 不允许 DROP 被 CHECK 引用的列，`validate_baseline_schema` 比对精确有序列清单，重建做错会让所有既有装机启动即砖，而收益为零（两列现在恒为 `'companion'`）。
-3. `companion_state` 里的全局游标与 mood 行故意保留、不再读取，以便回退到旧版本仍能找到它们。可在下一个版本清理。
+2. ~~`companion_memories.scope_kind` 与 `companion_skills.scope_kind` 的物理删除（表重建）~~ —— **已完成**（见「已完成」末条）。
+3. ~~`companion_state` 里的全局游标与 mood 行故意保留、不再读取，以便回退到旧版本仍能找到它们~~ —— **已完成**：那个理由是假的（见「已完成」末条），六行已删。
 4. ~~`memory_merge_suggestions` 仍扫描全部伙伴的记忆再由客户端过滤~~ —— **已完成**（见「已完成」末三条）。
 5. ~~四个记忆写入口仍按 `memory_id` 寻址而不校验 owner~~ —— **已完成**（见「已完成」末三条）。
 6. 死写法的**存量**清理：`ui/src` 下 95 个文件 / 276 处仍在用那三种写法（实测：ramp 79 文件 228 处、`border-border-N` 17 文件 40 处、`border-b-base` / `border-b-light` 4 文件 8 处，不含测试文件），它们的红字其实不是红的。根因与门禁已在本次铲除（见「已完成」末条），但一次性替换会同时改变 276 处渲染颜色、需要逐一目测明暗两套主题，故独立成一次改动；配方与基线见 `styles/MIGRATION.md` 与 `scripts/check-dead-css-utilities.mjs`。清理时必须同步改 `knowledgeCreateCtaContrast.test.ts` 与 `scheduledTaskLayout.test.ts`——这两个测试反过来断言了破写法**存在**。

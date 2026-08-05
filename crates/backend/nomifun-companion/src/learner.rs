@@ -23,7 +23,7 @@ use crate::collector::{LEARN_CURSOR_KEY, SharedEventStoreLock, read_events_since
 use crate::events::CompanionEventEmitter;
 use crate::prompt::{self, LEARN_MAX_TOKENS};
 use crate::registry::CompanionRegistry;
-use crate::store::{CompanionStore, MOOD_KEY, MemoryFilter, MemoryScope};
+use crate::store::{CompanionStore, MOOD_KEY, MemoryFilter};
 
 const MAX_EVENTS_PER_RUN: usize = 300;
 const TICK_SECONDS: u64 = 60;
@@ -235,7 +235,7 @@ impl Learner {
             .store
             .list_memories(&MemoryFilter {
                 status: Some("active".into()),
-                scope_companion_id: Some(owner.clone()),
+                companion_id: Some(owner.clone()),
                 limit: 120,
                 ..Default::default()
             })
@@ -361,7 +361,7 @@ impl Learner {
                     &m.tags,
                     m.importance,
                     "learn",
-                    MemoryScope::Companion(owner.clone()),
+                    Some(&owner),
                 )
                 .await?;
             run.memories_added += 1;
@@ -537,12 +537,12 @@ mod tests {
         // 一条属于 stranger 的活跃记忆 + 一条属于 owner 的活跃记忆。
         let theirs = learner
             .store
-            .insert_memory_scoped("profile", "别的伙伴的画像", &[], 0.9, "chat", MemoryScope::Companion(stranger))
+            .insert_memory_scoped("profile", "别的伙伴的画像", &[], 0.9, "chat", Some(&stranger))
             .await
             .unwrap();
         let mine = learner
             .store
-            .insert_memory_scoped("profile", "我记得主人写 Rust", &[], 0.9, "chat", MemoryScope::Companion(owner.clone()))
+            .insert_memory_scoped("profile", "我记得主人写 Rust", &[], 0.9, "chat", Some(&owner))
             .await
             .unwrap();
 
@@ -647,13 +647,13 @@ mod tests {
         let mine = learner
             .store
             .list_memories(&MemoryFilter {
-                scope_companion_id: Some(owner.clone()),
+                companion_id: Some(owner.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
         assert_eq!(mine.len(), 1);
-        assert_eq!(mine[0].scope_companion_id.as_deref(), Some(owner.as_str()));
+        assert_eq!(mine[0].companion_id.as_deref(), Some(owner.as_str()));
     }
 
     /// 休眠时段 gates the scheduled tick, not `run_for` — an explicit "run now"

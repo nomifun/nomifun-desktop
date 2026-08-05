@@ -48,6 +48,33 @@ notes at a high level rather than a complete historical log.
   install-wide at that point; the entry below makes learning and evolution
   per-companion too.
 
+- **Migration (schema + data cleanup).** The two vestigial ownership columns are
+  physically gone. `companion_memories` and `companion_skills` encoded "whose row
+  is this" in a PAIR — `scope_kind` (`'user'` / `'companion'`) plus a nullable
+  `scope_companion_id`, welded by a table CHECK into exactly `('user', NULL)` =
+  unowned and `('companion', id)` = owned — even though the discriminator was
+  fully determined by whether an owner was present. Both tables now carry ONE
+  nullable `companion_id`, where `NULL` says exactly what `('user', NULL)` said.
+  That shape, rather than "drop `scope_kind` and make the owner NOT NULL", is what
+  made this safe: a zero-companion install stays representable, so deleting down to
+  zero companions is still supported and the rebuild needs no "is every row owned
+  yet?" precondition. The paired CHECKs, the two `scope_kind`-keyed partial
+  indexes and the two-legal-states validation on every row read went with it.
+  The rebuild runs once, in one transaction, on the first launch after upgrading
+  and preserves every row verbatim — including each row's `id`, because the
+  full-text index is external-content FTS5 anchored on it. **Downgrading remains
+  impossible** (see the 建议 entry below: 0.3.8 validates an exact table set), so
+  the six install-wide `companion_state` rows that were kept "in case of a
+  rollback" (`learn_cursor_ts`, `evolve_cursor_ts`, `last_learn_ts`,
+  `last_evolve_ts`, `learn_parse_fail_streak`, `mood`) are now deleted once every
+  companion has its own copy — an install with no companions keeps them, since
+  they are still the only record of how far the owner's loops had read the event
+  spool. Memory and skill export bundles are unaffected in both directions: they
+  still carry the owner under its historical field name `scope_companion_id`, and a
+  bundle written by 0.3.8 (which also carries `scope_kind`) still imports — the
+  retired field is accepted and discarded. `scope_kind` no longer appears in any
+  response, so the UI/API contract version was bumped.
+
 - **Behaviour change + migration.** 定时学习 and 技能进化 are now **per
   companion**, not install-wide. Each companion carries its own `learn`
   (`enabled` / `interval_minutes` / `model`) and `evolve` (`enabled`, a
@@ -162,6 +189,21 @@ notes at a high level rather than a complete historical log.
   The summoned-session `propose_companion_memory` capability went with it:
   suggestion cards were its only storage and its only review surface, so it has
   no confirm-before-write channel left. Restoring it needs a new design.
+
+- **Fixed (data safety, regression in 0.3.8).** Backups made by 0.3.1–0.3.7 can
+  be restored again, and factory reset once more sweeps the leftover
+  `browser-secrets/` directory. Removing the companion-credential subsystem in
+  0.3.8 also deleted `browser-secrets` from the managed dataset-root registry,
+  but that registry is a compatibility surface, not an implementation detail:
+  backup coverage is validated as an *exact* match against it, so every bundle
+  those releases wrote — all of which list `browser-secrets` — began failing
+  verification with `InvalidManifest`. The same removal changed the persisted
+  factory-reset plan shape, so a reset interrupted before the upgrade could fail
+  plan validation and turn into a hard error at startup, and a "factory reset" on
+  an upgraded install silently left the old credential directory behind. The root
+  is restored as cleanup-only (no live code writes there) and a new test
+  reproduces the frozen released registry from the live one, so a future removal
+  fails loudly at development time instead of on a user's data directory.
 
 - SSH remote sessions: save a remote Linux host's SSH credentials (password,
   private key with passphrase, certificate, or the local ssh-agent — all

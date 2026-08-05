@@ -302,8 +302,8 @@ historical row migrations. The multi-companion layout:
 │   └── memory.db                standalone SQLite (PRAGMA user_version ladder):
 │                                one memory database for the whole install, but
 │                                every row is OWNED by exactly one companion
-│                                (scope_kind/scope_companion_id) and readable only
-│                                by that companion; + per-companion runtime
+│                                (companion_memories.companion_id) and readable
+│                                only by that companion; + per-companion runtime
 │                                state (companion_runtime_state: XP, mood, and
 │                                each companion's learn_cursor_ts /
 │                                evolve_cursor_ts position in events/)
@@ -315,16 +315,29 @@ historical row migrations. The multi-companion layout:
 ```
 
 `shared/` is "one per install", not "shared between companions". `memory.db` holds
-every companion's memory rows in one table, and each row carries its owner in
-`(scope_kind, scope_companion_id)`; every companion-facing read filters on that
-owner, so a companion never sees another's memories and a memory cannot be moved
-between owners. The vestigial `('user', NULL)` pair is the only ownerless state:
-it is what pre-upgrade rows and imports into an empty roster look like. It stays
-legal at the DB level because a zero-companion install is supported, and rows in
-that state are re-homed onto one owner (the explicit `default_companion_id` if it
-is still in the roster, else the oldest companion) by an idempotent boot
-migration — one `UPDATE`, never a per-companion copy, so `memory_id` values stay
-stable and a fact cannot diverge into per-companion duplicates.
+every companion's memory rows in one table, and each row carries its owner in ONE
+nullable column, `companion_id` (`companion_skills` is the same); every
+companion-facing read filters on that owner, so a companion never sees another's
+memories and a memory cannot be moved between owners. `companion_id IS NULL` is
+the only ownerless state: it is what pre-upgrade rows and imports into an empty
+roster look like. The column stays nullable because a zero-companion install is
+supported, and rows in that state are re-homed onto one owner (the explicit
+`default_companion_id` if it is still in the roster, else the oldest companion) by
+an idempotent boot migration — one `UPDATE`, never a per-companion copy, so
+`memory_id` values stay stable and a fact cannot diverge into per-companion
+duplicates.
+
+Both tables carried a two-column encoding of that owner until 2026-08 —
+`scope_kind TEXT NOT NULL` (`'user'` / `'companion'`) plus a nullable
+`scope_companion_id`, paired by a table CHECK into exactly `('user', NULL)` and
+`('companion', id)`. The discriminator was fully determined by whether an owner
+was present, so it could only ever disagree, never inform; a boot migration
+rebuilds both tables into the single nullable column (SQLite cannot drop a column
+named in a table CHECK). The rebuild preserves every `id` verbatim because
+`companion_memories_fts` is external-content FTS5 keyed on `content_rowid='id'`.
+Export bundles still carry the owner under its historical wire name
+`scope_companion_id`, and an older bundle's `scope_kind` is accepted and discarded
+on import.
 
 The historical single-companion layout `companion/nomi/` is not migrated into
 v3. If detected, it is retired together with the complete old managed dataset.

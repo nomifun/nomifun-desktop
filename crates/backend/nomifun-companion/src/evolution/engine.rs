@@ -401,7 +401,7 @@ impl EvolutionEngine {
         let skill = CompanionSkill {
             companion_skill_id: CompanionSkillId::new().into_string(),
             skill_name: name.clone(),
-            scope_companion_id: Some(owner.to_owned()),
+            companion_id: Some(owner.to_owned()),
             status: if auto { "active".into() } else { "draft".into() },
             source: "mined".into(),
             confidence,
@@ -534,7 +534,7 @@ impl EvolutionEngine {
             .insert_skill(&CompanionSkill {
                 companion_skill_id: CompanionSkillId::new().into_string(),
                 skill_name: name.clone(),
-                scope_companion_id: Some(owner.to_owned()),
+                companion_id: Some(owner.to_owned()),
                 status: "draft".into(),
                 source: "demonstrated".into(),
                 confidence: 0.5,
@@ -900,7 +900,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "grep-read-edit".into(),
-                scope_companion_id: Some(cid.clone()),
+                companion_id: Some(cid.clone()),
                 status: "active".into(),
                 source: "mined".into(),
                 confidence: 0.7,

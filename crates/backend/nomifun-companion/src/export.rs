@@ -720,7 +720,7 @@ async fn import_extracted(
 ///
 /// - owner that IS a live local companion → kept verbatim
 /// - foreign owner, or a vestigial unowned row → the resolved local owner
-/// - empty roster (no legal owner at all) → parked as unowned (`('user', NULL)`),
+/// - empty roster (no legal owner at all) → parked as unowned (`companion_id = NULL`),
 ///   which stays legal at the DB level and gets re-homed by the boot migration as
 ///   soon as a companion exists
 ///
@@ -735,23 +735,14 @@ fn rehome_imported_memories(
     let local_owner = crate::registry::row_owner_of(roster.iter(), default_companion_id);
     for memory in memories {
         let owned_locally = memory
-            .scope_companion_id
+            .companion_id
             .as_deref()
             .is_some_and(|owner| live.contains(owner));
         if owned_locally {
             continue;
         }
-        match &local_owner {
-            Some(owner) => {
-                memory.scope_kind = "companion".to_owned();
-                memory.scope_companion_id = Some(owner.clone());
-            }
-            None => {
-                // No legal owner yet — park it rather than lose it or brick boot.
-                memory.scope_kind = "user".to_owned();
-                memory.scope_companion_id = None;
-            }
-        }
+        // No legal owner yet — park it rather than lose it or brick boot.
+        memory.companion_id = local_owner.clone();
     }
 }
 
@@ -771,7 +762,7 @@ async fn import_memory_bundle(
     config: Option<&crate::collector::SharedConfig>,
 ) -> Result<ImportOutcome, AppError> {
     let mut memories =
-        parse_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", true)?;
+        parse_owned_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", true)?;
     let default_companion_id = match config {
         Some(config) => config.read().await.default_companion_id.clone(),
         None => None,
@@ -895,8 +886,8 @@ async fn import_companion_bundle(
     // Optional payloads: a bundle written before companions carried anything but
     // their settings has none of these, and must still import.
     let mut memories =
-        parse_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", false)?;
-    let skills = parse_jsonl::<CompanionSkill>(&extract_dir.join("skills.jsonl"), "skills.jsonl", false)?;
+        parse_owned_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", false)?;
+    let skills = parse_owned_jsonl::<CompanionSkill>(&extract_dir.join("skills.jsonl"), "skills.jsonl", false)?;
     let bodies = read_skill_bodies(extract_dir, &skills)?;
     let figure = read_packaged_figure(extract_dir)?;
 
@@ -1133,11 +1124,45 @@ fn rehome_imported_skills(
             continue;
         }
         skill.companion_skill_id = nomifun_common::CompanionSkillId::new().into_string();
-        skill.scope_companion_id = Some(owner.to_owned());
+        skill.companion_id = Some(owner.to_owned());
         skill.skill_pattern_id = None;
         out.push((skill, body));
     }
     Ok(out)
+}
+
+/// Parse a bundle jsonl of owner-carrying rows, tolerating the ONE retired field
+/// those rows used to have.
+///
+/// Memory and skill rows carried a `scope_kind` (`'user'` / `'companion'`)
+/// discriminator next to the owner id until the two collapsed into one nullable
+/// `companion_id`. Both row structs are `deny_unknown_fields`, so without this
+/// step every bundle exported by 0.3.8 or earlier would be rejected outright — and
+/// a bundle is a long-lived file on the owner's disk, not a request we can ask them
+/// to re-issue. The value is DISCARDED rather than mapped: it was fully determined
+/// by whether an owner is present, and the owner is still on the wire under its
+/// historical name (`scope_companion_id`).
+///
+/// Deliberately a key removal on the parsed object rather than a `#[serde(flatten)]`
+/// wrapper: flattening makes serde buffer the row and silently drops the inner
+/// struct's `deny_unknown_fields`, which would turn "tolerate one retired name"
+/// into "accept any misspelled field in an import bundle".
+fn parse_owned_jsonl<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    label: &str,
+    required: bool,
+) -> Result<Vec<T>, AppError> {
+    let objects =
+        parse_jsonl::<serde_json::Map<String, serde_json::Value>>(path, label, required)?;
+    let mut rows = Vec::with_capacity(objects.len());
+    for (index, mut object) in objects.into_iter().enumerate() {
+        object.remove("scope_kind");
+        let row = serde_json::from_value(serde_json::Value::Object(object)).map_err(|error| {
+            AppError::BadRequest(format!("{label} 第 {} 行无法解析: {error}", index + 1))
+        })?;
+        rows.push(row);
+    }
+    Ok(rows)
 }
 
 /// Parse one jsonl file into rows, strictly: any malformed line fails the
@@ -1654,8 +1679,7 @@ mod tests {
             created_at: 1_111,
             updated_at: 2_222,
             last_reinforced_at: 3_333,
-            scope_kind: "user".into(),
-            scope_companion_id: None,
+            companion_id: None,
         }
     }
 
@@ -1796,12 +1820,10 @@ mod tests {
         // machine, one vestigial unowned row, one owned by a live local companion.
         let foreign_owner = companion_fixture(999);
         let mut foreign = raw_memory(&memory_fixture(11), "knowledge", "源机器私有记忆", "active");
-        foreign.scope_kind = "companion".into();
-        foreign.scope_companion_id = Some(foreign_owner.clone());
+        foreign.companion_id = Some(foreign_owner.clone());
         let unowned = raw_memory(&memory_fixture(12), "preference", "源机器共享记忆", "active");
         let mut local = raw_memory(&memory_fixture(13), "episode", "本机伙伴乙的记忆", "archived");
-        local.scope_kind = "companion".into();
-        local.scope_companion_id = Some(second.clone());
+        local.companion_id = Some(second.clone());
         let rows: String = [&foreign, &unowned, &local]
             .iter()
             .map(|m| format!("{}\n", serde_json::to_string(m).unwrap()))
@@ -1831,22 +1853,22 @@ mod tests {
             restored
                 .iter()
                 .find(|m| m.memory_id == memory_id)
-                .map(|m| (m.scope_kind.clone(), m.scope_companion_id.clone()))
+                .map(|m| m.companion_id.clone())
                 .unwrap()
         };
         assert_eq!(
             owner_of(&memory_fixture(11)),
-            ("companion".to_owned(), Some(oldest.clone())),
+            Some(oldest.clone()),
             "a foreign owner must be re-homed onto the resolved local owner"
         );
         assert_eq!(
             owner_of(&memory_fixture(12)),
-            ("companion".to_owned(), Some(oldest.clone())),
+            Some(oldest.clone()),
             "an unowned row must be re-homed too"
         );
         assert_eq!(
             owner_of(&memory_fixture(13)),
-            ("companion".to_owned(), Some(second.clone())),
+            Some(second.clone()),
             "a row already owned by a live local companion is kept verbatim"
         );
 
@@ -1868,8 +1890,7 @@ mod tests {
         let store = CompanionStore::open_memory().await.unwrap();
         // 乙 already holds this exact fact. It is 乙's, and only 乙's.
         let mut owned_by_other = raw_memory(&memory_fixture(41), "preference", "主人喜欢深烘焙咖啡豆", "active");
-        owned_by_other.scope_kind = "companion".into();
-        owned_by_other.scope_companion_id = Some(other.clone());
+        owned_by_other.companion_id = Some(other.clone());
         store.insert_memory_raw(&owned_by_other).await.unwrap();
 
         // The bundle carries the same fact from another machine; it re-homes onto 甲.
@@ -1895,7 +1916,7 @@ mod tests {
         let restored = store.dump_memories_all().await.unwrap();
         assert_eq!(restored.len(), 2, "both owners keep their own copy: {restored:?}");
         let landed = restored.iter().find(|m| m.memory_id == memory_fixture(42)).unwrap();
-        assert_eq!(landed.scope_companion_id.as_deref(), Some(oldest.as_str()));
+        assert_eq!(landed.companion_id.as_deref(), Some(oldest.as_str()));
 
         // Re-importing the same bundle IS a duplicate (same id, same re-homed
         // shape), so idempotency is untouched by the owner scoping.
@@ -1915,8 +1936,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let roster = scan_registry(dir.path(), "companions");
         let mut foreign = raw_memory(&memory_fixture(21), "knowledge", "源机器私有记忆", "active");
-        foreign.scope_kind = "companion".into();
-        foreign.scope_companion_id = Some(companion_fixture(998));
+        foreign.companion_id = Some(companion_fixture(998));
         let archive = dir.path().join("orphan-memory.zip");
         write_test_zip(
             &archive,
@@ -1934,8 +1954,7 @@ mod tests {
             .unwrap();
         let restored = store.dump_memories_all().await.unwrap();
         assert_eq!(restored.len(), 1, "the memory must survive");
-        assert_eq!(restored[0].scope_kind, "user");
-        assert_eq!(restored[0].scope_companion_id, None);
+        assert_eq!(restored[0].companion_id, None);
         store.validate_companion_references(&HashSet::new()).await.unwrap();
     }
 
@@ -1959,8 +1978,115 @@ mod tests {
             "last_reinforced_at": 1
         });
         let memory: CompanionMemory = serde_json::from_value(row).unwrap();
-        assert_eq!(memory.scope_kind, "user");
-        assert_eq!(memory.scope_companion_id, None);
+        assert_eq!(memory.companion_id, None);
+    }
+
+    /// A bundle exported by 0.3.8 carries the retired `scope_kind` discriminator on
+    /// every memory and skill row. Both structs are `deny_unknown_fields`, so
+    /// without [`LegacyScopedRow`] the owner's年-old backup would be rejected
+    /// outright — and a bundle is a file on their disk, not a request they can
+    /// re-issue. The owner half must survive; the discriminator must be discarded,
+    /// including when it CONTRADICTS the owner (a shape the old table CHECK could
+    /// not produce, and which must not be able to strip an owner now).
+    #[test]
+    fn bundle_rows_from_0_3_8_still_parse_and_keep_their_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = companion_fixture(64);
+        let memories_path = dir.path().join("memories.jsonl");
+        let mut unowned = serde_json::to_value(raw_memory(
+            &memory_fixture(41),
+            "knowledge",
+            "0.3.8 导出的共享记忆",
+            "active",
+        ))
+        .unwrap();
+        unowned["scope_kind"] = serde_json::json!("user");
+        let mut owned = serde_json::to_value(raw_memory(
+            &memory_fixture(42),
+            "preference",
+            "0.3.8 导出的私有记忆",
+            "archived",
+        ))
+        .unwrap();
+        owned["scope_kind"] = serde_json::json!("companion");
+        owned["scope_companion_id"] = serde_json::json!(owner);
+        std::fs::write(
+            &memories_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&unowned).unwrap(),
+                serde_json::to_string(&owned).unwrap()
+            ),
+        )
+        .unwrap();
+
+        // The un-shimmed struct is exactly what would reject the bundle.
+        let strict = parse_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true).unwrap_err();
+        assert!(strict.to_string().contains("unknown field"), "{strict}");
+
+        let rows =
+            parse_owned_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].companion_id, None);
+        assert_eq!(rows[0].content, "0.3.8 导出的共享记忆");
+        assert_eq!(rows[1].companion_id.as_deref(), Some(owner.as_str()));
+        assert_eq!(rows[1].status, "archived", "the rest of the row is untouched");
+        assert_eq!(rows[1].strength, 0.42);
+
+        // Same for skills.jsonl, whose rows carried the same pair.
+        let skills_path = dir.path().join("skills.jsonl");
+        let skill = serde_json::json!({
+            "companion_skill_id": nomifun_common::CompanionSkillId::new().into_string(),
+            "scope_kind": "companion",
+            "skill_name": "legacy-skill",
+            "scope_companion_id": owner,
+            "status": "active",
+            "source": "mined",
+            "confidence": 0.9,
+            "provenance_event_ids": [],
+            "strength": 1.0,
+            "version": 1,
+            "skill_pattern_id": null,
+            "usage_count": 0,
+            "last_used_at": null,
+            "created_at": 1,
+            "updated_at": 1,
+            "signature": ""
+        });
+        std::fs::write(&skills_path, format!("{}\n", serde_json::to_string(&skill).unwrap())).unwrap();
+        let skills = parse_owned_jsonl::<CompanionSkill>(&skills_path, "skills.jsonl", false).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].companion_id.as_deref(), Some(owner.as_str()));
+        assert_eq!(skills[0].skill_name, "legacy-skill");
+
+        // A row from the CURRENT build (no discriminator at all) parses through the
+        // same path — one shim, both bundle generations.
+        let current = format!(
+            "{}\n",
+            serde_json::to_string(&raw_memory(&memory_fixture(43), "task", "本版本导出的记忆", "active")).unwrap()
+        );
+        std::fs::write(&memories_path, current).unwrap();
+        assert_eq!(
+            parse_owned_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // And a genuinely unknown field is still rejected: the shim tolerates ONE
+        // retired name, it does not turn the bundle parser lax.
+        let mut bogus = serde_json::to_value(raw_memory(
+            &memory_fixture(44),
+            "task",
+            "带未知字段",
+            "active",
+        ))
+        .unwrap();
+        bogus["retired_field"] = serde_json::json!(true);
+        std::fs::write(&memories_path, format!("{}\n", serde_json::to_string(&bogus).unwrap())).unwrap();
+        let error =
+            parse_owned_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true).unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     #[tokio::test]
@@ -2211,7 +2337,7 @@ mod tests {
         let skill = CompanionSkill {
             companion_skill_id: nomifun_common::CompanionSkillId::new().into_string(),
             skill_name: name.to_owned(),
-            scope_companion_id: Some(owner.to_owned()),
+            companion_id: Some(owner.to_owned()),
             status: status.to_owned(),
             source: "mined".into(),
             confidence: 0.8,
@@ -2261,11 +2387,9 @@ mod tests {
         // Two memories owned by this companion, one owned by nobody (a vestigial
         // shared row) that must NOT travel with it.
         let mut owned = raw_memory(&memory_fixture(61), "preference", "主人怕苦", "active");
-        owned.scope_kind = "companion".into();
-        owned.scope_companion_id = Some(source.companion_id.clone());
+        owned.companion_id = Some(source.companion_id.clone());
         let mut archived = raw_memory(&memory_fixture(62), "episode", "上周一起改了导出", "archived");
-        archived.scope_kind = "companion".into();
-        archived.scope_companion_id = Some(source.companion_id.clone());
+        archived.companion_id = Some(source.companion_id.clone());
         let stranger = raw_memory(&memory_fixture(63), "knowledge", "谁也不拥有的旧行", "active");
         for memory in [&owned, &archived, &stranger] {
             store_a.insert_memory_raw(memory).await.unwrap();
@@ -2335,7 +2459,7 @@ mod tests {
         let imported_skills = store_b.list_skills(&companion_id).await.unwrap();
         assert_eq!(imported_skills.len(), 2);
         for skill in &imported_skills {
-            assert_eq!(skill.scope_companion_id.as_deref(), Some(companion_id.as_str()));
+            assert_eq!(skill.companion_id.as_deref(), Some(companion_id.as_str()));
             assert_ne!(skill.companion_skill_id, active_skill.companion_skill_id);
             assert!(
                 crate::skill_io::read_skill_body(&paths_b, skill)

@@ -192,7 +192,7 @@ async fn list_memories(
         kind,
         q: None,
         status: status_filter,
-        scope_companion_id: query.scope_companion_id,
+        companion_id: query.scope_companion_id,
         limit,
         offset,
     };
@@ -1485,12 +1485,12 @@ mod tests {
         // similarity rule the merge assistant groups by, so it would fold the pair
         // into one row before it ever became a suggestion.
         let owned = |companion_id: &str, kind: &str, content: &str| {
-            let scope = crate::store::MemoryScope::Companion(companion_id.to_owned());
+            let owner = companion_id.to_owned();
             let (kind, content) = (kind.to_owned(), content.to_owned());
             let store = &service.store;
             async move {
                 store
-                    .insert_memory_scoped(&kind, &content, &[], 0.8, "manual", scope)
+                    .insert_memory_scoped(&kind, &content, &[], 0.8, "manual", Some(&owner))
                     .await
                     .unwrap()
             }
@@ -1613,8 +1613,7 @@ mod tests {
             created_at: updated_at,
             updated_at,
             last_reinforced_at: updated_at,
-            scope_kind: "user".into(),
-            scope_companion_id: None,
+            companion_id: None,
         };
         let old_archived = raw("主人上月研究了咖啡烘焙曲线", 0.9, "archived", 1_000);
         let new_active = raw("主人今天又聊起咖啡豆产区", 0.2, "active", 2_000);

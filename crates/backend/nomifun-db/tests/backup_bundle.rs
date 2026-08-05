@@ -579,6 +579,71 @@ async fn pre_work_root_owner_v2_coverage_remains_verifiable_and_restorable() {
     ));
 }
 
+/// `BackupCoverage::validate` demands an exact match against the live
+/// managed-dataset registry, and its only historical allowance is the
+/// work-root host-control shape above. So dropping a root from that registry —
+/// even one whose subsystem was deleted — silently invalidates every bundle
+/// older releases produced: the coverage entry they recorded no longer has a
+/// counterpart, and restore fails closed with `InvalidManifest`.
+///
+/// `browser-secrets` was published as an *included* data root by v0.3.1..=v0.3.7,
+/// so it must keep that exact path, kind and policy even though the companion
+/// credential subsystem is gone.
+#[tokio::test]
+async fn coverage_still_matches_bundles_published_by_earlier_releases() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.db");
+    let bundle = dir.path().join("backup.nomifun");
+    let destination = dir.path().join("restored");
+    let data_dir = dir.path().join("data");
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let database = init_database(&source).await.unwrap();
+
+    // Credential material a v0.3.7 install left behind.
+    std::fs::create_dir_all(data_dir.join("browser-secrets")).unwrap();
+    std::fs::write(
+        data_dir.join("browser-secrets/vault.json"),
+        b"legacy credential blob",
+    )
+    .unwrap();
+
+    create_backup_bundle_with_sources(
+        &database,
+        &bundle,
+        &generate_id(),
+        BackupObjectGraph::full_database(),
+        BackupSource {
+            data_dir: &data_dir,
+            work_dir: &work_dir,
+        },
+    )
+    .await
+    .unwrap();
+
+    let verified = verify_backup_bundle(&bundle).unwrap();
+    let entry = verified
+        .coverage
+        .included
+        .iter()
+        .find(|entry| {
+            entry.root == BackupCoverageRoot::DataDir && entry.path == "browser-secrets"
+        })
+        .expect(
+            "browser-secrets must stay an included data root: pre-v0.3.8 bundles \
+             recorded it, and coverage validation is an exact match",
+        );
+    assert_eq!(entry.kind, BackupCoverageKind::Directory);
+
+    restore_backup_data_dir(&bundle, &destination).await.unwrap();
+    assert_eq!(
+        std::fs::read(destination.join("browser-secrets/vault.json")).unwrap(),
+        b"legacy credential blob",
+        "a restore must not silently drop the legacy root it carried"
+    );
+}
+
 #[tokio::test]
 async fn bundle_verification_fails_closed_after_tampering() {
     let dir = tempfile::tempdir().unwrap();
