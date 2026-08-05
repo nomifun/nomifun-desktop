@@ -185,6 +185,38 @@ impl SshHostService {
             .map_err(map_not_found)
     }
 
+    /// Walk a host's status back to `disconnected` after a dial or a live link
+    /// failed. Until this existed `mark_connected` was the only writer of the
+    /// column, so a host read `connected` forever after its first successful dial.
+    ///
+    /// The column is per-HOST while links are per-CONVERSATION, so treat it as a
+    /// last-known hint for the host book — the live truth is the pool's `watch`
+    /// per link. `detail` is logged rather than stored: the column holds a bare
+    /// status word, and a diagnostic string persisted next to a credential is a
+    /// leak waiting to happen.
+    pub async fn mark_unreachable(
+        &self,
+        user_id: &str,
+        id: &SshHostId,
+        detail: &str,
+    ) -> Result<(), SshServiceError> {
+        tracing::debug!(ssh_host_id = %id, detail = %detail, "ssh host marked unreachable");
+        // `update_status` assigns `last_connected_at` unconditionally (only the
+        // fingerprint is COALESCEd), so passing `None` would erase the very hint
+        // this column exists to provide. Read it back and hand it straight in.
+        let last_connected_at = self
+            .repo
+            .find(user_id, id)
+            .await
+            .map_err(|e| SshServiceError::Internal(e.to_string()))?
+            .ok_or(SshServiceError::NotFound)?
+            .last_connected_at;
+        self.repo
+            .update_status(user_id, id, "disconnected", last_connected_at, None)
+            .await
+            .map_err(map_not_found)
+    }
+
     /// Decrypt an owned host's credentials for the transport layer. Never
     /// serialized; the returned secrets are `Zeroizing`.
     pub async fn decrypt_credential(
