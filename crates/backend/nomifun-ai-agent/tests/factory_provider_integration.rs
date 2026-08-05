@@ -105,6 +105,7 @@ fn make_factory_with_summon(
         settings_repo: None,
         companion_prompt: None,
         companion_summon,
+        ssh_provider: None,
         companion_skill_sink: None,
         skill_manager: AcpSkillManager::new(skill_paths),
         remote_agent_repo,
