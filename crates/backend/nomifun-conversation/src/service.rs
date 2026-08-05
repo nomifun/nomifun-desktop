@@ -44,7 +44,7 @@ use nomifun_common::{
 use nomifun_db::models::{AgentMetadataRow, ConversationRow, MessageRow};
 use nomifun_db::{
     AgentExecutionTurnAuthority, ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, IAcpSessionRepository,
-    IAgentMetadataRepository, IConversationRepository, IMcpServerRepository, SaveRuntimeStateParams,
+    IAgentMetadataRepository, IConversationRepository, IMcpServerRepository, MessageDayBucket, SaveRuntimeStateParams,
     ConversationTurnAdmissionState, RequirementConversationTurnAuthority, SortOrder,
     TurnLifecycleTransition, TurnReceiptCompletion,
 };
@@ -5763,6 +5763,44 @@ impl ConversationService {
 
         let compact_content = matches!(query.content_mode.as_deref(), Some("compact"));
 
+        // Day path: one LOCAL calendar day, oldest-first, server-bounded. The
+        // companion history reader pages by day rather than by cursor, so the
+        // day boundary stays computed in the one place that also partitions
+        // session digests instead of being re-derived in the browser (whose
+        // timezone need not match the backend's).
+        if let Some(day) = query.day.as_deref() {
+            if query.cursor.is_some() {
+                return Err(AppError::BadRequest(
+                    "day and cursor are mutually exclusive message queries".to_owned(),
+                ));
+            }
+            let limit = query.page_size.unwrap_or(500);
+            let result = self
+                .conversation_repo
+                .get_messages_for_local_day(parse_conv_id(conversation_id)?, day, limit)
+                .await?;
+            let mut items = Vec::with_capacity(result.items.len());
+            for row in result.items {
+                items.push(if compact_content {
+                    row_to_message_response_compact(row)?
+                } else {
+                    row_to_message_response(row)?
+                });
+            }
+            let items = self
+                .project_history_artifact_integrity(&conversation, items)
+                .await?;
+            let items = items
+                .into_iter()
+                .map(|message| self.project_orphaned_turn_writeback(message))
+                .collect();
+            return Ok(PaginatedResult {
+                items,
+                total: result.total,
+                has_more: result.has_more,
+            });
+        }
+
         // Keyset (cursor) path: incremental newest-first windows for long
         // sessions (e.g. a companion's single session, which now also absorbs
         // every IM-channel turn). The frontend opts in by sending `cursor`: ""
@@ -5875,6 +5913,25 @@ impl ConversationService {
             total: result.total,
             has_more: result.has_more,
         })
+    }
+
+    /// Complete LOCAL-calendar-day index of a conversation's visible messages,
+    /// newest day first. A read-only companion history rail is built from this,
+    /// so it never mints anything and an empty conversation is an empty list.
+    pub async fn message_local_day_index(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<MessageDayBucket>, AppError> {
+        self.conversation_repo
+            .get(parse_conv_id(conversation_id)?)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        Ok(self
+            .conversation_repo
+            .message_local_day_index(parse_conv_id(conversation_id)?)
+            .await?)
     }
 
     /// Return one full message for a conversation after verifying ownership.

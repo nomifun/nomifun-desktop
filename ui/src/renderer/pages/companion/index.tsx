@@ -11,7 +11,7 @@ import { parseCompanionId, type CompanionId, type ConversationId } from '@/commo
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
-import type { ICompanionProfile, ICompanionSuggestion, IResponseMessage } from '@/common/adapter/ipcBridge';
+import type { ICompanionProfile, IResponseMessage } from '@/common/adapter/ipcBridge';
 import { extractResponseTextChunk } from '@/common/chat/displayText';
 import MarkdownView from '@/renderer/components/Markdown';
 import LocalImageView from '@/renderer/components/media/LocalImageView';
@@ -41,8 +41,7 @@ import {
   pickHostMonitor,
   resolveDeskRestoreLayout,
   type MonitorLayout,
-} from './memoryPanelGeometry';
-import { useDetachedMemoryPanel } from './useDetachedMemoryPanel';
+} from './deskRestoreGeometry';
 import { placeResizedWindow, type GeomRect } from './windowGeometry';
 import { buildCompanionMenuEntries, type CompanionMenuAction } from './companionNativeMenu';
 import { useCompanionClickThrough } from './useCompanionClickThrough';
@@ -141,8 +140,6 @@ const CompanionPage: React.FC = () => {
   const [activity, setActivity] = useState<RabbitActivity>('idle');
   const [bubble, setBubble] = useState<string>('');
   const [bubbleLoading, setBubbleLoading] = useState(false);
-  const [unread, setUnread] = useState(0);
-  const [suggestions, setSuggestions] = useState<ICompanionSuggestion[]>([]);
   const [input, setInput] = useState('');
   const deliveryPendingRef = useRef(false);
   /** 光标是否停在伙伴交互区（由 useCompanionClickThrough 上报）：驱动「悬停才出现」的
@@ -163,7 +160,6 @@ const CompanionPage: React.FC = () => {
   const [dragging, setDragging] = useState(false);
   /** 立绘命中元素 ref：传给 CompanionAvatar→CustomFigure 挂 alpha 掩码。 */
   const figureHitRef = useRef<HTMLDivElement | null>(null);
-  const unreadBadgeRef = useRef<HTMLButtonElement | null>(null);
   /** 'sendbox' 上传进度：粘贴/选择图片落盘期间用于 loading 态与暂禁发送。 */
   const sendboxUpload = useUploadState('sendbox');
   /** 本地回合是否正在流式生成（驱动气泡上的「打断 □」按钮显隐）。镜像 turnActiveRef。 */
@@ -171,8 +167,6 @@ const CompanionPage: React.FC = () => {
   const bubbleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const profileRef = useRef<ICompanionProfile | null>(null);
   profileRef.current = profile;
-  const suggestionsRef = useRef<ICompanionSuggestion[]>([]);
-  suggestionsRef.current = suggestions;
   /** Set while the user is dragging / just dragged, so a config-updated echo
    *  doesn't snap the window back to a stale position. */
   const lastLocalMoveAt = useRef(0);
@@ -648,15 +642,12 @@ const CompanionPage: React.FC = () => {
     }
     const init = async (attempt: number) => {
       try {
-        const [withStatus, news] = await Promise.all([
-          ipcBridge.companion.getCompanion.invoke({ companion_id: companionId }),
-          ipcBridge.companion.listSuggestions.invoke({ status: 'new', limit: 50 }),
-        ]);
+        const withStatus = await ipcBridge.companion.getCompanion.invoke({
+          companion_id: companionId,
+        });
         if (disposed) return;
         setProfile(withStatus);
         setMood((withStatus.status?.mood as RabbitMood) || 'content');
-        setUnread(news.total);
-        setSuggestions(news.items);
         await applyWindowState(withStatus);
         await applyDeskSize(withStatus, { anchor: 'top-left' });
       } catch (e) {
@@ -681,37 +672,6 @@ const CompanionPage: React.FC = () => {
       if (!isForCompanion(run, companionId)) return;
       setActivity('idle');
       if (run.summary) popBubble(run.summary);
-    });
-    const unsubSuggestion = ipcBridge.companion.onSuggestionCreated.on((s) => {
-      if (!isForCompanion(s, companionId)) return;
-      // Dedup against current list outside the state updater — updaters must
-      // stay pure (StrictMode double-invokes them) and popBubble/setUnread
-      // are side effects.
-      const known = suggestionsRef.current.some(
-        (x) => x.suggestion_id === s.suggestion_id
-      );
-      if (known) return;
-      setSuggestions((list) =>
-        list.some((x) => x.suggestion_id === s.suggestion_id) ? list : [s, ...list]
-      );
-      setUnread((n) => n + 1);
-      popBubble(`${s.title}`);
-    });
-    // A suggestion was decided anywhere (e.g. the owner accepted/dismissed it
-    // in the main panel). Drop it from the bubble + fix the unread badge so the
-    // two surfaces stay in sync. Guard on suggestionsRef so we only decrement
-    // unread for items we were actually showing (StrictMode-safe: no side
-    // effects inside the state updater).
-    const unsubSuggestionDecided = ipcBridge.companion.onSuggestionDecided.on((s) => {
-      if (
-        !suggestionsRef.current.some(
-          (x) => x.suggestion_id === s.suggestion_id
-        )
-      ) return;
-      setSuggestions((list) =>
-        list.filter((x) => x.suggestion_id !== s.suggestion_id)
-      );
-      setUnread((n) => Math.max(0, n - 1));
     });
     const unsubConfig = ipcBridge.companion.onConfigUpdated.on((evt) => {
       // companion.config-updated is shared across scopes: `scope === "shared"` for
@@ -740,11 +700,18 @@ const CompanionPage: React.FC = () => {
         }
       })();
     });
-    // The companion just saved a memory of its own (private to it): a low-key
-    // bubble note, but only when idle so it never clobbers an in-flight reply.
-    // Editing/managing is a right-click away (打开记忆 → the scope-aware tab).
+    // The companion just saved a memory DURING A CHAT with the owner (`source:
+    // 'chat'`): a low-key bubble note, but only when idle so it never clobbers an
+    // in-flight reply. Editing/managing is a right-click away (打开记忆).
+    //
+    // The source gate is load-bearing. Every memory is owned now, including the
+    // ones the background learner distills (`source: 'learn'`) and the ones the
+    // owner types in the workspace or an agent writes over MCP (`'manual'`,
+    // `'merge'`) — without it the pet would start popping bubbles for silent
+    // background work nobody asked to be notified about.
     const unsubMemoryCreated = ipcBridge.companion.onMemoryCreated.on((m) => {
       if (!companionId || m.scope_companion_id !== companionId) return;
+      if (m.source !== 'chat') return;
       if (turnActiveRef.current) return;
       const brief = m.content.length > 40 ? `${m.content.slice(0, 40)}…` : m.content;
       popBubble(t('nomi.companion.memorySavedToast', { brief }));
@@ -989,8 +956,6 @@ const CompanionPage: React.FC = () => {
       unsubMood();
       unsubLearnStart();
       unsubLearnDone();
-      unsubSuggestion();
-      unsubSuggestionDecided();
       unsubConfig();
       unsubDeleted();
       unsubMemoryCreated();
@@ -1209,14 +1174,6 @@ const CompanionPage: React.FC = () => {
       console.error('companion→main navigate failed:', e);
     }
   }, []);
-
-  const memoryPanel = useDetachedMemoryPanel({
-    companionId,
-    suggestions,
-    onActivate: async (suggestion) => openMainAt(suggestion.action?.to || '/nomi?tab=suggestions'),
-    onFallback: async () => openMainAt('/nomi?tab=suggestions'),
-    badgeRef: unreadBadgeRef,
-  });
 
   /** 解析（或幂等创建）该伙伴的唯一专属会话 id。单会话契约（FE2）：
    *  先读 getCompanionSession，有 id 直接用；否则 ensureCompanionSession 幂等创建。
@@ -1627,7 +1584,6 @@ const CompanionPage: React.FC = () => {
 
   const hideCompanion = useCallback(async () => {
     if (!companionId) return;
-    memoryPanel.close('owner-invalid');
     const next = await ipcBridge.companion.patchCompanion
       .invoke({ companion_id: companionId, patch: { appearance: { companion_enabled: false } } })
       .catch(() => null);
@@ -1638,24 +1594,7 @@ const CompanionPage: React.FC = () => {
       // through the config-updated path; kept for call-site symmetry.
       await applyDeskSize(next);
     }
-  }, [applyDeskSize, applyWindowState, companionId, memoryPanel]);
-
-  const clearUnreadSuggestions = useCallback(() => {
-    setUnread(0);
-    memoryPanel.close('empty');
-    // Dismiss server-side too — otherwise the badge resurrects on the next
-    // window load.
-    const pending = suggestionsRef.current;
-    setSuggestions([]);
-    void Promise.allSettled(
-      pending.map((s) =>
-        ipcBridge.companion.decideSuggestion.invoke({
-          suggestion_id: s.suggestion_id,
-          accept: false,
-        })
-      )
-    );
-  }, [memoryPanel]);
+  }, [applyDeskSize, applyWindowState, companionId]);
 
   const runMenuAction = useCallback(
     (action: CompanionMenuAction) => {
@@ -1676,24 +1615,21 @@ const CompanionPage: React.FC = () => {
         return;
       }
       if (action === 'open-memories') {
-        // Lands on the scope-aware Memories tab for this companion (shared +
-        // its own private). Memories live in the companion domain now.
+        // Lands on this companion's 记忆&知识库 tab. Memory is per-companion now —
+        // the former shared/private scope switch is gone.
         void openMainAt(
-          companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=memories` : '/nomi?tab=memories'
+          companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=memory` : '/nomi?tab=memory'
         );
         return;
       }
       if (action === 'open-config') {
-        void openMainAt(companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=settings` : '/nomi');
-        return;
-      }
-      if (action === 'clear-unread') {
-        clearUnreadSuggestions();
+        // 设置 tab was folded into 总览; identity/persona/model all live there now.
+        void openMainAt(companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=overview` : '/nomi');
         return;
       }
       void hideCompanion();
     },
-    [clearUnreadSuggestions, companionId, ensureThread, hideCompanion, openMainAt]
+    [companionId, ensureThread, hideCompanion, openMainAt]
   );
 
   const openNativeContextMenu = useCallback(async () => {
@@ -1832,22 +1768,6 @@ const CompanionPage: React.FC = () => {
       )}
       <div className='nomi-companion-stage-shell'>
         <div className='nomi-companion-stage'>
-          {unread > 0 && (
-            <button
-              ref={unreadBadgeRef}
-              type='button'
-              className='nomi-companion-badge'
-              data-companion-hit
-              aria-label={t('nomi.tabs.suggestions')}
-              aria-expanded={memoryPanel.isExpanded}
-              onClick={(e) => {
-                e.stopPropagation();
-                memoryPanel.toggle();
-              }}
-            >
-              {unread > 99 ? '99+' : unread}
-            </button>
-          )}
           <div
             ref={figureHitRef}
             className='nomi-companion-figure-hit'

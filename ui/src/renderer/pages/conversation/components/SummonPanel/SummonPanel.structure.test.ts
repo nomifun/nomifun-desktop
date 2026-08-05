@@ -6,7 +6,7 @@
 
 /**
  * Structure tests for the in-session companion summon UI (设计 B5) — same
- * source-assertion style as `pages/nomi/tabs/MemoriesTab.test.ts`.
+ * source-assertion style as `pages/nomi/workspace/tabs/MemoryTab`.
  */
 
 import { describe, expect, test } from 'bun:test';

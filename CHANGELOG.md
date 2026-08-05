@@ -5,6 +5,164 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- Desktop companion management page (`/nomi`) rebuilt as a three-pane
+  workspace: a companion sidebar (create, drag-reorder, 形象库), a seven-tab
+  centre workspace (总览 / 记忆&知识库 / 远程控制 / 进化 / 技能 / 聊天历史 /
+  其他), and an on-demand right detail pane. The previous page stacked two
+  identical `Radio.Group` controls — an outer 伙伴/共享/形象库 "domain" switch
+  above an inner tab switch — which existed only because half the settings were
+  install-wide rather than per-companion. New in the rebuild: a per-companion
+  chat-history reader grouped by day, and a persisted sidebar order
+  (`order_index` on the companion profile). Removed from 总览: the counter row
+  that summed memories/suggestions/skills across **all** companions while
+  rendering inside a single companion's card.
+
+- **Breaking / irreversible data change.** Companion memory is now strictly
+  per-companion: every memory row belongs to exactly one companion, only its
+  owner's rows are injected into that companion's prompts, and 记忆&知识库 lists
+  the selected companion's memories only. 共享记忆 is gone as a product concept —
+  there is no shared/all-companions scope left to write, and no way, in the UI or
+  the API, to re-home a memory from one companion to another. **On the first
+  launch after upgrading, memories that used to be shared by the whole family are
+  re-homed onto a single companion**: the explicit default companion if it is
+  still in the roster, otherwise the oldest one. Nothing is deleted or duplicated
+  (ids, content, timestamps, strength and pinned/archived state are preserved),
+  but every *other* companion permanently loses sight of them and this cannot be
+  undone — if you want a particular companion to inherit the history, make it the
+  default companion **before** launching this build. Deleting a companion now
+  destroys the memories filed under it, so export the companion first if you want
+  to keep them (the companion bundle now carries its memories by default). A zero-companion install
+  remains supported: rows stay unowned until a companion exists again and are
+  re-homed at a later launch, and a learning run with an empty roster exits early
+  instead of writing an ownerless memory. Importing a memory bundle re-homes
+  every row onto the local owner, since companion ids are not stable across
+  machines. The UI/API contract version was bumped accordingly
+  (`PUT /api/companion/memories/{id}` no longer accepts `scope_kind`, and its
+  `scope_companion_id` no longer names a target scope — see the ownership-check
+  entry below, where it becomes the *asking* companion; `scope_companion_id` on
+  `POST /api/companion/memories` now names the owner instead of meaning
+  "private", `scope_kind` is gone from the
+  memory shape the UI consumes, and `memories_active` / `memories_archived` plus
+  the digest's `memories_added` are per-companion counts rather than install-wide
+  totals). Collection, learning and evolution **configuration** was still
+  install-wide at that point; the entry below makes learning and evolution
+  per-companion too.
+
+- **Behaviour change + migration.** 定时学习 and 技能进化 are now **per
+  companion**, not install-wide. Each companion carries its own `learn`
+  (`enabled` / `interval_minutes` / `model`) and `evolve` (`enabled`, a
+  保守/激进 preference, `min_distinct_sessions`) block on its profile, runs its
+  own loop on its own schedule from its **own cursor** into the shared raw-event
+  spool, and owns everything the run produces — memories, mined skills, XP and
+  mood alike. The 进化 tab therefore writes through `PATCH
+  /api/companion/companions/{id}` instead of the shared config, and every "these
+  settings currently apply to every companion" / "the output lands on the default
+  companion" disclosure is gone because it is no longer true. Two consequences
+  worth naming: learning-run XP is credited only to the companion that ran (it
+  used to be granted to the whole roster), and **mood is per companion** (it used
+  to be one global row, so whichever run finished last set everyone's mood).
+  休眠时段 now gates the two background loops as well as the desktop bubbles —
+  inside the window a companion neither interrupts you nor spends tokens; IM
+  auto-replies are deliberately still answered.
+
+  **On the first launch after upgrading, every existing companion is seeded from
+  the current install-wide values**, so nobody's behaviour changes: an install
+  learning every 25 minutes in 激进 mode keeps doing exactly that, on every
+  companion. Each companion's event cursors and its mood are seeded from the
+  retired global ones rather than from zero — seeding to zero would make every
+  companion re-distill the entire retained event history on its first run
+  (duplicate memories and a large unexpected LLM bill). The migration is additive
+  and idempotent: a companion that already has settings or a cursor of its own is
+  never overwritten, and `shared/config.json` is only rewritten without `learn` /
+  `evolve` once the seeding has durably succeeded, so an interrupted upgrade
+  replays cleanly. No table is rebuilt and no column is dropped. A companion
+  created after the upgrade starts reading the spool from its creation time, for
+  the same token-burn reason.
+
+  Raw-event retention follows: an event day-file is deleted only once **every**
+  companion with a consumer enabled has read past it, and a companion whose
+  consumer is on but has no cursor yet protects everything. `SharedCompanionConfig`
+  keeps `collect`, `archive`, `smart_collaboration`, `default_companion_id` and
+  `bridge_to_memory_dir`; `PATCH /api/companion/config` no longer accepts `learn`
+  or `evolve`, `POST /api/companion/learn/run` became `POST
+  /api/companion/companions/{id}/learn/run` (companion-scoped, so one companion's
+  run cannot serialise the others), and the MCP `learn`/`evolve` patch shape moved
+  from `nomi_companion_update_config` to `nomi_companion_update`. Skill-pattern
+  statistics and accept/reject feedback stay install-wide on purpose: a repeated
+  tool sequence is a fact about how the owner works, and a rejection is the
+  owner's judgement about that pattern rather than about a companion.
+
+- **Memory ownership is now enforced where memory is stored, not merely respected
+  by its callers.** `PUT /api/companion/memories/{id}`, `DELETE
+  /api/companion/memories/{id}`, `POST /api/companion/memories/batch` and `POST
+  /api/companion/memories/merge` used to address rows by memory id alone, so "a
+  memory can only be changed by its owner" held only because a companion's
+  workspace happens to know just its own ids. All four now require the asking
+  companion (`scope_companion_id` in the body; the query string for `DELETE`) and
+  refuse anything that is not its memory with a `404` — never a silent no-op
+  reported as success. It is the caller's identity, not a new owner: no wire can
+  re-home a memory. The one cross-companion surface is the machine owner's MCP
+  tools (`nomi_memory_update` / `nomi_memory_delete`), which pass an explicitly
+  named "any owner" actor, because the owner agent has no companion identity of its
+  own. `POST /api/companion/memories/merge-suggestions` is scoped the same way and
+  requires `scope_companion_id` too: it used to scan every companion's memories and
+  let the client filter, which put other companions' memory **text** on a wire
+  belonging to a single companion. The UI/API contract version was bumped
+  accordingly.
+
+- 导出伙伴 now also carries the companion's **mood**. `state.json` in a companion
+  bundle grew a `mood` field beside `xp`, and import restores it, so a companion
+  moved between machines keeps the mood it was in. Bundles written before this
+  change have no such field and still import (the importing machine's default
+  stands). The memory bundle's own `mood` field stays deliberately null and
+  ignored — mood belongs to one companion, not to a whole memory hub.
+
+- 聊天历史 (`/nomi` → 聊天历史) now reads a **server-side** day index:
+  `GET /api/companion/companions/{id}/history/days` returns every local calendar
+  day the companion's conversation holds visible messages on (plus every day with
+  an archive digest), and `GET /api/conversations/{id}/messages` takes a new
+  `day=YYYYMMDD` parameter that returns exactly that day, oldest-first. The day
+  boundary is now computed once, on the server, in the same timezone that
+  partitions archive digests — so the digest marker can no longer land on the
+  wrong day near midnight, and a browser in a different timezone from the backend
+  no longer mislabels days. The day rail is therefore complete: 「加载更早」 and
+  the "the index only reaches {day}" footnote are gone. The reader still never
+  mints a session, so it works for a companion with no model configured.
+
+- 导出伙伴 now actually exports the companion. The bundle carries its
+  `memories.jsonl` (on by default), optionally its skills (rows plus their
+  `SKILL.md` bodies), and the custom figure image whenever the companion wears
+  one; settings and growth progress are always included. `POST
+  /api/companion/export/companions/{id}` gained `include_memories` (default
+  `true`) and `include_skills` (default `false`), the response's `file_count` and
+  `memories` are computed rather than hardcoded, and it reports a new `skills`
+  count. Import re-homes every carried memory and skill onto the freshly minted
+  companion id with fresh row ids, so a bundle from another machine can no longer
+  leave a foreign owner behind (which would hard-fail the next boot's reference
+  audit). Two latent import bugs are fixed on the way: a companion exported
+  before its chat model was configured no longer fails to import, and a bundle
+  claiming a custom figure it has no image for now drops the figure instead of
+  producing an install that refuses to boot. Bundles written by the previous
+  build (four entries, no memories) still import. The UI/API contract version was
+  bumped accordingly.
+
+- **Breaking / no downgrade.** The 建议 (Suggestions) feature is removed
+  entirely — the `/nomi` tab, the desktop-pet unread badge, the detached
+  suggestion popup window (`/nomi-memory-panel`), the learner's suggestion
+  distillation, both `/api/companion/suggestions*` endpoints, the
+  `companion.suggestion-created` / `-decided` WebSocket events, the
+  `nomi_companion_list_suggestions` / `nomi_companion_decide_suggestion` agent
+  tools, and the `companion_suggestions` table. The table is dropped on first
+  launch after upgrading, which destroys any pending suggestion cards.
+  **Downgrading to 0.3.8 after this upgrade fails at boot**: 0.3.8 validates an
+  exact table set and refuses to start when a table is missing. Export anything
+  you need before upgrading. The UI/API contract version was bumped
+  accordingly (`suggestions_new` is gone from the companion status shape and
+  `suggestions_added` from the learn result).
+  The summoned-session `propose_companion_memory` capability went with it:
+  suggestion cards were its only storage and its only review surface, so it has
+  no confirm-before-write channel left. Restoring it needs a new design.
+
 - SSH remote sessions: save a remote Linux host's SSH credentials (password,
   private key with passphrase, certificate, or the local ssh-agent — all
   AES-256-GCM encrypted at rest and never returned in plaintext) under a new
