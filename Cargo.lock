@@ -6028,6 +6028,7 @@ dependencies = [
  "nomifun-requirement",
  "nomifun-runtime",
  "nomifun-shell",
+ "nomifun-ssh",
  "nomifun-system",
  "nomifun-terminal",
  "nomifun-webhook",
