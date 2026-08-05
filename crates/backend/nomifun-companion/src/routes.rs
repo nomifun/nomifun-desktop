@@ -6,7 +6,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 
 use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
@@ -15,13 +15,14 @@ use serde::Deserialize;
 
 use crate::profile::{HeadBox, CompanionProfileConfig, SharedCompanionConfig};
 use crate::memory_search::MemoryStatusFilter;
+use crate::learner::CompanionLearnResult;
 use crate::service::{
     CompanionSkillContent, CompanionSkillViewPage, CompanionStatus, CompanionWeeklyDigest,
     MemoryListItem, MemoryListPage, MemoryMergeGroup, SourceStats,
 };
 use crate::state::CompanionRouterState;
 use crate::store::{
-    MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryScope, CompanionLearnRun,
+    MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryScope,
     CompanionMemory, CompanionSkill, CompanionSuggestion, SuggestionPage,
 };
 
@@ -83,10 +84,8 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
             post(gift_companion_skill),
         )
         .route("/api/companion/learn/run", post(run_learn))
-        .route("/api/companion/learn/runs", get(list_learn_runs))
         .route("/api/companion/events/stats", get(event_stats))
-        .route("/api/companion/events/recent", get(recent_events))
-        .route("/api/companion/events", delete(clear_events))
+        .route("/api/companion/events/storage", get(event_storage))
         .route("/api/companion/consent", post(apply_consent))
         .route("/api/companion/disable-all", post(disable_all))
         .route("/api/companion/export/memory", post(export_memory))
@@ -599,39 +598,22 @@ async fn gift_companion_skill(
 async fn run_learn(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<CompanionLearnRun>>, AppError> {
+) -> Result<Json<ApiResponse<CompanionLearnResult>>, AppError> {
     Ok(Json(ApiResponse::ok(state.service.run_learn_now().await?)))
-}
-
-#[derive(Deserialize)]
-struct LimitQuery {
-    limit: Option<i64>,
-}
-
-async fn list_learn_runs(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Query(query): Query<LimitQuery>,
-) -> Result<Json<ApiResponse<Vec<CompanionLearnRun>>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state.service.list_learn_runs(query.limit.unwrap_or(30)).await?,
-    )))
 }
 
 async fn event_stats(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<Vec<SourceStats>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.event_stats()?)))
+    Ok(Json(ApiResponse::ok(state.service.event_stats().await?)))
 }
 
-async fn recent_events(
+async fn event_storage(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Query(query): Query<LimitQuery>,
-) -> Result<Json<ApiResponse<Vec<crate::collector::CollectedEvent>>>, AppError> {
-    let limit = query.limit.unwrap_or(100).clamp(1, 500) as usize;
-    Ok(Json(ApiResponse::ok(state.service.recent_events(limit)?)))
+) -> Result<Json<ApiResponse<crate::collector::EventStorageStatus>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.event_storage().await?)))
 }
 
 async fn apply_consent(
@@ -999,14 +981,6 @@ async fn get_active_thread(
     })))
 }
 
-async fn clear_events(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.clear_events()?;
-    Ok(Json(ApiResponse::ok(())))
-}
-
 // ----- cross-machine bundle export / import (§4.8) -----
 
 /// The live shared store + shared dir for export/import. `CompanionService` keeps
@@ -1026,15 +1000,14 @@ struct ExportMemoryRequest {
 }
 
 async fn export_memory(
-    State(_state): State<CompanionRouterState>,
+    State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
     body: Result<Json<ExportMemoryRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<crate::export::ExportSummary>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let (shared_dir, store) = live_store()?;
-    let summary = crate::export::export_memory_bundle(
-        store,
-        shared_dir,
+    let summary = state
+        .service
+        .export_memory_bundle(
         std::path::Path::new(&req.dest_path),
         req.include_events,
     )
@@ -1082,14 +1055,7 @@ async fn import_package(
     body: Result<Json<ImportPackageRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<crate::export::ImportOutcome>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let (shared_dir, store) = live_store()?;
-    let outcome = crate::export::import_bundle(
-        store,
-        state.service.as_ref(),
-        shared_dir,
-        std::path::Path::new(&req.src_path),
-    )
-    .await?;
+    let outcome = state.service.import_bundle(std::path::Path::new(&req.src_path)).await?;
     Ok(Json(ApiResponse::ok(outcome)))
 }
 
@@ -1145,6 +1111,128 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn learn_endpoint_returns_only_a_transient_result_and_history_route_is_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = test_app(dir.path()).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/companion/learn/run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let data = body["data"].as_object().unwrap();
+        let actual_keys: std::collections::BTreeSet<&str> =
+            data.keys().map(String::as_str).collect();
+        let expected_keys: std::collections::BTreeSet<&str> = [
+            "error",
+            "events_processed",
+            "memories_added",
+            "status",
+            "suggestions_added",
+            "summary",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual_keys, expected_keys);
+        assert_eq!(data["status"], "model_unconfigured");
+
+        let retired = app
+            .oneshot(
+                Request::get("/api/companion/learn/runs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retired.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn event_storage_reports_policy_and_raw_viewer_clear_routes_are_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let events_dir = dir
+            .path()
+            .join(crate::COMPANION_SHARED_REL_DIR)
+            .join("events");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        std::fs::write(events_dir.join("20260804.jsonl"), b"newest\n").unwrap();
+        std::fs::write(events_dir.join("20260802.jsonl"), b"old\n").unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/companion/events/storage").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(
+            body["data"],
+            serde_json::json!({
+                "total_bytes": 11,
+                "max_bytes": 64 * 1024 * 1024,
+                "file_count": 2,
+                "oldest_day": "2026-08-02",
+                "newest_day": "2026-08-04",
+                "retention_days": 30,
+                "max_storage_mb": 64
+            })
+        );
+
+        let valid_patch = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/companion/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "collect": {
+                                "event_retention_days": 7,
+                                "event_max_storage_mb": 16
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(valid_patch.status(), StatusCode::OK);
+        let status = service.event_storage().await.unwrap();
+        assert_eq!(status.retention_days, 7);
+        assert_eq!(status.max_storage_mb, 16);
+
+        let invalid_patch = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/companion/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"collect": {"event_max_storage_mb": 15}}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_patch.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(service.get_config().await.collect.event_max_storage_mb, 16);
+
+        for request in [
+            Request::get("/api/companion/events/recent").body(Body::empty()).unwrap(),
+            Request::delete("/api/companion/events").body(Body::empty()).unwrap(),
+        ] {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]

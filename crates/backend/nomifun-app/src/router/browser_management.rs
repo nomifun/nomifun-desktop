@@ -21,9 +21,11 @@ use nomifun_browser_platform::{
     BrowserSessionHub, BrowserSurface, BrowserTabSnapshot, CloseResult,
     BrowserVisibility, HostLifecycleState, LaneLifecycleState, QueueMetadata,
     ResourcePolicy, ResourcePolicyPreset, ResourcePressureState,
-    MAX_ACTIVE_OPERATIONS, MAX_BROWSER_MEMORY_RATIO, MAX_GLOBAL_QUEUE, MAX_OPEN_LANES,
-    MAX_OWNER_QUEUE, MAX_RESERVED_MEMORY_BYTES, MIN_BROWSER_MEMORY_RATIO,
-    MIN_RESERVED_MEMORY_BYTES,
+    AUTOMATIC_TASK_MEMORY_BYTES, HIGH_CONCURRENCY_TASK_MEMORY_BYTES, MAX_ACTIVE_OPERATIONS,
+    MAX_BROWSER_MEMORY_RATIO, MAX_GLOBAL_QUEUE, MAX_OPEN_LANES, MAX_OWNER_QUEUE,
+    MAX_RESERVED_MEMORY_BYTES, MAX_TASK_ACTIVE_OPERATIONS, MAX_TASK_MEMORY_BYTES,
+    MAX_TASK_OPEN_LANES, MAX_TASK_TABS, MIN_BROWSER_MEMORY_RATIO, MIN_RESERVED_MEMORY_BYTES,
+    MIN_TASK_MEMORY_BYTES, RESOURCE_SAVING_TASK_MEMORY_BYTES,
 };
 use nomifun_db::IClientPreferenceRepository;
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,9 @@ pub struct BrowserManagementState {
     pub preferences: Arc<dyn IClientPreferenceRepository>,
     installation_owner_user_id: Arc<str>,
     display_mode_update_gate: Arc<tokio::sync::Mutex<()>>,
+    display_mode_updates: Arc<tokio::sync::Mutex<DisplayModeUpdateCoordinator>>,
+    resource_policy_update_gate: Arc<tokio::sync::Mutex<()>>,
+    resource_policy_updates: Arc<tokio::sync::Mutex<ResourcePolicyUpdateCoordinator>>,
 }
 
 impl BrowserManagementState {
@@ -59,6 +64,13 @@ impl BrowserManagementState {
             preferences,
             installation_owner_user_id,
             display_mode_update_gate: Arc::new(tokio::sync::Mutex::new(())),
+            display_mode_updates: Arc::new(tokio::sync::Mutex::new(
+                DisplayModeUpdateCoordinator::default(),
+            )),
+            resource_policy_update_gate: Arc::new(tokio::sync::Mutex::new(())),
+            resource_policy_updates: Arc::new(tokio::sync::Mutex::new(
+                ResourcePolicyUpdateCoordinator::default(),
+            )),
         }
     }
 
@@ -68,6 +80,101 @@ impl BrowserManagementState {
 
     fn is_installation_owner(&self, user: &CurrentUser) -> bool {
         user.id.as_str() == self.installation_owner_user_id.as_ref()
+    }
+}
+
+type DisplayModeUpdateResult = Result<BrowserDisplayModeDto, BrowserApiError>;
+
+#[derive(Default)]
+struct DisplayModeUpdateCoordinator {
+    active: Option<DisplayModeUpdateSlot>,
+    pending: Option<DisplayModeUpdateWork>,
+    worker_running: bool,
+}
+
+struct DisplayModeUpdateSlot {
+    mode: BrowserDisplayModeValueDto,
+    flight: Arc<DisplayModeUpdateFlight>,
+}
+
+struct DisplayModeUpdateWork {
+    mode: BrowserDisplayModeValueDto,
+    flight: Arc<DisplayModeUpdateFlight>,
+}
+
+struct DisplayModeUpdateFlight {
+    result: tokio::sync::watch::Sender<Option<DisplayModeUpdateResult>>,
+}
+
+impl DisplayModeUpdateFlight {
+    fn new() -> Self {
+        let (result, _receiver) = tokio::sync::watch::channel(None);
+        Self { result }
+    }
+
+    async fn wait(&self) -> DisplayModeUpdateResult {
+        let mut receiver = self.result.subscribe();
+        loop {
+            if let Some(result) = receiver.borrow().clone() {
+                return result;
+            }
+            if receiver.changed().await.is_err() {
+                return Err(BrowserApiError::display_mode_transaction_failed());
+            }
+        }
+    }
+
+    fn complete(&self, result: DisplayModeUpdateResult) {
+        self.result.send_replace(Some(result));
+    }
+}
+
+type ResourcePolicyUpdateResult = Result<ResourcePolicyDto, BrowserApiError>;
+
+#[derive(Default)]
+struct ResourcePolicyUpdateCoordinator {
+    active: Option<ResourcePolicyUpdateSlot>,
+    pending: Option<ResourcePolicyUpdateWork>,
+    worker_running: bool,
+    #[cfg(test)]
+    worker_starts: usize,
+}
+
+struct ResourcePolicyUpdateSlot {
+    key: String,
+    flight: Arc<ResourcePolicyUpdateFlight>,
+}
+
+struct ResourcePolicyUpdateWork {
+    key: String,
+    request: ResourcePolicyDto,
+    flight: Arc<ResourcePolicyUpdateFlight>,
+}
+
+struct ResourcePolicyUpdateFlight {
+    result: tokio::sync::watch::Sender<Option<ResourcePolicyUpdateResult>>,
+}
+
+impl ResourcePolicyUpdateFlight {
+    fn new() -> Self {
+        let (result, _receiver) = tokio::sync::watch::channel(None);
+        Self { result }
+    }
+
+    async fn wait(&self) -> ResourcePolicyUpdateResult {
+        let mut receiver = self.result.subscribe();
+        loop {
+            if let Some(result) = receiver.borrow().clone() {
+                return result;
+            }
+            if receiver.changed().await.is_err() {
+                return Err(BrowserApiError::resource_policy_transaction_failed());
+            }
+        }
+    }
+
+    fn complete(&self, result: ResourcePolicyUpdateResult) {
+        self.result.send_replace(Some(result));
     }
 }
 
@@ -115,7 +222,7 @@ pub fn browser_management_owner_routes(state: BrowserManagementState) -> Router 
         .with_state(state)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct BrowserApiErrorBody {
     code: Value,
     message: String,
@@ -127,7 +234,7 @@ struct BrowserApiErrorBody {
     metadata: Value,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BrowserApiError {
     status: StatusCode,
     body: BrowserApiErrorBody,
@@ -228,6 +335,57 @@ impl BrowserApiError {
         }
     }
 
+    fn resource_policy_partial_state() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: BrowserApiErrorBody {
+                code: json!("browser_resource_policy_partial_state"),
+                message: "The live browser policy was not applied and the previous persisted policy could not be restored."
+                    .to_owned(),
+                retryable: false,
+                next_action: "Stop Browser Use, inspect application storage, and restart before changing the policy again."
+                    .to_owned(),
+                lane_id: None,
+                metadata: json!({
+                    "live_apply_failed": true,
+                    "storage_rollback_failed": true
+                }),
+            },
+        }
+    }
+
+    fn resource_policy_transaction_failed() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: BrowserApiErrorBody {
+                code: json!("browser_resource_policy_transaction_failed"),
+                message: "The browser resource policy transaction stopped unexpectedly."
+                    .to_owned(),
+                retryable: true,
+                next_action: "Refresh the current browser policy and retry the update."
+                    .to_owned(),
+                lane_id: None,
+                metadata: Value::Null,
+            },
+        }
+    }
+
+    fn resource_policy_superseded() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            body: BrowserApiErrorBody {
+                code: json!("browser_resource_policy_superseded"),
+                message: "The pending browser resource policy was replaced by a newer update."
+                    .to_owned(),
+                retryable: true,
+                next_action: "Refresh the current browser policy before retrying this update."
+                    .to_owned(),
+                lane_id: None,
+                metadata: json!({"superseded": true}),
+            },
+        }
+    }
+
     fn display_mode_storage() -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -240,6 +398,36 @@ impl BrowserApiError {
                         .to_owned(),
                 lane_id: None,
                 metadata: Value::Null,
+            },
+        }
+    }
+
+    fn display_mode_transaction_failed() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: BrowserApiErrorBody {
+                code: json!("browser_display_mode_transaction_failed"),
+                message: "The browser display mode transaction stopped unexpectedly.".to_owned(),
+                retryable: true,
+                next_action: "Refresh the current display mode and retry the update.".to_owned(),
+                lane_id: None,
+                metadata: Value::Null,
+            },
+        }
+    }
+
+    fn display_mode_superseded() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            body: BrowserApiErrorBody {
+                code: json!("browser_display_mode_superseded"),
+                message: "The pending browser display mode was replaced by a newer update."
+                    .to_owned(),
+                retryable: true,
+                next_action: "Refresh the current display mode before retrying this update."
+                    .to_owned(),
+                lane_id: None,
+                metadata: json!({"superseded": true}),
             },
         }
     }
@@ -264,7 +452,8 @@ impl From<BrowserPlatformError> for BrowserApiError {
             | BrowserErrorCode::StaleLaneRef
             | BrowserErrorCode::TargetCrashed
             | BrowserErrorCode::IdentityReplicaStale
-            | BrowserErrorCode::NeedsPrimaryIdentity => StatusCode::CONFLICT,
+            | BrowserErrorCode::NeedsPrimaryIdentity
+            | BrowserErrorCode::PrimaryProfileStorageLimit => StatusCode::CONFLICT,
             BrowserErrorCode::BrowserRestarted
             | BrowserErrorCode::BrowserUnavailable
             | BrowserErrorCode::BrowserShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
@@ -528,11 +717,34 @@ struct BrowserOverviewDto {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BrowserTaskMemoryEnforcementDto {
+    /// The scheduler compares the per-task budget with RSS attributed from a
+    /// shared Browser Host. This is an operational estimate, not an OS-level
+    /// hard memory boundary for the task.
+    AttributedEstimate,
+}
+
+#[derive(Debug, Serialize)]
 struct BrowserCapacityDto {
+    /// Scheduler-admitted Lanes. This is not a count of in-flight browser
+    /// operations; the corresponding ceiling is `max_open_lanes`.
+    active_lanes: usize,
+    /// Backward-compatible alias retained for older renderer builds.
     active: usize,
     queued: usize,
+    /// Global weighted-operation ceiling. It intentionally does not pair
+    /// with `active_lanes`; Lane capacity is `max_open_lanes`.
     max_active: usize,
     max_open_lanes: usize,
+    global_memory_pressure_threshold_bytes: u64,
+    max_task_memory_bytes: u64,
+    /// Describes how `max_task_memory_bytes` is enforced without changing the
+    /// long-standing numeric field's wire format or meaning.
+    task_memory_enforcement: BrowserTaskMemoryEnforcementDto,
+    max_task_active_operations: usize,
+    max_task_open_lanes: usize,
+    max_task_tabs: usize,
     recommended_concurrency: usize,
     reason_code: Option<String>,
 }
@@ -551,10 +763,17 @@ struct BrowserHostDto {
 impl From<BrowserCapacitySnapshot> for BrowserCapacityDto {
     fn from(value: BrowserCapacitySnapshot) -> Self {
         Self {
+            active_lanes: value.active,
             active: value.active,
             queued: value.queued,
             max_active: value.max_active,
             max_open_lanes: value.max_open_lanes,
+            global_memory_pressure_threshold_bytes: value.global_memory_pressure_threshold_bytes,
+            max_task_memory_bytes: value.max_task_memory_bytes,
+            task_memory_enforcement: BrowserTaskMemoryEnforcementDto::AttributedEstimate,
+            max_task_active_operations: value.max_task_active_operations,
+            max_task_open_lanes: value.max_task_open_lanes,
+            max_task_tabs: value.max_task_tabs,
             recommended_concurrency: value.recommended_concurrency,
             reason_code: value.reason_code,
         }
@@ -788,11 +1007,35 @@ enum ResourcePolicyPresetDto {
     Custom,
 }
 
+impl ResourcePolicyPresetDto {
+    const fn domain(self) -> ResourcePolicyPreset {
+        match self {
+            Self::Automatic => ResourcePolicyPreset::Automatic,
+            Self::ResourceSaving => ResourcePolicyPreset::ResourceSaving,
+            Self::HighConcurrency => ResourcePolicyPreset::HighConcurrency,
+            Self::Custom => ResourcePolicyPreset::Custom,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResourcePolicyAdvancedDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_memory_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_task_memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_task_active_operations: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_task_open_lanes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_task_tabs: Option<usize>,
+    // Compatibility-only input from builds that incorrectly modeled a fixed
+    // installation-wide RSS ceiling. It is deliberately ignored and never
+    // serialized: aggregate Browser memory is elastic across many tasks.
+    #[serde(default, rename = "max_memory_bytes", skip_serializing)]
+    _legacy_max_memory_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reserved_memory_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -811,6 +1054,62 @@ struct ResourcePolicyDto {
     preset: ResourcePolicyPresetDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     advanced: Option<ResourcePolicyAdvancedDto>,
+}
+
+fn request_has_explicit_advanced_override(request: &ResourcePolicyDto) -> bool {
+    request.advanced.as_ref().is_some_and(|advanced| {
+        advanced.max_memory_ratio.is_some()
+            || advanced.max_task_memory_bytes.is_some()
+            || advanced.max_task_active_operations.is_some()
+            || advanced.max_task_open_lanes.is_some()
+            || advanced.max_task_tabs.is_some()
+            || advanced.reserved_memory_bytes.is_some()
+            || advanced.max_active_operations.is_some()
+            || advanced.max_open_lanes.is_some()
+            || advanced.max_queued_requests.is_some()
+            || advanced.max_owner_queued_requests.is_some()
+    })
+}
+
+fn machine_resource_policy(
+    preset: ResourcePolicyPresetDto,
+    fallback: ResourcePolicy,
+) -> ResourcePolicy {
+    if preset == ResourcePolicyPresetDto::Custom {
+        return fallback;
+    }
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    let logical_cpus = std::thread::available_parallelism()
+        .ok()
+        .map(std::num::NonZeroUsize::get);
+    match (system.total_memory(), logical_cpus) {
+        (total_memory_bytes, Some(logical_cpus))
+            if total_memory_bytes > 0 && logical_cpus > 0 =>
+        {
+            ResourcePolicy::preset(preset.domain(), total_memory_bytes, logical_cpus)
+        }
+        _ => {
+            tracing::warn!(
+                total_memory_bytes = system.total_memory(),
+                logical_cpus = logical_cpus.unwrap_or(0),
+                "browser policy update could not refresh hardware capacity; using the conservative fallback baseline"
+            );
+            ResourcePolicy::preset(preset.domain(), 8 * 1024 * 1024 * 1024, 4)
+        }
+    }
+}
+
+fn resource_policy_base_for_request(
+    request: &ResourcePolicyDto,
+    current: ResourcePolicy,
+    named_hardware_policy: ResourcePolicy,
+) -> ResourcePolicy {
+    if request.preset == ResourcePolicyPresetDto::Custom {
+        current
+    } else {
+        named_hardware_policy
+    }
 }
 
 async fn get_overview(
@@ -1024,12 +1323,132 @@ async fn put_display_mode(
             "The browser display mode body must contain only display_mode with value headless or external.",
         )
     })?;
-    let serialized_mode = serde_json::to_string(&request.display_mode)
+    let mut start_worker = None;
+    let requested_mode = request.display_mode;
+    let flight = {
+        let mut updates = state.display_mode_updates.lock().await;
+        let active_match = updates
+            .active
+            .as_ref()
+            .filter(|active| active.mode == requested_mode)
+            .map(|active| Arc::clone(&active.flight));
+        let pending_match = updates
+            .pending
+            .as_ref()
+            .filter(|pending| pending.mode == requested_mode)
+            .map(|pending| Arc::clone(&pending.flight));
+        if let Some(pending) = pending_match {
+            pending
+        } else if updates.pending.is_some() && active_match.is_some() {
+            let superseded = updates.pending.take().expect("pending mode disappeared");
+            superseded
+                .flight
+                .complete(Err(BrowserApiError::display_mode_superseded()));
+            active_match.expect("active mode disappeared")
+        } else if let Some(active) = active_match {
+            active
+        } else {
+            let flight = Arc::new(DisplayModeUpdateFlight::new());
+            let work = DisplayModeUpdateWork {
+                mode: requested_mode,
+                flight: Arc::clone(&flight),
+            };
+            if updates.active.is_none() {
+                debug_assert!(!updates.worker_running);
+                updates.worker_running = true;
+                updates.active = Some(DisplayModeUpdateSlot {
+                    mode: requested_mode,
+                    flight: Arc::clone(&flight),
+                });
+                start_worker = Some(work);
+            } else if let Some(superseded) = updates.pending.replace(work) {
+                superseded
+                    .flight
+                    .complete(Err(BrowserApiError::display_mode_superseded()));
+            }
+            flight
+        }
+    };
+
+    if let Some(work) = start_worker {
+        tokio::spawn(run_display_mode_update_worker(state.clone(), work));
+    }
+
+    let response = flight.wait().await?;
+    Ok(Json(ApiResponse::ok(response)))
+}
+
+async fn run_display_mode_update_worker(
+    state: BrowserManagementState,
+    mut work: DisplayModeUpdateWork,
+) {
+    loop {
+        let result = match tokio::spawn(run_display_mode_update_transaction(
+            state.clone(),
+            work.mode,
+        ))
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(%error, "browser display mode transaction task failed");
+                Err(BrowserApiError::display_mode_transaction_failed())
+            }
+        };
+        work.flight.complete(result);
+
+        let next = {
+            let mut updates = state.display_mode_updates.lock().await;
+            let active_matches = updates
+                .active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.flight, &work.flight));
+            if !active_matches {
+                tracing::error!(
+                    mode = ?work.mode,
+                    "browser display mode worker lost its active transaction slot"
+                );
+                updates.worker_running = false;
+                updates.active = None;
+                if let Some(pending) = updates.pending.take() {
+                    pending
+                        .flight
+                        .complete(Err(BrowserApiError::display_mode_transaction_failed()));
+                }
+                return;
+            }
+            updates.active = None;
+            match updates.pending.take() {
+                Some(next) => {
+                    updates.active = Some(DisplayModeUpdateSlot {
+                        mode: next.mode,
+                        flight: Arc::clone(&next.flight),
+                    });
+                    Some(next)
+                }
+                None => {
+                    updates.worker_running = false;
+                    None
+                }
+            }
+        };
+        let Some(next) = next else {
+            return;
+        };
+        work = next;
+    }
+}
+
+async fn run_display_mode_update_transaction(
+    state: BrowserManagementState,
+    requested_mode: BrowserDisplayModeValueDto,
+) -> DisplayModeUpdateResult {
+    let serialized_mode = serde_json::to_string(&requested_mode)
         .map_err(|_| BrowserApiError::display_mode_storage())?;
     let _update_guard = state.display_mode_update_gate.lock().await;
     let hub = state.require_hub()?;
     let previous = hub.primary_visibility().await;
-    let requested = request.display_mode.visibility();
+    let requested = requested_mode.visibility();
     let applied = hub.set_primary_visibility(requested).await?;
 
     if let Err(error) = state
@@ -1053,15 +1472,16 @@ async fn put_display_mode(
         return Err(BrowserApiError::display_mode_storage());
     }
 
-    Ok(Json(ApiResponse::ok(BrowserDisplayModeDto {
+    Ok(BrowserDisplayModeDto {
         display_mode: BrowserDisplayModeValueDto::from_visibility(applied),
-    })))
+    })
 }
 
 async fn get_resource_policy(
     State(state): State<BrowserManagementState>,
     Extension(_user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<ResourcePolicyDto>>, BrowserApiError> {
+    let _update_guard = state.resource_policy_update_gate.lock().await;
     let hub = state.require_hub()?;
     // Startup restores the persisted policy before the Hub becomes reachable.
     // A safe GET must remain observational: reconciling storage here would
@@ -1079,32 +1499,203 @@ async fn put_resource_policy(
     let Json(request) = body.map_err(|_| {
         BrowserApiError::bad_request("The browser resource policy body is invalid.")
     })?;
+    let request_key = serde_json::to_string(&request).map_err(|_| BrowserApiError::storage())?;
+    let mut start_worker = None;
+    let flight = {
+        let mut updates = state.resource_policy_updates.lock().await;
+        let active_match = updates
+            .active
+            .as_ref()
+            .filter(|active| active.key == request_key)
+            .map(|active| Arc::clone(&active.flight));
+        let pending_match = updates
+            .pending
+            .as_ref()
+            .filter(|pending| pending.key == request_key)
+            .map(|pending| Arc::clone(&pending.flight));
+        if let Some(pending) = pending_match {
+            pending
+        } else if updates.pending.is_some() && active_match.is_some() {
+            // The caller has selected the value already in flight again. It
+            // is now the latest intent, so discard the older opposite pending
+            // value instead of applying it after this caller receives success.
+            let superseded = updates.pending.take().expect("pending value disappeared");
+            superseded
+                .flight
+                .complete(Err(BrowserApiError::resource_policy_superseded()));
+            active_match.expect("active match disappeared")
+        } else if let Some(active) = active_match {
+            active
+        } else {
+            let flight = Arc::new(ResourcePolicyUpdateFlight::new());
+            let work = ResourcePolicyUpdateWork {
+                key: request_key.clone(),
+                request,
+                flight: Arc::clone(&flight),
+            };
+            if updates.active.is_none() {
+                debug_assert!(!updates.worker_running);
+                updates.worker_running = true;
+                #[cfg(test)]
+                {
+                    updates.worker_starts += 1;
+                }
+                updates.active = Some(ResourcePolicyUpdateSlot {
+                    key: request_key,
+                    flight: Arc::clone(&flight),
+                });
+                start_worker = Some(work);
+            } else {
+                if let Some(superseded) = updates.pending.replace(work) {
+                    superseded
+                        .flight
+                        .complete(Err(BrowserApiError::resource_policy_superseded()));
+                }
+            }
+            flight
+        }
+    };
+
+    if let Some(work) = start_worker {
+        let worker_state = state.clone();
+        tokio::spawn(run_resource_policy_update_worker(worker_state, work));
+    }
+
+    let response = flight.wait().await?;
+    Ok(Json(ApiResponse::ok(response)))
+}
+
+async fn run_resource_policy_update_worker(
+    state: BrowserManagementState,
+    mut work: ResourcePolicyUpdateWork,
+) {
+    loop {
+        // The nested task converts a panic/cancellation into a terminal result
+        // for every waiter. The one application-owned worker and its one live
+        // transaction are the only tasks retained when HTTP callers vanish.
+        let result = match tokio::spawn(run_resource_policy_update_transaction(
+            state.clone(),
+            work.request,
+        ))
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(%error, "browser resource policy transaction task failed");
+                Err(BrowserApiError::resource_policy_transaction_failed())
+            }
+        };
+        work.flight.complete(result);
+
+        let next = {
+            let mut updates = state.resource_policy_updates.lock().await;
+            let active_matches = updates
+                .active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.flight, &work.flight));
+            if !active_matches {
+                tracing::error!(
+                    request_key = %work.key,
+                    "browser resource policy worker lost its active transaction slot"
+                );
+                updates.worker_running = false;
+                updates.active = None;
+                if let Some(pending) = updates.pending.take() {
+                    pending
+                        .flight
+                        .complete(Err(BrowserApiError::resource_policy_transaction_failed()));
+                }
+                return;
+            }
+            updates.active = None;
+            match updates.pending.take() {
+                Some(next) => {
+                    updates.active = Some(ResourcePolicyUpdateSlot {
+                        key: next.key.clone(),
+                        flight: Arc::clone(&next.flight),
+                    });
+                    Some(next)
+                }
+                None => {
+                    updates.worker_running = false;
+                    None
+                }
+            }
+        };
+        let Some(next) = next else {
+            return;
+        };
+        work = next;
+    }
+}
+
+async fn run_resource_policy_update_transaction(
+    state: BrowserManagementState,
+    request: ResourcePolicyDto,
+) -> ResourcePolicyUpdateResult {
+    let _update_guard = state.resource_policy_update_gate.lock().await;
     let hub = state.require_hub()?;
     let current = hub.resource_policy().await;
-    let policy = apply_resource_policy(current.clone(), &request)?;
-    policy_update_result(hub.set_resource_policy(policy.clone()).await)?;
-    // Persist the fully materialized policy, not a patch. A restart therefore
-    // restores the exact live limits even when the request omitted advanced
-    // fields that inherited their current hardware-adaptive values.
+    let named_hardware_policy = machine_resource_policy(request.preset, current.clone());
+    let base = resource_policy_base_for_request(
+        &request,
+        current.clone(),
+        named_hardware_policy,
+    );
+    let policy = apply_resource_policy(base, &request)?;
     let response = resource_policy_dto(&policy);
-    let persisted = serde_json::to_string(&response).map_err(|_| BrowserApiError::storage())?;
+    let persisted = serde_json::to_string(&resource_policy_persistence_dto(&policy))
+        .map_err(|_| BrowserApiError::storage())?;
+    let previous_persisted = state
+        .preferences
+        .get_by_keys(&[RESOURCE_POLICY_PREF_KEY])
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "could not read the previous browser resource policy before update");
+            BrowserApiError::storage()
+        })?
+        .into_iter()
+        .next()
+        .map(|row| row.value);
+
+    // Persistence must succeed before live reconciliation because lowering a
+    // policy may irreversibly close queued requests, tabs, or Lanes. A failed
+    // storage write therefore leaves the live Hub completely untouched.
     if let Err(error) = state
         .preferences
         .upsert_batch(&[(RESOURCE_POLICY_PREF_KEY, persisted.as_str())])
         .await
     {
         tracing::warn!(%error, "could not persist browser resource policy");
-        if let Err(rollback_error) =
-            policy_update_result(hub.set_resource_policy(current).await)
-        {
-            tracing::error!(
-                %rollback_error,
-                "could not roll back browser resource policy after persistence failure"
-            );
-        }
         return Err(BrowserApiError::storage());
     }
-    Ok(Json(ApiResponse::ok(response)))
+
+    if let Err(error) = policy_update_result(hub.set_resource_policy(policy.clone()).await) {
+        let rollback = match previous_persisted.as_deref() {
+            Some(previous) => {
+                state
+                    .preferences
+                    .upsert_batch(&[(RESOURCE_POLICY_PREF_KEY, previous)])
+                    .await
+            }
+            None => {
+                state
+                    .preferences
+                    .delete_keys(&[RESOURCE_POLICY_PREF_KEY])
+                    .await
+            }
+        };
+        if let Err(rollback_error) = rollback {
+            tracing::error!(
+                %error,
+                %rollback_error,
+                "live browser resource policy failed and persisted rollback also failed"
+            );
+            return Err(BrowserApiError::resource_policy_partial_state());
+        }
+        return Err(BrowserApiError::from(error));
+    }
+    Ok(response)
 }
 
 fn parse_lane_id(value: String) -> Result<BrowserLaneId, BrowserApiError> {
@@ -1205,6 +1796,11 @@ fn resource_policy_dto(policy: &ResourcePolicy) -> ResourcePolicyDto {
         },
         advanced: Some(ResourcePolicyAdvancedDto {
             max_memory_ratio: Some(policy.max_browser_memory_ratio),
+            max_task_memory_bytes: Some(policy.max_task_memory_bytes),
+            max_task_active_operations: Some(policy.max_task_active_operations),
+            max_task_open_lanes: Some(policy.max_task_open_lanes),
+            max_task_tabs: Some(policy.max_task_tabs),
+            _legacy_max_memory_bytes: None,
             reserved_memory_bytes: Some(policy.reserved_memory_bytes),
             max_active_operations: Some(policy.max_active_operations),
             max_open_lanes: Some(policy.max_open_lanes),
@@ -1212,6 +1808,18 @@ fn resource_policy_dto(policy: &ResourcePolicy) -> ResourcePolicyDto {
             max_owner_queued_requests: Some(policy.max_owner_queue),
         }),
     }
+}
+
+fn resource_policy_persistence_dto(policy: &ResourcePolicy) -> ResourcePolicyDto {
+    let mut dto = resource_policy_dto(policy);
+    // Named presets are hardware-derived intent, not frozen numeric policy.
+    // Persist only the preset so a restart or machine migration recomputes
+    // aggregate capacity from the current hardware. Custom remains the sole
+    // representation for exact advanced overrides.
+    if policy.preset != ResourcePolicyPreset::Custom {
+        dto.advanced = None;
+    }
+    dto
 }
 
 /// Restore the persisted management DTO into a complete scheduler policy.
@@ -1234,13 +1842,26 @@ pub(crate) async fn restore_persisted_resource_policy(
     let Some(row) = rows.into_iter().next() else {
         return base;
     };
-    let request = match serde_json::from_str::<ResourcePolicyDto>(&row.value) {
+    let mut request = match serde_json::from_str::<ResourcePolicyDto>(&row.value) {
         Ok(request) => request,
         Err(error) => {
             tracing::warn!(%error, "ignoring invalid persisted browser resource policy");
             return base;
         }
     };
+    // Older builds materialized every derived value into `advanced` even for
+    // named presets. Treat those rows as preset intent and rebase them on the
+    // current hardware supplied by startup. Only a persisted Custom policy is
+    // allowed to restore exact numeric overrides.
+    if request.preset != ResourcePolicyPresetDto::Custom {
+        if request_has_explicit_advanced_override(&request) {
+            tracing::warn!(
+                preset = ?request.preset,
+                "rebasing a legacy materialized named browser policy on current hardware; exact overrides now require the custom preset"
+            );
+        }
+        request.advanced = None;
+    }
     match apply_resource_policy(base.clone(), &request) {
         Ok(policy) => policy,
         Err(error) => {
@@ -1257,12 +1878,7 @@ fn apply_resource_policy(
     mut policy: ResourcePolicy,
     request: &ResourcePolicyDto,
 ) -> Result<ResourcePolicy, BrowserApiError> {
-    let requested_preset = match request.preset {
-        ResourcePolicyPresetDto::Automatic => ResourcePolicyPreset::Automatic,
-        ResourcePolicyPresetDto::ResourceSaving => ResourcePolicyPreset::ResourceSaving,
-        ResourcePolicyPresetDto::HighConcurrency => ResourcePolicyPreset::HighConcurrency,
-        ResourcePolicyPresetDto::Custom => ResourcePolicyPreset::Custom,
-    };
+    let requested_preset = request.preset.domain();
     if policy.preset != requested_preset {
         let current_active = policy.max_active_operations.max(1);
         match requested_preset {
@@ -1272,18 +1888,42 @@ fn apply_resource_policy(
                     ResourcePolicyPreset::ResourceSaving => current_active.saturating_mul(2).min(64),
                     ResourcePolicyPreset::HighConcurrency => (current_active / 2).max(1),
                     _ => current_active,
-                };
-                policy.max_open_lanes = policy.max_active_operations.saturating_mul(4).min(128);
+                }
+                .max(2);
+                policy.max_open_lanes = policy.max_active_operations.saturating_mul(4).min(MAX_OPEN_LANES).max(4);
+                policy.max_task_memory_bytes = AUTOMATIC_TASK_MEMORY_BYTES;
+                policy.max_task_active_operations = 2;
+                policy.max_task_open_lanes = 4;
+                policy.max_task_tabs = 16;
+                policy.idle_expiry_ms = 2 * 60_000;
+                policy.pressured_idle_expiry_ms = 30_000;
+                policy.host_warm_ms = 0;
             }
             ResourcePolicyPreset::ResourceSaving => {
                 policy.max_browser_memory_ratio = 0.3;
                 policy.max_active_operations = (current_active / 2).max(1);
-                policy.max_open_lanes = policy.max_active_operations.saturating_mul(3).min(96);
+                policy.max_open_lanes = policy.max_active_operations.saturating_mul(3).min(96).max(2);
+                policy.max_task_memory_bytes = RESOURCE_SAVING_TASK_MEMORY_BYTES;
+                policy.max_task_active_operations = 1;
+                policy.max_task_open_lanes = 2;
+                policy.max_task_tabs = 8;
+                policy.idle_expiry_ms = 60_000;
+                policy.pressured_idle_expiry_ms = 15_000;
+                policy.host_warm_ms = 0;
             }
             ResourcePolicyPreset::HighConcurrency => {
                 policy.max_browser_memory_ratio = 0.5;
-                policy.max_active_operations = current_active.saturating_mul(2).min(64);
-                policy.max_open_lanes = policy.max_active_operations.saturating_mul(4).min(128);
+                policy.max_active_operations = current_active.saturating_mul(2).min(64).max(2);
+                policy.max_open_lanes = policy.max_active_operations.saturating_mul(4).min(MAX_OPEN_LANES).max(4);
+                // High concurrency expands installation-wide throughput. It
+                // intentionally does not relax one task's resource envelope.
+                policy.max_task_memory_bytes = HIGH_CONCURRENCY_TASK_MEMORY_BYTES;
+                policy.max_task_active_operations = 2;
+                policy.max_task_open_lanes = 4;
+                policy.max_task_tabs = 16;
+                policy.idle_expiry_ms = 10 * 60_000;
+                policy.pressured_idle_expiry_ms = 2 * 60_000;
+                policy.host_warm_ms = 60_000;
             }
             // Custom keeps every current value: the user takes over from the
             // preset transition deltas, and the advanced overrides below are
@@ -1303,6 +1943,38 @@ fn apply_resource_policy(
                 ));
             }
             policy.max_browser_memory_ratio = value;
+        }
+        if let Some(value) = advanced.max_task_memory_bytes {
+            if !(MIN_TASK_MEMORY_BYTES..=MAX_TASK_MEMORY_BYTES).contains(&value) {
+                return Err(BrowserApiError::bad_request(format!(
+                    "max_task_memory_bytes must be between {MIN_TASK_MEMORY_BYTES} and {MAX_TASK_MEMORY_BYTES}."
+                )));
+            }
+            policy.max_task_memory_bytes = value;
+        }
+        if let Some(value) = advanced.max_task_active_operations {
+            if !(1..=MAX_TASK_ACTIVE_OPERATIONS).contains(&value) {
+                return Err(BrowserApiError::bad_request(format!(
+                    "max_task_active_operations must be between 1 and {MAX_TASK_ACTIVE_OPERATIONS}."
+                )));
+            }
+            policy.max_task_active_operations = value;
+        }
+        if let Some(value) = advanced.max_task_open_lanes {
+            if !(1..=MAX_TASK_OPEN_LANES).contains(&value) {
+                return Err(BrowserApiError::bad_request(format!(
+                    "max_task_open_lanes must be between 1 and {MAX_TASK_OPEN_LANES}."
+                )));
+            }
+            policy.max_task_open_lanes = value;
+        }
+        if let Some(value) = advanced.max_task_tabs {
+            if !(1..=MAX_TASK_TABS).contains(&value) {
+                return Err(BrowserApiError::bad_request(format!(
+                    "max_task_tabs must be between 1 and {MAX_TASK_TABS}."
+                )));
+            }
+            policy.max_task_tabs = value;
         }
         if let Some(value) = advanced.reserved_memory_bytes {
             if !(MIN_RESERVED_MEMORY_BYTES..=MAX_RESERVED_MEMORY_BYTES).contains(&value) {
@@ -1350,6 +2022,14 @@ fn apply_resource_policy(
             "max_owner_queued_requests cannot exceed max_queued_requests.",
         ));
     }
+    if requested_preset != ResourcePolicyPreset::Custom
+        && request_has_explicit_advanced_override(request)
+    {
+        // A named preset is always the hardware-derived policy. Any explicit
+        // numeric override transfers authority to Custom so HighConcurrency
+        // can never disguise widened per-task limits.
+        policy.preset = ResourcePolicyPreset::Custom;
+    }
     policy.validate().map_err(|error| {
         BrowserApiError::bad_request(format!(
             "The browser resource policy is invalid: {error}."
@@ -1361,7 +2041,7 @@ fn apply_resource_policy(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
@@ -1377,6 +2057,7 @@ mod tests {
     };
     use nomifun_browser_platform::{
         BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserLaneDriver,
+        BrowserProfileFootprint,
         BrowserOperation, BrowserOperationKind, BrowserOperationResult, BrowserSessionHub,
         BrowserSurface, CallerIdentity, DriverOperationContext, HostLaunchRequest,
         HostLifecycleState, HubConfig, LaneLaunchRequest,
@@ -1442,6 +2123,17 @@ mod tests {
             1
         }
 
+        // This fake manages no on-disk profile, so report a completed
+        // zero measurement. Inheriting the trait default would instead
+        // mean "could not measure", which fences Primary fail-closed.
+        async fn profile_footprint(
+            &self,
+            _stop_after_bytes: u64,
+            _stop_after_entries: u64,
+        ) -> Result<Option<BrowserProfileFootprint>, BrowserPlatformError> {
+            Ok(Some(BrowserProfileFootprint::EMPTY))
+        }
+
         fn state(&self) -> HostLifecycleState {
             HostLifecycleState::Running
         }
@@ -1465,6 +2157,14 @@ mod tests {
                 foreground_attempts: Arc::clone(&self.foreground_attempts),
                 foreground_failure: Arc::clone(&self.foreground_failure),
             }))
+        }
+
+        async fn reconcile_task_tab_limit(
+            &self,
+            _task_resource_key: &str,
+            _max_task_tabs: usize,
+        ) -> Result<(), BrowserPlatformError> {
+            Ok(())
         }
 
         async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
@@ -1539,6 +2239,9 @@ mod tests {
         inner: SqliteClientPreferenceRepository,
         fail_writes: AtomicBool,
         block_writes: AtomicBool,
+        write_attempts: AtomicUsize,
+        block_write_attempt: AtomicUsize,
+        fail_write_attempt: AtomicUsize,
         write_entered: tokio::sync::Semaphore,
         write_release: tokio::sync::Semaphore,
     }
@@ -1549,6 +2252,9 @@ mod tests {
                 inner,
                 fail_writes: AtomicBool::new(false),
                 block_writes: AtomicBool::new(false),
+                write_attempts: AtomicUsize::new(0),
+                block_write_attempt: AtomicUsize::new(0),
+                fail_write_attempt: AtomicUsize::new(0),
                 write_entered: tokio::sync::Semaphore::new(0),
                 write_release: tokio::sync::Semaphore::new(0),
             }
@@ -1560,6 +2266,26 @@ mod tests {
 
         fn block_writes(&self) {
             self.block_writes.store(true, Ordering::Release);
+        }
+
+        fn block_nth_future_write(&self, offset: usize) {
+            assert!(offset > 0);
+            self.block_write_attempt.store(
+                self.write_attempts.load(Ordering::Acquire) + offset,
+                Ordering::Release,
+            );
+        }
+
+        fn fail_nth_future_write(&self, offset: usize) {
+            assert!(offset > 0);
+            self.fail_write_attempt.store(
+                self.write_attempts.load(Ordering::Acquire) + offset,
+                Ordering::Release,
+            );
+        }
+
+        fn write_attempt_count(&self) -> usize {
+            self.write_attempts.load(Ordering::Acquire)
         }
 
         async fn wait_for_blocked_write(&self) {
@@ -1587,7 +2313,12 @@ mod tests {
         }
 
         async fn upsert_batch(&self, entries: &[(&str, &str)]) -> Result<(), DbError> {
-            if self.block_writes.load(Ordering::Acquire) {
+            let attempt = self.write_attempts.fetch_add(1, Ordering::AcqRel) + 1;
+            let block_this_attempt = self
+                .block_write_attempt
+                .compare_exchange(attempt, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+            if self.block_writes.load(Ordering::Acquire) || block_this_attempt {
                 self.write_entered.add_permits(1);
                 self.write_release
                     .acquire()
@@ -1595,7 +2326,11 @@ mod tests {
                     .expect("test preference repository must remain open")
                     .forget();
             }
-            if self.fail_writes.load(Ordering::Acquire) {
+            let fail_this_attempt = self
+                .fail_write_attempt
+                .compare_exchange(attempt, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+            if self.fail_writes.load(Ordering::Acquire) || fail_this_attempt {
                 return Err(DbError::Init(
                     "synthetic browser preference write failure".to_owned(),
                 ));
@@ -2405,6 +3140,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_display_mode_handler_does_not_cancel_live_storage_convergence() {
+        let app = test_app(true).await;
+        app.preferences.block_nth_future_write(1);
+
+        let router = app.router.clone();
+        let request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/display-mode",
+            json!({"display_mode": "external"}),
+        );
+        let caller = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+        app.preferences.wait_for_blocked_write().await;
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headful,
+            "the transaction must be paused after live apply"
+        );
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+
+        app.preferences.release_blocked_write();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let updates = app.management_state.display_mode_updates.lock().await;
+                if !updates.worker_running
+                    && updates.active.is_none()
+                    && updates.pending.is_none()
+                {
+                    break;
+                }
+                drop(updates);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the application-owned display transaction must finish after caller cancellation");
+
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headful
+        );
+        let persisted = app
+            .preferences
+            .get_by_keys(&[BROWSER_DISPLAY_MODE_PREF_KEY])
+            .await
+            .unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].value, "\"external\"");
+    }
+
+    #[tokio::test]
     async fn display_mode_put_strictly_rejects_unknown_values_and_fields() {
         let app = test_app(true).await;
         for body in [
@@ -3177,6 +3964,28 @@ mod tests {
         assert_eq!(body["data"]["hosts"][0]["rss_bytes"], 2_048);
         assert_eq!(body["data"]["hosts"][0]["epoch"], 1);
         assert_eq!(body["data"]["hosts"][0]["headful"], false);
+        assert_eq!(body["data"]["capacity"]["active_lanes"], 1);
+        assert!(
+            body["data"]["capacity"]["global_memory_pressure_threshold_bytes"]
+                .as_u64()
+                .is_some()
+        );
+        assert_eq!(
+            body["data"]["capacity"]["max_task_memory_bytes"],
+            AUTOMATIC_TASK_MEMORY_BYTES
+        );
+        assert_eq!(
+            body["data"]["capacity"]["task_memory_enforcement"],
+            "attributed_estimate"
+        );
+        assert_eq!(body["data"]["capacity"]["max_task_active_operations"], 2);
+        assert_eq!(body["data"]["capacity"]["max_task_open_lanes"], 4);
+        assert_eq!(body["data"]["capacity"]["max_task_tabs"], 16);
+        assert!(
+            body["data"]["capacity"]
+                .get("browser_memory_limit_bytes")
+                .is_none()
+        );
         let encoded = body.to_string();
         assert!(!encoded.contains("process_id"));
         assert!(!encoded.contains("cdp"));
@@ -3205,7 +4014,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resource_policy_is_validated_persisted_and_applied() {
+    async fn explicit_advanced_policy_is_custom_validated_persisted_and_applied() {
         let app = test_app(true).await;
         let update = authorized_json_request(
             &app,
@@ -3224,14 +4033,26 @@ mod tests {
         let response = app.router.clone().oneshot(update).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
-        assert_eq!(body["data"]["preset"], "resource_saving");
+        assert_eq!(body["data"]["preset"], "custom");
+        assert_eq!(
+            body["data"]["advanced"]["max_task_memory_bytes"],
+            RESOURCE_SAVING_TASK_MEMORY_BYTES
+        );
+        assert_eq!(body["data"]["advanced"]["max_task_active_operations"], 1);
+        assert_eq!(body["data"]["advanced"]["max_task_open_lanes"], 2);
+        assert_eq!(body["data"]["advanced"]["max_task_tabs"], 8);
+        assert!(body["data"]["advanced"].get("max_memory_bytes").is_none());
         assert_eq!(body["data"]["advanced"]["max_active_operations"], 3);
         assert_eq!(body["data"]["advanced"]["max_open_lanes"], 12);
 
         let startup_policy =
             restore_persisted_resource_policy(app.preferences.as_ref(), ResourcePolicy::default())
                 .await;
-        assert_eq!(startup_policy.preset, ResourcePolicyPreset::ResourceSaving);
+        assert_eq!(startup_policy.preset, ResourcePolicyPreset::Custom);
+        assert_eq!(
+            startup_policy.max_task_memory_bytes,
+            RESOURCE_SAVING_TASK_MEMORY_BYTES
+        );
         assert_eq!(startup_policy.max_active_operations, 3);
         assert_eq!(startup_policy.max_open_lanes, 12);
         assert_eq!(startup_policy.max_global_queue, 40);
@@ -3250,7 +4071,7 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.status(), StatusCode::OK);
         let loaded = response_json(loaded).await;
-        assert_eq!(loaded["data"]["preset"], "resource_saving");
+        assert_eq!(loaded["data"]["preset"], "custom");
         assert_eq!(loaded["data"]["advanced"]["max_queued_requests"], 40);
 
         let invalid = app
@@ -3281,6 +4102,33 @@ mod tests {
         let restored =
             restore_persisted_resource_policy(app.preferences.as_ref(), fallback.clone()).await;
         assert_eq!(restored, fallback);
+    }
+
+    #[tokio::test]
+    async fn legacy_materialized_named_policy_rebases_on_current_hardware() {
+        let app = test_app(true).await;
+        let legacy = serde_json::json!({
+            "preset": "automatic",
+            "advanced": {
+                "max_memory_ratio": 0.4,
+                "max_memory_bytes": 8_u64 * 1024 * 1024 * 1024,
+                "reserved_memory_bytes": 13_743_895_347_u64,
+                "max_active_operations": 64,
+                "max_open_lanes": 128,
+                "max_queued_requests": 256,
+                "max_owner_queued_requests": 32
+            }
+        })
+        .to_string();
+        app.preferences
+            .upsert_batch(&[(RESOURCE_POLICY_PREF_KEY, legacy.as_str())])
+            .await
+            .unwrap();
+
+        let base = ResourcePolicy::automatic(64 * 1024 * 1024 * 1024, 32);
+        let restored = restore_persisted_resource_policy(app.preferences.as_ref(), base.clone()).await;
+
+        assert_eq!(restored, base);
     }
 
     #[tokio::test]
@@ -3326,6 +4174,556 @@ mod tests {
         .await;
         assert_eq!(restored.preset, ResourcePolicyPreset::Custom);
         assert_eq!(restored.reserved_memory_bytes, explicit_reserve);
+    }
+
+    #[tokio::test]
+    async fn resource_policy_storage_failure_does_not_touch_live_lanes_or_policy() {
+        let app = test_app(true).await;
+        let second_lane = app
+            .hub
+            .open_lane(
+                &app.caller,
+                Some("storage-failure-second"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap()
+            .lane()
+            .lane_id
+            .clone();
+        let current = app.hub.resource_policy().await;
+        let lanes_before = app.hub.list_lanes().await.len();
+        app.preferences.set_fail_writes(true);
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/resource-policy",
+                json!({
+                    "preset": "custom",
+                    "advanced": {"max_task_open_lanes": 1}
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["code"], "browser_resource_policy_storage_failed");
+        assert_eq!(app.hub.resource_policy().await, current);
+        assert_eq!(app.hub.list_lanes().await.len(), lanes_before);
+        assert!(app.hub.list_lanes().await.iter().any(|lane| lane.lane_id == second_lane));
+        assert!(
+            app.close_attempts
+                .lock()
+                .expect("close attempt list must not be poisoned")
+                .is_empty(),
+            "persistence failure must occur before destructive reconciliation"
+        );
+
+        app.preferences.set_fail_writes(false);
+        app.hub.close_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resource_policy_live_failure_restores_previous_persisted_policy() {
+        let app = test_app(true).await;
+        let second_lane = app
+            .hub
+            .open_lane(
+                &app.caller,
+                Some("live-failure-second"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap()
+            .lane()
+            .lane_id
+            .clone();
+        let current = app.hub.resource_policy().await;
+        let previous_persisted = serde_json::to_string(&resource_policy_persistence_dto(&current))
+            .unwrap();
+        app.preferences
+            .upsert_batch(&[(RESOURCE_POLICY_PREF_KEY, previous_persisted.as_str())])
+            .await
+            .unwrap();
+        {
+            let mut failures = app
+                .close_failures
+                .lock()
+                .expect("close failure set must not be poisoned");
+            failures.insert(app.lane_id.clone());
+            failures.insert(second_lane);
+        }
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/resource-policy",
+                json!({
+                    "preset": "custom",
+                    "advanced": {"max_task_open_lanes": 1}
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::OK);
+        assert_eq!(app.hub.resource_policy().await, current);
+        let restored = app
+            .preferences
+            .get_by_keys(&[RESOURCE_POLICY_PREF_KEY])
+            .await
+            .unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].value, previous_persisted);
+
+        app.close_failures
+            .lock()
+            .expect("close failure set must not be poisoned")
+            .clear();
+        app.hub.close_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_resource_policy_handler_does_not_cancel_persisted_rollback() {
+        let app = test_app(true).await;
+        let second_lane = app
+            .hub
+            .open_lane(
+                &app.caller,
+                Some("cancelled-policy-second"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap()
+            .lane()
+            .lane_id
+            .clone();
+        let current = app.hub.resource_policy().await;
+        let previous_persisted = serde_json::to_string(&resource_policy_persistence_dto(&current))
+            .unwrap();
+        app.preferences
+            .upsert_batch(&[(RESOURCE_POLICY_PREF_KEY, previous_persisted.as_str())])
+            .await
+            .unwrap();
+        {
+            let mut failures = app
+                .close_failures
+                .lock()
+                .expect("close failure set must not be poisoned");
+            failures.insert(app.lane_id.clone());
+            failures.insert(second_lane);
+        }
+        // Candidate persistence is the first future write; the rollback after
+        // forced live reconciliation failure is the second. Pause exactly at
+        // the rollback write so cancellation occurs after the candidate is
+        // already durable.
+        app.preferences.block_nth_future_write(2);
+        let request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/resource-policy",
+            json!({
+                "preset": "custom",
+                "advanced": {"max_task_open_lanes": 1}
+            }),
+        );
+        let router = app.router.clone();
+        let request_task = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+        app.preferences.wait_for_blocked_write().await;
+
+        let candidate = app
+            .preferences
+            .get_by_keys(&[RESOURCE_POLICY_PREF_KEY])
+            .await
+            .unwrap();
+        assert_eq!(candidate.len(), 1);
+        assert_ne!(candidate[0].value, previous_persisted);
+        request_task.abort();
+        assert!(request_task.await.unwrap_err().is_cancelled());
+
+        app.preferences.release_blocked_write();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let rows = app
+                    .preferences
+                    .get_by_keys(&[RESOURCE_POLICY_PREF_KEY])
+                    .await
+                    .unwrap();
+                if rows.len() == 1 && rows[0].value == previous_persisted {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the application-owned transaction must finish rollback after caller cancellation");
+        assert_eq!(app.hub.resource_policy().await, current);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let updates = app.management_state.resource_policy_updates.lock().await;
+                if updates.active.is_none()
+                    && updates.pending.is_none()
+                    && !updates.worker_running
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completed policy flight must be removed");
+
+        app.close_failures
+            .lock()
+            .expect("close failure set must not be poisoned")
+            .clear();
+        app.hub.close_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn identical_resource_policy_waiters_share_one_owned_transaction_result() {
+        let app = test_app(true).await;
+        let request_body = json!({
+            "preset": "custom",
+            "advanced": {"max_task_memory_bytes": AUTOMATIC_TASK_MEMORY_BYTES}
+        });
+        let request_key = serde_json::to_string(&ResourcePolicyDto {
+            preset: ResourcePolicyPresetDto::Custom,
+            advanced: Some(ResourcePolicyAdvancedDto {
+                max_task_memory_bytes: Some(AUTOMATIC_TASK_MEMORY_BYTES),
+                ..ResourcePolicyAdvancedDto::default()
+            }),
+        })
+        .unwrap();
+        let writes_before = app.preferences.write_attempt_count();
+        app.preferences.block_nth_future_write(1);
+
+        let first_router = app.router.clone();
+        let first_request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/resource-policy",
+            request_body.clone(),
+        );
+        let first = tokio::spawn(async move {
+            first_router.oneshot(first_request).await.unwrap()
+        });
+        app.preferences.wait_for_blocked_write().await;
+        let second_router = app.router.clone();
+        let second_request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/resource-policy",
+            request_body,
+        );
+        let second = tokio::spawn(async move {
+            second_router.oneshot(second_request).await.unwrap()
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiter_count = app
+                    .management_state
+                    .resource_policy_updates
+                    .lock()
+                    .await
+                    .active
+                    .as_ref()
+                    .filter(|active| active.key == request_key)
+                    .map_or(0, |active| active.flight.result.receiver_count());
+                if waiter_count >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both callers must subscribe to the same policy flight");
+        app.preferences.release_blocked_write();
+
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+        let first_status = first.status();
+        let second_status = second.status();
+        let first_body = response_json(first).await;
+        let second_body = response_json(second).await;
+        assert_eq!(first_status, StatusCode::OK, "first response: {first_body}");
+        assert_eq!(second_status, StatusCode::OK, "second response: {second_body}");
+        assert_eq!(first_body, second_body);
+        assert_eq!(app.preferences.write_attempt_count() - writes_before, 1);
+        app.hub.close_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reselecting_active_resource_policy_supersedes_the_opposite_pending_value() {
+        let app = test_app(true).await;
+        let active_body = json!({
+            "preset": "custom",
+            "advanced": {"max_task_memory_bytes": AUTOMATIC_TASK_MEMORY_BYTES}
+        });
+        let pending_body = json!({
+            "preset": "custom",
+            "advanced": {"max_task_memory_bytes": AUTOMATIC_TASK_MEMORY_BYTES + 1}
+        });
+        app.preferences.block_nth_future_write(1);
+
+        let first_router = app.router.clone();
+        let first_request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/resource-policy",
+            active_body.clone(),
+        );
+        let first = tokio::spawn(async move {
+            first_router.oneshot(first_request).await.unwrap()
+        });
+        app.preferences.wait_for_blocked_write().await;
+
+        let pending_router = app.router.clone();
+        let pending_request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/resource-policy",
+            pending_body,
+        );
+        let pending = tokio::spawn(async move {
+            pending_router.oneshot(pending_request).await.unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if app
+                    .management_state
+                    .resource_policy_updates
+                    .lock()
+                    .await
+                    .pending
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the opposite value must occupy the sole pending slot");
+
+        let latest_router = app.router.clone();
+        let latest_request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/resource-policy",
+            active_body,
+        );
+        let latest = tokio::spawn(async move {
+            latest_router.oneshot(latest_request).await.unwrap()
+        });
+        let pending = tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("superseded pending waiter must finish immediately")
+            .unwrap();
+        let pending_status = pending.status();
+        let pending_body = response_json(pending).await;
+        assert_eq!(pending_status, StatusCode::CONFLICT);
+        assert_eq!(pending_body["code"], "browser_resource_policy_superseded");
+        assert!(
+            app.management_state
+                .resource_policy_updates
+                .lock()
+                .await
+                .pending
+                .is_none(),
+            "reselecting the in-flight value must cancel the opposite pending intent"
+        );
+
+        app.preferences.release_blocked_write();
+        assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(latest.await.unwrap().status(), StatusCode::OK);
+        app.hub.close_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn distinct_cancelled_resource_policy_updates_keep_one_worker_and_one_latest_candidate() {
+        let app = test_app(true).await;
+        let writes_before = app.preferences.write_attempt_count();
+        app.preferences.block_nth_future_write(1);
+
+        let first_router = app.router.clone();
+        let first_request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/resource-policy",
+            json!({
+                "preset": "custom",
+                "advanced": {"max_task_memory_bytes": AUTOMATIC_TASK_MEMORY_BYTES}
+            }),
+        );
+        let first = tokio::spawn(async move {
+            first_router.oneshot(first_request).await.unwrap()
+        });
+        app.preferences.wait_for_blocked_write().await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        for offset in 1_u64..1_000 {
+            let max_task_memory_bytes = AUTOMATIC_TASK_MEMORY_BYTES + offset;
+            let request_key = serde_json::to_string(&ResourcePolicyDto {
+                preset: ResourcePolicyPresetDto::Custom,
+                advanced: Some(ResourcePolicyAdvancedDto {
+                    max_task_memory_bytes: Some(max_task_memory_bytes),
+                    ..ResourcePolicyAdvancedDto::default()
+                }),
+            })
+            .unwrap();
+            let router = app.router.clone();
+            let request = authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/resource-policy",
+                json!({
+                    "preset": "custom",
+                    "advanced": {"max_task_memory_bytes": max_task_memory_bytes}
+                }),
+            );
+            let caller = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let updates = app.management_state.resource_policy_updates.lock().await;
+                    if updates
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.key == request_key)
+                    {
+                        break;
+                    }
+                    drop(updates);
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the latest request must replace the one pending candidate");
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+        }
+
+        {
+            let updates = app.management_state.resource_policy_updates.lock().await;
+            assert!(updates.worker_running);
+            assert!(updates.active.is_some());
+            assert!(updates.pending.is_some());
+            assert_eq!(updates.worker_starts, 1);
+        }
+        assert_eq!(
+            app.preferences.write_attempt_count() - writes_before,
+            1,
+            "only the active transaction may reach storage while it is blocked"
+        );
+
+        app.preferences.release_blocked_write();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let updates = app.management_state.resource_policy_updates.lock().await;
+                if !updates.worker_running
+                    && updates.active.is_none()
+                    && updates.pending.is_none()
+                {
+                    break;
+                }
+                drop(updates);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the active transaction and sole latest candidate must converge");
+        assert_eq!(
+            app.preferences.write_attempt_count() - writes_before,
+            2,
+            "one thousand distinct cancelled requests must execute only the active and latest values"
+        );
+        assert_eq!(
+            app.hub.resource_policy().await.max_task_memory_bytes,
+            AUTOMATIC_TASK_MEMORY_BYTES + 999
+        );
+        app.hub.close_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resource_policy_rollback_write_failure_reports_partial_state() {
+        let app = test_app(true).await;
+        let second_lane = app
+            .hub
+            .open_lane(
+                &app.caller,
+                Some("rollback-failure-second"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap()
+            .lane()
+            .lane_id
+            .clone();
+        let current = app.hub.resource_policy().await;
+        let previous_persisted = serde_json::to_string(&resource_policy_persistence_dto(&current))
+            .unwrap();
+        app.preferences
+            .upsert_batch(&[(RESOURCE_POLICY_PREF_KEY, previous_persisted.as_str())])
+            .await
+            .unwrap();
+        {
+            let mut failures = app
+                .close_failures
+                .lock()
+                .expect("close failure set must not be poisoned");
+            failures.insert(app.lane_id.clone());
+            failures.insert(second_lane);
+        }
+        app.preferences.fail_nth_future_write(2);
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/resource-policy",
+                json!({
+                    "preset": "custom",
+                    "advanced": {"max_task_open_lanes": 1}
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["code"], "browser_resource_policy_partial_state");
+        assert_eq!(body["metadata"]["live_apply_failed"], true);
+        assert_eq!(body["metadata"]["storage_rollback_failed"], true);
+        assert_eq!(app.hub.resource_policy().await, current);
+        let candidate = app
+            .preferences
+            .get_by_keys(&[RESOURCE_POLICY_PREF_KEY])
+            .await
+            .unwrap();
+        assert_eq!(candidate.len(), 1);
+        assert_ne!(candidate[0].value, previous_persisted);
+
+        app.close_failures
+            .lock()
+            .expect("close failure set must not be poisoned")
+            .clear();
+        app.hub.close_all().await.unwrap();
     }
 
     #[tokio::test]
@@ -3449,6 +4847,90 @@ mod tests {
             }),
         };
         assert!(apply_resource_policy(ResourcePolicy::default(), &request).is_err());
+    }
+
+    #[test]
+    fn high_concurrency_expands_only_global_capacity() {
+        let base = ResourcePolicy::automatic(64 * 1024 * 1024 * 1024, 16);
+        let automatic_task_limits = (
+            base.max_task_memory_bytes,
+            base.max_task_active_operations,
+            base.max_task_open_lanes,
+            base.max_task_tabs,
+        );
+        let request = ResourcePolicyDto {
+            preset: ResourcePolicyPresetDto::HighConcurrency,
+            advanced: None,
+        };
+
+        let high = apply_resource_policy(base.clone(), &request).unwrap();
+
+        assert!(high.max_active_operations >= base.max_active_operations);
+        assert!(high.max_open_lanes >= base.max_open_lanes);
+        assert_eq!(
+            (
+                high.max_task_memory_bytes,
+                high.max_task_active_operations,
+                high.max_task_open_lanes,
+                high.max_task_tabs,
+            ),
+            automatic_task_limits
+        );
+    }
+
+    #[test]
+    fn named_preset_with_an_explicit_override_is_labeled_custom() {
+        let base = ResourcePolicy::automatic(64 * 1024 * 1024 * 1024, 16);
+        let request = ResourcePolicyDto {
+            preset: ResourcePolicyPresetDto::HighConcurrency,
+            advanced: Some(ResourcePolicyAdvancedDto {
+                max_task_active_operations: Some(8),
+                ..ResourcePolicyAdvancedDto::default()
+            }),
+        };
+
+        let policy = apply_resource_policy(base, &request).unwrap();
+
+        assert_eq!(policy.preset, ResourcePolicyPreset::Custom);
+        assert_eq!(policy.max_task_active_operations, 8);
+        assert!(resource_policy_persistence_dto(&policy).advanced.is_some());
+    }
+
+    #[test]
+    fn partial_named_override_starts_from_hardware_policy_not_current_custom_limits() {
+        let mut current = ResourcePolicy::automatic(8 * 1024 * 1024 * 1024, 4);
+        current.preset = ResourcePolicyPreset::Custom;
+        current.max_active_operations = 1;
+        current.max_open_lanes = 4;
+        let hardware = ResourcePolicy::automatic(64 * 1024 * 1024 * 1024, 16);
+        let request = ResourcePolicyDto {
+            preset: ResourcePolicyPresetDto::Automatic,
+            advanced: Some(ResourcePolicyAdvancedDto {
+                max_task_tabs: Some(8),
+                ..ResourcePolicyAdvancedDto::default()
+            }),
+        };
+
+        let base = resource_policy_base_for_request(&request, current, hardware.clone());
+        let policy = apply_resource_policy(base, &request).unwrap();
+
+        assert_eq!(policy.preset, ResourcePolicyPreset::Custom);
+        assert_eq!(policy.max_active_operations, hardware.max_active_operations);
+        assert_eq!(policy.max_open_lanes, hardware.max_open_lanes);
+        assert_eq!(policy.max_task_tabs, 8);
+    }
+
+    #[test]
+    fn named_preset_persistence_keeps_only_hardware_derived_intent() {
+        let policy = ResourcePolicy::preset(
+            ResourcePolicyPreset::HighConcurrency,
+            64 * 1024 * 1024 * 1024,
+            16,
+        );
+        let persisted = resource_policy_persistence_dto(&policy);
+
+        assert_eq!(persisted.preset, ResourcePolicyPresetDto::HighConcurrency);
+        assert!(persisted.advanced.is_none());
     }
 
     #[tokio::test]

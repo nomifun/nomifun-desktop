@@ -21,6 +21,7 @@ import {
   Tooltip,
 } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
 import type { ICompanionSkill } from '@/common/adapter/ipcBridge';
 import type { useCompanion } from '../useNomi';
 import {
@@ -418,17 +419,18 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
         </div>
       </div>
       <div className='flex gap-8px items-center flex-wrap'>
-        <Select
-          style={{ width: 130 }}
+        <NomiSelect
+          contentFit
+          contentMaxWidth={180}
           value={statusFilter}
           onChange={setStatusFilter}
           placeholder={t('nomi.skills.statusAll', { defaultValue: '全部' })}
         >
-          <Select.Option value=''>{t('nomi.skills.statusAll', { defaultValue: '全部' })}</Select.Option>
-          <Select.Option value='draft'>{t('nomi.skills.statusDraft', { defaultValue: '待审' })}</Select.Option>
-          <Select.Option value='active'>{t('nomi.skills.statusActive', { defaultValue: '已启用' })}</Select.Option>
-          <Select.Option value='archived'>{t('nomi.skills.statusArchived', { defaultValue: '已归档' })}</Select.Option>
-        </Select>
+          <NomiSelect.Option value=''>{t('nomi.skills.statusAll', { defaultValue: '全部' })}</NomiSelect.Option>
+          <NomiSelect.Option value='draft'>{t('nomi.skills.statusDraft', { defaultValue: '待审' })}</NomiSelect.Option>
+          <NomiSelect.Option value='active'>{t('nomi.skills.statusActive', { defaultValue: '已启用' })}</NomiSelect.Option>
+          <NomiSelect.Option value='archived'>{t('nomi.skills.statusArchived', { defaultValue: '已归档' })}</NomiSelect.Option>
+        </NomiSelect>
         <div className='text-12px text-t-tertiary'>
           {t('nomi.skills.hint', { defaultValue: '伙伴从你的重复操作里自动沉淀的技能，可查看、编辑、审阅' })}
         </div>

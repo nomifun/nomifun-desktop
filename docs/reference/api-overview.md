@@ -76,7 +76,6 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Knowledge bases | `/api/knowledge/*` | authenticated | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
 | Companion | `/api/companion/*` | authenticated | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | Companion access tokens for WebUI/public capability use | `/api/webui/companions/{id}/access-token` | authenticated/local WebUI admin flow | [`router/companion_token_routes.rs`](../../crates/backend/nomifun-app/src/router/companion_token_routes.rs) |
-| Browser-use secrets | `/api/browser-secrets/*` | authenticated | [`nomifun-secret/src/routes.rs`](../../crates/backend/nomifun-secret/src/routes.rs) |
 | Browser platform management (Agent-only managed browser) | `/api/browser/*` | authenticated; state-changing HTTP requests are CSRF-protected; installation-owner-only routes are separately gated | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs), [`router/browser_login.rs`](../../crates/backend/nomifun-app/src/router/browser_login.rs) |
 | Filesystem | `/api/fs/*` | authenticated | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
 | Office preview | `/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`, `/api/preview-history/*`, `/api/star-office/detect` | authenticated | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |

@@ -73,7 +73,10 @@ All production call paths ultimately use the same Hub:
   context before forwarding to the Hub.
 - ACP browser stdio holds only a short-lived, renewable loopback capability
   scoped to an audience and operation set; it does not own Chromium.
-- Knowledge URL rendering uses a fixed Anonymous Lane.
+- Each knowledge URL render uses a transaction-scoped Anonymous Lane. The
+  renderer serializes `navigate` plus `rendered_html`, then closes that exact
+  Lane on success, error, timeout, or cancellation; it does not pin a page
+  between fetches.
 - Browser sign-in uses a managed Primary Lane and follows the current trusted
   Primary display default; the user may still make a one-time foreground or
   background request from the management page.
@@ -93,6 +96,15 @@ that become empty. Installation shutdown and installation-wide **Close All**
 block new opens while draining every Lane, pending cleanup/retirement, and
 managed Host before reporting completion. Normal cleanup does not rely on idle
 expiry, a periodic sweep, or a warm timer.
+
+Delayed transaction cleanup carries the exact Lane id and its sealed owner,
+runtime, and task-family authority. Retry, dispatcher saturation, or cleanup
+budget pressure never widens that authority into a later task scan or an
+installation-wide `close_all`; it only reconciles already-retained exact debt.
+This prevents an old cancelled crawl/fetch from closing a replacement Lane
+created under the same runtime (the ABA case). Broad cleanup remains available
+only through explicit owner/session/installation lifecycle operations that
+fence new ingress before draining.
 
 ## Agent tools
 
@@ -120,6 +132,99 @@ retry metadata. `browser_status` remains the successful polling operation.
 The Automatic policy derives safe limits from total system memory and logical
 CPU count. At runtime, the Hub samples available memory, CPU pressure, and
 managed Chromium RSS and computes `normal`, `pressured`, or `critical` state.
+Aggregate Browser memory is intentionally elastic across independent tasks: the
+machine-wide ratio is a pressure threshold, not a fixed installation quota.
+Automatic uses 40% of physical memory, Resource saving uses 30%, and High
+concurrency uses 50%; the derived system reserve is capped at 8 GiB and global
+operation/Lane capacity remains hardware-adaptive. This lets many concurrent
+tasks use more than 1 GiB in total without allowing one task to monopolize the
+installation.
+
+Each trusted user-visible task family has its own envelope. Sibling runtimes in
+one conversation share that family; rotating a runtime does not mint another
+quota. Automatic and High concurrency both use a 1 GiB attributed-memory
+budget, 2 weighted active operations, 4 open Lanes, and 16 top-level tabs;
+Resource saving uses 768 MiB, 1 operation, 2 Lanes, and 8 tabs. High concurrency
+raises only aggregate throughput and does not relax those per-task limits.
+Operation, Lane, tab, queue, and internal state bounds are exact. Runtime and
+owner-lease keys remain separate lifecycle authorities, so dropping one
+runtime never closes a sibling in its family. A shared Chromium Host has only one operating-system
+process tree, so its RSS cannot be measured exactly per task; the Hub attributes
+that RSS across live task Lanes and uses the result as a reclaim watchdog. The
+management API and Browser page therefore label the global value as a pressure
+threshold and the per-task memory value as an estimate.
+
+Remote MCP transport state follows the same bounded model. `/mcp` and
+`/mcp-agent` share one machine-adaptive admission authority; request bodies,
+session identifiers, scopes, provisional sessions, initialization rate, and
+pending Browser cleanup debt are all bounded. Headerless non-`initialize`
+requests are rejected before rmcp can create a transport session. A live,
+server-validated MCP session is a trusted task-family boundary, but a fresh
+`initialize` creates a new session: exact continuity across fresh sessions would
+require a future server-signed persistent logical-task lease and is not claimed
+by the current protocol.
+
+A structural envelope does not turn one page into a byte- or CPU-isolated
+process. JavaScript or native renderer work can continue after an Agent
+operation releases its permit, and shared-Host RSS attribution can be diluted
+by sibling tasks. As a physical backstop, when verified managed-Chromium RSS
+exceeds the hardware-derived ratio for three consecutive samples and exact
+task-local reclaim makes no progress, the Hub replaces the largest attributable
+managed Host. CPU has an independent Host-level endpoint: when whole-system CPU
+is at least 90% and exact live managed-Chromium process trees account for at
+least 50% of machine capacity for three consecutive samples, the Hub replaces
+the busiest matched managed Host. A recovery sample, or a successful task-local
+close, resets the corresponding streak. These fallbacks never scan or terminate
+unrelated system Chrome, but replacing a shared Host necessarily interrupts its
+sibling tasks and requires a fresh observe. Exact per-task byte and CPU
+enforcement would require a task-dedicated Chromium process tree plus an OS
+Job/cgroup; the attributed memory setting and CPU endpoint deliberately do not
+claim that isolation.
+
+One managed Host is one Chromium process tree, not one operating-system
+process. Chromium normally creates browser, renderer, GPU, network/utility, and
+crash-handler child processes. Multiple process rows are therefore expected;
+Host count, isolated profile ownership, root PID ancestry, and aggregate tree
+RSS are the authoritative diagnostics. Primary and Anonymous Lanes reuse their
+corresponding Host; only explicit Isolated identity creates a per-Lane Host.
+On Windows, descendant attribution also verifies process start times: an orphan
+can retain a stale parent PID after its parent exits, and that numeric PID can
+later be reused by Chromium. Rejecting children that predate their current
+recorded parent prevents unrelated long-lived process trees from inflating
+browser RSS and producing false pressure alerts.
+The launch baseline keeps Chromium's native background throttling enabled and
+does not weaken site isolation or disable GPU acceleration merely to reduce a
+process count. Each Lane is additionally limited to eight top-level tabs, while
+the task-wide cap applies across all of its Lanes; explicit excess opens are
+rejected and excess page-created popups are closed by the bounded target-cleanup
+path. Cross-origin iframes/OOPIFs can still create additional renderer
+processes, so this top-level target limit is not a physical process-tree cap.
+
+The shared Anonymous Host has a separate, bounded profile lifecycle so cache,
+IndexedDB, CacheStorage, and Service Worker state cannot grow for the lifetime
+of the application. By default, the exact Host is fenced and rotated after its
+profile reaches 512 MiB or 50,000 entries, after 30 minutes, or before an
+admitted navigation would exceed 256. Footprint sampling is bounded and fails
+closed; the old Host remains fenced until its exact process tree is stopped and
+its ephemeral profile cleanup completes. Anonymous launches also constrain the
+ordinary disk and media caches to 64 MiB and 32 MiB. These are per-Host hygiene
+limits, not an installation-wide browser-memory cap.
+
+Cross-CDP retained data is bounded independently. Page text is limited to
+1 MiB, rendered HTML to 8 MiB, extraction schemas to 64 KiB/32 levels/4,096
+nodes, one crawl result to 9 MiB, and the final crawl batch to 16 MiB. A batch
+accepts at most 64 URLs with eight workers, while each URL is limited to 16 KiB
+and all input URLs together to 256 KiB. Auxiliary CDP sessions are limited to
+64 per Lane and 256 per trusted task family; Host-global workers that cannot be
+attributed from a trusted browser lineage use a separate 64-session Host bucket.
+Rejected sessions are detached and their exact targets closed.
+
+Ephemeral profile deletion itself is resumable rather than all-or-nothing. One
+pass retains at most 100,000 entries and 16 MiB of names/paths, keeps the exact
+ownership record until the final empty-directory proof, and hands incomplete
+work back to authoritative cleanup. Startup recovery may continue the same
+claimed profile for up to 64 passes or 30 seconds in one invocation; an active
+writer or identity change fails closed and leaves authority for a later retry.
 
 Scheduling follows these constraints:
 
@@ -129,17 +234,23 @@ Scheduling follows these constraints:
   against that floor; a second first Lane and every expansion Lane still
   require the full reserve, and critical pressure admits none;
 - equal-priority work rotates between owners;
+- the task's operation, Lane, tab, and queue quotas are checked independently,
+  so saturation in one task does not consume another task's envelope;
 - queue age raises effective priority;
 - cancellation immediately removes queued work;
 - resource balancing does not preempt an operation already in progress; and
-- pressure reclamation prefers idle expansion or Crawl Lanes while protecting
-  an owner's only active Lane.
+- machine-wide pressure reclamation first freezes idle expansion or Crawl
+  Lanes, then closes lanes that remain frozen on a later pressured sweep;
+  task-budget reclamation targets only the over-budget task and never closes a
+  sibling task's Lane on a shared Host.
 
-Normal idle expiry is 10 minutes; reclaimable Lanes use a 2-minute idle expiry
-under pressure. The periodic sweep remains a recovery backstop for expired
-owner credentials and stale Lane lifecycle state, not the normal cleanup path:
-explicit Lane closure and Agent-turn completion close the final Host
-immediately.
+Automatic idle expiry is 2 minutes and pressure eligibility starts after 30
+seconds; Resource saving uses 1 minute and 15 seconds respectively. Both use no
+empty-Host warm window. High concurrency retains the older 10-minute normal,
+2-minute pressured, and 1-minute empty-Host warm windows. The periodic sweep
+remains a recovery backstop for expired owner credentials and stale Lane
+lifecycle state, not the normal cleanup path: explicit Lane closure and
+Agent-turn completion close the final Host immediately.
 
 For a stable application-managed profile, a proven normal Host shutdown removes
 the exact completed ownership marker and that launch's `DevToolsActivePort`

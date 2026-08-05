@@ -28,8 +28,7 @@
 
 - [x] hosted agent/browser 通过 `NOMIFUN_DATA_DIR` 使用有效 application
   data root，不再把产品浏览器数据写到另一个平台配置根；
-- [x] `browser-state`、`browser-profiles`、`login-profile` 和
-  `browser-secrets` 属于可移植 managed dataset；
+- [x] `browser-state`、`browser-profiles` 和 `login-profile` 属于可移植 managed dataset；
 - [x] `browser-data` 只保存浏览器引擎、缓存、下载和 ephemeral profile，
   factory reset 会管理它，但 portable backup 明确以 runtime/cache 理由排除；
 - [x] site memory 位于 `browser-state/site-memory`；

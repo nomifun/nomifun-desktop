@@ -34,12 +34,15 @@ import {
   Spin,
   Tabs,
   Tag,
+  Tooltip,
   Tree,
 } from '@arco-design/web-react';
 import {
+  ExpandDown,
+  ExpandUp,
+  FileFocus,
   Delete,
   EditTwo,
-  FileText,
   FolderOpen,
   FolderPlus,
   Left,
@@ -49,6 +52,7 @@ import {
   More,
   Plus,
   Refresh,
+  Right,
   Search,
   SettingTwo,
   Upload,
@@ -113,6 +117,36 @@ const knowledgeDetailSegmentIdleClass =
   'border border-solid border-transparent text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]';
 const knowledgeDetailSettingsLabelClass = 'block text-13px font-600 text-[var(--color-text-1)]';
 const knowledgeDetailSettingsInputClass = 'knowledge-detail-settings-input';
+
+type KnowledgeIconButtonProps = {
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+  loading?: boolean;
+  tooltipPosition?: 'top' | 'bottom';
+};
+
+/** Compact icon action shared by the document rail header and its fixed footer. */
+const KnowledgeIconButton: React.FC<KnowledgeIconButtonProps> = ({
+  label,
+  icon,
+  onClick,
+  loading = false,
+  tooltipPosition = 'bottom',
+}) => (
+  <Tooltip content={label} position={tooltipPosition} mini>
+    <Button
+      type='text'
+      size='mini'
+      shape='circle'
+      className='knowledge-doc-icon-button'
+      icon={icon}
+      loading={loading}
+      aria-label={label}
+      onClick={onClick}
+    />
+  </Tooltip>
+);
 
 // ─── Settings Tab (D5) ────────────────────────────────────────────────────────
 
@@ -437,6 +471,8 @@ const KnowledgeDetailPage: React.FC = () => {
   const [selectedFolderPath, setSelectedFolderPath] = useState('');
   const [selectedTreeKey, setSelectedTreeKey] = useState<string | null>(null);
   const [fileSearch, setFileSearch] = useState('');
+  const [treeAction, setTreeAction] = useState<'reveal' | 'expand' | null>(null);
+  const treeScrollRef = React.useRef<HTMLDivElement>(null);
   const isTreeSearch = fileSearch.trim().length > 0;
 
   const source = getBaseSource(base);
@@ -547,6 +583,73 @@ const KnowledgeDetailPage: React.FC = () => {
     },
     [id]
   );
+
+  const scrollCurrentTreeNodeIntoView = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const container = treeScrollRef.current;
+        const selectedNode = container?.querySelector<HTMLElement>('.arco-tree-node-selected');
+        if (!container || !selectedNode) return;
+
+        const containerRect = container.getBoundingClientRect();
+        const nodeRect = selectedNode.getBoundingClientRect();
+        const centeredTop =
+          container.scrollTop + nodeRect.top - containerRect.top - (container.clientHeight - nodeRect.height) / 2;
+        container.scrollTo({ top: Math.max(0, centeredTop), behavior: 'smooth' });
+      });
+    });
+  }, []);
+
+  const handleRevealCurrentFile = useCallback(async () => {
+    if (!selectedPath) {
+      Message.info(t('knowledge.selectFile'));
+      return;
+    }
+
+    setTreeAction('reveal');
+    try {
+      const parentPath = parentDirOfKnowledgePath(selectedPath);
+      const ancestorKeys = knowledgeFolderPathChain(parentPath);
+      setFileSearch('');
+      await reloadTreePath(parentPath);
+      setExpandedTreeKeys((prev) => [...new Set([...prev, ...ancestorKeys])]);
+      setSelectedTreeKey(selectedPath);
+      scrollCurrentTreeNodeIntoView();
+    } catch (e) {
+      Message.error(String(e));
+    } finally {
+      setTreeAction(null);
+    }
+  }, [reloadTreePath, scrollCurrentTreeNodeIntoView, selectedPath, t]);
+
+  const handleExpandAllTreeNodes = useCallback(async () => {
+    if (!id) return;
+
+    setTreeAction('expand');
+    try {
+      const loadAllChildren = async (nodes: IKnowledgeTreeEntry[]): Promise<IKnowledgeTreeEntry[]> =>
+        Promise.all(
+          nodes.map(async (node) => {
+            if (!node.is_dir) return node;
+            const children = await ipcBridge.knowledge.listTree.invoke({
+              knowledge_base_id: id,
+              path: node.rel_path,
+            });
+            return { ...node, children: await loadAllChildren(children) };
+          })
+        );
+
+      const rootNodes = await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: id });
+      const fullTree = await loadAllChildren(rootNodes);
+      setFileSearch('');
+      setTreeData(fullTree);
+      setExpandedTreeKeys(collectKnowledgeDirKeys(fullTree));
+    } catch (e) {
+      Message.error(String(e));
+    } finally {
+      setTreeAction(null);
+    }
+  }, [id]);
 
   const openNewFileModal = (folderOverride?: string) => {
     const folder = folderOverride ?? (selectedFolderPath || parentDirOfKnowledgePath(selectedPath));
@@ -778,6 +881,21 @@ const KnowledgeDetailPage: React.FC = () => {
     () => (isTreeSearch ? collectKnowledgeDirKeys(displayedTreeData) : expandedTreeKeys),
     [displayedTreeData, expandedTreeKeys, isTreeSearch]
   );
+  const loadedTreeDirectoryKeys = useMemo(() => collectKnowledgeDirKeys(treeData), [treeData]);
+  const isEntireTreeExpanded = useMemo(
+    () =>
+      loadedTreeDirectoryKeys.length > 0 &&
+      loadedTreeDirectoryKeys.every((key) => expandedTreeKeys.includes(key)),
+    [expandedTreeKeys, loadedTreeDirectoryKeys]
+  );
+
+  const handleToggleEntireTree = useCallback(() => {
+    if (isEntireTreeExpanded && !isTreeSearch) {
+      setExpandedTreeKeys([]);
+      return;
+    }
+    void handleExpandAllTreeNodes();
+  }, [handleExpandAllTreeNodes, isEntireTreeExpanded, isTreeSearch]);
 
   // Build breadcrumb segments from selected path
   const breadcrumbSegments = useMemo(() => {
@@ -945,54 +1063,66 @@ const KnowledgeDetailPage: React.FC = () => {
             {/* ── Document tree + viewer (D2 redesign) ── */}
             <div
               className={classNames(
-                'flex w-full gap-18px pt-16px',
+                'knowledge-doc-workspace flex w-full gap-14px pt-16px',
                 isMobile ? 'flex-col' : 'flex-row',
-                'min-h-440px'
+                isMobile ? 'min-h-720px' : 'h-[clamp(500px,calc(100vh-300px),760px)] min-h-500px'
               )}
             >
               {/* ─── Left: File tree panel ─── */}
               <div
                 className={classNames(
-                  'box-border shrink-0 flex flex-col rd-14px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-12px',
-                  isMobile ? 'w-full' : 'w-264px'
+                  'knowledge-doc-panel-frame knowledge-doc-sidebar box-border shrink-0 flex flex-col overflow-hidden rd-12px bg-transparent',
+                  isMobile ? 'h-420px w-full' : 'h-full w-276px'
                 )}
               >
-                {/* Document actions */}
-                <div className='knowledge-doc-actions mb-8px grid grid-cols-3 gap-4px rounded-10px bg-[var(--color-fill-2)] p-3px'>
-                  <button
-                    type='button'
-                    className='knowledge-doc-action inline-flex min-w-0 appearance-none items-center justify-center gap-4px rounded-8px border-none bg-transparent px-6px py-7px font-[inherit] text-11px font-500 text-[var(--color-text-2)] cursor-pointer transition-colors hover:bg-[var(--color-fill-3)] hover:text-[var(--color-text-1)] focus-visible:outline-none focus-visible:bg-[var(--color-fill-3)] focus-visible:text-[var(--color-text-1)]'
+                {/* Compact document toolbar: icon-first, labels are shown in small hover bubbles. */}
+                <div className='knowledge-doc-divider-bottom knowledge-doc-toolbar flex h-42px shrink-0 items-center gap-2px bg-transparent px-9px'>
+                  <KnowledgeIconButton
+                    label={t('knowledge.detail.docs.newFile', { defaultValue: '新建文档' })}
+                    icon={<Plus theme='outline' size='15' />}
                     onClick={() => openNewFileModal()}
-                    title={t('knowledge.detail.docs.newFile', { defaultValue: '新建文档' })}
-                  >
-                    <Plus theme='outline' size='12' className='shrink-0' />
-                    <span className='truncate'>{t('knowledge.detail.docs.newFile', { defaultValue: '新建文档' })}</span>
-                  </button>
-                  <button
-                    type='button'
-                    className='knowledge-doc-action inline-flex min-w-0 appearance-none items-center justify-center gap-4px rounded-8px border-none bg-transparent px-6px py-7px font-[inherit] text-11px font-500 text-[var(--color-text-2)] cursor-pointer transition-colors hover:bg-[var(--color-fill-3)] hover:text-[var(--color-text-1)] focus-visible:outline-none focus-visible:bg-[var(--color-fill-3)] focus-visible:text-[var(--color-text-1)]'
+                  />
+                  <KnowledgeIconButton
+                    label={t('knowledge.detail.docs.newFolder', { defaultValue: '新建文件夹' })}
+                    icon={<FolderPlus theme='outline' size='15' />}
                     onClick={() => openNewFolderModal()}
-                    title={t('knowledge.detail.docs.newFolder', { defaultValue: '新建文件夹' })}
-                  >
-                    <FolderPlus theme='outline' size='12' className='shrink-0' />
-                    <span className='truncate'>{t('knowledge.detail.docs.newFolder', { defaultValue: '文件夹' })}</span>
-                  </button>
-                  <button
-                    type='button'
-                    className='knowledge-doc-action inline-flex min-w-0 appearance-none items-center justify-center gap-4px rounded-8px border-none bg-transparent px-6px py-7px font-[inherit] text-11px font-500 text-[var(--color-text-2)] cursor-pointer transition-colors hover:bg-[var(--color-fill-3)] hover:text-[var(--color-text-1)] focus-visible:outline-none focus-visible:bg-[var(--color-fill-3)] focus-visible:text-[var(--color-text-1)]'
+                  />
+                  <KnowledgeIconButton
+                    label={t('knowledge.detail.docs.upload', { defaultValue: '上传' })}
+                    icon={<Upload theme='outline' size='15' />}
                     onClick={() => Message.info(t('knowledge.detail.docs.uploadTodo', { defaultValue: '上传功能开发中' }))}
-                    title={t('knowledge.detail.docs.upload', { defaultValue: '上传' })}
-                  >
-                    <Upload theme='outline' size='12' className='shrink-0' />
-                    <span className='truncate'>{t('knowledge.detail.docs.upload', { defaultValue: '上传' })}</span>
-                  </button>
+                  />
+                  <div className='ml-auto flex items-center gap-2px'>
+                    <KnowledgeIconButton
+                      label={t('knowledge.detail.docs.revealCurrentFile', { defaultValue: '自动显示当前文件' })}
+                      icon={<FileFocus theme='outline' size='15' />}
+                      loading={treeAction === 'reveal'}
+                      onClick={() => void handleRevealCurrentFile()}
+                    />
+                    <KnowledgeIconButton
+                      label={
+                        isEntireTreeExpanded && !isTreeSearch
+                          ? t('knowledge.detail.docs.collapseAll', { defaultValue: '全部折叠' })
+                          : t('knowledge.detail.docs.expandAll', { defaultValue: '全部展开' })
+                      }
+                      icon={
+                        isEntireTreeExpanded && !isTreeSearch ? (
+                          <ExpandUp theme='outline' size='15' />
+                        ) : (
+                          <ExpandDown theme='outline' size='15' />
+                        )
+                      }
+                      loading={treeAction === 'expand'}
+                      onClick={handleToggleEntireTree}
+                    />
+                  </div>
                 </div>
 
                 {/* Search box */}
-                <div className='knowledge-doc-search flex items-center gap-7px rounded-8px bg-[var(--color-fill-2)] border border-solid border-[var(--color-border-3)] px-10px py-7px mb-8px'>
+                <div className='knowledge-doc-search mx-9px mt-9px flex shrink-0 items-center gap-7px rounded-7px bg-[var(--color-fill-2)] border border-solid border-[var(--color-border-3)] px-9px py-6px'>
                   <Search theme='outline' size='13' className='text-[var(--color-text-3)] shrink-0' />
                   <input
-                    className='border-none bg-transparent outline-none text-[var(--color-text-1)] text-12px w-full placeholder:text-[var(--color-text-3)]'
+                    className='min-w-0 border-none bg-transparent outline-none text-[var(--color-text-1)] text-11px w-full placeholder:text-[var(--color-text-3)]'
                     placeholder={t('knowledge.detail.docs.searchPlaceholder', { defaultValue: '搜索文档…' })}
                     value={fileSearch}
                     onChange={(e) => setFileSearch(e.target.value)}
@@ -1000,7 +1130,10 @@ const KnowledgeDetailPage: React.FC = () => {
                 </div>
 
                 {/* File tree */}
-                <div className='flex-1 overflow-y-auto'>
+                <div
+                  ref={treeScrollRef}
+                  className='knowledge-doc-tree-scroll min-h-0 flex-1 overflow-y-auto px-7px py-8px'
+                >
                   <Spin loading={loading} className='w-full'>
                     {displayedTreeData.length === 0 ? (
                       <Empty
@@ -1014,7 +1147,21 @@ const KnowledgeDetailPage: React.FC = () => {
                     ) : (
                       <Tree
                         className='knowledge-doc-tree text-13px [&_.arco-tree-node]:w-full [&_.arco-tree-node-title-wrapper]:flex [&_.arco-tree-node-title-wrapper]:w-full [&_.arco-tree-node-title-wrapper]:min-w-0 [&_.arco-tree-node-title-wrapper]:items-center [&_.arco-tree-node-title]:min-w-0 [&_.arco-tree-node-title]:flex-1 [&_.arco-tree-node-title]:!pr-0'
+                        size='mini'
+                        blockNode
                         showLine
+                        icons={(nodeProps) => ({
+                          switcherIcon: nodeProps.isLeaf ? null : (
+                            <Right
+                              theme='outline'
+                              size='11'
+                              className={classNames(
+                                'knowledge-tree-switcher-chevron transition-transform duration-150',
+                                nodeProps.expanded && 'rotate-90'
+                              )}
+                            />
+                          ),
+                        })}
                         actionOnClick={['select', 'expand']}
                         selectedKeys={selectedTreeKey ? [selectedTreeKey] : []}
                         expandedKeys={visibleTreeExpandedKeys}
@@ -1050,47 +1197,45 @@ const KnowledgeDetailPage: React.FC = () => {
                         renderTitle={(node) => {
                           const item = node.dataRef as IKnowledgeTreeEntry;
                           return (
-                            <div className='knowledge-tree-node-row group flex w-full min-w-0 items-center gap-6px pr-1px'>
-                              <span className='knowledge-tree-node-main flex min-w-0 flex-1 items-center gap-5px'>
-                                {item.is_dir ? (
-                                  <FolderOpen theme='outline' size='13' className='shrink-0 text-[var(--color-text-3)]' />
-                                ) : (
-                                  <FileText theme='outline' size='13' className='shrink-0 text-[var(--color-text-3)]' />
-                                )}
-                                <span className='knowledge-tree-node-name block min-w-0 truncate' title={item.rel_path}>
+                            <div className='knowledge-tree-node-row group flex w-full min-w-0 items-center gap-3px pr-1px'>
+                              <span className='knowledge-tree-node-main flex min-w-0 flex-1 items-center'>
+                                <span className='knowledge-tree-node-name block min-w-0 truncate leading-17px' title={item.rel_path}>
                                   {node.title}
                                 </span>
                               </span>
-                              <span className='knowledge-tree-node-action ml-auto w-24px grid shrink-0 place-items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100'>
+                              <span className='knowledge-tree-node-action ml-auto w-21px grid shrink-0 place-items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100'>
                                 <Dropdown
                                   trigger='click'
                                   droplist={
-                                    <Menu onClickMenuItem={(key) => handleTreeNodeMenuClick(String(key), item)}>
+                                    <Menu
+                                      className='knowledge-tree-node-menu'
+                                      onClickMenuItem={(key) => handleTreeNodeMenuClick(String(key), item)}
+                                    >
                                       {item.is_dir && (
                                         <>
                                           <Menu.Item key='new-file'>
-                                            <span className='inline-flex items-center gap-6px'>
-                                              <Plus theme='outline' size='13' />
+                                            <span className='inline-flex items-center gap-4px'>
+                                              <Plus theme='outline' size='11' />
                                               {t('knowledge.detail.docs.newFile', { defaultValue: '新建文档' })}
                                             </span>
                                           </Menu.Item>
                                           <Menu.Item key='new-folder'>
-                                            <span className='inline-flex items-center gap-6px'>
-                                              <FolderPlus theme='outline' size='13' />
+                                            <span className='inline-flex items-center gap-4px'>
+                                              <FolderPlus theme='outline' size='11' />
                                               {t('knowledge.detail.docs.newFolder', { defaultValue: '新建文件夹' })}
                                             </span>
                                           </Menu.Item>
                                         </>
                                       )}
                                       <Menu.Item key='rename'>
-                                        <span className='inline-flex items-center gap-6px'>
-                                          <EditTwo theme='outline' size='13' />
+                                        <span className='inline-flex items-center gap-4px'>
+                                          <EditTwo theme='outline' size='11' />
                                           {t('knowledge.actions.rename', { defaultValue: '重命名' })}
                                         </span>
                                       </Menu.Item>
                                       <Menu.Item key='delete' className='!text-[rgb(var(--danger-6))]'>
-                                        <span className='inline-flex items-center gap-6px'>
-                                          <Delete theme='outline' size='13' />
+                                        <span className='inline-flex items-center gap-4px'>
+                                          <Delete theme='outline' size='11' />
                                           {t('knowledge.actions.delete', { defaultValue: '删除' })}
                                         </span>
                                       </Menu.Item>
@@ -1099,7 +1244,7 @@ const KnowledgeDetailPage: React.FC = () => {
                                 >
                                   <button
                                     type='button'
-                                    className='knowledge-tree-node-more grid h-22px w-22px shrink-0 place-items-center rounded-6px border-0 bg-transparent p-0 text-[var(--color-text-3)] cursor-pointer hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)] focus-visible:outline-none focus-visible:bg-[var(--color-fill-2)]'
+                                    className='knowledge-tree-node-more grid h-20px w-20px shrink-0 place-items-center rounded-5px border-0 bg-transparent p-0 text-[var(--color-text-3)] cursor-pointer hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)] focus-visible:outline-none focus-visible:bg-[var(--color-fill-2)]'
                                     onMouseDown={(e) => e.stopPropagation()}
                                     onClick={(e) => e.stopPropagation()}
                                     title={t('common.more', { defaultValue: '更多' })}
@@ -1116,10 +1261,38 @@ const KnowledgeDetailPage: React.FC = () => {
                     )}
                   </Spin>
                 </div>
+
+                {/* This footer remains pinned while only the directory tree scrolls. */}
+                <div className='knowledge-doc-divider-top knowledge-doc-footer flex h-44px shrink-0 items-center gap-2px bg-transparent px-8px'>
+                  <KnowledgeIconButton
+                    label={t('knowledge.actions.aiGenerateOverview')}
+                    icon={<MagicHat theme='outline' size='13' />}
+                    loading={autogenLoading}
+                    tooltipPosition='top'
+                    onClick={() => void handleAutogen()}
+                  />
+                  <div className='min-w-0 flex-1'>
+                    <KnowledgeModelSelector
+                      size='small'
+                      choice={modelChoice}
+                      onChange={(c) => void setModelChoice(c)}
+                      triggerClassName='knowledge-doc-model-trigger'
+                    />
+                  </div>
+                  {source && (
+                    <KnowledgeIconButton
+                      label={t('knowledge.source.refresh')}
+                      icon={<Refresh theme='outline' size='13' />}
+                      loading={refreshingSource}
+                      tooltipPosition='top'
+                      onClick={() => void handleRefreshSource()}
+                    />
+                  )}
+                </div>
               </div>
 
               {/* ─── Right: Viewer / editor panel ─── */}
-              <div className='box-border min-w-0 flex-1 flex flex-col rd-14px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] overflow-hidden'>
+              <div className='knowledge-doc-panel-frame box-border min-h-0 min-w-0 flex-1 flex flex-col overflow-hidden rd-12px bg-transparent'>
                 {selectedPath == null ? (
                   <div className='flex-1 grid place-items-center'>
                     <Empty description={t('knowledge.selectFile')} />
@@ -1127,7 +1300,7 @@ const KnowledgeDetailPage: React.FC = () => {
                 ) : (
                   <>
                     {/* Toolbar: breadcrumb + toggle + save */}
-                    <div className='flex items-center justify-between gap-8px px-16px py-11px border-b border-solid border-[var(--color-border-2)]'>
+                    <div className='knowledge-doc-divider-bottom knowledge-doc-editor-toolbar flex items-center justify-between gap-8px bg-transparent px-16px py-11px'>
                       {/* Breadcrumb */}
                       <div className='text-12px text-[var(--color-text-3)] truncate'>
                         {breadcrumbSegments.map((seg, idx) => (
@@ -1177,47 +1350,28 @@ const KnowledgeDetailPage: React.FC = () => {
                       </div>
                     </div>
                     {/* Content area */}
-                    <div className='flex-1 overflow-y-auto p-20px'>
+                    <div
+                      className={classNames(
+                        'knowledge-doc-content flex-1 overflow-y-auto',
+                        editMode ? 'knowledge-doc-content-edit' : 'p-16px'
+                      )}
+                    >
                       <Spin loading={fileLoading} className='w-full'>
                         {editMode ? (
                           <Input.TextArea
                             value={draft}
                             onChange={setDraft}
                             autoSize={{ minRows: 18, maxRows: 40 }}
-                            className='font-mono text-13px'
+                            className='knowledge-doc-source-editor font-mono text-13px'
                           />
                         ) : (
-                          <Markdown>{content}</Markdown>
+                          <Markdown compact>{content}</Markdown>
                         )}
                       </Spin>
                     </div>
                   </>
                 )}
               </div>
-            </div>
-            {/* AI actions row (autogen / refresh source) */}
-            <div className='flex flex-wrap items-center gap-8px mt-12px'>
-              <Button
-                shape='round'
-                size='small'
-                loading={autogenLoading}
-                icon={<MagicHat theme='outline' size='14' />}
-                onClick={() => void handleAutogen()}
-              >
-                {t('knowledge.actions.aiGenerateOverview')}
-              </Button>
-              <KnowledgeModelSelector size='small' choice={modelChoice} onChange={(c) => void setModelChoice(c)} />
-              {source && (
-                <Button
-                  shape='round'
-                  size='small'
-                  icon={<Refresh theme='outline' size='12' />}
-                  loading={refreshingSource}
-                  onClick={() => void handleRefreshSource()}
-                >
-                  {t('knowledge.source.refresh')}
-                </Button>
-              )}
             </div>
           </Tabs.TabPane>
 

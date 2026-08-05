@@ -96,11 +96,14 @@
     "delete": "删除知识库",
     "deletePlaceholder": "请在设置 Tab 中删除",
     "docs": {
+      "collapseAll": "全部折叠",
       "edit": "编辑",
+      "expandAll": "全部展开",
       "newFile": "新建文档",
       "newFolder": "新建文件夹",
       "noSearchResults": "无匹配文件",
       "preview": "预览",
+      "revealCurrentFile": "自动显示当前文件",
       "searchPlaceholder": "搜索文档…",
       "upload": "上传",
       "uploadTodo": "上传功能开发中"

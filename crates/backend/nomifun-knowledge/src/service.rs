@@ -3145,7 +3145,7 @@ impl KnowledgeService {
     }
 
     /// Fetch every entry and prepare `{root}/snapshots/{slug}.md`
-    /// (frontmatter + markdown body) entirely in memory. Per-entry failures
+    /// (metadata header + markdown body) entirely in memory. Per-entry failures
     /// are collected, never fatal.
     /// Pages larger than the compression threshold are condensed via the
     /// completer when one is wired (raw-but-truncated otherwise). Entries
@@ -4687,9 +4687,9 @@ async fn quarantine_snapshot_file(
     Ok(true)
 }
 
-/// Quarantine `{root}/snapshots/*.md` files whose frontmatter `source_url` no
+/// Quarantine `{root}/snapshots/*.md` files whose managed-header `source_url` no
 /// longer appears in the configured entries (orphans left behind after the
-/// entry list shrank). Files WITHOUT a `source_url` frontmatter line are
+/// entry list shrank). Files WITHOUT a managed `source_url` header are
 /// user-authored and never touched. The entire mutation boundary is no-follow,
 /// recoverable, and fail-closed.
 async fn prune_orphan_snapshots(
@@ -4750,7 +4750,7 @@ async fn prune_orphan_snapshots(
                 path.display()
             ))
         })?;
-        // No source_url frontmatter ⇒ not ours ⇒ keep.
+        // No managed source_url header ⇒ not ours ⇒ keep.
         let Some(src_url) = source_url::snapshot_source_url(&content) else {
             continue;
         };
@@ -9384,12 +9384,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Snapshot landed with frontmatter.
+        // Snapshot landed with its readable metadata header.
         let snap_dir = PathBuf::from(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR);
         let snaps: Vec<_> = std::fs::read_dir(&snap_dir).unwrap().flatten().collect();
         assert_eq!(snaps.len(), 1, "{snaps:?}");
         let content = std::fs::read_to_string(snaps[0].path()).unwrap();
-        assert!(content.starts_with(&format!("---\nsource_url: {url}\nfetched_at: ")), "got: {content}");
+        assert!(
+            content.starts_with(&format!("> **source_url**: {url}\n> **fetched_at**: ")),
+            "got: {content}"
+        );
         assert!(content.contains("# API"), "got: {content}");
 
         // Source stamped + entry title backfilled from <title>.
@@ -9810,8 +9813,8 @@ mod tests {
     }
 
     /// After the entry list shrinks, a refresh must sweep snapshots whose
-    /// frontmatter `source_url` no longer matches any configured entry —
-    /// while user-authored files in `snapshots/` (no source_url frontmatter)
+    /// managed-header `source_url` no longer matches any configured entry —
+    /// while user-authored files in `snapshots/` (no managed source header)
     /// stay untouched.
     #[tokio::test]
     async fn refresh_source_prunes_orphan_snapshots_but_keeps_user_files() {

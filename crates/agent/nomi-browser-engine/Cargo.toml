@@ -40,13 +40,10 @@ nomifun-net.workspace     = true
 nomi-process-runtime.workspace = true
 # P3-W4d storage_state vault：登录态（cookie token / localStorage JWT）敏感，加密落盘。复用
 # nomifun-common 的 encrypt_string/decrypt_string（AES-256-GCM）——DESIGN §4/§16 裁决⑦「不另起第二套
-# crypto 栈」（与 nomifun-secret 凭据 vault 同一实现）。nomifun-common 已是本 crate 的传递依赖
-# （经 nomifun-secret），直列为直接依赖零额外构建成本，依赖方向不成环（common 是近叶 crate）。
+# crypto 栈」。
 nomifun-common.workspace  = true
-# E5 出口防火墙：跨域判定复用 nomifun-secret 的 eTLD+1（PSL 机器，离线）——`same_etld_plus_one` /
-# `host_of` / `etld_plus_one` 是纯函数（与 secret vault 解耦），E1 已交付。不复用死字段
-# BrowserConfig.allowed_origins（裁决⑪/不变量⑭）。
-nomifun-secret.workspace  = true
+# E5 出口防火墙：跨域判定使用离线 Public Suffix List。
+psl.workspace = true
 # 序列化层脱敏（redact.rs）：复用共享的 best-effort 正则脱敏（sk-/AKIA/Bearer/k=v/PEM），
 # 高熵 token 兜底是本 crate 的补充。
 nomi-redact.workspace = true

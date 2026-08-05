@@ -6,7 +6,7 @@
     "overview": "总览",
     "memories": "记忆",
     "review": "会话回顾",
-    "collect": "数据采集",
+    "collect": "学习&知识共享",
     "learn": "知识共享交流",
     "suggestions": "建议",
     "chat": "聊天",
@@ -14,7 +14,6 @@
     "migrate": "迁移",
     "knowledge": "专属知识库",
     "remote": "远程连接",
-    "secrets": "凭据",
     "skills": "技能"
   },
   "skills": {
@@ -48,7 +47,6 @@
     "giftPick": "选择接收的伙伴",
     "giftedOk": "已赠送给对方",
     "source_mined": "重复挖掘",
-    "source_reflected": "任务反思",
     "source_demonstrated": "示范教学",
     "source_manual": "手动",
     "configuredTitle": "已配置能力",
@@ -61,28 +59,6 @@
     "learnedTitle": "伙伴专精",
     "configMissing": "未安装",
     "configMissingHint": "这个 Skill 当前未安装；重新安装后会自动恢复。"
-  },
-  "secrets": {
-    "title": "浏览器凭据",
-    "hint": "浏览器会话共享这些已存凭据，并可按引用注入。值在本机加密保存、不再回显也不送给模型——仅当页面域名匹配允许域时才注入。允许域同时限定浏览器可向哪些域发送数据。",
-    "add": "添加凭据",
-    "empty": "尚未注册任何凭据。",
-    "register": "注册",
-    "registered": "凭据已注册。",
-    "removed": "凭据已删除。",
-    "delete": "删除",
-    "removeConfirm": "删除凭据「{{name}}」？",
-    "nameLabel": "引用名",
-    "namePlaceholder": "如 github_password（在动作里以 secret:github_password 引用）",
-    "nameRequired": "请填写引用名。",
-    "valueLabel": "值",
-    "valuePlaceholder": "凭据值（密码、令牌等）",
-    "valueRequired": "请填写值。",
-    "valueWriteOnly": "只写：在本设备加密保存，不再回显、不送给模型。",
-    "originsLabel": "允许域",
-    "originsPlaceholder": "github.com\napi.github.com",
-    "originsHint": "每行一个或逗号分隔，会归一为可注册域。凭据仅在这些域注入，这些域同时作为浏览器出口允许名单。",
-    "originsRequired": "至少填写一个允许域。"
   },
   "domains": {
     "companion": "伙伴",
@@ -121,6 +97,7 @@
     "affective": "情感"
   },
   "overview": {
+    "basicConfig": "基础配置",
     "modelMissing": "还没有为 {{companionName}} 配置聊天模型，它暂时无法学习和聊天。",
     "goConfig": "去配置",
     "collectOff": "所有数据采集都处于关闭状态，{{companionName}} 学不到任何东西哦。",
@@ -131,12 +108,9 @@
     "weeklyTitle": "我这周学到了什么",
     "weeklySkills": "新技能",
     "weeklyMemories": "新记忆",
-    "weeklyRuns": "学习次数",
     "companionSwitch": "桌面伙伴",
     "companionOn": "已显示",
-    "companionOff": "已隐藏",
-    "diary": "{{companionName}} 的日记",
-    "diaryEmpty": "还没有日记，等 {{companionName}} 完成第一次学习后再来看看吧～"
+    "companionOff": "已隐藏"
   },
   "memories": {
     "kindAll": "全部类型",
@@ -193,24 +167,34 @@
     "source_merge": "合并产生"
   },
   "collect": {
-    "intro": "勾选伙伴们可以学习的数据范围。所有数据默认不采集，开启后写入本地 companion/nomi/ 目录，随时可以一键清空。",
+    "sectionTitle": "数据采集",
+    "intro": "勾选伙伴们可以学习的工作数据范围。开启后写入本地 companion/shared/events/ 目录，并按下方策略自动清理。",
     "sensitivity": {
       "low": "低敏感",
       "medium": "中敏感",
       "high": "高敏感"
     },
     "today": "今日",
-    "total": "累计",
-    "clear": "清空全部采集数据",
-    "clearConfirm": "将删除 companion/nomi/events 下的全部采集数据，已提炼的记忆不受影响。继续？",
-    "cleared": "采集数据已清空",
-    "clearHint": "只删除原始事件文件，不影响已学到的记忆。",
+    "total": "当前保留",
     "disableAll": "一键全关",
     "disableAllConfirm": "停止所有采集、学习与进化？已学到的技能和记忆会保留，模型配置不变，随时可再开启。",
     "disabledAll": "已全部关闭",
-    "viewRaw": "查看采集到的内容",
-    "hideRaw": "收起采集内容",
-    "rawEmpty": "还没有采集到任何内容。",
+    "retentionTitle": "自动清理",
+    "retentionHint": "超过目标保留期且已被所有启用的学习、进化处理后，自动清理原始事件；已提炼的记忆和技能不受影响。",
+    "retentionDays": "目标保留期",
+    "days": "天",
+    "capacityLimit": "容量上限",
+    "applyPolicy": "应用清理策略",
+    "policyApplied": "清理策略已应用",
+    "lowerPolicyConfirm": "降低保留期或容量可能立即删除最旧的原始事件，且无法恢复。已提炼的记忆和技能会保留。继续应用？",
+    "storageUsage": "当前占用：{{used}} / {{max}}",
+    "storedRange": "数据范围：{{from}} 至 {{to}}（{{count}} 个日文件）",
+    "storedRange_one": "数据范围：{{from}} 至 {{to}}（{{count}} 个日文件）",
+    "storedRange_other": "数据范围：{{from}} 至 {{to}}（{{count}} 个日文件）",
+    "noStoredEvents": "当前没有采集事件文件",
+    "storageLoading": "正在读取存储状态…",
+    "storageUnavailable": "暂时无法读取存储状态",
+    "hardLimitHint": "容量是硬上限；始终从最旧日文件开始删除，必要时也会删除尚未处理的数据。",
     "sources": {
       "tool_calls": {
         "name": "工具调用",
@@ -220,10 +204,6 @@
         "name": "会话提问内容",
         "desc": "你在各个会话里发送的提问文本"
       },
-      "chat_assistant_replies": {
-        "name": "模型回复内容",
-        "desc": "助手在会话里给出的回复全文"
-      },
       "requirements": {
         "name": "需求平台内容",
         "desc": "你创建的需求标题、描述与标签"
@@ -231,32 +211,23 @@
       "terminal_sessions": {
         "name": "终端会话元数据",
         "desc": "终端会话的创建/退出记录（不含输出内容）"
-      },
-      "cron_runs": {
-        "name": "定时任务执行",
-        "desc": "定时任务的执行结果与错误"
-      },
-      "conversation_lifecycle": {
-        "name": "会话生命周期",
-        "desc": "会话的创建/更新/删除节奏"
       }
     }
   },
   "disclosure": {
     "title": "让桌面伙伴越用越懂你",
-    "body": "开启后，伙伴会从你使用平台的行为（工具调用、任务、对话）里学习，自动沉淀技能与记忆。所有数据仅保存在本地，随时可在「数据采集」里查看、清空或一键全关。",
+    "body": "开启后，伙伴会从你使用平台的行为（工具调用、任务、对话）里学习，自动沉淀技能与记忆。所有数据仅保存在本地，可在「数据采集」里调整自动清理策略或一键全关。",
     "enable": "开启自学习",
     "later": "暂不开启",
     "enabled": "已开启，桌面伙伴会从你的使用里学习"
   },
   "evolve": {
+    "sectionTitle": "技能配置",
     "title": "技能进化",
     "hint": "从你重复的多步操作里自动沉淀技能，复用上面的学习模型。",
     "enabled": "开启技能进化",
     "interval": "挖掘间隔",
     "minSessions": "重复会话数阈值",
-    "reflect": "任务后反思",
-    "reflectHint": "复杂任务完成后也反思是否值得固化",
     "autoActivate": "高置信自动生效",
     "autoActivateHint": "多次重复的高置信技能直接启用（仍可在技能页撤销）"
   },
@@ -276,19 +247,14 @@
     "enabled": "开启智能协作"
   },
   "learn": {
-    "enabled": "定时学习",
+    "sectionTitle": "学习配置",
+    "enabled": "开启定时学习",
     "interval": "学习间隔",
     "minutes": "分钟",
     "runNow": "立即学习",
     "runOk": "学习完成：新增 {{memories}} 条记忆、{{suggestions}} 条建议",
     "model": "学习模型",
     "modelHint": "所有伙伴共用这个模型做定时学习",
-    "colTime": "时间",
-    "colStatus": "状态",
-    "colEvents": "事件数",
-    "colMemories": "新记忆",
-    "colSuggestions": "新建议",
-    "colNote": "备注",
     "status": {
       "ok": "成功",
       "error": "失败",
@@ -336,6 +302,8 @@
     "retry": "重试"
   },
   "settings": {
+    "basicSection": "基础配置",
+    "behaviorSection": "个性与习惯",
     "name": "名字",
     "nameHint": "伙伴的称呼，会出现在聊天与桌面伙伴里",
     "providerPlaceholder": "选择服务商",

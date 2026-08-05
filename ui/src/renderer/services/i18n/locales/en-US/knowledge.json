@@ -96,11 +96,14 @@
     "delete": "Delete knowledge base",
     "deletePlaceholder": "Use the Settings tab to delete",
     "docs": {
+      "collapseAll": "Collapse all",
       "edit": "Edit",
+      "expandAll": "Expand all",
       "newFile": "New file",
       "newFolder": "New folder",
       "noSearchResults": "No matching files",
       "preview": "Preview",
+      "revealCurrentFile": "Reveal current file",
       "searchPlaceholder": "Search documents…",
       "upload": "Upload",
       "uploadTodo": "Upload coming soon"
