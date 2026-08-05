@@ -25,7 +25,7 @@ use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::skill_sink::CompanionSkillStoreSink;
 use crate::store::{
     CompanionThread, MemoryActor, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage,
-    MemoryScope, CompanionMemory, CompanionSkill, CompanionStore,
+    CompanionMemory, CompanionSkill, CompanionStore,
     memory_contents_similar,
 };
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
@@ -34,8 +34,8 @@ use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 /// Map the stored owner to the extension skill scope. `None` is only the
 /// vestigial legacy row the boot re-homing has not claimed, whose body still
 /// lives in the shared tree.
-fn scope_for(scope_companion_id: Option<&str>) -> SkillScope {
-    scope_companion_id
+fn scope_for(companion_id: Option<&str>) -> SkillScope {
+    companion_id
         .map(|id| SkillScope::Companion(id.to_owned()))
         .unwrap_or(SkillScope::Shared)
 }
@@ -141,8 +141,7 @@ fn group_similar_memories(memories: Vec<CompanionMemory>) -> Vec<MemoryMergeGrou
         let slot = groups.iter_mut().find(|group| {
             let head = &group[0];
             head.kind == memory.kind
-                && head.scope_kind == memory.scope_kind
-                && head.scope_companion_id == memory.scope_companion_id
+                && head.companion_id == memory.companion_id
                 && group
                     .iter()
                     .any(|member| memory_contents_similar(&member.content, &memory.content))
@@ -1266,12 +1265,12 @@ impl CompanionService {
         q: &str,
         kind: Option<String>,
         status: MemoryStatusFilter,
-        scope_companion_id: Option<String>,
+        owner: Option<String>,
         sort: &str,
         limit: i64,
         offset: i64,
     ) -> Result<MemoryListPage, AppError> {
-        let companion_id = scope_companion_id
+        let companion_id = owner
             .as_deref()
             .map(|id| {
                 CompanionId::try_from(id).map_err(|error| {
@@ -1507,7 +1506,7 @@ impl CompanionService {
         }
         let mem = self
             .store
-            .insert_memory_scoped(kind, content, tags, 0.8, "manual", MemoryScope::Companion(owner))
+            .insert_memory_scoped(kind, content, tags, 0.8, "manual", Some(&owner))
             .await?;
         self.emitter.emit_memory_created(&mem);
         Ok(mem)
@@ -1573,7 +1572,7 @@ impl CompanionService {
     ) -> Result<Vec<CompanionSkillView>, AppError> {
         let mut out = Vec::with_capacity(skills.len());
         for skill in skills {
-            let scope = scope_for(skill.scope_companion_id.as_deref());
+            let scope = scope_for(skill.companion_id.as_deref());
             let draft = skill.status == "draft";
             let dir = skill_service::skill_dir_for(
                 &self.skill_paths,
@@ -1616,7 +1615,7 @@ impl CompanionService {
                     "companion skill {companion_skill_id} not found"
                 ))
             })?;
-        let scope = scope_for(skill.scope_companion_id.as_deref());
+        let scope = scope_for(skill.companion_id.as_deref());
         let draft = skill.status == "draft";
         let dir = skill_service::skill_dir_for(
             &self.skill_paths,
@@ -1648,7 +1647,7 @@ impl CompanionService {
                     "companion skill {companion_skill_id} not found"
                 ))
             })?;
-        let scope = scope_for(skill.scope_companion_id.as_deref());
+        let scope = scope_for(skill.companion_id.as_deref());
         let draft = skill.status == "draft";
         crate::skill_io::write_skill(
             &self.skill_paths,
@@ -2284,7 +2283,7 @@ mod tests {
             .insert_skill(&crate::store::CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "demo".into(),
-                scope_companion_id: Some(cid.clone()),
+                companion_id: Some(cid.clone()),
                 status: "draft".into(),
                 source: "mined".into(),
                 confidence: 0.9,
@@ -2366,7 +2365,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: name.into(),
-                scope_companion_id: Some(cid.to_owned()),
+                companion_id: Some(cid.to_owned()),
                 status: "draft".into(),
                 source: "mined".into(),
                 confidence: 0.5,
@@ -2396,7 +2395,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "beta".into(),
-                scope_companion_id: Some(cid.clone()),
+                companion_id: Some(cid.clone()),
                 status: "draft".into(),
                 source: "mined".into(),
                 confidence: 0.5,
@@ -2504,7 +2503,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "rej-sig".into(),
-                scope_companion_id: Some(cid.clone()),
+                companion_id: Some(cid.clone()),
                 status: "draft".into(),
                 source: "mined".into(),
                 confidence: 0.5,
@@ -2538,7 +2537,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "recent".into(),
-                scope_companion_id: Some(cid.clone()),
+                companion_id: Some(cid.clone()),
                 status: "active".into(),
                 source: "mined".into(),
                 confidence: 0.5,
@@ -2570,7 +2569,7 @@ mod tests {
 
     /// 赠送 (cross-companion gift) is gone, and with it every cross-companion
     /// skill read: a companion's list is exactly its own rows. This is the
-    /// regression net for the list query — a resurrected `OR scope_kind = 'user'`
+    /// regression net for the list query — a resurrected `OR companion_id IS NULL`
     /// or a copy path would show up here as a second row.
     #[tokio::test]
     async fn a_companions_skill_list_is_exactly_its_own() {
@@ -2591,7 +2590,7 @@ mod tests {
         let mut skill = CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
             skill_name: "mine".into(),
-            scope_companion_id: Some(a.clone()),
+            companion_id: Some(a.clone()),
             status: "active".into(),
             source: "mined".into(),
             confidence: 0.7,
@@ -2615,7 +2614,7 @@ mod tests {
 
         // And there is no way to write an ownerless (shared) row any more.
         skill.companion_skill_id = nomifun_common::generate_id();
-        skill.scope_companion_id = None;
+        skill.companion_id = None;
         assert!(svc.store.insert_skill(&skill).await.is_err(), "an ownerless skill must be refused");
     }
 
@@ -3026,7 +3025,7 @@ mod tests {
             .add_memory("preference", "主人喜欢深色主题", &["ui".into()], Some(&a))
             .await
             .unwrap();
-        assert_eq!(first.scope_companion_id.as_deref(), Some(a.as_str()));
+        assert_eq!(first.companion_id.as_deref(), Some(a.as_str()));
         assert_eq!(svc.store.count_memories("active", Some(&a)).await.unwrap(), 1);
 
         // Same content (modulo case/whitespace) merges: reinforced, no new row.
@@ -3044,13 +3043,13 @@ mod tests {
         // row instead of being silently folded into 甲's memory.
         let bs = svc.add_memory("preference", "主人喜欢深色主题", &[], Some(&b)).await.unwrap();
         assert_ne!(bs.memory_id, first.memory_id);
-        assert_eq!(bs.scope_companion_id.as_deref(), Some(b.as_str()));
+        assert_eq!(bs.companion_id.as_deref(), Some(b.as_str()));
         assert_eq!(svc.store.count_memories("active", Some(&b)).await.unwrap(), 1);
 
         // Omitting the companion resolves the owner (oldest = 甲) rather than
         // writing a shared row.
         let resolved = svc.add_memory("task", "帮主人订咖啡豆", &[], None).await.unwrap();
-        assert_eq!(resolved.scope_companion_id.as_deref(), Some(a.as_str()));
+        assert_eq!(resolved.companion_id.as_deref(), Some(a.as_str()));
 
         // Validation untouched, and an unknown owner is rejected before any write
         // (an orphaned reference would hard-fail the next boot).

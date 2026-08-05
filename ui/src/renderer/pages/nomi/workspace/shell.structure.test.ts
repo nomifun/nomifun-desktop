@@ -149,10 +149,11 @@ describe('deleted features stay deleted', () => {
 
   test('the 共享记忆 concept is gone from the workspace entirely', () => {
     // 共享记忆 was deleted as a product concept: memory is strictly per-companion.
-    // `scope_kind` is the DB discriminator that used to encode it ('user' = shared)
-    // and is now a vestigial always-'companion' column, so NO workspace surface may
-    // read it — not to filter, not to badge. Ownership questions are answered by
-    // `scope_companion_id` alone.
+    // `scope_kind` was the DB discriminator that used to encode it ('user' = shared);
+    // the column is now physically gone (ownership is one nullable owner column) and
+    // the backend never sends it, so NO workspace surface may read it — not to
+    // filter, not to badge. Ownership questions are answered by the owner id alone,
+    // which still travels under its historical wire name `scope_companion_id`.
     expect(offenders(({ code }) => /scope_kind/.test(code))).toEqual([]);
     // The install-wide memory read-outs went with it (their i18n keys are deleted
     // too, so a leftover call would render the defaultValue and silently lie).
