@@ -215,10 +215,12 @@ without a database cascade.
 
 ## Encryption at rest — AES-GCM
 
-Sensitive strings (provider API keys, OAuth tokens, channel-bot tokens, ...)
-are encrypted before insertion using AES-256-GCM via
-`nomifun_common::crypto::{encrypt_string, decrypt_string}` and the
-data-encryption key loaded by `nomifun_app::load_or_create_data_encryption_key`.
+Sensitive strings (provider API keys, OAuth tokens, channel-bot tokens,
+SSH host credentials — password / private key / passphrase / certificate /
+sudo password in the `ssh_hosts` table, ...) are encrypted before insertion
+using AES-256-GCM via `nomifun_common::crypto::{encrypt_string, decrypt_string}`
+and the data-encryption key loaded by
+`nomifun_app::load_or_create_data_encryption_key`.
 
 The master key is a per-v3-dataset file at `<data_dir>/encryption_key`, created
 when the new dataset is initialized. Password changes and JWT rotation do not
