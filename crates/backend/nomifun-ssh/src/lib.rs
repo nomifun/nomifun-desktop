@@ -7,9 +7,11 @@
 //! only place that joins transport + credentials + persistence + realtime.
 
 pub mod dto;
+pub mod routes;
 pub mod service;
 pub mod sink;
 
 pub use dto::{CreateSshHostRequest, SshHostResponse, UpdateSshHostRequest};
+pub use routes::{ssh_host_routes, SshHostRouterState};
 pub use service::{DecryptedCredential, SshHostService, SshServiceError};
 pub use sink::{SshBackendSink, SshConnectionHandle, SshConnectionProvider};
