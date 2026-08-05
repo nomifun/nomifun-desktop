@@ -193,8 +193,7 @@ pub(super) async fn build(
                 let name = provider.companion_name(&summon.companion_id).await;
                 let notice = format!(
                     "本会话已装载伙伴「{}」的技能与所选记忆（只读）。伙伴人格不接管本会话。\
-                     需要补查伙伴记忆用 recall_memories；发现长期有价值的新事实用 \
-                     propose_companion_memory 提议（主人确认后才写入伙伴记忆），宁缺毋滥。",
+                     需要补查伙伴记忆用 recall_memories；伙伴记忆在本会话中只读，不可写入。",
                     name.as_deref().unwrap_or("（已不存在）")
                 );
                 overrides.system_prompt = Some(match overrides.system_prompt.take() {
@@ -205,21 +204,18 @@ pub(super) async fn build(
                 });
                 match (
                     provider.summon_memory_sink(&summon.companion_id),
-                    provider.summon_proposal_sink(&summon.companion_id),
                     provider.summon_context_sink(summon),
                 ) {
-                    (Ok(memory_sink), Ok(proposal_sink), Ok(context_sink)) => {
+                    (Ok(memory_sink), Ok(context_sink)) => {
                         summon_wiring = Some(NomiSummonWiring {
                             memory_sink,
-                            proposal_sink,
                             context_sink,
                         });
                     }
-                    (memory, proposal, context) => {
+                    (memory, context) => {
                         warn!(
                             conversation_id = %ctx.conversation_id,
                             memory_sink_err = ?memory.err().map(|e| e.to_string()),
-                            proposal_sink_err = ?proposal.err().map(|e| e.to_string()),
                             context_sink_err = ?context.err().map(|e| e.to_string()),
                             "summon: sink construction failed; session continues without summon tools"
                         );

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use nomifun_companion::store::{MemoryFilter, MemoryScope};
+use nomifun_companion::store::{MemoryActor, MemoryFilter};
 use nomifun_common::CompanionMemoryId;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -88,7 +88,10 @@ async fn list(deps: Arc<GatewayDeps>, p: MemoryListParams) -> Value {
         } else {
             Some("active".to_owned())
         },
-        // The owner Agent view spans every companion's memories.
+        // Deliberate: this administrative view belongs to the machine owner, not
+        // to a companion, so it spans EVERY companion's memories. It is the one
+        // read surface that stays cross-companion after 共享记忆 was removed —
+        // the owner agent has no companion identity to scope to.
         scope_companion_id: None,
         limit: p.limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, 200),
         offset: p.offset.unwrap_or(0).max(0),
@@ -106,7 +109,10 @@ async fn save(deps: Arc<GatewayDeps>, p: MemorySaveParams) -> Value {
     }
     let kind = p.kind.unwrap_or_else(|| "knowledge".to_owned());
     let tags = p.tags.unwrap_or_default();
-    match deps.companion_service.add_memory(&kind, content, &tags, MemoryScope::Shared).await {
+    // The owner agent has no companion in its CallerCtx, so the memory lands on
+    // the server-resolved owner (explicit default → oldest companion). An empty
+    // roster has no legal owner and the service refuses with a readable error.
+    match deps.companion_service.add_memory(&kind, content, &tags, None).await {
         Ok(memory) => ok(memory),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -123,7 +129,11 @@ async fn update(deps: Arc<GatewayDeps>, p: MemoryUpdateParams) -> Value {
             p.content.as_deref(),
             p.pinned,
             p.status.as_deref(),
-            None,
+            // Same deliberate cross-companion reach as `list` above: this is the
+            // machine owner's administrative surface and has no companion identity
+            // to scope to, so it may edit any row it can list. Named, not an
+            // absent owner that silently skips the ownership check.
+            &MemoryActor::AnyOwner,
         )
         .await
     {
@@ -133,7 +143,12 @@ async fn update(deps: Arc<GatewayDeps>, p: MemoryUpdateParams) -> Value {
 }
 
 async fn delete(deps: Arc<GatewayDeps>, p: MemoryDeleteParams) -> Value {
-    match deps.companion_service.delete_memory(p.memory_id.as_str()).await {
+    // Cross-companion by design — see `update`.
+    match deps
+        .companion_service
+        .delete_memory(p.memory_id.as_str(), &MemoryActor::AnyOwner)
+        .await
+    {
         Ok(()) => json!({ "result": format!("memory {} deleted", p.memory_id) }),
         Err(e) => json!({ "error": e.to_string() }),
     }

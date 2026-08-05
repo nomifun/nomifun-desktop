@@ -23,7 +23,7 @@ NomiFun 把状态保存在三个地方：一个 SQLite 数据库（一切结构�
 │                        the open OS handle; a leftover file is harmless)
 ├── logs/                tracing-appender file output (rotated daily)
 ├── conversations/       per-conversation workspaces (see below)
-└── companion/                 companion file domain (shared memory hub + per-companion profiles, see below)
+└── companion/                 companion file domain (install-wide memory database + per-companion profiles, see below)
 ```
 
 三个宿主的缺省默认值都经由同一个共享辅助函数解析：[`nomifun_app::cli::default_data_dir()`](../../crates/backend/nomifun-app/src/cli.rs) —— `dirs::data_local_dir()/NomiFun<channel-suffix>`（按用户的 application-data 位置）。stable 使用 `NomiFun`，非 stable channel 使用 `NomiFun-dev`、`NomiFun-beta` 等**同级目录**——channel 目录永远不嵌套在 stable 根之内；仅当操作系统报告不出用户目录时才极端回退到系统临时目录（`<system temp>/nomifun-data<channel-suffix>`，如 dev 为 `nomifun-data-dev`）。环境变量语义在所有宿主上统一：包括桌面外壳在内（见 [`apps/desktop/src/main.rs`](../../apps/desktop/src/main.rs)），`NOMIFUN_DATA_DIR` 都按**字面值**作为最终数据根（外壳不再追加 `"Nomi"`；clap `env` 绑定与 `nomicore` 共享——它以前不读这个变量）。位于 `NomiFun/Nomi<suffix>` 的遗留数据集会在升级后首次启动时由一次性自动迁移搬入 `NomiFun<suffix>`（抗崩溃、中断后下次启动续跑；旧应用实例仍在运行时推迟到下次启动），数据库中持久化的绝对路径会在搬迁后一次性改写。Windows 上展示或持久化的路径不再带 `\\?\` 扩展长度前缀。v3 不会把 `<system temp>/nomifun-data` 或其他旧根目录中的产品数据复制到 active dataset；检测到历史受管数据集时，reset 状态机会将其完整移动到 retired/quarantine 位置，然后创建全新的 v3 数据集，不改写历史数据库路径。
@@ -180,15 +180,23 @@ v3 reset/restore，不通过历史逐行迁移导入。多伙伴布局如下：
 
 ```
 <data_dir>/companion/
-├── shared/                      共享记忆中枢（全体伙伴一份）
-│   ├── config.json              SharedCompanionConfig：采集开关、事件保留/容量策略、学习间隔与学习模型、default_companion_id
+├── shared/                      整机唯一的一份文件（不是「共享记忆」）
+│   ├── config.json              SharedCompanionConfig：采集开关、事件保留/容量策略、会话归档、default_companion_id
+│                                （learn/evolve 已于 2026-08 迁到每个伙伴的 profile 上）
 │   ├── events/YYYYMMDD.jsonl    采集链路的原始事件（自动按期限/硬容量清理；隐私敏感，导出需显式勾选）
 │   └── memory.db                独立 SQLite（PRAGMA user_version 版本阶梯）：
-│                                共享记忆/建议 + 每宠运行态（companion_runtime_state：XP 等）
+│                                整机一个记忆数据库，但每一行记忆都归属于
+│                                唯一一个伙伴（scope_kind/scope_companion_id），
+│                                也只有该伙伴读得到；+ 每宠运行态
+│                                （companion_runtime_state：XP、mood，以及每个伙伴在
+│                                events/ 里的 learn_cursor_ts / evolve_cursor_ts 游标）
 └── companions/
     └── {companion_id}/                companion_id 为裸标准 UUIDv7，目录即真相
-        └── config.json          CompanionProfileConfig：名称/形象/人格/每宠模型/桌宠开关与位置
+        └── config.json          CompanionProfileConfig：名称/形象/人格/每宠聊天模型/
+                                 该伙伴自己的 learn + evolve 设置/桌宠开关、位置与休眠时段
 ```
+
+`shared/` 的含义是「整机一份」，不是「伙伴之间共用」。`memory.db` 把所有伙伴的记忆行放在同一张表里，每行用 `(scope_kind, scope_companion_id)` 标明主人；所有面向伙伴的读取都按主人过滤，因此一个伙伴永远看不到另一个伙伴的记忆，记忆也不能在主人之间转移。唯一的无主状态是残留的 `('user', NULL)`：升级前的旧行、以及名册为空时导入的行就是这个样子。它在 DB 层仍然合法（零伙伴的安装是受支持的状态），这类行会由一次幂等的启动迁移落户到唯一主人名下（若显式 `default_companion_id` 仍在名册里就是它，否则是最早创建的伙伴）——一条 `UPDATE`，绝不按伙伴复制，因此 `memory_id` 保持稳定，同一件事也不会分裂成每个伙伴各一份。
 
 历史单宠布局 `companion/nomi/` 不迁移到 v3；检测到它时随整个旧数据集退役。
 
@@ -251,7 +259,7 @@ NomiFun 自带其 `bun` 运行时（1.3.13），使 MCP 服务器与工具子进
 - **工作区** —— bundle 只递归纳入后端托管的
   `<work_dir>/conversations/`。磁盘其他位置由用户选择的自定义工作区属于外部
   用户项目，绝不会被隐式复制。
-- **伙伴数据** —— bundle 递归纳入 `<data_dir>/companion/`（共享记忆中枢 +
+- **伙伴数据** —— bundle 递归纳入 `<data_dir>/companion/`（整机一份的记忆数据库 +
   每宠配置，见[伙伴指南](../guides/companions.zh.md)）。
 - **bun 运行时缓存** —— 可丢弃；下次启动时会重新解压。
 
