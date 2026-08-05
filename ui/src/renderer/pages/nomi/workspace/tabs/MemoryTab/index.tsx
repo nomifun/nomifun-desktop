@@ -28,11 +28,11 @@ type PaneMode = 'detail' | 'compose' | 'merge' | null;
 /**
  * 记忆&知识库 — the memory this companion can consult, plus its knowledge bases.
  *
- * Every request is scoped to `companionId`, so the list is exactly what this
- * companion sees at retrieval time: its own private memories plus the ones
- * shared by every companion on this install. There is no scope picker and no
- * owner column; where that distinction changes what an action costs — editing or
- * deleting a shared memory hits every companion — the detail pane says so.
+ * Every request is scoped to `companionId`, reads and writes alike: the list is
+ * exactly what this companion sees at retrieval time, and each mutation says who
+ * is asking, so the server refuses anything that is not this companion's. There
+ * is no scope picker and no owner column because there is nothing to pick —
+ * memory belongs to one companion from the moment it is written.
  */
 const MemoryTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAttentionChange }) => {
   const { t } = useTranslation();

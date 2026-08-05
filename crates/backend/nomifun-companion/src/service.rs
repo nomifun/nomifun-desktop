@@ -24,8 +24,8 @@ use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::skill_sink::CompanionSkillStoreSink;
 use crate::store::{
-    CompanionThread, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage, MemoryScope,
-    CompanionMemory, CompanionSkill, CompanionStore,
+    CompanionThread, MemoryActor, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage,
+    MemoryScope, CompanionMemory, CompanionSkill, CompanionStore,
     memory_contents_similar,
 };
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
@@ -1319,8 +1319,14 @@ impl CompanionService {
     }
 
     /// Atomic batch memory operation + live per-row surface refresh events.
-    pub async fn batch_memories(&self, ids: &[String], action: &MemoryBatchAction) -> Result<(), AppError> {
-        self.store.batch_update_memories(ids, action).await?;
+    /// `actor` owns the whole batch: one foreign id rolls all of it back.
+    pub async fn batch_memories(
+        &self,
+        ids: &[String],
+        action: &MemoryBatchAction,
+        actor: &MemoryActor,
+    ) -> Result<(), AppError> {
+        self.store.batch_update_memories(ids, action, actor).await?;
         for id in ids {
             match self.store.get_memory(id).await {
                 Ok(Some(updated)) => self.emitter.emit_memory_updated(&updated),
@@ -1331,23 +1337,31 @@ impl CompanionService {
         Ok(())
     }
 
-    /// Merge-assistant dry run: suspected-duplicate groups over the ACTIVE
-    /// layer (per kind + scope, normalized-similarity clustering).
-    pub async fn memory_merge_suggestions(&self) -> Result<Vec<MemoryMergeGroup>, AppError> {
-        let active: Vec<CompanionMemory> = self
-            .store
-            .dump_memories_all()
-            .await?
-            .into_iter()
-            .filter(|memory| memory.status == "active")
-            .collect();
+    /// Merge-assistant dry run for ONE companion: suspected-duplicate groups over
+    /// the active layer it can see (per kind + scope, normalized-similarity
+    /// clustering).
+    ///
+    /// Scoped in the store, not here and certainly not on the client: this feeds a
+    /// surface that belongs to a single companion, and memory is owned, so another
+    /// companion's memory text has no business being on that wire.
+    pub async fn memory_merge_suggestions(&self, companion_id: &str) -> Result<Vec<MemoryMergeGroup>, AppError> {
+        // Existence gate: an unknown companion must 404 rather than read as
+        // "nothing to merge".
+        self.get_companion(companion_id).await?;
+        let active = self.store.dump_active_memories_visible_to(companion_id).await?;
         Ok(group_similar_memories(active))
     }
 
     /// Merge-assistant confirm: persist the merged memory, archive the source
     /// group (audit-tagged `superseded_by:{id}`), and notify open surfaces.
-    pub async fn merge_memories(&self, group: &[String], merged_content: &str, kind: &str) -> Result<CompanionMemory, AppError> {
-        let merged = self.store.merge_memories(group, merged_content, kind).await?;
+    pub async fn merge_memories(
+        &self,
+        group: &[String],
+        merged_content: &str,
+        kind: &str,
+        actor: &MemoryActor,
+    ) -> Result<CompanionMemory, AppError> {
+        let merged = self.store.merge_memories(group, merged_content, kind, actor).await?;
         self.emitter.emit_memory_created(&merged);
         for id in group {
             if let Ok(Some(archived)) = self.store.get_memory(id).await {
@@ -1501,13 +1515,14 @@ impl CompanionService {
 
     /// Edit a memory's content / pin / lifecycle. Ownership is immutable: there
     /// is no re-homing wire any more, so an edit can never move a memory between
-    /// companions.
+    /// companions — and `actor` decides which rows are addressable at all.
     pub async fn update_memory(
         &self,
         memory_id: &str,
         content: Option<&str>,
         pinned: Option<bool>,
         status: Option<&str>,
+        actor: &MemoryActor,
     ) -> Result<(), AppError> {
         if let Some(status) = status {
             if status != "active" && status != "archived" {
@@ -1515,7 +1530,7 @@ impl CompanionService {
             }
         }
         self.store
-            .update_memory(memory_id, content, pinned, status)
+            .update_memory(memory_id, content, pinned, status, actor)
             .await?;
         // Notify open surfaces with the post-edit row (best-effort; a missing
         // row already errored above).
@@ -1525,8 +1540,8 @@ impl CompanionService {
         Ok(())
     }
 
-    pub async fn delete_memory(&self, memory_id: &str) -> Result<(), AppError> {
-        self.store.delete_memory(memory_id).await?;
+    pub async fn delete_memory(&self, memory_id: &str, actor: &MemoryActor) -> Result<(), AppError> {
+        self.store.delete_memory(memory_id, actor).await?;
         self.emitter.emit_memory_deleted(memory_id);
         Ok(())
     }

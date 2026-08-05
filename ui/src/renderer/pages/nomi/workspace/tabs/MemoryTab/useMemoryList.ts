@@ -126,8 +126,10 @@ export const useMemoryList = (companionId: CompanionId) => {
   );
 
   // ── mutations ──
-  // `updateMemory` carries no ownership at all: the wire has no scope fields left,
-  // so editing text can no longer re-home a memory between companions.
+  // Every mutation carries `scope_companion_id: companionId` — the companion DOING
+  // it, never a new owner: ownership is fixed at write time and the store rejects
+  // a row belonging to anybody else. This tab can therefore only ever change the
+  // memories it is displaying.
 
   const addMemory = useCallback(
     async (nextKind: ICompanionMemoryKind, content: string) => {
@@ -143,18 +145,26 @@ export const useMemoryList = (companionId: CompanionId) => {
 
   const saveContent = useCallback(
     async (memoryId: CompanionMemoryId, content: string) => {
-      await ipcBridge.companion.updateMemory.invoke({ memory_id: memoryId, content: content.trim() });
+      await ipcBridge.companion.updateMemory.invoke({
+        memory_id: memoryId,
+        content: content.trim(),
+        scope_companion_id: companionId,
+      });
       void refresh();
     },
-    [refresh]
+    [companionId, refresh]
   );
 
   const setPinned = useCallback(
     async (memory: ICompanionMemory, pinned: boolean) => {
-      await ipcBridge.companion.updateMemory.invoke({ memory_id: memory.memory_id, pinned });
+      await ipcBridge.companion.updateMemory.invoke({
+        memory_id: memory.memory_id,
+        pinned,
+        scope_companion_id: companionId,
+      });
       void refresh();
     },
-    [refresh]
+    [companionId, refresh]
   );
 
   const setArchived = useCallback(
@@ -162,18 +172,19 @@ export const useMemoryList = (companionId: CompanionId) => {
       await ipcBridge.companion.updateMemory.invoke({
         memory_id: memory.memory_id,
         status: archived ? 'archived' : 'active',
+        scope_companion_id: companionId,
       });
       void refresh();
     },
-    [refresh]
+    [companionId, refresh]
   );
 
   const removeMemory = useCallback(
     async (memoryId: CompanionMemoryId) => {
-      await ipcBridge.companion.deleteMemory.invoke({ memory_id: memoryId });
+      await ipcBridge.companion.deleteMemory.invoke({ memory_id: memoryId, scope_companion_id: companionId });
       void refresh();
     },
-    [refresh]
+    [companionId, refresh]
   );
 
   /**
@@ -185,12 +196,17 @@ export const useMemoryList = (companionId: CompanionId) => {
     async (action: ICompanionMemoryBatchAction, batchKind?: ICompanionMemoryKind): Promise<number> => {
       if (selected.length === 0) return 0;
       const count = selected.length;
-      await ipcBridge.companion.batchMemories.invoke({ ids: selected, action, kind: batchKind });
+      await ipcBridge.companion.batchMemories.invoke({
+        ids: selected,
+        action,
+        kind: batchKind,
+        scope_companion_id: companionId,
+      });
       setSelected([]);
       void refresh();
       return count;
     },
-    [selected, refresh]
+    [companionId, selected, refresh]
   );
 
   return {

@@ -4832,27 +4832,52 @@ export const companion = {
     ),
     fromApiCompanionMemory
   ),
-  /** Content / pin / lifecycle only: a memory's owner is fixed at write time. */
+  /**
+   * Content / pin / lifecycle only: a memory's owner is fixed at write time.
+   *
+   * `scope_companion_id` is the companion DOING the edit, not a new owner — the
+   * store rejects a row owned by anyone else with a 404. Required on every memory
+   * mutation below for the same reason: the invariant is enforced server-side, so
+   * the caller has to say who it is.
+   */
   updateMemory: httpPut<
     void,
-    { memory_id: CompanionMemoryId; content?: string; pinned?: boolean; status?: string }
+    {
+      memory_id: CompanionMemoryId;
+      scope_companion_id: CompanionId;
+      content?: string;
+      pinned?: boolean;
+      status?: string;
+    }
   >(
     (p) => `/api/companion/memories/${p.memory_id}`,
     (p) => ({
       content: p.content,
       pinned: p.pinned,
       status: p.status,
+      scope_companion_id: p.scope_companion_id,
     })
   ),
-  deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId }>((p) => `/api/companion/memories/${p.memory_id}`),
-  /** Atomic batch memory op (single transaction — any bad id rolls the whole batch back). */
+  deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId; scope_companion_id: CompanionId }>(
+    (p) => `/api/companion/memories/${p.memory_id}?scope_companion_id=${encodeURIComponent(p.scope_companion_id)}`
+  ),
+  /** Atomic batch memory op (single transaction — any bad or foreign id rolls the whole batch back). */
   batchMemories: httpPost<
     void,
-    { ids: CompanionMemoryId[]; action: ICompanionMemoryBatchAction; kind?: ICompanionMemoryKind }
+    {
+      ids: CompanionMemoryId[];
+      action: ICompanionMemoryBatchAction;
+      kind?: ICompanionMemoryKind;
+      scope_companion_id: CompanionId;
+    }
   >('/api/companion/memories/batch'),
-  /** Merge-assistant dry run: suspected-duplicate groups over the active layer. */
+  /**
+   * Merge-assistant dry run: suspected-duplicate groups over the active layer of
+   * ONE companion. Scoped server-side — the response carries memory content, so
+   * this surface never receives another companion's text to filter out.
+   */
   memoryMergeSuggestions: withResponseMap(
-    httpPost<unknown[], void>('/api/companion/memories/merge-suggestions'),
+    httpPost<unknown[], { scope_companion_id: CompanionId }>('/api/companion/memories/merge-suggestions'),
     (raw): ICompanionMemoryMergeGroup[] =>
       raw.map((entry) => {
         const value = asWireObject(entry, 'companion memory merge group');
@@ -4864,9 +4889,15 @@ export const companion = {
   ),
   /** Merge-assistant confirm: insert the merged memory, archive the source group. */
   mergeMemories: withResponseMap(
-    httpPost<unknown, { group: CompanionMemoryId[]; merged_content: string; kind: ICompanionMemoryKind }>(
-      '/api/companion/memories/merge'
-    ),
+    httpPost<
+      unknown,
+      {
+        group: CompanionMemoryId[];
+        merged_content: string;
+        kind: ICompanionMemoryKind;
+        scope_companion_id: CompanionId;
+      }
+    >('/api/companion/memories/merge'),
     fromApiCompanionMemory
   ),
   // ── Self-evolved skills (P2: see + edit). Addressed by companion_id + companion_skill_id. ──

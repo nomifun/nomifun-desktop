@@ -302,7 +302,9 @@ To verify a multi-companion setup end to end, walk through in order:
 | Companion detail / update / delete | `GET/PATCH/DELETE /api/companion/companions/{companionId}` |
 | Install-wide config (collect / learn / default companion) | `GET/PATCH /api/companion/config` |
 | One companion's memories / add a memory | `GET /api/companion/memories?scope_companion_id={companionId}`, `POST /api/companion/memories` (`scope_companion_id` = the owner; omitted lets the server resolve it) |
-| Edit a memory (content / pin / status only — never its owner) | `PUT /api/companion/memories/{memoryId}` |
+| Edit a memory (content / pin / status only — never its owner) | `PUT /api/companion/memories/{memoryId}` (`scope_companion_id` = the companion *asking*; another companion's memory is a 404) |
+| Delete a memory / batch op / merge | `DELETE /api/companion/memories/{memoryId}?scope_companion_id={companionId}`, `POST /api/companion/memories/batch`, `POST /api/companion/memories/merge` (all require `scope_companion_id`) |
+| Suspected-duplicate groups for one companion | `POST /api/companion/memories/merge-suggestions` (`{scope_companion_id}` — the scan and the response are scoped to that companion) |
 | Per-companion companion threads | `GET /api/companion/companions/{companionId}/companion/threads`, `…/companion/active` |
 | A companion's chat-history day index | `GET /api/companion/companions/{companionId}/history/days` → `[{day, message_count, has_digest}]`, newest first (local days; read-only, never mints a session) |
 | One day of a conversation | `GET /api/conversations/{conversationId}/messages?day=YYYYMMDD` (oldest-first, server-bounded) |

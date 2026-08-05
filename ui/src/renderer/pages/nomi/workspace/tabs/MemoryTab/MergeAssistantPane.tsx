@@ -29,11 +29,12 @@ interface MergeAssistantPaneProps {
 /**
  * Duplicate-merge assistant, hosted in the detail pane instead of its own Drawer.
  *
- * The dry-run endpoint scans the whole memory layer, so groups are narrowed here
- * to members this companion can actually see — the tab must never offer to merge
- * another companion's memories. The backend groups by owner, so a shown group is
- * always entirely this companion's (a legacy row not yet re-homed has no owner
- * and is visible to everyone until the boot migration assigns it one).
+ * The dry run is scoped to `companionId` in the STORE: the response only ever
+ * contains memories this companion can see, so there is nothing to filter here —
+ * and, more to the point, another companion's memory text never reaches this
+ * surface at all. Groups are owner-buckets by construction (a legacy row not yet
+ * re-homed has no owner and is visible to everyone until the boot migration
+ * assigns it one).
  */
 const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, onMerged }) => {
   const { t } = useTranslation();
@@ -42,7 +43,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
   const [drafts, setDrafts] = useState<MergeDraft[]>([]);
 
   /**
-   * The dry run scans every active memory on the install and can outlive the
+   * The dry run scans this companion's whole active layer and can outlive the
    * pane, so the caller passes a liveness probe and a closed pane is never
    * written to.
    */
@@ -50,18 +51,13 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
     async (isAlive: () => boolean) => {
       setLoading(true);
       try {
-        const raw = await ipcBridge.companion.memoryMergeSuggestions.invoke();
+        const groups = await ipcBridge.companion.memoryMergeSuggestions.invoke({
+          scope_companion_id: companionId,
+        });
         if (!isAlive()) return;
-        const visible = raw
-          .map((group) => ({
-            memories: group.memories.filter(
-              (m) => m.scope_companion_id === null || m.scope_companion_id === companionId
-            ),
-          }))
-          .filter((group) => group.memories.length >= 2);
-        setGroups(visible);
+        setGroups(groups);
         setDrafts(
-          visible.map((group) => ({
+          groups.map((group) => ({
             ids: group.memories.map((m) => m.memory_id),
             // Pre-fill with the longest member; the user edits before confirming.
             content: group.memories.reduce((best, m) => (m.content.length > best.length ? m.content : best), ''),
@@ -101,6 +97,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
           group: draft.ids,
           merged_content: draft.content.trim(),
           kind: draft.kind,
+          scope_companion_id: companionId,
         });
         Message.success(t('nomi.memories.merged', { defaultValue: '已合并' }));
         setGroups((prev) => prev.filter((_, i) => i !== index));
@@ -110,7 +107,7 @@ const MergeAssistantPane: React.FC<MergeAssistantPaneProps> = ({ companionId, on
         Message.error(String(e));
       }
     },
-    [drafts, onMerged, t]
+    [companionId, drafts, onMerged, t]
   );
 
   if (loading) {

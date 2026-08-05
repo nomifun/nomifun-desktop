@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use nomifun_companion::store::MemoryFilter;
+use nomifun_companion::store::{MemoryActor, MemoryFilter};
 use nomifun_common::CompanionMemoryId;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -129,6 +129,11 @@ async fn update(deps: Arc<GatewayDeps>, p: MemoryUpdateParams) -> Value {
             p.content.as_deref(),
             p.pinned,
             p.status.as_deref(),
+            // Same deliberate cross-companion reach as `list` above: this is the
+            // machine owner's administrative surface and has no companion identity
+            // to scope to, so it may edit any row it can list. Named, not an
+            // absent owner that silently skips the ownership check.
+            &MemoryActor::AnyOwner,
         )
         .await
     {
@@ -138,7 +143,12 @@ async fn update(deps: Arc<GatewayDeps>, p: MemoryUpdateParams) -> Value {
 }
 
 async fn delete(deps: Arc<GatewayDeps>, p: MemoryDeleteParams) -> Value {
-    match deps.companion_service.delete_memory(p.memory_id.as_str()).await {
+    // Cross-companion by design — see `update`.
+    match deps
+        .companion_service
+        .delete_memory(p.memory_id.as_str(), &MemoryActor::AnyOwner)
+        .await
+    {
         Ok(()) => json!({ "result": format!("memory {} deleted", p.memory_id) }),
         Err(e) => json!({ "error": e.to_string() }),
     }
