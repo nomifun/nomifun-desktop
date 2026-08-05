@@ -8,6 +8,8 @@
 //! `Result<_, String>` returns, no `connect()` on the trait. Connection
 //! identity, credential decryption, pooling and keepalive all stay behind the
 //! implementation; the model never sees or supplies them.
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 /// Result of running a remote command.
@@ -53,6 +55,41 @@ pub trait SshBackend: Send + Sync {
     async fn stat(&self, path: &str) -> Result<RemoteFileStat, String>;
 }
 
+/// What releasing a session lease could prove about the link behind it. Carried
+/// into the runtime's teardown report, where only `Lost` counts as a failure.
+#[derive(Debug, Clone)]
+pub enum SshLeaseRelease {
+    /// The link is still up and was deliberately kept for the conversation.
+    Retained { detail: String },
+    /// The link was closed and the remote shell was provably reaped.
+    Reaped { detail: String },
+    /// The link is gone with no proof the remote shell died. A real failure.
+    Lost { detail: String },
+}
+
+/// One agent runtime's claim on a live remote session.
+///
+/// `release` **must not close the link.** The runtime that holds a lease is
+/// destroyed and rebuilt on every model switch
+/// (`AgentKillReason::ConfigurationChanged`); a lease that closed on release
+/// would drop the operator's shell — its cwd, its exported environment, its
+/// passphrase prompt — each time they touch the model picker. That is exactly
+/// what the connection pool exists to prevent, so `release` only *reports* what
+/// is already true about the link. Closing is the pool's decision (conversation
+/// deleted, host withdrawn, process shutting down), never a lease's.
+#[async_trait]
+pub trait SshSessionLease: Send + Sync {
+    async fn release(&self) -> SshLeaseRelease;
+}
+
+/// What a provider hands back: the tools' backend plus the runtime's claim on the
+/// session. Kept as one value so a caller cannot take the backend and forget the
+/// lease — then nothing would ever report on the link at teardown.
+pub struct SshSessionBinding {
+    pub backend: Arc<dyn SshBackend>,
+    pub lease: Arc<dyn SshSessionLease>,
+}
+
 /// Connects a conversation to its bound SSH host and returns a ready
 /// `SshBackend`. This is the seam the agent factory calls when a session's
 /// `extra` carries an `ssh_host_id`; the implementation (in `nomifun-ssh`)
@@ -63,12 +100,17 @@ pub trait SshBackend: Send + Sync {
 #[async_trait]
 pub trait SshBackendProvider: Send + Sync {
     /// Build a live backend for `ssh_host_id` owned by `user_id`, rooted at
-    /// `remote_cwd` on the remote host. Errors are surfaced to the session build.
+    /// `remote_cwd` on the remote host. `conversation_id` identifies the session
+    /// the link belongs to: the implementation pools one link per
+    /// (conversation, host), so a rebuilt runtime rejoins the session its
+    /// predecessor was using instead of dialling a second time. Errors are
+    /// surfaced to the session build.
     async fn connect(
         &self,
         user_id: &str,
+        conversation_id: &str,
         ssh_host_id: &str,
         remote_cwd: &str,
-    ) -> Result<std::sync::Arc<dyn SshBackend>, String>;
+    ) -> Result<SshSessionBinding, String>;
 }
 

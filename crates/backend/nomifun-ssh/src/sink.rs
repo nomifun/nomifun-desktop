@@ -8,10 +8,10 @@
 //! Connection identity and credentials are baked in at `connect`; the model never
 //! sees them. This mirrors the Sink pattern (`nomifun-requirement`).
 //!
-//! Two `SshBackend` implementations live here for two different lifetimes:
-//! [`SshBackendSink`] pins one handle for its whole life (the un-pooled path), and
-//! [`SshLinkBackend`] resolves the pool's *current* handle on every call so a
-//! reconnect underneath is invisible to the tools the model is already holding.
+//! There is exactly one `SshBackend` implementation, [`SshLinkBackend`], and it
+//! resolves the pool's *current* handle on every call — so a reconnect underneath
+//! is invisible to the tools the model is already holding, and no session can
+//! exist outside the pool's accounting.
 use std::sync::Arc;
 
 use nomi_ssh::connection::{HostKeyPolicy, SshConnection, SshError};
@@ -23,7 +23,7 @@ use nomifun_ai_agent::{RemoteCommandOutput, RemoteFileStat, SshBackend};
 use zeroize::Zeroizing;
 
 use crate::pool::{SshConnectionPool, SshLink};
-use crate::service::{DecryptedCredential, SshHostService, SshServiceError};
+use crate::service::{DecryptedCredential, SshServiceError};
 
 /// Why a dial did not produce a usable link.
 ///
@@ -185,80 +185,6 @@ pub(crate) fn sudo_rules(cred: &DecryptedCredential) -> Vec<AnswerRule> {
     match &cred.sudo_password {
         Some(pw) => vec![AnswerRule::sudo(Zeroizing::new(pw.as_str().to_string()))],
         None => Vec::new(),
-    }
-}
-
-/// The `SshBackend` implementation handed to the agent's remote tools when there
-/// is no pool to resolve against (`SshConnectionProvider`'s one-shot path).
-pub struct SshBackendSink {
-    handle: Arc<SshConnectionHandle>,
-}
-
-impl SshBackendSink {
-    pub fn new(handle: Arc<SshConnectionHandle>) -> Self {
-        Self { handle }
-    }
-
-    /// Erase to the seam trait object the agent bootstrap expects.
-    pub fn into_arc(handle: Arc<SshConnectionHandle>) -> Arc<dyn SshBackend> {
-        Arc::new(Self::new(handle))
-    }
-}
-
-#[async_trait::async_trait]
-impl SshBackend for SshBackendSink {
-    async fn run_command(
-        &self,
-        command: &str,
-        timeout_ms: u64,
-    ) -> Result<RemoteCommandOutput, String> {
-        let outcome = run_with_budget(self.handle.shell(), command, timeout_ms)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(remote_output(outcome))
-    }
-
-    async fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
-        self.handle
-            .fs()
-            .read_file(path)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn write_file(&self, path: &str, bytes: Vec<u8>) -> Result<(), String> {
-        self.handle
-            .fs()
-            .write_file_atomic(path, &bytes)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn grep(&self, pattern: &str, path: &str) -> Result<String, String> {
-        let out = run_with_budget(self.handle.shell(), &grep_command(pattern, path), GREP_TIMEOUT_MS)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(out.output)
-    }
-
-    async fn list_files(&self, glob: &str) -> Result<Vec<String>, String> {
-        let out = run_with_budget(self.handle.shell(), &list_command(glob), LIST_TIMEOUT_MS)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(list_lines(&out.output))
-    }
-
-    async fn stat(&self, path: &str) -> Result<RemoteFileStat, String> {
-        let s = self
-            .handle
-            .fs()
-            .stat(path)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(RemoteFileStat {
-            size: s.size,
-            is_dir: s.is_dir,
-        })
     }
 }
 
@@ -477,52 +403,6 @@ fn clone_secret(
 /// Single-quote a value for POSIX sh, escaping embedded single quotes.
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// Connects conversations to their bound SSH host by decrypting the stored
-/// credential and dialing. Implements the agent's `SshBackendProvider` seam so
-/// the factory can request a backend without depending on this crate.
-#[derive(Clone)]
-pub struct SshConnectionProvider {
-    service: SshHostService,
-    known_hosts: std::path::PathBuf,
-}
-
-impl SshConnectionProvider {
-    pub fn new(service: SshHostService, known_hosts: std::path::PathBuf) -> Self {
-        Self {
-            service,
-            known_hosts,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl nomifun_ai_agent::SshBackendProvider for SshConnectionProvider {
-    async fn connect(
-        &self,
-        user_id: &str,
-        ssh_host_id: &str,
-        remote_cwd: &str,
-    ) -> Result<Arc<dyn SshBackend>, String> {
-        let id = nomifun_common::SshHostId::parse(ssh_host_id)
-            .map_err(|e| format!("invalid ssh_host_id: {e}"))?;
-        let cred = self
-            .service
-            .decrypt_credential(user_id, &id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let handle = SshConnectionHandle::connect(cred, self.known_hosts.clone(), remote_cwd)
-            .await
-            .map_err(|e| e.to_string())?;
-        // Best-effort: stamp connected status + fingerprint on the host row.
-        let fingerprint = handle.fingerprint.clone();
-        let _ = self
-            .service
-            .mark_connected(user_id, &id, fingerprint.as_deref())
-            .await;
-        Ok(SshBackendSink::into_arc(Arc::new(handle)))
-    }
 }
 
 /// Glob patterns must NOT be single-quoted (that would disable expansion), but

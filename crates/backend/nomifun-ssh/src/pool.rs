@@ -354,6 +354,19 @@ impl SshConnectionPool {
         self.0.service.clone()
     }
 
+    /// Whether two handles are the same pool — same links, same sockets. A pool is
+    /// an identity, not a value, so this is deliberately not `PartialEq`.
+    pub fn is_same_pool(&self, other: &SshConnectionPool) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Whether this pool still holds the link for `key`. False once it has been
+    /// closed (or was never opened), which is how a released lease tells "the pool
+    /// kept my session" from "my session is gone".
+    pub fn is_pooled(&self, key: &SshLinkKey) -> bool {
+        self.0.links.contains_key(key)
+    }
+
     /// The link for `(conversation_id, ssh_host_id)`, connected. Reuses the
     /// existing link when there is one; `remote_cwd` only seeds a brand-new link,
     /// because a live session's cwd belongs to the session, not the caller.
@@ -562,6 +575,79 @@ impl nomifun_common::OnConversationDelete for SshConnectionPool {
                     "ssh link for a deleted conversation was let go of without proof"
                 );
             }
+        }
+    }
+}
+
+/// The pool *is* the agent's SSH provider. There is deliberately no second
+/// un-pooled path: a session that dialled on the side would be invisible to the
+/// status routes, to the delete cascade and to shutdown accounting.
+#[async_trait::async_trait]
+impl nomifun_ai_agent::SshBackendProvider for SshConnectionPool {
+    async fn connect(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        ssh_host_id: &str,
+        remote_cwd: &str,
+    ) -> Result<nomifun_ai_agent::SshSessionBinding, String> {
+        let id = SshHostId::parse(ssh_host_id)
+            .map_err(|e| format!("invalid ssh_host_id: {e}"))?;
+        let link = self
+            .acquire(user_id, conversation_id, &id, remote_cwd)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(nomifun_ai_agent::SshSessionBinding {
+            backend: self.backend_for(&link),
+            lease: Arc::new(PooledSessionLease {
+                pool: self.clone(),
+                link,
+            }),
+        })
+    }
+}
+
+/// One agent runtime's claim on a pooled link.
+///
+/// Holds the pool strongly on purpose: the pool is a process-level service that
+/// outlives every runtime, and a lease that could not reach it would have to
+/// report a failure it cannot actually distinguish from success.
+struct PooledSessionLease {
+    pool: SshConnectionPool,
+    link: Arc<SshLink>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_ai_agent::SshSessionLease for PooledSessionLease {
+    /// Report, never close. The runtime that holds this lease is destroyed and
+    /// rebuilt on every model switch; closing here would cost the operator their
+    /// shell, their cwd and another passphrase prompt for a UI click. So the answer
+    /// is read out of the link's own state — the single truth this crate keeps.
+    async fn release(&self) -> nomifun_ai_agent::SshLeaseRelease {
+        use nomifun_ai_agent::SshLeaseRelease;
+        match self.link.state() {
+            SshLinkState::Closed { teardown } => match teardown {
+                SshTeardown::Reaped { detail } => SshLeaseRelease::Reaped { detail },
+                // A lease reports proof, and "already down" is the absence of it:
+                // the remote shell was never seen to exit. The pool's shutdown
+                // report keeps the two apart because it counts links for an
+                // operator; a runtime can only say "proven" or "not proven".
+                SshTeardown::Lost { detail } | SshTeardown::AlreadyDown { detail } => {
+                    SshLeaseRelease::Lost { detail }
+                }
+            },
+            other if self.pool.is_pooled(self.link.key()) => SshLeaseRelease::Retained {
+                detail: format!(
+                    "link kept for this conversation ({:?})",
+                    other.phase()
+                ),
+            },
+            other => SshLeaseRelease::Lost {
+                detail: format!(
+                    "link left the pool while {:?} and never reported how it closed",
+                    other.phase()
+                ),
+            },
         }
     }
 }

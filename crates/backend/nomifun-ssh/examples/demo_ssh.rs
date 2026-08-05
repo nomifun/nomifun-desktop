@@ -1,10 +1,12 @@
 //! Manual acceptance harness for SSH remote sessions (vertical slice).
 //!
 //! Drives the real backend stack end to end against a throwaway sshd started by
-//! this program: encrypt a host into an in-memory DB, connect the pool sink, and
+//! this program: encrypt a host into an in-memory DB, acquire a pooled link, and
 //! run the agent's own remote tools (Bash/Read/Edit/Write/Grep) plus a sudo
-//! injection — exactly what the model would do in a chat session. Prints each
-//! step so a human can verify without a GUI.
+//! injection — exactly what the model would do in a chat session. Every link
+//! transition the operator's browser would receive is printed as it happens, and
+//! the run ends with the pool's close forensics, so a human can verify without a
+//! GUI.
 //!
 //! Run: `cargo run -p nomifun-ssh --example demo_ssh`
 //! Requires `sshd` and `ssh-keygen` on PATH (skips with a message otherwise).
@@ -14,8 +16,25 @@ use std::process::{Child, Command};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nomifun_api_types::WebSocketMessage;
+use nomifun_realtime::UserEventSink;
 use nomifun_ssh::dto::CreateSshHostRequest;
-use nomifun_ssh::{SshBackendSink, SshConnectionHandle, SshHostService};
+use nomifun_ssh::{SshConnectionPool, SshEventEmitter, SshHostService};
+
+/// Prints what the owner's `/ws` channel would have delivered. The pool emits on
+/// every real state change, so this is the demo's window onto the state machine.
+struct PrintingEvents;
+
+impl UserEventSink for PrintingEvents {
+    fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+        println!(
+            "  → {} to {}: {}",
+            event.name,
+            &user_id[..8.min(user_id.len())],
+            event.data
+        );
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -73,17 +92,27 @@ async fn run() -> Result<(), String> {
         return Err("private key was not masked in the response DTO".into());
     }
 
-    // 2) Decrypt + connect the sink (what the factory does per session).
+    // 2) Acquire the pooled link (what the factory does per session).
     let id = nomifun_common::SshHostId::parse(host.ssh_host_id).unwrap();
-    let cred = service
-        .decrypt_credential(&user_id, &id)
+    let pool = SshConnectionPool::new(
+        service.clone(),
+        sshd.known_hosts.clone(),
+        SshEventEmitter::new(Arc::new(PrintingEvents)),
+    );
+    let link = pool
+        .acquire(&user_id, "demo-conversation", &id, "/tmp")
         .await
         .map_err(|e| e.to_string())?;
-    let handle = SshConnectionHandle::connect(cred, sshd.known_hosts.clone(), "/tmp")
+    println!("• connected; link state = {:?}", link.state());
+    let again = pool
+        .acquire(&user_id, "demo-conversation", &id, "/tmp")
         .await
         .map_err(|e| e.to_string())?;
-    println!("• connected; host fingerprint = {:?}", handle.fingerprint);
-    let backend = SshBackendSink::into_arc(Arc::new(handle));
+    if !Arc::ptr_eq(&link, &again) || pool.active_link_count() != 1 {
+        return Err("a second acquire opened a second link instead of reusing one".into());
+    }
+    println!("• re-acquire reused the same link (active links = 1)");
+    let backend = pool.backend_for(&link);
 
     // 3) Drive the SshBackend seam exactly as the agent's remote tools do.
     let target = format!("/tmp/nomi_demo_{}.txt", std::process::id());
@@ -121,6 +150,19 @@ async fn run() -> Result<(), String> {
     let _ = backend
         .run_command(&format!("rm -rf {target} {uniq}"), 30_000)
         .await;
+
+    // 5) Close with forensics: the remote shell must be provably reaped, not just
+    // let go of.
+    let report = pool.shutdown_all().await;
+    println!(
+        "• shutdown_all: reaped={} lost={} already_down={}",
+        report.reaped, report.lost, report.already_down
+    );
+    if report.reaped != 1 {
+        return Err(format!(
+            "the pooled link was not proven reaped at shutdown: {report:?}"
+        ));
+    }
 
     Ok(())
 }
