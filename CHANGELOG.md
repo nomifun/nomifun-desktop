@@ -37,9 +37,11 @@ notes at a high level rather than a complete historical log.
   instead of writing an ownerless memory. Importing a memory bundle re-homes
   every row onto the local owner, since companion ids are not stable across
   machines. The UI/API contract version was bumped accordingly
-  (`PUT /api/companion/memories/{id}` no longer accepts `scope_kind` /
-  `scope_companion_id`, `scope_companion_id` on `POST /api/companion/memories`
-  now names the owner instead of meaning "private", `scope_kind` is gone from the
+  (`PUT /api/companion/memories/{id}` no longer accepts `scope_kind`, and its
+  `scope_companion_id` no longer names a target scope — see the ownership-check
+  entry below, where it becomes the *asking* companion; `scope_companion_id` on
+  `POST /api/companion/memories` now names the owner instead of meaning
+  "private", `scope_kind` is gone from the
   memory shape the UI consumes, and `memories_active` / `memories_archived` plus
   the digest's `memories_added` are per-companion counts rather than install-wide
   totals). Collection, learning and evolution **configuration** was still
@@ -89,6 +91,31 @@ notes at a high level rather than a complete historical log.
   statistics and accept/reject feedback stay install-wide on purpose: a repeated
   tool sequence is a fact about how the owner works, and a rejection is the
   owner's judgement about that pattern rather than about a companion.
+
+- **Memory ownership is now enforced where memory is stored, not merely respected
+  by its callers.** `PUT /api/companion/memories/{id}`, `DELETE
+  /api/companion/memories/{id}`, `POST /api/companion/memories/batch` and `POST
+  /api/companion/memories/merge` used to address rows by memory id alone, so "a
+  memory can only be changed by its owner" held only because a companion's
+  workspace happens to know just its own ids. All four now require the asking
+  companion (`scope_companion_id` in the body; the query string for `DELETE`) and
+  refuse anything that is not its memory with a `404` — never a silent no-op
+  reported as success. It is the caller's identity, not a new owner: no wire can
+  re-home a memory. The one cross-companion surface is the machine owner's MCP
+  tools (`nomi_memory_update` / `nomi_memory_delete`), which pass an explicitly
+  named "any owner" actor, because the owner agent has no companion identity of its
+  own. `POST /api/companion/memories/merge-suggestions` is scoped the same way and
+  requires `scope_companion_id` too: it used to scan every companion's memories and
+  let the client filter, which put other companions' memory **text** on a wire
+  belonging to a single companion. The UI/API contract version was bumped
+  accordingly.
+
+- 导出伙伴 now also carries the companion's **mood**. `state.json` in a companion
+  bundle grew a `mood` field beside `xp`, and import restores it, so a companion
+  moved between machines keeps the mood it was in. Bundles written before this
+  change have no such field and still import (the importing machine's default
+  stands). The memory bundle's own `mood` field stays deliberately null and
+  ignored — mood belongs to one companion, not to a whole memory hub.
 
 - 聊天历史 (`/nomi` → 聊天历史) now reads a **server-side** day index:
   `GET /api/companion/companions/{id}/history/days` returns every local calendar
