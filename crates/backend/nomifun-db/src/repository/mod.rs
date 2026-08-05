@@ -99,7 +99,6 @@ pub use requirement::{
 };
 pub use settings::ISettingsRepository;
 pub use skill_tag::ISkillTagRepository;
-pub use ssh_host::{CreateSshHostParams, ISshHostRepository, UpdateSshHostParams};
 pub use sqlite_acp_session::SqliteAcpSessionRepository;
 pub use sqlite_agent_metadata::SqliteAgentMetadataRepository;
 pub use sqlite_agent_execution::SqliteAgentExecutionRepository;
