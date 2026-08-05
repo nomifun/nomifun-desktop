@@ -52,6 +52,11 @@ pub enum SshError {
     HostKeyChanged { host: String, line: usize },
     #[error("ssh protocol error: {0}")]
     Protocol(String),
+    /// The transport or shell channel went away mid-operation. Distinct from a
+    /// slow command on purpose: there is no outcome to report, only a lost link,
+    /// so the pool must redial rather than wait.
+    #[error("ssh link disconnected: {0}")]
+    Disconnected(String),
 }
 
 impl From<russh::Error> for SshError {
@@ -224,5 +229,32 @@ impl SshConnection {
     /// Borrow the authenticated handle for opening channels (shell / SFTP).
     pub(crate) fn handle(&self) -> &Handle<ClientHandler> {
         &self.handle
+    }
+
+    /// Cheap in-process liveness bit: true once russh's session task has ended
+    /// (TCP gone, server disconnected, transport error). No network I/O and no
+    /// channel lock, so a supervisor can poll it on a timer while a long command
+    /// still holds the shell. It cannot detect a silently black-holed link — for
+    /// that the peer has to be pinged.
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
+    /// Round-trip liveness probe: sends a keepalive and waits for the peer's
+    /// reply, so a half-open TCP connection is detected instead of looking idle.
+    pub async fn ping(&self) -> Result<(), SshError> {
+        self.handle
+            .send_ping()
+            .await
+            .map_err(|e| SshError::Disconnected(e.to_string()))
+    }
+
+    /// Send `SSH_MSG_DISCONNECT` so the server sees a deliberate close instead
+    /// of a torn-down TCP connection.
+    pub async fn disconnect(&self) -> Result<(), SshError> {
+        self.handle
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await
+            .map_err(|e| SshError::Disconnected(e.to_string()))
     }
 }

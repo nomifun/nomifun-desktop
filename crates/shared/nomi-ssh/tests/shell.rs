@@ -1,8 +1,11 @@
 //! RemoteShell sentinel protocol against a real sshd: cwd/env persistence,
-//! exit codes, cwd in the marker, and recoverable timeout.
+//! exit codes, cwd in the marker, recoverable timeout, and the disconnect /
+//! close-with-evidence contracts the connection pool relies on.
 mod support;
 
 use std::time::Duration;
+
+use nomi_ssh::connection::SshError;
 
 const T: Duration = Duration::from_secs(8);
 
@@ -87,5 +90,96 @@ async fn timeout_is_recoverable() {
         after.output.contains("recovered"),
         "got: {:?}",
         after.output
+    );
+}
+
+/// A shell that is gone is not a shell that is slow. Reporting the conventional
+/// timeout code for a dead channel makes liveness detection and teardown
+/// forensics impossible: the pool cannot tell "still running, be patient" from
+/// "link is gone, redial".
+#[tokio::test(flavor = "multi_thread")]
+async fn run_reports_disconnect_when_the_shell_exits() {
+    let Some(sshd) = support::start_pubkey_sshd() else {
+        eprintln!("SKIP: no usable sshd");
+        return;
+    };
+    let sh = support::connect(&sshd)
+        .await
+        .open_shell("/tmp")
+        .await
+        .unwrap();
+
+    // `exit` ends the remote shell, so this submission's sentinel can never
+    // arrive — the channel closes instead.
+    let first = sh.run("exit", T).await;
+    let second = sh.run("echo after_exit", T).await;
+
+    for (label, result) in [("first", &first), ("second", &second)] {
+        if let Ok(outcome) = result {
+            assert!(
+                !(outcome.timed_out && outcome.exit_code == 124),
+                "{label} run dressed a dead shell up as a timeout: {outcome:?}"
+            );
+        }
+    }
+    assert!(
+        matches!(second, Err(SshError::Disconnected(_))),
+        "a run against a dead shell must report Disconnected, got: {second:?}"
+    );
+}
+
+/// `is_reaped()` is the teardown verdict, so it must be backed by evidence from
+/// the server: the channel closed AND the remote said how the shell ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_proves_the_shell_was_reaped() {
+    let Some(sshd) = support::start_pubkey_sshd() else {
+        eprintln!("SKIP: no usable sshd");
+        return;
+    };
+    let sh = support::connect(&sshd)
+        .await
+        .open_shell("/tmp")
+        .await
+        .unwrap();
+    sh.run("echo alive", T).await.expect("run before close");
+
+    let proof = sh.close(T).await;
+    assert!(proof.eof_sent, "close must send EOF, got: {proof:?}");
+    assert!(
+        proof.channel_closed,
+        "close must observe the channel closing, got: {proof:?}"
+    );
+    assert!(
+        proof.exit_status.is_some() || proof.exit_signal.is_some(),
+        "close must capture how the shell ended, got: {proof:?}"
+    );
+    assert!(proof.is_reaped(), "got: {proof:?}");
+}
+
+/// The honest half of the contract: no evidence, no `reaped`.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_after_the_shell_died_is_not_reaped() {
+    let Some(sshd) = support::start_pubkey_sshd() else {
+        eprintln!("SKIP: no usable sshd");
+        return;
+    };
+    let sh = support::connect(&sshd)
+        .await
+        .open_shell("/tmp")
+        .await
+        .unwrap();
+    // Kill the shell out from under us, then drain it so the close path has
+    // nothing left to learn from.
+    let _ = sh.run("exit", T).await;
+    let _ = sh.run("echo drained", T).await;
+
+    let proof = sh.close(T).await;
+    assert!(
+        !proof.is_reaped(),
+        "a shell that vanished before close must not be reported reaped: {proof:?}"
+    );
+    assert!(
+        !proof.errors.is_empty() || proof.exit_status.is_none(),
+        "an unproven close must say why it is unproven: {proof:?}"
     );
 }
