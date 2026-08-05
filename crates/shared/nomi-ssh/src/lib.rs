@@ -8,6 +8,7 @@
 //! with a fast-churning `Handler` API — is never a transitive dependency of
 //! `nomi-tools` / `nomi-agent` / `nomifun-terminal`.
 
-// Modules land in subsequent tasks: shell, fs, responder.
+// Modules land in subsequent tasks: fs, responder.
 pub mod connection;
 pub mod credential;
+pub mod shell;
