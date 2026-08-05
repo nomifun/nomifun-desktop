@@ -6752,6 +6752,7 @@ dependencies = [
  "axum",
  "dashmap",
  "nomi-ssh",
+ "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",

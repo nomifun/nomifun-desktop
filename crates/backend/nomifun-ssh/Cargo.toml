@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 nomi-ssh.workspace = true
+nomifun-ai-agent.workspace = true
 nomifun-common.workspace = true
 nomifun-db.workspace = true
 nomifun-realtime.workspace = true
