@@ -52,3 +52,23 @@ pub trait SshBackend: Send + Sync {
     /// Stat a remote path.
     async fn stat(&self, path: &str) -> Result<RemoteFileStat, String>;
 }
+
+/// Connects a conversation to its bound SSH host and returns a ready
+/// `SshBackend`. This is the seam the agent factory calls when a session's
+/// `extra` carries an `ssh_host_id`; the implementation (in `nomifun-ssh`)
+/// decrypts the stored credential, dials, and opens the shell + SFTP. Kept
+/// separate from `SshBackend` so the factory can request a connection without
+/// `nomi-agent`/`nomifun-ai-agent` depending on the transport crate (that would
+/// be a dependency cycle — the transport crate already depends on the seam).
+#[async_trait]
+pub trait SshBackendProvider: Send + Sync {
+    /// Build a live backend for `ssh_host_id` owned by `user_id`, rooted at
+    /// `remote_cwd` on the remote host. Errors are surfaced to the session build.
+    async fn connect(
+        &self,
+        user_id: &str,
+        ssh_host_id: &str,
+        remote_cwd: &str,
+    ) -> Result<std::sync::Arc<dyn SshBackend>, String>;
+}
+

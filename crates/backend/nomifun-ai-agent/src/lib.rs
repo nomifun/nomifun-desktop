@@ -37,7 +37,7 @@ pub use nomi_agent::companion_tools::{CompanionSkillSink, SkillListing};
 pub use nomi_agent::summon_tools::{SummonContextSink, SummonProposalSink};
 pub use nomi_agent::cron_tools::{CronJobSummary, CronSink};
 pub use nomi_agent::ssh_backend::{
-    RemoteCommandOutput, RemoteFileStat, SshBackend,
+    RemoteCommandOutput, RemoteFileStat, SshBackend, SshBackendProvider,
 };
 pub use nomi_agent::requirement_tools::RequirementSink;
 pub use nomi_config;

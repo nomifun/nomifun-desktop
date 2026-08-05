@@ -171,6 +171,20 @@ impl SshHostService {
         self.repo.delete(user_id, id).await.map_err(map_not_found)
     }
 
+    /// Stamp a host as connected now, recording its fingerprint (best-effort;
+    /// called after a successful dial).
+    pub async fn mark_connected(
+        &self,
+        user_id: &str,
+        id: &SshHostId,
+        fingerprint: Option<&str>,
+    ) -> Result<(), SshServiceError> {
+        self.repo
+            .update_status(user_id, id, "connected", Some(nomifun_common::now_ms()), fingerprint)
+            .await
+            .map_err(map_not_found)
+    }
+
     /// Decrypt an owned host's credentials for the transport layer. Never
     /// serialized; the returned secrets are `Zeroizing`.
     pub async fn decrypt_credential(

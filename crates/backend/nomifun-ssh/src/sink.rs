@@ -16,7 +16,7 @@ use nomi_ssh::shell::RemoteShell;
 use nomifun_ai_agent::{RemoteCommandOutput, RemoteFileStat, SshBackend};
 use zeroize::Zeroizing;
 
-use crate::service::DecryptedCredential;
+use crate::service::{DecryptedCredential, SshHostService};
 
 /// A live connection bound to one conversation: a persistent shell (cwd/env
 /// survive across commands) and an SFTP session (file ops).
@@ -198,6 +198,48 @@ fn clone_secret(
 /// Single-quote a value for POSIX sh, escaping embedded single quotes.
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Connects conversations to their bound SSH host by decrypting the stored
+/// credential and dialing. Implements the agent's `SshBackendProvider` seam so
+/// the factory can request a backend without depending on this crate.
+#[derive(Clone)]
+pub struct SshConnectionProvider {
+    service: SshHostService,
+    known_hosts: std::path::PathBuf,
+}
+
+impl SshConnectionProvider {
+    pub fn new(service: SshHostService, known_hosts: std::path::PathBuf) -> Self {
+        Self { service, known_hosts }
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_ai_agent::SshBackendProvider for SshConnectionProvider {
+    async fn connect(
+        &self,
+        user_id: &str,
+        ssh_host_id: &str,
+        remote_cwd: &str,
+    ) -> Result<Arc<dyn SshBackend>, String> {
+        let id = nomifun_common::SshHostId::parse(ssh_host_id)
+            .map_err(|e| format!("invalid ssh_host_id: {e}"))?;
+        let cred = self
+            .service
+            .decrypt_credential(user_id, &id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let handle =
+            SshConnectionHandle::connect(cred, self.known_hosts.clone(), remote_cwd).await?;
+        // Best-effort: stamp connected status + fingerprint on the host row.
+        let fingerprint = handle.fingerprint.clone();
+        let _ = self
+            .service
+            .mark_connected(user_id, &id, fingerprint.as_deref())
+            .await;
+        Ok(SshBackendSink::into_arc(Arc::new(handle)))
+    }
 }
 
 /// Glob patterns must NOT be single-quoted (that would disable expansion), but
