@@ -335,11 +335,13 @@ was present, so it could only ever disagree, never inform; a boot migration
 rebuilds both tables into the single nullable column (SQLite cannot drop a column
 named in a table CHECK). The rebuild preserves every `id` verbatim because
 `companion_memories_fts` is external-content FTS5 keyed on `content_rowid='id'`.
-A memory's owner reaches the wire under the column's own name, `companion_id`;
-skill rows still ship theirs as `scope_companion_id`. An older bundle's
-`scope_kind` is accepted and discarded on import, and its `scope_companion_id` on
-a memory row is translated to `companion_id` — a bundle is a long-lived file on
-the owner's disk, not a request we can ask them to re-issue.
+A memory's owner reaches the wire under the column's own name, `companion_id`,
+and so does a skill's — the skill wire kept the retired spelling on a
+`serde(rename)` for one release longer, which is exactly how a wire and its
+column get to disagree unnoticed. An older bundle's `scope_kind` is accepted and
+discarded on import, and a `scope_companion_id` on either row type is translated
+to `companion_id` — a bundle is a long-lived file on the owner's disk, not a
+request we can ask them to re-issue.
 
 The historical single-companion layout `companion/nomi/` is not migrated into
 v3. If detected, it is retired together with the complete old managed dataset.

@@ -310,12 +310,18 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
       data-tauri-drag-region
       onDoubleClick={handleTitlebarDoubleClick}
       style={mobileCenterStyle}
-      className={classNames('flex items-center gap-8px app-titlebar bg-2 border-b border-[var(--border-base)]', {
-        'app-titlebar--mobile': layout?.isMobile,
-        'app-titlebar--mobile-conversation': layout?.isMobile && workspaceAvailable,
-        'app-titlebar--desktop': isDesktopRuntime,
-        'app-titlebar--mac': isMacRuntime,
-      })}
+      // 标题栏底部分隔线：原来只有 border-b（宽度）+ 边框色，没有 border-style，
+      // 而本仓库没有全局 border reset，所以这条线从来没画出来过。
+      // The titlebar's bottom rule never painted: width + colour but no border-style.
+      className={classNames(
+        'flex items-center gap-8px app-titlebar bg-2 border-b border-b-solid border-[var(--border-base)]',
+        {
+          'app-titlebar--mobile': layout?.isMobile,
+          'app-titlebar--mobile-conversation': layout?.isMobile && workspaceAvailable,
+          'app-titlebar--desktop': isDesktopRuntime,
+          'app-titlebar--mac': isMacRuntime,
+        },
+      )}
     >
       <div ref={menuRef} className='app-titlebar__menu' style={menuStyle}>
         {showBackToChatButton && (

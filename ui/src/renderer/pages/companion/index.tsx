@@ -109,10 +109,18 @@ const inQuietHours = (start: string, end: string): boolean => {
   return s <= e ? cur >= s && cur < e : cur >= s || cur < e;
 };
 
-/** Owning companion id from the window URL (`index.html#/companion?companionId={companion_id}`). */
+/**
+ * Owning companion id from the window URL (`index.html#/companion?companion_id={companion_id}`).
+ *
+ * The parameter is snake_case because the writer is Rust: `apps/desktop/src/main.rs`
+ * builds the URL as `format!("index.html#/companion?companion_id={}", …)` when it
+ * creates the window. Reading a camelCase spelling here would not throw — it would
+ * return null and silently fall through to "first enabled companion", which looks
+ * correct on a single-companion install and misroutes every window on any other.
+ */
 const parseCompanionIdFromHash = (): CompanionId | null => {
   if (typeof window === 'undefined') return null;
-  const hash = window.location.hash; // "#/companion?companionId={companion_id}"
+  const hash = window.location.hash; // "#/companion?companion_id={companion_id}"
   const q = hash.indexOf('?');
   if (q === -1) return null;
   const id = new URLSearchParams(hash.slice(q + 1)).get('companion_id');
@@ -125,11 +133,11 @@ const parseCompanionIdFromHash = (): CompanionId | null => {
 };
 
 /**
- * The desktop-companion window page (route #/companion?companionId={companion_id}, window label
+ * The desktop-companion window page (route #/companion?companion_id={companion_id}, window label
  * "companion-{companion_id}"). Renders that companion's character on a transparent always-on-top
  * window; shows/hides the native window from the companion's persisted profile
  * (appearance.companion_enabled); hover reveals the chat bar and replies stream into
- * the forehead bubble. Without a companionId query (direct open / web preview) it
+ * the forehead bubble. Without a companion_id query (direct open / web preview) it
  * falls back to the first enabled companion in the registry.
  */
 const CompanionPage: React.FC = () => {
@@ -577,7 +585,7 @@ const CompanionPage: React.FC = () => {
     []
   );
 
-  // No companionId in the URL (direct open / web preview): fall back to the first
+  // No `companion_id` in the URL (direct open / web preview): fall back to the first
   // enabled companion in the registry (retry — the embedded backend may be booting).
   useEffect(() => {
     if (companionId) return;

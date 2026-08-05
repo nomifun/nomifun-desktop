@@ -1,14 +1,14 @@
 # Theme Color Migration Guide
 
 > 门禁 / Gate: `bun run check:dead-css`（`scripts/check-dead-css-utilities.mjs`）
-> 拦住本文「⚠️ 四个死写法」一节里的**任何一处**使用。存量已清零，棘轮基线已删除，
+> 拦住本文「⚠️ 七个死写法」一节里的**任何一处**使用。存量已清零，棘轮基线已删除，
 > 现在是一刀切禁令。
 > The sweep is done and the ratchet baseline is gone: these forms are now simply
 > banned, anywhere under `ui/src`.
 
-## ⚠️ 四个死写法 / Four dead forms (measured, not guessed)
+## ⚠️ 七个死写法 / Seven dead forms (measured, not guessed)
 
-下面四种写法在本仓库**编译不出 CSS，或编译成错的属性**。都用真实 UnoCSS
+下面七种写法在本仓库**编译不出 CSS，或编译成错的属性**。都用真实 UnoCSS
 生成器（`ui/uno.config.ts`）实测过。写出来不会报错、tsc 抓不到、页面也不会崩——
 元素只是静默保留继承来的颜色，所以特别容易蔓延。
 
@@ -115,6 +115,10 @@ UnoCSS 解析 `border-b-*` 时**先吃掉 `-b-` 当成 bottom 方向**，再拿�
 配置块想支撑这套写法，**它永远不可达**（方向解析先发生，且 `b-1/2/3` 会被
 `backgroundColors` 的数字键抢先命中），已删除；删除前后整站产出 CSS 逐字节相同。
 
+**四个方向都会犯同一个错。** 门禁最初只拦 `-b-`，于是 `ExecutionAdjustBox.tsx` 里一处
+「`border-t-` + `base`」的顶部分隔线漏了过去（实测产出 `border-top-color: var(--bg-base)`，
+分隔线和背景同色）。现在规则按 `border-[trblxy]-(base|light)` 匹配。
+
 ```tsx
 // ❌ 落到 --bg-* 上，不是基础边框色
 <div className='border border-b-base' />
@@ -125,9 +129,8 @@ UnoCSS 解析 `border-b-*` 时**先吃掉 `-b-` 当成 bottom 方向**，再拿�
 <div className='border-b border-b-solid border-b-[var(--border-base)]' />
 ```
 
-同一个陷阱还有一个变体：**数字键**也会被 theme 颜色劫持。`border-b-2` 不是
-「下边框 2px」，而是 `border-bottom-color: var(--bg-2)`（`backgroundColors` 的 `2` 键
-命中）。要下边框宽度就写 `border-b-2px`。
+同一个陷阱的**数字键**变体现在单列为第 6 条：`border-b-2` 不是「下边框 2px」，而是
+`border-bottom-color: var(--bg-2)`。
 
 ### 4. `bg-primary-6/12` —— 项目规则被斜杠透明度打断，产出 0 条 CSS
 
@@ -144,6 +147,121 @@ UnoCSS 解析 `border-b-*` 时**先吃掉 `-b-` 当成 bottom 方向**，再拿�
 这是把写法 1 **机械 sed** 成项目规则类时最容易踩的坑：原来的
 `bg-[rgb(var(--success-6))]/12` 里的 `/12` 会被留在后面，于是一个死写法换成了另一个
 死写法，而且换完之后连 grep 都找不到它了。门禁把这条也列为禁令。
+
+### 5. `bg-bg-N` / `text-text-*` —— 前缀写两遍，产出 0 条 CSS
+
+`uno.config.ts` 把 `backgroundColors` 合进 `theme.colors` 时用的是**数字键** `1..10`
+（`3: 'var(--bg-3)'`）。所以 `bg-3` 命中键 `3`，而 `bg-bg-3` 查的是一个叫「`bg-3`」的
+颜色——theme 里没有名为 `bg` 或 `text` 的颜色，重复前缀索引到空：
+
+```css
+/* 真实生成器实测 / measured with the real generator */
+/* 输入 bg-bg-0 bg-bg-1 bg-bg-2 bg-bg-3 bg-bg-4 hover:bg-bg-3 dark:bg-bg-2 */
+(ZERO CSS)
+
+/* 输入 bg-1 bg-2 bg-3 bg-4 bg-base hover:bg-3 */
+.bg-1 { background-color: var(--bg-1); }
+.bg-2 { background-color: var(--bg-2); }
+.bg-3 { background-color: var(--bg-3); }
+.bg-4 { background-color: var(--bg-4); }
+.bg-base { background-color: var(--bg-base); }
+.hover\:bg-3:hover { background-color: var(--bg-3); }
+```
+
+```tsx
+// ❌ 背景根本不画（浏览器里量到 background-color: rgba(0, 0, 0, 0)，明暗主题都一样）
+<div className='bg-bg-2' />
+// ✅ 去掉重复前缀即可，语义完全对应
+<div className='bg-2' />        // → var(--bg-2)
+<div className='text-t-primary' />
+```
+
+⚠️ `bg-0` **也是死的**（theme 没有 `0` 键，实测 0 条 CSS）。要主背景写 `bg-base`。
+根因已经铲掉：`ui/src/renderer/styles/colors.ts` 的头注**曾把这三种写法当作推荐写法**
+（连 `var(--color-bg-0)` 这个变量也不存在），现已改为正确写法并注明为什么它们是死的。
+
+### 6. `border-b-2` / `border-t-4` —— 带方向的数字是**颜色**，不是宽度
+
+第 3 条的数字键变体，单列出来是因为它造成的是**可见的产品缺陷**：选中态 Tab 的下划线
+整条不存在。UnoCSS 先吃掉方向，再拿数字去 `theme.colors` 查到 `backgroundColors[N]`：
+
+```css
+/* 输入 border-b-1 border-b-2 border-b-3 border-b-4 */
+.border-b-1 { border-bottom-color: var(--bg-1); }
+.border-b-2 { border-bottom-color: var(--bg-2); }
+.border-b-3 { border-bottom-color: var(--bg-3); }
+.border-b-4 { border-bottom-color: var(--bg-4); }
+
+/* 输入 border-b-0 border-b-2px border-b-4px —— 这三个才是宽度 */
+.border-b-0 { border-bottom-width: 0px; }
+.border-b-2px { border-bottom-width: 2px; }
+.border-b-4px { border-bottom-width: 4px; }
+```
+
+所以 `border-b-4 border-brand` 是**两个颜色类**：没有宽度、没有样式，而且 `border-b-4`
+的 `border-bottom-color` 还会盖掉 `border-brand`。下划线三个属性一个都不成立。
+
+```tsx
+// ❌ 选中态下划线完全不存在
+<div className='text-brand border-b-4 border-brand' />
+// ✅ 宽度 / 样式 / 颜色分三条写
+<div className='text-brand border-b-4px border-b-solid border-brand' />
+```
+
+⚠️ **不带方向**的 `border-2` 同样是颜色（`border-color: var(--bg-2)`），但它在本仓库是
+**文档化过的合法写法**（本文推荐 `border border-3` 当分隔色），所以门禁只拦带方向的形式。
+`border-[trbl]-0` 是真的宽度（`border-bottom-width: 0px`），也不在禁令内。
+
+### 7. 有边框宽度 + 有边框颜色，却没有 `border-style`
+
+**本仓库没有全局 border reset。** 唯一的 preflight 是 `* { color: inherit }`，
+`@unocss/reset/tailwind.css` **没有**被引入。于是 `border-style` 保持 CSS 初始值 `none`：
+
+```css
+/* 输入 border-b border-arco-2 —— 宽度和颜色都有，但没有 style */
+.border-b { border-bottom-width: 1px; }
+.border-arco-2 { border-color: var(--color-border-2); }
+/* → border-style 仍是初始值 none，一个像素都不画 */
+
+/* 输入 border-solid / border-b-solid */
+.border-solid { border-style: solid; }      /* 四边 */
+.border-b-solid { border-bottom-style: solid; } /* 只有下边 */
+```
+
+**带方向的宽度必须配同方向的样式类。** 只有下边框宽度却写了 `border-solid`，另外三边
+拿不到宽度类，会回落到 CSS 初始值 `border-width: medium`（≈3px）并**凭空画出三条边**；
+这正是仓库里那套 `border-t border-solid border-[...] border-l-0 border-r-0 border-b-0`
+显式操作的来历。最简写法是全方向：
+
+```tsx
+// ❌ 一个像素都不画
+<div className='border border-arco-2' />
+<div className='border-b border-[var(--border-base)]' />
+
+// ✅ 四边
+<div className='border border-solid border-arco-2' />
+// ✅ 只要下边框（宽度/样式同方向，颜色可以不带方向——另外三边没有宽度，不会画出来）
+<div className='border-b border-b-solid border-arco-2' />
+// ✅ 颜色也带方向（FileChangeList.tsx 里一直是这么写的）
+<div className='border-b border-b-solid border-b-[var(--border-base)]' />
+```
+
+#### 为什么不加全局 border reset / Why no global border reset
+
+Tailwind 的 preflight 会写 `* { border-width: 0; border-style: solid; }`，加上它这七条里的
+第 7 条就自动消失。**这个方案评估过，明确否决：**
+
+- 影响面无法界定。这条 `*` 规则会同时**抹掉原生表单控件的默认边框**（`input` /
+  `select` / `textarea` / `button` / `fieldset` / `table`），而本仓库还大量使用 Arco
+  Design 组件与原生控件混排，1000+ 个文件都在这条规则的作用域里，没法逐一目测回归。
+- `border-width: 0` 会让所有**只写了颜色、宽度靠 CSS 初始值 `medium` 撑着**的元素
+  （本文第 6 条那 20 多处 `border-2 border-solid border-...`）从「3px 边框」变成「无边框」，
+  是另一批静默视觉回归。
+- 收益可以用更小的代价拿到：逐站点补同方向的样式类 + 一条门禁规则。影响面有界、可验证、
+  出问题能定位到具体那一行。
+- A global `*` reset would strip default borders from native form controls across
+  1000+ files — an unbounded blast radius. Per-site directional classes plus a gate
+  rule is bounded and verifiable, so that is what we did.
 
 ## ✅ 存量清理已完成 / Sweep completed
 
@@ -183,48 +301,69 @@ UnoCSS 解析 `border-b-*` 时**先吃掉 `-b-` 当成 bottom 方向**，再拿�
 改完跑 `bun run check:dead-css` + `bun test --cwd ui` + `bun run build:ui`，并在明暗两套
 主题下目测：这类修复会让**原本不显示的颜色开始显示**，要留意红字落在红底上之类的新问题。
 
-## 🚧 尚未清理：第五个死写法 `bg-bg-N` / `text-text` / `border-border`（重复前缀）
+## ✅ 第 5-7 条的存量清理 / Sweep for forms 5-7
 
-上面四条是门禁**当前覆盖**的写法。集成核对时又量到**同一类错误的第五个变体**，它还没有
-清理、也**还没进门禁**（进门禁就会让 `bun run check` 立刻变红）：
+这三条是「重复前缀」与「边框三属性」两族，和上面四条一起清完了，门禁同步补上。
 
-theme 里没有名为 `bg`、`text`、`border` 的颜色，所以「**前缀写两遍**」的类名索引到空：
+| 写法                                                  | 文件数 | 出现次数 |
+| ----------------------------------------------------- | ------ | -------- |
+| `bg-bg-N`（写法 5）                                   | 31     | 87       |
+| `border-[trbl]-N` 当宽度用（写法 6）                  | 3      | 6        |
+| 有宽度 + 有颜色 + 没 `border-style`（写法 7）         | 30     | 63       |
 
-| 写法            | 实测产出                       | 本意                       |
-| --------------- | ------------------------------ | -------------------------- |
-| `bg-bg-1/2/3/4` | **0 条 CSS**（元素完全透明）   | `background: var(--bg-N)`  |
-| `text-text`     | **0 条 CSS**                   | 正文色                     |
-| `border-border` | **0 条 CSS**                   | 基础边框色                 |
+`bg-bg-N` 的分布：`bg-bg-3` 32、`bg-bg-1` 30、`bg-bg-2` 23、`bg-bg-4` 2，集中在
+`pages/conversation/Preview/**`、`pages/browser/**` 与几个 settings 面板。
+（第 88 处 `bg-bg-0` 在 `styles/colors.ts` 的头注里，是讲解反例，不渲染，故保留。）
 
-```tsx
-// ❌ 背景根本不画（浏览器里实测 background-color: rgba(0, 0, 0, 0)，明暗主题都一样）
-<div className='bg-bg-2' />
-// ✅ 去掉重复前缀即可，语义完全对应
-<div className='bg-2' />        // → var(--bg-2)
-<div className='bg-base' />     // → var(--bg-base)
-<div className='text-t-primary' />
-<div className='border-[var(--border-base)]' />
-```
+清理时定下的判断，后续改动请沿用：
 
-实测证据（三重）：真实生成器对 `bg-bg-1/2/3` 产出 ZERO CSS；`ui/dist` 全部 CSS 产物里
-`.bg-bg-` 与 `.border-border` 规则数为 **0**；headless Firefox 里注入 `bg-bg-1/2/3` 量到
-`rgba(0, 0, 0, 0)`，而 `bg-1/2/3` 量到 `rgb(250,250,250)/(242,242,243)/(228,228,230)`（亮）
-与 `rgb(18,18,18)/(31,31,31)/(42,42,42)`（暗）。
+- **`bg-bg-N` → `bg-N`**，逐个确认过语义：命中的全是「面板底色 / 行悬停底色 / 代码块底色」，
+  正好对应 `--bg-N` 色阶，所以只删掉重复的前缀，没有改任何一处的色号。没有改成
+  `bg-fill-N`：`--color-fill-*` 是半透明 rgba，嵌套时会叠色变浑，这些站点都是不透明面板。
+- **写法 7 一律补同方向的样式类**，不动作者选的颜色：`border` → 加 `border-solid`，
+  `border-b` → 加 `border-b-solid`。**不要**给带方向的宽度配无方向的 `border-solid`。
+- **颜色本身就指错的，一并换掉**（这几处的「颜色」落到的是背景变量或自己的底色）：
+  - `border-base` → `border-[var(--border-base)]`（`base` 键指向 `--bg-base`，是主背景）
+  - 「`border-t-` + `base`」→ `border-t-[var(--border-base)]`（同一个陷阱的方向版）
+  - `border border-2` + `bg-2` → `border border-solid border-arco-2`
+    （`border-2` 是 `--bg-2`，和这张卡片自己的底色同色，等于没有边框）
+  - `border-3 border-fill-3` 的环形 spinner（UpdateModal）→
+    `border-3px border-solid border-[var(--color-fill-3)]`：`border-3` 是颜色、
+    `border-fill-3` 在 theme 里根本不存在，两层圆环一条边都没画出来。
+- **variant 前缀要跟着走**：`[&_.arco-collapse-item-content]:!border-t` 补的是
+  `[&_.arco-collapse-item-content]:!border-t-solid`，不是裸的 `border-t-solid`
+  ——后者落在外层元素上，descendant 依然没有样式。
 
-存量：**88 处 / 32 文件**（`bg-bg-3` 32、`bg-bg-1` 30、`bg-bg-2` 23、`bg-bg-4` 2、`bg-bg-0` 1），
-集中在 `pages/conversation/Preview/**`、`pages/browser/**` 与几个 settings 面板。
+### 门禁覆盖不到的边界 / What the gate cannot see
 
-根因已经铲掉：`ui/src/renderer/styles/colors.ts` 的头注**曾把 `bg-bg-0` / `text-text` /
-`border-border` 当作推荐写法**（连 `var(--color-bg-0)` 这个变量也不存在），这就是 88 处的
-来源，现已改为正确写法并注明为什么那四个是死的。
+写法 7 的检测器**只在同一个字符串字面量里判断**（这是为了不误报：样式可能来自
+兄弟 variant group、同串别处的 `border-solid`、或组件自己的 CSS）。因此这两类会漏：
 
-清理配方（机械，但**会让 88 处背景色从"透明"变成"有色"**，属于真实视觉改动，需要在明暗
-两套主题下过一遍 Preview / browser 两个区域，故独立成一次改动）：
+1. **class 列表被拆进数组/多个字面量**：
+   `['... rounded-8px border', isSelected ? '!border-primary-6' : 'border-[...]']`
+   宽度在第一段、颜色在第二段，检测器看不到它们在同一个元素上。
+   `CreateStudio/TypeRail.tsx` 的图标框就是这样漏的（已手工修掉）。
+2. **样式来自组件自己的 CSS**（`.foo { border-style: solid }`）——这种其实是对的，
+   漏报正是我们想要的行为。
 
-1. `bg-bg-N` → `bg-N`（`bg-bg-0` 要单独看：`bg-0` 也是死的，theme 没有 `0` 键，应为 `bg-base`）；
-2. 给 `scripts/check-dead-css-utilities.mjs` 加第五条禁令
-   `/\b(?:bg-bg|text-text|border-border)(?:-[a-z0-9]+)?\b/`（`border-border-*` 已被第 2 条覆盖）；
-3. 补 `--self-test` 用例，跑 `bun run check` + `bun test --cwd ui` + `bun run build:ui`。
+`.css` 文件里的 `@apply` 同理不在扫描范围内；当前 `ui/src` 下**没有任何** `@apply`
+（实测 grep 为 0），所以今天没有实际漏洞。
+
+### 还留在树上的两个近亲问题 / Two related issues left in the tree
+
+清理时量到、但**故意没有一起改**，也没有进门禁：
+
+- **不带方向的 `border-N` 被当宽度用**：`border-2 border-solid border-[...]` 共 **23 处**。
+  它们画得出来，只是宽度落在 CSS 初始值 `medium`（≈3px）而不是作者想要的 1px/2px。
+  不进门禁的原因：`border-N` 是本文**推荐过**的合法颜色写法（`border border-3`），
+  一刀切禁掉需要先决定「`border-N` 到底算颜色还是宽度」，那是一次独立的取舍。
+- **theme 里不存在的边框色名**：`border-line` 10 处、`border-line-2` 1 处、
+  `border-fill-3` 2 处、`b-color-border-2` 4 处，实测都是 0 条 CSS。修它们要**挑一个新颜色**
+  （属于视觉决策），不是机械替换，所以单独处理。
+
+改完跑 `bun run check:dead-css` + `bun test --cwd ui` + `bun run build:ui`，并在明暗两套
+主题下目测：这两族修复会让**原本不存在的边框和背景开始出现**，要留意分隔线扎堆、
+或原本"无框"的卡片突然有框之类的观感问题。
 
 ## 🎨 使用方式
 
@@ -243,9 +382,11 @@ theme 里没有名为 `bg`、`text`、`border` 的颜色，所以「**前缀写�
 <div className="text-brand">        // 品牌色文字
 
 // ✅ 边框色（⚠️ 不要写 border-b-base，见上文「-b- 方向陷阱」）
-<div className="border-[var(--border-base)]">  // 基础边框 (#E5E6EB)
-<div className="border-arco-2">                // Arco 边框 token
-<div className="border-3">                     // --bg-3 分隔色
+// ⚠️ 边框要画出来必须三件齐：宽度 + 样式 + 颜色。本仓库没有全局 border-style reset。
+<div className="border border-solid border-[var(--border-base)]">  // 基础边框 (#E5E6EB)
+<div className="border border-solid border-arco-2">                // Arco 边框 token
+<div className="border border-solid border-3">                     // --bg-3 分隔色
+<div className="border-b border-b-solid border-arco-2">            // 只要下边框（同方向）
 
 // ✅ 状态色阶（走项目规则，1-9）
 <div className="text-danger-6 bg-primary-1 border-success-5">
@@ -303,7 +444,7 @@ theme 里没有名为 `bg`、`text`、`border` 的颜色，所以「**前缀写�
 ```tsx
 <div className='bg-aou-1 hover:bg-aou-2'>
   <span className='text-t-primary'>文本</span>
-  <div className='border border-[var(--border-base)]'></div>
+  <div className='border border-solid border-[var(--border-base)]'></div>
 </div>
 ```
 
@@ -314,15 +455,18 @@ theme 里没有名为 `bg`、`text`、`border` 的颜色，所以「**前缀写�
 <div className="bg-#F7F8FA text-#86909C border-#E5E6EB">
 
 // ✅ 推荐
-<div className="bg-1 text-t-secondary border-[var(--border-base)]">
+<div className="bg-1 text-t-secondary border border-solid border-[var(--border-base)]">
 ```
 
 ## 🎯 快速参考
 
-- **背景**: `bg-base`, `bg-1`, `bg-2`, `bg-3`
+- **背景**: `bg-base`, `bg-1`, `bg-2`, `bg-3`（❌ 不是 `bg-bg-N`，也不是 `bg-0`）
 - **文字**: `text-t-primary`, `text-t-secondary`, `text-t-disabled`
-- **边框**: `border-[var(--border-base)]`, `border-arco-1` ~ `border-arco-4`, `border-3`
-  （❌ 不是 `border-b-base` / `border-b-light` / `border-` + `border-N`）
+- **边框**: 宽度 + 样式 + 颜色三件齐 —— `border border-solid border-[var(--border-base)]`,
+  `border-arco-1` ~ `border-arco-4`, `border-3`；只要下边框写
+  `border-b border-b-solid ...`
+  （❌ 不是 `border-b-base` / `border-b-light` / `border-` + `border-N`；
+  ❌ `border-b-2` 是下边框**颜色**不是 2px，宽度写 `border-b-2px`）
 - **品牌**: `bg-brand`, `bg-brand-light`, `bg-brand-hover`
 - **状态**: `bg-primary`, `bg-success`, `bg-warning`, `bg-danger`
 - **状态色阶**: `text-danger-6`, `bg-primary-1` ~ `bg-primary-9`（❌ 不带 `/NN` 透明度后缀）

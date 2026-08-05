@@ -124,7 +124,7 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
   const renderHost = (host: IBrowserHost) => (
     <article
       key={host.host_id}
-      className='min-w-0 rd-12px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-bg-1 p-12px shadow-[0_6px_18px_rgba(15,23,42,0.03)]'
+      className='min-w-0 rd-12px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-1 p-12px shadow-[0_6px_18px_rgba(15,23,42,0.03)]'
       data-browser-host-id={host.host_id}
     >
       <div className='flex items-center gap-6px mb-9px'>

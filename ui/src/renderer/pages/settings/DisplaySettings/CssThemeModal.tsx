@@ -173,7 +173,7 @@ const CssThemeModal: React.FC<CssThemeModalProps> = ({ visible, theme, onClose, 
         </div>
 
         {/* 底部操作按钮 / Footer action buttons */}
-        <div className='flex justify-between items-center pt-16px border-t border-arco-2'>
+        <div className='flex justify-between items-center pt-16px border-t border-t-solid border-arco-2'>
           <div>
             {onDelete && (
               <Button type='text' icon={<Delete theme='outline' size='14' />} onClick={onDelete}>

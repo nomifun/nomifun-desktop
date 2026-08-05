@@ -762,12 +762,7 @@ async fn import_memory_bundle(
     config: Option<&crate::collector::SharedConfig>,
 ) -> Result<ImportOutcome, AppError> {
     let mut memories =
-        parse_owned_jsonl::<CompanionMemory>(
-            &extract_dir.join("memories.jsonl"),
-            "memories.jsonl",
-            true,
-            Some(LEGACY_MEMORY_OWNER_KEY),
-        )?;
+        parse_owned_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", true)?;
     let default_companion_id = match config {
         Some(config) => config.read().await.default_companion_id.clone(),
         None => None,
@@ -891,14 +886,8 @@ async fn import_companion_bundle(
     // Optional payloads: a bundle written before companions carried anything but
     // their settings has none of these, and must still import.
     let mut memories =
-        parse_owned_jsonl::<CompanionMemory>(
-            &extract_dir.join("memories.jsonl"),
-            "memories.jsonl",
-            false,
-            Some(LEGACY_MEMORY_OWNER_KEY),
-        )?;
-    let skills =
-        parse_owned_jsonl::<CompanionSkill>(&extract_dir.join("skills.jsonl"), "skills.jsonl", false, None)?;
+        parse_owned_jsonl::<CompanionMemory>(&extract_dir.join("memories.jsonl"), "memories.jsonl", false)?;
+    let skills = parse_owned_jsonl::<CompanionSkill>(&extract_dir.join("skills.jsonl"), "skills.jsonl", false)?;
     let bodies = read_skill_bodies(extract_dir, &skills)?;
     let figure = read_packaged_figure(extract_dir)?;
 
@@ -1142,11 +1131,12 @@ fn rehome_imported_skills(
     Ok(out)
 }
 
-/// Memory rows shipped their owner under this name through 0.3.9, before the
-/// wire adopted the column's own `companion_id`.
-const LEGACY_MEMORY_OWNER_KEY: &str = "scope_companion_id";
+/// Both memory and skill rows shipped their owner under this name before each wire
+/// adopted the column's own `companion_id`. The memory wire dropped it first, so a
+/// bundle can carry the retired spelling on its skill rows alone.
+const LEGACY_OWNER_KEY: &str = "scope_companion_id";
 
-/// Parse a bundle jsonl of owner-carrying rows, tolerating the retired field
+/// Parse a bundle jsonl of owner-carrying rows, translating the retired field
 /// names those rows used to have.
 ///
 /// Memory and skill rows carried a `scope_kind` (`'user'` / `'companion'`)
@@ -1157,12 +1147,10 @@ const LEGACY_MEMORY_OWNER_KEY: &str = "scope_companion_id";
 /// to re-issue. The discriminator is DISCARDED rather than mapped: it was fully
 /// determined by whether an owner is present.
 ///
-/// `legacy_owner_key` names the owner field's retired spelling for row types that
-/// have since renamed it on the wire — memory rows shipped their owner as
-/// `scope_companion_id` and now ship it as `companion_id`, so an older bundle's key
-/// is renamed. A row that already carries an owner under the current name keeps it:
-/// the retired key is dropped either way, and never displaces a live value.
-/// Skill rows still ship the historical spelling, so they pass `None`.
+/// The owner id itself is RENAMED, never dropped: both row types used to ship it as
+/// [`LEGACY_OWNER_KEY`] and now ship it as `companion_id`, so an older bundle's key
+/// is moved across. A row that already carries an owner under the current name keeps
+/// it — the retired key is dropped either way, and never displaces a live value.
 ///
 /// Deliberately key surgery on the parsed object rather than a `#[serde(flatten)]`
 /// wrapper: flattening makes serde buffer the row and silently drops the inner
@@ -1172,15 +1160,13 @@ fn parse_owned_jsonl<T: serde::de::DeserializeOwned>(
     path: &Path,
     label: &str,
     required: bool,
-    legacy_owner_key: Option<&str>,
 ) -> Result<Vec<T>, AppError> {
     let objects =
         parse_jsonl::<serde_json::Map<String, serde_json::Value>>(path, label, required)?;
     let mut rows = Vec::with_capacity(objects.len());
     for (index, mut object) in objects.into_iter().enumerate() {
         object.remove("scope_kind");
-        if let Some(legacy) = legacy_owner_key
-            && let Some(owner) = object.remove(legacy)
+        if let Some(owner) = object.remove(LEGACY_OWNER_KEY)
             && object.get("companion_id").is_none_or(serde_json::Value::is_null)
         {
             object.insert("companion_id".to_owned(), owner);
@@ -2013,8 +1999,8 @@ mod tests {
     /// every memory and skill row, and spells the owner `scope_companion_id`. Both
     /// structs are `deny_unknown_fields`, so without the shim the owner's年-old
     /// backup would be rejected outright — and a bundle is a file on their disk, not
-    /// a request they can re-issue. The owner half must survive (under the memory
-    /// wire's current `companion_id`); the discriminator must be discarded,
+    /// a request they can re-issue. The owner half must survive (under the current
+    /// `companion_id`, on both row types); the discriminator must be discarded,
     /// including when it CONTRADICTS the owner (a shape the old table CHECK could
     /// not produce, and which must not be able to strip an owner now).
     #[test]
@@ -2065,8 +2051,7 @@ mod tests {
         let strict = parse_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true).unwrap_err();
         assert!(strict.to_string().contains("unknown field"), "{strict}");
 
-        let rows =
-            parse_owned_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true, Some(LEGACY_MEMORY_OWNER_KEY)).unwrap();
+        let rows = parse_owned_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].companion_id, None);
         assert_eq!(rows[0].content, "0.3.8 导出的共享记忆");
@@ -2074,31 +2059,58 @@ mod tests {
         assert_eq!(rows[1].status, "archived", "the rest of the row is untouched");
         assert_eq!(rows[1].strength, 0.42);
 
-        // Same for skills.jsonl, whose rows carried the same pair.
+        // Same for skills.jsonl, whose rows carried the same pair — and whose owner
+        // kept the retired spelling after memory's wire had already dropped it, so a
+        // bundle exported between the two renames is a legacy skill row too.
         let skills_path = dir.path().join("skills.jsonl");
-        let skill = serde_json::json!({
-            "companion_skill_id": nomifun_common::CompanionSkillId::new().into_string(),
-            "scope_kind": "companion",
-            "skill_name": "legacy-skill",
-            "scope_companion_id": owner,
-            "status": "active",
-            "source": "mined",
-            "confidence": 0.9,
-            "provenance_event_ids": [],
-            "strength": 1.0,
-            "version": 1,
-            "skill_pattern_id": null,
-            "usage_count": 0,
-            "last_used_at": null,
-            "created_at": 1,
-            "updated_at": 1,
-            "signature": ""
-        });
+        let skill_row = |owner_key: &str, owner: &str, name: &str| {
+            let mut row = serde_json::json!({
+                "companion_skill_id": nomifun_common::CompanionSkillId::new().into_string(),
+                "skill_name": name,
+                "status": "active",
+                "source": "mined",
+                "confidence": 0.9,
+                "provenance_event_ids": [],
+                "strength": 1.0,
+                "version": 1,
+                "skill_pattern_id": null,
+                "usage_count": 0,
+                "last_used_at": null,
+                "created_at": 1,
+                "updated_at": 1,
+                "signature": ""
+            });
+            row[owner_key] = serde_json::json!(owner);
+            row
+        };
+        let mut skill = skill_row("scope_companion_id", &owner, "legacy-skill");
+        skill["scope_kind"] = serde_json::json!("companion");
         std::fs::write(&skills_path, format!("{}\n", serde_json::to_string(&skill).unwrap())).unwrap();
-        let skills = parse_owned_jsonl::<CompanionSkill>(&skills_path, "skills.jsonl", false, None).unwrap();
+        assert!(
+            parse_jsonl::<CompanionSkill>(&skills_path, "skills.jsonl", false)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field"),
+            "the un-shimmed skill struct is what would reject the bundle"
+        );
+        let skills = parse_owned_jsonl::<CompanionSkill>(&skills_path, "skills.jsonl", false).unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].companion_id.as_deref(), Some(owner.as_str()));
         assert_eq!(skills[0].skill_name, "legacy-skill");
+
+        // A skill row from the CURRENT build spells the owner `companion_id`; a
+        // hand-edited row carrying BOTH keeps the live one, never the retired one.
+        let skill_owner = companion_fixture(66);
+        let mut current_skill = skill_row("companion_id", &skill_owner, "current-skill");
+        std::fs::write(&skills_path, format!("{}\n", serde_json::to_string(&current_skill).unwrap()))
+            .unwrap();
+        let skills = parse_owned_jsonl::<CompanionSkill>(&skills_path, "skills.jsonl", false).unwrap();
+        assert_eq!(skills[0].companion_id.as_deref(), Some(skill_owner.as_str()));
+        current_skill["scope_companion_id"] = serde_json::json!(owner);
+        std::fs::write(&skills_path, format!("{}\n", serde_json::to_string(&current_skill).unwrap()))
+            .unwrap();
+        let skills = parse_owned_jsonl::<CompanionSkill>(&skills_path, "skills.jsonl", false).unwrap();
+        assert_eq!(skills[0].companion_id.as_deref(), Some(skill_owner.as_str()));
 
         // A row from the CURRENT build (owner under `companion_id`, no discriminator
         // at all) parses through the same path — one shim, both bundle generations.
@@ -2112,13 +2124,7 @@ mod tests {
         .unwrap();
         current["companion_id"] = serde_json::json!(current_owner);
         std::fs::write(&memories_path, format!("{}\n", serde_json::to_string(&current).unwrap())).unwrap();
-        let rows = parse_owned_jsonl::<CompanionMemory>(
-            &memories_path,
-            "memories.jsonl",
-            true,
-            Some(LEGACY_MEMORY_OWNER_KEY),
-        )
-        .unwrap();
+        let rows = parse_owned_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].companion_id.as_deref(), Some(current_owner.as_str()));
 
@@ -2126,13 +2132,7 @@ mod tests {
         // live name wins and the retired one is dropped, never the other way round.
         current["scope_companion_id"] = serde_json::json!(owner);
         std::fs::write(&memories_path, format!("{}\n", serde_json::to_string(&current).unwrap())).unwrap();
-        let rows = parse_owned_jsonl::<CompanionMemory>(
-            &memories_path,
-            "memories.jsonl",
-            true,
-            Some(LEGACY_MEMORY_OWNER_KEY),
-        )
-        .unwrap();
+        let rows = parse_owned_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true).unwrap();
         assert_eq!(rows[0].companion_id.as_deref(), Some(current_owner.as_str()));
 
         // And a genuinely unknown field is still rejected: the shim tolerates the two
@@ -2147,7 +2147,7 @@ mod tests {
         bogus["retired_field"] = serde_json::json!(true);
         std::fs::write(&memories_path, format!("{}\n", serde_json::to_string(&bogus).unwrap())).unwrap();
         let error =
-            parse_owned_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true, Some(LEGACY_MEMORY_OWNER_KEY)).unwrap_err();
+            parse_owned_jsonl::<CompanionMemory>(&memories_path, "memories.jsonl", true).unwrap_err();
         assert!(error.to_string().contains("unknown field"), "{error}");
     }
 

@@ -4412,8 +4412,12 @@ export interface ICompanionSkill {
    * per-companion — there is no shared tier and no way to hand one to another
    * companion. `null` is only the vestigial state of a legacy row the backend's
    * one-time re-homing migration has not claimed yet.
+   *
+   * Named after the column it comes from (`companion_skills.companion_id`), like
+   * the memory owner above: the field used to travel as `scope_companion_id`, and
+   * that spelling is now gone from the wire as well as from the database.
    */
-  scope_companion_id: CompanionId | null;
+  companion_id: CompanionId | null;
   status: 'draft' | 'active' | 'archived';
   source: string;
   confidence: number;
@@ -4767,9 +4771,13 @@ const fromApiCompanionMemory = (raw: unknown): ICompanionMemory => {
 
 const fromApiCompanionSkill = (raw: unknown): ICompanionSkill => {
   const value = asWireObject(raw, 'companion skill');
-  for (const retiredField of ['provenance', 'superseded_by', 'scope_kind']) {
+  for (const retiredField of ['provenance', 'superseded_by', 'scope_kind', 'scope_companion_id']) {
     // `scope_kind` was the shared/private discriminator; 共享技能 is gone and the
     // owner alone answers "whose skill is this", so the backend must not send it.
+    // `scope_companion_id` was that owner's own historical name, which outlived the
+    // column rename as a bare `#[serde(rename)]`. Rejecting it rather than ignoring
+    // it is what stops a mismatched backend from serving skills whose owner every
+    // caller then reads as `undefined` — the guard the memory adapter mirrors.
     if (Object.prototype.hasOwnProperty.call(value, retiredField)) {
       throw new TypeError(`companion skill must not contain retired field "${retiredField}"`);
     }
@@ -4780,7 +4788,7 @@ const fromApiCompanionSkill = (raw: unknown): ICompanionSkill => {
   return {
     ...(value as unknown as ICompanionSkill),
     companion_skill_id: parseCompanionSkillId(value.companion_skill_id),
-    scope_companion_id: nullableCompanionId(value.scope_companion_id),
+    companion_id: nullableCompanionId(value.companion_id),
     provenance_event_ids: value.provenance_event_ids.map(parseCompanionEventId),
     skill_pattern_id:
       value.skill_pattern_id == null ? null : parseSkillPatternId(value.skill_pattern_id),

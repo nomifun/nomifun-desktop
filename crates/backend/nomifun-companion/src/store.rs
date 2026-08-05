@@ -3266,11 +3266,13 @@ pub struct CompanionSkill {
     /// [`backfill_skill_owner`] re-homes at the first launch that has a companion
     /// to re-home it onto.
     ///
-    /// Serialized under its historical wire name: the shipped UI contract and
-    /// every skill bundle ever exported read `scope_companion_id`. Memory's
-    /// owner field ([`CompanionMemory::companion_id`]) has since dropped the
-    /// alias; skills keep it until the same rename is made on the skill wire.
-    #[serde(rename = "scope_companion_id")]
+    /// Serialized under the column's own name, exactly like
+    /// [`CompanionMemory::companion_id`]: the field used to travel as
+    /// `scope_companion_id` next to a retired `scope_kind` discriminator, and both
+    /// retired names are now gone from the wire. [`crate::export`] accepts and
+    /// translates them when importing a bundle written by an older build — the only
+    /// place the retired spelling can still arrive from, because a bundle is a file
+    /// on the owner's disk rather than a request we can ask them to re-issue.
     pub companion_id: Option<String>,
     pub status: String,
     pub source: String,

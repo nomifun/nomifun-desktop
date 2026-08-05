@@ -130,7 +130,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
       </PreferenceRow>
 
       {/* Privileged-intent reminder: Discord requires the Message Content Intent. */}
-      <div className='bg-[rgba(var(--primary-rgb),0.08)] rd-12px p-12px border border-[rgba(var(--primary-rgb),0.2)] text-12px text-t-secondary'>
+      <div className='bg-[rgba(var(--primary-rgb),0.08)] rd-12px p-12px border border-solid border-[rgba(var(--primary-rgb),0.2)] text-12px text-t-secondary'>
         {t('settings.discord.intentNote', 'In the Developer Portal → Bot → Privileged Gateway Intents, enable "Message Content Intent", otherwise the bot cannot read message text. Invite the bot to your server (or DM it) to start.')}
       </div>
 
