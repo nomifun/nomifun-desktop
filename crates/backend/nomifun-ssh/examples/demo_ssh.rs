@@ -80,7 +80,8 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     let handle = SshConnectionHandle::connect(cred, sshd.known_hosts.clone(), "/tmp")
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
     println!("• connected; host fingerprint = {:?}", handle.fingerprint);
     let backend = SshBackendSink::into_arc(Arc::new(handle));
 

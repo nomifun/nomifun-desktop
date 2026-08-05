@@ -8,6 +8,7 @@
 
 pub mod dto;
 pub mod events;
+pub mod pool;
 pub mod routes;
 pub mod service;
 pub mod sink;
@@ -15,9 +16,15 @@ pub mod state;
 
 pub use dto::{CreateSshHostRequest, SshHostResponse, SshStatusEvent, UpdateSshHostRequest};
 pub use events::SshEventEmitter;
+pub use pool::{
+    PoolTuning, SshConnectionPool, SshLink, SshLinkKey, SshProbeOutcome, SshShutdownReport,
+    SSH_DIAL_COOLDOWN, SSH_PING_TIMEOUT,
+};
 pub use routes::{ssh_host_routes, SshHostRouterState};
 pub use service::{DecryptedCredential, SshHostService, SshServiceError};
-pub use sink::{SshBackendSink, SshConnectionHandle, SshConnectionProvider};
+pub use sink::{
+    SshBackendSink, SshConnectionHandle, SshConnectionProvider, SshDialError, SshLinkBackend,
+};
 pub use state::{
     is_retryable, reconnect_delay, SshLinkPhase, SshLinkState, SshTeardown, SSH_CLOSE_BUDGET,
     SSH_LIVENESS_POLL_INTERVAL, SSH_RECONNECT_INITIAL_BACKOFF_MS, SSH_RECONNECT_MAX_ATTEMPTS,
