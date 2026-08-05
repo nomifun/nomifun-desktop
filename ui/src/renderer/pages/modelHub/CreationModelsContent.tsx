@@ -137,7 +137,7 @@ const CreationModelsContent: React.FC = () => {
                 className='rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] overflow-hidden'
               >
                 {/* Group header */}
-                <div className='flex items-center justify-between gap-8px px-14px py-10px bg-[var(--fill-0)] border-b border-solid border-[var(--color-border-2)] flex-wrap'>
+                <div className='flex items-center justify-between gap-8px px-14px py-10px bg-[var(--fill-0)] border-b border-b-solid border-[var(--color-border-2)] flex-wrap'>
                   <div className='flex items-center gap-8px min-w-0'>
                     <span className='text-14px font-600 text-t-primary truncate'>{group.providerName}</span>
                     <span className='text-11px text-t-tertiary shrink-0'>{group.platform}</span>
@@ -154,7 +154,7 @@ const CreationModelsContent: React.FC = () => {
                       key={entry.model}
                       className={classNames(
                         'flex items-center justify-between gap-8px px-14px py-10px transition-colors hover:bg-[var(--fill-0)]',
-                        idx < group.models.length - 1 && 'border-b border-solid border-[var(--color-border-2)]/70'
+                        idx < group.models.length - 1 && 'border-b border-b-solid border-[var(--color-border-2)]/70'
                       )}
                     >
                       <span className='text-13px text-t-primary min-w-0 truncate' title={entry.model}>

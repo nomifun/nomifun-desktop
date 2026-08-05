@@ -445,13 +445,19 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                   </div>
                 </EmojiPicker>
               )}
+              {/* 不写 bg-1：styles/layout.css 用 `.arco-input { background-color:
+                  var(--fill-0) !important }` 统一了全站输入框底色，`!important` 一定赢，
+                  所以这里的 bg-1 从来没生效过（改成 !bg-1 反而会把输入框拉成和抽屉
+                  正文 --color-bg-1 几乎同色，暗色下等于看不见的输入框）。留白即正确。
+                  Dropping a token the cascade can never honour: layout.css already owns
+                  `.arco-input` with `!important`, and --fill-0 is the better surface. */}
               <Input
                 value={editName}
                 onChange={(value) => setEditName(value)}
                 disabled={readOnly}
                 placeholder={t('settings.presetNamePlaceholder', { defaultValue: 'Enter a name for this preset' })}
                 data-testid='input-preset-name'
-                className='flex-1 rounded-4px bg-1'
+                className='flex-1 rounded-4px'
               />
             </div>
           </div>
@@ -462,7 +468,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
               {t('settings.presetDescription', { defaultValue: 'Preset Description' })}
             </Typography.Text>
             <Input
-              className='mt-10px rounded-4px bg-1'
+              className='mt-10px rounded-4px'
               value={editDescription}
               onChange={(value) => setEditDescription(value)}
               disabled={readOnly}

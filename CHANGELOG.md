@@ -5,6 +5,58 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Fixed (appearance + accessibility).** Row separators, focus rings and keyboard
+  focus outlines that never painted, and borders that painted 3px where the class
+  said 1px. All of it is the same numeric-theme-key hijack as the entry below,
+  reaching three more prefixes. Every one of the nine `divide-y` sites was broken —
+  including the one that looked correct — by two stacked causes and a third nobody
+  had seen: `divide-y` supplies only top/bottom *widths*, so the non-directional
+  `divide-solid` put a style on all four sides and the unset left/right widths fell
+  back to the CSS initial `medium`, growing a 3px vertical rule on every row after
+  the first. There is no directional divide-style utility (`divide-y-solid` emits
+  nothing), so `divide-x-0` is the fix. `ring-2` set only a ring *colour* custom
+  property — no width, no box-shadow — so those focus rings did not exist; `ring-2px`
+  is the width spelling. `outline-2` was worse than missing: it overrode the browser's
+  own focus ring colour with `--bg-2`, the page background in both themes, actively
+  camouflaging the indicator on a `border-0` button that had no other affordance.
+  On the border side, `border-N`/`b-N` is a legitimate *colour* when another token
+  supplies a real width (`border border-solid border-3`) and broken when it is the
+  only border token; 34 of the latter now carry an explicit unit. Rule ordering
+  mattered too: `.border-2` is emitted after `.border-[var(…)]`, so a selection ring
+  was invisible in both states and six spinner tracks were silently repainted. 27
+  dead colour names (`border-line`, `b-color-border-2`, `bg-border-2`, `color-text-3`,
+  `text-error`, `text-t-error` …) are gone, along with the last `bg-fill-1/60`.
+
+- The dead-CSS gate no longer plays whack-a-mole. Its seven regexes each target one
+  *known* dead form — but every family in this effort was found by a mechanical
+  sweep, and several had been live for months without any regex seeing them. So the
+  gate gained a layer that does not enumerate mistakes at all: every token in the
+  source that *looks like* a colour or decoration utility is compiled through the
+  real UnoCSS generator, and anything emitting zero CSS fails. That closes the whole
+  "compiles to nothing" class, including forms nobody has written yet. The
+  discriminator is whether the leading segment is a colour/decoration prefix — not
+  whether the class is defined in a stylesheet, which does not converge, because
+  semantic hook names like `nomi-input` emit nothing either and would need an
+  ever-growing allowlist. Two traps are pinned by its own self-test: numeric
+  suffixes must NOT be excluded (bare integers are this project's colour rules;
+  unit-suffixed ones are widths that compile anyway, so excluding them only buys a
+  blind spot), and non-class strings must be — MIME types, CSS property names,
+  `box-sizing` values, SVG data-URI fragments and prose beginning with `text-` all
+  reach the token stream. `--self-test` now runs 117 cases in three parts, the last
+  of which proves through the real generator that known-dead forms still compile to
+  nothing and known-live ones still compile — so a broken detector fails loudly
+  instead of passing silently. 186 tokens, one generator call, 24ms.
+
+- `scripts/generate-i18n-types.mjs` fails with one actionable line instead of a
+  loader stack when run under a runtime that cannot load TypeScript. It imports the
+  shared plural-parity module (a `.ts` file), which made it bun-only; `package.json`
+  only ever invoked it through bun, but a contributor's muscle memory would have hit
+  `ERR_UNKNOWN_FILE_EXTENSION` with no mention of bun anywhere in the output. The
+  import had to become dynamic for the guard to run at all — static specifiers are
+  resolved before any statement executes — and the guard rethrows anything that is
+  not a TypeScript-support error, so a genuine syntax error in the module is not
+  disguised as "use bun".
+
 - **Fixed (appearance).** Three tab underlines that did not exist, two spinner
   rings that painted nothing, 63 borders that were invisible, and 87 panel
   backgrounds that were transparent. All of it is one root cause: `uno.config.ts`

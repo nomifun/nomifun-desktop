@@ -178,7 +178,11 @@ const PreviewContextMenu: React.FC<PreviewContextMenuProps> = ({
       </div>
 
       {/* 分隔线 / Divider */}
-      <div className='h-1px bg-border-1 my-4px mx-8px' />
+      {/* 这个 div 的全部可见内容就是 1px 高的背景色，而 `bg-border-1` 查的是一个叫
+          「border-1」的颜色（theme 里没有），产出 0 条 CSS —— 分隔线整条不可见。
+          用容器 inline style 里同一个 --border-base，保证和菜单外框同色。
+          The div's only visual is its background, and `bg-border-1` compiled to nothing. */}
+      <div className='h-1px bg-[var(--border-base)] my-4px mx-8px' />
 
       {/* 全部关闭 / Close all tabs */}
       <div

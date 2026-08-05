@@ -81,9 +81,11 @@ const CompanionRow: React.FC<CompanionRowProps> = ({
           size={30}
         />
         {/* Model readiness is the one thing that decides whether this companion can
-            talk at all, so it rides the avatar rather than hiding in a tab. */}
+            talk at all, so it rides the avatar rather than hiding in a tab.
+            边框写 border-2px + border-solid：`border-2` 只是 --bg-2 颜色，没宽度没样式，
+            这圈把状态点从头像抠出来的描边根本不会出现。 */}
         <span
-          className='absolute -right-1px -bottom-1px w-8px h-8px rd-full border-2 border-[var(--color-bg-2)]'
+          className='absolute -right-1px -bottom-1px w-8px h-8px rd-full border-2px border-solid border-[var(--color-bg-2)]'
           style={{ background: modelReady ? 'rgb(var(--success-6))' : 'rgb(var(--warning-6))' }}
           title={modelReady ? undefined : t('nomi.chat.modelUnset')}
         />

@@ -30,7 +30,7 @@ const MediaLayer: React.FC<{ assetId: AssetId | null; kind: 'image' | 'video' | 
   if (media.status !== 'ready') {
     return (
       <div className='flex h-full w-full items-center justify-center'>
-        <span className='h-16px w-16px animate-spin rounded-full border-2 border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
+        <span className='h-16px w-16px animate-spin rounded-full border-2px border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
       </div>
     );
   }

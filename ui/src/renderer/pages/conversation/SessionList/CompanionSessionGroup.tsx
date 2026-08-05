@@ -224,8 +224,12 @@ const CompanionSessionGroup: React.FC<Props> = ({
                     activity='idle'
                     size={32}
                   />
+                  {/* 这圈边框把状态点从头像上「抠」出来，所以宽度和样式都得写实：
+                      `border-2` 只是 --bg-2 颜色，没有宽度也没有 border-style（本仓库
+                      没有全局 border reset），整圈一个像素都不画。
+                      The cut-out ring needs a real width AND a style to exist. */}
                   <span
-                    className='absolute -right-1px -bottom-1px w-9px h-9px rd-full border-2 border-[var(--color-bg-1)]'
+                    className='absolute -right-1px -bottom-1px w-9px h-9px rd-full border-2px border-solid border-[var(--color-bg-1)]'
                     style={{ background: modelReady ? 'rgb(var(--success-6))' : 'rgb(var(--warning-6))' }}
                     title={modelReady ? undefined : t('nomi.chat.modelUnset')}
                   />

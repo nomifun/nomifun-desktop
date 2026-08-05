@@ -1654,8 +1654,11 @@ const SendBox: React.FC<{
           {prefix}
           {context}
           {/* 编辑消息提示条 / Editing message banner */}
+          {/* b-1px 才是 1px 宽度（`b-1` 是 --bg-1 颜色），b-border-2 在 theme 里不存在，
+              两者叠加等于「无宽度 + 无颜色」：下面这几条提示条从来没有边框。
+              `b-1px` is the width; `b-border-2` names no colour that exists. */}
           {editingMsgId && (
-            <div className='flex items-center gap-10px mb-8px px-12px py-8px rd-10px bg-fill-1 b-1 b-solid b-border-2'>
+            <div className='flex items-center gap-10px mb-8px px-12px py-8px rd-10px bg-fill-1 b-1px b-solid border-arco-2'>
               <span className='text-13px text-t-primary'>{t('conversation.editMessage.banner')}</span>
               <div
                 className='ml-auto flex-shrink-0 p-2px rd-full cursor-pointer hover:bg-fill-3 transition-colors'
@@ -1668,7 +1671,7 @@ const SendBox: React.FC<{
           )}
           {/* Reply quote preview */}
           {replyQuote && (
-            <div className='flex items-start gap-10px mb-8px px-12px py-10px rd-10px bg-fill-1 b-1 b-solid b-border-2'>
+            <div className='flex items-start gap-10px mb-8px px-12px py-10px rd-10px bg-fill-1 b-1px b-solid border-arco-2'>
               <div className='flex-shrink-0 mt-2px' style={{ lineHeight: 0 }}>
                 <Quote theme='filled' size='16' fill='rgb(var(--primary-6))' />
               </div>
@@ -1693,7 +1696,7 @@ const SendBox: React.FC<{
                   closable
                   closeIcon={<CloseSmall theme='outline' size='12' />}
                   onClose={() => removeDomSnippet(snippet.id)}
-                  className='text-12px bg-fill-2 b-1 b-solid b-border-2 rd-4px'
+                  className='text-12px bg-fill-2 b-1px b-solid border-arco-2 rd-4px'
                 >
                   {snippet.tag}
                 </Tag>
@@ -1721,7 +1724,7 @@ const SendBox: React.FC<{
                     );
                     onSelectedWorkspaceItemsChange(nextItems);
                   }}
-                  className='text-12px bg-fill-2 b-1 b-solid b-border-2 rd-4px'
+                  className='text-12px bg-fill-2 b-1px b-solid border-arco-2 rd-4px'
                 >
                   {getSelectedItemDisplayLabel(item)}
                 </Tag>

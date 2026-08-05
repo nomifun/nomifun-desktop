@@ -258,7 +258,11 @@ const WorkspaceFolderSelect: React.FC<WorkspaceFolderSelectProps> = ({
                   </div>
                 );
               })}
-              <div className='mx-2px my-4px h-1px bg-border-2' />
+              {/* 这条分隔线唯一的可见物就是背景色，而 `bg-border-2` 查的是一个叫
+                  「border-2」的颜色（theme 里没有），产出 0 条 CSS。取和菜单外框
+                  （border-arco-1）同一档的 --color-border-1。
+                  The separator's only visual was a background that compiled to nothing. */}
+              <div className='mx-2px my-4px h-1px bg-[var(--color-border-1)]' />
             </>
           )}
 

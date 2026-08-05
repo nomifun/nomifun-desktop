@@ -1,10 +1,14 @@
 # Theme Color Migration Guide
 
 > 门禁 / Gate: `bun run check:dead-css`（`scripts/check-dead-css-utilities.mjs`）
-> 拦住本文「⚠️ 七个死写法」一节里的**任何一处**使用。存量已清零，棘轮基线已删除，
-> 现在是一刀切禁令。
-> The sweep is done and the ratchet baseline is gone: these forms are now simply
-> banned, anywhere under `ui/src`.
+> 分两层：**七条正则**拦住本文「⚠️ 七个死写法」一节里的任何一处使用；**生成器兜底**
+> 再把源码里所有「长得像颜色/装饰工具类」的 token 喂给真实 UnoCSS 生成器，产出 0 条
+> CSS 就失败——所以还没被命名的死写法也拦得住（见文末「生成器兜底」一节）。
+> 存量已清零，棘轮基线已删除，现在是一刀切禁令。
+> Two layers: seven regexes for the named forms, plus a generator backstop that
+> fails any utility-shaped token which compiles to nothing. The sweep is done and
+> the ratchet baseline is gone: these forms are now simply banned, anywhere under
+> `ui/src`.
 
 ## ⚠️ 七个死写法 / Seven dead forms (measured, not guessed)
 
@@ -349,21 +353,60 @@ Tailwind 的 preflight 会写 `* { border-width: 0; border-style: solid; }`，�
 `.css` 文件里的 `@apply` 同理不在扫描范围内；当前 `ui/src` 下**没有任何** `@apply`
 （实测 grep 为 0），所以今天没有实际漏洞。
 
-### 还留在树上的两个近亲问题 / Two related issues left in the tree
+### 还留在树上的两个近亲问题 —— 已清 / Two related issues, now cleared
 
-清理时量到、但**故意没有一起改**，也没有进门禁：
+这两族曾经被「量到但故意没改」，理由是需要视觉决策而非机械替换。后来都做完了：
 
-- **不带方向的 `border-N` 被当宽度用**：`border-2 border-solid border-[...]` 共 **23 处**。
-  它们画得出来，只是宽度落在 CSS 初始值 `medium`（≈3px）而不是作者想要的 1px/2px。
-  不进门禁的原因：`border-N` 是本文**推荐过**的合法颜色写法（`border border-3`），
-  一刀切禁掉需要先决定「`border-N` 到底算颜色还是宽度」，那是一次独立的取舍。
-- **theme 里不存在的边框色名**：`border-line` 10 处、`border-line-2` 1 处、
-  `border-fill-3` 2 处、`b-color-border-2` 4 处，实测都是 0 条 CSS。修它们要**挑一个新颜色**
-  （属于视觉决策），不是机械替换，所以单独处理。
+- **不带方向的 `border-N` 被当宽度用**：实清 **34 处**（远多于当初量到的 23 处）。
+  判据不是「一律禁掉 `border-N`」，而是**同一串里有没有别的 token 提供真实宽度**：
+  `border border-solid border-3` 与 `border-3 b b-solid` 是**合法**的（`border` / `b`
+  给了 1px），`border-1 border-solid border-[var(--color-border-2)]` 是**坏的**（两个颜色 +
+  样式、零宽度，渲染成 `medium`≈3px）。修法是补显式单位：`border-1px` / `b-1px` / `border-2px`。
+  顺带发现两件事：`.border-2` 的规则排在 `.border-[var(...)]` **之后**，所以
+  `CharacterPicker` 的选中描边在两种状态下都不可见、6 个转圈的轨道颜色被静默改写；
+  以及 `ConversationTerminalPanel` 的 `border-0 border-t border-solid` 其实是**对的**——
+  `.border-0` 先出、`.border-t` 后出，只有上边画。
+- **theme 里不存在的边框色名**：`border-line` / `border-line-2` / `border-fill-3` /
+  `b-color-border-2` / `b-border-2` / `bg-border-N` / `color-text-N` / `text-error` /
+  `text-t-error` 共 **27 处**全部换成能编译的写法（并补上缺失的 `border-style`）。
 
-改完跑 `bun run check:dead-css` + `bun test --cwd ui` + `bun run build:ui`，并在明暗两套
-主题下目测：这两族修复会让**原本不存在的边框和背景开始出现**，要留意分隔线扎堆、
-或原本"无框"的卡片突然有框之类的观感问题。
+### 生成器兜底 / The generator backstop — 为什么不再加第八条正则
+
+上面七条正则各对着一个**已知**的死写法族。问题是这些族全是机械扫描才找出来的，
+有几个已经活了好几个月：`border-line` 11 处、`divide-border-2` 7 处、`text-error`、
+`bg-border-2`、`b-color-border-2`、`color-text-3`、`bg-fill-1/60` ——**没有一条能被当时的
+七条正则看见**。再加第八、第九条只会继续落后于下一个拼错的颜色名。
+
+所以门禁多了一层不枚举错误写法的检查：把源码里**长得像颜色/装饰工具类**的 token
+喂给真实 UnoCSS 生成器，产出 0 条 CSS 就失败。这一下覆盖「编译出零 CSS」整类，
+包括还没被写出来的（实测连随手编的 `ring-nope-9` 都会被抓住）。
+
+判别轴是**首段是不是颜色/装饰前缀**，不是「有没有在样式表里定义过」。后者试过，
+不收敛：`nomi-input` / `katex-display` / `markdown-shadow` / BEM 钩子名同样产出 0 条 CSS
+（它们的样式来自手写 CSS 或 CSS module），逐条加白名单意味着项目每加一个语义类名
+门禁就红一次。而前缀集合是封闭的（取自 `uno.config.ts` 里真正走颜色/装饰管道的规则），
+`border-line` 命中，`nomi-input` 永远不会。
+
+两条踩过的坑，都写进了自检：
+
+- **数值后缀不能排除**，裸的和带单位的都不行。裸数字 `text-3` / `bg-1` 是本仓库自有的
+  颜色规则（数字键映射到 `--bg-N`），排掉它们等于让真颜色类到不了生成器面前；带单位的
+  `ring-2px` / `border-1.5px` 是宽度类，而宽度类**本来就会编译通过**，排除它们不解决任何
+  误报，只白送一块盲区。
+- **非 class 字符串要挡在门外**。class 列表提取器是按属性名/函数名抓字符串字面量的，
+  所以 MIME 类型（`text/plain;charset=utf-8`）、CSS 属性名（`border-color`、
+  `stroke-dashoffset`）、`box-sizing` 的值（`border-box`）、SVG data-URI 碎片、以及恰好以
+  `text-` 开头的英文散文（`text-only.`）都会混进 token 流。这 12 个就是兜底层的**全部**
+  误报——判别轴是对的，是这些 token 不该进来。
+
+`--self-test` 因此分三段：七条正则 68 例、兜底层的形状筛选 33 例、兜底层的产出判定
+16 例（后者用真实生成器确认已知死写法真的产出 0 条 CSS、已知活写法真的产出 CSS，
+防止检测器自身失效后静默通过）。全量 186 个 token 一次 `generate` 调用判完，实测 24ms，
+所以这一层不会让 `bun run check` 变慢。
+
+改完跑 `bun run check` + `bun test --cwd ui` + `bun run build:ui`，并在明暗两套主题下目测：
+这些修复会让**原本不存在的边框和背景开始出现**，要留意分隔线扎堆、或原本「无框」的卡片
+突然有框之类的观感问题。
 
 ## 🎨 使用方式
 

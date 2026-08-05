@@ -236,7 +236,7 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
       </div>
 
       {/* Separator */}
-      <div className='border-t border-solid border-[var(--color-border-2)]' />
+      <div className='border-t border-t-solid border-[var(--color-border-2)]' />
 
       {/* Row 2: Tag filter + manage */}
       <div className='flex items-center gap-9px flex-wrap py-9px'>

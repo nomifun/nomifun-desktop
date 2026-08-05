@@ -1562,7 +1562,7 @@ const MessageList: React.FC<{
           {/* Scroll button */}
           <div className='absolute bottom-20px left-50% transform -translate-x-50% z-100'>
             <div
-              className='flex items-center justify-center w-40px h-40px rd-full bg-base shadow-lg cursor-pointer hover:bg-1 transition-all hover:scale-110 border-1 border-solid border-3'
+              className='flex items-center justify-center w-40px h-40px rd-full bg-base shadow-lg cursor-pointer hover:bg-1 transition-all hover:scale-110 border-1px border-solid border-3'
               onClick={handleScrollButtonClick}
               title={t('messages.scrollToBottom')}
               style={{ lineHeight: 0 }}

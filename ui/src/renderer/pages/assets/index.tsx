@@ -745,7 +745,7 @@ const AssetLibraryPage: React.FC = () => {
 
       {/* Drag-to-upload overlay */}
       {dragActive && (
-        <div className='pointer-events-none fixed inset-16px z-40 grid place-items-center rounded-16px border-2 border-dashed border-primary-6 bg-[rgba(var(--primary-6),0.08)] backdrop-blur-sm'>
+        <div className='pointer-events-none fixed inset-16px z-40 grid place-items-center rounded-16px border-2px border-dashed border-primary-6 bg-[rgba(var(--primary-6),0.08)] backdrop-blur-sm'>
           <div className='flex flex-col items-center gap-8px text-center text-primary-6'>
             <Upload theme='outline' size={34} strokeWidth={3} />
             <span className='text-16px font-700'>{t('workshopAssets.upload.dropTitle', { defaultValue: '松开以上传' })}</span>

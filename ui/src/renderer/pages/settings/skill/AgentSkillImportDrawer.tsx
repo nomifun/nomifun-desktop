@@ -275,7 +275,11 @@ const AgentSkillImportDrawer: React.FC<AgentSkillImportDrawerProps> = ({
 
         <div className='rd-12px overflow-hidden bg-fill-1 shadow-[inset_0_0_0_1px_rgba(var(--primary-6),0.10)]'>
           {rows.length > 0 ? (
-            <div className='max-h-[420px] overflow-auto divide-y divide-[rgba(var(--primary-6),0.10)]'>
+            // The colour here was always valid, but `divide-y` emits only a width and this project
+            // ships no border reset, so the style stayed `none` and no separator ever painted.
+            // `divide-solid` styles all four sides, so `divide-x-0` keeps the unset left/right
+            // widths from falling back to the CSS initial `medium` (~3px).
+            <div className='max-h-[420px] overflow-auto divide-y divide-x-0 divide-solid divide-[rgba(var(--primary-6),0.10)]'>
               {rows.map((row) => (
                 <div
                   key={row.key}

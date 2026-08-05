@@ -65,7 +65,7 @@ const TRAY_CONTAINER: Record<AssetControlVariant, string> = {
   // Standalone rounded card in the page flow.
   page: 'flex flex-col gap-8px rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-16px py-12px',
   // Edge-to-edge strip under the drawer toolbar.
-  drawer: 'flex flex-col gap-6px border-b border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-14px py-10px',
+  drawer: 'flex flex-col gap-6px border-b border-b-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-14px py-10px',
 };
 
 export const UploadTray: React.FC<{

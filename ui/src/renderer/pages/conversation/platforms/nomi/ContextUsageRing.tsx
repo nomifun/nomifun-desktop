@@ -57,7 +57,11 @@ export function ContextUsageRing({ used, max }: ContextUsageRingProps) {
         type='button'
         aria-label={ariaLabel}
         data-testid='nomi-context-usage-ring'
-        className='relative h-22px w-22px shrink-0 rd-999px b-none bg-transparent p-0 cursor-pointer outline-none transition-transform hover:scale-105 active:scale-95 focus-visible:ring-2 focus-visible:ring-[rgba(var(--primary-6),1)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg-2)]'
+        // `ring-2`/`ring-offset-2` looked like widths but the numeric suffix resolves against the
+        // theme's numeric colour keys, so both only set a COLOUR custom property — no ring width,
+        // no box-shadow chain, no focus ring at all. `ring-2px`/`ring-offset-2px` are the width
+        // spellings; `ring-[2px]` matches nothing.
+        className='relative h-22px w-22px shrink-0 rd-999px b-none bg-transparent p-0 cursor-pointer outline-none transition-transform hover:scale-105 active:scale-95 focus-visible:ring-2px focus-visible:ring-[rgba(var(--primary-6),1)] focus-visible:ring-offset-2px focus-visible:ring-offset-[var(--color-bg-2)]'
         style={{ color: tone }}
       >
         <span aria-hidden='true' className='absolute inset-0 rd-999px' style={{ background: ringFill }} />

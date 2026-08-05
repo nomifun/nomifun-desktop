@@ -69,7 +69,7 @@ const SkillSuggestCard: React.FC<SkillSuggestCardProps> = ({
   return (
     <div
       data-testid='skill-suggest-card'
-      className='mt-8px p-12px rd-8px bg-fill-0 b-1 b-solid'
+      className='mt-8px p-12px rd-8px bg-fill-0 b-1px b-solid'
       style={{ borderColor: 'color-mix(in srgb, var(--color-border-2) 70%, transparent)' }}
     >
       <div className='flex items-center gap-6px mb-8px'>

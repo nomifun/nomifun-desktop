@@ -155,7 +155,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
     >
       {skill && display && (
         <div className='flex h-full min-h-0 flex-col' data-testid='skill-detail-content'>
-          <div className='flex-shrink-0 border-b border-solid border-[var(--color-border-1)] px-24px py-20px'>
+          <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-1)] px-24px py-20px'>
             <div className='flex items-start gap-14px'>
               <div
                 className={[

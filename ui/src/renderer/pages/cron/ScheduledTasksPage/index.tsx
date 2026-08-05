@@ -258,7 +258,13 @@ const ScheduledTasksPage: React.FC = () => {
               <span>{t('cron.page.form.executionMode')}</span>
             </div>
 
-            <div className='grid w-full grid-cols-1 items-start gap-8px md:block md:divide-y md:divide-solid md:divide-[var(--color-border-2)]'>
+            {/*
+              `md:divide-x-0` is not decoration. `md:divide-solid` sets border-style on all four
+              sides, and only the top/bottom widths come from `md:divide-y`, so without it the unset
+              left/right widths fall back to the CSS initial `medium` and every row after the first
+              grew a 3px vertical rule. Each class needs its own `md:` prefix.
+            */}
+            <div className='grid w-full grid-cols-1 items-start gap-8px md:block md:divide-y md:divide-x-0 md:divide-solid md:divide-[var(--color-border-2)]'>
               {pagedJobs.map((job) => {
                 const agentMeta = getJobAgentMeta(job, cliAgents);
                 const isManualOnly = job.schedule.kind === 'cron' && !job.schedule.expr;
