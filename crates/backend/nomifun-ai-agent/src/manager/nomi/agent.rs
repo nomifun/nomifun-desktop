@@ -331,6 +331,9 @@ pub(crate) fn map_engine_stop_reason(
 pub(crate) struct NomiHostWiring {
     #[cfg(feature = "browser-use")]
     pub browser_lane_binding: Option<crate::BrowserLaneBinding>,
+    /// A ready remote backend when the session is SSH-bound (the factory already
+    /// connected it via the SshBackendProvider). Selects the remote tool family.
+    pub ssh_backend: Option<Arc<dyn crate::SshBackend>>,
 }
 
 impl Default for NomiHostWiring {
@@ -338,6 +341,7 @@ impl Default for NomiHostWiring {
         Self {
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
+            ssh_backend: None,
         }
     }
 }
@@ -650,6 +654,16 @@ impl NomiAgentManager {
                 "Resuming nomi session"
             );
             bootstrap = bootstrap.resume(session);
+        }
+
+        // SSH-bound session: hand the runtime the pre-connected remote backend so
+        // the remote tool family takes over Read/Write/Edit/Bash/Grep/Glob.
+        if let Some(ssh_backend) = host_wiring.ssh_backend {
+            info!(
+                conversation_id = %conversation_id,
+                "Nomi session bound to a remote SSH host"
+            );
+            bootstrap = bootstrap.ssh_session(ssh_backend);
         }
 
         let result = bootstrap
