@@ -2024,6 +2024,105 @@ export const ssh = {
 };
 
 // ---------------------------------------------------------------------------
+// Physical robots — ESP32 devices bound to a companion, served by the embedded
+// robot gateway (`/robot/*` for the DEVICE, `/api/robots*` for this UI).
+//
+// A robot is keyed by `robot_id`, which is the firmware's Device-Id — a MAC
+// address, not a UUIDv7 — so unlike every other entity id in this bridge it is
+// deliberately NOT branded: a parser would reject every real device.
+// ---------------------------------------------------------------------------
+
+/** Live phase of one robot. `offline` = no WS session right now. */
+export type IApiRobotPhase = 'offline' | 'idle' | 'listening' | 'speaking';
+
+/** One registered robot. `companion_id === null` = paired with nobody yet. */
+export interface IApiRobot {
+  robot_id: string;
+  name: string;
+  companion_id: CompanionId | null;
+  /** Firmware board type, e.g. `esp32-s3n16r8-emoji`. */
+  board: string;
+  firmware_version: string;
+  /** RFC 3339, or null when the device has never reported in. */
+  last_seen: string | null;
+  /** RFC 3339. */
+  created_at: string;
+}
+
+/**
+ * The single wire shape for robot liveness: the `robot.status` event and the
+ * `/api/robots/statuses` snapshot both carry it, so a robot cannot look
+ * different depending on how the client learned about it. `changed_at` is when
+ * the phase CHANGED (ms), not when it was asked — which is what makes it a
+ * usable tiebreak across both arrival paths.
+ */
+export interface IApiRobotStatus {
+  robot_id: string;
+  companion_id: CompanionId | null;
+  phase: IApiRobotPhase;
+  changed_at: number;
+}
+
+/**
+ * Where a device should be pointed, and whether it can reach us at all.
+ * `ota_urls` lists one candidate per non-loopback NIC; `lan_enabled` is the LAN
+ * listener's state — with it off, no device can connect no matter what it is
+ * configured with.
+ */
+export interface IApiRobotEndpoints {
+  ota_urls: string[];
+  lan_enabled: boolean;
+}
+
+const fromApiRobot = (value: IApiRobot): IApiRobot => ({
+  ...value,
+  companion_id: value.companion_id == null ? null : parseCompanionId(value.companion_id),
+});
+
+const fromApiRobotStatus = (value: IApiRobotStatus): IApiRobotStatus => ({
+  ...value,
+  companion_id: value.companion_id == null ? null : parseCompanionId(value.companion_id),
+});
+
+export const robot = {
+  list: withResponseMap(httpGet<{ robots: IApiRobot[] }, void>('/api/robots'), (payload) =>
+    (payload.robots ?? []).map(fromApiRobot)
+  ),
+  /**
+   * Claim the device showing `code` for `companion_id`.
+   * 404 = no such code (mistyped or expired); 409 = already bound to another
+   * companion. The caller surfaces the backend message verbatim.
+   */
+  claim: withResponseMap(
+    httpPost<IApiRobot, { code: string; companion_id: CompanionId }>('/api/robots/claim'),
+    fromApiRobot
+  ),
+  /** Rename, rebind (`companion_id`) or unbind (`companion_id: null`). */
+  update: withResponseMap(
+    httpPatch<
+      IApiRobot,
+      { robot_id: string; updates: { name?: string; companion_id?: CompanionId | null } }
+    >(
+      (p) => `/api/robots/${p.robot_id}`,
+      (p) => p.updates
+    ),
+    fromApiRobot
+  ),
+  /** Revoke the device token and forget the record; the device becomes new again. */
+  remove: httpDelete<void, { robot_id: string }>((p) => `/api/robots/${p.robot_id}`),
+  /** Snapshot of every robot's phase. Plural for the same reason ssh statuses is. */
+  statuses: withResponseMap(
+    httpGet<{ statuses: IApiRobotStatus[] }, void>('/api/robots/statuses'),
+    (payload) => (payload.statuses ?? []).map(fromApiRobotStatus)
+  ),
+  endpoints: httpGet<IApiRobotEndpoints, void>('/api/robots/endpoints'),
+  /** Every phase transition, owner-scoped. Same payload as `statuses`. */
+  onStatus: wsMappedEmitter<IApiRobotStatus>('robot.status', (raw) =>
+    fromApiRobotStatus(raw as IApiRobotStatus)
+  ),
+};
+
+// ---------------------------------------------------------------------------
 // Database — routed to conversation/message endpoints
 // ---------------------------------------------------------------------------
 
