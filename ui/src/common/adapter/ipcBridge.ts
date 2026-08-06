@@ -4701,6 +4701,36 @@ export interface ICompanionModelRef {
   use_model?: string | null;
 }
 
+/** One companion's speech-synthesis选择: catalog model + provider voice id. */
+export interface ICompanionTtsSelection {
+  provider_id: ProviderId;
+  model: string;
+  /** Provider voice id (free text); `null` = the provider's own default voice. */
+  voice: string | null;
+}
+
+/**
+ * One companion's voice-activity-detection tuning. The engine runs locally, so
+ * there is no Provider reference here — only tuning. `engine` is a string
+ * rather than a union because the backend recognises exactly `'silero'` today
+ * and falls back to its built-in energy detector for anything else; a union
+ * would make a future engine a breaking type change.
+ */
+export interface ICompanionVadConfig {
+  engine: string;
+  /** Speech-probability threshold, 0..1. */
+  sensitivity: number;
+  /** Trailing silence (ms) that closes one utterance, 200..3000. */
+  min_silence_ms: number;
+}
+
+/** One companion's voice stack. `asr`/`tts` null = use the install-wide default. */
+export interface ICompanionVoiceConfig {
+  asr: ICompanionModelRef | null;
+  tts: ICompanionTtsSelection | null;
+  vad: ICompanionVadConfig;
+}
+
 /** Desktop-companion window settings of one companion (`character` lives on ICompanionProfile). */
 export interface ICompanionWindowConfig {
   companion_enabled: boolean;
@@ -4755,6 +4785,12 @@ export interface ICompanionProfile {
   character: string;
   persona: ICompanionPersona;
   model: ICompanionModelRef | null;
+  /** 备用对话模型: replayed once when the main model's turn fails. */
+  fallback_model: ICompanionModelRef | null;
+  /** 视觉大模型; null = use the main chat model when it can see images. */
+  vision_model: ICompanionModelRef | null;
+  /** ASR / TTS / VAD for this companion. */
+  voice: ICompanionVoiceConfig;
   /** This companion's own 定时学习 loop (install-wide until 2026-08). */
   learn: ICompanionLearnConfig;
   /** This companion's own 技能进化 loop (install-wide until 2026-08). */
@@ -4844,6 +4880,13 @@ export type ICompanionProfilePatch = {
   character?: string;
   persona?: Partial<ICompanionPersona>;
   model?: ICompanionModelRef | null;
+  fallback_model?: ICompanionModelRef | null;
+  vision_model?: ICompanionModelRef | null;
+  voice?: {
+    asr?: ICompanionModelRef | null;
+    tts?: ICompanionTtsSelection | null;
+    vad?: Partial<ICompanionVadConfig>;
+  };
   learn?: Partial<ICompanionLearnConfig>;
   evolve?: Partial<ICompanionEvolveConfig>;
   skills?: Partial<ICompanionSkillConfig>;
