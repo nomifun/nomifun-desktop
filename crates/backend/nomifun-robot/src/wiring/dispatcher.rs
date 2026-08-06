@@ -39,6 +39,8 @@ pub trait RobotConversationBackend: Send + Sync {
     async fn cancel(&self, conversation_id: &str) -> anyhow::Result<()>;
     /// `voice.vad` of the companion profile.
     async fn vad_tuning(&self, companion_id: &str) -> VadTuning;
+    /// `voice.vad.engine` of the companion profile.
+    async fn vad_engine(&self, companion_id: &str) -> String;
     /// Whether `fallback_model` is set.
     async fn has_fallback_model(&self, companion_id: &str) -> bool;
 }
@@ -77,6 +79,10 @@ impl CompanionTurnDispatcher for RobotDispatcher {
 
     async fn vad_tuning(&self, companion_id: &str) -> VadTuning {
         self.inner.vad_tuning(companion_id).await
+    }
+
+    async fn vad_engine(&self, companion_id: &str) -> String {
+        self.inner.vad_engine(companion_id).await
     }
 
     async fn has_fallback_model(&self, companion_id: &str) -> bool {

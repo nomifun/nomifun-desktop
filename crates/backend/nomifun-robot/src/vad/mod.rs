@@ -6,6 +6,11 @@ pub mod silero;
 
 pub use energy::EnergyVad;
 
+/// The engine a companion profile names by default. Mirrors
+/// `nomifun_companion::profile`'s own default so the two cannot drift into
+/// disagreeing about what "unset" means.
+pub const DEFAULT_VAD_ENGINE: &str = "silero";
+
 /// Tunables exposed per companion (`voice.vad` in the companion profile).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VadTuning {
@@ -68,9 +73,11 @@ pub fn frame_ms(samples: usize, sample_rate: u32) -> u32 {
 
 /// Build the engine a companion asked for. Silero is preferred; if its model or
 /// the ONNX runtime is unavailable this degrades to [`EnergyVad`] with a warning
-/// rather than breaking the voice link.
+/// rather than breaking the voice link. Any name other than `"silero"` — including
+/// one this build does not know — resolves to the energy engine, so a profile
+/// written by a newer build still talks.
 pub fn build_engine(engine: &str, tuning: VadTuning) -> Box<dyn VadEngine> {
-    if engine == "silero" {
+    if engine == DEFAULT_VAD_ENGINE {
         match silero::SileroVad::new(tuning) {
             Ok(vad) => return Box::new(vad),
             Err(error) => {
