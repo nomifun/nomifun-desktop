@@ -16,7 +16,6 @@ import type { AvailableCommand } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import type { SlashCommandItem } from '@/common/chat/slash/types';
 import type { IResponseMessage } from '@/common/adapter/ipcBridge';
-import type { TokenUsageData } from '@/common/config/storage';
 import { useAddOrUpdateMessage } from '@/renderer/pages/conversation/Messages/hooks';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import {
@@ -163,8 +162,6 @@ export type UseAcpMessageReturn = {
   restoreRunningAfterStopFailure: () => void;
   getTurnStartGeneration: () => number;
   getTurnCompletionGeneration: () => number;
-  tokenUsage: TokenUsageData | null;
-  context_limit: number;
   hasThinkingMessage: boolean;
   slashCommands: SlashCommandItem[];
   fetchSlashCommands: () => void;
@@ -183,10 +180,7 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
   const [acpStatus, setAcpStatus] = useState<
     'connecting' | 'connected' | 'authenticated' | 'session_active' | 'disconnected' | 'error' | null
   >(null);
-  const [tokenUsage, setTokenUsage] = useState<TokenUsageData | null>(null);
-  const [context_limit, setContextLimit] = useState<number>(0);
   const [slashCommands, setSlashCommands] = useState<SlashCommandItem[]>([]);
-
   // Correlate the conversation-scoped authoritative lifecycle. The stream can
   // contain multiple internal continuation msg_ids; only turn.started /
   // turn.completed carry the stable outer turn id.
@@ -665,16 +659,11 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
           }
           break;
         }
-        case 'acp_context_usage': {
-          const usageData = message.data as { used: number; size: number };
-          if (usageData && typeof usageData.used === 'number') {
-            setTokenUsage({ total_tokens: usageData.used });
-            if (usageData.size > 0) {
-              setContextLimit(usageData.size);
-            }
-          }
+        case 'acp_context_usage':
+          // Known engine event with no UI consumer; swallowed so it neither
+          // breaks thinking segmentation (see ACP_THINKING_NON_BOUNDARY_TYPES)
+          // nor hits the unsupported-type warning below.
           break;
-        }
         case 'request_trace':
           {
             const trace = message.data as Record<string, unknown>;
@@ -870,8 +859,6 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
 
     setThought({ subject: '', description: '' });
     setAcpStatus(null);
-    setTokenUsage(null);
-    setContextLimit(0);
     setSlashCommands([]);
     hasContentInTurnRef.current = false;
     turnLifecycleGenerationRef.current += 1;
@@ -924,17 +911,6 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
           processingStartedAt: res.runtime?.processing_started_at,
         });
         setHasHydratedRunningState(runtimeAuthority !== 'unknown');
-
-        // Restore persisted context usage data
-        if (res.type === 'acp' && res.extra?.last_token_usage) {
-          const { last_token_usage, last_context_limit } = res.extra;
-          if (last_token_usage.total_tokens > 0) {
-            setTokenUsage(last_token_usage);
-          }
-          if (last_context_limit && last_context_limit > 0) {
-            setContextLimit(last_context_limit);
-          }
-        }
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -1083,8 +1059,6 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
     restoreRunningAfterStopFailure,
     getTurnStartGeneration,
     getTurnCompletionGeneration,
-    tokenUsage,
-    context_limit,
     hasThinkingMessage,
     slashCommands,
     fetchSlashCommands,

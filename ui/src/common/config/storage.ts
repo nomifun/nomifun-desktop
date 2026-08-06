@@ -131,10 +131,6 @@ export type TChatConversation =
           acp_session_conversation_id?: ConversationId;
           /** ACP session 最后更新时间 / Last update time of ACP session */
           acp_session_updated_at?: number;
-          /** Last context usage from usage_update */
-          last_token_usage?: TokenUsageData;
-          /** Context window capacity from usage_update */
-          last_context_limit?: number;
           /** Persisted session mode for resume support / 持久化的会话模式，用于恢复 */
           session_mode?: string;
           /** Persisted model ID for resume support / 持久化的模型 ID，用于恢复 */

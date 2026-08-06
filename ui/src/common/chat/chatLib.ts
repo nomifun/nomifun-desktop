@@ -1469,7 +1469,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'system': // Cron system responses, ignored
     case 'acp_model_info': // Model info updates, handled by AcpModelSelector
     case 'codex_model_info': // Legacy Codex model info updates
-    case 'acp_context_usage': // Context usage updates, handled by AcpSendBox
+    case 'acp_context_usage': // Known engine event; no UI consumer, swallowed
     case 'request_trace': // Request trace events, logged to F12 console (not persisted)
       return undefined;
     default: {
