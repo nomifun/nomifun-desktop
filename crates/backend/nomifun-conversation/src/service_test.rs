@@ -11398,8 +11398,7 @@ async fn send_message_turn_writeback_runs_after_system_continuation_final_answer
             KnowledgeBinding {
                 enabled: true,
                 writeback: true,
-                writeback_mode: "staged".into(),
-                writeback_eagerness: "aggressive".into(),
+                writeback_eagerness: "auto".into(),
                 kb_ids: vec![kb.knowledge_base_id.clone()],
                 ..Default::default()
             },
@@ -11659,8 +11658,7 @@ async fn slow_turn_writeback_completes_turn_immediately_and_never_blocks_next_se
             KnowledgeBinding {
                 enabled: true,
                 writeback: true,
-                writeback_mode: "staged".into(),
-                writeback_eagerness: "aggressive".into(),
+                writeback_eagerness: "auto".into(),
                 kb_ids: vec![kb.knowledge_base_id.clone()],
                 ..Default::default()
             },
@@ -14483,8 +14481,7 @@ async fn view_warmup_of_finished_writeback_session_never_builds_or_reconciles_mo
     let binding = KnowledgeBinding {
         enabled: true,
         writeback: true,
-        writeback_mode: "direct".into(),
-        writeback_eagerness: "aggressive".into(),
+        writeback_eagerness: "auto".into(),
         kb_ids: vec![kb.knowledge_base_id.clone()],
         ..Default::default()
     };

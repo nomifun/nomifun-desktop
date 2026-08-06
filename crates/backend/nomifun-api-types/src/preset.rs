@@ -84,17 +84,14 @@ pub struct KnowledgeBaseBinding {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PresetKnowledgePolicy {
     #[serde(default)] pub enabled: bool,
-    #[serde(default = "default_knowledge_mode")] pub mode: String,
     #[serde(default)] pub writeback: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub eagerness: Option<String>,
     #[serde(default)] pub grounded: bool,
 }
 
-fn default_knowledge_mode() -> String { "inherit".to_string() }
-
 impl Default for PresetKnowledgePolicy {
     fn default() -> Self {
-        Self { enabled: false, mode: default_knowledge_mode(), writeback: false, eagerness: None, grounded: false }
+        Self { enabled: false, writeback: false, eagerness: None, grounded: false }
     }
 }
 

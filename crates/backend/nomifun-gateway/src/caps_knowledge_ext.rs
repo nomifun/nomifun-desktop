@@ -1,5 +1,5 @@
 //! Extended knowledge-base capabilities (registry form): base detail / update /
-//! delete, file listing / read / delete, inbox review (list / merge / discard),
+//! delete, file listing / read / delete,
 //! full-text search, and user tag CRUD. Supplements `caps_knowledge.rs` which
 //! owns the core catalog + binding + write + autogen + fetch-url tools.
 
@@ -83,38 +83,6 @@ struct DeleteFileParams {
     #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
     kb_id: KnowledgeBaseId,
     /// Relative .md path of the file to delete (forward slashes, no traversal).
-    rel_path: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ListInboxParams {
-    /// Knowledge base id whose staged inbox to list.
-    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
-    kb_id: KnowledgeBaseId,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct MergeInboxParams {
-    /// Knowledge base id.
-    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
-    kb_id: KnowledgeBaseId,
-    /// Scope (session id that staged the proposal).
-    scope: String,
-    /// Relative .md path of the staged proposal (mirrors the target base path).
-    rel_path: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct DiscardInboxParams {
-    /// Knowledge base id.
-    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
-    kb_id: KnowledgeBaseId,
-    /// Scope (session id that staged the proposal).
-    scope: String,
-    /// Relative .md path of the staged proposal.
     rel_path: String,
 }
 
@@ -238,45 +206,6 @@ async fn delete_file(deps: Arc<GatewayDeps>, p: DeleteFileParams) -> Value {
     }
 }
 
-async fn list_inbox(deps: Arc<GatewayDeps>, p: ListInboxParams) -> Value {
-    match deps.knowledge_service.list_inbox(p.kb_id.as_str()).await {
-        Ok(entries) => ok(json!({
-            "kb_id": p.kb_id,
-            "total": entries.len(),
-            "entries": entries,
-        })),
-        Err(e) => json!({"error": e.to_string()}),
-    }
-}
-
-async fn merge_inbox(deps: Arc<GatewayDeps>, p: MergeInboxParams) -> Value {
-    match deps
-        .knowledge_service
-        .merge_inbox(p.kb_id.as_str(), &p.scope, &p.rel_path)
-        .await
-    {
-        Ok(result) => ok(json!({
-            "merged_path": result.merged_path,
-            "note": "inbox proposal accepted and merged into the base body",
-        })),
-        Err(e) => json!({"error": e.to_string()}),
-    }
-}
-
-async fn discard_inbox(deps: Arc<GatewayDeps>, p: DiscardInboxParams) -> Value {
-    match deps
-        .knowledge_service
-        .discard_inbox(p.kb_id.as_str(), &p.scope, &p.rel_path)
-        .await
-    {
-        Ok(()) => ok(json!({
-            "discarded": format!("{}/{}/{}", p.kb_id, p.scope, p.rel_path),
-            "note": "inbox proposal rejected and removed",
-        })),
-        Err(e) => json!({"error": e.to_string()}),
-    }
-}
-
 async fn search(deps: Arc<GatewayDeps>, p: SearchParams) -> Value {
     if p.kb_ids.is_empty() {
         return json!({"error": "kb_ids must not be empty"});
@@ -387,35 +316,6 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         )
         .deny_on(&[Surface::Channel]),
         |deps, _ctx, p| delete_file(deps, p),
-    ));
-
-    // ── inbox (staged write-back review) ─────────────────────────────────
-    out.push(Capability::new::<ListInboxParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_knowledge_list_inbox",
-            "knowledge",
-            "List pending staged write-back proposals (inbox) for a knowledge base.",
-            DangerTier::Read,
-        ),
-        |deps, _ctx, p| list_inbox(deps, p),
-    ));
-    out.push(Capability::new::<MergeInboxParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_knowledge_merge_inbox",
-            "knowledge",
-            "Accept a staged inbox proposal: merge it into the base body and remove the staged copy.",
-            DangerTier::Write,
-        ),
-        |deps, _ctx, p| merge_inbox(deps, p),
-    ));
-    out.push(Capability::new::<DiscardInboxParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_knowledge_discard_inbox",
-            "knowledge",
-            "Reject and remove a staged inbox proposal without merging.",
-            DangerTier::Write,
-        ),
-        |deps, _ctx, p| discard_inbox(deps, p),
     ));
 
     // ── search ───────────────────────────────────────────────────────────
