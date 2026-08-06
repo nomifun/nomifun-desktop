@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AutoWorkRunState, IdmmRunState, ISshLinkPhase } from '@/common/adapter/ipcBridge';
+import type {
+  AutoWorkRunState,
+  IApiRobotPhase,
+  IdmmRunState,
+  ISshLinkPhase,
+} from '@/common/adapter/ipcBridge';
 
 import { CAPABILITY_COLORS } from './CapabilityIcon';
 
@@ -56,4 +61,21 @@ export const SSH_STATUS_COLOR: Record<ISshLinkPhase, string> = {
   reconnecting: CAPABILITY_COLORS.armed,
   dropped: CAPABILITY_COLORS.danger,
   closed: CAPABILITY_COLORS.off,
+};
+
+/**
+ * Robot phase → colour for the 机器人连接 list pill.
+ *
+ * `idle` is green because it means the device IS connected and waiting — for a
+ * physical robot "reachable" is the good state, and `offline` (gray) is the
+ * neutral absence, not a fault: a robot that is simply unplugged must not glow
+ * red. `listening` / `speaking` share the primary tint: something is happening
+ * right now, and distinguishing them by hue would only add noise to a row whose
+ * label already says which.
+ */
+export const ROBOT_STATUS_COLOR: Record<IApiRobotPhase, string> = {
+  offline: CAPABILITY_COLORS.off,
+  idle: CAPABILITY_COLORS.active,
+  listening: CAPABILITY_COLORS.primary,
+  speaking: CAPABILITY_COLORS.primary,
 };
