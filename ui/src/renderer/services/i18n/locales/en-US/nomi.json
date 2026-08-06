@@ -58,6 +58,8 @@
       "action": "Turn everything off",
       "actionDesc": "Switches only, no deletion: models and intervals stay as they are, learned skills and memories are kept, and already-collected raw records are still cleaned by the retention policy above. It stops learning for every companion, not just the one whose tab this is.",
       "confirm": "Turn off every collection source and stop periodic learning and skill generation for every companion? You can re-enable at any time with no model reconfiguration. Already-collected raw records are not deleted.",
+      "partial": "Collection has stopped, but learning could not be stopped for some companions. Press again to retry — the ones already stopped are unaffected.",
+      "failed": "Could not turn things off. Please retry.",
       "done": "Everything turned off"
     }
   },

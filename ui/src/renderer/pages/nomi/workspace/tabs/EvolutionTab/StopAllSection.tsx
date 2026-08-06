@@ -33,8 +33,22 @@ const StopAllSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setting
   const stopAll = async () => {
     setStopping(true);
     try {
-      await settings.disableAll();
-      Message.success(t('nomi.collect.stopAll.done', { defaultValue: '已全部关闭' }));
+      const outcome = await settings.disableAll();
+      if (outcome.complete) {
+        Message.success(t('nomi.collect.stopAll.done', { defaultValue: '已全部关闭' }));
+      } else if (outcome.collectionStopped) {
+        // The half that landed is the half the user cares about most, so lead with
+        // it. A bare error here would read as "nothing happened" and invite a
+        // second press — while recording has in fact already stopped. Retrying is
+        // safe (the write is idempotent), so say so.
+        Message.error(
+          t('nomi.collect.stopAll.partial', {
+            defaultValue: '采集已全部停止，但有伙伴的学习没能停下。再按一次即可重试，已经停下的不受影响。',
+          })
+        );
+      } else {
+        Message.error(outcome.error ?? t('nomi.collect.stopAll.failed', { defaultValue: '没能关闭，请重试。' }));
+      }
     } catch (error) {
       Message.error(String(error));
     } finally {

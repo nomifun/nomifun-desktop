@@ -2242,6 +2242,8 @@ export type I18nKey =
   | 'nomi.collect.stopAll.confirm'
   | 'nomi.collect.stopAll.desc'
   | 'nomi.collect.stopAll.done'
+  | 'nomi.collect.stopAll.failed'
+  | 'nomi.collect.stopAll.partial'
   | 'nomi.collect.stopAll.title'
   | 'nomi.companion.attachImage'
   | 'nomi.companion.browser.busy'
