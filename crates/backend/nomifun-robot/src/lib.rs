@@ -12,6 +12,7 @@ pub mod events;
 pub mod lan_source;
 pub mod link;
 pub mod mcp_bridge;
+pub mod mcp_proxy;
 pub mod pipeline;
 pub mod protocol;
 pub mod registry;
@@ -19,6 +20,7 @@ pub mod routes;
 pub mod services;
 pub mod session;
 pub mod status;
+pub mod tool_registry;
 pub mod vad;
 
 use std::sync::Arc;
