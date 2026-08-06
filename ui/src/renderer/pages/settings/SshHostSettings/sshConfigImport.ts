@@ -68,6 +68,7 @@ export const summarizeImport = (
   result: IApiSshImportResult
 ): { level: 'success' | 'warning'; clauses: SshImportClause[] } => {
   const needsCredential = result.imported.filter((item) => item.needsCredential).length;
+  const needsUsername = result.imported.filter((item) => item.needsUsername).length;
   const duplicates = result.skipped.filter(
     (item) => item.reason === 'duplicateName' || item.reason === 'duplicateEndpoint'
   ).length;
@@ -80,6 +81,11 @@ export const summarizeImport = (
   if (needsCredential > 0) {
     clauses.push({ key: 'ssh.import.summaryNeedsCredential', values: { count: needsCredential } });
   }
+  // Reported separately from the credential: a host whose key we stored is still
+  // undialable with no username, so counting it as ready would be a lie.
+  if (needsUsername > 0) {
+    clauses.push({ key: 'ssh.import.summaryNeedsUsername', values: { count: needsUsername } });
+  }
   if (duplicates > 0) {
     clauses.push({ key: 'ssh.import.summaryDuplicate', values: { count: duplicates } });
   }
@@ -87,6 +93,10 @@ export const summarizeImport = (
     clauses.push({ key: 'ssh.import.summaryVanished', values: { count: vanished } });
   }
 
-  const clean = result.imported.length > 0 && needsCredential === 0 && result.skipped.length === 0;
+  const clean =
+    result.imported.length > 0 &&
+    needsCredential === 0 &&
+    needsUsername === 0 &&
+    result.skipped.length === 0;
   return { level: clean ? 'success' : 'warning', clauses };
 };

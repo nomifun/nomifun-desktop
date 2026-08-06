@@ -21,6 +21,7 @@
     "summaryImported": "已导入 {{count}} 台主机。",
     "summaryNothing": "没有导入任何主机。",
     "summaryNeedsCredential": "其中 {{count}} 台仍缺凭据 —— 打开它补上即可。",
+    "summaryNeedsUsername": "其中 {{count}} 台在配置里没写用户名 —— 打开它补上即可。",
     "summaryDuplicate": "{{count}} 台已存在于主机簿。",
     "summaryVanished": "{{count}} 个别名已不在配置里。",
     "failed": "从 ~/.ssh/config 导入失败：{{message}}"

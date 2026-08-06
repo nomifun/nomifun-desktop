@@ -4470,6 +4470,8 @@ export type I18nKey =
   | 'ssh.import.summaryImported_other'
   | 'ssh.import.summaryNeedsCredential'
   | 'ssh.import.summaryNeedsCredential_other'
+  | 'ssh.import.summaryNeedsUsername'
+  | 'ssh.import.summaryNeedsUsername_other'
   | 'ssh.import.summaryNothing'
   | 'ssh.import.summaryVanished'
   | 'ssh.import.summaryVanished_other'

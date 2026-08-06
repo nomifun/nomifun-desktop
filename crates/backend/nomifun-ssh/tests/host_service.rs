@@ -311,6 +311,36 @@ async fn import_asked_for_the_same_alias_twice_creates_one_host() {
 }
 
 #[tokio::test]
+async fn import_flags_a_host_the_config_gave_no_user() {
+    // ssh would fall back to the local account name here; we deliberately do not
+    // guess (a wrong user fails authentication far from its cause). The row is
+    // still worth having, but it cannot dial until someone fills the field in —
+    // and a stored key does not make it ready, so `needs_credential` alone would
+    // report this host as fine.
+    let (svc, user) = service_with_owner().await;
+    let (_dir, scan) = scan_fixture(
+        "Host userless\n  HostName 10.0.3.60\n  IdentityFile ~/.ssh/id_ed25519\n",
+        &[("id_ed25519", FAKE_KEY)],
+    );
+
+    let result = svc
+        .import_hosts(&user, &["userless".to_string()], &scan.hosts)
+        .await
+        .expect("import");
+
+    assert_eq!(result.imported.len(), 1);
+    let imported = &result.imported[0];
+    assert!(!imported.needs_credential, "the key was readable");
+    assert!(imported.needs_username, "the config named no user");
+
+    let row = svc
+        .get(&user, &SshHostId::parse(imported.ssh_host_id.clone()).unwrap())
+        .await
+        .expect("get");
+    assert_eq!(row.username, "", "no user is stored as no user, not a guess");
+}
+
+#[tokio::test]
 async fn the_host_book_router_builds_with_every_route() {
     // axum panics when two routes conflict, and it does so while *building* the
     // router — i.e. at boot, not on a request. The import routes sit on the same

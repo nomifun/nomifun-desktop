@@ -260,10 +260,12 @@ impl SshHostService {
                 .await?;
             names.insert(candidate.alias.clone());
             endpoints.insert(endpoint);
+            let needs_username = created.username.is_empty();
             result.imported.push(ImportedSshHost {
                 alias: candidate.alias.clone(),
                 ssh_host_id: created.ssh_host_id,
                 needs_credential: private_key.is_none(),
+                needs_username,
             });
         }
         Ok(result)

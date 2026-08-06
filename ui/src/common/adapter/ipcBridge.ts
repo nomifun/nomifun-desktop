@@ -1937,6 +1937,12 @@ export interface IApiSshImportedHost {
    * the host is right; it just cannot connect until someone supplies a secret.
    */
   needsCredential: boolean;
+  /**
+   * The config named no `User`, so the row's username is empty. A separate
+   * missing piece from {@link needsCredential}: a host whose key was read fine is
+   * still undialable without a username.
+   */
+  needsUsername: boolean;
 }
 
 export type IApiSshImportSkipReason = 'duplicateName' | 'duplicateEndpoint' | 'notInConfig';

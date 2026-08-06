@@ -27,6 +27,8 @@
     "summaryNothing": "No host was imported.",
     "summaryNeedsCredential": "{{count}} still needs a credential — open it to add one.",
     "summaryNeedsCredential_other": "{{count}} still need a credential — open them to add one.",
+    "summaryNeedsUsername": "{{count}} has no username in the config — open it to fill one in.",
+    "summaryNeedsUsername_other": "{{count}} have no username in the config — open them to fill one in.",
     "summaryDuplicate": "{{count}} was already saved.",
     "summaryDuplicate_other": "{{count}} were already saved.",
     "summaryVanished": "{{count}} is no longer in the config.",
