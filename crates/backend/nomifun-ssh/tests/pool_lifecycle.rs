@@ -560,10 +560,10 @@ async fn a_tool_call_revives_a_link_the_ladder_gave_up_on() {
 async fn await_ladder_give_up(link: &Arc<nomifun_ssh::SshLink>, budget: Duration) -> String {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        if let nomifun_ssh::SshLinkState::Dropped { detail, .. } = link.state() {
-            if detail.contains("gave up") {
-                return detail;
-            }
+        if let nomifun_ssh::SshLinkState::Dropped { detail, .. } = link.state()
+            && detail.contains("gave up")
+        {
+            return detail;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
