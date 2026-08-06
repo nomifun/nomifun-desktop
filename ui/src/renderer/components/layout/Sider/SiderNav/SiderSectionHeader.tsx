@@ -36,7 +36,7 @@ const SiderSectionHeader: React.FC<SiderSectionHeaderProps> = ({ label, collapse
   }
 
   return (
-    <div className='shrink-0 mt-5px mb-1px px-12px h-18px flex items-center text-12px font-[500] leading-none text-t-tertiary select-none'>
+    <div className='shrink-0 mt-6px mb-4px px-12px h-18px flex items-center text-12px font-[500] leading-none text-t-tertiary select-none'>
       {label}
     </div>
   );

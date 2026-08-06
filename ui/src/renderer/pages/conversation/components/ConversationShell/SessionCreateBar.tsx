@@ -63,7 +63,7 @@ const SessionCreateBar: React.FC<SessionCreateBarProps> = ({
 }) => {
   const { t } = useTranslation();
   const actionButtonClassName =
-    'w-full min-w-0 h-32px px-9px rd-8px border border-solid outline-none flex items-center justify-center gap-6px text-13px font-[500] leading-none transition-colors focus:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
+    'w-full min-w-0 h-28px px-9px rd-8px border border-solid outline-none flex items-center justify-center gap-6px text-13px font-[500] leading-none transition-colors focus:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
   const restingButtonClassName =
     'cursor-pointer bg-transparent border-[var(--color-border-2)] text-t-primary hover:bg-fill-3 active:bg-fill-4';
   const batchToggleLabel = t(batchMode ? 'sessionList.exitBatchSelect' : 'sessionList.batchSelect');
