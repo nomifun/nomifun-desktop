@@ -9,10 +9,10 @@
  *
  * Structure:
  *   Header: back + kind icon + name + kind badge + tags + actions + meta row
- *   Tabs:   docs | inbox(n) | use | set
+ *   Tabs:   docs | use | set
  *
  * Each tab body is a placeholder for D2-D5 tasks.
- * Existing document/inbox logic is preserved inline under the "docs"/"inbox" tabs.
+ * Existing document logic is preserved inline under the "docs" tab.
  */
 
 import classNames from 'classnames';
@@ -21,7 +21,6 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { parseKnowledgeBaseId } from '@/common/types/ids';
 import { useTranslation } from 'react-i18next';
 import {
-  Badge,
   Button,
   Checkbox,
   Dropdown,
@@ -70,11 +69,9 @@ import {
   knowledgeErrorText,
   notifySourceFetchResult,
   useKnowledgeBase,
-  useKnowledgeInbox,
 } from '../useKnowledge';
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
-import InboxReviewPanel from '../InboxReviewPanel';
 import KnowledgeConsumersSection from '../KnowledgeConsumersSection';
 import TagPicker from '../CreateStudio/TagPicker';
 import { getKindConfig, KindIcon, type KindConfig } from '../knowledgeKind';
@@ -90,8 +87,8 @@ import {
 
 // ─── Tab keys (maps to ?tab= query values) ─────────────────────────────────────
 
-type TabKey = 'docs' | 'inbox' | 'use' | 'set';
-const ALL_TABS: TabKey[] = ['docs', 'inbox', 'use', 'set'];
+type TabKey = 'docs' | 'use' | 'set';
+const ALL_TABS: TabKey[] = ['docs', 'use', 'set'];
 
 // ─── Kind config (shared with KnowledgeCard via ../knowledgeKind) ──────────────
 
@@ -399,7 +396,7 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
       >
         <p className='text-13px text-[var(--color-text-2)] mb-12px'>
           {t('knowledge.detail.settings.deleteWarning', {
-            defaultValue: '删除后无法恢复。知识库的所有文档、待审内容、挂载关系将被清除。',
+            defaultValue: '删除后无法恢复。知识库的所有文档、挂载关系将被清除。',
           })}
         </p>
         {base.managed && (
@@ -435,7 +432,6 @@ const KnowledgeDetailPage: React.FC = () => {
 
   // ─── Data hooks ─────────────────────────────────────────────────────────────
   const { base, files, tree, loading, error, refresh } = useKnowledgeBase(id);
-  const { items: inboxItems, loading: inboxLoading, refresh: refreshInbox } = useKnowledgeInbox(id);
   const { choice: modelChoice, setChoice: setModelChoice } = useKnowledgeAutogenModel();
   const { tags: allTags, createTag } = useKnowledgeTags();
 
@@ -493,11 +489,6 @@ const KnowledgeDetailPage: React.FC = () => {
   useEffect(() => {
     setTreeData((prev) => preserveKnowledgeTreeChildren(tree, prev));
   }, [tree]);
-
-  const handleInboxChanged = () => {
-    void refresh();
-    void refreshInbox();
-  };
 
   // Auto-select first file
   useEffect(() => {
@@ -884,7 +875,6 @@ const KnowledgeDetailPage: React.FC = () => {
 
   // ─── Computed ───────────────────────────────────────────────────────────────
   const kindConfig = base ? getKindConfig(base.kind, t, 'neutral') : null;
-  const pendingCount = base?.pending_inbox ?? inboxItems.length;
 
   const displayedTreeData = useMemo(
     () => (isTreeSearch ? buildKnowledgeSearchTree(files, fileSearch) : treeData),
@@ -1388,25 +1378,6 @@ const KnowledgeDetailPage: React.FC = () => {
             </div>
           </Tabs.TabPane>
 
-          {/* Tab: Inbox / Pending Review */}
-          <Tabs.TabPane
-            key='inbox'
-            title={
-              <span className='flex items-center gap-6px'>
-                {t('knowledge.detail.tabInbox', { defaultValue: '待审' })}
-                {pendingCount > 0 && <Badge count={pendingCount} />}
-              </span>
-            }
-          >
-            <div>
-              {base && (inboxLoading || inboxItems.length > 0) ? (
-                <InboxReviewPanel baseId={base.knowledge_base_id} items={inboxItems} loading={inboxLoading} onChanged={handleInboxChanged} />
-              ) : (
-                <Empty description={t('knowledge.detail.inboxEmpty', { defaultValue: '暂无待审内容' })} />
-              )}
-            </div>
-          </Tabs.TabPane>
-
           {/* Tab: Mount & Usage */}
           <Tabs.TabPane key='use' title={t('knowledge.detail.tabUse', { defaultValue: '挂载与使用' })}>
             <div
@@ -1484,7 +1455,7 @@ const KnowledgeDetailPage: React.FC = () => {
                       </b>
                       <p className='mb-0 mt-3px text-11px leading-17px text-[var(--color-text-3)]'>
                         {t('knowledge.detail.use.step3Desc', {
-                          defaultValue: '开启回血后，会话里新学到的知识可暂存到「待审」由你确认，知识库越用越厚。',
+                          defaultValue: '开启回血后，会话里新学到的知识会直接写回知识库正文，知识库越用越厚。',
                         })}
                       </p>
                       <div className='mt-9px rd-8px bg-[var(--color-fill-1)] px-9px py-8px text-10px leading-16px text-[var(--color-text-3)]'>
@@ -1493,7 +1464,7 @@ const KnowledgeDetailPage: React.FC = () => {
                         </div>
                         <p className='mb-5px mt-2px'>
                           {t('knowledge.detail.use.writebackDesc', {
-                            defaultValue: '回血模式在每个会话的「挂载知识库」控件里按工作区设置——不是全局统一开关。每个挂载可独立选择：',
+                            defaultValue: '回血在每个会话的「挂载知识库」控件里按工作区设置——不是全局统一开关。每个挂载可独立选择：',
                           })}
                         </p>
                         <ul className='m-0 pl-14px'>
@@ -1506,17 +1477,12 @@ const KnowledgeDetailPage: React.FC = () => {
                           </li>
                           <li>
                             <span className='font-500 text-[var(--color-text-2)]'>
-                              {t('knowledge.detail.use.writebackStaged', { defaultValue: '暂存审阅' })}
+                              {t('knowledge.detail.use.writebackDirect', { defaultValue: '开启回写' })}
                             </span>
                             {' — '}
-                            {t('knowledge.detail.use.writebackStagedDesc', { defaultValue: '新知识先进「待审」，你确认后才并入（推荐）' })}
-                          </li>
-                          <li>
-                            <span className='font-500 text-[var(--color-text-2)]'>
-                              {t('knowledge.detail.use.writebackDirect', { defaultValue: '直接写入' })}
-                            </span>
-                            {' — '}
-                            {t('knowledge.detail.use.writebackDirectDesc', { defaultValue: '模型直接改库，适合个人/数字伙伴' })}
+                            {t('knowledge.detail.use.writebackDirectDesc', {
+                              defaultValue: '模型把新知识写进库内正文，更新已有文档时追加、不覆盖；由「回写意识」决定它是等你开口还是自己判断',
+                            })}
                           </li>
                         </ul>
                       </div>

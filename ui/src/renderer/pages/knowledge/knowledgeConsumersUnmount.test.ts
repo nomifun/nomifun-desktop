@@ -10,8 +10,7 @@ const KB_MISSING = parseKnowledgeBaseId('019b0000-0000-7000-8000-000000000003');
 const binding = (overrides: Partial<IKnowledgeBinding> = {}): IKnowledgeBinding => ({
   enabled: true,
   writeback: true,
-  writeback_mode: 'direct',
-  writeback_eagerness: 'aggressive',
+  writeback_eagerness: 'auto',
   channel_write_enabled: true,
   kb_ids: [KB_A, KB_B],
   ...overrides,
@@ -22,8 +21,7 @@ describe('knowledge consumer unmount binding transform', () => {
     expect(removeBaseFromBinding(binding(), KB_A)).toEqual({
       enabled: true,
       writeback: true,
-      writeback_mode: 'direct',
-      writeback_eagerness: 'aggressive',
+      writeback_eagerness: 'auto',
       channel_write_enabled: true,
       kb_ids: [KB_B],
     });
@@ -33,8 +31,7 @@ describe('knowledge consumer unmount binding transform', () => {
     expect(removeBaseFromBinding(binding({ kb_ids: [KB_A] }), KB_A)).toEqual({
       enabled: false,
       writeback: true,
-      writeback_mode: 'direct',
-      writeback_eagerness: 'aggressive',
+      writeback_eagerness: 'auto',
       channel_write_enabled: true,
       kb_ids: [],
     });
