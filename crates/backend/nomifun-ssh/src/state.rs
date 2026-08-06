@@ -25,6 +25,15 @@ pub const SSH_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// How long a close may spend collecting exit evidence before giving up and
 /// reporting the teardown as unproven.
 pub const SSH_CLOSE_BUDGET: Duration = Duration::from_secs(5);
+/// How long one dial may take before it counts as unreachable.
+///
+/// Nothing below this bounds a dial: the transport sets no connect or handshake
+/// timeout, so a firewall that DROPs gets the kernel's ~130s of SYN retries and a
+/// port that accepts without speaking SSH (a mistyped port landing on an HTTP
+/// server) never returns at all. A dial is also serialized per host, so an
+/// unbounded one wedges every other session's `acquire` behind it — including the
+/// agent's — not just the operator's "test connection" spinner.
+pub const SSH_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The coarse, machine-readable half of a link state — what the UI colours by.
 /// Payload-free on purpose: clients pick a colour from this and never string-
@@ -134,6 +143,7 @@ mod tests {
         assert_eq!(SSH_RECONNECT_MAX_ATTEMPTS, 10);
         assert_eq!(SSH_LIVENESS_POLL_INTERVAL, std::time::Duration::from_secs(15));
         assert_eq!(SSH_CLOSE_BUDGET, std::time::Duration::from_secs(5));
+        assert_eq!(SSH_DIAL_TIMEOUT, std::time::Duration::from_secs(15));
     }
 
     #[test]

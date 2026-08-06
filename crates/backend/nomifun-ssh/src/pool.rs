@@ -32,7 +32,7 @@ use crate::events::SshEventEmitter;
 use crate::service::SshHostService;
 use crate::sink::{SshConnectionHandle, SshDialError, SshLinkBackend};
 use crate::state::{
-    SshLinkState, SshTeardown, SSH_CLOSE_BUDGET, SSH_LIVENESS_POLL_INTERVAL,
+    SshLinkState, SshTeardown, SSH_CLOSE_BUDGET, SSH_DIAL_TIMEOUT, SSH_LIVENESS_POLL_INTERVAL,
     SSH_RECONNECT_INITIAL_BACKOFF_MS, SSH_RECONNECT_MAX_ATTEMPTS, SSH_RECONNECT_MAX_BACKOFF_MS,
 };
 
@@ -808,7 +808,22 @@ impl PoolInner {
         }
 
         let outcome = match self.service.decrypt_credential(user_id, host_id).await {
-            Ok(cred) => SshConnectionHandle::connect(cred, self.known_hosts.clone(), cwd).await,
+            // Bounded here and nowhere else: the transport has no connect or
+            // handshake timeout, and this await is held under the per-host dial
+            // lock, so an unbounded one blocks every other session's `acquire` on
+            // this host — the agent's included — not just the caller's.
+            Ok(cred) => match tokio::time::timeout(
+                SSH_DIAL_TIMEOUT,
+                SshConnectionHandle::connect(cred, self.known_hosts.clone(), cwd),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(SshDialError::Unreachable(format!(
+                    "ssh dial timed out after {}s",
+                    SSH_DIAL_TIMEOUT.as_secs()
+                ))),
+            },
             Err(e) => Err(SshDialError::from(e)),
         };
         match &outcome {
