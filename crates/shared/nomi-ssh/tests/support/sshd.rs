@@ -6,7 +6,8 @@
 //! [`start_cert_sshd`] is the same host configured with `TrustedUserCAKeys`
 //! pointing at a CA the fixture generates, plus three certificates issued off it
 //! (good / wrong principal / already expired) so the certificate branch can be
-//! exercised end to end.
+//! exercised end to end. [`start_agent`] runs a **private** ssh-agent on a socket
+//! inside the tempdir; the operator's own `SSH_AUTH_SOCK` is never read.
 //!
 //! The exact command sequence here was verified by hand against
 //! OpenSSH 10.2p1 on this machine before being committed.
@@ -275,6 +276,89 @@ fn issue_cert(
     status.success().then_some(())?;
     let cert = dir.join(format!("{name}-cert.pub"));
     cert.is_file().then_some(cert)
+}
+
+/// A private ssh-agent listening on a socket inside its own tempdir.
+///
+/// Started for the test and killed with it. The operator's agent is never
+/// contacted: `SSH_AUTH_SOCK` is neither read nor written in this process, only
+/// passed explicitly to the `ssh-add` child.
+pub struct TestAgent {
+    socket: PathBuf,
+    child: Child,
+    _tmp: TempDir,
+}
+
+impl TestAgent {
+    pub fn socket(&self) -> PathBuf {
+        self.socket.clone()
+    }
+}
+
+impl Drop for TestAgent {
+    /// Kills exactly the one process we spawned and still hold a `Child` for.
+    /// No pid scanning, no process-group signal: a fixture must not be able to
+    /// reach anything it did not start.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Start a private ssh-agent and load `keys` into it. `None` when
+/// `ssh-agent`/`ssh-add` are missing or the agent never came up.
+pub fn start_agent(keys: &[&Path]) -> Option<TestAgent> {
+    let tmp = TempDir::new().ok()?;
+    let socket = tmp.path().join("agent.sock");
+    // `-D` keeps the agent in the foreground, so the pid we hold really is the
+    // agent (a forking agent would hand us an already-exited shim).
+    let child = Command::new("ssh-agent")
+        .arg("-D")
+        .arg("-a")
+        .arg(&socket)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let agent = TestAgent {
+        socket,
+        child,
+        _tmp: tmp,
+    };
+    wait_until_socket_exists(&agent.socket)?;
+    for key in keys {
+        let status = Command::new("ssh-add")
+            .arg("-q")
+            .arg(key)
+            .env("SSH_AUTH_SOCK", &agent.socket)
+            .env_remove("SSH_AGENT_PID")
+            // No passphrase on fixture keys, but make certain a prompt can never
+            // appear and hang the suite.
+            .env_remove("SSH_ASKPASS")
+            .env_remove("DISPLAY")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() {
+            // Returning drops `agent`, which kills the agent we just started.
+            return None;
+        }
+    }
+    Some(agent)
+}
+
+fn wait_until_socket_exists(path: &Path) -> Option<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if path.exists() {
+            return Some(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
 }
 
 #[cfg(unix)]
