@@ -140,8 +140,19 @@ impl SshConnection {
         // OSC), then blank prompts, disable echo, cd, and prime sentinel 0. The
         // PTY byte stream is FIFO: bash reads the `exec` line and replaces itself;
         // the new sh reads the remaining buffered init bytes.
+        //
+        // The pager variables are the other half of "this is a real PTY": sudo
+        // needs one, but so every tool that pages when stdout is a tty starts
+        // `less` and blocks on a keypress nobody will ever send — `git log`,
+        // `git diff`, `systemctl status`, `journalctl`, `man`. The command then
+        // burns its whole budget and comes back as a timeout with a screenful of
+        // escape codes. `cat` is the value both git and systemd read as "no
+        // pager", and `TERM=dumb` stops the rest from emitting cursor control
+        // into the capture. sudo is unaffected: it decides whether it has a
+        // terminal with `isatty`, not from `TERM`.
         let init = format!(
-            "exec /bin/sh\nstty -echo 2>/dev/null; PS1=''; PS2=''; unset PROMPT_COMMAND 2>/dev/null; cd {} 2>/dev/null\n",
+            "exec /bin/sh\nstty -echo 2>/dev/null; PS1=''; PS2=''; unset PROMPT_COMMAND 2>/dev/null; \
+             export PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat TERM=dumb; cd {} 2>/dev/null\n",
             shell_quote(cwd)
         );
         {
