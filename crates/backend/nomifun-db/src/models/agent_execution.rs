@@ -15,7 +15,6 @@ pub struct AgentExecutionRow {
     pub work_dir: Option<String>,
     pub initial_plan_input: String,
     pub summary: Option<String>,
-    pub total_tokens: Option<i64>,
     pub version: i64,
     pub plan_revision: i64,
     pub event_sequence: i64,
