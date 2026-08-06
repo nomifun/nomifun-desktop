@@ -58,6 +58,20 @@ const STATS_POLL_MS = 15_000;
 
 export type StorageState = 'loading' | 'ready' | 'error';
 
+/**
+ * What 一键全关 actually achieved. It is deliberately a value rather than a thrown
+ * error: `disable_all` is two separate writes (one shared collect file, then N
+ * companion profiles), so "it failed" is not one outcome but two, and the section
+ * needs to say which — see `disableAll` below.
+ */
+export interface DisableAllOutcome {
+  /** Collection off AND every companion stopped learning. */
+  complete: boolean;
+  /** Collection is off. True even when the learning half failed. */
+  collectionStopped: boolean;
+  error?: string;
+}
+
 export interface CollectSettingsHandle {
   collect: ICompanionCollectConfig | null;
   loading: boolean;
@@ -70,7 +84,7 @@ export interface CollectSettingsHandle {
   patch: (patch: Partial<ICompanionCollectConfig>) => Promise<void>;
   /** Re-read both measurements (after a policy change deleted files, say). */
   refreshMeasurements: (showStorageLoading?: boolean) => void;
-  disableAll: () => Promise<void>;
+  disableAll: () => Promise<DisableAllOutcome>;
 }
 
 export const useCollectSettings = (): CollectSettingsHandle => {
@@ -171,10 +185,29 @@ export const useCollectSettings = (): CollectSettingsHandle => {
     [refreshConfig]
   );
 
-  const disableAll = useCallback(async () => {
-    const saved = await ipcBridge.companion.disableAll.invoke();
-    if (aliveRef.current) setConfig(saved);
-    refreshMeasurements();
+  const disableAll = useCallback(async (): Promise<DisableAllOutcome> => {
+    try {
+      const saved = await ipcBridge.companion.disableAll.invoke();
+      if (aliveRef.current) setConfig(saved);
+      refreshMeasurements();
+      return { complete: true, collectionStopped: true };
+    } catch (e) {
+      // The kill switch is two writes — one shared collect file, then N profiles —
+      // so a failure means either "nothing happened" or "collection already
+      // stopped, some companions did not". Re-read the truth instead of guessing:
+      // telling a worried user nothing happened when their events have in fact
+      // already stopped being recorded is the worse of the two lies, and it invites
+      // a second press. The re-read also repaints the switches, so the user SEES
+      // the half that landed while reading the message.
+      const latest = await ipcBridge.companion.getSharedConfig.invoke().catch(() => null);
+      if (latest && aliveRef.current) setConfig(latest);
+      refreshMeasurements();
+      return {
+        complete: false,
+        collectionStopped: latest != null && !COLLECTION_SOURCE_KEYS.some((key) => latest.collect[key]),
+        error: String(e),
+      };
+    }
   }, [refreshMeasurements]);
 
   return {
