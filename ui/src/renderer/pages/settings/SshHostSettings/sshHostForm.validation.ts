@@ -78,9 +78,6 @@ export function validateSshHostForm(
   return null;
 }
 
-export const isSshHostFormValid = (values: SshHostFormValues, isEdit: boolean = false): boolean =>
-  validateSshHostForm(values, isEdit) === null;
-
 /**
  * Strip credential fields still equal to the mask from an update payload, so an
  * unchanged secret is never resent (the server keeps the stored ciphertext).
@@ -94,10 +91,4 @@ export function buildUpdatePayload(values: Partial<SshHostFormValues>): Partial<
     }
   }
   return out;
-}
-
-/** Test Connection must be blocked while a required secret is only the mask and
- *  the user has not typed a fresh value (we cannot test what we don't have). */
-export function canTestConnection(values: SshHostFormValues, isEdit: boolean): boolean {
-  return isSshHostFormValid(values, isEdit);
 }

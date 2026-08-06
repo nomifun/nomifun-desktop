@@ -14,12 +14,12 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import useSWR from 'swr';
 import { conversationTarget } from '@/common/types/ids';
+import type { I18nKey } from '@renderer/services/i18n';
 import { emitter } from '@renderer/utils/emitter';
 import { seedConversationCache } from '@renderer/pages/conversation/utils/conversationCache';
 import { useGuidModelSelection } from '@renderer/pages/guid/hooks/useGuidModelSelection';
 import {
   buildUpdatePayload,
-  canTestConnection,
   validateSshHostForm,
   type SshAuthType,
   type SshHostFormValues,
@@ -38,6 +38,20 @@ const AUTH_ICON: Record<SshAuthType, React.ReactNode> = {
   key: <Key theme='outline' size='14' />,
   certificate: <Certificate theme='outline' size='14' />,
   agent: <Fingerprint theme='outline' size='14' />,
+};
+
+/**
+ * One literal {@link I18nKey} per auth method, same shape as {@link AUTH_ICON}.
+ * Building the key from the value instead (`` `ssh.form.auth${…}` ``) only gets
+ * past I18nKey with a cast that disables the union, and that cast is what lets
+ * an unmapped method render its raw key into the row. As a table, a new method
+ * is a typecheck failure here rather than a surprise on screen.
+ */
+const AUTH_LABEL_KEY: Record<SshAuthType, I18nKey> = {
+  password: 'ssh.form.authPassword',
+  key: 'ssh.form.authKey',
+  certificate: 'ssh.form.authCertificate',
+  agent: 'ssh.form.authAgent',
 };
 
 // ── Add / edit form modal ───────────────────────────────────────────────
@@ -124,9 +138,9 @@ const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, onClose
 
   const handleTest = useCallback(async () => {
     const values = currentValues();
-    if (!canTestConnection(values, isEdit)) {
-      const errorKey = validateSshHostForm(values, isEdit);
-      if (errorKey) Message.warning(t(errorKey));
+    const errorKey = validateSshHostForm(values, isEdit);
+    if (errorKey) {
+      Message.warning(t(errorKey));
       return;
     }
     if (!editHost) {
@@ -525,7 +539,7 @@ const SshHostManagement: React.FC = () => {
                 <div className='mt-3px flex items-center gap-6px text-11px leading-17px text-t-tertiary'>
                   <span className='inline-flex items-center gap-4px'>
                     {AUTH_ICON[host.authType]}
-                    {t(`ssh.form.auth${host.authType.charAt(0).toUpperCase()}${host.authType.slice(1)}` as never)}
+                    {t(AUTH_LABEL_KEY[host.authType])}
                   </span>
                   {host.sudoPassword ? <span>· sudo</span> : null}
                 </div>
