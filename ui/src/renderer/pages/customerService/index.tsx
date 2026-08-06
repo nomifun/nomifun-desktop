@@ -13,6 +13,7 @@ import { useCsAgents } from './useCsAgents';
 import CreateCsAgentModal from './CreateCsAgentModal';
 import type { ICsAgent } from '@/common/adapter/ipcBridge';
 import type { CsAgentId } from '@/common/types/ids';
+import { HUB_PAGE_TITLE_CLASS } from '@/renderer/components/layout/HubPageShell';
 
 /** 客服花名册卡片：名称 + 启停状态 + 模型/知识库指标。点击进入专属管理页。 */
 const CsAgentCard: React.FC<{ agent: ICsAgent; onOpen: () => void }> = ({ agent, onOpen }) => {
@@ -86,26 +87,15 @@ const CustomerServiceRosterPage: React.FC = () => {
       <div className='mx-auto flex w-full max-w-[1160px] box-border flex-col gap-16px'>
         {/* Header */}
         <div className='flex items-start justify-between gap-16px flex-wrap'>
-          <div className='flex items-start gap-12px min-w-0'>
-            <span
-              className='flex items-center justify-center w-40px h-40px rd-11px shrink-0 text-primary-6'
-              style={{
-                background: 'linear-gradient(150deg, rgba(var(--primary-5),0.16) 0%, rgba(var(--primary-6),0.26) 100%)',
-                border: '1px solid rgba(var(--primary-6),0.22)',
-              }}
-            >
-              <Headset theme='outline' size='22' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
-            </span>
-            <div className='min-w-0'>
-              <h1 className='m-0 mb-3px text-20px font-700 text-t-primary'>
-                {t('customerService.title', { defaultValue: '客服' })}
-              </h1>
-              <p className='m-0 text-13px text-t-secondary leading-19px max-w-[560px]'>
-                {t('customerService.subtitle', {
-                  defaultValue: '面向陌生访客的客服员工 —— 只依据知识库与客服笔记回答，高危能力从不注册。',
-                })}
-              </p>
-            </div>
+          <div className='min-w-0'>
+            <h1 className={`${HUB_PAGE_TITLE_CLASS} mb-3px`}>
+              {t('customerService.title', { defaultValue: '客服' })}
+            </h1>
+            <p className='m-0 text-13px text-t-secondary leading-19px max-w-[560px]'>
+              {t('customerService.subtitle', {
+                defaultValue: '面向陌生访客的客服员工 —— 只依据知识库与客服笔记回答，高危能力从不注册。',
+              })}
+            </p>
           </div>
           <Button type='primary' size='default' className='shrink-0' onClick={() => setCreateOpen(true)}>
             <span className='inline-flex items-center gap-6px'>

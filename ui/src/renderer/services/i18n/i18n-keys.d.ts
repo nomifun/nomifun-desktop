@@ -1729,6 +1729,7 @@ export type I18nKey =
   | 'knowledge.filter.kindLocal'
   | 'knowledge.filter.kindWeb'
   | 'knowledge.filter.manageTags'
+  | 'knowledge.filter.selectedCount'
   | 'knowledge.filter.sortCreated'
   | 'knowledge.filter.sortLabel'
   | 'knowledge.filter.sortName'
