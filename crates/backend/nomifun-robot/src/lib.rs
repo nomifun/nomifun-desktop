@@ -11,6 +11,7 @@ pub mod endpoint;
 pub mod events;
 pub mod lan_source;
 pub mod link;
+pub mod mcp_bridge;
 pub mod pipeline;
 pub mod protocol;
 pub mod registry;

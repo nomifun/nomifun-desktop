@@ -43,6 +43,13 @@ pub struct SessionDeps {
     pub status: Arc<RobotStatusRegistry>,
     pub speech: Arc<dyn SpeechServices>,
     pub dispatcher: Arc<dyn CompanionTurnDispatcher>,
+    /// HTTP base the device can reach us on, e.g. `http://192.168.1.20:25808`.
+    /// The MCP `initialize` handshake is the only channel that can configure the
+    /// firmware's photo-explain endpoint, so with no reachable base we simply do
+    /// not advertise vision.
+    pub vision_base: Option<String>,
+    /// Bearer token the device presents on `/robot/vision/explain`.
+    pub device_token: String,
 }
 
 fn now_ms() -> i64 {
@@ -381,6 +388,8 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
     let mut session_id: Option<String> = None;
     let mut companion_id: Option<String> = None;
     let mut uplink: Option<UplinkPipeline> = None;
+    let mut mcp: Option<Arc<crate::mcp_bridge::RobotMcpClient>> = None;
+    let mut discovery_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut conversation_id: Option<String> = None;
     let (pacer, pacer_task) = DownlinkPacer::spawn(writer.tx.clone());
     let pacer = Arc::new(pacer);
@@ -497,6 +506,35 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                         tracing::error!(%robot_id, %error, "robot: could not open a companion thread");
                                     })
                                     .ok();
+                                let client = Arc::new(crate::mcp_bridge::RobotMcpClient::new(
+                                    writer.tx.clone(),
+                                    sid.clone(),
+                                ));
+                                mcp = Some(client.clone());
+                                if hello.mcp {
+                                    let vision_base = deps.vision_base.clone();
+                                    let device_token = deps.device_token.clone();
+                                    let discovering = robot_id.clone();
+                                    discovery_task = Some(tokio::spawn(async move {
+                                        let url = vision_base
+                                            .map(|base| format!("{base}{}", crate::endpoint::VISION_PATH));
+                                        if let Err(error) =
+                                            client.initialize(url.as_deref(), &device_token).await
+                                        {
+                                            tracing::warn!(robot_id = %discovering, %error, "robot: MCP initialize failed");
+                                            return;
+                                        }
+                                        match client.list_tools().await {
+                                            Ok(tools) => tracing::info!(
+                                                robot_id = %discovering,
+                                                count = tools.len(),
+                                                names = ?tools.iter().map(|t| &t.exposed_name).collect::<Vec<_>>(),
+                                                "robot: device tools discovered"
+                                            ),
+                                            Err(error) => tracing::warn!(robot_id = %discovering, %error, "robot: tools/list failed"),
+                                        }
+                                    }));
+                                }
                                 session_id = Some(sid);
                                 companion_id = Some(bound);
                             }
@@ -550,8 +588,11 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                             DeviceMessage::Unknown { raw_type } => {
                                 tracing::debug!(%robot_id, %raw_type, "robot: unknown message type");
                             }
-                            // The device MCP bridge is attached in a later task.
-                            DeviceMessage::Mcp { .. } => {}
+                            DeviceMessage::Mcp { payload } => {
+                                if let Some(client) = &mcp {
+                                    client.handle_incoming(payload).await;
+                                }
+                            }
                         }
                     }
                 }
@@ -622,13 +663,19 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
         }
     }
 
-    // Both the turn task and the pacer hold clones of the writer's sender, so
-    // they have to be gone — not merely asked to stop — before the writer task
-    // can see its channel close and finish.
+    // The turn task, the tool-discovery task, the pacer and the MCP client all
+    // hold clones of the writer's sender, so every one of them has to be gone —
+    // not merely asked to stop — before the writer task can see its channel
+    // close and finish.
     if let Some(task) = turn_task.take() {
         task.abort();
         let _ = task.await;
     }
+    if let Some(task) = discovery_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+    drop(mcp);
     pacer.flush();
     pacer_task.abort();
     let _ = pacer_task.await;
@@ -749,6 +796,8 @@ mod tests {
             status,
             speech: speech.clone(),
             dispatcher: dispatcher.clone(),
+            vision_base: None,
+            device_token: "tok".to_owned(),
         };
         (
             Harness {
