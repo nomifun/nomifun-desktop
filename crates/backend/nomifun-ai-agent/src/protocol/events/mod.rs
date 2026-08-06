@@ -128,14 +128,6 @@ pub struct TurnCompletedEventData {
     pub input_tokens: u64,
     #[ts(type = "number")]
     pub output_tokens: u64,
-    /// Tokens written into the provider prompt cache.
-    #[serde(default)]
-    #[ts(type = "number")]
-    pub cache_creation_tokens: u64,
-    /// Tokens read back from the provider prompt cache.
-    #[serde(default)]
-    #[ts(type = "number")]
-    pub cache_read_tokens: u64,
     /// Current context occupancy (last request's prompt tokens). Gauge numerator.
     #[serde(default)]
     #[ts(type = "number")]
@@ -144,9 +136,6 @@ pub struct TurnCompletedEventData {
     #[serde(default)]
     #[ts(type = "number")]
     pub context_window: u64,
-    /// Why the turn ended (mirrors Finish), for a single self-contained record.
-    #[serde(default)]
-    pub stop_reason: Option<TurnStopReason>,
 }
 
 /// Cross-backend normalized "why did the turn end" reason. Deliberately NOT the
@@ -2509,34 +2498,31 @@ mod tests {
             elapsed_ms: 1234,
             input_tokens: 500,
             output_tokens: 250,
-            cache_creation_tokens: 120,
-            cache_read_tokens: 380,
             context_tokens: 8000,
             context_window: 100_000,
-            stop_reason: Some(TurnStopReason::EndTurn),
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "turn_completed");
         assert_eq!(json["data"]["elapsed_ms"], 1234);
         assert_eq!(json["data"]["input_tokens"], 500);
         assert_eq!(json["data"]["output_tokens"], 250);
-        assert_eq!(json["data"]["cache_creation_tokens"], 120);
-        assert_eq!(json["data"]["cache_read_tokens"], 380);
         assert_eq!(json["data"]["context_tokens"], 8000);
         assert_eq!(json["data"]["context_window"], 100_000);
-        assert_eq!(json["data"]["stop_reason"], "end_turn");
 
-        // Back-compat: an old payload with no stop_reason / context fields
-        // deserializes to defaults (None / 0) via `#[serde(default)]`.
+        // Back-compat: an old payload with extra retired fields and no context
+        // fields deserializes cleanly (unknown keys ignored, defaults applied).
         let old = serde_json::json!({
             "type": "turn_completed",
-            "data": { "elapsed_ms": 1, "input_tokens": 2, "output_tokens": 3 }
+            "data": {
+                "elapsed_ms": 1, "input_tokens": 2, "output_tokens": 3,
+                "cache_read_tokens": 4, "stop_reason": "end_turn"
+            }
         });
         let back: AgentStreamEvent = serde_json::from_value(old).unwrap();
         assert!(matches!(
             back,
             AgentStreamEvent::TurnCompleted(d)
-                if d.stop_reason.is_none() && d.context_tokens == 0 && d.context_window == 0
+                if d.context_tokens == 0 && d.context_window == 0
         ));
     }
 

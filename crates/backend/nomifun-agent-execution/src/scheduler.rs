@@ -2016,12 +2016,6 @@ impl ExecutionScheduler {
         // when present, receives one idempotent assistant-message projection;
         // Remote callers read this persisted summary directly.
         let summary = terminal_summary(detail);
-        let token_values: Vec<i64> = detail
-            .attempts
-            .iter()
-            .filter_map(|attempt| attempt.tokens)
-            .collect();
-        let total_tokens = (!token_values.is_empty()).then(|| token_values.into_iter().sum());
         self.inner
             .deps
             .repository
@@ -2033,7 +2027,6 @@ impl ExecutionScheduler {
                 &UpdateAgentExecutionParams {
                     status: Some(status),
                     summary: Some(Some(summary)),
-                    total_tokens: Some(total_tokens),
                     ..Default::default()
                 },
                 &system_event(
