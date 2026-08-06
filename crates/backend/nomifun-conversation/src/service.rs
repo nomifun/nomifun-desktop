@@ -44,7 +44,7 @@ use nomifun_common::{
 use nomifun_db::models::{AgentMetadataRow, ConversationRow, MessageRow};
 use nomifun_db::{
     AgentExecutionTurnAuthority, ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, IAcpSessionRepository,
-    IAgentMetadataRepository, IConversationRepository, IMcpServerRepository, SaveRuntimeStateParams,
+    IAgentMetadataRepository, IConversationRepository, IMcpServerRepository, MessageDayBucket, SaveRuntimeStateParams,
     ConversationTurnAdmissionState, RequirementConversationTurnAuthority, SortOrder,
     TurnLifecycleTransition, TurnReceiptCompletion,
 };
@@ -4641,10 +4641,6 @@ impl ConversationService {
                     .and_then(|guard| guard.as_ref().cloned())
             {
                 let (target_kind, target_id) = knowledge_binding_target(&extra, &new_id)?;
-                let mode = match snapshot.knowledge_policy.mode.as_str() {
-                    "direct" => "direct",
-                    _ => "staged",
-                };
                 service
                     .set_binding(
                         target_kind,
@@ -4652,12 +4648,13 @@ impl ConversationService {
                         nomifun_knowledge::KnowledgeBinding {
                             enabled: snapshot.knowledge_policy.enabled,
                             writeback: snapshot.knowledge_policy.writeback,
-                            writeback_mode: mode.to_owned(),
+                            // A preset that left the disposition unspecified gets
+                            // the restrained one, never the self-directed one.
                             writeback_eagerness: snapshot
                                 .knowledge_policy
                                 .eagerness
                                 .clone()
-                                .unwrap_or_else(|| "conservative".to_owned()),
+                                .unwrap_or_else(|| "manual".to_owned()),
                             // Presets never self-authorize unattended channel writes.
                             channel_write_enabled: false,
                             kb_ids: snapshot.knowledge_base_ids.clone(),
@@ -5763,6 +5760,44 @@ impl ConversationService {
 
         let compact_content = matches!(query.content_mode.as_deref(), Some("compact"));
 
+        // Day path: one LOCAL calendar day, oldest-first, server-bounded. The
+        // companion history reader pages by day rather than by cursor, so the
+        // day boundary stays computed in the one place that also partitions
+        // session digests instead of being re-derived in the browser (whose
+        // timezone need not match the backend's).
+        if let Some(day) = query.day.as_deref() {
+            if query.cursor.is_some() {
+                return Err(AppError::BadRequest(
+                    "day and cursor are mutually exclusive message queries".to_owned(),
+                ));
+            }
+            let limit = query.page_size.unwrap_or(500);
+            let result = self
+                .conversation_repo
+                .get_messages_for_local_day(parse_conv_id(conversation_id)?, day, limit)
+                .await?;
+            let mut items = Vec::with_capacity(result.items.len());
+            for row in result.items {
+                items.push(if compact_content {
+                    row_to_message_response_compact(row)?
+                } else {
+                    row_to_message_response(row)?
+                });
+            }
+            let items = self
+                .project_history_artifact_integrity(&conversation, items)
+                .await?;
+            let items = items
+                .into_iter()
+                .map(|message| self.project_orphaned_turn_writeback(message))
+                .collect();
+            return Ok(PaginatedResult {
+                items,
+                total: result.total,
+                has_more: result.has_more,
+            });
+        }
+
         // Keyset (cursor) path: incremental newest-first windows for long
         // sessions (e.g. a companion's single session, which now also absorbs
         // every IM-channel turn). The frontend opts in by sending `cursor`: ""
@@ -5875,6 +5910,25 @@ impl ConversationService {
             total: result.total,
             has_more: result.has_more,
         })
+    }
+
+    /// Complete LOCAL-calendar-day index of a conversation's visible messages,
+    /// newest day first. A read-only companion history rail is built from this,
+    /// so it never mints anything and an empty conversation is an empty list.
+    pub async fn message_local_day_index(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<MessageDayBucket>, AppError> {
+        self.conversation_repo
+            .get(parse_conv_id(conversation_id)?)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        Ok(self
+            .conversation_repo
+            .message_local_day_index(parse_conv_id(conversation_id)?)
+            .await?)
     }
 
     /// Return one full message for a conversation after verifying ownership.
@@ -6191,7 +6245,6 @@ impl ConversationService {
         let (knowledge_service, mut request) = self
             .build_turn_writeback_request(
                 &runtime_options.extra,
-                conversation_id,
                 &assistant.message_id,
                 &user_text,
                 None,
@@ -6205,10 +6258,6 @@ impl ConversationService {
                         .into(),
                 )
             })?;
-        // Staged writes use one conversation scope across explicit tool writes
-        // and turn-final extraction. This lets an automatic attempt de-duplicate
-        // a proposal already staged during the same conversation.
-        request.scope = conversation_id.to_owned();
         let prior_written = state
             .get("written")
             .and_then(serde_json::Value::as_array)
@@ -6257,34 +6306,16 @@ impl ConversationService {
             request.user_text.push_str(&retry_error_context);
         }
         if !prior_written.is_empty() {
-            let persisted_scope = state
-                .get("scope")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(&request.scope);
-            let staged_prefix =
-                format!("_inbox/{}/", persisted_scope.trim_matches('/'));
-            let excluded_targets: Vec<(nomifun_common::KnowledgeBaseId, String)> =
-                prior_written
+            // Exclude the documents a previous attempt already wrote. Rows
+            // persisted before staging was removed carry an `_inbox/{scope}/`
+            // prefix and a `staged` flag; both are ignored rather than parsed,
+            // so an old row re-proposes its material instead of matching a
+            // path that no longer exists.
+            let excluded_targets: Vec<(nomifun_common::KnowledgeBaseId, String)> = prior_written
                 .iter()
                 .filter_map(|written| {
-                    let kb_id = serde_json::from_value(
-                        written.get("kb_id")?.clone(),
-                    )
-                    .ok()?;
-                    let stored_path = written
-                        .get("rel_path")?
-                        .as_str()?
-                        .trim()
-                        .to_owned();
-                    let rel_path = if written
-                        .get("staged")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                    {
-                        stored_path.strip_prefix(&staged_prefix)?.to_owned()
-                    } else {
-                        stored_path
-                    };
+                    let kb_id = serde_json::from_value(written.get("kb_id")?.clone()).ok()?;
+                    let rel_path = written.get("rel_path")?.as_str()?.trim().to_owned();
                     (!rel_path.is_empty()).then_some((kb_id, rel_path))
                 })
                 .collect();
@@ -6301,7 +6332,6 @@ impl ConversationService {
             conversation_id.to_owned(),
             message_id.to_owned(),
             source.message_id,
-            request.scope.clone(),
             final_text.clone(),
             prior_written,
             prior_failures,
@@ -9084,7 +9114,6 @@ impl ConversationService {
                         && let Some(final_text_msg_id) = outcome.final_text_msg_id.clone()
                         && let Some((knowledge_service, request)) = service.build_turn_writeback_request(
                             &knowledge_extra,
-                            &conv_id,
                             &turn_msg_id,
                             &turn_user_text,
                             turn_origin.as_deref(),
@@ -9169,7 +9198,6 @@ impl ConversationService {
                         conv_id.clone(),
                         msg_id,
                         source_user_message_id,
-                        request.scope.clone(),
                         final_text.clone(),
                         Vec::new(),
                         Vec::new(),
@@ -12386,7 +12414,6 @@ impl ConversationService {
         if outcome.mounts.is_empty() {
             obj.remove("knowledge_mounts");
             obj.remove("knowledge_writeback");
-            obj.remove("knowledge_writeback_mode");
             obj.remove("knowledge_writeback_eagerness");
             obj.remove("knowledge_channel_write_enabled");
             return Ok(Some(new_signature));
@@ -12397,7 +12424,6 @@ impl ConversationService {
             target_id = %target_id,
             mounts = outcome.mounts.len(),
             writeback = outcome.writeback,
-            writeback_mode = %outcome.writeback_mode,
             writeback_eagerness = %outcome.writeback_eagerness,
             "knowledge bases mounted into workspace"
         );
@@ -12405,10 +12431,6 @@ impl ConversationService {
         obj.insert(
             "knowledge_writeback".into(),
             serde_json::Value::Bool(outcome.writeback),
-        );
-        obj.insert(
-            "knowledge_writeback_mode".into(),
-            serde_json::Value::String(outcome.writeback_mode),
         );
         obj.insert(
             "knowledge_writeback_eagerness".into(),
@@ -12424,7 +12446,6 @@ impl ConversationService {
     fn build_turn_writeback_request(
         &self,
         extra: &serde_json::Value,
-        conversation_id: &str,
         _msg_id: &str,
         user_text: &str,
         origin: Option<&str>,
@@ -12457,16 +12478,20 @@ impl ConversationService {
             return None;
         }
 
-        let writeback_mode = extra
-            .get("knowledge_writeback_mode")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("staged")
-            .to_owned();
         let writeback_eagerness = extra
             .get("knowledge_writeback_eagerness")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("conservative")
+            .unwrap_or("manual")
             .to_owned();
+        // The manual disposition means the owner drives write-back, so there is
+        // nothing to extract on their behalf. Returning here — before the
+        // provider call the extractor would make — is what keeps "manual" from
+        // costing a model call per turn and from depending on the model's own
+        // restraint. A user who asks in-conversation is still served: the
+        // knowledge_write tool stays registered regardless of disposition.
+        if writeback_eagerness == "manual" {
+            return None;
+        }
         let channel_write_enabled = extra
             .get("knowledge_channel_write_enabled")
             .and_then(serde_json::Value::as_bool)
@@ -12480,20 +12505,17 @@ impl ConversationService {
         } else {
             nomifun_knowledge::WriteSurface::RegularChat
         };
-        let scope = conversation_id.trim_matches('/').to_owned();
         let request = nomifun_knowledge::TurnWritebackRequest {
             mounts: mounts.clone(),
             binding: nomifun_knowledge::KnowledgeBinding {
                 enabled: true,
                 writeback,
-                writeback_mode,
                 writeback_eagerness,
                 channel_write_enabled,
                 kb_ids: mounts.iter().map(|m| m.knowledge_base_id.clone()).collect(),
                 ..Default::default()
             },
             surface,
-            scope,
             user_text: user_text.to_owned(),
             assistant_text: String::new(),
             model: None,
@@ -13262,7 +13284,6 @@ fn attach_unbound_workspace_authority(
             "knowledge_binding_signature",
             "knowledge_mounts_signature",
             "knowledge_writeback",
-            "knowledge_writeback_mode",
             "knowledge_writeback_eagerness",
             "knowledge_channel_write_enabled",
         ] {

@@ -47,7 +47,7 @@ const HeaderControl: React.FC<{
       }}
       className={classNames(
         'flex h-30px shrink-0 cursor-pointer select-none items-center gap-5px rd-8px px-10px text-12px font-500 transition-all duration-150',
-        primary ? 'text-white' : 'border border-b-base text-t-secondary',
+        primary ? 'text-white' : 'border border-solid border-[var(--border-base)] text-t-secondary',
         hover,
       )}
       style={{
@@ -174,7 +174,7 @@ export const ExecutionControls: React.FC<{
       {showActiveParticipants && (
         // Read-only status badge (NOT a HeaderControl) — mirrors the status pill so it
         // cannot be mis-clicked. Signals that collaborators are currently active.
-        <span className='inline-flex items-center gap-4px rd-8px px-8px h-30px text-11px font-500 text-t-secondary border border-b-base'>
+        <span className='inline-flex items-center gap-4px rd-8px px-8px h-30px text-11px font-500 text-t-secondary border border-solid border-[var(--border-base)]'>
           <Loading theme='outline' size='12' strokeWidth={3} className='animate-spin line-height-0' />
           {t('agentExecution.controls.activeParticipants', {
             count: inFlightCount,
@@ -195,7 +195,7 @@ export const ExecutionControls: React.FC<{
             tabIndex={0}
             aria-label={t('agentExecution.controls.cancel')}
             aria-disabled={busy}
-            className='flex h-30px shrink-0 cursor-pointer select-none items-center gap-5px rd-8px border border-b-base px-10px text-12px font-500 text-t-secondary transition-all duration-150 hover:border-danger hover:text-danger'
+            className='flex h-30px shrink-0 cursor-pointer select-none items-center gap-5px rd-8px border border-solid border-[var(--border-base)] px-10px text-12px font-500 text-t-secondary transition-all duration-150 hover:border-danger hover:text-danger'
             style={{
               opacity: busy ? 0.6 : undefined,
               pointerEvents: busy ? 'none' : undefined,

@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use nomi_agent::knowledge_tools::{
-    KnowledgeReadTool, KnowledgeRetrievalSink, KnowledgeSearchTool, KnowledgeWritebackSink, KnowledgeWriteTool, WriteMode,
+    KnowledgeReadTool, KnowledgeRetrievalSink, KnowledgeSearchTool, KnowledgeWritebackSink, KnowledgeWriteTool,
 };
 use nomi_tools::Tool;
 use serde_json::json;
@@ -41,7 +41,7 @@ async fn build_service() -> (Arc<nomifun_knowledge::KnowledgeService>, tempfile:
 }
 
 #[tokio::test]
-async fn staged_write_tool_with_mount_prefixed_path_lands_in_inbox_not_nested() {
+async fn write_tool_with_mount_prefixed_path_updates_the_original_not_a_nested_copy() {
     let (svc, _tmp) = build_service().await;
     let info = svc.create_base("领域库", "", None, None).await.unwrap();
     svc.write_file(&info.knowledge_base_id, "terms.md", "ORIGINAL").await.unwrap();
@@ -51,7 +51,6 @@ async fn staged_write_tool_with_mount_prefixed_path_lands_in_inbox_not_nested() 
     let tool = KnowledgeWriteTool::new(
         sink,
         vec![(info.knowledge_base_id.clone(), info.name.clone())],
-        WriteMode::Staged { scope: "conv-9".into() },
         vec![info.knowledge_base_id.clone()],
     );
 
@@ -65,12 +64,11 @@ async fn staged_write_tool_with_mount_prefixed_path_lands_in_inbox_not_nested() 
         .await;
     assert!(!res.is_error, "tool errored: {}", res.content);
 
-    // Original untouched; proposal staged under the mirrored path.
-    assert_eq!(svc.read_file(&info.knowledge_base_id, "terms.md").await.unwrap().content, "ORIGINAL");
-    assert_eq!(
-        svc.read_file(&info.knowledge_base_id, "_inbox/conv-9/terms.md").await.unwrap().content,
-        "PROPOSED EDIT"
-    );
+    // The mount prefix resolved to the real document: the curated text is still
+    // there and the new material joined it.
+    let after = svc.read_file(&info.knowledge_base_id, "terms.md").await.unwrap().content;
+    assert!(after.contains("ORIGINAL"), "existing content must survive: {after}");
+    assert!(after.contains("PROPOSED EDIT"), "new material must be recorded: {after}");
     // No stray nested file under the mount path.
     let files = svc.list_files(&info.knowledge_base_id).await.unwrap();
     assert!(
@@ -80,7 +78,7 @@ async fn staged_write_tool_with_mount_prefixed_path_lands_in_inbox_not_nested() 
 }
 
 #[tokio::test]
-async fn search_read_write_handle_loop_updates_original_in_direct_mode() {
+async fn search_read_write_handle_loop_appends_to_the_addressed_document() {
     let (svc, _tmp) = build_service().await;
     let info = svc.create_base("金融库", "", None, None).await.unwrap();
     svc.write_file(&info.knowledge_base_id, "terms.md", "# 术语表\n市盈率 = PER\n").await.unwrap();
@@ -95,7 +93,6 @@ async fn search_read_write_handle_loop_updates_original_in_direct_mode() {
     let write = KnowledgeWriteTool::new(
         writeback,
         vec![(info.knowledge_base_id.clone(), info.name.clone())],
-        WriteMode::Direct,
         vec![info.knowledge_base_id.clone()],
     );
 
@@ -113,14 +110,17 @@ async fn search_read_write_handle_loop_updates_original_in_direct_mode() {
     let r = read.execute(json!({ "handle": handle })).await;
     assert!(!r.is_error && r.content.contains("市盈率"), "read by handle: {}", r.content);
 
-    // 3. Update by handle in DIRECT mode → overwrites the original in place.
+    // 3. Update by handle: the contract asks for ONLY the new material, and the
+    //    service appends it to the document it addressed.
     let w = write
-        .execute(json!({ "handle": handle, "content": "# 术语表\n市盈率 = PER\nROE = 净资产收益率\n" }))
+        .execute(json!({ "handle": handle, "content": "ROE = 净资产收益率" }))
         .await;
     assert!(!w.is_error, "write by handle: {}", w.content);
 
     let updated = svc.read_file(&info.knowledge_base_id, "terms.md").await.unwrap().content;
-    assert!(updated.contains("ROE"), "original must be updated in place: {updated}");
+    assert!(updated.contains("ROE"), "new material must be recorded: {updated}");
+    assert!(updated.contains("市盈率 = PER"), "curated content must survive: {updated}");
+    assert!(updated.starts_with("# 术语表"), "the heading must stay first: {updated}");
     let files = svc.list_files(&info.knowledge_base_id).await.unwrap();
     assert_eq!(
         files.iter().filter(|f| f.rel_path.ends_with("terms.md")).count(),

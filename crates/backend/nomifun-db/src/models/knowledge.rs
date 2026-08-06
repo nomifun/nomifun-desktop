@@ -63,19 +63,14 @@ pub struct KnowledgeBindingRow {
     pub target_companion_id: Option<CompanionId>,
     pub enabled: bool,
     pub writeback: bool,
-    /// `staged` (agent writes confined to `_inbox/{conversation_id}/`,
-    /// conflict-free across sessions) or `direct` (agent may edit the base
-    /// body). Only meaningful while `writeback` is true.
-    pub writeback_mode: String,
-    /// Write-back disposition ("回写意识"), orthogonal to `writeback_mode`:
-    /// `conservative` (restrained, the default — only clearly-worth-keeping
-    /// knowledge) or `aggressive` (capture anything plausibly relevant). Only
+    /// Write-back disposition ("回写意识"): `manual` (the default — write back
+    /// only when the user explicitly asks) or `auto` (the agent decides on its
+    /// own, persisting only high-confidence, durably valuable knowledge). Only
     /// meaningful while `writeback` is true.
     pub writeback_eagerness: String,
-    /// When `true`, an external IM Channel Agent binding may write back
-    /// (forced to STAGED placement). Default `false` — channel writes are
-    /// disabled unless the user explicitly re-enables them. Ignored for
-    /// non-channel surfaces.
+    /// When `true`, an external IM Channel Agent binding may write back.
+    /// Default `false` — channel writes are disabled unless the user explicitly
+    /// enables them. Ignored for non-channel surfaces.
     pub channel_write_enabled: bool,
     pub updated_at: TimestampMs,
 }
@@ -126,7 +121,6 @@ impl<'row> sqlx::FromRow<'row, SqliteRow> for KnowledgeBindingRow {
             target_companion_id: parse_optional(row.try_get("target_companion_id")?)?,
             enabled: row.try_get("enabled")?,
             writeback: row.try_get("writeback")?,
-            writeback_mode: row.try_get("writeback_mode")?,
             writeback_eagerness: row.try_get("writeback_eagerness")?,
             channel_write_enabled: row.try_get("channel_write_enabled")?,
             updated_at: row.try_get("updated_at")?,
@@ -198,8 +192,7 @@ mod tests {
             target_companion_id: None,
             enabled: true,
             writeback: false,
-            writeback_mode: "staged".into(),
-            writeback_eagerness: "conservative".into(),
+            writeback_eagerness: "manual".into(),
             channel_write_enabled: false,
             updated_at: 3,
         };

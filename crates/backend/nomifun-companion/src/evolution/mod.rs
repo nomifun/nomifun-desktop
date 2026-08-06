@@ -12,7 +12,7 @@ pub mod transcript;
 
 pub use conversation_transcript::ConversationTranscriptSource;
 pub use engine::{EvolutionEngine, EvolveRun};
-pub use miner::{mine_patterns, mine_reflection_candidates, tool_call_signature, MinedPattern};
+pub use miner::{mine_patterns, tool_call_signature, MinedPattern};
 pub use transcript::{
     render_transcript, NoopTranscriptSource, ToolTrace, TranscriptAnchor, TranscriptSource, TranscriptTurn, TurnRole,
 };

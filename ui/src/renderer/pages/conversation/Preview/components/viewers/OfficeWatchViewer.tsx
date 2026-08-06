@@ -235,7 +235,7 @@ const OfficeWatchViewer: React.FC<OfficeWatchViewerProps> = ({ docType, file_pat
 
   if (loading) {
     return (
-      <div className='h-full w-full flex items-center justify-center bg-bg-1'>
+      <div className='h-full w-full flex items-center justify-center bg-1'>
         <div className='flex flex-col items-center gap-12px'>
           <Spin size={32} />
           <span className='text-13px text-t-secondary'>
@@ -251,7 +251,7 @@ const OfficeWatchViewer: React.FC<OfficeWatchViewerProps> = ({ docType, file_pat
     const showInstallLink = error.code === 'OFFICECLI_NOT_FOUND';
 
     return (
-      <div className='h-full w-full flex items-center justify-center bg-bg-1'>
+      <div className='h-full w-full flex items-center justify-center bg-1'>
         <div className='text-center max-w-400px'>
           <div className='text-16px text-danger mb-8px'>{error.message}</div>
           {!error.code && <div className='text-12px text-t-secondary mb-12px'>{t(keys.installHint)}</div>}
@@ -276,7 +276,7 @@ const OfficeWatchViewer: React.FC<OfficeWatchViewerProps> = ({ docType, file_pat
 
   if (!watchUrl) return null;
 
-  return <iframe src={watchUrl} className='w-full h-full border-0 bg-bg-1' title={IFRAME_TITLE[docType]} />;
+  return <iframe src={watchUrl} className='w-full h-full border-0 bg-1' title={IFRAME_TITLE[docType]} />;
 };
 
 export default OfficeWatchViewer;

@@ -14,6 +14,7 @@ pub mod aria_ref;
 pub mod backend;
 pub mod debug_capture;
 pub mod display;
+pub mod domain;
 pub mod download;
 pub mod engine;
 pub mod errmap;
@@ -40,7 +41,8 @@ pub mod vault;
 /// 无需知晓子模块布局（返回类型 `Arc<dyn BrowserEngine>` 的 trait 与配套类型即此公开面）。
 pub use engine::{
     BrowserEngine, BrowserError, BrowserTabInfo, Capabilities, CssRect, DetachKind, ElementEntry,
-    LoadState, NavPhase, NavResult, Observation, ObserveOpts, SnapshotGen,
+    LoadState, MAX_RENDERED_HTML_BYTES, NavPhase, NavResult, Observation, ObserveOpts,
+    RENDERED_HTML_TRUNCATION_MARKER, SnapshotGen,
 };
 pub use actions::{
     ActResult, ActSpec, Effect, ScrollDir, ScrollTarget, TypeInput, WaitCondition,
@@ -55,14 +57,20 @@ pub use firewall::{ApprovedDomains, EgressApprover, EgressVerdict, FirewallConfi
 /// 用 [`StorageState`] 在 `EngineConfig.storage_state` 与磁盘 vault 间往返。IndexedDB 是 best-effort/TODO。
 pub use storage_state::{
     IdbDatabase, IdbStore, IndexedDbDump, LocalStorageItem, OriginStorage, StorageState,
-    StorageStateCookie, IDB_BASE64_SENTINEL, decode_binary_sentinel, encode_binary_sentinel,
+    StorageStateBoundsError, StorageStateCookie, IDB_BASE64_SENTINEL,
+    MAX_CAPTURED_LOCAL_STORAGE_UTF16_BYTES, MAX_STORAGE_STATE_COOKIES,
+    MAX_STORAGE_STATE_IDB_DATABASES_PER_ORIGIN, MAX_STORAGE_STATE_IDB_RECORDS_TOTAL,
+    MAX_STORAGE_STATE_IDB_STORES_PER_DATABASE, MAX_STORAGE_STATE_JSON_BYTES,
+    MAX_STORAGE_STATE_JSON_DEPTH, MAX_STORAGE_STATE_JSON_NODES,
+    MAX_STORAGE_STATE_LOCAL_ITEMS_PER_ORIGIN, MAX_STORAGE_STATE_ORIGINS,
+    decode_binary_sentinel, encode_binary_sentinel,
 };
 /// **P3-W4d：storage_state 持久化 vault（加密）公开面**（DESIGN §17 / 决策1，吸收原 P6）。
 /// 把 [`StorageState`] 登录态 AES-256-GCM 加密落盘到共享 vault（[`vault::save_storage_state`]）/
 /// 跨会话解密读回（[`vault::load_storage_state`]，坏 vault 优雅退回 `None`），喂 `EngineConfig.storage_state`
 /// 启动注入实现**持久登录**。crypto 复用 `nomifun_common`（裁决⑦不另起第二套栈）。
 pub use vault::{
-    SHARED_STORAGE_STATE_DIR, VaultError, load_storage_state, save_storage_state,
+    MAX_STORAGE_STATE_VAULT_BYTES, SHARED_STORAGE_STATE_DIR, VaultError, load_storage_state, save_storage_state,
     shared_storage_state_path, storage_state_path,
 };
 /// **浏览器来源**（「浏览器模式」的来源维度，与 headless 正交）：托管 CfT vs 系统 Chrome/Edge。
@@ -70,8 +78,13 @@ pub use vault::{
 pub use acquire::ChromeSource;
 pub use launch::{BrowserHostLaunchMode, build_chrome_args_for_mode};
 pub use host::{
-    LaneEngineConfig, LaneId, ManagedBrowserHost, TargetOwnership,
-    TargetRoute,
+    HostCleanupLease, LaneEngineConfig, LaneId, ManagedBrowserHost, TargetOwnership, TargetRoute,
+    StandaloneResourceScope, TaskDownloadReservation, TaskDownloadReservationAuthority,
+    TaskTabReservation, TaskTabReservationAuthority, MAX_TASK_ACTIVE_DOWNLOADS,
+    MAX_TASK_COMPLETED_DOWNLOAD_BYTES, MAX_TASK_COMPLETED_DOWNLOAD_FILES,
+    MAX_TASK_SINGLE_DOWNLOAD_BYTES,
+    STANDALONE_MAX_LIVE_HOSTS_PER_SCOPE, STANDALONE_MAX_LIVE_LANES_PER_SCOPE,
+    STANDALONE_MAX_LIVE_TABS_PER_SCOPE,
 };
 
 use std::collections::HashSet;
@@ -79,8 +92,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 
-/// Session-scoped registry of the agent's own resolved secret plaintext values (from the
-/// facade's `secret:NAME` → vault resolution). Used **solely** for deterministic exact-blackout
+/// Session-scoped registry of sensitive plaintext values handled by browser actions. Used
+/// **solely** for deterministic exact-blackout
 /// redaction in debug serializers: any debug output containing one of these values has it
 /// replaced with `[KNOWN_SECRET_REDACTED]` BEFORE heuristic passes run.
 ///
@@ -91,9 +104,91 @@ use std::sync::Arc;
 /// - Used exclusively for read-side redaction (never written to disk, logs, or network).
 /// - Only values with `len >= 4` are inserted (avoid over-matching trivial values).
 ///
-/// The facade (BrowserTool) owns the canonical Arc and populates it on each successful
+/// The facade (BrowserTool) owns the canonical clone and populates it on each successful
 /// `secret:NAME` resolution; the engine holds a clone and reads it during serialization.
-pub type KnownSecretValues = Arc<std::sync::Mutex<HashSet<String>>>;
+/// Admission is structural and fail-closed: distinct values and retained UTF-8 bytes both
+/// have hard limits, duplicates are idempotent, and no existing secret is silently evicted.
+pub const MAX_KNOWN_SECRET_VALUES: usize = 128;
+pub const MAX_KNOWN_SECRET_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum KnownSecretLimitError {
+    #[error("known-secret distinct-value limit exceeded (limit={limit})")]
+    DistinctValues { limit: usize },
+    #[error("known-secret byte limit exceeded (limit={limit}, current={current}, additional={additional})")]
+    Bytes {
+        limit: usize,
+        current: usize,
+        additional: usize,
+    },
+}
+
+#[derive(Default)]
+struct KnownSecretRegistry {
+    values: HashSet<String>,
+    retained_bytes: usize,
+}
+
+/// Cloneable, session-scoped known-secret registry with non-evicting bounded admission.
+#[derive(Clone, Default)]
+pub struct KnownSecretValues {
+    inner: Arc<std::sync::Mutex<KnownSecretRegistry>>,
+}
+
+impl KnownSecretValues {
+    /// Register one resolved plaintext for exact blackout.  `Ok(false)` means
+    /// it was already present or is shorter than the four-byte redaction
+    /// minimum.  Limit errors never contain the plaintext.
+    pub fn try_insert(&self, value: &str) -> Result<bool, KnownSecretLimitError> {
+        if value.len() < 4 {
+            return Ok(false);
+        }
+        let mut registry = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if registry.values.contains(value) {
+            return Ok(false);
+        }
+        if registry.values.len() >= MAX_KNOWN_SECRET_VALUES {
+            return Err(KnownSecretLimitError::DistinctValues {
+                limit: MAX_KNOWN_SECRET_VALUES,
+            });
+        }
+        if registry.retained_bytes.saturating_add(value.len()) > MAX_KNOWN_SECRET_BYTES {
+            return Err(KnownSecretLimitError::Bytes {
+                limit: MAX_KNOWN_SECRET_BYTES,
+                current: registry.retained_bytes,
+                additional: value.len(),
+            });
+        }
+        registry.retained_bytes += value.len();
+        registry.values.insert(value.to_owned());
+        Ok(true)
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub(crate) fn with_values<R>(&self, read: impl FnOnce(&HashSet<String>) -> R) -> R {
+        let registry = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        read(&registry.values)
+    }
+
+    #[cfg(test)]
+    fn retained_bytes(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retained_bytes
+    }
+}
 
 /// 创建引擎的配置。`Default` 给出合理本机默认（临时数据目录、无打包目录、headless）。
 #[derive(Clone)]
@@ -147,8 +242,7 @@ pub struct EngineConfig {
     /// 经 `from_launched` / `from_host` → [`crate::backend::cdp::spawn_fetch_firewall_loop`] 透传
     /// （**不再硬编码 `FirewallConfig::default()`**）。`Default` = `FirewallConfig::default()`（IP 封禁开
     /// 与跨域 POST 门控检测开）——默认即现行为，零回归。**域名 allowlist（`allow_etld1`/`deny_etld1`）
-    /// 的真值注入是 D1 的活**（上层从 secret 的 per-pet `allowed_origins` 灌真策略，⑤共用真值）；G1 只打通
-    /// 链路使 firewall **可注入**，facade 暂传 `default()`。
+    /// 的真值由上层注入；G1 只打通链路使 firewall **可注入**，浏览器层暂传 `default()`。
     pub firewall: crate::firewall::FirewallConfig,
     /// **W4d 持久登录：storage_state vault 灌入态**。上层从共享 vault
     /// （[`crate::vault::load_storage_state`]）解密读出的跨会话登录态 JSON（[`crate::StorageState`] 的
@@ -167,13 +261,16 @@ pub struct EngineConfig {
     pub egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
     /// **Known-secret exact-blackout registry** (debug-capture security keystone).
     ///
-    /// Session-scoped set of the agent's own resolved secret plaintext values. The facade
-    /// populates it on each successful `secret:NAME` resolution; the engine's debug serializers
-    /// apply exact `String::replace` before any heuristic redaction, guaranteeing deterministic
-    /// blackout of known secrets regardless of format, position, or entropy.
+    /// Session-scoped set of sensitive plaintext values handled by the browser layer. The
+    /// engine's debug serializers apply exact `String::replace` before any heuristic redaction,
+    /// guaranteeing deterministic blackout regardless of format, position, or entropy.
     ///
     /// See [`KnownSecretValues`] for security invariants and retention bounds.
     pub known_secret_values: KnownSecretValues,
+    /// Trusted standalone task resource authority. It is deliberately opaque
+    /// and non-serializable. `Default` uses one process-wide compatibility
+    /// scope so legacy callers cannot mint fresh budgets with Lane ids.
+    pub standalone_resource_scope: StandaloneResourceScope,
 }
 
 impl std::fmt::Debug for EngineConfig {
@@ -213,7 +310,7 @@ impl std::fmt::Debug for EngineConfig {
             }
         }
 
-        let secret_count = self.known_secret_values.lock().map(|s| s.len()).unwrap_or(0);
+        let secret_count = self.known_secret_values.len();
         f.debug_struct("EngineConfig")
             .field("data_dir_configured", &true)
             .field("user_data_dir_configured", &self.user_data_dir.is_some())
@@ -240,6 +337,7 @@ impl std::fmt::Debug for EngineConfig {
             .field("storage_state", &StorageStateSummary(&self.storage_state))
             .field("egress_approver_configured", &self.egress_approver.is_some())
             .field("known_secret_value_count", &secret_count)
+            .field("standalone_resource_scope_configured", &true)
             .finish()
     }
 }
@@ -267,7 +365,8 @@ impl Default for EngineConfig {
             // P3-D2：默认无出口审批通道 → 被门控请求 fail-closed（拒绝）。facade/网关注入真 approver。
             egress_approver: None,
             // Known-secret blackout: default empty (no secrets known until facade resolves some).
-            known_secret_values: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            known_secret_values: KnownSecretValues::default(),
+            standalone_resource_scope: StandaloneResourceScope::default(),
         }
     }
 }
@@ -416,8 +515,10 @@ mod tests {
             "allow-secret.example",
             "deny-secret.example",
         ];
-        let mut known_secrets = HashSet::new();
-        known_secrets.insert(sentinels[6].to_string());
+        let known_secrets = KnownSecretValues::default();
+        known_secrets
+            .try_insert(sentinels[6])
+            .expect("sentinel is within known-secret bounds");
         let config = EngineConfig {
             data_dir: PathBuf::from(sentinels[0]),
             user_data_dir: Some(PathBuf::from(sentinels[1])),
@@ -447,7 +548,7 @@ mod tests {
                     }]
                 }]
             })),
-            known_secret_values: Arc::new(std::sync::Mutex::new(known_secrets)),
+            known_secret_values: known_secrets,
             ..Default::default()
         };
 
@@ -478,6 +579,71 @@ mod tests {
         };
         assert_eq!(c.firewall, custom);
         assert_ne!(c.firewall, crate::firewall::FirewallConfig::default());
+    }
+
+    #[test]
+    fn known_secrets_reject_distinct_overflow_without_eviction() {
+        let secrets = KnownSecretValues::default();
+        for index in 0..MAX_KNOWN_SECRET_VALUES {
+            assert_eq!(
+                secrets.try_insert(&format!("secret-{index:04}")),
+                Ok(true)
+            );
+        }
+        let bytes_before = secrets.retained_bytes();
+        assert_eq!(
+            secrets.try_insert("one-too-many"),
+            Err(KnownSecretLimitError::DistinctValues {
+                limit: MAX_KNOWN_SECRET_VALUES
+            })
+        );
+        assert_eq!(secrets.len(), MAX_KNOWN_SECRET_VALUES);
+        assert_eq!(secrets.retained_bytes(), bytes_before);
+        secrets.with_values(|values| {
+            assert!(values.contains("secret-0000"));
+            assert!(values.contains(&format!("secret-{:04}", MAX_KNOWN_SECRET_VALUES - 1)));
+            assert!(!values.contains("one-too-many"));
+        });
+        assert_eq!(
+            secrets.try_insert("secret-0000"),
+            Ok(false),
+            "duplicates remain idempotent at capacity"
+        );
+    }
+
+    #[test]
+    fn known_secrets_reject_byte_overflow_without_partial_insert() {
+        let secrets = KnownSecretValues::default();
+        let oversized = "x".repeat(MAX_KNOWN_SECRET_BYTES + 1);
+        assert_eq!(
+            secrets.try_insert(&oversized),
+            Err(KnownSecretLimitError::Bytes {
+                limit: MAX_KNOWN_SECRET_BYTES,
+                current: 0,
+                additional: MAX_KNOWN_SECRET_BYTES + 1,
+            })
+        );
+        assert!(secrets.is_empty());
+        assert_eq!(secrets.retained_bytes(), 0);
+
+        let almost_full = "a".repeat(MAX_KNOWN_SECRET_BYTES - 4);
+        assert_eq!(secrets.try_insert(&almost_full), Ok(true));
+        assert_eq!(secrets.try_insert("bbbb"), Ok(true));
+        assert_eq!(secrets.retained_bytes(), MAX_KNOWN_SECRET_BYTES);
+        assert_eq!(
+            secrets.try_insert("cccc"),
+            Err(KnownSecretLimitError::Bytes {
+                limit: MAX_KNOWN_SECRET_BYTES,
+                current: MAX_KNOWN_SECRET_BYTES,
+                additional: 4,
+            })
+        );
+        assert_eq!(secrets.len(), 2);
+        secrets.with_values(|values| {
+            assert!(values.contains(&almost_full));
+            assert!(values.contains("bbbb"));
+            assert!(!values.contains("cccc"));
+        });
     }
 
     // ── 端到端集成冒烟（#[ignore]，本机/打包 chrome）───────────────────────────

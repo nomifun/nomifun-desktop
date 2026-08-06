@@ -152,10 +152,9 @@ from silently tying themselves to engine internals.
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal) | PTY-backed terminal sessions managed alongside conversations; streams output via the realtime broadcaster. |
 | [`nomifun-preset`](../../crates/backend/nomifun-preset) | Reusable launch configurations; merges builtin + user + extension presets, resolves target-specific immutable snapshots, and serves `/api/presets`. |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge) | Knowledge bases, bound-base state, and scoped knowledge MCP search. |
-| [`nomifun-companion`](../../crates/backend/nomifun-companion) | Desktop companions, figures, shared memory, and companion-bound state. |
+| [`nomifun-companion`](../../crates/backend/nomifun-companion) | Desktop companions, figures, per-companion memory (every row owned by exactly one companion), and companion-bound state. |
 | [`nomifun-gateway`](../../crates/backend/nomifun-gateway) | Platform Gateway MCP registry and process-issued capability tools. |
 | [`nomifun-public`](../../crates/backend/nomifun-public) | Public `/mcp`, `/mcp-agent`, and `/v1` front doors with companion-token auth. |
-| [`nomifun-secret`](../../crates/backend/nomifun-secret) | Per-companion browser-use secret storage. |
 | [`nomifun-app`](../../crates/backend/nomifun-app) | Application crate: assembles every domain crate into the axum server with DI + middleware. Ships the `nomicore` binary. |
 
 > The full backend layering — request lifecycle, who owns which routes, the

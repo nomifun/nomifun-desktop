@@ -17,7 +17,7 @@ use nomifun_api_types::{
 use nomifun_common::{LoopbackCapabilityError, LoopbackSessionKind};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
-use rmcp::{schemars, service::ServiceExt, tool, tool_router, transport};
+use rmcp::{schemars, service::ServiceExt, tool, tool_router};
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
@@ -41,16 +41,22 @@ pub async fn run_browser_stdio() -> ExitCode {
     };
     let claims = client.access().await.expect("startup renewal succeeded").claims;
     eprintln!(
-        "[mcp-browser-stdio] Started OK. SESSION={}, RUNTIME={}, EXP={}",
+        "[mcp-browser-stdio] Started OK. SESSION={}, RUNTIME={}, EXP={}, TASK_FAMILY_STDIO_WIRE_MAX={}MiB",
         claims.session.session_id,
         claims.scope.runtime_instance_id,
         claims.expires_at_unix_secs,
+        super::stdio_common::MAX_BROWSER_TASK_FAMILY_STDIO_WIRE_BYTES / (1024 * 1024),
     );
 
     let lifecycle = client.clone();
-    let server = BrowserStdioServer { client };
+    let request_budget = super::stdio_common::ProcessRequestBudget::browser();
+    let server = BrowserStdioServer {
+        client,
+        request_budget: request_budget.clone(),
+    };
 
-    let transport = transport::io::stdio();
+    let transport = super::stdio_common::bounded_browser_stdio_transport(request_budget.clone());
+    let server = super::stdio_common::panic_shield_stdio_service(server, request_budget);
     let exit = match server.serve(transport).await {
         Ok(peer) => {
             eprintln!("[mcp-browser-stdio] MCP session started, waiting for completion...");
@@ -73,6 +79,7 @@ pub async fn run_browser_stdio() -> ExitCode {
 #[derive(Clone)]
 struct BrowserStdioServer {
     client: super::stdio_common::ScopedBridgeClient<BrowserCapabilityScope>,
+    request_budget: super::stdio_common::ProcessRequestBudget,
 }
 
 /// Validate the immutable ACP audience, runtime scope, and two-level
@@ -149,8 +156,7 @@ struct RefParams {
 struct TypeParams {
     /// A `[ref=f<seq>e<n>]` element from the most recent `observe`.
     r#ref: String,
-    /// Text to type. Use "secret:NAME" to inject a stored credential bound to the
-    /// current origin WITHOUT the value passing through this conversation.
+    /// Text to type.
     text: String,
     #[serde(flatten)]
     lane: LaneParams,
@@ -161,7 +167,7 @@ struct TypeParams {
 struct SetValueParams {
     /// A `[ref=f<seq>e<n>]` element from the most recent `observe`.
     r#ref: String,
-    /// Value to set on the control. Also accepts "secret:NAME".
+    /// Value to set on the control.
     value: String,
     #[serde(flatten)]
     lane: LaneParams,
@@ -713,7 +719,7 @@ impl BrowserStdioServer {
 
     #[tool(
         name = "type",
-        description = "Type `text` into the element with the given `ref`. Use \"secret:NAME\" to inject a stored credential bound to the current origin without the value passing through this conversation (fails closed on this bridge if no secret store is configured)."
+        description = "Type `text` into the element with the given `ref`."
     )]
     async fn type_text(&self, Parameters(p): Parameters<TypeParams>) -> CallToolResult {
         self.run(json!({
@@ -727,7 +733,7 @@ impl BrowserStdioServer {
 
     #[tool(
         name = "set_value",
-        description = "Set the `value` of the control with the given `ref` (good for text fields). Also accepts \"secret:NAME\"."
+        description = "Set the `value` of the control with the given `ref` (good for text fields)."
     )]
     async fn set_value(&self, Parameters(p): Parameters<SetValueParams>) -> CallToolResult {
         self.run(json!({
@@ -920,8 +926,15 @@ impl rmcp::ServerHandler for BrowserStdioServer {
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        mut context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        // This is deliberately the first handler action and never waits. The
+        // transport normally injects the permit before rmcp can spawn this
+        // task; the fallback keeps direct Service invocations fail closed.
+        let _request_permit = super::stdio_common::take_stdio_request_permit(
+            &mut context,
+            &self.request_budget,
+        )?;
         let claims = self
             .client
             .access()
@@ -943,8 +956,12 @@ impl rmcp::ServerHandler for BrowserStdioServer {
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
-        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        mut context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let _request_permit = super::stdio_common::take_stdio_request_permit(
+            &mut context,
+            &self.request_budget,
+        )?;
         self.client
             .access_for(&request.name)
             .await

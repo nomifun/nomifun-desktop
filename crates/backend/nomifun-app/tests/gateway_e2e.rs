@@ -502,6 +502,15 @@ async fn gw_cron_create_list_update_delete_roundtrip() {
 async fn gw_memory_save_list_update_delete_roundtrip() {
     let (_app, services) = build_app().await;
     let gw = Gateway::from_services(&services);
+    // 共享记忆已删除：每条记忆都必须有主人。owner agent 自己没有伙伴身份，
+    // 于是服务端按「显式默认体 → 最早创建的伙伴」解析归属；空 roster 会干净地
+    // 拒绝写入（见下面的 gw_memory_save_without_any_companion_fails_cleanly）。
+    let owner = services
+        .companion_service
+        .create_companion("记忆主人", "ink")
+        .await
+        .unwrap()
+        .companion_id;
 
     let body = gw
         .call(
@@ -513,6 +522,14 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
         .await;
     let memory_id = result_of(&body)["memory_id"].as_str().unwrap().to_owned();
     assert!(result_of(&body).get("id").is_none());
+    // The saved memory is OWNED by the resolved companion, never install-wide.
+    // The owner id is the whole answer now: the retired `scope_kind`
+    // discriminator was collapsed away with the column pair behind it, and the
+    // owner travels under the column's own name.
+    assert_eq!(result_of(&body)["companion_id"], json!(owner));
+    for retired in ["scope_kind", "scope_companion_id"] {
+        assert!(result_of(&body).get(retired).is_none(), "retired `{retired}` is back on the wire");
+    }
 
     let body = gw
         .call(
@@ -557,6 +574,36 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
         )
         .await;
     assert!(result_of(&body).as_array().unwrap().is_empty());
+}
+
+/// An empty roster has no legal owner, so the write refuses with a readable
+/// error instead of persisting an ownerless row.
+#[tokio::test]
+async fn gw_memory_save_without_any_companion_fails_cleanly() {
+    let (_app, services) = build_app().await;
+    let gw = Gateway::from_services(&services);
+    let body = gw
+        .call(
+            "nomi_memory_save",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
+            json!({"content": "没有伙伴时不该落库", "kind": "preference"}),
+        )
+        .await;
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("还没有伙伴"),
+        "{body}"
+    );
+
+    let body = gw
+        .call(
+            "nomi_memory_list",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
+            json!({}),
+        )
+        .await;
+    assert!(result_of(&body).as_array().unwrap().is_empty(), "{body}");
 }
 
 #[tokio::test]

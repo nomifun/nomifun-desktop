@@ -12,6 +12,21 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Maximum UTF-8 bytes returned by one rendered-DOM capture.
+///
+/// Knowledge ingestion may parse several copies of this string (CDP JSON,
+/// `serde_json::Value`, HTML tree, and markdown).  Bound it well below the
+/// transport's 64 MiB emergency ceiling so one hostile document cannot turn a
+/// single read into an unbounded per-task memory spike.
+pub const MAX_RENDERED_HTML_BYTES: usize = 8 * 1024 * 1024;
+
+/// In-band marker used to preserve the renderer-side truncation bit without
+/// widening the long-standing `BrowserEngine::rendered_html -> String` ABI.
+/// HTML parsers ignore comments; the platform adapter also exposes a structured
+/// `html_truncated` flag to callers.
+pub const RENDERED_HTML_TRUNCATION_MARKER: &str =
+    "<!-- nomifun:rendered-html-truncated -->";
+
 /// Monotonic snapshot generation. A `ref` produced against one generation is
 /// only valid for that generation; backends use this to reject stale references
 /// instead of acting on a node that has moved or detached. (Used from P1
@@ -179,7 +194,7 @@ pub struct Observation {
 /// with DESIGN §22's action-layer taxonomy. Progress-layer timeout/abort
 /// (`progress.rs`) is mapped into these at the action boundary via
 /// [`crate::errmap::map_progress_err`] — never surfaced raw.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum BrowserError {
     #[error("unsupported capability {capability}: {hint}")]
     Unsupported { capability: String, hint: String },
@@ -322,6 +337,20 @@ pub trait BrowserEngine: Send + Sync {
         Err(BrowserError::Unsupported {
             capability: "takeover".into(),
             hint: "bring_to_front not supported by this backend".into(),
+        })
+    }
+
+    /// Capture only browser-context cookies for managed identity refresh.
+    ///
+    /// This is deliberately separate from `capture_storage_state`: managed Browser Use must
+    /// never materialize localStorage or IndexedDB after every successful operation. Backends
+    /// fail closed by default instead of silently delegating to a full capture.
+    async fn capture_cookie_state(
+        &self,
+    ) -> Result<crate::storage_state::StorageState, BrowserError> {
+        Err(BrowserError::Unsupported {
+            capability: "capture_cookie_state".into(),
+            hint: "cookie-only identity capture not supported by this backend".into(),
         })
     }
 

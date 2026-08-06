@@ -30,7 +30,6 @@ const snapshot = (overrides: Record<string, unknown> = {}) => ({
   excluded_auto_skills: [],
   knowledge_policy: {
     enabled: false,
-    mode: 'inherit',
     writeback: false,
     grounded: false,
   },

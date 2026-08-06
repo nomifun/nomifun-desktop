@@ -43,7 +43,6 @@ use nomifun_common::{
     KnowledgeBaseId, LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -250,11 +249,11 @@ async fn handle_tool_request(
     // deliberately keep their connect-time scope).
     let is_terminal_session =
         claims.session.kind == nomifun_common::LoopbackSessionKind::Terminal;
-    let (kb_ids, live_terminal_binding): (Vec<KnowledgeBaseId>, Option<(KnowledgeBinding, String)>) =
+    let (kb_ids, live_terminal_binding): (Vec<KnowledgeBaseId>, Option<KnowledgeBinding>) =
         if is_terminal_session {
-            let (live_ids, binding, wp_key) =
+            let (live_ids, binding, _) =
                 service.resolve_terminal_scope_for_cwd(workspace_path).await;
-            (live_ids, Some((binding, wp_key)))
+            (live_ids, Some(binding))
         } else {
             (claims.scope.kb_ids.clone(), None)
         };
@@ -283,15 +282,15 @@ async fn handle_tool_request(
             finish(dispatch_read(&service, &kb_ids, &handle).await)
         }
         "knowledge_write" => {
-            let (bound_kb_ids, binding, wp_key) = match live_terminal_binding {
+            let (bound_kb_ids, binding) = match live_terminal_binding {
                 // Terminal: the live binding IS the write scope — no
                 // intersection with the spawn-time snapshot, so bases bound
                 // after launch become writable immediately (and unbinding
                 // revokes immediately). resolve_write_policy fails closed
                 // when the live binding has write-back off.
-                Some((binding, wp_key)) => (kb_ids.clone(), binding, wp_key),
+                Some(binding) => (kb_ids.clone(), binding),
                 None => {
-                    let (resolved_kb_ids, binding, wp_key) = service
+                    let (resolved_kb_ids, binding, _) = service
                         .resolve_write_context_for_cwd(workspace_path)
                         .await;
                     let signed = &claims.scope.kb_ids;
@@ -299,19 +298,14 @@ async fn handle_tool_request(
                         .into_iter()
                         .filter(|id| signed.contains(id))
                         .collect();
-                    (bound, binding, wp_key)
+                    (bound, binding)
                 }
             };
-            let write_scope = claims
-                .session
-                .conversation_id
-                .clone()
-                .unwrap_or_else(|| opaque_workpath_write_scope(&wp_key));
             info!(tool, kb_ids = bound_kb_ids.len(), workspace = %workspace_path, "Knowledge MCP: dispatching tool");
             if bound_kb_ids.is_empty() {
                 return finish(no_bases_bound_error());
             }
-            finish(dispatch_write(&service, &bound_kb_ids, &binding, &write_scope, &args).await)
+            finish(dispatch_write(&service, &bound_kb_ids, &binding, &args).await)
         }
         _ => {
             warn!(tool, "Knowledge MCP: unknown tool");
@@ -395,14 +389,6 @@ async fn handle_context_request(
         }
     }
     finish(json!({"result": {"mounted": mounted, "write_enabled": write_enabled}}))
-}
-
-fn opaque_workpath_write_scope(workpath_key: &str) -> String {
-    // `workpath_key` is already the binding subsystem's canonical identity.
-    // Hash its exact bytes: Linux intentionally distinguishes case and Unicode
-    // normalization forms, so additional folding would merge unrelated scopes.
-    let digest = Sha256::digest(workpath_key.as_bytes());
-    format!("workpath-{}", &hex::encode(digest)[..32])
 }
 
 /// Renew access from the issuer's immutable authorization registry. The
@@ -498,12 +484,11 @@ pub(crate) async fn dispatch_read<I: AsRef<str>>(service: &KnowledgeService, kb_
 /// Write a document through the canonical `write_document` path. The surface is
 /// always `TerminalAcp` (this server serves ACP/terminal CLIs); the placement
 /// policy is resolved server-side from the caller's workpath binding — the model
-/// supplies only `handle | base+rel_path` + `content`, never the policy/scope.
+/// supplies only `handle | base+rel_path` + `content`, never the policy.
 pub(crate) async fn dispatch_write<I: AsRef<str>>(
     service: &KnowledgeService,
     bound_kb_ids: &[I],
     binding: &KnowledgeBinding,
-    scope: &str,
     args: &Value,
 ) -> Value {
     let Some(content) = args.get("content").and_then(Value::as_str) else {
@@ -524,7 +509,7 @@ pub(crate) async fn dispatch_write<I: AsRef<str>>(
         };
         WriteTargetSpec::Path { kb_id, rel_path: rel_path.to_owned() }
     };
-    let policy = resolve_write_policy(WriteSurface::TerminalAcp, binding, scope);
+    let policy = resolve_write_policy(WriteSurface::TerminalAcp, binding);
     let bound_kb_ids = match bound_kb_ids
         .iter()
         .map(|id| KnowledgeBaseId::parse(id.as_ref()))
@@ -543,7 +528,6 @@ pub(crate) async fn dispatch_write<I: AsRef<str>>(
         Ok(out) => json!({ "result": {
             "kb_id": out.kb_id,
             "rel_path": out.final_rel_path,
-            "staged": out.staged,
             "updated": matches!(out.op, WriteOp::Update),
         }}),
         Err(e) => json!({ "error": e.to_string() }),
@@ -997,14 +981,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_write_staged_lands_in_inbox_and_preserves_original() {
+    async fn dispatch_write_lands_in_the_target_document_and_keeps_curated_text() {
         let (svc, _tmp) = build_service().await;
         let info = svc.create_base("库", "", None, None).await.unwrap();
         svc.write_file(&info.knowledge_base_id, "terms.md", "ORIGINAL").await.unwrap();
         let binding = KnowledgeBinding {
             enabled: true,
             writeback: true,
-            writeback_mode: "staged".into(),
             kb_ids: vec![info.knowledge_base_id.clone()],
             ..Default::default()
         };
@@ -1012,27 +995,17 @@ mod tests {
             &svc,
             std::slice::from_ref(&info.knowledge_base_id),
             &binding,
-            TEST_CONVERSATION_ID,
             &json!({ "handle": encode_doc_handle(&info.knowledge_base_id, "terms.md"), "content": "PROPOSED" }),
         )
         .await;
         let r = out.get("result").unwrap_or_else(|| panic!("{out}"));
+        assert_eq!(r.get("rel_path").and_then(Value::as_str), Some("terms.md"));
+        assert_eq!(r.get("updated").and_then(Value::as_bool), Some(true));
+        // The model never sees the whole document, so the write appends instead
+        // of overwriting — hand-curated material must survive the turn.
         assert_eq!(
-            r.get("rel_path").and_then(Value::as_str),
-            Some("_inbox/0190f5fe-7c00-7a00-8000-000000000017/terms.md")
-        );
-        assert_eq!(r.get("staged").and_then(Value::as_bool), Some(true));
-        // Original untouched; proposal staged.
-        assert_eq!(svc.read_file(&info.knowledge_base_id, "terms.md").await.unwrap().content, "ORIGINAL");
-        assert_eq!(
-            svc.read_file(
-                &info.knowledge_base_id,
-                "_inbox/0190f5fe-7c00-7a00-8000-000000000017/terms.md",
-            )
-            .await
-            .unwrap()
-            .content,
-            "PROPOSED"
+            svc.read_file(&info.knowledge_base_id, "terms.md").await.unwrap().content,
+            "ORIGINAL\n\nPROPOSED\n"
         );
     }
 
@@ -1047,7 +1020,6 @@ mod tests {
             &svc,
             std::slice::from_ref(&info.knowledge_base_id),
             &binding,
-            "wp",
             &json!({ "handle": encode_doc_handle(&info.knowledge_base_id, "terms.md"), "content": "y" }),
         )
         .await;
@@ -1067,7 +1039,6 @@ mod tests {
             KnowledgeBinding {
                 enabled: true,
                 writeback: true,
-                writeback_mode: "direct".into(),
                 kb_ids: vec![info.knowledge_base_id.clone()],
                 ..Default::default()
             },
@@ -1088,7 +1059,11 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         assert!(resp.get("result").is_some(), "expected result, got {resp}");
-        assert_eq!(svc.read_file(&info.knowledge_base_id, "notes.md").await.unwrap().content, "NEW");
+        // The HTTP tool route reaches the same append-only write path as every
+        // other surface: the curated text stays, the new material joins it.
+        let after = svc.read_file(&info.knowledge_base_id, "notes.md").await.unwrap().content;
+        assert!(after.contains("OLD"), "the existing document must survive: {after}");
+        assert!(after.contains("NEW"), "the new material must be recorded: {after}");
     }
 
     // ── Terminal sessions: live binding resolution (no relaunch needed) ──
@@ -1196,14 +1171,13 @@ mod tests {
             "live policy must refuse while writeback is off: {resp}"
         );
 
-        // The 13:27 change: writeback on (staged). Same capability now writes.
+        // The 13:27 change: writeback on. Same capability now writes.
         svc.set_binding(
             crate::workpath::WORKPATH_BINDING_KIND,
             &key,
             KnowledgeBinding {
                 enabled: true,
                 writeback: true,
-                writeback_mode: "staged".into(),
                 kb_ids: vec![info.knowledge_base_id.clone()],
                 ..Default::default()
             },
@@ -1212,9 +1186,12 @@ mod tests {
         .unwrap();
         let (status, resp) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, write_body()).await;
         assert_eq!(status, 200);
-        let r = resp.get("result").unwrap_or_else(|| panic!("staged write must succeed live: {resp}"));
-        assert_eq!(r.get("staged").and_then(Value::as_bool), Some(true));
-        assert_eq!(svc.read_file(&info.knowledge_base_id, "terms.md").await.unwrap().content, "ORIGINAL");
+        let r = resp.get("result").unwrap_or_else(|| panic!("write must succeed live: {resp}"));
+        assert_eq!(r.get("rel_path").and_then(Value::as_str), Some("terms.md"));
+        assert_eq!(
+            svc.read_file(&info.knowledge_base_id, "terms.md").await.unwrap().content,
+            "ORIGINAL\n\nPROPOSED\n"
+        );
 
         // Revoke: writeback back off — refusal is immediate too.
         svc.set_binding(
@@ -1277,7 +1254,6 @@ mod tests {
             KnowledgeBinding {
                 enabled: true,
                 writeback: true,
-                writeback_mode: "staged".into(),
                 kb_ids: vec![info.knowledge_base_id.clone()],
                 ..Default::default()
             },
@@ -1325,7 +1301,6 @@ mod tests {
             KnowledgeBinding {
                 enabled: true,
                 writeback: true,
-                writeback_mode: "staged".into(),
                 kb_ids: vec![info.knowledge_base_id.clone()],
                 ..Default::default()
             },

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", "apps/desktop"]
 
 [workspace.package]
-version = "0.3.7"
+version = "0.4.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "local/nomifun-tauri"
@@ -38,7 +38,6 @@ nomifun-webhook = { path = "crates/backend/nomifun-webhook" }
 nomifun-agent-execution = { path = "crates/backend/nomifun-agent-execution" }
 nomifun-terminal = { path = "crates/backend/nomifun-terminal" }
 nomifun-preset = { path = "crates/backend/nomifun-preset" }
-nomifun-secret = { path = "crates/backend/nomifun-secret" }
 nomifun-customer-service = { path = "crates/backend/nomifun-customer-service" }
 nomifun-workshop = { path = "crates/backend/nomifun-workshop" }
 nomifun-creation = { path = "crates/backend/nomifun-creation" }
@@ -49,6 +48,8 @@ nomifun-browser-platform = { path = "crates/backend/nomifun-browser-platform" }
 nomifun-net = { path = "crates/shared/nomifun-net" }
 nomi-redact = { path = "crates/shared/nomi-redact" }
 nomi-process-runtime = { path = "crates/shared/nomi-process-runtime" }
+nomi-ssh = { path = "crates/shared/nomi-ssh" }
+nomifun-ssh = { path = "crates/backend/nomifun-ssh" }
 
 # --- Internal crates: agent (from nomifun-agent-rs, now local) ---
 nomi-types = { path = "crates/agent/nomi-types" }
@@ -109,12 +110,11 @@ jsonwebtoken = "10"
 bcrypt = "0.17"
 aes-gcm = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-# Public Suffix List (compile-time embedded, offline) for eTLD+1 domain binding
-# in nomifun-secret. Correctly handles multi-level suffixes (co.uk, com.cn).
+# Public Suffix List (compile-time embedded, offline) for browser domain policy.
 psl = "2"
 
 uuid = { version = "1", features = ["v7"] }
-reqwest = { version = "0.12", features = ["json", "multipart", "stream", "rustls-tls", "socks", "system-proxy"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream", "gzip", "rustls-tls", "socks", "system-proxy"], default-features = false }
 dashmap = "6"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 prost = "0.13"
@@ -129,7 +129,6 @@ notify = "8"
 walkdir = "2"
 ignore = "0.4"
 # Unified-diff computation for the knowledge-base inbox review panel (P4).
-similar = "2"
 zip = "2"
 # Node portable-runtime archive extraction (provisioner): tar.gz on unix/macos.
 flate2 = "1"
@@ -153,6 +152,15 @@ chrono-tz = "0.10"
 
 # --- PTY / shell ---
 portable-pty = "0.8"
+
+# --- SSH remote sessions ---
+# russh: crypto backend = `ring` (0.17.14 already in the lock), which avoids the
+# aws-lc-sys native toolchain burden (NASM on Windows x86, clang-cl on ARM64).
+# Pinned exactly: russh's Handler API churns fast (8 releases in July 2026), so
+# the `nomi-ssh` adapter crate isolates it and an upgrade touches one place.
+russh = { version = "=0.62.5", default-features = false, features = ["ring", "flate2"] }
+russh-sftp = "2.4.0"
+zeroize = { version = "1.8", features = ["derive"] }
 # `shellexecute-on-windows`: launch via real ShellExecuteExW on Windows instead
 # of the default `cmd /c start "" <target>` fallback. The `start` builtin
 # mis-parses URLs/paths as window titles, runs with no console (CREATE_NO_WINDOW)

@@ -52,7 +52,6 @@ pub trait IKnowledgeRepository: Send + Sync {
         kb_ids: &[String],
         enabled: bool,
         writeback: bool,
-        writeback_mode: &str,
         writeback_eagerness: &str,
         channel_write_enabled: bool,
         updated_at: nomifun_common::TimestampMs,

@@ -65,7 +65,7 @@ const TRAY_CONTAINER: Record<AssetControlVariant, string> = {
   // Standalone rounded card in the page flow.
   page: 'flex flex-col gap-8px rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-16px py-12px',
   // Edge-to-edge strip under the drawer toolbar.
-  drawer: 'flex flex-col gap-6px border-b border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-14px py-10px',
+  drawer: 'flex flex-col gap-6px border-b border-b-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-14px py-10px',
 };
 
 export const UploadTray: React.FC<{
@@ -108,7 +108,7 @@ export const UploadTray: React.FC<{
               <span
                 className={[
                   'shrink-0 text-11px font-600',
-                  u.status === 'error' ? 'text-[rgb(var(--danger-6))]' : 'text-[var(--color-text-3)]',
+                  u.status === 'error' ? 'text-danger-6' : 'text-[var(--color-text-3)]',
                 ].join(' ')}
               >
                 {u.status === 'error'
@@ -120,7 +120,7 @@ export const UploadTray: React.FC<{
               <div
                 className={[
                   'h-full rounded-full transition-all duration-200',
-                  u.status === 'error' ? 'bg-[rgb(var(--danger-6))]' : 'bg-[rgb(var(--primary-6))]',
+                  u.status === 'error' ? 'bg-danger-6' : 'bg-primary-6',
                 ].join(' ')}
                 style={{ width: `${u.status === 'error' ? 100 : u.percent}%` }}
               />

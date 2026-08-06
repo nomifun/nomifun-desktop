@@ -191,6 +191,13 @@ define_entity_id!(
     RemoteAgentId
 );
 define_entity_id!(
+    /// Globally unique SSH host identifier.
+    ///
+    /// Identifies a saved, reusable SSH connection profile in the `ssh_hosts`
+    /// table. Referenced from `conversations.extra.$.ssh_host_id`.
+    SshHostId
+);
+define_entity_id!(
     /// Globally unique user identifier.
     UserId
 );
@@ -304,14 +311,6 @@ define_entity_id!(
 define_entity_id!(
     /// Globally unique companion memory identifier.
     CompanionMemoryId
-);
-define_entity_id!(
-    /// Globally unique companion suggestion identifier.
-    CompanionSuggestionId
-);
-define_entity_id!(
-    /// Globally unique companion learn-run identifier.
-    CompanionLearnRunId
 );
 define_entity_id!(
     /// Globally unique companion collected-event identifier.

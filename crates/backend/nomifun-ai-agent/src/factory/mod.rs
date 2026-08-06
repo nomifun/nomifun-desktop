@@ -73,13 +73,6 @@ pub trait CompanionSummonProvider: Send + Sync {
         companion_id: &str,
     ) -> Result<Arc<dyn nomi_agent::companion_tools::CompanionMemorySink>, AppError>;
 
-    /// `propose_companion_memory` sink: candidate memories become suggestion
-    /// cards (owner-confirmed), never direct memory writes.
-    fn summon_proposal_sink(
-        &self,
-        companion_id: &str,
-    ) -> Result<Arc<dyn nomi_agent::summon_tools::SummonProposalSink>, AppError>;
-
     /// Per-turn live resolver for the summon's selected memory ids.
     fn summon_context_sink(
         &self,
@@ -229,10 +222,15 @@ pub struct AgentFactoryDeps {
     /// Optional in-session companion summon provider (spec §设计 B). When `Some`
     /// AND an owner-authority non-companion nomi session carries `extra.summon`,
     /// the factory materializes the companion's skills, registers the read-only
-    /// `recall_memories` + `propose_companion_memory` tools and injects the
+    /// read-only `recall_memories` tool and injects the
     /// per-turn memory-snapshot contributor. `None` (standalone / tests) leaves
     /// summon unwired — `extra.summon` is then inert.
     pub companion_summon: Option<Arc<dyn CompanionSummonProvider>>,
+    /// Optional SSH connection provider. When `Some` AND a nomi session carries
+    /// `extra.ssh_host_id`, the factory connects the bound host and gives the
+    /// runtime the remote tool family instead of the local one. `None` leaves
+    /// SSH sessions unwired — `extra.ssh_host_id` is then inert.
+    pub ssh_provider: Option<Arc<dyn crate::SshBackendProvider>>,
 }
 
 /// Build a production agent factory that dispatches to concrete agent types.

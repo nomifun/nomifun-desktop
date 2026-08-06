@@ -321,3 +321,91 @@ async fn bootstrap_with_external_provider() {
 
     assert!(!result.engine.tool_names().is_empty());
 }
+
+// ── SSH-bound sessions ───────────────────────────────────────────────────────
+
+/// Enough of the seam to select the remote tool family. Nothing here is called:
+/// the assertion is about what the prompt says, not about remote traffic.
+struct StubSshBackend;
+
+#[async_trait]
+impl nomi_agent::ssh_backend::SshBackend for StubSshBackend {
+    async fn run_command(
+        &self,
+        _command: &str,
+        _timeout_ms: u64,
+    ) -> Result<nomi_agent::ssh_backend::RemoteCommandOutput, String> {
+        Err("not dialled in this test".into())
+    }
+    async fn read_file(&self, _path: &str) -> Result<Vec<u8>, String> {
+        Err("not dialled in this test".into())
+    }
+    async fn write_file(&self, _path: &str, _bytes: Vec<u8>) -> Result<(), String> {
+        Err("not dialled in this test".into())
+    }
+    async fn grep(&self, _pattern: &str, _path: &str) -> Result<String, String> {
+        Err("not dialled in this test".into())
+    }
+    async fn list_files(&self, _glob: &str) -> Result<Vec<String>, String> {
+        Err("not dialled in this test".into())
+    }
+    async fn stat(
+        &self,
+        _path: &str,
+    ) -> Result<nomi_agent::ssh_backend::RemoteFileStat, String> {
+        Err("not dialled in this test".into())
+    }
+}
+
+async fn captured_system_prompt(workspace: &str, ssh: bool) -> String {
+    let systems = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(CapturingProvider {
+        systems: Arc::clone(&systems),
+    });
+    let mut bootstrap = AgentBootstrap::new(minimal_config(), workspace, null_output())
+        .provider(provider);
+    if ssh {
+        bootstrap = bootstrap.ssh_session(Arc::new(StubSshBackend));
+    }
+    let mut engine = bootstrap.build().await.unwrap().engine;
+    engine.execute_turn("hello", workspace).await.unwrap();
+    systems.lock().unwrap()[0].clone()
+}
+
+/// By design F2 an SSH session's `extra.workspace` is a LOCAL scratch directory
+/// (transcripts, attachments). The same bootstrap swaps Read/Write/Edit/Bash/
+/// Grep/Glob for the remote family and registers no local exec tool at all — so
+/// rendering that scratch path as "Working directory" hands the model a path
+/// none of its tools can reach, on a machine it is not operating.
+#[tokio::test]
+async fn ssh_session_prompt_states_the_remote_start_point_not_the_local_scratch_dir() {
+    let scratch = "/tmp/nomi-test-conversations/9f1c2b7a-scratch";
+    let system = captured_system_prompt(scratch, true).await;
+
+    assert!(
+        !system.contains(scratch),
+        "the local scratch path must not be presented as the session's cwd:\n{system}"
+    );
+    assert!(
+        !system.contains("Working directory:"),
+        "there is no local working directory in an SSH session:\n{system}"
+    );
+    assert!(
+        system.contains("remote host"),
+        "the prompt must say the session runs on a remote host:\n{system}"
+    );
+    assert!(
+        system.contains("Current date:"),
+        "the environment section still owes the model the date:\n{system}"
+    );
+}
+
+/// Control: a local session is unchanged — it still gets its real cwd.
+#[tokio::test]
+async fn local_session_prompt_keeps_its_working_directory() {
+    let system = captured_system_prompt("/tmp/nomi-test-local-ws", false).await;
+    assert!(
+        system.contains("Working directory: \"/tmp/nomi-test-local-ws\""),
+        "local sessions must keep the cwd line:\n{system}"
+    );
+}

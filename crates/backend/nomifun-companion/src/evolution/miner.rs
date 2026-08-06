@@ -184,85 +184,6 @@ fn is_contiguous_subsequence(needle: &[String], haystack: &[String]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// 反思候选的会话序列长度上限（签名不无限膨胀）。
-const MAX_REFLECT_STEPS: usize = 8;
-
-/// 任务后反思候选（design §5.5）：把"单个会话里一长串多步操作"整体作为一个候选——
-/// 即使只出现一次，也在一次复杂任务后反思是否值得固化。每会话至多一条，折叠连续重复后
-/// 长度 ≥ `min_steps`（取前 [`MAX_REFLECT_STEPS`] 步作签名），`distinct_sessions=1`
-/// （故其 confidence 低、永远走人审，不会被高置信自动激活）。最多返回 `max` 条。
-pub fn mine_reflection_candidates(events: &[CollectedEvent], min_steps: usize, max: usize) -> Vec<MinedPattern> {
-    let mut by_conv: BTreeMap<String, Vec<(String, String, String, i64)>> =
-        BTreeMap::new();
-    for ev in events {
-        if ev.source != "tool_calls" {
-            continue;
-        }
-        let name = ev.data.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        if name.is_empty() {
-            continue;
-        }
-        let Some(conv) = ev
-            .data
-            .get("conversation_id")
-            .and_then(|c| c.as_str())
-            .and_then(|id| ConversationId::try_from(id).ok())
-            .map(ConversationId::into_string)
-        else {
-            continue;
-        };
-        let call_id = ev.data.get("call_id").and_then(|c| c.as_str()).unwrap_or("").to_owned();
-        by_conv
-            .entry(conv)
-            .or_default()
-            .push((name.to_owned(), call_id, ev.event_id.clone(), ev.ts));
-    }
-    let mut out = Vec::new();
-    for (conv, calls) in &by_conv {
-        if out.len() >= max {
-            break;
-        }
-        let mut seq: Vec<(String, String, String, i64)> = Vec::new();
-        for (name, call_id, event_id, ts) in calls {
-            if seq.last().map(|(n, _, _, _)| n == name).unwrap_or(false) {
-                continue;
-            }
-            seq.push((name.clone(), call_id.clone(), event_id.clone(), *ts));
-        }
-        if seq.len() < min_steps {
-            continue;
-        }
-        let take = seq.len().min(MAX_REFLECT_STEPS);
-        let taken = &seq[..take];
-        let names: Vec<String> = taken.iter().map(|(n, _, _, _)| n.clone()).collect();
-        let examples: Vec<String> = taken
-            .iter()
-            .take(8)
-            .map(|(_, _, event_id, _)| event_id.clone())
-            .collect();
-        let anchor = TranscriptAnchor {
-            conversation_id: conv.clone(),
-            start_ts: taken.first().map(|(_, _, _, t)| *t).unwrap_or(0),
-            end_ts: taken.last().map(|(_, _, _, t)| *t).unwrap_or(0),
-            pad_turns: ANCHOR_PAD_TURNS,
-            call_ids: taken
-                .iter()
-                .filter(|(_, call_id, _, _)| !call_id.is_empty())
-                .map(|(_, call_id, _, _)| call_id.clone())
-                .collect(),
-        };
-        out.push(MinedPattern {
-            signature: tool_call_signature(&names),
-            steps: names,
-            count: 1,
-            distinct_sessions: 1,
-            example_event_ids: examples,
-            anchor,
-        });
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,23 +271,6 @@ mod tests {
         );
     }
 
-    /// 反思候选也带定位锚(单会话整段)。
-    #[test]
-    fn reflection_candidate_carries_anchor() {
-        let mut events = Vec::new();
-        let conversation = conversation_fixture(4);
-        for (i, tool) in ["a", "b", "c", "d", "e"].iter().enumerate() {
-            events.push(tool_event(&conversation, tool, &format!("{conversation}-{i}"), (i as i64) + 10));
-        }
-        let cands = mine_reflection_candidates(&events, 4, 3);
-        assert_eq!(cands.len(), 1);
-        let a = &cands[0].anchor;
-        assert_eq!(a.conversation_id, conversation);
-        assert_eq!(a.start_ts, 10);
-        assert!(a.end_ts >= a.start_ts);
-        assert!(!a.call_ids.is_empty());
-    }
-
     /// 只出现在单个会话的序列被排除（distinct_sessions < 阈值）。
     #[test]
     fn excludes_single_session_sequences() {
@@ -410,20 +314,4 @@ mod tests {
         assert!(mine_patterns(&events, 1, 1).is_empty());
     }
 
-    /// 单个长会话 → 一条反思候选（distinct_sessions=1）；过短会话被排除。
-    #[test]
-    fn reflection_candidate_from_single_long_session() {
-        let mut events = Vec::new();
-        let mut ts = 0;
-        let conversation = conversation_fixture(8);
-        for tool in ["grep", "read", "edit", "write"] {
-            ts += 1;
-            events.push(tool_event(&conversation, tool, &format!("e{ts}"), ts));
-        }
-        events.push(tool_event(&conversation_fixture(9), "ls", "x", 100)); // 1-step session: excluded
-        let cands = mine_reflection_candidates(&events, 4, 5);
-        assert_eq!(cands.len(), 1);
-        assert_eq!(cands[0].steps, vec!["grep".to_string(), "read".into(), "edit".into(), "write".into()]);
-        assert_eq!(cands[0].distinct_sessions, 1);
-    }
 }

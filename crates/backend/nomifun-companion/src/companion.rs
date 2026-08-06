@@ -19,7 +19,7 @@ use nomifun_api_types::CreateConversationRequest;
 use nomifun_common::{AppError, ProviderWithModel};
 use nomifun_conversation::ConversationService;
 
-use crate::collector::{self, SharedConfig};
+use crate::collector::{self, SharedConfig, SharedEventStoreLock};
 use crate::events::CompanionEventEmitter;
 use crate::managed_skills::{
     load_manifest, record_managed_entry, record_source_matches, remove_stale_managed_entries,
@@ -28,7 +28,7 @@ use crate::managed_skills::{
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, normalized_effective_skill_names};
 use crate::registry::CompanionRegistry;
-use crate::store::{CompanionThread, MEMORY_KINDS, MemoryScope, CompanionStore};
+use crate::store::{CompanionThread, MEMORY_KINDS, CompanionStore};
 
 /// Per-companion runtime-state key holding that companion's active companion thread.
 pub(crate) const ACTIVE_THREAD_KEY: &str = "companion_active_thread";
@@ -1042,18 +1042,28 @@ impl CompanionThreads {
 pub struct CompanionStoreSink {
     pub store: CompanionStore,
     pub config: SharedConfig,
+    /// Roster, for the memory-owner fallback when the conversation is not a
+    /// registered companion thread (see [`CompanionStoreSink::owner_of`]).
+    pub registry: Arc<CompanionRegistry>,
     pub emitter: CompanionEventEmitter,
     pub companion_dir: std::path::PathBuf,
+    pub event_store_lock: SharedEventStoreLock,
 }
 
 impl CompanionStoreSink {
-    /// The companion a save should credit: the thread's owner, else the default
-    /// companion, else nobody (XP skipped).
-    async fn xp_target(&self, conversation_id: &str) -> Option<String> {
+    /// The companion a save belongs to (and the one credited with XP): the
+    /// thread's owner, else the shared owner-resolution chain (explicit default
+    /// → oldest companion), else `None` on an empty roster — in which case
+    /// there is no legal owner and the save must refuse rather than write an
+    /// ownerless row.
+    async fn owner_of(&self, conversation_id: &str) -> Option<String> {
         if let Ok(Some(companion_id)) = self.store.thread_companion_id(conversation_id).await {
             return Some(companion_id);
         }
-        self.config.read().await.default_companion_id.clone()
+        let default_companion_id = self.config.read().await.default_companion_id.clone();
+        self.registry
+            .resolve_row_owner(default_companion_id.as_deref())
+            .await
     }
 }
 
@@ -1092,14 +1102,13 @@ impl CompanionMemorySink for CompanionStoreSink {
         // Scope recall to the owning companion: shared memories + this
         // companion's own private ones. Mirrors the prompt-injection scope so a
         // companion never recalls another's private memories.
-        let scope_companion_id = self.xp_target(conversation_id).await;
-        let companion_id = scope_companion_id
+        let owner_id = self.owner_of(conversation_id).await;
+        let companion_id = owner_id
             .as_deref()
             .and_then(|id| nomifun_common::CompanionId::try_from(id).ok());
         let query = MemorySearchQuery {
             queries: queries.to_vec(),
             kind: kind.map(str::to_owned),
-            scope: None,
             status: if include_archived { MemoryStatusFilter::All } else { MemoryStatusFilter::Active },
             companion_id,
             limit: if limit == 0 { 20 } else { limit },
@@ -1131,26 +1140,23 @@ impl CompanionMemorySink for CompanionStoreSink {
         if content.is_empty() {
             return Err("content 不能为空".into());
         }
-        match self.store.find_similar_active(kind, content).await {
+        // The companion that owns this chat owns the memory. There is no
+        // ownerless write path any more: an empty roster refuses the save.
+        let Some(owner) = self.owner_of(conversation_id).await else {
+            return Err("还没有伙伴，无法保存记忆：请先创建一个伙伴。".into());
+        };
+        match self.store.find_similar_active(kind, content, &owner).await {
             Ok(Some(_)) => return Ok("已有相似记忆，无需重复保存。".into()),
             Ok(None) => {}
             Err(e) => return Err(e.to_string()),
         }
-        // The companion that owns this chat owns the memory. Chat-saved memories
-        // are PRIVATE to that companion; if no owner resolves, fall back to shared.
-        let owner = self.xp_target(conversation_id).await;
-        let scope = owner.clone().map(MemoryScope::Companion).unwrap_or(MemoryScope::Shared);
         let mem = self
             .store
-            .insert_memory_scoped(kind, content, tags, 0.8, "chat", scope)
+            .insert_memory_scoped(kind, content, tags, 0.8, "chat", Some(&owner))
             .await
             .map_err(|e| e.to_string())?;
-        // Exclusive-interaction XP: credit the owning companion only (spec ruling
-        // 2). Chat-saved memories are PRIVATE to that companion; the learner hub
-        // still writes shared memory.
-        if let Some(companion_id) = &owner {
-            let _ = self.store.add_companion_xp(companion_id, 5).await;
-        }
+        // Exclusive-interaction XP: credit the owning companion only (spec ruling 2).
+        let _ = self.store.add_companion_xp(&owner, 5).await;
         self.emitter.emit_memory_created(&mem);
         // §3.4 bridge (opt-in): mirror the save into the nomi agent's file-memory
         // so it recalls companion-learned facts. Off unless an operator sets a
@@ -1165,8 +1171,11 @@ impl CompanionMemorySink for CompanionStoreSink {
     }
 
     async fn recent_events(&self, limit: usize) -> Result<String, String> {
-        let events = collector::read_recent_events(&self.companion_dir, limit)
-            .map_err(|error| error.to_string())?;
+        let events = {
+            let _event_guard = self.event_store_lock.read().await;
+            collector::read_recent_events(&self.companion_dir, limit)
+                .map_err(|error| error.to_string())?
+        };
         if events.is_empty() {
             return Ok("最近没有采集到事件（采集可能未开启）。".into());
         }
@@ -1277,6 +1286,7 @@ mod tests {
     use super::*;
     use crate::config::PersonaConfig;
     use crate::profile::SharedCompanionConfig;
+    use crate::store::MemoryFilter;
     use nomifun_realtime::BroadcastEventBus;
     use tokio::sync::RwLock;
 
@@ -1322,12 +1332,18 @@ mod tests {
         assert_eq!(count, 1, "same content must not duplicate the memory file");
     }
 
+    /// Sink over a real (initially empty) roster rooted at `dir`; tests that need
+    /// a companion create one through `sink.registry`.
     fn sink(dir: &std::path::Path, store: CompanionStore, config: SharedCompanionConfig) -> CompanionStoreSink {
         CompanionStoreSink {
             store,
             config: Arc::new(RwLock::new(config)),
+            registry: Arc::new(
+                CompanionRegistry::scan(dir.join("companions"), dir.join("shared")).unwrap(),
+            ),
             emitter: CompanionEventEmitter::new(Arc::new(BroadcastEventBus::new(16)), "owner-a"),
             companion_dir: dir.to_path_buf(),
+            event_store_lock: Arc::new(RwLock::new(())),
         }
     }
 
@@ -1338,15 +1354,16 @@ mod tests {
         let owned_conversation = conversation_fixture(1);
         let unknown_conversation = conversation_fixture(2);
         let owner = companion_fixture(1);
-        let default_companion = companion_fixture(2);
         store.insert_companion_thread(&owned_conversation, &owner, "聊").await.unwrap();
-        let mut config = SharedCompanionConfig::default();
-        config.default_companion_id = Some(default_companion.clone());
-        let s = sink(dir.path(), store.clone(), config);
+        let s = sink(dir.path(), store.clone(), SharedCompanionConfig::default());
+        // The fallback owner must be a LIVE roster member (a dangling default
+        // would re-home rows onto a companion that no longer exists).
+        let default_companion = s.registry.create("默认体", "ink").await.unwrap().companion_id;
+        s.config.write().await.default_companion_id = Some(default_companion.clone());
 
         let saved = s.save(&owned_conversation, "preference", "主人喜欢先结论后细节", &[]).await.unwrap();
         assert!(saved.contains("已保存"));
-        assert_eq!(store.count_memories("active").await.unwrap(), 1);
+        assert_eq!(store.count_memories("active", Some(&owner)).await.unwrap(), 1);
         // XP credited to the owning companion, not the default and not globally.
         assert_eq!(store.get_companion_state_i64(&owner, "xp").await.unwrap(), 5);
         assert_eq!(store.get_companion_state_i64(&default_companion, "xp").await.unwrap(), 0);
@@ -1354,13 +1371,24 @@ mod tests {
 
         let dup = s.save(&owned_conversation, "preference", "主人喜欢先结论后细节", &[]).await.unwrap();
         assert!(dup.contains("相似"));
-        assert_eq!(store.count_memories("active").await.unwrap(), 1);
+        assert_eq!(store.count_memories("active", Some(&owner)).await.unwrap(), 1);
         assert_eq!(store.get_companion_state_i64(&owner, "xp").await.unwrap(), 5);
 
-        // Unregistered conversation falls back to the default companion.
+        // Unregistered conversation falls back to the resolved default companion,
+        // and the row is OWNED by it (no ownerless write path any more).
         let other = s.save(&unknown_conversation, "knowledge", "cargo check 是门禁", &[]).await.unwrap();
         assert!(other.contains("已保存"));
         assert_eq!(store.get_companion_state_i64(&default_companion, "xp").await.unwrap(), 5);
+        let fallback_owned = store
+            .list_memories(&MemoryFilter {
+                kind: Some("knowledge".into()),
+                companion_id: Some(default_companion.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(fallback_owned.len(), 1);
+        assert_eq!(fallback_owned[0].companion_id.as_deref(), Some(default_companion.as_str()));
 
         let hits = s.recall(&owned_conversation, &["结论".into()], None, false, 20).await.unwrap();
         assert!(hits.contains("先结论后细节"));
@@ -1378,13 +1406,20 @@ mod tests {
         assert!(s.save(&owned_conversation, "task", "  ", &[]).await.is_err());
     }
 
+    /// Empty roster = no legal owner. The save must fail cleanly (a readable
+    /// message the tool surfaces) and write NOTHING — never an ownerless row,
+    /// never a panic.
     #[tokio::test]
-    async fn sink_save_without_any_companion_skips_xp() {
+    async fn sink_save_without_any_companion_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
         let s = sink(dir.path(), store.clone(), SharedCompanionConfig::default());
-        let saved = s.save(&conversation_fixture(3), "task", "明天修 bug", &[]).await.unwrap();
-        assert!(saved.contains("已保存"));
+        let error = s
+            .save(&conversation_fixture(3), "task", "明天修 bug", &[])
+            .await
+            .unwrap_err();
+        assert!(error.contains("还没有伙伴"), "{error}");
+        assert_eq!(store.count_memories("active", None).await.unwrap(), 0);
         assert_eq!(store.get_state_i64("xp").await.unwrap(), 0);
     }
 

@@ -67,8 +67,7 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
         kb.enabled ||
         kb.writeback ||
         kb.kb_ids.length > 0 ||
-        kb.writeback_mode !== 'staged' ||
-        kb.writeback_eagerness !== 'conservative';
+        kb.writeback_eagerness !== 'manual';
       if (kbTouched) {
         tasks.push({
           label: t('knowledge.control.label'),

@@ -169,6 +169,7 @@ impl ConversationAttemptRunner {
                     order: Some("desc".to_owned()),
                     content_mode: None,
                     cursor: None,
+                    day: None,
                 },
             )
             .await
@@ -320,6 +321,7 @@ impl ConversationAttemptRunner {
                         order: Some("desc".to_owned()),
                         content_mode: None,
                         cursor: None,
+                        day: None,
                     },
                 )
                 .await

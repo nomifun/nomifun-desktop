@@ -177,7 +177,7 @@ const NomiCollapseComponent: React.FC<NomiCollapseProps> & { Item: typeof NomiCo
         const isActive = currentKeys.includes(name);
         const iconNode = expandIcon ? expandIcon(isActive) : <DefaultIcon active={isActive} />;
         const itemBorderClass = bordered ? 'border border-solid border-[color:var(--color-border-2)]' : '';
-        const contentDividerClass = bordered ? 'border-t border-[color:var(--color-border-2)]' : '';
+        const contentDividerClass = bordered ? 'border-t border-t-solid border-[color:var(--color-border-2)]' : '';
 
         return (
           <div

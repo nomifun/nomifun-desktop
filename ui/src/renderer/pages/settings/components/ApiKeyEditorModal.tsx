@@ -256,7 +256,10 @@ const ApiKeyEditorModal: React.FC<ApiKeyEditorModalProps> = ({ visible, api_keys
         </div>
 
         {/* 底部操作栏 */}
-        <div className='flex items-center justify-between pt-12px border-t border-line-2'>
+        {/* `border-line-2` 不是任何颜色（theme 无 line 键），而且缺 border-style，
+            这条分隔线两头都不成立。border-t-solid 必须同方向，否则另外三边会回落到
+            medium≈3px。Neither the colour nor the style existed here. */}
+        <div className='flex items-center justify-between pt-12px border-t border-t-solid border-arco-2'>
           <span className='text-11px text-t-secondary'>{t('settings.multiKeyTip')}</span>
           <div className='flex items-center gap-8px'>
             {hasMultipleKeys && (
