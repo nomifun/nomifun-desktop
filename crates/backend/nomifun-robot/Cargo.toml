@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Exposes the mock service implementations to integration tests.
+test-support = []
+
 [dependencies]
 nomifun-api-types = { workspace = true }
 nomifun-realtime = { workspace = true }
