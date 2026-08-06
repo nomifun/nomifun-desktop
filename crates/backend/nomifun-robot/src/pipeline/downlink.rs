@@ -27,14 +27,16 @@ use crate::protocol::{DOWNLINK_SAMPLE_RATE, FRAME_DURATION_MS};
 /// its ~40-packet ceiling.
 pub const PRIME_FRAMES: u64 = 3;
 
-struct PacedFrame {
+/// One queued outbound frame. Text rides the same queue as audio so a `tts
+/// stop` cannot overtake the sentence it ends.
+struct PacedItem {
     generation: u64,
-    packet: Vec<u8>,
+    frame: Frame,
 }
 
 /// Hands Opus packets to the device on a real-time cadence.
 pub struct DownlinkPacer {
-    tx: mpsc::Sender<PacedFrame>,
+    tx: mpsc::Sender<PacedItem>,
     generation: Arc<AtomicU64>,
 }
 
@@ -42,7 +44,7 @@ impl DownlinkPacer {
     /// Start the pacing task. `out` is the session's writer channel.
     pub fn spawn(out: mpsc::Sender<Frame>) -> (Self, JoinHandle<()>) {
         // Deep enough to hold a long sentence without blocking the encoder.
-        let (tx, mut rx) = mpsc::channel::<PacedFrame>(512);
+        let (tx, mut rx) = mpsc::channel::<PacedItem>(512);
         let generation = Arc::new(AtomicU64::new(0));
         let task_generation = generation.clone();
 
@@ -65,8 +67,11 @@ impl DownlinkPacer {
                     _ => (Instant::now(), 0),
                 };
                 // The first `PRIME_FRAMES` leave together; from then on one frame
-                // per frame duration, which is exactly playback speed.
+                // per frame duration, which is exactly playback speed. Text
+                // frames cost no playback time, so they inherit the deadline of
+                // the audio they follow instead of advancing it.
                 let paced = index.saturating_sub(PRIME_FRAMES.saturating_sub(1));
+                let is_audio = matches!(item.frame, Frame::Binary(_));
                 let deadline = start + frame_gap * u32::try_from(paced).unwrap_or(u32::MAX);
                 sleep_until(deadline).await;
 
@@ -75,14 +80,14 @@ impl DownlinkPacer {
                     current = None;
                     continue;
                 }
-                if out
-                    .send(Frame::Binary(encode_binary_v1(&item.packet)))
-                    .await
-                    .is_err()
-                {
+                if out.send(item.frame).await.is_err() {
                     break;
                 }
-                current = Some((item.generation, start, index + 1));
+                current = Some((
+                    item.generation,
+                    start,
+                    if is_audio { index + 1 } else { index },
+                ));
             }
         });
 
@@ -106,13 +111,33 @@ impl DownlinkPacer {
             }
             if self
                 .tx
-                .send(PacedFrame { generation, packet })
+                .send(PacedItem {
+                    generation,
+                    frame: Frame::Binary(encode_binary_v1(&packet)),
+                })
                 .await
                 .is_err()
             {
                 return;
             }
         }
+    }
+
+    /// Queue a text frame behind the audio already queued for `generation`.
+    /// The device drops downlink audio the moment it leaves the speaking state,
+    /// so `tts stop` has to travel this way rather than jumping the queue.
+    /// Returns whether it was accepted.
+    pub async fn enqueue_text(&self, generation: u64, text: String) -> bool {
+        if generation != self.generation() {
+            return false;
+        }
+        self.tx
+            .send(PacedItem {
+                generation,
+                frame: Frame::Text(text),
+            })
+            .await
+            .is_ok()
     }
 
     /// Cancel everything queued and return the new generation.
@@ -255,6 +280,41 @@ mod tests {
             started.elapsed() < Duration::from_millis(30),
             "a fresh generation primes immediately, it does not inherit the old deadline"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_paced_text_frame_lands_after_the_audio_queued_before_it() {
+        let (out_tx, mut out_rx) = mpsc::channel(256);
+        let (pacer, _task) = DownlinkPacer::spawn(out_tx);
+        let generation = pacer.generation();
+        pacer.enqueue(generation, packets(8)).await;
+        assert!(pacer.enqueue_text(generation, "stop".to_owned()).await);
+
+        let mut order = Vec::new();
+        while order.len() < 9 {
+            match tokio::time::timeout(Duration::from_secs(5), out_rx.recv()).await {
+                Ok(Some(frame)) => order.push(frame),
+                _ => break,
+            }
+        }
+        assert_eq!(order.len(), 9, "audio plus the stop");
+        assert!(
+            order[..8].iter().all(|f| matches!(f, Frame::Binary(_))),
+            "the audio comes first"
+        );
+        assert!(
+            matches!(order[8], Frame::Text(_)),
+            "the stop must not overtake the audio it ends"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_text_frame_is_refused_so_the_caller_can_fall_back() {
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let (pacer, _task) = DownlinkPacer::spawn(out_tx);
+        let stale = pacer.generation();
+        pacer.flush();
+        assert!(!pacer.enqueue_text(stale, "stop".to_owned()).await);
     }
 
     #[test]
