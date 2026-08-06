@@ -19,7 +19,6 @@ import {
   isCompleteMessageProjection,
   isConversationProcessing,
 } from '@/renderer/pages/conversation/utils/conversationRuntime';
-import { emitter } from '@/renderer/utils/emitter';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ThoughtData } from '../thoughtTypes';
 import {
@@ -446,7 +445,6 @@ export const useNomiMessage = (
               };
               setTokenUsage(newTokenUsage);
               if (!readOnly) {
-                emitter.emit('nomi.usage.updated', { conversation_id, tokenUsage: newTokenUsage });
                 void ipcBridge.conversation.update.invoke({
                   conversation_id: conversation_id,
                   updates: {
