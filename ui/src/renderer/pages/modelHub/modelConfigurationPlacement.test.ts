@@ -41,8 +41,10 @@ describe('model-owned tool configuration placement', () => {
     // The 语音 section hosts ASR, TTS and the local VAD entry.
     expect(speechHost.includes('<SpeechToTextContent />')).toBe(true);
     // Candidates come from the authoritative catalog resolve, not provider
-    // rows + name guessing.
-    expect(speechSource.includes("useModelsForTask('speech_recognition')")).toBe(true);
+    // rows + name guessing — reached through the ONE shared selector, which is
+    // what performs the `speech_recognition` resolution.
+    expect(speechSource.includes("task='speech_recognition'")).toBe(true);
+    expect(speechSource.includes('<TaskModelSelect')).toBe(true);
     expect(speechSource.includes('inferCloudSpeechService')).toBe(false);
     expect(creationSource.includes('ImageGenerationToolSettings')).toBe(false);
     expect(providerSource.includes('SpeechToTextCloudSettings')).toBe(false);
