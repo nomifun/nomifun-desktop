@@ -1381,7 +1381,19 @@
       "languagePlaceholder": "留空则自动识别，例如 zh、en",
       "enabled": "在输入框中启用语音转文字",
       "noSources": "暂无可用的语音转文字模型，请先在供应商中录入语音识别模型。",
-      "manageProviders": "管理供应商模型"
+      "manageProviders": "管理供应商模型",
+      "asrTitle": "语音识别（ASR）",
+      "asrSubtitle": "把说话内容转成文字的默认模型。",
+      "ttsTitle": "语音合成（TTS）",
+      "ttsSubtitle": "把文字念出来的默认模型与音色；伙伴没单独配时都用它。",
+      "ttsSource": "默认语音合成模型",
+      "ttsNoSources": "暂无可用的语音合成模型，请先到「供应商与密钥」里录入语音合成模型。",
+      "ttsSaved": "已保存语音合成默认设置",
+      "ttsSaveFailed": "保存语音合成默认设置失败",
+      "ttsClear": "清除默认",
+      "vadTitle": "语音活动检测（VAD）",
+      "vadBuiltin": "内置 Silero VAD（本地）",
+      "vadBuiltinHint": "在本机运行，不联网、不需要供应商，也没有可选的模型。默认灵敏度 {{sensitivity}}、停顿判停 {{silence}} 毫秒；每只伙伴可以在它的总览页单独调。"
     }
   },
   "otherHub": {

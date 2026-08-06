@@ -1,5 +1,5 @@
 import type { AcpInitializeResult, AcpSessionConfigOption, AcpSessionModes } from '@/common/types/platform/acpTypes';
-import type { SpeechToTextConfig } from '@/common/types/provider/speech';
+import type { SpeechToTextConfig, TextToSpeechConfig } from '@/common/types/provider/speech';
 import type { ICssTheme } from '@/common/config/storage';
 import type { CompanionId, ProviderId } from '@/common/types/ids';
 
@@ -55,6 +55,10 @@ export type ConfigKeyMap = {
   'knowledge.autogenModel': { provider_id: ProviderId; model: string } | undefined;
   'tools.imageGenerationModel': { provider_id: ProviderId; model: string; switch?: boolean };
   'tools.speechToText': SpeechToTextConfig | undefined;
+  // Install-wide speech-synthesis default. Registered backend-side as a REQUIRED
+  // Provider reference (nomifun-db client_preference), so an absent key — not a
+  // blank object — is how "no default" is expressed.
+  'tools.textToSpeech': TextToSpeechConfig | undefined;
   'workspace.pasteConfirm': boolean | undefined;
   'upload.saveToWorkspace': boolean | undefined;
   'guid.lastSelectedAgent': string | undefined;

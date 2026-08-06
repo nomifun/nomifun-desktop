@@ -1381,7 +1381,19 @@
       "languagePlaceholder": "Leave empty for automatic detection, for example zh or en",
       "enabled": "Enable speech to text in input boxes",
       "noSources": "No speech-to-text model is available. Add a speech recognition model to a provider first.",
-      "manageProviders": "Manage Provider Models"
+      "manageProviders": "Manage Provider Models",
+      "asrTitle": "Speech recognition (ASR)",
+      "asrSubtitle": "The default model that turns speech into text.",
+      "ttsTitle": "Speech synthesis (TTS)",
+      "ttsSubtitle": "The default model and voice for reading text out loud — used by every companion that has no choice of its own.",
+      "ttsSource": "Default synthesis model",
+      "ttsNoSources": "No speech-synthesis model is available yet. Add one under Providers & keys first.",
+      "ttsSaved": "Speech-synthesis default saved",
+      "ttsSaveFailed": "Failed to save the speech-synthesis default",
+      "ttsClear": "Clear default",
+      "vadTitle": "Voice activity detection (VAD)",
+      "vadBuiltin": "Built-in Silero VAD (local)",
+      "vadBuiltinHint": "Runs on this machine — no network, no provider, and no model to choose. Defaults: sensitivity {{sensitivity}}, end-of-speech pause {{silence}} ms. Each companion can tune both on its own overview page."
     }
   },
   "otherHub": {
