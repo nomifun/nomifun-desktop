@@ -6752,6 +6752,7 @@ dependencies = [
  "async-trait",
  "axum",
  "dashmap",
+ "dirs 6.0.0",
  "nomi-ssh",
  "nomifun-ai-agent",
  "nomifun-api-types",
