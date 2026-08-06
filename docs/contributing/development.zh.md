@@ -16,6 +16,7 @@ Tauri 桌面壳。如果只是安装或部署，请先看
 | Bun | >= 1.3.13 | 前端包管理、Vite runner，也被 agent 运行时使用。 |
 | Tauri CLI v2 | 来自 `devDependencies` | 通过 `bun run dev` / `bun run build` 调用，无需全局安装。 |
 | Git | 较新版本 | 开发流程和部分内置工具需要。 |
+| CMake | >= 3.16 | `opusic-sys` 在干净构建时现场编译内置的 libopus（约 25 秒）。 |
 | 原生编译工具 | 按平台 | SQLite、TLS、libgit2、WebKit/WebView 与原生 crate 需要。 |
 
 平台提示：
@@ -23,6 +24,17 @@ Tauri 桌面壳。如果只是安装或部署，请先看
 - Windows：MSVC C++ Build Tools 与 WebView2 runtime。
 - macOS：Xcode Command Line Tools。
 - Linux：`build-essential cmake clang pkg-config perl git`；构建桌面端还需要 WebKitGTK 4.1 开发包。
+
+CMake 与 C 编译器在任何平台都是必需的：机器人网关的 Opus 编解码从源码构建并
+静态链接，因此任何机器都不需要预装 libopus，发布产物也不必附带额外文件。
+
+### 首次构建需要访问 pyke 的 CDN
+
+机器人网关的 Silero 语音活动检测跑在 ONNX Runtime 上，`ort-sys` 会在首次构建时
+从 pyke 的 CDN 下载预编译的静态 `libonnxruntime.a`（约 101 MB），缓存在
+`~/.cache/ort.pyke.io`。之后的构建——包括完全离线的机器——直接复用该缓存。由于
+运行时是静态链接的，不需要分发任何 dylib；而完全无法访问该 CDN 的机器会在构建
+阶段失败，而不是在运行时才暴露问题。
 
 ## 安装依赖
 
