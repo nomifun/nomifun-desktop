@@ -67,8 +67,15 @@ describe('SshHostStatusPill structure', () => {
     expect(pillSource.includes("t('ssh.pill.unconfirmedExit')")).toBe(true);
   });
 
-  test('suppresses itself when the host cannot be resolved', () => {
-    expect(pillSource.includes('return null')).toBe(true);
+  test('an unresolvable host still shows an identity, never nothing', () => {
+    // Going silent here is the one failure this pill exists to prevent: until the
+    // backend's host-deletion cut lands as `closed`, the session is still driving
+    // a real machine. A grey chip carrying the host id prefix keeps "which box am
+    // I on" answerable; `return null` leaves the header indistinguishable from a
+    // local session.
+    expect(pillSource.includes('return null')).toBe(false);
+    expect(pillSource.includes("t('ssh.group.hostMissing')")).toBe(true);
+    expect(pillSource.includes('sshHostId.slice(0,')).toBe(true);
     // Shares the host book's SWR key, so the pill costs no extra round-trip.
     expect(pillSource.includes("useSWR('ssh-hosts.list'")).toBe(true);
     expect(pillSource.includes('ipcBridge.ssh.list')).toBe(true);
