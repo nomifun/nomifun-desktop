@@ -59,7 +59,7 @@ const SiderFooter: React.FC<SiderFooterProps> = ({
           <div
             onClick={onSettingsClick}
             className={classNames(
-              'group h-32px flex items-center rd-0.5rem cursor-pointer transition-colors',
+              'group h-28px flex items-center rd-0.5rem cursor-pointer transition-colors',
               collapsed ? 'w-full justify-center' : 'flex-1 min-w-0 justify-start gap-8px pl-10px pr-8px',
               isMobile && 'sider-footer-btn-mobile',
               {
@@ -87,7 +87,7 @@ const SiderFooter: React.FC<SiderFooterProps> = ({
             <div
               onClick={onLogoutClick}
               className={classNames(
-                'h-32px flex items-center rd-0.5rem cursor-pointer transition-colors hover:bg-[rgba(var(--primary-6),0.14)] active:bg-fill-2',
+                'h-28px flex items-center rd-0.5rem cursor-pointer transition-colors hover:bg-[rgba(var(--primary-6),0.14)] active:bg-fill-2',
                 collapsed ? 'w-full justify-center' : 'flex-1 min-w-0 justify-start gap-10px px-14px',
                 isMobile && 'sider-footer-btn-mobile'
               )}
