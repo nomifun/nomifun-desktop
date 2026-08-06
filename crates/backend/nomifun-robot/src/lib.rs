@@ -15,6 +15,7 @@ pub mod pipeline;
 pub mod protocol;
 pub mod registry;
 pub mod routes;
+pub mod services;
 pub mod session;
 pub mod status;
 pub mod vad;
