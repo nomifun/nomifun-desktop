@@ -1916,7 +1916,6 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 max_parallel = COALESCE(?, max_parallel), \
                 work_dir = CASE WHEN ? THEN ? ELSE work_dir END, \
                 summary = CASE WHEN ? THEN ? ELSE summary END, \
-                total_tokens = CASE WHEN ? THEN ? ELSE total_tokens END, \
                 version = version + 1, updated_at = ? \
              WHERE execution_id = ? AND user_id = ? AND version = ? AND deleted_at IS NULL \
                AND (? IS NULL OR ? = status OR status NOT IN (\
@@ -1933,8 +1932,6 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         .bind(params.work_dir.as_ref().and_then(|value| value.as_deref()))
         .bind(params.summary.is_some())
         .bind(params.summary.as_ref().and_then(|value| value.as_deref()))
-        .bind(params.total_tokens.is_some())
-        .bind(params.total_tokens.as_ref().and_then(|value| *value))
         .bind(now)
         .bind(execution_id)
         .bind(user_id)

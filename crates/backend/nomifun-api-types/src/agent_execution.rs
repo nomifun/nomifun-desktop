@@ -290,7 +290,6 @@ pub struct AgentExecution {
     pub max_parallel: i64,
     pub status: AgentExecutionStatus,
     pub summary: Option<String>,
-    pub total_tokens: Option<i64>,
     pub version: i64,
     pub plan_revision: i64,
     /// Latest committed outbox sequence for refetch deduplication.
@@ -780,7 +779,6 @@ mod tests {
             "max_parallel": 1,
             "status": "planning",
             "summary": null,
-            "total_tokens": null,
             "version": 1,
             "plan_revision": 1,
             "event_sequence": 0,
