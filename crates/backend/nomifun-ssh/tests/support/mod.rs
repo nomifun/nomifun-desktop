@@ -55,6 +55,20 @@ impl RecordingUserEvents {
             .collect()
     }
 
+    /// Every `ssh.status` payload delivered so far, in order. Used by the
+    /// negative security assertion, which has to look at the whole payload rather
+    /// than one field: `detail` is free-form operator text, and a leak would show
+    /// up wherever that text was built.
+    pub fn status_payloads(&self) -> Vec<serde_json::Value> {
+        self.deliveries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, event)| event.name == "ssh.status")
+            .map(|(_, event)| event.data.clone())
+            .collect()
+    }
+
     /// Whether `wanted` appears in order (not necessarily adjacently) in the
     /// emitted phase log.
     ///
