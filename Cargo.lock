@@ -6700,7 +6700,9 @@ version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "bytes",
+ "chrono",
  "rand 0.9.4",
  "serde",
  "serde_json",
@@ -6708,6 +6710,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tower",
  "tracing",
 ]
 
