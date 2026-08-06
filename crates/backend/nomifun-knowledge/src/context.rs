@@ -22,68 +22,39 @@ pub const TOC_PER_KB_MAX: usize = 20;
 /// are mounted the per-base budget shrinks to `TOC_GLOBAL_MAX / n`.
 pub const TOC_GLOBAL_MAX: usize = 60;
 
-/// Typed write-back mode, parsed ONCE at the context-builder entry point.
+/// Typed write-back disposition ("回写意识"), parsed ONCE at the
+/// context-builder entry point. It is the ONLY write-back knob left: placement
+/// is always the base body, so this decides WHETHER the agent writes at all.
 /// The wire/API surfaces keep passing strings
-/// ([`KnowledgeContextOptions::writeback_mode`] stays `Option<&str>`); this
-/// enum replaces the internal string comparisons so a typo'd mode can never
+/// ([`KnowledgeContextOptions::writeback_eagerness`] stays `Option<&str>`);
+/// this enum replaces internal string comparisons so a typo'd value can never
 /// silently pick a branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WritebackMode {
-    /// Agent writes are confined to `_inbox/{target_id}/` (the safe default).
-    #[default]
-    Staged,
-    /// The agent may edit the base body directly.
-    Direct,
-}
-
-impl WritebackMode {
-    /// Parse a wire string: `None`/`"staged"` → [`Self::Staged`], `"direct"`
-    /// → [`Self::Direct`]. Unknown values fall back to the safe default
-    /// ([`Self::Staged`]) with a warning — never to the more permissive mode.
-    pub fn parse(raw: Option<&str>) -> Self {
-        match raw {
-            None | Some("staged") => Self::Staged,
-            Some("direct") => Self::Direct,
-            Some(other) => {
-                tracing::warn!(writeback_mode = other, "unknown writeback_mode; falling back to staged");
-                Self::Staged
-            }
-        }
-    }
-}
-
-/// Typed write-back disposition ("回写意识"), parsed ONCE at the
-/// context-builder entry point. ORTHOGONAL to [`WritebackMode`]: the mode
-/// decides WHERE writes land (staged inbox vs direct body), the eagerness
-/// decides HOW EAGERLY the agent writes at all. The wire/API surfaces keep
-/// passing strings ([`KnowledgeContextOptions::writeback_eagerness`] stays
-/// `Option<&str>`); this enum replaces internal string comparisons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WritebackEagerness {
-    /// Restrained: only persist knowledge the model judges clearly worth
-    /// keeping. The historical behaviour and the safe default.
+    /// The owner drives write-back: the agent persists only what the user
+    /// explicitly asked it to persist. The safe default, and the reason the
+    /// turn-final extractor is not scheduled at all under this disposition.
     #[default]
-    Conservative,
-    /// Bold: capture anything plausibly relevant to a mounted base without
-    /// much hesitation; the user prunes later.
-    Aggressive,
+    Manual,
+    /// The agent decides for itself, against a high bar: durable, reusable,
+    /// clearly-correct knowledge only.
+    Auto,
 }
 
 impl WritebackEagerness {
-    /// Parse a wire string: `None`/`"conservative"` → [`Self::Conservative`],
-    /// `"aggressive"` → [`Self::Aggressive`]. Unknown values fall back to the
-    /// restrained default ([`Self::Conservative`]) with a warning — never to
-    /// the more eager mode.
+    /// Parse a wire string: `None`/`"manual"` → [`Self::Manual`], `"auto"` →
+    /// [`Self::Auto`]. Unknown values fall back to the restrained default
+    /// ([`Self::Manual`]) with a warning — never to the self-directed side.
     pub fn parse(raw: Option<&str>) -> Self {
         match raw {
-            None | Some("conservative") => Self::Conservative,
-            Some("aggressive") => Self::Aggressive,
+            None | Some("manual") => Self::Manual,
+            Some("auto") => Self::Auto,
             Some(other) => {
                 tracing::warn!(
                     writeback_eagerness = other,
-                    "unknown writeback_eagerness; falling back to conservative"
+                    "unknown writeback_eagerness; falling back to manual"
                 );
-                Self::Conservative
+                Self::Manual
             }
         }
     }
@@ -100,22 +71,15 @@ pub enum KnowledgeContextFormat {
     TerminalReadme,
 }
 
-/// Inputs beyond the mounts themselves. `target_id` is the session-scoped
-/// identifier (conversation id today, terminal id for C1) used to scope the
-/// staged write-back inbox path `_inbox/{target_id}/`.
+/// Inputs beyond the mounts themselves.
 #[derive(Debug, Clone)]
 pub struct KnowledgeContextOptions<'a> {
     pub format: KnowledgeContextFormat,
     /// Write-back ("回血") switch — `false` renders the read-only contract.
     pub writeback: bool,
-    /// `staged` (default when `None`) or `direct`; only meaningful while
-    /// `writeback` is true.
-    pub writeback_mode: Option<&'a str>,
-    /// `conservative` (default when `None`) or `aggressive`; the write-back
-    /// disposition ("回写意识"), only meaningful while `writeback` is true.
+    /// `manual` (default when `None`) or `auto`; the write-back disposition
+    /// ("回写意识"), only meaningful while `writeback` is true.
     pub writeback_eagerness: Option<&'a str>,
-    /// Conversation / terminal id scoping staged write-backs.
-    pub target_id: &'a str,
     /// Whether THIS surface exposes a `knowledge_search` agent tool. When true,
     /// the protocol leads with an imperative to call it; when false (e.g. a raw
     /// terminal PTY, or an ACP session before the knowledge MCP exists), it
@@ -146,9 +110,8 @@ pub fn build_knowledge_context(
         KnowledgeContextFormat::TerminalReadme => true,
         KnowledgeContextFormat::PromptSection => false,
     };
-    // Parse the writeback mode once at the entry point; everything below
-    // works on the typed value.
-    let writeback_mode = WritebackMode::parse(options.writeback_mode);
+    // Parse the writeback disposition once at the entry point; everything
+    // below works on the typed value.
     let writeback_eagerness = WritebackEagerness::parse(options.writeback_eagerness);
     let mut out = String::new();
 
@@ -197,7 +160,7 @@ pub fn build_knowledge_context(
          path inside the mount.\n\
          5. ",
     );
-    out.push_str(&writeback_contract(options, writeback_mode, writeback_eagerness));
+    out.push_str(&writeback_contract(options, writeback_eagerness));
     out.push('\n');
 
     // ── Per-base sections ─────────────────────────────────────────────
@@ -278,15 +241,16 @@ fn toc_topic_hints(toc: &[String]) -> String {
         .join("; ")
 }
 
-/// The write-back ("回血") contract paragraph. Wording is load-bearing:
-/// staged mode confines writes to `_inbox/{target_id}/`, direct mode allows
-/// editing the base body, disabled declares everything read-only. When
-/// write-back is enabled, the disposition (`eagerness`) sentence is appended
-/// to tune HOW EAGERLY the agent writes — orthogonal to the staged/direct
-/// placement decision.
+/// The write-back ("回血") contract paragraph. Wording is load-bearing: writes
+/// always land in the base body (staged placement was removed), and the
+/// disposition (`eagerness`) sentence is appended to state WHETHER the agent
+/// should write at all.
+///
+/// The tool-based branch tells the model to send only the new material: the
+/// service merges append-only, so a proposal that contains the document would
+/// fail the already-present check and be appended to it.
 fn writeback_contract(
     options: &KnowledgeContextOptions<'_>,
-    mode: WritebackMode,
     eagerness: WritebackEagerness,
 ) -> String {
     if !options.writeback {
@@ -299,46 +263,23 @@ fn writeback_contract(
     // nomi engine — the tool resolves the base + placement internally and is
     // allow-listed past the approval gate, unlike the generic Write tool.
     let mut contract = if options.has_write_tool {
-        match mode {
-            WritebackMode::Staged => "Write-back is ENABLED in STAGED mode: when you produce reusable knowledge \
-                 (conclusions, domain facts, lessons learned), persist it by CALLING the `knowledge_write` tool. \
-                 To UPDATE an existing document, pass the `handle` from a `knowledge_search` result (read it first \
-                 with `knowledge_read`, merge, then write the full `content`); to CREATE a new one, pass `base` plus \
-                 a descriptive `.md` `rel_path`. The system automatically places your write in a review inbox keyed \
-                 to this session — you do NOT manage the path, and the original document is left untouched for the \
-                 user to merge later. Never rebuild paths by hand. Do NOT use the generic Write/Edit file tools; \
-                 treat the mounted base files as READ-ONLY."
-                .to_owned(),
-            WritebackMode::Direct => "Write-back is ENABLED in DIRECT mode: when you produce reusable knowledge \
-                 (conclusions, domain facts, lessons learned), persist it by CALLING the `knowledge_write` tool — it \
-                 writes straight into the matching knowledge base. To UPDATE an existing document, pass the `handle` \
-                 from a `knowledge_search` result (read it first with `knowledge_read`, merge, then write the full \
-                 `content`); to CREATE a new one, pass `base` plus a descriptive `.md` `rel_path`. Never rebuild \
-                 paths by hand. Do NOT use the generic Write/Edit file tools for knowledge; never delete files."
-                .to_owned(),
-        }
+        "Write-back is ENABLED: when you produce reusable knowledge (conclusions, domain facts, \
+         lessons learned), persist it by CALLING the `knowledge_write` tool — it writes straight \
+         into the matching knowledge base. To ADD to an existing document, pass the `handle` from \
+         a `knowledge_search` result and put ONLY THE NEW MATERIAL in `content`: the system \
+         appends it to the document and silently skips it when it is already there. Never resend \
+         a document's existing text, and never try to rewrite, reorder, or shorten a document — \
+         you cannot see all of it, so any rewrite risks destroying content. To CREATE a new \
+         document, pass `base` plus a descriptive `.md` `rel_path`. Never rebuild paths by hand. \
+         Do NOT use the generic Write/Edit file tools for knowledge; never delete files."
+            .to_owned()
     } else {
-        match mode {
-            WritebackMode::Staged => format!(
-                "Write-back is ENABLED in STAGED mode: when you produce reusable knowledge \
-                 (conclusions, domain facts, lessons learned), distill it into well-structured \
-                 markdown files and save them ONLY under `_inbox/{}/` inside the matching \
-                 knowledge base directory (create it if missing). Treat everything else in the \
-                 knowledge bases as READ-ONLY — never modify or delete existing documents. \
-                 Staged notes are reviewed and merged by the user later, so make each file \
-                 self-contained, concise, and free of session-specific noise.",
-                options.target_id
-            ),
-            WritebackMode::Direct => {
-                "Write-back is ENABLED in DIRECT mode: when you produce reusable knowledge \
-                 (conclusions, domain facts, lessons learned), distill it into well-structured \
-                 markdown files inside the matching knowledge base directory — create new files or \
-                 make small, focused updates to existing ones. Never rewrite documents wholesale \
-                 and never delete files; other sessions may be using the same base concurrently. \
-                 Keep entries concise, organized, and free of session-specific noise."
-                    .to_owned()
-            }
-        }
+        "Write-back is ENABLED: when you produce reusable knowledge (conclusions, domain facts, \
+         lessons learned), distill it into well-structured markdown inside the matching knowledge \
+         base directory — create new files, or append focused additions to existing ones. Never \
+         rewrite documents wholesale and never delete files; other sessions may be using the same \
+         base concurrently. Keep entries concise, organized, and free of session-specific noise."
+            .to_owned()
     };
     contract.push(' ');
     contract.push_str(eagerness_clause(eagerness));
@@ -346,21 +287,22 @@ fn writeback_contract(
 }
 
 /// The write-back disposition ("回写意识") sentence appended to an enabled
-/// write-back contract. Only the threshold for WHAT to write changes — the
-/// placement rules (staged/direct) above are unaffected.
+/// write-back contract. This is the whole policy: `Manual` means the agent does
+/// not write unless asked, `Auto` means it decides against a high bar.
 fn eagerness_clause(eagerness: WritebackEagerness) -> &'static str {
     match eagerness {
-        WritebackEagerness::Conservative => {
-            "Disposition — CONSERVATIVE: be restrained about what you write back. Persist only \
-             durable, broadly reusable knowledge you judge clearly worth keeping; when in doubt, \
-             do NOT write. Skip session-specific, trivial, redundant, or uncertain material."
+        WritebackEagerness::Manual => {
+            "Disposition — MANUAL: the owner drives write-back. Do NOT write to a knowledge \
+             base on your own initiative, however useful the material seems. Write only when the \
+             user in this conversation explicitly asks you to record, save, or remember something \
+             into a knowledge base — then persist exactly what they asked for and nothing more."
         }
-        WritebackEagerness::Aggressive => {
-            "Disposition — AGGRESSIVE: be eager to write back. Whenever you encounter or produce \
-             anything plausibly relevant to a mounted base — facts, decisions, useful snippets, \
-             observations, gotchas — capture it without much hesitation, even if you are unsure it \
-             will be reused. Prefer over-capturing to losing knowledge; the user prunes later. \
-             Still skip secrets and pure session noise, and keep each entry self-contained."
+        WritebackEagerness::Auto => {
+            "Disposition — AUTO: you decide, and the bar is high. Write back only knowledge that \
+             is durable, reusable in future sessions, clearly relevant to a mounted base, and that \
+             you are confident is correct. Skip anything trivial, session-specific, transient, \
+             speculative, or already recorded. Writing nothing is the correct outcome for most \
+             turns — a knowledge base earns its value by what it leaves out."
         }
     }
 }
@@ -435,13 +377,11 @@ mod tests {
         }
     }
 
-    fn prompt_opts<'a>(writeback: bool, mode: Option<&'a str>, target: &'a str) -> KnowledgeContextOptions<'a> {
+    fn prompt_opts(writeback: bool) -> KnowledgeContextOptions<'static> {
         KnowledgeContextOptions {
             format: KnowledgeContextFormat::PromptSection,
             writeback,
-            writeback_mode: mode,
             writeback_eagerness: None,
-            target_id: target,
             has_search_tool: false,
             has_write_tool: false,
         }
@@ -450,16 +390,12 @@ mod tests {
     /// Like [`prompt_opts`] but lets a test pin the disposition explicitly.
     fn prompt_opts_eager<'a>(
         writeback: bool,
-        mode: Option<&'a str>,
         eagerness: Option<&'a str>,
-        target: &'a str,
     ) -> KnowledgeContextOptions<'a> {
         KnowledgeContextOptions {
             format: KnowledgeContextFormat::PromptSection,
             writeback,
-            writeback_mode: mode,
             writeback_eagerness: eagerness,
-            target_id: target,
             has_search_tool: false,
             has_write_tool: false,
         }
@@ -469,23 +405,11 @@ mod tests {
 
     #[test]
     fn empty_mounts_build_nothing() {
-        assert_eq!(
-            build_knowledge_context(
-                &[],
-                &prompt_opts(
-                    false,
-                    None,
-                    "0190f5fe-7c00-7a00-8000-000000000001",
-                ),
-            ),
-            None
-        );
+        assert_eq!(build_knowledge_context(&[], &prompt_opts(false)), None);
         let readme_opts = KnowledgeContextOptions {
             format: KnowledgeContextFormat::TerminalReadme,
             writeback: true,
-            writeback_mode: None,
             writeback_eagerness: None,
-            target_id: "0190f5fe-7c00-7a00-8000-000000000001",
             has_search_tool: false,
             has_write_tool: false,
         };
@@ -501,11 +425,7 @@ mod tests {
         m.summary = Some("Covers deployment flows and on-call runbooks.".into());
         m.toc = vec!["concepts/术语.md — 术语表".into(), "(+3 more files)".into()];
 
-        let out = build_knowledge_context(
-            &[m],
-            &prompt_opts(false, None, "0190f5fe-7c00-7a00-8000-000000000001"),
-        )
-        .unwrap();
+        let out = build_knowledge_context(&[m], &prompt_opts(false)).unwrap();
 
         // Section heading stays compatible with the historical one.
         assert!(out.starts_with("## Knowledge bases (extended knowledge source)"), "got: {out}");
@@ -535,11 +455,7 @@ mod tests {
     #[test]
     fn empty_description_and_summary_lines_are_omitted() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(
-            &[m],
-            &prompt_opts(false, None, "0190f5fe-7c00-7a00-8000-000000000001"),
-        )
-        .unwrap();
+        let out = build_knowledge_context(&[m], &prompt_opts(false)).unwrap();
         assert!(!out.contains("Description:"), "got: {out}");
         assert!(!out.contains("Summary:"), "got: {out}");
         // The when-to-consult guidance survives even without description.
@@ -555,11 +471,7 @@ mod tests {
             "docs/ — 12 files".into(),
             "(+3 more files)".into(),
         ];
-        let out = build_knowledge_context(
-            &[m],
-            &prompt_opts(false, None, "0190f5fe-7c00-7a00-8000-000000000001"),
-        )
-        .unwrap();
+        let out = build_knowledge_context(&[m], &prompt_opts(false)).unwrap();
         assert!(out.contains("Topics include:"), "got: {out}");
         assert!(out.contains("回滚流程"), "got: {out}");
         assert!(out.contains("术语表"), "got: {out}");
@@ -579,11 +491,7 @@ mod tests {
         let mut m = mount("库A", ".nomi/knowledge/库A");
         m.description = "团队约定".into();
         m.toc = vec!["x.md — 标题".into()];
-        let out = build_knowledge_context(
-            &[m],
-            &prompt_opts(false, None, "0190f5fe-7c00-7a00-8000-000000000001"),
-        )
-        .unwrap();
+        let out = build_knowledge_context(&[m], &prompt_opts(false)).unwrap();
         assert!(!out.contains("Topics include:"), "described base needs no hint line: {out}");
         assert!(out.contains("团队约定"));
     }
@@ -594,11 +502,7 @@ mod tests {
     fn multi_base_renders_protocol_once() {
         let a = mount("库A", ".nomi/knowledge/库A");
         let b = mount("库B", ".nomi/knowledge/库B");
-        let out = build_knowledge_context(
-            &[a, b],
-            &prompt_opts(false, None, "0190f5fe-7c00-7a00-8000-000000000001"),
-        )
-        .unwrap();
+        let out = build_knowledge_context(&[a, b], &prompt_opts(false)).unwrap();
         assert_eq!(out.matches("Retrieval protocol").count(), 1, "got: {out}");
         assert_eq!(out.matches("Write-back is DISABLED").count(), 1, "got: {out}");
         assert!(out.contains("### 库A"), "got: {out}");
@@ -610,11 +514,7 @@ mod tests {
     #[test]
     fn protocol_mentions_search_tool_when_available() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let mut opts = prompt_opts(
-            false,
-            None,
-            "0190f5fe-7c00-7a00-8000-000000000001",
-        );
+        let mut opts = prompt_opts(false);
         opts.has_search_tool = true;
         let out = build_knowledge_context(std::slice::from_ref(&m), &opts).unwrap();
         assert!(out.contains("call the `knowledge_search` tool"), "got: {out}");
@@ -624,11 +524,7 @@ mod tests {
     #[test]
     fn protocol_keeps_grep_wording_without_search_tool() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(
-            &[m],
-            &prompt_opts(false, None, "0190f5fe-7c00-7a00-8000-000000000001"),
-        )
-        .unwrap();
+        let out = build_knowledge_context(&[m], &prompt_opts(false)).unwrap();
         assert!(out.contains("Grep/Glob"), "got: {out}");
         assert!(!out.contains("knowledge_search"), "got: {out}");
     }
@@ -716,75 +612,21 @@ mod tests {
     // ── write-back contract ──────────────────────────────────────────
 
     #[test]
-    fn staged_writeback_scopes_inbox_to_target_id() {
-        let m = mount("库A", ".nomi/knowledge/库A");
-        // Default mode (None) is staged.
-        let out = build_knowledge_context(
-            std::slice::from_ref(&m),
-            &prompt_opts(true, None, "0190f5fe-7c00-7a00-8000-000000000001"),
-        )
-        .unwrap();
-        assert!(out.contains("STAGED mode"), "got: {out}");
-        assert!(
-            out.contains("_inbox/0190f5fe-7c00-7a00-8000-000000000001/"),
-            "got: {out}"
-        );
-        assert!(out.contains("READ-ONLY"), "got: {out}");
-        // Explicit "staged" renders identically.
-        let explicit = build_knowledge_context(
-            &[m],
-            &prompt_opts(
-                true,
-                Some("staged"),
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            ),
-        )
-        .unwrap();
-        assert_eq!(out, explicit);
-    }
-
-    #[test]
-    fn direct_writeback_never_mentions_inbox() {
-        let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(
-            &[m],
-            &prompt_opts(
-                true,
-                Some("direct"),
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            ),
-        )
-        .unwrap();
-        assert!(out.contains("DIRECT mode"), "got: {out}");
-        assert!(!out.contains("_inbox"), "got: {out}");
-    }
-
-    #[test]
     fn tool_writeback_contract_directs_handle_use_for_updates() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        // DIRECT + tools available: update via handle, read via knowledge_read.
-        let mut direct = prompt_opts(
-            true,
-            Some("direct"),
-            "0190f5fe-7c00-7a00-8000-000000000001",
-        );
-        direct.has_write_tool = true;
-        direct.has_search_tool = true;
-        let out = build_knowledge_context(std::slice::from_ref(&m), &direct).unwrap();
+        let mut opts = prompt_opts(true);
+        opts.has_write_tool = true;
+        opts.has_search_tool = true;
+        let out = build_knowledge_context(&[m], &opts).unwrap();
         assert!(out.contains("knowledge_write"), "got: {out}");
         assert!(out.contains("handle"), "update path must reference the handle: {out}");
         assert!(out.contains("knowledge_read"), "got: {out}");
-        // STAGED + tools: emphasize auto-placement + original untouched.
-        let mut staged = prompt_opts(
-            true,
-            Some("staged"),
-            "0190f5fe-7c00-7a00-8000-000000000001",
-        );
-        staged.has_write_tool = true;
-        staged.has_search_tool = true;
-        let s = build_knowledge_context(&[m], &staged).unwrap();
-        assert!(s.contains("handle") && s.contains("review inbox"), "got: {s}");
-        assert!(s.contains("left untouched"), "got: {s}");
+        // The service appends and de-duplicates, so resending the document's
+        // own text would either be skipped or appended to itself.
+        assert!(out.contains("ONLY THE NEW MATERIAL"), "got: {out}");
+        // The model only ever sees a fragment of a document; a "rewrite" is
+        // therefore a silent delete of everything it cannot see.
+        assert!(out.contains("rewrite, reorder, or shorten"), "got: {out}");
     }
 
     // ── realtime (live URL) sources ──────────────────────────────────
@@ -806,11 +648,7 @@ mod tests {
         ];
         let plain = mount("普通库", ".nomi/knowledge/普通库");
 
-        let out = build_knowledge_context(
-            &[m, plain],
-            &prompt_opts(false, None, "0190f5fe-7c00-7a00-8000-000000000001"),
-        )
-        .unwrap();
+        let out = build_knowledge_context(&[m, plain], &prompt_opts(false)).unwrap();
         assert!(out.contains("Realtime sources"), "got: {out}");
         assert!(out.contains("API docs"), "got: {out}");
         assert!(out.contains("https://example.com/api-docs"), "got: {out}");
@@ -826,120 +664,61 @@ mod tests {
         assert!(!out.contains("call the `nomi_knowledge_fetch_url` tool instead"), "got: {out}");
     }
 
-    // ── writeback mode parsing ───────────────────────────────────────
-
-    #[test]
-    fn writeback_mode_parses_known_values_and_falls_back_to_staged() {
-        assert_eq!(WritebackMode::parse(None), WritebackMode::Staged);
-        assert_eq!(WritebackMode::parse(Some("staged")), WritebackMode::Staged);
-        assert_eq!(WritebackMode::parse(Some("direct")), WritebackMode::Direct);
-        // Unknown (or wrong-case) values must never pick the permissive mode.
-        assert_eq!(WritebackMode::parse(Some("DIRECT")), WritebackMode::Staged);
-        assert_eq!(WritebackMode::parse(Some("yolo")), WritebackMode::Staged);
-        assert_eq!(WritebackMode::parse(Some("")), WritebackMode::Staged);
-        assert_eq!(WritebackMode::default(), WritebackMode::Staged);
-    }
-
-    /// An unrecognized writeback_mode string renders the STAGED contract —
-    /// never DIRECT (the permissive branch must be opt-in by exact value).
-    #[test]
-    fn unknown_writeback_mode_renders_staged_contract() {
-        let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(
-            &[m],
-            &prompt_opts(
-                true,
-                Some("yolo"),
-                "0190f5fe-7c00-7a00-8000-000000000007",
-            ),
-        )
-        .unwrap();
-        assert!(out.contains("STAGED mode"), "got: {out}");
-        assert!(
-            out.contains("_inbox/0190f5fe-7c00-7a00-8000-000000000007/"),
-            "got: {out}"
-        );
-        assert!(!out.contains("DIRECT mode"), "got: {out}");
-    }
-
     // ── writeback eagerness (回写意识) ─────────────────────────────────
 
     #[test]
-    fn writeback_eagerness_parses_known_values_and_falls_back_to_conservative() {
-        assert_eq!(WritebackEagerness::parse(None), WritebackEagerness::Conservative);
-        assert_eq!(WritebackEagerness::parse(Some("conservative")), WritebackEagerness::Conservative);
-        assert_eq!(WritebackEagerness::parse(Some("aggressive")), WritebackEagerness::Aggressive);
-        // Unknown / wrong-case values must never pick the eager mode.
-        assert_eq!(WritebackEagerness::parse(Some("AGGRESSIVE")), WritebackEagerness::Conservative);
-        assert_eq!(WritebackEagerness::parse(Some("bold")), WritebackEagerness::Conservative);
-        assert_eq!(WritebackEagerness::parse(Some("")), WritebackEagerness::Conservative);
-        assert_eq!(WritebackEagerness::default(), WritebackEagerness::Conservative);
+    fn eagerness_parses_known_values_and_falls_back_to_manual() {
+        assert_eq!(WritebackEagerness::parse(None), WritebackEagerness::Manual);
+        assert_eq!(WritebackEagerness::parse(Some("manual")), WritebackEagerness::Manual);
+        assert_eq!(WritebackEagerness::parse(Some("auto")), WritebackEagerness::Auto);
+        // Wrong-case and nonsense values must never pick the self-directed side.
+        assert_eq!(WritebackEagerness::parse(Some("AUTO")), WritebackEagerness::Manual);
+        assert_eq!(WritebackEagerness::parse(Some("bold")), WritebackEagerness::Manual);
+        assert_eq!(WritebackEagerness::parse(Some("")), WritebackEagerness::Manual);
+        // The pre-rename vocabulary is what an un-migrated row still holds. Both
+        // legacy values must land on the restrained side: a stored "aggressive"
+        // must not silently grant self-directed write-back.
+        assert_eq!(WritebackEagerness::parse(Some("conservative")), WritebackEagerness::Manual);
+        assert_eq!(WritebackEagerness::parse(Some("aggressive")), WritebackEagerness::Manual);
+        assert_eq!(WritebackEagerness::default(), WritebackEagerness::Manual);
     }
 
-    /// Enabled write-back defaults to the CONSERVATIVE disposition clause and
-    /// is orthogonal to the staged/direct placement decision.
+    /// Enabled write-back defaults to the MANUAL disposition clause, appended to
+    /// the file-based contract's additive-edits wording.
     #[test]
-    fn enabled_writeback_appends_conservative_clause_by_default() {
+    fn enabled_writeback_appends_manual_clause_by_default() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        // Default eagerness (None) under staged mode.
-        let staged = build_knowledge_context(
-            &[m.clone()],
-            &prompt_opts(true, None, "0190f5fe-7c00-7a00-8000-000000000001"),
-        )
-        .unwrap();
-        assert!(staged.contains("STAGED mode"), "got: {staged}");
-        assert!(staged.contains("Disposition — CONSERVATIVE"), "got: {staged}");
-        assert!(!staged.contains("Disposition — AGGRESSIVE"), "got: {staged}");
-        // Default eagerness under direct mode too.
-        let direct = build_knowledge_context(
-            &[m],
-            &prompt_opts(
-                true,
-                Some("direct"),
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            ),
-        )
-        .unwrap();
-        assert!(direct.contains("DIRECT mode"), "got: {direct}");
-        assert!(direct.contains("Disposition — CONSERVATIVE"), "got: {direct}");
+        let out = build_knowledge_context(std::slice::from_ref(&m), &prompt_opts(true)).unwrap();
+        assert!(out.contains("Write-back is ENABLED"), "got: {out}");
+        // File-based surface: additive edits against the mounted directory.
+        assert!(out.contains("append focused additions to existing ones"), "got: {out}");
+        assert!(out.contains("Disposition — MANUAL"), "got: {out}");
+        assert!(!out.contains("Disposition — AUTO"), "got: {out}");
+        // Explicit "manual" must render identically to the default.
+        let explicit =
+            build_knowledge_context(&[m], &prompt_opts_eager(true, Some("manual"))).unwrap();
+        assert_eq!(out, explicit);
     }
 
-    /// The aggressive disposition renders its own clause, independent of mode.
+    /// The AUTO disposition renders its own clause on both surfaces — the
+    /// disposition is orthogonal to whether a native write tool exists.
     #[test]
-    fn aggressive_eagerness_renders_aggressive_clause_for_both_modes() {
+    fn auto_eagerness_renders_auto_clause_on_both_surfaces() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let staged = build_knowledge_context(
-            &[m.clone()],
-            &prompt_opts_eager(
-                true,
-                Some("staged"),
-                Some("aggressive"),
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            ),
-        )
-        .unwrap();
-        assert!(staged.contains("STAGED mode"), "got: {staged}");
-        assert!(staged.contains("Disposition — AGGRESSIVE"), "got: {staged}");
-        assert!(!staged.contains("Disposition — CONSERVATIVE"), "got: {staged}");
-        // Staged placement survives an aggressive disposition (inbox still scoped).
-        assert!(
-            staged.contains("_inbox/0190f5fe-7c00-7a00-8000-000000000001/"),
-            "got: {staged}"
-        );
+        let eager = prompt_opts_eager(true, Some("auto"));
+        let file_based = build_knowledge_context(std::slice::from_ref(&m), &eager).unwrap();
+        assert!(file_based.contains("Disposition — AUTO"), "got: {file_based}");
+        assert!(!file_based.contains("Disposition — MANUAL"), "got: {file_based}");
+        // The high bar is the whole point of AUTO — without it the clause reads
+        // as licence to write on every turn.
+        assert!(file_based.contains("the bar is high"), "got: {file_based}");
 
-        let direct = build_knowledge_context(
-            &[m],
-            &prompt_opts_eager(
-                true,
-                Some("direct"),
-                Some("aggressive"),
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            ),
-        )
-        .unwrap();
-        assert!(direct.contains("DIRECT mode"), "got: {direct}");
-        assert!(direct.contains("Disposition — AGGRESSIVE"), "got: {direct}");
-        assert!(!direct.contains("_inbox"), "got: {direct}");
+        let mut tooled = prompt_opts_eager(true, Some("auto"));
+        tooled.has_search_tool = true;
+        tooled.has_write_tool = true;
+        let out = build_knowledge_context(&[m], &tooled).unwrap();
+        assert!(out.contains("Disposition — AUTO"), "got: {out}");
+        assert!(!out.contains("Disposition — MANUAL"), "got: {out}");
     }
 
     /// Disabled write-back is read-only and carries no disposition clause —
@@ -947,16 +726,7 @@ mod tests {
     #[test]
     fn disabled_writeback_has_no_eagerness_clause() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(
-            &[m],
-            &prompt_opts_eager(
-                false,
-                None,
-                Some("aggressive"),
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            ),
-        )
-        .unwrap();
+        let out = build_knowledge_context(&[m], &prompt_opts_eager(false, Some("auto"))).unwrap();
         assert!(out.contains("Write-back is DISABLED"), "got: {out}");
         assert!(!out.contains("Disposition —"), "got: {out}");
     }
@@ -964,88 +734,67 @@ mod tests {
     // ── tool-based write-back contract (has_write_tool = true) ────────
 
     /// Options helper pinning has_write_tool = true (the nomi-engine surface).
-    fn prompt_opts_tooled<'a>(mode: Option<&'a str>, target: &'a str) -> KnowledgeContextOptions<'a> {
+    fn prompt_opts_tooled() -> KnowledgeContextOptions<'static> {
         KnowledgeContextOptions {
             format: KnowledgeContextFormat::PromptSection,
             writeback: true,
-            writeback_mode: mode,
             writeback_eagerness: None,
-            target_id: target,
             has_search_tool: true,
             has_write_tool: true,
         }
     }
 
     /// When the surface has the native tool, the contract instructs CALLING
-    /// `knowledge_write` and drops the file-path / inbox-path prose — in BOTH
-    /// modes. The model must never be pointed at the generic Write tool.
+    /// `knowledge_write` and never points the model at the generic Write tool —
+    /// that one has no workspace cwd here and sits behind the approval gate.
     #[test]
-    fn tool_contract_directs_to_knowledge_write_in_both_modes() {
+    fn tool_contract_directs_to_knowledge_write() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let staged = build_knowledge_context(
-            &[m.clone()],
-            &prompt_opts_tooled(
-                Some("staged"),
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            ),
-        )
-        .unwrap();
-        assert!(staged.contains("knowledge_write"), "got: {staged}");
-        assert!(staged.contains("STAGED mode"), "got: {staged}");
-        assert!(staged.contains("Do NOT use the generic Write/Edit"), "got: {staged}");
-        // The staged inbox PATH is now internal to the tool — never leaked to the model.
-        assert!(!staged.contains("_inbox/"), "tool contract must not advertise the inbox path: {staged}");
-
-        let direct = build_knowledge_context(
-            &[m],
-            &prompt_opts_tooled(
-                Some("direct"),
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            ),
-        )
-        .unwrap();
-        assert!(direct.contains("knowledge_write"), "got: {direct}");
-        assert!(direct.contains("DIRECT mode"), "got: {direct}");
-        assert!(direct.contains("Do NOT use the generic Write/Edit"), "got: {direct}");
+        let out = build_knowledge_context(&[m], &prompt_opts_tooled()).unwrap();
+        assert!(out.contains("CALLING the `knowledge_write` tool"), "got: {out}");
+        assert!(out.contains("Do NOT use the generic Write/Edit"), "got: {out}");
+        // Creating a document goes through base + rel_path, never a hand-built path.
+        assert!(out.contains("Never rebuild paths by hand"), "got: {out}");
         // Disposition clause still appends under the tool contract.
-        assert!(direct.contains("Disposition — CONSERVATIVE"), "got: {direct}");
+        assert!(out.contains("Disposition — MANUAL"), "got: {out}");
+    }
+
+    /// Regression guard for the removal of staged write-back: neither enabled
+    /// contract may leak the retired inbox placement or its vocabulary, on
+    /// either surface. Stale wording here would send agents writing to a path
+    /// that no longer exists.
+    #[test]
+    fn enabled_contract_never_mentions_staging() {
+        let m = mount("库A", ".nomi/knowledge/库A");
+        let tooled =
+            build_knowledge_context(std::slice::from_ref(&m), &prompt_opts_tooled()).unwrap();
+        assert!(!tooled.contains("_inbox"), "got: {tooled}");
+        assert!(!tooled.contains("STAGED"), "got: {tooled}");
+
+        let file_based = build_knowledge_context(&[m], &prompt_opts(true)).unwrap();
+        assert!(!file_based.contains("_inbox"), "got: {file_based}");
+        assert!(!file_based.contains("STAGED"), "got: {file_based}");
     }
 
     /// Disabled write-back is read-only regardless of has_write_tool.
     #[test]
     fn tool_surface_still_read_only_when_writeback_disabled() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let opts = KnowledgeContextOptions {
-            format: KnowledgeContextFormat::PromptSection,
-            writeback: false,
-            writeback_mode: None,
-            writeback_eagerness: None,
-            target_id: "0190f5fe-7c00-7a00-8000-000000000001",
-            has_search_tool: true,
-            has_write_tool: true,
-        };
+        let mut opts = prompt_opts_tooled();
+        opts.writeback = false;
         let out = build_knowledge_context(&[m], &opts).unwrap();
         assert!(out.contains("Write-back is DISABLED"), "got: {out}");
         assert!(!out.contains("knowledge_write"), "got: {out}");
     }
 
-    /// An unrecognized eagerness string renders the CONSERVATIVE clause — the
-    /// eager branch must be opt-in by exact value, never reached by a typo.
+    /// An unrecognized eagerness string renders the MANUAL clause — the
+    /// self-directed branch must be opt-in by exact value, never reached by a typo.
     #[test]
-    fn unknown_eagerness_renders_conservative_clause() {
+    fn unknown_eagerness_renders_manual_clause() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(
-            &[m],
-            &prompt_opts_eager(
-                true,
-                None,
-                Some("yolo"),
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            ),
-        )
-        .unwrap();
-        assert!(out.contains("Disposition — CONSERVATIVE"), "got: {out}");
-        assert!(!out.contains("Disposition — AGGRESSIVE"), "got: {out}");
+        let out = build_knowledge_context(&[m], &prompt_opts_eager(true, Some("yolo"))).unwrap();
+        assert!(out.contains("Disposition — MANUAL"), "got: {out}");
+        assert!(!out.contains("Disposition — AUTO"), "got: {out}");
     }
 
     // ── TerminalReadme format ────────────────────────────────────────
@@ -1057,9 +806,7 @@ mod tests {
         let opts = KnowledgeContextOptions {
             format: KnowledgeContextFormat::TerminalReadme,
             writeback: true,
-            writeback_mode: None,
             writeback_eagerness: None,
-            target_id: "0190f5fe-7c00-7a00-8000-000000000009",
             has_search_tool: false,
             has_write_tool: false,
         };
@@ -1073,11 +820,11 @@ mod tests {
         assert!(out.contains("## Mounted bases"), "got: {out}");
         assert!(out.contains("### 领域知识"), "got: {out}");
         assert!(out.contains("intro.md — 简介"), "got: {out}");
-        assert!(out.contains("STAGED mode"), "got: {out}");
-        assert!(
-            out.contains("_inbox/0190f5fe-7c00-7a00-8000-000000000009/"),
-            "got: {out}"
-        );
+        // The readme is a terminal (file-based) surface, so it carries the
+        // directory-write contract rather than the tool one.
+        assert!(out.contains("Write-back is ENABLED"), "got: {out}");
+        assert!(out.contains("knowledge base directory"), "got: {out}");
+        assert!(!out.contains("knowledge_write"), "got: {out}");
         // The prompt-section heading must not leak into the readme format.
         assert!(!out.contains("## Knowledge bases (extended knowledge source)"), "got: {out}");
     }

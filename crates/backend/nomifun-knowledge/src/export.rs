@@ -6,8 +6,9 @@
 //!   rejected before anything touches the registry).
 //! - `meta.json` — `{name, description}` of the exported base.
 //! - `files/**` — every `.md` under the base root with relative paths
-//!   preserved. `_inbox/` is included on purpose: staged write-backs are
-//!   user data and must survive a machine migration.
+//!   preserved. The walk deliberately carries no path filter: a base holds
+//!   exactly one kind of content, and every document in it is user data that
+//!   must survive a machine migration.
 //!
 //! Import extracts into a temp dir under the managed knowledge dir (same
 //! volume as the final destination, so file moves are cheap renames), with
@@ -451,11 +452,7 @@ mod tests {
         source.write_file(&kb.knowledge_base_id, "guide.md", "# 指南\n正文").await.unwrap();
         source.write_file(&kb.knowledge_base_id, "sub/notes.md", "嵌套内容").await.unwrap();
         source
-            .write_file(
-                &kb.knowledge_base_id,
-                "_inbox/0190f5fe-7c00-7a00-8000-000000000001/draft.md",
-                "# 草稿",
-            )
+            .write_file(&kb.knowledge_base_id, "drafts/2026/draft.md", "# 草稿")
             .await
             .unwrap();
 

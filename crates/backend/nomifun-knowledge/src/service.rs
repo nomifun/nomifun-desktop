@@ -43,21 +43,11 @@ use crate::{KB_MANAGED_REL_DIR, KB_MOUNT_REL_DIR};
 /// their registered canonical entity IDs.
 pub const BINDING_KINDS: &[&str] = &["workpath", "conversation", "terminal", "companion"];
 
-/// Write-back modes. `staged` confines agent writes to
-/// `_inbox/{conversation_id}/` inside the base (conflict-free across
-/// concurrent sessions); `direct` lets the agent edit the base body.
-pub const WRITEBACK_MODES: &[&str] = &["staged", "direct"];
+/// Accepted write-back dispositions ("回写意识"). `manual` (the default) writes
+/// back only what the user explicitly asked for and suppresses the turn-final
+/// extractor entirely; `auto` lets the agent decide against a high bar.
+pub const WRITEBACK_EAGERNESS: &[&str] = &["manual", "auto"];
 
-/// Accepted write-back dispositions ("回写意识"), orthogonal to
-/// [`WRITEBACK_MODES`]: `conservative` (restrained, the default) only persists
-/// clearly-worth-keeping knowledge; `aggressive` captures anything plausibly
-/// relevant. Both are prompt-contract wording only.
-pub const WRITEBACK_EAGERNESS: &[&str] = &["conservative", "aggressive"];
-
-/// Subdirectory of a base root that holds staged (unreviewed) write-backs.
-/// Excluded from the prompt TOC — unreviewed content is not authoritative
-/// navigation.
-pub const KB_INBOX_REL_DIR: &str = "_inbox";
 const TURN_WRITEBACK_LLM_TIMEOUT: Duration = Duration::from_secs(45);
 const KNOWLEDGE_PATH_INSPECTION_TIMEOUT: Duration = Duration::from_secs(6);
 const KNOWLEDGE_FILE_IO_TIMEOUT: Duration = Duration::from_secs(20);
@@ -139,9 +129,6 @@ pub struct KnowledgeBaseInfo {
     /// UI type discriminator, derived from `managed` + `extra.source`:
     /// `"blank"` | `"local"` | `"web"`.
     pub kind: String,
-    /// Number of pending inbox proposals for this base (drives list badge /
-    /// detail tab count).
-    pub pending_inbox: u64,
 }
 
 /// One `search_bases` hit. `rel_path` is relative to the base root.
@@ -186,38 +173,6 @@ pub struct KbFileContent {
     pub modified_at: Option<TimestampMs>,
 }
 
-/// One staged write-back proposal living under `_inbox/{scope}/{rel_path}`.
-/// `scope` is the first path segment (the conversation/session id that staged
-/// it); `rel_path` mirrors the original base-relative path.
-#[derive(Debug, Clone, Serialize)]
-pub struct InboxEntry {
-    pub scope: String,
-    pub rel_path: String,
-    pub size: u64,
-    pub modified_at: Option<TimestampMs>,
-}
-
-/// A staged proposal vs. its current base version, for the review panel.
-/// `base_content` is `None` (and `is_new` true) when the proposal would create
-/// a brand-new document. `unified_diff` is a server-computed unified diff
-/// (`similar`), ready to hand to the frontend diff renderer.
-#[derive(Debug, Clone, Serialize)]
-pub struct InboxDiff {
-    pub scope: String,
-    pub rel_path: String,
-    pub inbox_content: String,
-    pub base_content: Option<String>,
-    pub unified_diff: String,
-    pub is_new: bool,
-}
-
-/// Result of accepting a staged proposal (the base path now holding the merged
-/// content).
-#[derive(Debug, Clone, Serialize)]
-pub struct InboxMergeResult {
-    pub merged_path: String,
-}
-
 /// One consumer (binding) of a knowledge base — a workspace/conversation/etc.
 /// that has this base mounted. Includes disabled bindings (greyed in the UI).
 #[derive(Debug, Clone, Serialize)]
@@ -232,24 +187,18 @@ pub struct ConsumerInfo {
 pub struct KnowledgeBinding {
     pub enabled: bool,
     pub writeback: bool,
-    #[serde(default = "default_writeback_mode")]
-    pub writeback_mode: String,
     #[serde(default = "default_writeback_eagerness")]
     pub writeback_eagerness: String,
-    /// External IM channel write opt-in (forced staged). Default false —
-    /// Channel Agent writes are disabled unless re-enabled here.
+    /// External IM channel write opt-in. Default false — Channel Agent writes
+    /// are disabled unless enabled here.
     #[serde(default)]
     pub channel_write_enabled: bool,
     #[serde(default)]
     pub kb_ids: Vec<KnowledgeBaseId>,
 }
 
-fn default_writeback_mode() -> String {
-    "staged".to_owned()
-}
-
 fn default_writeback_eagerness() -> String {
-    "conservative".to_owned()
+    "manual".to_owned()
 }
 
 impl Default for KnowledgeBinding {
@@ -257,7 +206,6 @@ impl Default for KnowledgeBinding {
         Self {
             enabled: false,
             writeback: false,
-            writeback_mode: default_writeback_mode(),
             writeback_eagerness: default_writeback_eagerness(),
             channel_write_enabled: false,
             kb_ids: Vec::new(),
@@ -272,10 +220,8 @@ impl Default for KnowledgeBinding {
 pub struct MountOutcome {
     pub mounts: Vec<KnowledgeMountInfo>,
     pub writeback: bool,
-    /// `staged` or `direct`; meaningful only while `writeback` is true.
-    pub writeback_mode: String,
-    /// `conservative` or `aggressive` ("回写意识"); meaningful only while
-    /// `writeback` is true.
+    /// `manual` or `auto` ("回写意识"); meaningful only while `writeback` is
+    /// true.
     pub writeback_eagerness: String,
     /// Raw `channel_write_enabled` opt-in from the binding. Carried verbatim
     /// (independent of `writeback`) so the nomi factory can resolve the
@@ -380,12 +326,13 @@ pub enum WriteSurface {
     ExternalChannel,
 }
 
-/// Code-enforced placement. `Staged{scope}` confines writes to
-/// `_inbox/{scope}/…`; `Direct` writes the base body; `Disabled` refuses.
+/// Code-enforced placement. `Direct` writes the base body; `Disabled` refuses.
+/// Staged placement was removed with the review inbox — there is one landing
+/// spot left, and the safety it used to provide now comes from the append-only
+/// merge plus compare-and-swap on the update path.
 #[derive(Debug, Clone)]
 pub enum WriteMode {
     Disabled,
-    Staged { scope: String },
     Direct,
 }
 
@@ -406,36 +353,22 @@ pub struct WriteRequest {
 }
 
 #[derive(Debug, Clone)]
-enum StagedBaseSnapshot {
-    Missing,
-    Content(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StagedProposalMetadata {
-    version: u8,
-    base_sha256: Option<String>,
-    proposal_sha256: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct WriteOutcome {
     pub kb_id: KnowledgeBaseId,
     pub final_rel_path: String,
     pub op: WriteOp,
-    pub staged: bool,
 }
 
-/// Inputs for the turn-final write-back trigger. The trigger is deliberately
-/// separate from [`WritebackMode`] / [`WritebackEagerness`] semantics: mode still
-/// selects placement via [`resolve_write_policy`], eagerness only shapes
-/// candidate extraction.
+/// Inputs for the turn-final write-back trigger. Whether the trigger fires at
+/// all is decided by the caller from [`WritebackEagerness`] — a `manual` binding
+/// never reaches here, so no provider call is spent on it. Once here, eagerness
+/// only shapes candidate extraction and [`resolve_write_policy`] decides whether
+/// this surface may write.
 #[derive(Debug, Clone)]
 pub struct TurnWritebackRequest {
     pub mounts: Vec<KnowledgeMountInfo>,
     pub binding: KnowledgeBinding,
     pub surface: WriteSurface,
-    pub scope: String,
     pub user_text: String,
     pub assistant_text: String,
     /// Effective model for this write-back. Conversation callers resolve the
@@ -504,32 +437,27 @@ impl TurnWritebackReport {
     }
 }
 
-/// Per-surface write policy. Regular chat / terminal honor the binding's
-/// staged|direct choice (staged default); companion always writes direct when
-/// write-back is on; external IM channels are hard-disabled in P1 (the opt-in
-/// re-enable toggle is P2). `scope` is the staged inbox namespace
-/// (conversation/companion id).
-pub fn resolve_write_policy(surface: WriteSurface, binding: &KnowledgeBinding, scope: &str) -> WritePolicy {
+/// Per-surface write policy. Write-back now has exactly one landing spot, so
+/// this only decides whether a surface may write at all. Companion and regular
+/// chat / terminal write when the binding says so; external IM channels stay
+/// disabled unless the owner flips `channel_write_enabled`, because an
+/// unattended bot writing into a curated base is the owner's call to make.
+pub fn resolve_write_policy(surface: WriteSurface, binding: &KnowledgeBinding) -> WritePolicy {
     let writeback = binding.enabled && binding.writeback;
     let mode = if !writeback {
         WriteMode::Disabled
     } else {
         match surface {
-            WriteSurface::Companion => WriteMode::Direct,
-            // External IM channel: disabled by default; the opt-in toggle
-            // (`channel_write_enabled`) re-enables it, but ALWAYS staged —
-            // an unattended bot's writes go through the review inbox.
+            WriteSurface::Companion
+            | WriteSurface::RegularChat
+            | WriteSurface::TerminalAcp => WriteMode::Direct,
             WriteSurface::ExternalChannel => {
                 if binding.channel_write_enabled {
-                    WriteMode::Staged { scope: scope.to_owned() }
+                    WriteMode::Direct
                 } else {
                     WriteMode::Disabled
                 }
             }
-            WriteSurface::RegularChat | WriteSurface::TerminalAcp => match binding.writeback_mode.as_str() {
-                "direct" => WriteMode::Direct,
-                _ => WriteMode::Staged { scope: scope.to_owned() },
-            },
         }
     };
     WritePolicy { mode, allow_create: true, surface }
@@ -1474,7 +1402,7 @@ impl KnowledgeService {
         let root = PathBuf::from(&row.root_path);
         let resolved = resolve_portable_md_path(root.clone(), rel_path.to_owned()).await?;
         let lock_path = portable_turn_writeback_lock_path(
-            &logical_writeback_target_from_storage_path(&resolved.rel_path),
+            &deconfuse_rel_path(&resolved.rel_path),
         );
         let _target_guard = self
             .acquire_turn_writeback_target_lock(&kb_id, &lock_path)
@@ -1510,7 +1438,7 @@ impl KnowledgeService {
         let root = PathBuf::from(&row.root_path);
         let resolved = resolve_portable_md_path(root.clone(), rel_path.to_owned()).await?;
         let lock_path = portable_turn_writeback_lock_path(
-            &logical_writeback_target_from_storage_path(&resolved.rel_path),
+            &deconfuse_rel_path(&resolved.rel_path),
         );
         let _target_guard = self
             .acquire_turn_writeback_target_lock(&kb_id, &lock_path)
@@ -1648,260 +1576,6 @@ impl KnowledgeService {
         guard.total_bytes = guard.total_bytes.saturating_sub(freed);
     }
 
-    // ── P4 inbox review (staged write-back proposals) ─────────────────
-
-    /// List staged write-back proposals under `_inbox/{scope}/…` (the panel
-    /// groups them by `scope` client-side).
-    pub async fn list_inbox(&self, id: &str) -> Result<Vec<InboxEntry>, AppError> {
-        let row = self.require_base(id).await?;
-        let root = PathBuf::from(&row.root_path);
-        let task =
-            tokio::task::spawn_blocking(move || list_inbox_entries_strict(&root));
-        match tokio::time::timeout(KNOWLEDGE_PATH_INSPECTION_TIMEOUT, task).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => Err(AppError::Internal(format!(
-                "inbox list task join error: {error}"
-            ))),
-            Err(_) => Err(AppError::Timeout(
-                "knowledge review inbox scan timed out".into(),
-            )),
-        }
-    }
-
-    /// Unified diff of a staged proposal vs. the current base document
-    /// (full-content "new document" when the base file does not yet exist).
-    pub async fn inbox_diff(&self, id: &str, scope: &str, rel_path: &str) -> Result<InboxDiff, AppError> {
-        let row = self.require_base(id).await?;
-        let root = PathBuf::from(&row.root_path);
-        validate_inbox_scope(scope)?;
-        let inbox_rel =
-            format!("{KB_INBOX_REL_DIR}/{scope}/{rel_path}");
-        let inbox_abs =
-            safe_md_path_bounded(root.clone(), inbox_rel).await?;
-        let inbox_content = tokio::time::timeout(
-            KNOWLEDGE_FILE_IO_TIMEOUT,
-            tokio::fs::read_to_string(&inbox_abs),
-        )
-            .await
-            .map_err(|_| {
-                AppError::Timeout(format!(
-                    "inbox proposal read timed out: {scope}/{rel_path}"
-                ))
-            })?
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    AppError::NotFound(format!(
-                        "inbox proposal not found: {scope}/{rel_path}"
-                    ))
-                } else {
-                    AppError::Internal(format!(
-                        "failed to read inbox proposal: {error}"
-                    ))
-                }
-            })?;
-        let base_content = match self.read_file(id, rel_path).await {
-            Ok(file) => Some(file.content),
-            Err(AppError::NotFound(_)) => None,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let is_new = base_content.is_none();
-        let unified_diff = unified_md_diff(base_content.as_deref().unwrap_or(""), &inbox_content, rel_path);
-        Ok(InboxDiff {
-            scope: scope.to_owned(),
-            rel_path: rel_path.replace('\\', "/"),
-            inbox_content,
-            base_content,
-            unified_diff,
-            is_new,
-        })
-    }
-
-    /// Accept a staged proposal only if the base still matches the version the
-    /// user reviewed. This prevents an older proposal from overwriting edits
-    /// made after staging. Publication is version-checked under this service's
-    /// portable target lock and remains idempotent across a crash after the
-    /// base write but before inbox cleanup.
-    pub async fn merge_inbox(&self, id: &str, scope: &str, rel_path: &str) -> Result<InboxMergeResult, AppError> {
-        let row = self.require_base(id).await?;
-        let _tree_guard = self.acquire_document_tree_read_lock(&row).await?;
-        let root = PathBuf::from(&row.root_path);
-        validate_inbox_scope(scope)?;
-        validate_canonical_write_target(rel_path)?;
-        let kb_id = KnowledgeBaseId::parse(id)
-            .map_err(|error| AppError::BadRequest(format!("invalid knowledge base id: {error}")))?;
-        let lock_path = portable_turn_writeback_lock_path(rel_path);
-        let _target_guard = self
-            .acquire_turn_writeback_target_lock(&kb_id, &lock_path)
-            .await?;
-        let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
-        let current_row = self.require_base(id).await?;
-        if current_row.root_path != row.root_path {
-            return Err(AppError::Conflict(
-                "knowledge base root changed while the proposal was being accepted; retry".into(),
-            ));
-        }
-        // Source configuration may have been attached after this proposal was
-        // staged. Revalidate under the base lifecycle lock so accepting an old
-        // proposal can never publish into source-owned snapshots.
-        validate_source_owned_write_target(&current_row, rel_path)?;
-        let inbox_rel =
-            format!("{KB_INBOX_REL_DIR}/{scope}/{rel_path}");
-        let inbox_abs =
-            safe_md_path_bounded(root.clone(), inbox_rel).await?;
-        let content = tokio::time::timeout(
-            KNOWLEDGE_FILE_IO_TIMEOUT,
-            tokio::fs::read_to_string(&inbox_abs),
-        )
-            .await
-            .map_err(|_| {
-                AppError::Timeout(format!(
-                    "inbox proposal read timed out: {scope}/{rel_path}"
-                ))
-            })?
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    AppError::NotFound(format!(
-                        "inbox proposal not found: {scope}/{rel_path}"
-                    ))
-                } else {
-                    AppError::Internal(format!(
-                        "failed to read inbox proposal: {error}"
-                    ))
-                }
-            })?;
-        let metadata_abs = staged_proposal_metadata_path(&inbox_abs);
-        let current_base = match self.read_file(id, rel_path).await {
-            Ok(file) => Some(file.content),
-            Err(AppError::NotFound(_)) => None,
-            Err(error) => return Err(error),
-        };
-        let proposal_hash = content_sha256(&content);
-        let already_merged = current_base
-            .as_ref()
-            .is_some_and(|current| content_sha256(current) == proposal_hash);
-        if !already_merged {
-            let metadata = self
-                .read_staged_proposal_metadata(
-                    id,
-                    &format!("{KB_INBOX_REL_DIR}/{scope}/{rel_path}"),
-                    &content,
-                )
-                .await?;
-            let base_matches = match (&metadata.base_sha256, &current_base) {
-                (None, None) => true,
-                (Some(expected), Some(current)) => {
-                    content_sha256(current) == *expected
-                }
-                _ => false,
-            };
-            if !base_matches {
-                return Err(AppError::Conflict(
-                    "the knowledge document changed after this proposal was staged; discard it and retry write-back before accepting"
-                        .into(),
-                ));
-            }
-            let base_abs = safe_md_path_bounded(root.clone(), rel_path.to_owned()).await?;
-            if let Some(expected) = current_base.as_deref() {
-                write_text_atomic_if_unchanged(&base_abs, expected, &content).await?;
-            } else {
-                write_text_atomic_if_absent(&base_abs, &content).await?;
-            }
-            self.invalidate_search_cache_path(&base_abs);
-        }
-        // Publish first; only then remove proposal + version metadata. A crash
-        // between these steps is recognized by `already_merged` above.
-        match tokio::fs::remove_file(&inbox_abs).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(AppError::Internal(format!(
-                    "knowledge proposal was accepted but its review copy could not be removed; retry acceptance to finish cleanup: {error}"
-                )));
-            }
-        }
-        if let Err(error) = tokio::fs::remove_file(&metadata_abs).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                path = %metadata_abs.display(),
-                %error,
-                "accepted knowledge proposal metadata could not be removed"
-            );
-        }
-        if let Some(parent) = inbox_abs.parent() {
-            prune_empty_inbox_dirs(&root.join(KB_INBOX_REL_DIR), parent.to_path_buf()).await;
-        }
-        let info = self.row_to_info(row).await?;
-        self.emitter.emit_base_updated(&info);
-        Ok(InboxMergeResult { merged_path: rel_path.replace('\\', "/") })
-    }
-
-    /// Discard a staged proposal (delete the inbox copy + prune emptied dirs).
-    pub async fn discard_inbox(&self, id: &str, scope: &str, rel_path: &str) -> Result<(), AppError> {
-        let row = self.require_base(id).await?;
-        let _tree_guard =
-            self.acquire_document_tree_write_lock(&row).await?;
-        let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
-        self.require_base(id).await?;
-        let root = PathBuf::from(&row.root_path);
-        validate_inbox_scope(scope)?;
-        let inbox_rel =
-            format!("{KB_INBOX_REL_DIR}/{scope}/{rel_path}");
-        let inbox_abs =
-            safe_md_path_bounded(root.clone(), inbox_rel).await?;
-        let metadata_abs = staged_proposal_metadata_path(&inbox_abs);
-        tokio::fs::remove_file(&inbox_abs)
-            .await
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    AppError::NotFound(format!(
-                        "inbox proposal not found: {scope}/{rel_path}"
-                    ))
-                } else {
-                    AppError::Internal(format!(
-                        "failed to discard inbox proposal: {error}"
-                    ))
-                }
-            })?;
-        let _ = tokio::fs::remove_file(metadata_abs).await;
-        if let Some(parent) = inbox_abs.parent() {
-            prune_empty_inbox_dirs(&root.join(KB_INBOX_REL_DIR), parent.to_path_buf()).await;
-        }
-        Ok(())
-    }
-
-    /// Accept all staged proposals for a base (optionally filtered by scope).
-    /// Returns the number of proposals merged.
-    pub async fn merge_all_inbox(&self, id: &str, scope: Option<&str>) -> Result<usize, AppError> {
-        let entries = self.list_inbox(id).await?;
-        let filtered: Vec<_> = entries
-            .into_iter()
-            .filter(|e| scope.map_or(true, |s| e.scope == s))
-            .collect();
-        let count = filtered.len();
-        for entry in filtered {
-            self.merge_inbox(id, &entry.scope, &entry.rel_path).await?;
-        }
-        Ok(count)
-    }
-
-    /// Discard all staged proposals for a base (optionally filtered by scope).
-    /// Returns the number of proposals discarded.
-    pub async fn discard_all_inbox(&self, id: &str, scope: Option<&str>) -> Result<usize, AppError> {
-        let entries = self.list_inbox(id).await?;
-        let filtered: Vec<_> = entries
-            .into_iter()
-            .filter(|e| scope.map_or(true, |s| e.scope == s))
-            .collect();
-        let count = filtered.len();
-        for entry in filtered {
-            self.discard_inbox(id, &entry.scope, &entry.rel_path).await?;
-        }
-        Ok(count)
-    }
-
     /// Bindings currently mounting this base (enabled AND disabled — the UI
     /// greys the disabled ones). Powers the "who is using this base?" view.
     pub async fn list_consumers(&self, id: &str) -> Result<Vec<ConsumerInfo>, AppError> {
@@ -1911,21 +1585,6 @@ impl KnowledgeService {
             .into_iter()
             .map(|r| ConsumerInfo { target_kind: r.target_kind.clone(), target_id: r.target_id(), enabled: r.enabled })
             .collect())
-    }
-
-    /// Total staged-proposal count across every base (powers the sidebar
-    /// "unreviewed" red dot). Walks each base's `_inbox/` off the async
-    /// runtime; `0` means nothing awaits review.
-    pub async fn count_pending_inbox(&self) -> Result<usize, AppError> {
-        let rows = self.repo.list_bases().await?;
-        let roots: Vec<PathBuf> = rows.iter().map(|r| PathBuf::from(&r.root_path)).collect();
-        // Bounded: this backs the app-wide sidebar red-dot (fires on every page
-        // load), so a single slow/stale NAS base's `_inbox` walk must degrade to
-        // 0 rather than stall unrelated navigation.
-        Ok(bounded_blocking(BASE_WALK_BUDGET, 0usize, move || {
-            roots.iter().map(|root| list_inbox_entries(root).len()).sum()
-        })
-        .await)
     }
 
     /// Resolve a model-supplied write target to a canonical document + op.
@@ -2032,15 +1691,13 @@ impl KnowledgeService {
         let _guard = self
             .acquire_turn_writeback_target_lock(&res.kb_id, &lock_path)
             .await?;
-        self.write_resolved_document_under_target_lock(req, res, None)
-            .await
+        self.write_resolved_document_under_target_lock(req, res).await
     }
 
     async fn write_resolved_document_under_target_lock(
         &self,
         req: WriteRequest,
         res: WriteResolution,
-        staged_base_snapshot: Option<StagedBaseSnapshot>,
     ) -> Result<WriteOutcome, AppError> {
         validate_write_request(&req)?;
         validate_canonical_write_target(&res.canonical_rel_path)?;
@@ -2061,89 +1718,9 @@ impl KnowledgeService {
         if res.op == WriteOp::Create && !req.policy.allow_create {
             return Err(AppError::Forbidden("creating new knowledge documents is not allowed for this session".into()));
         }
-        let (mut final_rel_path, staged) = match &req.policy.mode {
-            WriteMode::Staged { scope } => (
-                format!("{KB_INBOX_REL_DIR}/{}/{}", scope.trim_matches('/'), res.canonical_rel_path),
-                true,
-            ),
-            WriteMode::Direct => (res.canonical_rel_path.clone(), false),
-            WriteMode::Disabled => unreachable!("disabled handled by validate_write_request"),
-        };
-        if staged {
-            let row = self.require_base(res.kb_id.as_str()).await?;
-            let resolved_proposal = resolve_portable_md_path(
-                PathBuf::from(&row.root_path),
-                final_rel_path.clone(),
-            )
-            .await?;
-            final_rel_path = resolved_proposal.rel_path;
-            match self.read_file(res.kb_id.as_str(), &final_rel_path).await {
-                Ok(existing)
-                    if markdown_identity(&existing.content)
-                        == markdown_identity(&req.content) =>
-                {
-                    self.require_valid_staged_proposal_metadata(
-                        res.kb_id.as_str(),
-                        &final_rel_path,
-                        &existing.content,
-                    )
-                    .await?;
-                    return Ok(WriteOutcome {
-                        kb_id: res.kb_id,
-                        final_rel_path,
-                        op: res.op,
-                        staged: true,
-                    });
-                }
-                Ok(_) => {
-                    return Err(AppError::Conflict(format!(
-                        "a different pending review proposal already targets {}",
-                        res.canonical_rel_path
-                    )));
-                }
-                Err(AppError::NotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
 
-            let base_snapshot = match staged_base_snapshot {
-                Some(snapshot) => snapshot,
-                None => self
-                    .capture_staged_base_snapshot(
-                        res.kb_id.as_str(),
-                        &res.canonical_rel_path,
-                        res.op,
-                    )
-                    .await?,
-            };
-            self.ensure_staged_base_snapshot_is_current(
-                res.kb_id.as_str(),
-                &res.canonical_rel_path,
-                &base_snapshot,
-            )
-            .await?;
-            self.write_staged_proposal_metadata(
-                res.kb_id.as_str(),
-                &final_rel_path,
-                &base_snapshot,
-                &req.content,
-            )
-            .await?;
-            if let Err(error) = self.write_file_if_absent(
-                res.kb_id.as_str(),
-                &final_rel_path,
-                &res.canonical_rel_path,
-                &req.content,
-            )
-            .await
-            {
-                self.remove_staged_proposal_metadata(
-                    res.kb_id.as_str(),
-                    &final_rel_path,
-                )
-                .await;
-                return Err(error);
-            }
-        } else if res.op == WriteOp::Create {
+        let final_rel_path = res.canonical_rel_path.clone();
+        if res.op == WriteOp::Create {
             self.write_file_if_absent(
                 res.kb_id.as_str(),
                 &final_rel_path,
@@ -2152,191 +1729,30 @@ impl KnowledgeService {
             )
             .await?;
         } else {
-            self.write_file_under_target_lock(
+            // The same safety path the turn-final finalizer uses: read the
+            // document, append only genuinely new material, then publish under
+            // compare-and-swap. Never an unconditional overwrite — the model
+            // cannot see the whole document, so a full rewrite can silently
+            // destroy content the user curated by hand.
+            let existing = self.read_file(res.kb_id.as_str(), &final_rel_path).await?.content;
+            let merged = merge_direct_turn_writeback(&existing, &req.content);
+            if markdown_identity(&existing) == markdown_identity(&merged) {
+                // The material is already in the document: idempotent no-op,
+                // not a failure. Repeated turns and manual retries land here.
+                return Ok(WriteOutcome { kb_id: res.kb_id, final_rel_path, op: res.op });
+            }
+            self.write_file_if_unchanged(
                 res.kb_id.as_str(),
                 &final_rel_path,
-                Some(&res.canonical_rel_path),
-                &req.content,
+                &res.canonical_rel_path,
+                &existing,
+                &merged,
             )
             .await?;
         }
-        Ok(WriteOutcome { kb_id: res.kb_id, final_rel_path, op: res.op, staged })
+        Ok(WriteOutcome { kb_id: res.kb_id, final_rel_path, op: res.op })
     }
 
-    async fn capture_staged_base_snapshot(
-        &self,
-        id: &str,
-        rel_path: &str,
-        op: WriteOp,
-    ) -> Result<StagedBaseSnapshot, AppError> {
-        match self.read_file(id, rel_path).await {
-            Ok(_file) if op == WriteOp::Create => Err(AppError::Conflict(format!(
-                "knowledge document appeared while the staged write was preparing: {rel_path}"
-            ))),
-            Ok(file) => Ok(StagedBaseSnapshot::Content(file.content)),
-            Err(AppError::NotFound(_)) if op == WriteOp::Update => {
-                Err(AppError::Conflict(format!(
-                    "knowledge document disappeared while the staged write was preparing: {rel_path}"
-                )))
-            }
-            Err(AppError::NotFound(_)) => Ok(StagedBaseSnapshot::Missing),
-            Err(error) => Err(error),
-        }
-    }
-
-    async fn ensure_staged_base_snapshot_is_current(
-        &self,
-        id: &str,
-        rel_path: &str,
-        snapshot: &StagedBaseSnapshot,
-    ) -> Result<(), AppError> {
-        match (snapshot, self.read_file(id, rel_path).await) {
-            (StagedBaseSnapshot::Missing, Err(AppError::NotFound(_))) => Ok(()),
-            (StagedBaseSnapshot::Content(expected), Ok(current))
-                if current.content.as_bytes() == expected.as_bytes() =>
-            {
-                Ok(())
-            }
-            (StagedBaseSnapshot::Missing, Ok(_))
-            | (StagedBaseSnapshot::Content(_), Err(AppError::NotFound(_)))
-            | (StagedBaseSnapshot::Content(_), Ok(_)) => Err(AppError::Conflict(format!(
-                "knowledge document changed while the staged write was preparing; retry against the latest content: {rel_path}"
-            ))),
-            (_, Err(error)) => Err(error),
-        }
-    }
-
-    async fn staged_proposal_paths(
-        &self,
-        id: &str,
-        proposal_rel_path: &str,
-    ) -> Result<(PathBuf, PathBuf), AppError> {
-        let row = self.require_base(id).await?;
-        let proposal_path = safe_md_path_bounded(
-            PathBuf::from(&row.root_path),
-            proposal_rel_path.to_owned(),
-        )
-        .await?;
-        let metadata_path = staged_proposal_metadata_path(&proposal_path);
-        Ok((proposal_path, metadata_path))
-    }
-
-    async fn read_staged_proposal_metadata(
-        &self,
-        id: &str,
-        proposal_rel_path: &str,
-        proposal_content: &str,
-    ) -> Result<StagedProposalMetadata, AppError> {
-        let (_, metadata_path) =
-            self.staged_proposal_paths(id, proposal_rel_path).await?;
-        let raw =
-            tokio::time::timeout(
-                KNOWLEDGE_FILE_IO_TIMEOUT,
-                tokio::fs::read_to_string(&metadata_path),
-            )
-                .await
-                .map_err(|_| {
-                    AppError::Timeout(
-                        "review proposal base-version metadata read timed out"
-                            .into(),
-                    )
-                })?
-                .map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound {
-                        AppError::Conflict(
-                            "this review proposal has no safe base version; discard it and retry the knowledge write-back"
-                                .into(),
-                        )
-                    } else {
-                        AppError::Internal(format!(
-                            "failed to read review proposal base-version metadata: {error}"
-                        ))
-                    }
-                })?;
-        let metadata: StagedProposalMetadata =
-            serde_json::from_str(&raw).map_err(|_| {
-                AppError::Conflict(
-                    "this review proposal has invalid base-version metadata; discard it and retry the knowledge write-back"
-                        .into(),
-                )
-            })?;
-        if metadata.version != 1
-            || metadata.proposal_sha256 != content_sha256(proposal_content)
-        {
-            return Err(AppError::Conflict(
-                "this review proposal changed after it was staged; discard it and retry the knowledge write-back"
-                    .into(),
-            ));
-        }
-        Ok(metadata)
-    }
-
-    async fn require_valid_staged_proposal_metadata(
-        &self,
-        id: &str,
-        proposal_rel_path: &str,
-        proposal_content: &str,
-    ) -> Result<(), AppError> {
-        self.read_staged_proposal_metadata(id, proposal_rel_path, proposal_content)
-            .await
-            .map(|_| ())
-    }
-
-    async fn write_staged_proposal_metadata(
-        &self,
-        id: &str,
-        proposal_rel_path: &str,
-        base_snapshot: &StagedBaseSnapshot,
-        proposal_content: &str,
-    ) -> Result<(), AppError> {
-        let row = self.require_base(id).await?;
-        let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
-        let current = self.require_base(id).await?;
-        if current.root_path != row.root_path {
-            return Err(AppError::Conflict(
-                "knowledge base root changed while write-back was starting; retry".into(),
-            ));
-        }
-        let proposal_path = safe_md_path_bounded(
-            PathBuf::from(&row.root_path),
-            proposal_rel_path.to_owned(),
-        )
-        .await?;
-        let metadata_path = staged_proposal_metadata_path(&proposal_path);
-        let metadata = StagedProposalMetadata {
-            version: 1,
-            base_sha256: match base_snapshot {
-                StagedBaseSnapshot::Missing => None,
-                StagedBaseSnapshot::Content(content) => {
-                    Some(content_sha256(content))
-                }
-            },
-            proposal_sha256: content_sha256(proposal_content),
-        };
-        let encoded = serde_json::to_string(&metadata).map_err(|error| {
-            AppError::Internal(format!(
-                "failed to encode staged proposal metadata: {error}"
-            ))
-        })?;
-        write_text_atomic(&metadata_path, &encoded).await
-    }
-
-    async fn remove_staged_proposal_metadata(
-        &self,
-        id: &str,
-        proposal_rel_path: &str,
-    ) {
-        if let Ok((_, metadata_path)) =
-            self.staged_proposal_paths(id, proposal_rel_path).await
-        {
-            let _ = tokio::fs::remove_file(metadata_path).await;
-        }
-    }
-
-    /// Run the turn-final write-back trigger after an assistant answer has been
-    /// produced. This never changes the binding semantics: [`resolve_write_policy`]
-    /// still decides staged/direct/disabled placement, and eagerness is passed only
-    /// to the extractor prompt.
     pub async fn finalize_turn_writeback(&self, req: TurnWritebackRequest) -> TurnWritebackReport {
         self.finalize_turn_writeback_with_progress(req, |_| async {}).await
     }
@@ -2361,7 +1777,7 @@ impl KnowledgeService {
             );
         }
 
-        let policy = resolve_write_policy(req.surface, &req.binding, &req.scope);
+        let policy = resolve_write_policy(req.surface, &req.binding);
         if matches!(policy.mode, WriteMode::Disabled) {
             return TurnWritebackReport::status(TurnWritebackStatus::Disabled);
         }
@@ -2501,23 +1917,6 @@ impl KnowledgeService {
                 });
                 continue;
             }
-            if rel_path
-                .split('/')
-                .next()
-                .is_some_and(|component| {
-                    portable_path_component_identity(component)
-                        == portable_path_component_identity(
-                            KB_INBOX_REL_DIR,
-                        )
-                })
-            {
-                failures.push(TurnWritebackFailure {
-                    kb_id: Some(kb_id),
-                    rel_path: Some(rel_path),
-                    error: "candidate rel_path must target the base body, not the review inbox".into(),
-                });
-                continue;
-            }
             accepted_chars += content_chars;
 
             let row = match self.require_base(kb_id.as_str()).await {
@@ -2582,6 +1981,8 @@ impl KnowledgeService {
                     continue;
                 }
             };
+            // Direct is the only landing spot left; `Disabled` already returned
+            // early above, so a candidate can never fall past this guard.
             if matches!(policy.mode, WriteMode::Direct) {
                 let mut expected_existing = None;
                 if resolution.op == WriteOp::Update {
@@ -2641,7 +2042,6 @@ impl KnowledgeService {
                             kb_id,
                             final_rel_path,
                             op: resolution.op,
-                            staged: false,
                         });
                     }
                     Err(e) => failures.push(TurnWritebackFailure {
@@ -2653,96 +2053,6 @@ impl KnowledgeService {
                 continue;
             }
 
-            let staged_base_snapshot = if resolution.op == WriteOp::Update {
-                let existing = match self
-                    .read_file(kb_id.as_str(), &resolution.canonical_rel_path)
-                    .await
-                {
-                    Ok(file) => file.content,
-                    Err(e) => {
-                        failures.push(TurnWritebackFailure {
-                            kb_id: Some(kb_id),
-                            rel_path: Some(resolution.canonical_rel_path),
-                            error: e.to_string(),
-                        });
-                        continue;
-                    }
-                };
-                if markdown_identity(&existing) == markdown_identity(&content) {
-                    continue;
-                }
-                content = merge_direct_turn_writeback(&existing, &content);
-                if markdown_identity(&existing) == markdown_identity(&content) {
-                    continue;
-                }
-                StagedBaseSnapshot::Content(existing)
-            } else {
-                StagedBaseSnapshot::Missing
-            };
-
-            let write_rel_path = resolution.canonical_rel_path.clone();
-            if let WriteMode::Staged { scope } = &policy.mode {
-                match self
-                    .staged_turn_writeback_candidate_already_present(
-                        &kb_id,
-                        scope,
-                        &resolution.canonical_rel_path,
-                        &content,
-                    )
-                    .await
-                {
-                    Ok(true) => continue,
-                    Ok(false) => {}
-                    Err(e) => {
-                        failures.push(TurnWritebackFailure {
-                            kb_id: Some(kb_id),
-                            rel_path: Some(resolution.canonical_rel_path),
-                            error: e,
-                        });
-                        continue;
-                    }
-                }
-            }
-
-            let write = WriteRequest {
-                spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: write_rel_path },
-                content,
-                policy: policy.clone(),
-                bound_kb_ids: bound_kb_ids.clone(),
-            };
-            if turn_writeback_is_cancelled(&req) {
-                failures.push(TurnWritebackFailure {
-                    kb_id: Some(kb_id),
-                    rel_path: Some(rel_path),
-                    error:
-                        "knowledge write-back was cancelled because the conversation changed"
-                            .into(),
-                });
-                break;
-            }
-            let write_resolution = WriteResolution {
-                kb_id: resolution.kb_id,
-                canonical_rel_path: match &write.spec {
-                    WriteTargetSpec::Path { rel_path, .. } => rel_path.clone(),
-                    WriteTargetSpec::Handle(_) => unreachable!("turn write-back stages by path"),
-                },
-                op: resolution.op,
-            };
-            match self
-                .write_resolved_document_under_target_lock(
-                    write,
-                    write_resolution,
-                    Some(staged_base_snapshot),
-                )
-                .await
-            {
-                Ok(outcome) => written.push(outcome),
-                Err(e) => failures.push(TurnWritebackFailure {
-                    kb_id: Some(kb_id),
-                    rel_path: Some(rel_path),
-                    error: e.to_string(),
-                }),
-            }
         }
 
         let status = match (written.is_empty(), failures.is_empty()) {
@@ -2870,50 +2180,6 @@ impl KnowledgeService {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(cache_key, identity.clone());
         Ok(identity)
-    }
-
-    async fn staged_turn_writeback_candidate_already_present(
-        &self,
-        kb_id: &KnowledgeBaseId,
-        scope: &str,
-        canonical_rel_path: &str,
-        content: &str,
-    ) -> Result<bool, String> {
-        let scope = scope.trim_matches('/');
-        let requested =
-            format!("{KB_INBOX_REL_DIR}/{scope}/{canonical_rel_path}");
-        let row = self
-            .require_base(kb_id.as_str())
-            .await
-            .map_err(|error| error.to_string())?;
-        let resolved = resolve_portable_md_path(
-            PathBuf::from(&row.root_path),
-            requested,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        if !resolved.exists {
-            return Ok(false);
-        }
-        let inbox_rel_path = resolved.rel_path;
-        match self.read_file(kb_id.as_str(), &inbox_rel_path).await {
-            Ok(existing)
-                if markdown_identity(&existing.content) == markdown_identity(content) =>
-            {
-                self.require_valid_staged_proposal_metadata(
-                    kb_id.as_str(),
-                    &inbox_rel_path,
-                    &existing.content,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                return Ok(true);
-            }
-            Ok(_) | Err(AppError::NotFound(_)) => {}
-            Err(e) => return Err(e.to_string()),
-        }
-
-        Ok(false)
     }
 
     pub async fn delete_file(&self, id: &str, rel_path: &str) -> Result<(), AppError> {
@@ -3517,12 +2783,6 @@ impl KnowledgeService {
     ) -> Result<KnowledgeBinding, AppError> {
         validate_kind(kind)?;
         let target_id = canonical_target_id(kind, target_id)?;
-        if !WRITEBACK_MODES.contains(&binding.writeback_mode.as_str()) {
-            return Err(AppError::BadRequest(format!(
-                "unsupported writeback_mode: {}",
-                binding.writeback_mode
-            )));
-        }
         if !WRITEBACK_EAGERNESS.contains(&binding.writeback_eagerness.as_str()) {
             return Err(AppError::BadRequest(format!(
                 "unsupported writeback_eagerness: {}",
@@ -3549,7 +2809,6 @@ impl KnowledgeService {
                 &kb_ids,
                 binding.enabled,
                 binding.writeback,
-                &binding.writeback_mode,
                 &binding.writeback_eagerness,
                 binding.channel_write_enabled,
                 now_ms(),
@@ -3560,7 +2819,6 @@ impl KnowledgeService {
             "target_id": target_id,
             "enabled": binding.enabled,
             "writeback": binding.writeback,
-            "writeback_mode": binding.writeback_mode,
             "writeback_eagerness": binding.writeback_eagerness,
             "channel_write_enabled": binding.channel_write_enabled,
             "kb_ids": binding.kb_ids,
@@ -3738,7 +2996,6 @@ impl KnowledgeService {
         let signature_payload = serde_json::to_vec(&(
             binding.enabled,
             binding.writeback,
-            binding.writeback_mode.as_str(),
             binding.writeback_eagerness.as_str(),
             binding.channel_write_enabled,
             signature_targets,
@@ -3753,7 +3010,6 @@ impl KnowledgeService {
         let outcome = MountOutcome {
             mounts,
             writeback: binding.enabled && binding.writeback,
-            writeback_mode: binding.writeback_mode,
             writeback_eagerness: binding.writeback_eagerness,
             channel_write_enabled: binding.channel_write_enabled,
         };
@@ -3892,7 +3148,6 @@ impl KnowledgeService {
         MountOutcome {
             mounts,
             writeback: binding.enabled && binding.writeback,
-            writeback_mode: binding.writeback_mode,
             writeback_eagerness: binding.writeback_eagerness,
             channel_write_enabled: binding.channel_write_enabled,
         }
@@ -4161,9 +3416,6 @@ fn search_one_knowledge_root(
             );
             continue;
         };
-        if rel_path_starts_with_dir(&rel, KB_INBOX_REL_DIR) {
-            continue;
-        }
         let (mtime_ms, size) = match entry.metadata() {
             Ok(metadata) => (
                 metadata
@@ -4268,7 +3520,6 @@ impl KnowledgeService {
         let source = source_from_extra(&row.extra)
             .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?;
         let root = PathBuf::from(&row.root_path);
-        let root_for_inbox = root.clone();
         let root_for_stats_lock = root.clone();
         // Bounded so a slow/stale NAS mount degrades (assume present, counts
         // unknown) instead of hanging the list/detail response past the
@@ -4295,15 +3546,6 @@ impl KnowledgeService {
             )
             .await;
 
-        let root_for_inbox_lock = root_for_inbox.clone();
-        let pending_inbox = bounded_root_blocking(
-            &root_for_inbox_lock,
-            BASE_WALK_BUDGET,
-            0u64,
-            move || list_inbox_entries(&root_for_inbox).len() as u64,
-        )
-        .await;
-
         let tags = tags_from_row(&row)?;
 
         let kind = derive_kind(row.managed, source.as_ref()).to_string();
@@ -4328,7 +3570,6 @@ impl KnowledgeService {
             source_fetch: None,
             tags,
             kind,
-            pending_inbox,
         })
     }
 }
@@ -4412,12 +3653,6 @@ async fn complete_description(
 }
 
 fn binding_from_row((row, kb_ids): (KnowledgeBindingRow, Vec<String>)) -> Result<KnowledgeBinding, AppError> {
-    if !WRITEBACK_MODES.contains(&row.writeback_mode.as_str()) {
-        return Err(AppError::Internal(format!(
-            "knowledge binding '{}' contains invalid writeback_mode '{}'",
-            row.id, row.writeback_mode
-        )));
-    }
     if !WRITEBACK_EAGERNESS.contains(&row.writeback_eagerness.as_str()) {
         return Err(AppError::Internal(format!(
             "knowledge binding '{}' contains invalid writeback_eagerness '{}'",
@@ -4436,7 +3671,6 @@ fn binding_from_row((row, kb_ids): (KnowledgeBindingRow, Vec<String>)) -> Result
     Ok(KnowledgeBinding {
         enabled: row.enabled,
         writeback: row.writeback,
-        writeback_mode: row.writeback_mode,
         writeback_eagerness: row.writeback_eagerness,
         channel_write_enabled: row.channel_write_enabled,
         kb_ids,
@@ -5562,21 +4796,7 @@ fn atomic_tmp_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(temp_name))
 }
 
-fn content_sha256(content: &str) -> String {
-    hex::encode(Sha256::digest(content.as_bytes()))
-}
 
-fn staged_proposal_metadata_path(proposal_path: &Path) -> PathBuf {
-    let identity = portable_absolute_path_identity(proposal_path);
-    let metadata_name = format!(
-        ".nomifun-base-{}.json",
-        content_sha256(&identity)
-    );
-    proposal_path
-        .parent()
-        .map(|parent| parent.join(&metadata_name))
-        .unwrap_or_else(|| PathBuf::from(metadata_name))
-}
 
 #[cfg(windows)]
 fn atomic_backup_path(path: &Path) -> PathBuf {
@@ -5699,8 +4919,7 @@ async fn build_toc(root: &Path) -> Vec<String> {
         let mut rels: Vec<String> = vault_walker(&root)
             .filter(|e| e.file_type().is_file() && is_md(e.path()))
             .filter_map(|e| {
-                let rel = e.path().strip_prefix(&root).ok()?.to_str()?.replace('\\', "/");
-                (!rel_path_starts_with_dir(&rel, KB_INBOX_REL_DIR)).then_some(rel)
+                Some(e.path().strip_prefix(&root).ok()?.to_str()?.replace('\\', "/"))
             })
             .collect();
         rels.sort_by(|a, b| toc_rank(a).cmp(&toc_rank(b)).then_with(|| a.cmp(b)));
@@ -5916,27 +5135,6 @@ fn vault_walker(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
         .flatten()
 }
 
-/// Run a blocking filesystem walk on the blocking pool but never let it hold up
-/// the caller past `budget`; on expiry (a slow or stale NAS mount) or a panic
-/// in the walk, return `on_timeout` and leave the walk to finish detached
-/// (`spawn_blocking` closures cannot be cancelled). This bounds every KB
-/// directory walk so a wedged mount degrades the response instead of hanging
-/// the request past the client's ~60s deadline (the reported failure mode).
-async fn bounded_blocking<T: Send + 'static>(
-    budget: std::time::Duration,
-    on_timeout: T,
-    f: impl FnOnce() -> T + Send + 'static,
-) -> T {
-    let handle = tokio::task::spawn_blocking(f);
-    match tokio::time::timeout(budget, handle).await {
-        Ok(Ok(v)) => v,
-        // Walk panicked → degrade rather than propagate.
-        Ok(Err(_join_err)) => on_timeout,
-        // Slow/stale mount exceeded the budget → degrade; the detached walk
-        // finishes on its own and its result is discarded.
-        Err(_elapsed) => on_timeout,
-    }
-}
 
 fn root_blocking_inspection_lock(root: &Path) -> Arc<AsyncMutex<()>> {
     let key = portable_absolute_path_identity(root);
@@ -6143,17 +5341,6 @@ pub fn portable_writeback_path_identity(rel_path: &str) -> String {
         .join("/")
 }
 
-pub fn logical_writeback_target_from_storage_path(rel_path: &str) -> String {
-    let canonical = deconfuse_rel_path(rel_path);
-    let components: Vec<&str> = canonical.split('/').collect();
-    if components.len() < 3
-        || portable_path_component_identity(components[0])
-            != portable_path_component_identity(KB_INBOX_REL_DIR)
-    {
-        return canonical;
-    }
-    components[2..].join("/")
-}
 
 fn portable_absolute_path_identity(path: &Path) -> String {
     path.to_string_lossy()
@@ -6223,17 +5410,6 @@ fn root_group_locks(
 fn validate_canonical_write_target(rel_path: &str) -> Result<(), AppError> {
     let components: Vec<&str> = rel_path.split('/').collect();
     if components
-        .first()
-        .is_some_and(|component| {
-            portable_path_component_identity(component)
-                == portable_path_component_identity(KB_INBOX_REL_DIR)
-        })
-    {
-        return Err(AppError::BadRequest(
-            "knowledge writes must target the base body, not the review inbox".into(),
-        ));
-    }
-    if components
         .iter()
         .take(components.len().saturating_sub(1))
         .any(|component| is_excluded_tree_dir_name(component))
@@ -6281,9 +5457,6 @@ fn validate_write_request(req: &WriteRequest) -> Result<(), AppError> {
         return Err(AppError::Forbidden(
             "write-back is disabled for this session".into(),
         ));
-    }
-    if let WriteMode::Staged { scope } = &req.policy.mode {
-        validate_inbox_scope(scope)?;
     }
     Ok(())
 }
@@ -6370,15 +5543,6 @@ async fn resolve_portable_md_path(
 
             let (actual_name, actual_path) =
                 matches.pop().expect("one portable path match");
-            if index == 0
-                && requested_identity
-                    == portable_path_component_identity(KB_INBOX_REL_DIR)
-                && actual_name != KB_INBOX_REL_DIR
-            {
-                return Err(AppError::Conflict(format!(
-                    "the knowledge root contains a portable alias \"{actual_name}\" for the reserved \"{KB_INBOX_REL_DIR}\" directory; rename it before staging write-back"
-                )));
-            }
             let metadata = tokio::fs::symlink_metadata(&actual_path)
                 .await
                 .map_err(|error| {
@@ -6667,18 +5831,8 @@ fn is_excluded_tree_dir_name(name: &str) -> bool {
     identity.starts_with('.')
         || identity == portable_path_component_identity("node_modules")
         || identity == portable_path_component_identity("_trash")
-        || identity == portable_path_component_identity(KB_INBOX_REL_DIR)
 }
 
-fn rel_path_starts_with_dir(rel_path: &str, directory: &str) -> bool {
-    rel_path
-        .split('/')
-        .next()
-        .is_some_and(|component| {
-            portable_path_component_identity(component)
-                == portable_path_component_identity(directory)
-        })
-}
 
 fn looks_like_windows_drive_prefix(segment: &str) -> bool {
     let bytes = segment.as_bytes();
@@ -7182,11 +6336,6 @@ fn list_md_files_strict(root: &Path) -> Result<Vec<KbFileEntry>, AppError> {
             );
             continue;
         };
-        // Staged write-back proposals live under `_inbox/` and are shown in
-        // the dedicated review panel, not the main document list.
-        if rel_path_starts_with_dir(&rel_str, KB_INBOX_REL_DIR) {
-            continue;
-        }
         let meta = entry.metadata().map_err(|error| {
             AppError::Internal(format!(
                 "failed to inspect knowledge document {}: {error}",
@@ -7203,131 +6352,8 @@ fn list_md_files_strict(root: &Path) -> Result<Vec<KbFileEntry>, AppError> {
     Ok(entries)
 }
 
-/// Walk `{root}/_inbox/{scope}/**/*.md`, deriving `scope` (first path segment)
-/// and `rel_path` (the remainder, mirroring the original base path).
-fn list_inbox_entries_strict(
-    root: &Path,
-) -> Result<Vec<InboxEntry>, AppError> {
-    validate_knowledge_root(root)?;
-    let inbox_root = root.join(KB_INBOX_REL_DIR);
-    match std::fs::symlink_metadata(&inbox_root) {
-        Ok(metadata) => {
-            if metadata_is_link_or_reparse(&inbox_root, &metadata)
-                || !metadata.is_dir()
-            {
-                return Err(AppError::BadRequest(
-                    "knowledge review inbox is not a real directory".into(),
-                ));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Vec::new());
-        }
-        Err(error) => {
-            return Err(AppError::Internal(format!(
-                "failed to inspect knowledge review inbox: {error}"
-            )));
-        }
-    }
-    let walker = walkdir::WalkDir::new(&inbox_root)
-        .follow_links(false)
-        .follow_root_links(false)
-        .into_iter()
-        .filter_entry(|entry| !is_machinery_dir(entry));
-    let mut entries = Vec::new();
-    for entry in walker {
-        let entry = entry.map_err(|error| {
-            AppError::Internal(format!(
-                "failed to scan knowledge review inbox: {error}"
-            ))
-        })?;
-        if !entry.file_type().is_file() || !is_md(entry.path()) {
-            continue;
-        }
-        let rel = entry.path().strip_prefix(&inbox_root).map_err(|error| {
-            AppError::Internal(format!(
-                "failed to resolve knowledge review path: {error}"
-            ))
-        })?;
-        let rel_str = rel
-            .to_str()
-            .ok_or_else(|| {
-                AppError::Internal(
-                    "knowledge review path must be valid Unicode".into(),
-                )
-            })?
-            .replace('\\', "/");
-        let segments: Vec<&str> = rel_str.split('/').collect();
-        if segments.len() < 2 {
-            continue;
-        }
-        let scope = segments[0].to_owned();
-        let rel_path = segments[1..].join("/");
-        if scope.is_empty() || rel_path.is_empty() {
-            continue;
-        }
-        let metadata = entry.metadata().map_err(|error| {
-            AppError::Internal(format!(
-                "failed to inspect knowledge review proposal {}: {error}",
-                entry.path().display()
-            ))
-        })?;
-        entries.push(InboxEntry {
-            scope,
-            rel_path,
-            size: metadata.len(),
-            modified_at: modified_ms(&metadata),
-        });
-    }
-    entries.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.rel_path.cmp(&b.rel_path)));
-    Ok(entries)
-}
 
-fn list_inbox_entries(root: &Path) -> Vec<InboxEntry> {
-    list_inbox_entries_strict(root).unwrap_or_default()
-}
 
-/// A staged-proposal scope is one portable, non-traversing segment.
-fn validate_inbox_scope(scope: &str) -> Result<(), AppError> {
-    let segments: Vec<&str> = scope.split('/').collect();
-    let single_segment = segments.len() == 1;
-    let invalid_component = segments.iter().any(|segment| {
-        segment.is_empty()
-            || *segment == "."
-            || *segment == ".."
-            || segment.contains('\\')
-            || validate_portable_path_component(segment).is_err()
-    });
-    if !single_segment || invalid_component {
-        return Err(AppError::BadRequest(format!("invalid inbox scope: {scope}")));
-    }
-    Ok(())
-}
-
-/// Server-side unified diff for the review panel. `old` empty ⇒ a clean "new
-/// document" diff (all additions).
-fn unified_md_diff(old: &str, new: &str, path: &str) -> String {
-    similar::TextDiff::from_lines(old, new)
-        .unified_diff()
-        .context_radius(3)
-        .header(&format!("a/{path}"), &format!("b/{path}"))
-        .to_string()
-}
-
-/// Remove now-empty inbox directories, walking up from `dir` (the merged/
-/// discarded file's parent) until a non-empty dir or the inbox root's parent.
-/// `remove_dir` only succeeds on empty dirs, so a non-empty ancestor halts it.
-async fn prune_empty_inbox_dirs(inbox_root: &Path, mut dir: PathBuf) {
-    while dir.starts_with(inbox_root) {
-        if tokio::fs::remove_dir(&dir).await.is_err() {
-            break; // non-empty or already gone
-        }
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => break,
-        }
-    }
-}
 
 // ── Tag CRUD ─────────────────────────────────────────────────────────────
 
@@ -7760,14 +6786,14 @@ mod tests {
         assert_eq!(first_atx_heading("#  spaced  \n").as_deref(), Some("spaced"));
     }
 
+    /// A document without a heading must still be listed — the TOC is the only
+    /// thing telling the model the document exists, so dropping the unheaded
+    /// ones would make them permanently unreachable.
     #[tokio::test]
-    async fn toc_lists_all_and_skips_inbox() {
+    async fn toc_lists_every_document_with_or_without_a_heading() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         std::fs::write(root.join("guide.md"), "# 使用指南\n正文").unwrap();
-        let inbox = root.join("_inbox/0190f5fe-7c00-7a00-8000-000000000011");
-        std::fs::create_dir_all(&inbox).unwrap();
-        std::fs::write(inbox.join("draft.md"), "# 草稿").unwrap();
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/notes.md"), "no heading here").unwrap();
 
@@ -7775,7 +6801,6 @@ mod tests {
         assert_eq!(toc.len(), 2, "{toc:?}");
         assert!(toc.contains(&"guide.md — 使用指南".to_string()));
         assert!(toc.contains(&"sub/notes.md".to_string()));
-        assert!(!toc.iter().any(|l| l.contains("_inbox")));
     }
 
     /// `build_toc` returns the FULL listing — budgeting/aggregation happens
@@ -8350,18 +7375,12 @@ mod tests {
         let vault = dir.path().join("vault");
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(vault.join("Node_Modules/pkg")).unwrap();
-        std::fs::create_dir_all(vault.join("_INBOX/scope")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(vault.join("visible.md"), "# Visible\npublic")
             .unwrap();
         std::fs::write(
             vault.join("Node_Modules/pkg/hidden.md"),
             "# Hidden\nmachinery-secret",
-        )
-        .unwrap();
-        std::fs::write(
-            vault.join("_INBOX/scope/draft.md"),
-            "# Draft\ninbox-secret",
         )
         .unwrap();
         std::fs::write(
@@ -8395,7 +7414,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["visible.md"]
         );
-        for query in ["machinery-secret", "inbox-secret", "junction-secret"] {
+        for query in ["machinery-secret", "junction-secret"] {
             assert!(
                 service
                     .search_bases(
@@ -8479,14 +7498,11 @@ mod tests {
         std::fs::create_dir_all(vault.join("raw")).unwrap();
         std::fs::create_dir_all(vault.join("empty")).unwrap();
         std::fs::create_dir_all(vault.join("assets")).unwrap();
-        let inbox = vault.join("_inbox/0190f5fe-7c00-7a00-8000-000000000011");
-        std::fs::create_dir_all(&inbox).unwrap();
         std::fs::create_dir_all(vault.join(".obsidian")).unwrap();
         std::fs::create_dir_all(vault.join("node_modules/pkg")).unwrap();
         std::fs::write(vault.join("README.md"), "# Root").unwrap();
         std::fs::write(vault.join("raw/python3-type-conversion.md"), "# Types").unwrap();
         std::fs::write(vault.join("assets/logo.png"), "png").unwrap();
-        std::fs::write(inbox.join("draft.md"), "# Draft").unwrap();
         std::fs::write(vault.join(".obsidian/workspace.md"), "# Tooling").unwrap();
         std::fs::write(vault.join("node_modules/pkg/readme.md"), "# Package").unwrap();
 
@@ -8547,7 +7563,6 @@ mod tests {
 
         assert!(service.create_folder(&info.knowledge_base_id, "").await.is_err());
         assert!(service.create_folder(&info.knowledge_base_id, "../escape").await.is_err());
-        assert!(service.create_folder(&info.knowledge_base_id, "_inbox/draft").await.is_err());
         assert!(service.create_folder(&info.knowledge_base_id, "node_modules/pkg").await.is_err());
         assert!(service.create_folder(&info.knowledge_base_id, "README.md/child").await.is_err());
     }
@@ -8575,7 +7590,6 @@ mod tests {
         assert!(service.delete_folder(&info.knowledge_base_id, "").await.is_err());
         assert!(service.delete_folder(&info.knowledge_base_id, "../escape").await.is_err());
         assert!(service.delete_folder(&info.knowledge_base_id, "root.md").await.is_err());
-        assert!(service.delete_folder(&info.knowledge_base_id, "_inbox").await.is_err());
         assert!(service.delete_folder(&info.knowledge_base_id, "node_modules").await.is_err());
     }
 
@@ -8625,13 +7639,14 @@ mod tests {
     /// (a slow/stale NAS mount must never hang the response past the client
     /// timeout). The detached closure keeps running; its result is discarded.
     #[tokio::test]
-    async fn bounded_blocking_returns_value_then_degrades_on_timeout() {
+    async fn bounded_root_blocking_returns_value_then_degrades_on_timeout() {
         use std::time::Duration;
 
-        let v = bounded_blocking(Duration::from_secs(5), 999u32, || 7u32).await;
+        let root = tempfile::TempDir::new().unwrap();
+        let v = bounded_root_blocking(root.path(), Duration::from_secs(5), 999u32, || 7u32).await;
         assert_eq!(v, 7, "value must be returned when the walk finishes within budget");
 
-        let v = bounded_blocking(Duration::from_millis(1), 999u32, || {
+        let v = bounded_root_blocking(root.path(), Duration::from_millis(1), 999u32, || {
             std::thread::sleep(Duration::from_millis(60));
             7u32
         })
@@ -8968,37 +7983,6 @@ mod tests {
                 ));
             }
             Ok(r#"{"candidates":[]}"#.into())
-        }
-    }
-
-    struct ConcurrentStagedCollisionCompleter {
-        kb_id: KnowledgeBaseId,
-        extracted: Arc<tokio::sync::Barrier>,
-    }
-
-    impl ConcurrentStagedCollisionCompleter {
-        fn new(kb_id: KnowledgeBaseId) -> Arc<Self> {
-            Arc::new(Self {
-                kb_id,
-                extracted: Arc::new(tokio::sync::Barrier::new(2)),
-            })
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl KnowledgeCompleter for ConcurrentStagedCollisionCompleter {
-        async fn complete(&self, system: &str, user: &str) -> Result<String, AppError> {
-            if system != crate::turn_writeback::TURN_WRITEBACK_SYSTEM {
-                return Ok(r#"{"candidates":[]}"#.into());
-            }
-            let marker = if user.contains("alpha-user") { "ALPHA" } else { "BETA" };
-            // Make both finalizers finish extraction together so they contend
-            // for the exact same logical staged target deterministically.
-            self.extracted.wait().await;
-            Ok(format!(
-                r##"{{"candidates":[{{"kb_id":"{}","rel_path":"patterns/shared.md","content":"{marker}"}}]}}"##,
-                self.kb_id
-            ))
         }
     }
 
@@ -9729,8 +8713,11 @@ mod tests {
         for (i, name) in expected.iter().enumerate() {
             let content = std::fs::read_to_string(snap_dir.join(name))
                 .unwrap_or_else(|e| panic!("{name} must exist: {e}"));
-            assert!(
-                content.contains(&format!("source_url: {}", urls[i])),
+            // Read the managed header back through its own parser so this
+            // ordering guard cannot drift on a header-format change.
+            assert_eq!(
+                source_url::snapshot_source_url(&content),
+                Some(urls[i].as_str()),
                 "{name} must hold entry #{i}: {content}"
             );
         }
@@ -9923,13 +8910,12 @@ mod tests {
             kb_ids: &[String],
             enabled: bool,
             writeback: bool,
-            writeback_mode: &str,
             writeback_eagerness: &str,
             channel_write_enabled: bool,
             updated_at: nomifun_common::TimestampMs,
         ) -> Result<String, nomifun_db::DbError> {
             self.0
-                .set_binding(kind, id, kb_ids, enabled, writeback, writeback_mode, writeback_eagerness, channel_write_enabled, updated_at)
+                .set_binding(kind, id, kb_ids, enabled, writeback, writeback_eagerness, channel_write_enabled, updated_at)
                 .await
         }
         async fn delete_binding(&self, kind: &str, id: &str) -> Result<(), nomifun_db::DbError> {
@@ -10532,14 +9518,10 @@ mod tests {
         std::fs::write(root.join(".gitignore"), "*\n").unwrap();
         std::fs::create_dir_all(root.join("deploy")).unwrap();
         std::fs::write(root.join("deploy/rollback.md"), "# 回滚流程\n\n生产环境回滚分三步：先停流量……\n").unwrap();
-        let inbox = root.join("_inbox/0190f5fe-7c00-7a00-8000-000000000011");
-        std::fs::create_dir_all(&inbox).unwrap();
-        std::fs::write(inbox.join("draft.md"), "# 回滚草稿\n临时笔记\n").unwrap();
 
         let hits = svc.search_bases(&[info.knowledge_base_id.clone()], "回滚", 8).await.unwrap();
         assert!(!hits.is_empty(), "must find topic despite .gitignore + hidden mount semantics");
         assert!(hits.iter().any(|h| h.rel_path == "deploy/rollback.md"));
-        assert!(hits.iter().all(|h| !h.rel_path.starts_with("_inbox/")), "_inbox excluded");
         let top = &hits[0];
         assert_eq!(top.kb_name, "运维手册");
         assert!(top.heading.contains("回滚流程"));
@@ -11053,71 +10035,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn portable_writeback_staged_snapshot_cannot_merge_after_source_attach() {
-        let (service, kb_id, _dir) =
-            test_service_with_file("terms.md", "x").await;
-        let proposal_rel =
-            format!("{KB_INBOX_REL_DIR}/{TEST_CONVERSATION_ID}/snapshots/manual.md");
-        service
-            .write_document(WriteRequest {
-                spec: WriteTargetSpec::Path {
-                    kb_id: kb_id.clone(),
-                    rel_path: "snapshots/manual.md".into(),
-                },
-                content: "# Stale proposal\n".into(),
-                policy: WritePolicy {
-                    mode: WriteMode::Staged {
-                        scope: TEST_CONVERSATION_ID.into(),
-                    },
-                    allow_create: true,
-                    surface: WriteSurface::RegularChat,
-                },
-                bound_kb_ids: vec![kb_id.clone()],
-            })
-            .await
-            .unwrap();
-        service
-            .set_source(
-                kb_id.as_str(),
-                Some(url_source(
-                    KnowledgeSourceMode::Live,
-                    &["https://example.com/docs"],
-                )),
-            )
-            .await
-            .unwrap();
-
-        let error = service
-            .merge_inbox(
-                kb_id.as_str(),
-                TEST_CONVERSATION_ID,
-                "snapshots/manual.md",
-            )
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, AppError::Forbidden(_)), "{error:?}");
-        assert!(
-            service
-                .read_file(kb_id.as_str(), "snapshots/manual.md")
-                .await
-                .is_err()
-        );
-        let proposal = service
-            .read_file(kb_id.as_str(), &proposal_rel)
-            .await
-            .unwrap();
-        let base = service.get_base_info(kb_id.as_str()).await.unwrap();
-        let proposal_abs =
-            safe_md_path(Path::new(&base.root_path), &proposal_rel).unwrap();
-        assert_eq!(proposal.content, "# Stale proposal\n");
-        assert!(
-            staged_proposal_metadata_path(&proposal_abs).exists(),
-            "blocked proposal and its CAS metadata must remain reviewable"
-        );
-    }
-
-    #[tokio::test]
     async fn portable_writeback_publication_revalidates_source_after_resolution() {
         let (service, kb_id, _dir) =
             test_service_with_file("terms.md", "x").await;
@@ -11125,21 +10042,10 @@ mod tests {
             kb_id: kb_id.clone(),
             rel_path: "snapshots/direct.md".into(),
         };
-        let staged_spec = WriteTargetSpec::Path {
-            kb_id: kb_id.clone(),
-            rel_path: "snapshots/staged.md".into(),
-        };
         let direct_resolution = service
             .resolve_write_target(
                 std::slice::from_ref(&kb_id),
                 &direct_spec,
-            )
-            .await
-            .unwrap();
-        let staged_resolution = service
-            .resolve_write_target(
-                std::slice::from_ref(&kb_id),
-                &staged_spec,
             )
             .await
             .unwrap();
@@ -11168,46 +10074,14 @@ mod tests {
                     bound_kb_ids: vec![kb_id.clone()],
                 },
                 direct_resolution,
-                None,
-            )
-            .await
-            .unwrap_err();
-        let staged_error = service
-            .write_resolved_document_under_target_lock(
-                WriteRequest {
-                    spec: staged_spec,
-                    content: "# Staged\n".into(),
-                    policy: WritePolicy {
-                        mode: WriteMode::Staged {
-                            scope: TEST_CONVERSATION_ID.into(),
-                        },
-                        allow_create: true,
-                        surface: WriteSurface::RegularChat,
-                    },
-                    bound_kb_ids: vec![kb_id.clone()],
-                },
-                staged_resolution,
-                None,
             )
             .await
             .unwrap_err();
 
         assert!(matches!(direct_error, AppError::Forbidden(_)));
-        assert!(matches!(staged_error, AppError::Forbidden(_)));
         assert!(
             service
                 .read_file(kb_id.as_str(), "snapshots/direct.md")
-                .await
-                .is_err()
-        );
-        assert!(
-            service
-                .read_file(
-                    kb_id.as_str(),
-                    &format!(
-                        "{KB_INBOX_REL_DIR}/{TEST_CONVERSATION_ID}/snapshots/staged.md"
-                    ),
-                )
                 .await
                 .is_err()
         );
@@ -11615,61 +10489,10 @@ mod tests {
         junction::delete(&registered).unwrap();
     }
 
-    #[tokio::test]
-    async fn portable_writeback_uuid_first_logical_path_is_not_an_inbox_scope() {
-        let (service, kb_id, _dir) =
-            test_service_with_file("terms.md", "x").await;
-        let uuid_directory = "0190f5fe-7c00-7a00-8000-000000000099";
-        let outcome = service
-            .write_document(WriteRequest {
-                spec: WriteTargetSpec::Path {
-                    kb_id: kb_id.clone(),
-                    rel_path: format!("{uuid_directory}/note.md"),
-                },
-                content: "# UUID directory\n".into(),
-                policy: WritePolicy {
-                    mode: WriteMode::Staged {
-                        scope: TEST_CONVERSATION_ID.into(),
-                    },
-                    allow_create: true,
-                    surface: WriteSurface::RegularChat,
-                },
-                bound_kb_ids: vec![kb_id.clone()],
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(
-            outcome.final_rel_path,
-            format!(
-                "{KB_INBOX_REL_DIR}/{TEST_CONVERSATION_ID}/{uuid_directory}/note.md"
-            )
-        );
-        service
-            .merge_inbox(
-                kb_id.as_str(),
-                TEST_CONVERSATION_ID,
-                &format!("{uuid_directory}/note.md"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            service
-                .read_file(
-                    kb_id.as_str(),
-                    &format!("{uuid_directory}/note.md"),
-                )
-                .await
-                .unwrap()
-                .content,
-            "# UUID directory\n"
-        );
-    }
-
     // ── write_document + per-surface WritePolicy (P1) ─────────────────
 
-    fn wb_binding(writeback: bool, mode: &str) -> KnowledgeBinding {
-        KnowledgeBinding { enabled: true, writeback, writeback_mode: mode.to_owned(), ..Default::default() }
+    fn wb_binding(writeback: bool) -> KnowledgeBinding {
+        KnowledgeBinding { enabled: true, writeback, ..Default::default() }
     }
 
     #[tokio::test]
@@ -11694,81 +10517,143 @@ mod tests {
         assert_eq!(svc.search_cache_len(), 0);
     }
 
+    /// Placement is no longer a per-surface choice: every surface either writes
+    /// the base body or is refused outright. The single asymmetry left is the
+    /// external IM channel, so the whole matrix is pinned here — a third variant
+    /// silently reappearing would reintroduce a landing spot nobody reviews.
     #[test]
-    fn policy_regular_chat_defaults_staged_and_respects_direct() {
-        let p = resolve_write_policy(
+    fn write_policy_is_direct_or_disabled_on_every_surface() {
+        const SURFACES: [WriteSurface; 4] = [
             WriteSurface::RegularChat,
-            &wb_binding(true, "staged"),
-            TEST_CONVERSATION_ID,
-        );
-        assert!(matches!(p.mode, WriteMode::Staged { ref scope } if scope == TEST_CONVERSATION_ID));
-        let p = resolve_write_policy(
+            WriteSurface::Companion,
+            WriteSurface::TerminalAcp,
+            WriteSurface::ExternalChannel,
+        ];
+
+        for surface in SURFACES {
+            // `channel_write_enabled` is deliberately on here: the toggle may
+            // only widen an already-open door, never open one.
+            let mut off = wb_binding(false);
+            off.channel_write_enabled = true;
+            assert!(
+                matches!(resolve_write_policy(surface, &off).mode, WriteMode::Disabled),
+                "{surface:?} must stay disabled while write-back is off"
+            );
+        }
+
+        for surface in [
             WriteSurface::RegularChat,
-            &wb_binding(true, "direct"),
-            TEST_CONVERSATION_ID,
-        );
-        assert!(matches!(p.mode, WriteMode::Direct));
+            WriteSurface::Companion,
+            WriteSurface::TerminalAcp,
+        ] {
+            assert!(
+                matches!(resolve_write_policy(surface, &wb_binding(true)).mode, WriteMode::Direct),
+                "{surface:?} writes the base body once write-back is on"
+            );
+        }
+
+        assert!(matches!(
+            resolve_write_policy(WriteSurface::ExternalChannel, &wb_binding(true)).mode,
+            WriteMode::Disabled
+        ));
+        let mut channel_on = wb_binding(true);
+        channel_on.channel_write_enabled = true;
+        assert!(matches!(
+            resolve_write_policy(WriteSurface::ExternalChannel, &channel_on).mode,
+            WriteMode::Direct
+        ));
     }
 
+    /// `channel_write_enabled` is all that stands between an unattended IM bot
+    /// and the base body, so it keeps its own named guard: the flip must be the
+    /// only way in, and powerless while the binding itself is off.
     #[test]
-    fn policy_companion_direct_channel_disabled_unwritten_disabled() {
-        assert!(matches!(resolve_write_policy(WriteSurface::Companion, &wb_binding(true, "staged"), "c").mode, WriteMode::Direct));
-        assert!(matches!(resolve_write_policy(WriteSurface::ExternalChannel, &wb_binding(true, "direct"), "c").mode, WriteMode::Disabled));
-        assert!(matches!(resolve_write_policy(WriteSurface::RegularChat, &wb_binding(false, "direct"), "c").mode, WriteMode::Disabled));
-    }
-
-    #[test]
-    fn policy_external_channel_respects_write_toggle_and_forces_staged() {
+    fn policy_external_channel_respects_write_toggle() {
         // Off (default) → Disabled even with writeback on.
         let off = KnowledgeBinding { enabled: true, writeback: true, channel_write_enabled: false, ..Default::default() };
-        assert!(matches!(resolve_write_policy(WriteSurface::ExternalChannel, &off, "ch-1").mode, WriteMode::Disabled));
-        // On → Staged (never Direct), regardless of writeback_mode.
-        let on = KnowledgeBinding {
-            enabled: true,
-            writeback: true,
-            writeback_mode: "direct".into(),
-            channel_write_enabled: true,
-            ..Default::default()
-        };
-        assert!(
-            matches!(resolve_write_policy(WriteSurface::ExternalChannel, &on, "ch-1").mode, WriteMode::Staged { ref scope } if scope == "ch-1"),
-            "channel writes must be forced to staged even when mode=direct"
-        );
-        // Toggle is irrelevant when write-back itself is off.
-        let no_wb = KnowledgeBinding { enabled: true, writeback: false, channel_write_enabled: true, ..Default::default() };
-        assert!(matches!(resolve_write_policy(WriteSurface::ExternalChannel, &no_wb, "ch-1").mode, WriteMode::Disabled));
+        assert!(matches!(resolve_write_policy(WriteSurface::ExternalChannel, &off).mode, WriteMode::Disabled));
+        // On → the owner has opted in, so the channel writes like any surface.
+        let on = KnowledgeBinding { enabled: true, writeback: true, channel_write_enabled: true, ..Default::default() };
+        assert!(matches!(resolve_write_policy(WriteSurface::ExternalChannel, &on).mode, WriteMode::Direct));
+        // Both switches are irrelevant when the binding is not enabled at all —
+        // nothing is mounted, so nothing may be written.
+        let unbound = KnowledgeBinding { enabled: false, writeback: true, channel_write_enabled: true, ..Default::default() };
+        assert!(matches!(resolve_write_policy(WriteSurface::ExternalChannel, &unbound).mode, WriteMode::Disabled));
     }
 
+    /// The disposition vocabulary shrank to `manual`/`auto`. `conservative` and
+    /// `aggressive` must not be quietly re-admitted: they parse to the
+    /// restrained default, so an owner would believe a disposition they never
+    /// chose was in force.
+    #[test]
+    fn eagerness_allow_list_is_manual_and_auto() {
+        assert_eq!(WRITEBACK_EAGERNESS, &["manual", "auto"]);
+        for retired in ["conservative", "aggressive"] {
+            assert!(
+                !WRITEBACK_EAGERNESS.contains(&retired),
+                "{retired} is retired vocabulary and must not be accepted"
+            );
+        }
+        assert_eq!(KnowledgeBinding::default().writeback_eagerness, "manual");
+    }
+
+    /// An un-migrated caller must fail loudly rather than be silently coerced —
+    /// a coerced binding reads back as configured while behaving as `manual`.
     #[tokio::test]
-    async fn staged_update_writes_to_inbox_and_preserves_original() {
-        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
-        let req = WriteRequest {
-            spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: "terms.md".into() },
-            content: "PROPOSED".into(),
-            policy: WritePolicy { mode: WriteMode::Staged { scope: TEST_CONVERSATION_ID.to_owned() }, allow_create: true, surface: WriteSurface::RegularChat },
-            bound_kb_ids: vec![kb_id.clone()],
-        };
-        let out = svc.write_document(req).await.unwrap();
-        assert_eq!(
-            out.final_rel_path,
-            "_inbox/0190f5fe-7c00-7a00-8000-000000000011/terms.md"
-        );
-        assert!(out.staged && out.op == WriteOp::Update);
-        assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "ORIGINAL");
-        assert_eq!(
-            svc.read_file(
-                &kb_id,
-                "_inbox/0190f5fe-7c00-7a00-8000-000000000011/terms.md",
+    async fn set_binding_rejects_the_retired_disposition_vocabulary() {
+        let (svc, kb_id, _dir) = test_service_with_file("a.md", "x").await;
+        let error = svc
+            .set_binding(
+                "conversation",
+                TEST_CONVERSATION_ID,
+                KnowledgeBinding {
+                    enabled: true,
+                    writeback: true,
+                    writeback_eagerness: "conservative".into(),
+                    kb_ids: vec![kb_id],
+                    ..Default::default()
+                },
             )
             .await
-            .unwrap()
-            .content,
-            "PROPOSED"
+            .unwrap_err();
+
+        assert!(
+            matches!(error, AppError::BadRequest(ref message) if message.contains("writeback_eagerness")),
+            "{error}"
         );
     }
 
+    /// Second rule of [`validate_canonical_write_target`]: a document parked
+    /// under a directory the walkers prune is invisible to search and to the
+    /// owner, so a write-back that lands there is indistinguishable from a
+    /// write-back that was silently dropped.
+    #[test]
+    fn canonical_write_target_refuses_directories_hidden_from_review() {
+        for hidden in [
+            ".obsidian/workspace.md",
+            ".git/COMMIT_EDITMSG.md",
+            "node_modules/pkg/readme.md",
+            "_trash/old.md",
+            "notes/.hidden/deep.md",
+        ] {
+            assert!(
+                matches!(
+                    validate_canonical_write_target(hidden),
+                    Err(AppError::BadRequest(_))
+                ),
+                "{hidden} must be refused"
+            );
+        }
+        assert!(validate_canonical_write_target("notes/visible.md").is_ok());
+        // Only PARENT components are machinery — a leading-dot file name is a
+        // legitimate document and must not be swept up by the same rule.
+        assert!(validate_canonical_write_target(".hidden.md").is_ok());
+    }
+
+    /// The handle spec (what `knowledge_search`/`knowledge_read` hand back) must
+    /// resolve to the very document it was minted from and append there.
     #[tokio::test]
-    async fn direct_update_overwrites_original() {
+    async fn direct_update_via_handle_appends_to_the_addressed_document() {
         let (svc, kb_id, _dir) = test_service_with_file("terms.md", "OLD").await;
         let req = WriteRequest {
             spec: WriteTargetSpec::Handle(encode_doc_handle(&kb_id, "terms.md")),
@@ -11778,8 +10663,96 @@ mod tests {
         };
         let out = svc.write_document(req).await.unwrap();
         assert_eq!(out.final_rel_path, "terms.md");
-        assert!(!out.staged);
-        assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "NEW");
+        assert_eq!(out.op, WriteOp::Update);
+        let body = svc.read_file(&kb_id, "terms.md").await.unwrap().content;
+        assert!(body.starts_with("OLD"), "{body}");
+        assert!(body.contains("NEW"), "{body}");
+    }
+
+    /// The regression guard for the data-loss hazard staged placement used to
+    /// cover. The tool write path may no longer overwrite: the model sees a
+    /// prompt-sized excerpt, never the whole document, so an unconditional
+    /// rewrite would silently discard everything the owner curated by hand.
+    /// A short new fact must therefore be APPENDED to a large document that
+    /// stays byte-for-byte intact.
+    #[tokio::test]
+    async fn tool_direct_update_appends_and_never_truncates() {
+        let existing = format!(
+            "# 术语表\n\n{}\nTAIL-SENTINEL\n",
+            "已有条目：必须原样保留。\n".repeat(2_000)
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let (svc, kb_id, root) = crate::testutil::make_service_with_base(
+            &dir.path().join("data"),
+            "库",
+            &[("terms.md", existing.as_str())],
+        )
+        .await;
+
+        let out = svc
+            .write_document(WriteRequest {
+                spec: WriteTargetSpec::Path {
+                    kb_id: kb_id.clone(),
+                    rel_path: "terms.md".into(),
+                },
+                content: "新增：一条简短的事实。".into(),
+                policy: WritePolicy {
+                    mode: WriteMode::Direct,
+                    allow_create: true,
+                    surface: WriteSurface::RegularChat,
+                },
+                bound_kb_ids: vec![kb_id.clone()],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(out.op, WriteOp::Update);
+        // Read the raw bytes rather than going back through the service, so the
+        // truncation claim is about what actually reached the disk.
+        let body = std::fs::read_to_string(root.join("terms.md")).unwrap();
+        assert!(body.starts_with("# 术语表"), "original heading was rewritten");
+        assert!(body.contains("已有条目：必须原样保留。"), "original body text was lost");
+        assert!(body.contains("TAIL-SENTINEL"), "the document tail was truncated");
+        assert!(body.contains("新增：一条简短的事实。"), "the new fact never landed");
+        assert!(
+            body.len() > existing.len(),
+            "a short update must grow the document, never shrink it: {} vs {}",
+            body.len(),
+            existing.len()
+        );
+    }
+
+    /// Repeated turns and manual retries propose the same material again. That
+    /// must be a no-op rather than a stack of duplicate paragraphs.
+    #[tokio::test]
+    async fn tool_direct_update_is_idempotent_for_material_already_present() {
+        let (svc, kb_id, _dir) =
+            test_service_with_file("terms.md", "# 术语表\n\n已有条目。\n").await;
+        let request = || WriteRequest {
+            spec: WriteTargetSpec::Path {
+                kb_id: kb_id.clone(),
+                rel_path: "terms.md".into(),
+            },
+            content: "新增：只应出现一次。".into(),
+            policy: WritePolicy {
+                mode: WriteMode::Direct,
+                allow_create: true,
+                surface: WriteSurface::RegularChat,
+            },
+            bound_kb_ids: vec![kb_id.clone()],
+        };
+
+        svc.write_document(request()).await.unwrap();
+        let first = svc.read_file(&kb_id, "terms.md").await.unwrap().content;
+        svc.write_document(request()).await.unwrap();
+        let second = svc.read_file(&kb_id, "terms.md").await.unwrap().content;
+
+        assert_eq!(first, second, "the retry must not touch the document at all");
+        assert_eq!(
+            second.matches("新增：只应出现一次。").count(),
+            1,
+            "{second}"
+        );
     }
 
     #[tokio::test]
@@ -11794,33 +10767,35 @@ mod tests {
         assert!(matches!(svc.write_document(req).await.unwrap_err(), AppError::Forbidden(_)));
     }
 
-    /// The exact reported scenario: STAGED regular-chat write-back where the
-    /// model passes the workspace-mount path. It must land in the review inbox
-    /// mirroring the ORIGINAL doc — NOT a new nested file — and the original
-    /// must be untouched.
+    /// The exact reported scenario: the model passes the workspace-MOUNT path
+    /// instead of the base-relative one. That must resolve to the ORIGINAL
+    /// document — not create a new file nested under `.nomi/knowledge/...`,
+    /// which nothing would ever read back.
     #[tokio::test]
-    async fn mothers_bug_staged_mount_prefixed_path_lands_in_inbox_not_nested() {
+    async fn mothers_bug_mount_prefixed_path_updates_original_not_a_nested_copy() {
         let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
         let req = WriteRequest {
             spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: ".nomi/knowledge/Finance/terms.md".into() },
             content: "PROPOSED EDIT".into(),
-            policy: WritePolicy { mode: WriteMode::Staged { scope: TEST_CONVERSATION_ID_9.to_owned() }, allow_create: true, surface: WriteSurface::RegularChat },
+            policy: WritePolicy { mode: WriteMode::Direct, allow_create: true, surface: WriteSurface::RegularChat },
             bound_kb_ids: vec![kb_id.clone()],
         };
         let out = svc.write_document(req).await.unwrap();
         assert_eq!(
             out.final_rel_path,
-            "_inbox/0190f5fe-7c00-7a00-8000-000000000019/terms.md",
-            "mirror original, not nest under .nomi/..."
+            "terms.md",
+            "update the original, not nest under .nomi/..."
         );
         assert_eq!(out.op, WriteOp::Update);
-        assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "ORIGINAL");
+        let body = svc.read_file(&kb_id, "terms.md").await.unwrap().content;
+        assert!(body.starts_with("ORIGINAL"), "{body}");
+        assert!(body.contains("PROPOSED EDIT"), "{body}");
         let files = svc.list_files(&kb_id).await.unwrap();
         assert!(!files.iter().any(|f| f.rel_path.contains(".nomi/knowledge")), "no nested mount-path file: {files:?}");
     }
 
     #[tokio::test]
-    async fn turn_finalizer_staged_aggressive_writes_candidate_to_inbox_after_final_answer() {
+    async fn turn_finalizer_auto_writes_candidate_to_the_base_after_final_answer() {
         let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
         let reply = format!(
             r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"patterns/finalizer.md","content":"# 回写触发\n\n知识库回写应在 assistant 最终答复后再检查一次。"}}]}}"##
@@ -11842,14 +10817,12 @@ mod tests {
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
-                    writeback_mode: "staged".into(),
-                    writeback_eagerness: "aggressive".into(),
+                    writeback_eagerness: "auto".into(),
                     kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: TEST_CONVERSATION_ID.to_owned(),
-                user_text: "请分析为什么暂存没有产出。".into(),
+                user_text: "请分析为什么回写没有产出。".into(),
                 assistant_text: "结论：触发时机应放在最终答复之后。".into(),
                 model: None,
                 excluded_targets: None,
@@ -11859,16 +10832,12 @@ mod tests {
 
         assert_eq!(report.status, TurnWritebackStatus::Written);
         assert_eq!(report.written.len(), 1);
-        assert_eq!(
-            report.written[0].final_rel_path,
-            "_inbox/0190f5fe-7c00-7a00-8000-000000000011/patterns/finalizer.md"
-        );
+        assert_eq!(report.written[0].final_rel_path, "patterns/finalizer.md");
+        assert_eq!(report.written[0].op, WriteOp::Create);
+        // A new document must not disturb the unrelated one it sits beside.
         assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "ORIGINAL");
         assert!(
-            svc.read_file(
-                &kb_id,
-                "_inbox/0190f5fe-7c00-7a00-8000-000000000011/patterns/finalizer.md",
-            )
+            svc.read_file(&kb_id, "patterns/finalizer.md")
                 .await
                 .unwrap()
                 .content
@@ -11876,8 +10845,8 @@ mod tests {
         );
         assert_eq!(completer.calls.load(Ordering::SeqCst), 1);
         assert!(
-            completer.last_user.lock().unwrap().contains("eagerness: aggressive"),
-            "eagerness must shape extraction, not placement"
+            completer.last_user.lock().unwrap().contains("eagerness: auto"),
+            "eagerness must reach extraction — it is the only knob left"
         );
         assert_eq!(
             *completer.last_override.lock().unwrap(),
@@ -11906,12 +10875,10 @@ mod tests {
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
-                    writeback_mode: "staged".into(),
                     kb_ids: vec![kb_id],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: Some(ProviderWithModel {
@@ -11963,12 +10930,10 @@ mod tests {
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
-                    writeback_mode: "staged".into(),
                     kb_ids: vec![kb_id.clone()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
@@ -12014,12 +10979,10 @@ mod tests {
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
-                    writeback_mode: "staged".into(),
                     kb_ids: vec![kb_id],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
@@ -12056,13 +11019,11 @@ mod tests {
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: false,
-                    writeback_mode: "direct".into(),
-                    writeback_eagerness: "aggressive".into(),
+                    writeback_eagerness: "auto".into(),
                     kb_ids: vec![KnowledgeBaseId::parse(kb_id).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
@@ -12079,11 +11040,14 @@ mod tests {
         );
     }
 
+    /// The finalizer must refuse a candidate that would land somewhere the
+    /// walkers prune. Writing it would report success while producing a document
+    /// no search, TOC or owner will ever see again.
     #[tokio::test]
-    async fn turn_finalizer_rejects_candidates_that_target_inbox_directly() {
+    async fn turn_finalizer_rejects_candidates_that_target_hidden_directories() {
         let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
         let reply = format!(
-            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"_INBOX/manual.md","content":"# Bad"}}]}}"##
+            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":".obsidian/manual.md","content":"# Bad"}}]}}"##
         );
         svc.set_completer(ScriptedCompleter::new(&[&reply]));
 
@@ -12101,12 +11065,10 @@ mod tests {
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
-                    writeback_mode: "staged".into(),
                     kb_ids: vec![KnowledgeBaseId::parse(kb_id).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
@@ -12117,7 +11079,7 @@ mod tests {
 
         assert_eq!(report.status, TurnWritebackStatus::Failed);
         assert_eq!(report.written.len(), 0);
-        assert!(report.failures[0].error.contains("not the review inbox"));
+        assert!(report.failures[0].error.contains("hidden from review and search"));
     }
 
     #[tokio::test]
@@ -12155,13 +11117,11 @@ mod tests {
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
-                    writeback_mode: "direct".into(),
-                    writeback_eagerness: "aggressive".into(),
+                    writeback_eagerness: "auto".into(),
                     kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "请补充这个经验。".into(),
                 assistant_text: "结论：应保留旧内容并追加新经验。".into(),
                 model: None,
@@ -12202,13 +11162,11 @@ mod tests {
             binding: KnowledgeBinding {
                 enabled: true,
                 writeback: true,
-                writeback_mode: "direct".into(),
-                writeback_eagerness: "aggressive".into(),
+                writeback_eagerness: "auto".into(),
                 kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
                 ..Default::default()
             },
             surface: WriteSurface::RegularChat,
-            scope: TEST_CONVERSATION_ID.to_owned(),
             user_text: user_text.into(),
             assistant_text: "final durable answer".into(),
             model: None,
@@ -12267,13 +11225,11 @@ mod tests {
             binding: KnowledgeBinding {
                 enabled: true,
                 writeback: true,
-                writeback_mode: "direct".into(),
-                writeback_eagerness: "aggressive".into(),
+                writeback_eagerness: "auto".into(),
                 kb_ids: vec![kb_id.clone()],
                 ..Default::default()
             },
             surface: WriteSurface::RegularChat,
-            scope: TEST_CONVERSATION_ID.to_owned(),
             user_text: user_text.into(),
             assistant_text: "final durable answer".into(),
             model: None,
@@ -12296,148 +11252,11 @@ mod tests {
         assert!(body.contains("Beta durable note."), "{body}");
     }
 
+    /// The finalizer skips a candidate whose material is already in the target
+    /// document — an explicit `knowledge_write` earlier in the same turn is the
+    /// common case, and re-appending it would duplicate the paragraph.
     #[tokio::test]
-    async fn turn_finalizer_concurrent_staged_collision_has_one_durable_winner() {
-        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
-        svc.set_completer(ConcurrentStagedCollisionCompleter::new(kb_id.clone()));
-
-        let request = |user_text: &str| TurnWritebackRequest {
-            mounts: vec![KnowledgeMountInfo {
-                knowledge_base_id: kb_id.clone(),
-                name: "Shared".into(),
-                description: String::new(),
-                rel_path: ".nomi/knowledge/Shared".into(),
-                toc: Vec::new(),
-                summary: None,
-                live_sources: Vec::new(),
-            }],
-            binding: KnowledgeBinding {
-                enabled: true,
-                writeback: true,
-                writeback_mode: "staged".into(),
-                writeback_eagerness: "aggressive".into(),
-                kb_ids: vec![kb_id.clone()],
-                ..Default::default()
-            },
-            surface: WriteSurface::RegularChat,
-            scope: TEST_CONVERSATION_ID.to_owned(),
-            user_text: user_text.into(),
-            assistant_text: "final durable answer".into(),
-            model: None,
-            excluded_targets: None,
-            cancellation: None,
-        };
-
-        let (alpha, beta) = tokio::join!(
-            svc.finalize_turn_writeback(request("alpha-user")),
-            svc.finalize_turn_writeback(request("beta-user")),
-        );
-
-        assert_eq!(
-            [&alpha, &beta]
-                .into_iter()
-                .filter(|report| report.status == TurnWritebackStatus::Written)
-                .count(),
-            1,
-            "exactly one proposal may claim a staged target: alpha={alpha:?}, beta={beta:?}"
-        );
-        let (winner, conflict) = if alpha.status == TurnWritebackStatus::Written {
-            (&alpha, &beta)
-        } else {
-            (&beta, &alpha)
-        };
-        assert_eq!(winner.written.len(), 1, "{winner:?}");
-        assert_eq!(conflict.status, TurnWritebackStatus::Failed, "{conflict:?}");
-        assert!(conflict.written.is_empty(), "{conflict:?}");
-        assert_eq!(conflict.failures.len(), 1, "{conflict:?}");
-        assert!(
-            conflict.failures[0]
-                .error
-                .contains("different pending review proposal already targets"),
-            "{conflict:?}"
-        );
-
-        let winner_body = svc
-            .read_file(
-                kb_id.as_str(),
-                winner.written[0].final_rel_path.as_str(),
-            )
-            .await
-            .unwrap()
-            .content;
-        assert!(
-            winner_body == "ALPHA" || winner_body == "BETA",
-            "{winner_body}"
-        );
-        assert_eq!(
-            svc.read_file(kb_id.as_str(), "terms.md")
-                .await
-                .unwrap()
-                .content,
-            "ORIGINAL"
-        );
-    }
-
-    #[tokio::test]
-    async fn turn_finalizer_staged_collision_does_not_overwrite_existing_proposal() {
-        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
-        svc.write_file(
-            &kb_id,
-            "_inbox/0190f5fe-7c00-7a00-8000-000000000011/patterns/note.md",
-            "FIRST",
-        )
-            .await
-            .unwrap();
-        let reply = format!(
-            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"patterns/note.md","content":"SECOND"}}]}}"##
-        );
-        svc.set_completer(ScriptedCompleter::new(&[&reply]));
-
-        let report = svc
-            .finalize_turn_writeback(TurnWritebackRequest {
-                mounts: vec![KnowledgeMountInfo {
-                    knowledge_base_id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
-                    name: "领域库".into(),
-                    description: String::new(),
-                    rel_path: ".nomi/knowledge/领域库".into(),
-                    toc: Vec::new(),
-                    summary: None,
-                    live_sources: Vec::new(),
-                }],
-                binding: KnowledgeBinding {
-                    enabled: true,
-                    writeback: true,
-                    writeback_mode: "staged".into(),
-                    kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
-                    ..Default::default()
-                },
-                surface: WriteSurface::RegularChat,
-                scope: TEST_CONVERSATION_ID.to_owned(),
-                user_text: "u".into(),
-                assistant_text: "a".into(),
-                model: None,
-                excluded_targets: None,
-                cancellation: None,
-            })
-            .await;
-
-        assert_eq!(report.status, TurnWritebackStatus::Failed, "{report:?}");
-        assert_eq!(
-            svc.read_file(
-                &kb_id,
-                "_inbox/0190f5fe-7c00-7a00-8000-000000000011/patterns/note.md",
-            )
-                .await
-                .unwrap()
-                .content,
-            "FIRST"
-        );
-        assert!(report.written.is_empty());
-        assert!(report.failures[0].error.contains("pending review proposal"));
-    }
-
-    #[tokio::test]
-    async fn turn_finalizer_staged_skips_candidate_already_written_by_explicit_tool() {
+    async fn turn_finalizer_skips_candidate_already_written_by_explicit_tool() {
         let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
         let parsed_kb_id = KnowledgeBaseId::parse(kb_id.clone()).unwrap();
         svc.write_document(WriteRequest {
@@ -12445,11 +11264,9 @@ mod tests {
                 kb_id: parsed_kb_id.clone(),
                 rel_path: "patterns/note.md".into(),
             },
-            content: "# Durable\n\nAlready staged by knowledge_write.".into(),
+            content: "# Durable\n\nAlready written by knowledge_write.".into(),
             policy: WritePolicy {
-                mode: WriteMode::Staged {
-                    scope: TEST_CONVERSATION_ID.into(),
-                },
+                mode: WriteMode::Direct,
                 allow_create: true,
                 surface: WriteSurface::RegularChat,
             },
@@ -12457,8 +11274,9 @@ mod tests {
         })
         .await
         .unwrap();
+        let before = svc.read_file(&kb_id, "patterns/note.md").await.unwrap().content;
         let reply = format!(
-            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"patterns/note.md","content":"# Durable\n\nAlready staged by knowledge_write."}}]}}"##
+            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"patterns/note.md","content":"# Durable\n\nAlready written by knowledge_write."}}]}}"##
         );
         svc.set_completer(ScriptedCompleter::new(&[&reply]));
 
@@ -12476,12 +11294,10 @@ mod tests {
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
-                    writeback_mode: "staged".into(),
                     kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
@@ -12492,190 +11308,19 @@ mod tests {
 
         assert_eq!(report.status, TurnWritebackStatus::NoCandidate, "{report:?}");
         assert_eq!(report.written.len(), 0);
-        assert!(
-            svc.read_file(
-                &kb_id,
-                "_inbox/0190f5fe-7c00-7a00-8000-000000000011/patterns/note.md",
-            )
-                .await
-                .is_ok(),
-            "finalizer must preserve the same-content explicit knowledge_write proposal"
+        assert_eq!(
+            svc.read_file(&kb_id, "patterns/note.md").await.unwrap().content,
+            before,
+            "already-present material must not be appended a second time"
         );
     }
 
-    /// **P4 inbox e2e**: stage proposals via the P1 staged-write path, then
-    /// list / diff / merge / discard them, and prove the main document list
-    /// hides `_inbox/`.
+    /// A retry that re-spells the path in another case must land on the SAME
+    /// document and keep the spelling the base already has. Otherwise a
+    /// case-insensitive volume ends up with two names for one file, and a
+    /// case-sensitive one silently forks the knowledge in two.
     #[tokio::test]
-    async fn inbox_review_lists_diffs_merges_and_discards() {
-        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL\n").await;
-        let stage = |rel: &str, content: &str, scope: &str| WriteRequest {
-            spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: rel.into() },
-            content: content.into(),
-            policy: WritePolicy {
-                mode: WriteMode::Staged { scope: scope.into() },
-                allow_create: true,
-                surface: WriteSurface::RegularChat,
-            },
-            bound_kb_ids: vec![kb_id.clone()],
-        };
-        svc.write_document(stage("terms.md", "UPDATED\n", TEST_CONVERSATION_ID))
-            .await
-            .unwrap();
-        svc.write_document(stage("new-note.md", "BRAND NEW\n", TEST_CONVERSATION_ID_2))
-            .await
-            .unwrap();
-
-        // Main document list excludes `_inbox/`.
-        let files = svc.list_files(&kb_id).await.unwrap();
-        assert!(files.iter().all(|f| !f.rel_path.starts_with("_inbox")), "main list hides inbox: {files:?}");
-        assert!(files.iter().any(|f| f.rel_path == "terms.md"));
-
-        // Inbox lists both proposals (grouped by scope client-side).
-        let inbox = svc.list_inbox(&kb_id).await.unwrap();
-        assert_eq!(inbox.len(), 2, "two staged proposals: {inbox:?}");
-        assert_eq!(
-            inbox.iter().find(|e| e.rel_path == "terms.md").unwrap().scope,
-            TEST_CONVERSATION_ID
-        );
-        assert_eq!(svc.count_pending_inbox().await.unwrap(), 2, "global pending count reflects staged proposals");
-
-        // Update diff carries old+new; new-doc diff flags is_new.
-        let d = svc
-            .inbox_diff(&kb_id, TEST_CONVERSATION_ID, "terms.md")
-            .await
-            .unwrap();
-        assert!(!d.is_new);
-        assert_eq!(d.base_content.as_deref(), Some("ORIGINAL\n"));
-        assert!(d.unified_diff.contains("-ORIGINAL") && d.unified_diff.contains("+UPDATED"), "diff: {}", d.unified_diff);
-        let dn = svc
-            .inbox_diff(&kb_id, TEST_CONVERSATION_ID_2, "new-note.md")
-            .await
-            .unwrap();
-        assert!(dn.is_new && dn.base_content.is_none());
-
-        // Merge → base overwritten, inbox copy gone, scope dir pruned.
-        assert_eq!(
-            svc.merge_inbox(&kb_id, TEST_CONVERSATION_ID, "terms.md")
-                .await
-                .unwrap()
-                .merged_path,
-            "terms.md"
-        );
-        assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "UPDATED\n");
-        let after = svc.list_inbox(&kb_id).await.unwrap();
-        assert_eq!(after.len(), 1, "merged proposal removed");
-        assert_eq!(after[0].rel_path, "new-note.md");
-
-        // Discard → gone, base never created.
-        svc.discard_inbox(&kb_id, TEST_CONVERSATION_ID_2, "new-note.md")
-            .await
-            .unwrap();
-        assert!(svc.list_inbox(&kb_id).await.unwrap().is_empty());
-        assert!(svc.read_file(&kb_id, "new-note.md").await.is_err(), "discarded proposal never merged");
-
-        // Vanished proposal → NotFound; traversal scope → BadRequest.
-        assert!(
-            svc.inbox_diff(&kb_id, TEST_CONVERSATION_ID, "terms.md")
-                .await
-                .is_err()
-        );
-        assert!(svc.inbox_diff(&kb_id, "..", "terms.md").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn portable_writeback_staged_merge_rejects_changed_base() {
-        let (svc, kb_id, _dir) =
-            test_service_with_file("terms.md", "ORIGINAL\n").await;
-        svc.write_document(WriteRequest {
-            spec: WriteTargetSpec::Path {
-                kb_id: kb_id.clone(),
-                rel_path: "terms.md".into(),
-            },
-            content: "PROPOSED\n".into(),
-            policy: WritePolicy {
-                mode: WriteMode::Staged {
-                    scope: TEST_CONVERSATION_ID.into(),
-                },
-                allow_create: true,
-                surface: WriteSurface::RegularChat,
-            },
-            bound_kb_ids: vec![kb_id.clone()],
-        })
-        .await
-        .unwrap();
-        svc.write_file(&kb_id, "terms.md", "USER EDIT\n")
-            .await
-            .unwrap();
-
-        let error = svc
-            .merge_inbox(&kb_id, TEST_CONVERSATION_ID, "terms.md")
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, AppError::Conflict(_)), "{error:?}");
-        assert_eq!(
-            svc.read_file(&kb_id, "terms.md").await.unwrap().content,
-            "USER EDIT\n"
-        );
-        assert!(
-            svc.read_file(
-                &kb_id,
-                &format!(
-                    "{KB_INBOX_REL_DIR}/{TEST_CONVERSATION_ID}/terms.md"
-                ),
-            )
-            .await
-            .is_ok(),
-            "stale proposal must remain available to inspect or discard"
-        );
-    }
-
-    #[tokio::test]
-    async fn portable_writeback_staged_merge_recovers_after_publication() {
-        let (svc, kb_id, _dir) =
-            test_service_with_file("terms.md", "ORIGINAL\n").await;
-        let proposal_rel =
-            format!("{KB_INBOX_REL_DIR}/{TEST_CONVERSATION_ID}/terms.md");
-        svc.write_document(WriteRequest {
-            spec: WriteTargetSpec::Path {
-                kb_id: kb_id.clone(),
-                rel_path: "terms.md".into(),
-            },
-            content: "PROPOSED\n".into(),
-            policy: WritePolicy {
-                mode: WriteMode::Staged {
-                    scope: TEST_CONVERSATION_ID.into(),
-                },
-                allow_create: true,
-                surface: WriteSurface::RegularChat,
-            },
-            bound_kb_ids: vec![kb_id.clone()],
-        })
-        .await
-        .unwrap();
-        svc.write_file(&kb_id, "terms.md", "PROPOSED\n")
-            .await
-            .unwrap();
-        let base = svc.get_base_info(&kb_id).await.unwrap();
-        let proposal_abs =
-            safe_md_path(Path::new(&base.root_path), &proposal_rel).unwrap();
-        std::fs::remove_file(staged_proposal_metadata_path(&proposal_abs))
-            .unwrap();
-
-        svc.merge_inbox(&kb_id, TEST_CONVERSATION_ID, "terms.md")
-            .await
-            .unwrap();
-
-        assert!(svc.read_file(&kb_id, &proposal_rel).await.is_err());
-        assert_eq!(
-            svc.read_file(&kb_id, "terms.md").await.unwrap().content,
-            "PROPOSED\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn portable_writeback_staged_retry_reuses_case_alias_and_sidecar() {
+    async fn portable_writeback_retry_reuses_the_existing_case_alias() {
         let (svc, kb_id, _dir) = test_service_with_file("terms.md", "x").await;
         let request = |rel_path: &str| WriteRequest {
             spec: WriteTargetSpec::Path {
@@ -12684,155 +11329,28 @@ mod tests {
             },
             content: "# Portable proposal\n".into(),
             policy: WritePolicy {
-                mode: WriteMode::Staged {
-                    scope: TEST_CONVERSATION_ID.into(),
-                },
+                mode: WriteMode::Direct,
                 allow_create: true,
                 surface: WriteSurface::RegularChat,
             },
             bound_kb_ids: vec![kb_id.clone()],
         };
-        svc.write_document(request("Notes/Foo.md")).await.unwrap();
+        let created = svc.write_document(request("Notes/Foo.md")).await.unwrap();
         let retried = svc.write_document(request("notes/foo.md")).await.unwrap();
 
+        assert_eq!(created.op, WriteOp::Create);
+        assert_eq!(created.final_rel_path, "Notes/Foo.md");
+        assert_eq!(retried.op, WriteOp::Update);
+        assert_eq!(retried.final_rel_path, "Notes/Foo.md");
+        let documents = svc.list_files(&kb_id).await.unwrap();
         assert_eq!(
-            retried.final_rel_path,
-            format!(
-                "{KB_INBOX_REL_DIR}/{TEST_CONVERSATION_ID}/Notes/Foo.md"
-            )
+            documents
+                .iter()
+                .filter(|entry| entry.rel_path.ends_with("Foo.md"))
+                .count(),
+            1,
+            "the alias must not fork a second document: {documents:?}"
         );
-        let proposals = svc.list_inbox(&kb_id).await.unwrap();
-        assert_eq!(proposals.len(), 1);
-        assert_eq!(proposals[0].rel_path, "Notes/Foo.md");
-    }
-
-    #[tokio::test]
-    async fn portable_writeback_staged_write_rejects_inbox_alias() {
-        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "x").await;
-        let base = svc.get_base_info(&kb_id).await.unwrap();
-        std::fs::create_dir(Path::new(&base.root_path).join("_INBOX"))
-            .unwrap();
-
-        let error = svc
-            .write_document(WriteRequest {
-                spec: WriteTargetSpec::Path {
-                    kb_id: kb_id.clone(),
-                    rel_path: "new.md".into(),
-                },
-                content: "new".into(),
-                policy: WritePolicy {
-                    mode: WriteMode::Staged {
-                        scope: TEST_CONVERSATION_ID.into(),
-                    },
-                    allow_create: true,
-                    surface: WriteSurface::RegularChat,
-                },
-                bound_kb_ids: vec![kb_id.clone()],
-            })
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, AppError::Conflict(_)), "{error:?}");
-    }
-
-    /// **Batch merge**: merge_all_inbox accepts all staged proposals and count
-    /// drops to zero.
-    #[tokio::test]
-    async fn merge_all_clears_pending() {
-        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL\n").await;
-        let stage = |rel: &str, content: &str, scope: &str| WriteRequest {
-            spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: rel.into() },
-            content: content.into(),
-            policy: WritePolicy {
-                mode: WriteMode::Staged { scope: scope.into() },
-                allow_create: true,
-                surface: WriteSurface::RegularChat,
-            },
-            bound_kb_ids: vec![kb_id.clone()],
-        };
-        svc.write_document(stage("terms.md", "UPDATED\n", TEST_CONVERSATION_ID))
-            .await
-            .unwrap();
-        svc.write_document(stage("new-note.md", "BRAND NEW\n", TEST_CONVERSATION_ID_2))
-            .await
-            .unwrap();
-        assert_eq!(svc.count_pending_inbox().await.unwrap(), 2);
-
-        let merged = svc.merge_all_inbox(&kb_id, None).await.unwrap();
-        assert_eq!(merged, 2);
-        assert_eq!(svc.count_pending_inbox().await.unwrap(), 0);
-        // Verify content was actually merged into base.
-        assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "UPDATED\n");
-        assert_eq!(svc.read_file(&kb_id, "new-note.md").await.unwrap().content, "BRAND NEW\n");
-    }
-
-    /// **Batch discard**: discard_all_inbox removes all proposals without
-    /// affecting base content.
-    #[tokio::test]
-    async fn discard_all_clears_pending() {
-        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL\n").await;
-        let stage = |rel: &str, content: &str, scope: &str| WriteRequest {
-            spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: rel.into() },
-            content: content.into(),
-            policy: WritePolicy {
-                mode: WriteMode::Staged { scope: scope.into() },
-                allow_create: true,
-                surface: WriteSurface::RegularChat,
-            },
-            bound_kb_ids: vec![kb_id.clone()],
-        };
-        svc.write_document(stage("terms.md", "UPDATED\n", TEST_CONVERSATION_ID))
-            .await
-            .unwrap();
-        svc.write_document(stage("new-note.md", "BRAND NEW\n", TEST_CONVERSATION_ID_2))
-            .await
-            .unwrap();
-        assert_eq!(svc.count_pending_inbox().await.unwrap(), 2);
-
-        let discarded = svc.discard_all_inbox(&kb_id, None).await.unwrap();
-        assert_eq!(discarded, 2);
-        assert_eq!(svc.count_pending_inbox().await.unwrap(), 0);
-        // Base content unchanged.
-        assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "ORIGINAL\n");
-        // New doc was never created.
-        assert!(svc.read_file(&kb_id, "new-note.md").await.is_err());
-    }
-
-    /// **Batch with scope filter**: only proposals in matching scope are processed.
-    #[tokio::test]
-    async fn merge_all_with_scope_filter() {
-        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL\n").await;
-        let stage = |rel: &str, content: &str, scope: &str| WriteRequest {
-            spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: rel.into() },
-            content: content.into(),
-            policy: WritePolicy {
-                mode: WriteMode::Staged { scope: scope.into() },
-                allow_create: true,
-                surface: WriteSurface::RegularChat,
-            },
-            bound_kb_ids: vec![kb_id.clone()],
-        };
-        svc.write_document(stage("terms.md", "UPDATED\n", TEST_CONVERSATION_ID))
-            .await
-            .unwrap();
-        svc.write_document(stage("new-note.md", "BRAND NEW\n", TEST_CONVERSATION_ID_2))
-            .await
-            .unwrap();
-        assert_eq!(svc.count_pending_inbox().await.unwrap(), 2);
-
-        // Only merge scope conv-1.
-        let merged = svc
-            .merge_all_inbox(&kb_id, Some(TEST_CONVERSATION_ID))
-            .await
-            .unwrap();
-        assert_eq!(merged, 1);
-        assert_eq!(svc.count_pending_inbox().await.unwrap(), 1);
-        // conv-1 was merged.
-        assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "UPDATED\n");
-        // conv-2 still pending.
-        let remaining = svc.list_inbox(&kb_id).await.unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].scope, TEST_CONVERSATION_ID_2);
     }
 
     /// **P4 consumers**: `list_consumers` returns every binding that mounts the

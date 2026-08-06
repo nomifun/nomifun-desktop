@@ -23,7 +23,6 @@ serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 walkdir.workspace = true
-similar.workspace = true
 zip.workspace = true
 reqwest.workspace = true
 url.workspace = true
