@@ -4,7 +4,7 @@ import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
 import { type IExtensionSettingsTab } from '@/common/adapter/ipcBridge';
 import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSettingsTabs';
-import { Computer, Cpu, DataLock, Earth, Info, Puzzle, Server, System } from '@icon-park/react';
+import { Computer, Cpu, Earth, Info, Puzzle, Server, System } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useExtI18n } from '@/renderer/hooks/system/useExtI18n';
@@ -37,12 +37,6 @@ export function getBuiltinSettingsNavItems(t: TranslateFn): NavItem[] {
       path: 'ssh-hosts',
     },
     system: { id: 'system', label: t('settings.system'), icon: <System theme='outline' size='16' />, path: 'system' },
-    privacy: {
-      id: 'privacy',
-      label: t('settings.privacy.nav', { defaultValue: '数据采集' }),
-      icon: <DataLock theme='outline' size='16' />,
-      path: 'privacy',
-    },
     'browser-use': {
       id: 'browser-use',
       label: t('settings.browserUseNav'),
