@@ -24,6 +24,7 @@ use zeroize::Zeroizing;
 
 use crate::pool::{SshConnectionPool, SshLink};
 use crate::service::{DecryptedCredential, SshServiceError};
+use crate::state::SshLinkState;
 
 /// Why a dial did not produce a usable link.
 ///
@@ -208,7 +209,29 @@ impl SshLinkBackend {
     /// The live handle, or an explanation of what the link is doing instead. The
     /// message names the phase because "connection closed" is useless to a model
     /// that could usefully wait for a reconnect.
+    ///
+    /// A link the ladder abandoned is dialled once here. The ladder is finite and
+    /// its supervisor exits when it runs out, after which the only other code that
+    /// dials is `acquire` — and `acquire` only runs while an agent runtime is being
+    /// built. A runtime that stays hot across the outage would therefore hold a
+    /// permanently dead link, and the operator fixing the host would change
+    /// nothing. The host's dial gate bounds the retry rate, and a link that has
+    /// left the pool (its host was deleted) is never revived.
     async fn handle(&self) -> Result<Arc<SshConnectionHandle>, String> {
+        if let Some(handle) = self.link.current_handle().await {
+            return Ok(handle);
+        }
+        if self.pool.is_pooled(self.link.key())
+            && matches!(
+                self.link.state(),
+                SshLinkState::Dropped { .. } | SshLinkState::Idle
+            )
+        {
+            self.pool
+                .revive(&self.link)
+                .await
+                .map_err(|e| format!("ssh link for this session could not be reopened: {e}"))?;
+        }
         self.link.current_handle().await.ok_or_else(|| {
             format!(
                 "ssh link for this session is not connected ({:?})",
