@@ -19,7 +19,7 @@ use std::time::Duration;
 use nomifun_common::OnConversationDelete;
 use nomifun_ai_agent::{SshBackendProvider, SshLeaseRelease};
 use nomifun_ssh::dto::CreateSshHostRequest;
-use nomifun_ssh::{SshDialError, SshLinkKey, SshLinkPhase, SshTeardown};
+use nomifun_ssh::{PoolTuning, SshDialError, SshLinkKey, SshLinkPhase, SshTeardown};
 
 /// Generous by test standards, tight by SSH standards: a local dial is tens of
 /// milliseconds, so anything near this budget is a hang, not slowness. The margin
@@ -487,6 +487,91 @@ async fn close_for_host_drops_its_links_and_stops_redialling() {
         .await
         .expect("a deliberate acquire may dial a re-authorized host");
     harness.pool.shutdown_all().await;
+}
+
+/// The ladder is finite: after `max_attempts` it publishes a retryable `Dropped`
+/// and its supervisor *exits*. From then on the only code that dials is
+/// `ensure_connected` via `acquire`, and `acquire` only runs when an agent runtime
+/// is built — so a runtime that stays hot holds a link nothing will ever revive,
+/// and the pill's "check your credentials" advice cannot take effect however
+/// thoroughly the operator fixes the host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_call_revives_a_link_the_ladder_gave_up_on() {
+    const NAME: &str = "a_tool_call_revives_a_link_the_ladder_gave_up_on";
+    let mut sshd = sshd_or_skip!(NAME);
+    // A two-rung ladder, so the give-up lands in milliseconds rather than the
+    // production five minutes. Everything else stays as the other tests have it.
+    let tuning = PoolTuning {
+        max_attempts: 2,
+        ..support::brisk_tuning()
+    };
+    let harness = support::harness(sshd.known_hosts_path(), tuning).await;
+    let id = harness.add_fixture_host(&sshd).await;
+
+    let Some(link) = harness.open_or_skip(NAME, "conv-1", &id, "/").await else {
+        return;
+    };
+    // Held across the outage, exactly as the agent holds it: the runtime that
+    // asked for this backend is not rebuilt just because the host blinked.
+    let backend = harness.pool.backend_for(&link);
+
+    sshd.stop();
+    let detail = await_ladder_give_up(&link, SETTLE).await;
+    assert!(
+        detail.contains("gave up"),
+        "expected the give-up drop, got {detail}"
+    );
+
+    // The link is still pooled — this is an abandoned session, not a withdrawn
+    // host — and nothing is watching it any more. Asserted rather than assumed:
+    // without it, a supervisor that had not quite exited could rescue the link
+    // after the restart and the test would pass for the wrong reason.
+    assert!(
+        harness.pool.is_pooled(&key("conv-1", &id)),
+        "the abandoned link must still be pooled"
+    );
+    assert!(
+        backend.run_command("echo down", 5_000).await.is_err(),
+        "the host really is down, so a tool call cannot succeed yet"
+    );
+
+    sshd.restart().expect("restart the fixture sshd on the same port");
+    // Past the dial gate's cooldown from the failed call above. That cooldown is
+    // what keeps revive-on-tool-call from becoming a dial storm, so waiting it out
+    // here is honouring it, not working around it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let out = backend
+        .run_command("echo revived", 15_000)
+        .await
+        .expect("a tool call must be able to revive a link the ladder abandoned");
+    assert!(out.stdout.contains("revived"), "{out:?}");
+    assert_eq!(
+        link.state().phase(),
+        SshLinkPhase::Connected,
+        "and the revived link is supervised again, not merely used once"
+    );
+    harness.pool.shutdown_all().await;
+}
+
+/// Wait for the *give-up* drop specifically. A plain `Dropped` is not enough:
+/// the supervisor publishes one the moment it notices the transport died, long
+/// before the ladder is exhausted.
+async fn await_ladder_give_up(link: &Arc<nomifun_ssh::SshLink>, budget: Duration) -> String {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if let nomifun_ssh::SshLinkState::Dropped { detail, .. } = link.state() {
+            if detail.contains("gave up") {
+                return detail;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the ladder to give up; link is {:?}",
+            link.state()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
