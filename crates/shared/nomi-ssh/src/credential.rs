@@ -1,6 +1,8 @@
 //! Credential material for an SSH connection. All secret fields are held in
 //! `Zeroizing` so they are wiped on drop, and elided from `Debug` so they never
 //! leak into logs, panics, or error chains.
+use std::path::PathBuf;
+
 use zeroize::Zeroizing;
 
 /// Everything needed to open and authenticate one SSH connection. Secret
@@ -15,7 +17,7 @@ pub struct SshCredential {
 
 /// The authentication method plus its secret material. `Password`,
 /// `PrivateKey` and `Certificate` carry `Zeroizing` secrets; `Agent` defers to
-/// the operator's running ssh-agent and holds nothing.
+/// a running ssh-agent and holds no secret of its own.
 pub enum Auth {
     Password(Zeroizing<String>),
     PrivateKey {
@@ -30,7 +32,12 @@ pub enum Auth {
         cert: String,
         passphrase: Option<Zeroizing<String>>,
     },
-    Agent,
+    Agent {
+        /// Where the agent listens. `None` means "wherever `SSH_AUTH_SOCK` in
+        /// *this process's* environment points" — which is what production uses
+        /// and what a test must never rely on, so tests pass the path explicitly.
+        socket: Option<PathBuf>,
+    },
 }
 
 impl Auth {
@@ -41,7 +48,7 @@ impl Auth {
             Auth::Password(_) => "password",
             Auth::PrivateKey { .. } => "key",
             Auth::Certificate { .. } => "certificate",
-            Auth::Agent => "agent",
+            Auth::Agent { .. } => "agent",
         }
     }
 }
@@ -107,7 +114,7 @@ mod tests {
 
     #[test]
     fn kind_labels_are_stable() {
-        assert_eq!(Auth::Agent.kind(), "agent");
+        assert_eq!(Auth::Agent { socket: None }.kind(), "agent");
         assert_eq!(
             Auth::Certificate {
                 key_pem: Zeroizing::new(String::new()),

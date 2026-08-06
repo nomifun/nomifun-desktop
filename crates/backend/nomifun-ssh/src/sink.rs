@@ -393,11 +393,10 @@ fn to_ssh_credential(cred: &DecryptedCredential) -> Result<SshCredential, SshDia
                 .as_ref()
                 .map(|p| Zeroizing::new(p.as_str().to_string())),
         },
-        "agent" => {
-            return Err(SshDialError::Credential(
-                "agent auth is not supported in Phase 1".to_string(),
-            ));
-        }
+        // Nothing is stored for agent auth: the keys stay in the operator's
+        // ssh-agent, which the transport finds through this process's
+        // `SSH_AUTH_SOCK`.
+        "agent" => Auth::Agent { socket: None },
         other => {
             return Err(SshDialError::Credential(format!(
                 "unknown auth_type {other:?}"

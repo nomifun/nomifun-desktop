@@ -7,13 +7,21 @@
 //! - unknown host under `Strict` → refuse with `HostKeyUnknown`;
 //! - changed key (any policy) → refuse with `HostKeyChanged`, never auto-accept
 //!   (the known_hosts file is shared with the operator's own `ssh`).
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use russh::client::{self, Handle};
+#[cfg(unix)]
+use russh::keys::agent::AgentIdentity;
+#[cfg(unix)]
+use russh::keys::agent::client::AgentClient;
 use russh::keys::ssh_key::certificate::CertType;
-use russh::keys::{Certificate, HashAlg, PrivateKey, PrivateKeyWithHashAlg, decode_secret_key};
+#[cfg(unix)]
+use russh::keys::{Algorithm, PublicKey};
+use russh::keys::{
+    Certificate, HashAlg, PrivateKey, PrivateKeyWithHashAlg, decode_secret_key,
+};
 
 use crate::credential::{Auth, SshCredential};
 
@@ -233,11 +241,8 @@ impl SshConnection {
                     &cred.username,
                 )));
             }
-            Auth::Agent => {
-                // Phase 3: ssh-agent authentication.
-                return Err(SshError::AuthFailed(
-                    "agent auth is not yet supported (Phase 3)".to_string(),
-                ));
+            Auth::Agent { socket } => {
+                return authenticate_with_agent(handle, cred, socket.as_deref()).await;
             }
         };
         if ok {
@@ -362,4 +367,129 @@ fn duration_words(secs: u64) -> String {
         s if s < 172_800 => format!("{}h", s / 3_600),
         s => format!("{}d", s / 86_400),
     }
+}
+
+/// Authenticate through a running ssh-agent, offering each identity it holds
+/// until one is accepted. Signing stays inside the agent — no private key ever
+/// enters this process.
+///
+/// Unix only: russh reaches an agent over a Unix-domain socket
+/// (`AgentClient::connect_uds` does not exist on Windows, where agents speak a
+/// named pipe or Pageant instead). See the `not(unix)` twin below.
+#[cfg(unix)]
+async fn authenticate_with_agent(
+    handle: &mut Handle<ClientHandler>,
+    cred: &SshCredential,
+    socket: Option<&Path>,
+) -> Result<(), SshError> {
+    let path = match socket {
+        Some(p) => p.to_path_buf(),
+        // Only ever *read*: this process's SSH_AUTH_SOCK is never set or changed,
+        // so the operator's own agent session is untouched either way.
+        None => std::env::var_os("SSH_AUTH_SOCK")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                SshError::AuthFailed(
+                    "no ssh-agent found in this process's environment (SSH_AUTH_SOCK is unset); \
+                     a desktop app started from a launcher usually does not inherit it — use key \
+                     or certificate auth for this host instead"
+                        .to_string(),
+                )
+            })?,
+    };
+    let mut agent = AgentClient::connect_uds(&path).await.map_err(|e| {
+        SshError::AuthFailed(format!(
+            "cannot reach the ssh-agent at {}: {e}",
+            path.display()
+        ))
+    })?;
+    let identities = agent.request_identities().await.map_err(|e| {
+        SshError::AuthFailed(format!(
+            "the ssh-agent at {} would not list its identities: {e}",
+            path.display()
+        ))
+    })?;
+    if identities.is_empty() {
+        return Err(SshError::AuthFailed(format!(
+            "the ssh-agent at {} holds no identities (check `ssh-add -l`)",
+            path.display()
+        )));
+    }
+
+    let offered = identities.len();
+    for identity in &identities {
+        let hash_alg = rsa_hash_alg(handle, &identity.public_key()).await;
+        let attempt = match identity {
+            AgentIdentity::PublicKey { key, .. } => {
+                handle
+                    .authenticate_publickey_with(
+                        cred.username.clone(),
+                        key.clone(),
+                        hash_alg,
+                        &mut agent,
+                    )
+                    .await
+            }
+            // An agent can hold a certificate as well as the bare key; offering
+            // it as a plain public key would fail against a cert-only server.
+            AgentIdentity::Certificate { certificate, .. } => {
+                handle
+                    .authenticate_certificate_with(
+                        cred.username.clone(),
+                        certificate.clone(),
+                        hash_alg,
+                        &mut agent,
+                    )
+                    .await
+            }
+        };
+        match attempt {
+            Ok(result) if result.success() => return Ok(()),
+            Ok(_) => continue,
+            // The agent itself failed (locked, key removed mid-flight, socket
+            // gone). Trying the next identity would hit the same wall.
+            Err(e) => {
+                return Err(SshError::AuthFailed(format!(
+                    "the ssh-agent at {} refused to sign: {e}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Err(SshError::AuthFailed(format!(
+        "the server accepted none of the {offered} {} offered by the ssh-agent at {}",
+        if offered == 1 { "identity" } else { "identities" },
+        path.display()
+    )))
+}
+
+/// RSA identities need an explicit signature hash: servers have been dropping the
+/// SHA-1 `ssh-rsa` algorithm, so ask this server which it will take. Every other
+/// algorithm carries its hash choice in the key type itself.
+#[cfg(unix)]
+async fn rsa_hash_alg(handle: &Handle<ClientHandler>, key: &PublicKey) -> Option<HashAlg> {
+    match key.algorithm() {
+        Algorithm::Rsa { .. } => handle
+            .best_supported_rsa_hash()
+            .await
+            .ok()
+            .flatten()
+            .flatten(),
+        _ => None,
+    }
+}
+
+/// Windows (and anything else without Unix sockets) cannot reach an agent through
+/// russh, so say that instead of failing as if the server had refused us.
+#[cfg(not(unix))]
+async fn authenticate_with_agent(
+    _handle: &mut Handle<ClientHandler>,
+    _cred: &SshCredential,
+    _socket: Option<&Path>,
+) -> Result<(), SshError> {
+    Err(SshError::AuthFailed(
+        "ssh-agent auth is not available on this platform — russh reaches agents over a \
+         Unix-domain socket only; use key or certificate auth for this host"
+            .to_string(),
+    ))
 }
