@@ -117,6 +117,7 @@ const MemoryList: React.FC<MemoryListProps> = ({ list, activeId, onOpen, onDelet
           {t('nomi.memories.total', { count: total, defaultValue: '共 {{count}} 条记忆' })}
         </span>
         <Pagination
+          className='memory-pagination'
           size='small'
           current={page}
           pageSize={pageSize}

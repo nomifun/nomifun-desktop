@@ -114,7 +114,7 @@ const MemoryListRow: React.FC<MemoryListRowProps> = ({
         }
       }}
       className={[
-        'group grid min-h-52px min-w-0 cursor-pointer items-center gap-x-8px px-4px py-8px transition-colors duration-150',
+        'group grid min-h-44px min-w-0 cursor-pointer items-center gap-x-8px px-4px py-4px transition-colors duration-150',
         active ? '!bg-primary-1' : 'hover:bg-fill-1',
       ].join(' ')}
       style={{ ...ROW_DIVIDER_STYLE, ...ROW_LAYOUT_STYLE }}
