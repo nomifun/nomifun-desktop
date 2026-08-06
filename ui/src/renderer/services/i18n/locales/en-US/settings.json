@@ -1242,6 +1242,15 @@
     "remoteSetupConversationName": "Connect remote execution engine ({{protocol}})",
     "remoteSetupPrompt": "Please help me connect a remote execution engine to NomiFun.\n\nI want to use the **{{protocol}}** protocol. Please:\n1. Explain what I need on the remote side (the gateway/execution engine service and how to start it).\n2. Walk me through getting the connection URL and any auth token/password.\n3. Tell me exactly what to fill into NomiFun's \"Connect Remote Engine\" form.\n\nKeep it concise and step-by-step."
   },
+  "taskModel": {
+    "providerPlaceholder": "Pick a provider",
+    "modelPlaceholder": "Pick a model",
+    "voicePlaceholder": "Default voice",
+    "unavailableOption": "{{model}} (unavailable)",
+    "staleHint": "The current choice \"{{model}}\" is no longer available — please pick another.",
+    "emptyHint": "No model is available for this purpose yet. Add one under Model Management → Providers & keys and tag it.",
+    "voiceFreeTextHint": "You can type the provider's own voice id."
+  },
   "modelHub": {
     "title": "Model Management",
     "subtitle": "Choose free or provider models by how you want to use them.",

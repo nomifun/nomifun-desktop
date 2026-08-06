@@ -1242,6 +1242,15 @@
     "remoteSetupConversationName": "接入远程执行引擎（{{protocol}}）",
     "remoteSetupPrompt": "请帮我把一个远程执行引擎接入 NomiFun。\n\n我想使用 **{{protocol}}** 协议。请：\n1. 说明远程端需要准备什么（网关 / 执行引擎服务以及如何启动）。\n2. 指导我获取连接 URL 以及认证 Token / 密码。\n3. 明确告诉我在 NomiFun「接入远程引擎」表单里应填写什么。\n\n请简洁、分步骤说明。"
   },
+  "taskModel": {
+    "providerPlaceholder": "选择服务商",
+    "modelPlaceholder": "选择模型",
+    "voicePlaceholder": "默认音色",
+    "unavailableOption": "{{model}}（不可用）",
+    "staleHint": "当前选择的「{{model}}」已不可用，请重新选择。",
+    "emptyHint": "没有可用于该用途的模型，请先到「模型管理 → 供应商与密钥」里添加并打标。",
+    "voiceFreeTextHint": "音色可直接输入服务商的音色 ID。"
+  },
   "modelHub": {
     "title": "模型管理",
     "subtitle": "按使用方式选择免费模型或供应商模型。",
