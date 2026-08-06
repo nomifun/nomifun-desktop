@@ -32,7 +32,6 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
-mod memory_panel_window;
 mod companion_pointer;
 mod updater_install_context;
 
@@ -310,7 +309,7 @@ fn default_data_dir() -> PathBuf {
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InstallUpdateProgress {
+struct DownloadUpdateProgress {
     phase: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     chunk_length: Option<usize>,
@@ -318,26 +317,152 @@ struct InstallUpdateProgress {
     content_length: Option<u64>,
 }
 
-/// Install the exact update version selected by the renderer through a
-/// Rust-owned updater handle. The renderer may check/download for progress, but
-/// it is never allowed to invoke the plugin's raw install commands. Progress is
-/// streamed over the request-scoped channel so the modal never appears frozen
-/// while this security boundary re-checks and downloads the signed package.
+enum DownloadedUpdateSlot<T> {
+    Empty,
+    Downloading { version: String },
+    Ready { version: String, payload: T },
+    Installing { version: String },
+}
+
+struct DownloadedUpdateCache<T> {
+    slot: Mutex<DownloadedUpdateSlot<T>>,
+}
+
+impl<T> Default for DownloadedUpdateCache<T> {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(DownloadedUpdateSlot::Empty),
+        }
+    }
+}
+
+enum BeginUpdateDownload {
+    Start,
+    AlreadyReady,
+}
+
+impl<T> DownloadedUpdateCache<T> {
+    fn begin_download(&self, version: &str) -> Result<BeginUpdateDownload, String> {
+        let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        match &*slot {
+            DownloadedUpdateSlot::Downloading { version: active }
+            | DownloadedUpdateSlot::Installing { version: active } => {
+                return Err(format!("update {active} is already being processed"));
+            }
+            DownloadedUpdateSlot::Ready { version: ready, .. } if ready == version => {
+                return Ok(BeginUpdateDownload::AlreadyReady);
+            }
+            DownloadedUpdateSlot::Empty | DownloadedUpdateSlot::Ready { .. } => {}
+        }
+        *slot = DownloadedUpdateSlot::Downloading {
+            version: version.to_owned(),
+        };
+        Ok(BeginUpdateDownload::Start)
+    }
+
+    fn cancel_download(&self, version: &str) {
+        let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        if matches!(&*slot, DownloadedUpdateSlot::Downloading { version: active } if active == version)
+        {
+            *slot = DownloadedUpdateSlot::Empty;
+        }
+    }
+
+    fn finish_download(&self, version: &str, payload: T) -> Result<(), String> {
+        let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        if !matches!(&*slot, DownloadedUpdateSlot::Downloading { version: active } if active == version)
+        {
+            return Err(format!(
+                "download state for update {version} changed before completion"
+            ));
+        }
+        *slot = DownloadedUpdateSlot::Ready {
+            version: version.to_owned(),
+            payload,
+        };
+        Ok(())
+    }
+
+    fn take_ready(&self, version: &str) -> Result<T, String> {
+        let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        match std::mem::replace(&mut *slot, DownloadedUpdateSlot::Empty) {
+            DownloadedUpdateSlot::Ready {
+                version: ready,
+                payload,
+            } if ready == version => {
+                *slot = DownloadedUpdateSlot::Installing { version: ready };
+                Ok(payload)
+            }
+            other @ DownloadedUpdateSlot::Ready { .. } => {
+                *slot = other;
+                Err(format!("update {version} has not been downloaded"))
+            }
+            other @ DownloadedUpdateSlot::Downloading { .. } => {
+                *slot = other;
+                Err(format!("update {version} is still downloading"))
+            }
+            other @ DownloadedUpdateSlot::Installing { .. } => {
+                *slot = other;
+                Err(format!("update {version} is already installing"))
+            }
+            DownloadedUpdateSlot::Empty => {
+                Err(format!("update {version} has not been downloaded"))
+            }
+        }
+    }
+
+    fn restore_ready(&self, version: String, payload: T) {
+        let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        if matches!(&*slot, DownloadedUpdateSlot::Installing { version: active } if active == &version)
+        {
+            *slot = DownloadedUpdateSlot::Ready { version, payload };
+        }
+    }
+}
+
+struct DownloadedUpdatePackage {
+    update: tauri_plugin_updater::Update,
+    bytes: Vec<u8>,
+}
+
+type DownloadedUpdateState = DownloadedUpdateCache<DownloadedUpdatePackage>;
+
+fn checked_update_version(version: &str) -> Result<&str, String> {
+    let version = version.trim();
+    if version.is_empty() {
+        Err("update version must not be empty".to_owned())
+    } else {
+        Ok(version)
+    }
+}
+
+/// Download and verify the exact update selected by the renderer, retaining the
+/// native Update handle and verified bytes together until installation. This is
+/// the only command that performs package network I/O.
 #[tauri::command]
-async fn install_update(
+async fn download_update(
     app: tauri::AppHandle,
     server: tauri::State<'_, Arc<DesktopServer>>,
+    downloaded: tauri::State<'_, DownloadedUpdateState>,
     version: String,
-    on_event: tauri::ipc::Channel<InstallUpdateProgress>,
+    on_event: tauri::ipc::Channel<DownloadUpdateProgress>,
 ) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
 
-    let requested_version = version.trim();
-    if requested_version.is_empty() {
-        return Err("update version must not be empty".to_owned());
+    let requested_version = checked_update_version(&version)?.to_owned();
+    match downloaded.begin_download(&requested_version)? {
+        BeginUpdateDownload::AlreadyReady => {
+            let _ = on_event.send(DownloadUpdateProgress {
+                phase: "downloaded",
+                chunk_length: None,
+                content_length: None,
+            });
+            return Ok(());
+        }
+        BeginUpdateDownload::Start => {}
     }
 
-    let _ = on_event.send(InstallUpdateProgress {
+    let _ = on_event.send(DownloadUpdateProgress {
         phase: "checking",
         chunk_length: None,
         content_length: None,
@@ -345,72 +470,96 @@ async fn install_update(
 
     let shutdown_server = server.inner().clone();
     let cleanup_app = app.clone();
-    let updater = app
-        .updater_builder()
-        .on_before_exit(move || {
-            let verified = updater_before_exit_until_verified(
-                || shutdown_server.shutdown_all_blocking(),
-                || cleanup_app.cleanup_before_exit(),
-                |attempt, error| {
-                    tracing::error!(
-                        attempt,
-                        %error,
-                        "updater installer handoff blocked until desktop shutdown is verified"
-                    );
-                },
-                || std::thread::sleep(Duration::from_millis(250)),
-                UPDATER_SHUTDOWN_MAX_ATTEMPTS,
-            );
-            if !verified {
-                tracing::error!(
-                    attempts = UPDATER_SHUTDOWN_MAX_ATTEMPTS,
-                    "proceeding with the updater installer handoff after exhausting bounded \
-                     shutdown attempts; desktop shutdown is NOT verified"
+    let result = async {
+        let updater = app
+            .updater_builder()
+            .on_before_exit(move || {
+                let verified = updater_before_exit_until_verified(
+                    || shutdown_server.shutdown_all_blocking(),
+                    || cleanup_app.cleanup_before_exit(),
+                    |attempt, error| {
+                        tracing::error!(
+                            attempt,
+                            %error,
+                            "updater installer handoff blocked until desktop shutdown is verified"
+                        );
+                    },
+                    || std::thread::sleep(Duration::from_millis(250)),
+                    UPDATER_SHUTDOWN_MAX_ATTEMPTS,
                 );
-            }
-        })
-        .build()
-        .map_err(|error| error.to_string())?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "no update is currently available".to_owned())?;
-    if update.version != requested_version {
-        return Err(format!(
-            "available update version changed from {requested_version} to {}",
-            update.version
-        ));
-    }
+                if !verified {
+                    tracing::error!(
+                        attempts = UPDATER_SHUTDOWN_MAX_ATTEMPTS,
+                        "proceeding with the updater installer handoff after exhausting bounded \
+                         shutdown attempts; desktop shutdown is NOT verified"
+                    );
+                }
+            })
+            .build()
+            .map_err(|error| error.to_string())?;
+        let update = updater
+            .check()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "no update is currently available".to_owned())?;
+        if update.version != requested_version {
+            return Err(format!(
+                "available update version changed from {requested_version} to {}",
+                update.version
+            ));
+        }
 
-    let download_progress = on_event.clone();
-    let download_finished = on_event.clone();
-    let bytes = update
-        .download(
-            move |chunk_length, content_length| {
-                let _ = download_progress.send(InstallUpdateProgress {
-                    phase: "downloading",
-                    chunk_length: Some(chunk_length),
-                    content_length,
-                });
-            },
-            move || {
-                let _ = download_finished.send(InstallUpdateProgress {
-                    phase: "downloaded",
-                    chunk_length: None,
-                    content_length: None,
-                });
-            },
+        let download_progress = on_event.clone();
+        let download_finished = on_event.clone();
+        let bytes = update
+            .download(
+                move |chunk_length, content_length| {
+                    let _ = download_progress.send(DownloadUpdateProgress {
+                        phase: "downloading",
+                        chunk_length: Some(chunk_length),
+                        content_length,
+                    });
+                },
+                move || {
+                    let _ = download_finished.send(DownloadUpdateProgress {
+                        phase: "downloaded",
+                        chunk_length: None,
+                        content_length: None,
+                    });
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        downloaded.finish_download(
+            &requested_version,
+            DownloadedUpdatePackage { update, bytes },
         )
-        .await
-        .map_err(|error| error.to_string())?;
+    }
+    .await;
 
-    let _ = on_event.send(InstallUpdateProgress {
-        phase: "installing",
-        chunk_length: None,
-        content_length: None,
-    });
-    update.install(bytes).map_err(|error| error.to_string())
+    if result.is_err() {
+        downloaded.cancel_download(&requested_version);
+    }
+    result
+}
+
+/// Install only the package already downloaded and signature-verified by
+/// `download_update`. A missing or mismatched package is an error: installation
+/// must never hide a second download behind an install action.
+#[tauri::command]
+async fn install_update(
+    downloaded: tauri::State<'_, DownloadedUpdateState>,
+    version: String,
+) -> Result<(), String> {
+    let requested_version = checked_update_version(&version)?.to_owned();
+    let package = downloaded.take_ready(&requested_version)?;
+
+    if let Err(error) = package.update.install(&package.bytes) {
+        downloaded.restore_ready(requested_version, package);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 /// Bounded shutdown attempts before the updater installer handoff proceeds
@@ -1972,21 +2121,13 @@ fn set_tray_labels(
 async fn sync_companion_windows(
     app: tauri::AppHandle,
     server: tauri::State<'_, Arc<DesktopServer>>,
-    memory_panel: tauri::State<'_, memory_panel_window::MemoryPanelWindowState>,
     specs: Vec<CompanionWindowSpec>,
 ) -> Result<(), String> {
     let init_script = webui_init_script(server.loopback_port(), server.local_trust_secret());
-    let enabled_ids = specs
-        .iter()
-        .filter(|spec| spec.enabled)
-        .map(|spec| spec.companion_id.clone())
-        .collect();
-    let hide_memory_panel = memory_panel.invalidate_owner_unless(&enabled_ids);
-    let memory_panel_for_task = memory_panel.inner().clone();
     let app_for_task = app.clone();
     run_on_main_thread_task(
         move |task| app.run_on_main_thread(task).map_err(|e| e.to_string()),
-        move || reconcile_companion_windows(app_for_task, init_script, specs, hide_memory_panel, memory_panel_for_task),
+        move || reconcile_companion_windows(app_for_task, init_script, specs),
     )
     .await
 }
@@ -1995,17 +2136,8 @@ fn reconcile_companion_windows(
     app: tauri::AppHandle,
     init_script: String,
     specs: Vec<CompanionWindowSpec>,
-    hide_memory_panel: bool,
-    memory_panel: memory_panel_window::MemoryPanelWindowState,
 ) -> Result<(), String> {
     use std::collections::HashSet;
-
-    if hide_memory_panel {
-        memory_panel.run_if_empty(|| {
-            if let Some(window) = app.get_webview_window(memory_panel_window::MEMORY_PANEL_LABEL) { let _ = window.hide(); }
-            Ok(())
-        })?;
-    }
 
     let known: HashSet<String> = specs
         .iter()
@@ -2507,16 +2639,13 @@ fn main() -> std::process::ExitCode {
         .manage(AwakeState(Mutex::new(None)))
         .manage(QuitFlag(AtomicBool::new(false)))
         .manage(Arc::new(ExitCoordinator::default()))
-        .manage(memory_panel_window::MemoryPanelWindowState::default())
+        .manage(DownloadedUpdateState::default())
         .invoke_handler(tauri::generate_handler![
+            download_update,
             install_update,
             companion_pointer::get_companion_local_pointer,
             updater_install_context::get_updater_install_context,
             sync_companion_windows,
-            memory_panel_window::prepare_companion_memory_panel,
-            memory_panel_window::place_companion_memory_panel,
-            memory_panel_window::show_companion_memory_panel,
-            memory_panel_window::hide_companion_memory_panel,
             webui_get_status,
             webui_start,
             webui_stop,
@@ -2561,6 +2690,55 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn downloaded_update_cache_separates_download_from_install() {
+        let cache = DownloadedUpdateCache::default();
+
+        assert!(matches!(
+            cache.begin_download("0.3.8"),
+            Ok(BeginUpdateDownload::Start)
+        ));
+        assert!(cache.begin_download("0.3.8").is_err());
+        cache.finish_download("0.3.8", "verified bytes").unwrap();
+
+        assert!(matches!(
+            cache.begin_download("0.3.8"),
+            Ok(BeginUpdateDownload::AlreadyReady)
+        ));
+        assert_eq!(cache.take_ready("0.3.8").unwrap(), "verified bytes");
+        assert!(cache.begin_download("0.3.8").is_err());
+        assert!(cache.take_ready("0.3.8").is_err());
+    }
+
+    #[test]
+    fn downloaded_update_cache_rejects_wrong_version_without_losing_ready_package() {
+        let cache = DownloadedUpdateCache::default();
+        assert!(matches!(
+            cache.begin_download("0.3.8"),
+            Ok(BeginUpdateDownload::Start)
+        ));
+        cache.finish_download("0.3.8", vec![1, 2, 3]).unwrap();
+
+        assert!(cache.take_ready("0.3.9").is_err());
+        let payload = cache.take_ready("0.3.8").unwrap();
+        cache.restore_ready("0.3.8".to_owned(), payload);
+        assert_eq!(cache.take_ready("0.3.8").unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn failed_update_download_can_be_retried() {
+        let cache = DownloadedUpdateCache::<Vec<u8>>::default();
+        assert!(matches!(
+            cache.begin_download("0.3.8"),
+            Ok(BeginUpdateDownload::Start)
+        ));
+        cache.cancel_download("0.3.8");
+        assert!(matches!(
+            cache.begin_download("0.3.8"),
+            Ok(BeginUpdateDownload::Start)
+        ));
+    }
 
     #[test]
     fn updater_before_exit_retries_until_shutdown_is_verified_then_cleans_up_once() {

@@ -332,7 +332,7 @@ const SshConfigImportModal: React.FC<ImportModalProps> = ({ visible, scan, onClo
           {candidates.map((candidate) => (
             <div
               key={candidate.alias}
-              className='flex items-center gap-10px rd-8px border border-arco-2 bg-fill-0 px-10px py-8px'
+              className='flex items-center gap-10px rd-8px border border-solid border-arco-2 bg-fill-0 px-10px py-8px'
             >
               <span className='flex size-26px shrink-0 items-center justify-center rd-6px bg-brand-light text-brand'>
                 <Server theme='outline' size='14' fill='currentColor' />
@@ -480,7 +480,7 @@ const SshHostManagement: React.FC = () => {
       </div>
 
       {isEmpty ? (
-        <div className='flex min-h-200px flex-col items-center justify-center gap-10px rd-12px border border-arco-2 bg-fill-0 px-24px py-28px text-center'>
+        <div className='flex min-h-200px flex-col items-center justify-center gap-10px rd-12px border border-solid border-arco-2 bg-fill-0 px-24px py-28px text-center'>
           <span className='flex size-44px items-center justify-center rd-12px bg-brand-light text-brand'>
             <Server theme='outline' size='24' fill='currentColor' />
           </span>
@@ -512,7 +512,7 @@ const SshHostManagement: React.FC = () => {
           {hosts.map((host) => (
             <div
               key={host.sshHostId}
-              className='group flex items-center gap-10px rd-10px border border-arco-2 bg-fill-0 px-12px py-10px transition-colors hover:border-[var(--color-border-3)]'
+              className='group flex items-center gap-10px rd-10px border border-solid border-arco-2 bg-fill-0 px-12px py-10px transition-colors hover:border-[var(--color-border-3)]'
             >
               <span className='flex size-30px shrink-0 items-center justify-center rd-8px bg-brand-light text-brand'>
                 <Server theme='outline' size='16' fill='currentColor' />

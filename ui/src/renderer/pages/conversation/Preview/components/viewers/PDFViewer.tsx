@@ -84,7 +84,10 @@ const PDFPreview: React.FC<PDFPreviewProps> = ({ file_path, content, hideToolbar
       <div className='flex items-center justify-center h-full'>
         {messageContextHolder}
         <div className='text-center'>
-          <div className='text-16px text-t-error mb-8px'>❌ {error}</div>
+          {/* textColors 里没有 t-error（只有 t-primary/secondary/tertiary/quaternary/
+              disabled），所以这条失败提示原来是继承来的正文色。语义状态色叫 danger。
+              `text-t-error` is not a token; the semantic state colour is `danger`. */}
+          <div className='text-16px text-danger mb-8px'>❌ {error}</div>
           <div className='text-12px text-t-secondary'>{t('preview.pdf.unableDisplay')}</div>
         </div>
       </div>
@@ -101,10 +104,10 @@ const PDFPreview: React.FC<PDFPreviewProps> = ({ file_path, content, hideToolbar
   }
 
   return (
-    <div className='h-full w-full bg-bg-1 flex flex-col'>
+    <div className='h-full w-full bg-1 flex flex-col'>
       {messageContextHolder}
       {!usePortalToolbar && !hideToolbar && (
-        <div className='flex items-center justify-between h-40px px-12px bg-bg-2 flex-shrink-0'>
+        <div className='flex items-center justify-between h-40px px-12px bg-2 flex-shrink-0'>
           <div className='flex items-center gap-8px'>
             <span className='text-13px text-t-secondary'>📄 {t('preview.pdf.title')}</span>
             <span className='text-11px text-t-tertiary'>{t('preview.readOnlyLabel')}</span>
@@ -122,7 +125,7 @@ const PDFPreview: React.FC<PDFPreviewProps> = ({ file_path, content, hideToolbar
         </div>
       )}
       {/* PDF 内容区域 / PDF content area */}
-      <div className='flex-1 overflow-hidden bg-bg-1'>
+      <div className='flex-1 overflow-hidden bg-1'>
         {/* key ensures the iframe remounts when the file path changes */}
         <iframe
           key={pdfSrc}

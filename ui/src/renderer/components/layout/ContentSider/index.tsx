@@ -21,6 +21,13 @@ export interface ContentSiderProps {
   header?: React.ReactNode;
   /** Scrollable body — the list / tree content. */
   children: React.ReactNode;
+  /**
+   * Sticky footer region pinned below the scrollable body. Use for entries that
+   * must stay reachable regardless of list length (e.g. a secondary library
+   * entry beneath a long roster). Separated from the body by spacing and tone
+   * only — no hard divider, matching the panel's soft-boundary language.
+   */
+  footer?: React.ReactNode;
   /** Accessible label for the complementary region. */
   ariaLabel?: string;
   className?: string;
@@ -52,6 +59,7 @@ const ContentSider: React.FC<ContentSiderProps> = ({
   width = 300,
   header,
   children,
+  footer,
   ariaLabel,
   className,
   resizeHandle,
@@ -70,6 +78,7 @@ const ContentSider: React.FC<ContentSiderProps> = ({
     >
       {header ? <div className='shrink-0'>{header}</div> : null}
       <div className={classNames('flex-1 min-h-0 overflow-y-auto', styles.scrollArea)}>{children}</div>
+      {footer ? <div className='shrink-0'>{footer}</div> : null}
       {resizeHandle}
     </aside>
   );

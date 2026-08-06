@@ -500,7 +500,7 @@ const EmojiPicker: React.FC<EmojiPickerProps> = ({ value, onChange, children, pl
   const pickerContent = (
     <div className='w-280px'>
       {/* Category Tabs */}
-      <div className='flex items-center gap-2px px-8px py-6px border-b border-[var(--color-border-2)] overflow-x-auto'>
+      <div className='flex items-center gap-2px px-8px py-6px border-b border-b-solid border-[var(--color-border-2)] overflow-x-auto'>
         {categoryKeys.map((key) => (
           <button
             key={key}

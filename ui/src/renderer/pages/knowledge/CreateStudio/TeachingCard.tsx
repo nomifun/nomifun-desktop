@@ -134,7 +134,7 @@ const TeachingCard: React.FC<TeachingCardProps> = ({ sourceType }) => {
     <div className='knowledge-studio-teaching-card mt-12px rounded-16px bg-[var(--color-bg-2)] p-14px shadow-[0_10px_30px_rgba(15,23,42,0.035)]'>
       {/* Header */}
       <div className='mb-10px flex items-center gap-8px text-12px font-700 text-[var(--color-text-1)]'>
-        <span className='grid size-24px place-items-center rounded-8px bg-[rgba(var(--primary-6),0.08)] text-[rgb(var(--primary-6))]'>
+        <span className='grid size-24px place-items-center rounded-8px bg-[rgba(var(--primary-6),0.08)] text-primary-6'>
           <Info theme='outline' size='14' />
         </span>
         {t('knowledge.studio.teachHeader', { defaultValue: '它是什么 · 怎么填 · 怎么用' })}

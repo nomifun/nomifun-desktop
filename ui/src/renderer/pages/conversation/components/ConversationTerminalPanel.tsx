@@ -113,8 +113,8 @@ const TerminalOutputTail: React.FC<{ session: ITerminalSession }> = ({ session }
 };
 
 const statusClass = (status: ITerminalSession['last_status']): string => {
-  if (status === 'running') return 'bg-[rgb(var(--success-6))]';
-  if (status === 'error') return 'bg-[rgb(var(--danger-6))]';
+  if (status === 'running') return 'bg-success-6';
+  if (status === 'error') return 'bg-danger-6';
   return 'bg-[var(--color-text-4)]';
 };
 
@@ -156,7 +156,7 @@ const TerminalPanelItem: React.FC<TerminalPanelItemProps> = ({
         </span>
         <span
           className={`h-7px w-7px shrink-0 rounded-full ${
-            closing ? 'bg-[rgb(var(--warning-6))]' : statusClass(session.last_status)
+            closing ? 'bg-warning-6' : statusClass(session.last_status)
           }`}
         />
       </button>
@@ -468,7 +468,7 @@ const ConversationTerminalPanel: React.FC<ConversationTerminalPanelProps> = ({ c
       </div>
 
       {error && (
-        <div className='rounded-8px bg-[rgb(var(--danger-1))] px-9px py-7px text-11px text-[rgb(var(--danger-6))]'>
+        <div className='rounded-8px bg-danger-1 px-9px py-7px text-11px text-danger-6'>
           {error}
         </div>
       )}

@@ -48,7 +48,7 @@ const SourceBadge: React.FC<{ skill: SkillInfo; isAutoInjected: boolean }> = ({ 
       <Tag
         size='small'
         bordered={false}
-        className='!flex-shrink-0 !text-10px !leading-14px !px-6px !py-0 !rounded-6px !bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]'
+        className='!flex-shrink-0 !text-10px !leading-14px !px-6px !py-0 !rounded-6px !bg-[rgba(var(--success-6),0.1)] !text-success-6'
       >
         {t('settings.skillsHub.sourceAuto', { defaultValue: 'Auto' })}
       </Tag>
@@ -59,7 +59,7 @@ const SourceBadge: React.FC<{ skill: SkillInfo; isAutoInjected: boolean }> = ({ 
       <Tag
         size='small'
         bordered={false}
-        className='!flex-shrink-0 !text-10px !leading-14px !px-6px !py-0 !rounded-6px !bg-[rgba(var(--orange-6),0.1)] !text-[rgb(var(--orange-6))]'
+        className='!flex-shrink-0 !text-10px !leading-14px !px-6px !py-0 !rounded-6px !bg-[rgba(var(--orange-6),0.1)] !text-[rgba(var(--orange-6),1)]'
       >
         {t('settings.skillsHub.custom', { defaultValue: 'Custom' })}
       </Tag>
@@ -128,7 +128,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
         'group relative flex flex-col rounded-16px border border-solid p-14px pb-42px cursor-pointer outline-none',
         'transition-all duration-180',
         highlighted
-          ? 'border-[rgb(var(--primary-5))] bg-[var(--color-primary-light-1)] shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
+          ? 'border-primary-5 bg-[var(--color-primary-light-1)] shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
           : 'border-[var(--color-border-2)] bg-[var(--color-bg-2)] hover:border-[var(--color-primary-light-4)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.06)]',
       ].join(' ')}
     >
@@ -212,7 +212,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
                 onDelete(skill);
               }
             }}
-            className='inline-flex items-center gap-4px text-12px text-[var(--color-text-3)] cursor-pointer hover:text-[rgb(var(--danger-6))] transition-colors'
+            className='inline-flex items-center gap-4px text-12px text-[var(--color-text-3)] cursor-pointer hover:text-danger-6 transition-colors'
           >
             <Delete theme='outline' size={13} strokeWidth={3} />
             {t('common.delete', { defaultValue: 'Delete' })}

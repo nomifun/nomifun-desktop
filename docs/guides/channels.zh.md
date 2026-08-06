@@ -197,6 +197,6 @@ backend/model 配置。平台级配置发生变化后，调用
 
 ## 相关
 
-- [伙伴（Companions）](./companions.zh.md)——多伙伴管理、共享记忆，以及搭载在渠道会话上的每宠知识库绑定。
+- [伙伴（Companions）](./companions.zh.md)——多伙伴管理、按伙伴独立的记忆，以及搭载在渠道会话上的每宠知识库绑定。
 - [AutoWork & Requirements](./autowork-requirements.zh.md)——从聊天里登记一条需求，再用 webhook 卡片把通知打回飞书。
 - [Web Server Deployment](./web-server-deployment.zh.md)——当你在服务器上自托管后端时同样能暴露这些 channel。

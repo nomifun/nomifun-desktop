@@ -202,7 +202,7 @@ const InboxReviewPanel: React.FC<InboxReviewPanelProps> = ({ baseId, items, load
               className='overflow-hidden rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)]'
             >
               {/* Card header */}
-              <div className='flex flex-wrap items-center justify-between gap-10px border-b border-solid border-[var(--color-border-2)] px-16px py-12px'>
+              <div className='flex flex-wrap items-center justify-between gap-10px border-b border-b-solid border-[var(--color-border-2)] px-16px py-12px'>
                 <div className='min-w-0 flex-1'>
                   <div className='flex items-center gap-8px text-13px text-[var(--color-text-1)]'>
                     <span className='truncate font-500' title={entry.rel_path}>

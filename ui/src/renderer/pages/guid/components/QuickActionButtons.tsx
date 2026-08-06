@@ -126,7 +126,7 @@ const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
           onClick={onOpenBugReport}
         >
           <svg
-            className='flex-shrink-0 text-[var(--color-text-3)] group-hover:text-[rgb(var(--primary-6))] transition-colors duration-300'
+            className='flex-shrink-0 text-[var(--color-text-3)] group-hover:text-primary-6 transition-colors duration-300'
             width='20'
             height='20'
             viewBox='0 0 20 20'
@@ -179,7 +179,7 @@ const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
               theme='outline'
               size={20}
               fill='currentColor'
-              className='flex-shrink-0 text-[var(--color-text-3)] group-hover:text-[rgb(var(--primary-6))] transition-colors duration-300'
+              className='flex-shrink-0 text-[var(--color-text-3)] group-hover:text-primary-6 transition-colors duration-300'
             />
             <span className='opacity-0 max-w-0 overflow-hidden text-14px text-[var(--color-text-2)] group-hover:opacity-100 group-hover:max-w-128px transition-all duration-360 ease-in-out'>
               {t('conversation.welcome.quickActionCheckUpdate')}

@@ -155,7 +155,7 @@ const PreviewContextMenu: React.FC<PreviewContextMenuProps> = ({
     >
       {/* 关闭左侧 / Close tabs to the left */}
       <div
-        className={`px-12px py-8px text-12px transition-colors ${hasLeftTabs ? 'cursor-pointer text-t-primary hover:bg-bg-3' : 'opacity-50 cursor-not-allowed text-t-tertiary'}`}
+        className={`px-12px py-8px text-12px transition-colors ${hasLeftTabs ? 'cursor-pointer text-t-primary hover:bg-3' : 'opacity-50 cursor-not-allowed text-t-tertiary'}`}
         onClick={() => hasLeftTabs && onCloseLeft(contextMenu.tabId!)}
       >
         {t('preview.closeLeft')}
@@ -163,7 +163,7 @@ const PreviewContextMenu: React.FC<PreviewContextMenuProps> = ({
 
       {/* 关闭右侧 / Close tabs to the right */}
       <div
-        className={`px-12px py-8px text-12px transition-colors ${hasRightTabs ? 'cursor-pointer text-t-primary hover:bg-bg-3' : 'opacity-50 cursor-not-allowed text-t-tertiary'}`}
+        className={`px-12px py-8px text-12px transition-colors ${hasRightTabs ? 'cursor-pointer text-t-primary hover:bg-3' : 'opacity-50 cursor-not-allowed text-t-tertiary'}`}
         onClick={() => hasRightTabs && onCloseRight(contextMenu.tabId!)}
       >
         {t('preview.closeRight')}
@@ -171,18 +171,22 @@ const PreviewContextMenu: React.FC<PreviewContextMenuProps> = ({
 
       {/* 关闭其他 / Close other tabs */}
       <div
-        className={`px-12px py-8px text-12px transition-colors ${hasOtherTabs ? 'cursor-pointer text-t-primary hover:bg-bg-3' : 'opacity-50 cursor-not-allowed text-t-tertiary'}`}
+        className={`px-12px py-8px text-12px transition-colors ${hasOtherTabs ? 'cursor-pointer text-t-primary hover:bg-3' : 'opacity-50 cursor-not-allowed text-t-tertiary'}`}
         onClick={() => hasOtherTabs && onCloseOthers(contextMenu.tabId!)}
       >
         {t('preview.closeOthers')}
       </div>
 
       {/* 分隔线 / Divider */}
-      <div className='h-1px bg-border-1 my-4px mx-8px' />
+      {/* 这个 div 的全部可见内容就是 1px 高的背景色，而 `bg-border-1` 查的是一个叫
+          「border-1」的颜色（theme 里没有），产出 0 条 CSS —— 分隔线整条不可见。
+          用容器 inline style 里同一个 --border-base，保证和菜单外框同色。
+          The div's only visual is its background, and `bg-border-1` compiled to nothing. */}
+      <div className='h-1px bg-[var(--border-base)] my-4px mx-8px' />
 
       {/* 全部关闭 / Close all tabs */}
       <div
-        className='px-12px py-8px text-12px text-t-primary cursor-pointer hover:bg-bg-3 transition-colors'
+        className='px-12px py-8px text-12px text-t-primary cursor-pointer hover:bg-3 transition-colors'
         onClick={onCloseAll}
       >
         {t('preview.closeAll')}

@@ -30,7 +30,7 @@ const MediaLayer: React.FC<{ assetId: AssetId | null; kind: 'image' | 'video' | 
   if (media.status !== 'ready') {
     return (
       <div className='flex h-full w-full items-center justify-center'>
-        <span className='h-16px w-16px animate-spin rounded-full border-2 border-solid border-[var(--color-fill-3)] border-t-[rgb(var(--primary-6))]' />
+        <span className='h-16px w-16px animate-spin rounded-full border-2px border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
       </div>
     );
   }
@@ -124,7 +124,7 @@ function CompareNodeImpl({ id, data, selected }: NodeProps<CompareFlowNode>) {
           <NodeHandles sides='target' />
           <div className='flex items-center gap-6px border-b border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-t-0 px-10px py-6px'>
             <span
-              className='flex h-18px w-18px items-center justify-center rounded-5px text-[rgb(var(--primary-6))]'
+              className='flex h-18px w-18px items-center justify-center rounded-5px text-primary-6'
               style={{ background: 'rgba(var(--primary-6),0.12)' }}
             >
               <Contrast theme='outline' size={11} strokeWidth={3} />

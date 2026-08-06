@@ -206,7 +206,7 @@ const ImagePreview: React.FC<ImagePreviewProps> = ({ assetIds, startIndex, onClo
       ) : media.status === 'error' ? (
         <span className='text-14px text-white/80'>{t('workshopCanvas.preview.loadFailed', { defaultValue: '图片加载失败' })}</span>
       ) : (
-        <span className='h-28px w-28px animate-spin rounded-full border-2 border-solid border-white/30 border-t-white' />
+        <span className='h-28px w-28px animate-spin rounded-full border-2px border-solid border-white/30 border-t-white' />
       )}
     </div>
   );

@@ -231,7 +231,7 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
     <div className='flex flex-col gap-10px w-240px p-4px'>
       <div className='text-t-primary text-13px font-600'>{t('requirements.autowork.label')}</div>
       <div className='text-t-tertiary text-12px leading-16px'>{t('requirements.autowork.hint')}</div>
-      {safetyHint ? <div className='text-12px leading-16px text-[rgb(var(--warning-6))]'>{safetyHint}</div> : null}
+      {safetyHint ? <div className='text-12px leading-16px text-warning-6'>{safetyHint}</div> : null}
       <div className='flex flex-col gap-4px' onKeyDownCapture={handleTagPickerKeyDownCapture}>
         <span className='text-t-secondary text-12px'>{t('requirements.autowork.tagLabel')}</span>
         <Tooltip disabled={!enabled} content={t('requirements.autowork.disableToChangeTag')}>
