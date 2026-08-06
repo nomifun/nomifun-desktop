@@ -80,8 +80,9 @@ impl Default for PoolTuning {
 }
 
 impl PoolTuning {
-    /// How long before retry number `attempt` (1-based). The default tuning
-    /// reproduces [`reconnect_delay`] exactly (pinned by this module's tests).
+    /// How long before retry number `attempt` (1-based). The default tuning walks
+    /// the 1s→60s ladder the constants in [`crate::state`] describe, pinned
+    /// literally by this module's tests.
     pub fn delay(&self, attempt: u32) -> Duration {
         let doublings = attempt.saturating_sub(1);
         match self.initial_backoff.checked_mul(1u32 << doublings.min(31)) {
@@ -1171,17 +1172,23 @@ async fn supervise(pool: std::sync::Weak<PoolInner>, link: Arc<SshLink>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::reconnect_delay;
 
     #[test]
     fn default_tuning_reproduces_the_pinned_ladder() {
-        // The tests shrink these numbers; production must not silently inherit a
-        // different ladder from the one `state.rs` pins.
+        // The literal ladder, spelled out: the tests shrink these numbers, and
+        // production must not silently inherit a different ladder. This is the
+        // only place the 1s→60s sequence is pinned, so it is written as expected
+        // values rather than recomputed from the same constants it is checking.
+        let expected_ms = [
+            1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000, 60_000, 60_000,
+            60_000,
+        ];
         let tuning = PoolTuning::default();
-        for attempt in 1..=12 {
+        for (i, want) in expected_ms.iter().enumerate() {
+            let attempt = (i + 1) as u32;
             assert_eq!(
                 tuning.delay(attempt),
-                reconnect_delay(attempt),
+                Duration::from_millis(*want),
                 "attempt {attempt}"
             );
         }

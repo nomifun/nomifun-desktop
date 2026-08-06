@@ -33,7 +33,7 @@ pub use ssh_config::{
     SshConfigHost, SshConfigScan,
 };
 pub use state::{
-    is_retryable, reconnect_delay, SshLinkPhase, SshLinkState, SshTeardown, SSH_CLOSE_BUDGET,
+    is_retryable, SshLinkPhase, SshLinkState, SshTeardown, SSH_CLOSE_BUDGET,
     SSH_LIVENESS_POLL_INTERVAL, SSH_RECONNECT_INITIAL_BACKOFF_MS, SSH_RECONNECT_MAX_ATTEMPTS,
     SSH_RECONNECT_MAX_BACKOFF_MS,
 };
