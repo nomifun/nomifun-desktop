@@ -15,6 +15,8 @@ const ChatModelsContent: React.FC = () => (
     icon={<Comment theme='outline' size='18' strokeWidth={3} />}
     titleKey='settings.modelHub.modality.chatTitle'
     subtitleKey='settings.modelHub.modality.chatSubtitle'
+    showDefaultModel
+    showUntagged
   />
 );
 
