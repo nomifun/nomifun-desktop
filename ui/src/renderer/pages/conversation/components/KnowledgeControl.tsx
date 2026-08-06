@@ -111,13 +111,13 @@ function getKindBadge(kind: IKnowledgeBase['kind']): KindBadgeStyle {
     case 'local':
       return {
         bgClass: 'bg-[rgba(var(--primary-6),0.1)]',
-        textClass: 'text-[rgb(var(--primary-5))]',
+        textClass: 'text-primary-5',
         borderClass: 'border-[rgba(var(--primary-6),0.3)]',
       };
     case 'web':
       return {
         bgClass: 'bg-[rgba(var(--success-6),0.1)]',
-        textClass: 'text-[rgb(var(--success-5))]',
+        textClass: 'text-success-5',
         borderClass: 'border-[rgba(var(--success-6),0.3)]',
       };
     case 'blank':
@@ -374,7 +374,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
             className={[
               'cursor-pointer rounded-6px px-10px py-4px text-11px leading-none',
               activeSeg
-                ? 'border border-solid border-[rgba(var(--primary-6),0.28)] bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))] font-600'
+                ? 'border border-solid border-[rgba(var(--primary-6),0.28)] bg-[rgba(var(--primary-6),0.12)] text-primary-6 font-600'
                 : 'border border-solid border-transparent text-[var(--color-text-1)] hover:bg-[var(--color-fill-3)]',
               targetUnresolved && 'cursor-not-allowed opacity-60',
             ]
@@ -425,7 +425,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
           className={[
             'grid h-17px w-17px flex-none place-items-center rounded-5px border-1.5px border-solid text-10px leading-none',
             isSelected
-              ? 'border-[rgba(var(--primary-6),0.48)] bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))]'
+              ? 'border-[rgba(var(--primary-6),0.48)] bg-[rgba(var(--primary-6),0.12)] text-primary-6'
               : 'border-[var(--color-text-3)] bg-[var(--color-bg-1)] text-transparent',
           ].join(' ')}
         >
@@ -455,7 +455,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
             </span>
           </span>
           {rootMissing && (
-            <span className='knowledge-control-root-missing mt-2px block text-11px leading-15px text-[rgb(var(--danger-6))]'>
+            <span className='knowledge-control-root-missing mt-2px block text-11px leading-15px text-danger-6'>
               {t('knowledge.mount.rootMissingHint', {
                 defaultValue: '源目录不存在或暂时不可访问，恢复目录后再挂载。',
               })}
@@ -504,7 +504,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
           {t('knowledge.control.hint')}
         </div>
         <div
-          className='self-start text-11px font-600 text-[rgb(var(--primary-6))] cursor-pointer hover:underline'
+          className='self-start text-11px font-600 text-primary-6 cursor-pointer hover:underline'
           onClick={() => navigate('/knowledge')}
         >
           {t('knowledge.mount.manage', { defaultValue: '管理知识库 ›' })}
@@ -635,7 +635,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
         </>
       )}
 
-      {footer ? <div className='shrink-0 border-t border-[var(--color-border-1)] pt-8px'>{footer}</div> : null}
+      {footer ? <div className='shrink-0 border-t border-t-solid border-[var(--color-border-1)] pt-8px'>{footer}</div> : null}
     </div>
   );
 

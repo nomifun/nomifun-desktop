@@ -107,7 +107,7 @@ const InputSummary: React.FC<InputSummaryProps> = ({ selfId, mentions, onRemoveM
       {mentionChips.map((chip) => (
         <span
           key={chip.ref}
-          className='inline-flex items-center gap-4px rounded-full border border-solid border-[rgba(var(--primary-6),0.3)] bg-[rgba(var(--primary-6),0.08)] px-7px py-2px text-10px font-600 text-[rgb(var(--primary-6))]'
+          className='inline-flex items-center gap-4px rounded-full border border-solid border-[rgba(var(--primary-6),0.3)] bg-[rgba(var(--primary-6),0.08)] px-7px py-2px text-10px font-600 text-primary-6'
         >
           {KIND_ICON[chip.kind]}
           <span className='max-w-88px truncate'>{chip.label}</span>

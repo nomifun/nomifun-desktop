@@ -171,7 +171,7 @@ const RequirementListRow: React.FC<RequirementListRowProps> = ({
               onEdit(item.requirement_id);
             }
           }}
-          className='inline-flex items-center text-[var(--color-text-3)] cursor-pointer hover:text-[rgb(var(--primary-6))] transition-colors'
+          className='inline-flex items-center text-[var(--color-text-3)] cursor-pointer hover:text-primary-6 transition-colors'
         >
           <Edit theme='outline' size={15} strokeWidth={3} />
         </span>
@@ -190,7 +190,7 @@ const RequirementListRow: React.FC<RequirementListRowProps> = ({
                 (e.currentTarget as HTMLElement).click();
               }
             }}
-            className='inline-flex items-center text-[var(--color-text-3)] cursor-pointer hover:text-[rgb(var(--danger-6))] transition-colors'
+            className='inline-flex items-center text-[var(--color-text-3)] cursor-pointer hover:text-danger-6 transition-colors'
           >
             <Delete theme='outline' size={15} strokeWidth={3} />
           </span>

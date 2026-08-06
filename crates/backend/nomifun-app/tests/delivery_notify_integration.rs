@@ -390,6 +390,7 @@ async fn user_texts(stack: &Stack, conversation_id: &str) -> Vec<String> {
         order: Some("ASC".into()),
         content_mode: None,
         cursor: None,
+        day: None,
     };
     stack
         .conversation_svc

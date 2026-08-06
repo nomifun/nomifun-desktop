@@ -427,7 +427,7 @@ const PreviewPanel: React.FC = () => {
           <div className='flex flex-1 relative overflow-hidden'>
             {/* 左侧：编辑器 / Left: Editor */}
             <div className='flex flex-col relative' style={{ width: `${splitRatio}%` }}>
-              <div className='h-40px flex items-center px-12px bg-bg-2'>
+              <div className='h-40px flex items-center px-12px bg-2'>
                 <span className='text-12px text-t-secondary'>{t('preview.editor')}</span>
               </div>
               <div className='flex-1 overflow-hidden'>
@@ -445,7 +445,7 @@ const PreviewPanel: React.FC = () => {
 
             {/* 右侧：预览 / Right: Preview */}
             <div className='flex flex-col' style={{ width: `${100 - splitRatio}%`, minWidth: 0 }}>
-              <div className='h-40px flex items-center px-12px bg-bg-2'>
+              <div className='h-40px flex items-center px-12px bg-2'>
                 <span className='text-12px text-t-secondary'>{t('preview.preview')}</span>
               </div>
               <div className='flex flex-col flex-1 overflow-hidden'>
@@ -495,7 +495,7 @@ const PreviewPanel: React.FC = () => {
           <div className='flex flex-1 relative overflow-hidden'>
             {/* 左侧：编辑器 / Left: Editor */}
             <div className='flex flex-col relative' style={{ width: `${splitRatio}%` }}>
-              <div className='h-40px flex items-center px-12px bg-bg-2'>
+              <div className='h-40px flex items-center px-12px bg-2'>
                 <span className='text-12px text-t-secondary'>{t('preview.editor')}</span>
               </div>
               <div className='flex-1 overflow-hidden'>
@@ -514,7 +514,7 @@ const PreviewPanel: React.FC = () => {
 
             {/* 右侧：预览 / Right: Preview */}
             <div className='flex flex-col' style={{ width: `${100 - splitRatio}%`, minWidth: 0 }}>
-              <div className='h-40px flex items-center justify-between px-12px bg-bg-2'>
+              <div className='h-40px flex items-center justify-between px-12px bg-2'>
                 <span className='text-12px text-t-secondary'>{t('preview.preview')}</span>
               </div>
               <div className='flex flex-col flex-1 overflow-hidden'>
@@ -571,7 +571,7 @@ const PreviewPanel: React.FC = () => {
           <div className='flex flex-1 relative overflow-hidden'>
             {/* 左侧：编辑器 / Left: Editor */}
             <div className='flex flex-col relative' style={{ width: `${splitRatio}%` }}>
-              <div className='h-40px flex items-center px-12px bg-bg-2'>
+              <div className='h-40px flex items-center px-12px bg-2'>
                 <span className='text-12px text-t-secondary'>{t('preview.editor')}</span>
               </div>
               <div className='flex-1 overflow-hidden'>
@@ -583,7 +583,7 @@ const PreviewPanel: React.FC = () => {
 
             {/* 右侧：预览 / Right: Preview */}
             <div className='flex flex-col' style={{ width: `${100 - splitRatio}%`, minWidth: 0 }}>
-              <div className='h-40px flex items-center px-12px bg-bg-2'>
+              <div className='h-40px flex items-center px-12px bg-2'>
                 <span className='text-12px text-t-secondary'>{t('preview.preview')}</span>
               </div>
               <div className='flex flex-col flex-1 overflow-hidden'>
@@ -713,7 +713,7 @@ const PreviewPanel: React.FC = () => {
         )}
 
         {metadata?.truncated && (
-          <div className='sticky top-0 z-1 px-16px py-10px text-12px bg-warning-1 text-warning-7 border-b border-warning-3'>
+          <div className='sticky top-0 z-1 px-16px py-10px text-12px bg-warning-1 text-warning-7 border-b border-b-solid border-warning-3'>
             {t('preview.truncatedBanner')}
           </div>
         )}

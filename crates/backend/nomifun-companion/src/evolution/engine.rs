@@ -11,19 +11,20 @@ use std::sync::Arc;
 use nomifun_common::{AppError, CompanionSkillId, generate_id, now_ms};
 use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 use nomifun_extension::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
-use tokio::sync::Mutex;
 
-use crate::collector::{SharedConfig, SharedEventStoreLock, read_events_since};
+use crate::collector::{EVOLVE_CURSOR_KEY, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
 use crate::evolution::miner::{mine_patterns, MinedPattern};
 use crate::evolution::prompt::{self, DraftOutput};
 use crate::evolution::transcript::{render_transcript, TranscriptAnchor, TranscriptSource};
-use crate::learner::CompanionCompleter;
+use crate::learner::{CompanionCompleter, CompanionRunLocks};
 use crate::registry::CompanionRegistry;
 use crate::store::{CompanionSkill, CompanionStore};
 
 const MAX_EVENTS_PER_RUN: usize = 500;
 const TICK_SECONDS: u64 = 60;
+/// Per-companion `companion_runtime_state` key for this loop's schedule stamp.
+const LAST_EVOLVE_TS_KEY: &str = "last_evolve_ts";
 const DRAFT_MAX_TOKENS: u32 = 1200;
 const CRITIC_MAX_TOKENS: u32 = 256;
 /// 一次最多起草几个新技能（避免单轮爆量骚扰）。
@@ -47,8 +48,9 @@ pub struct EvolveRun {
 
 pub struct EvolutionEngine {
     pub companion_dir: PathBuf,
-    pub config: SharedConfig,
     pub store: CompanionStore,
+    /// 每个伙伴自带 `evolve` 配置：跑不跑、多久跑、用哪个模型、保守还是激进，
+    /// 全部来自 profile。挖出来的技能就归这个伙伴。
     pub registry: Arc<CompanionRegistry>,
     pub completer: Arc<dyn CompanionCompleter>,
     pub emitter: CompanionEventEmitter,
@@ -59,8 +61,8 @@ pub struct EvolutionEngine {
     /// → 起草降级回工具名步骤。`std::sync::RwLock` 因 `attach_companion` 非 async；读出 Arc
     /// 即刻 drop guard，绝不跨 await 持锁。
     pub transcript: std::sync::RwLock<Arc<dyn TranscriptSource>>,
-    /// 与 Learner 各自独立的再入守卫。
-    pub run_lock: Arc<Mutex<()>>,
+    /// 与 Learner 各自独立的再入守卫，每伙伴一把。
+    pub run_locks: Arc<CompanionRunLocks>,
 }
 
 impl EvolutionEngine {
@@ -89,77 +91,96 @@ impl EvolutionEngine {
             }
         }
     }
-    /// 启动周期 tick 循环。
+    /// 启动周期 tick 循环：逐个伙伴，按各自的 `evolve` 配置与 休眠时段 决定跑不跑。
+    /// 顺序遍历，避免一次 tick 同时打 N 个 LLM 请求。
     pub fn spawn(self: Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(TICK_SECONDS));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                let (enabled, interval_minutes) = {
-                    let cfg = self.config.read().await;
-                    (cfg.evolve.enabled, cfg.evolve.interval_minutes.max(5) as i64)
-                };
-                if !enabled {
-                    continue;
-                }
-                let last_run = self.store.get_state_i64("last_evolve_ts").await.unwrap_or(0);
-                if now_ms() - last_run < interval_minutes * 60_000 {
-                    continue;
-                }
-                if let Err(e) = self.run_once().await {
-                    tracing::warn!(error = %e, "companion evolution run failed");
+                for profile in self.registry.list().await {
+                    if !profile.evolve.enabled {
+                        continue;
+                    }
+                    // 休眠时段：后台 LLM 循环要花主人的钱、还会生成待审技能，
+                    // 睡觉期间一律不跑（IM 自动回复不受此门控）。
+                    if profile.appearance.in_quiet_hours_now() {
+                        continue;
+                    }
+                    let last_run = self
+                        .store
+                        .get_companion_state_i64(&profile.companion_id, LAST_EVOLVE_TS_KEY)
+                        .await
+                        .unwrap_or(0);
+                    let interval_minutes = profile.evolve.effective_interval_minutes() as i64;
+                    if now_ms() - last_run < interval_minutes * 60_000 {
+                        continue;
+                    }
+                    if let Err(e) = self.run_for(&profile.companion_id).await {
+                        tracing::warn!(
+                            companion_id = %profile.companion_id,
+                            error = %e,
+                            "companion evolution run failed"
+                        );
+                    }
                 }
             }
         });
     }
 
-    /// 一次进化运行。失败绝不 emit_error；状态写进返回的 EvolveRun。
-    pub async fn run_once(&self) -> Result<EvolveRun, AppError> {
-        let Ok(_guard) = self.run_lock.try_lock() else {
-            return Err(AppError::Conflict("an evolution run is already in progress".into()));
+    /// 一次进化运行（针对一个伙伴）。失败绝不 emit_error；状态写进返回的 EvolveRun。
+    pub async fn run_for(&self, companion_id: &str) -> Result<EvolveRun, AppError> {
+        let profile = self
+            .registry
+            .get(companion_id)
+            .await
+            .ok_or_else(|| AppError::NotFound(format!("companion '{companion_id}' not found")))?;
+        let owner = profile.companion_id.clone();
+        let lock = self.run_locks.for_companion(&owner).await;
+        let Ok(_guard) = lock.try_lock() else {
+            return Err(AppError::Conflict(
+                "an evolution run is already in progress for this companion".into(),
+            ));
         };
         let started_at = now_ms();
         // 先 stamp，崩溃/失败也不会让 60s 调度热循环。
-        self.store.set_state("last_evolve_ts", &started_at.to_string()).await?;
+        self.store
+            .set_companion_state(&owner, LAST_EVOLVE_TS_KEY, &started_at.to_string())
+            .await?;
 
         // Skill health/decay pass (P5 T1-B): runs every evolution tick, before the
         // model-configured gate, so unused mined skills fade even when no draft is produced.
+        // Scoped to THIS companion's own skills with THIS companion's half-life —
+        // a decay clock is part of how one companion forgets, not a global sweep.
         // Fire-and-forget; never emit_error. Emits skill-archived for live UI refresh.
-        let (half_life, archive_threshold) = {
-            let cfg = self.config.read().await;
-            (cfg.evolve.skill_half_life_days, cfg.evolve.skill_archive_threshold)
-        };
-        if let Ok(archived) = self.store.decay_skills(half_life, archive_threshold).await {
+        if let Ok(archived) = self
+            .store
+            .decay_skills(
+                &owner,
+                profile.evolve.skill_half_life_days,
+                profile.evolve.skill_archive_threshold,
+            )
+            .await
+        {
             for skill in archived {
-                let owner = {
-                    let did = { self.config.read().await.default_companion_id.clone() };
-                    self.registry.resolve_default(did.as_deref()).await
-                };
-                if let Some(owner) = owner.as_deref() {
-                    self.emitter.emit_skill_archived(
-                        owner,
-                        &skill.companion_skill_id,
-                        &skill.skill_name,
-                    );
-                }
+                self.emitter
+                    .emit_skill_archived(&owner, &skill.companion_skill_id, &skill.skill_name);
             }
         }
 
-        let (model, min_count, min_distinct, auto_activate, auto_threshold) = {
-            let cfg = self.config.read().await;
-            // One model for the whole flywheel: fall back to the learn model when no
-            // dedicated evolve model is configured, so default-on works out of the box
-            // once the user has set the shared learning model.
-            let model = cfg.evolve.model.clone().or_else(|| cfg.learn.model.clone());
-            (
-                model,
-                cfg.evolve.min_pattern_count,
-                cfg.evolve.min_distinct_sessions,
-                cfg.evolve.auto_activate,
-                cfg.evolve.auto_threshold,
-            )
-        };
+        // One model for the whole flywheel: fall back to the learn model when no
+        // dedicated evolve model is configured, so default-on works out of the box
+        // once the user has set this companion's learning model.
+        let model = profile
+            .evolve
+            .model
+            .clone()
+            .or_else(|| profile.learn.model.clone());
+        let min_count = profile.evolve.min_pattern_count;
+        let min_distinct = profile.evolve.min_distinct_sessions;
+        let auto_activate = profile.evolve.auto_activate;
+        let auto_threshold = profile.evolve.auto_threshold;
         let mut run = EvolveRun {
             // This summary is returned to the current caller only. It is not
             // persisted, exported, or referenced after the call, so use an
@@ -180,17 +201,10 @@ impl EvolutionEngine {
             return Ok(run);
         };
 
-        // 自生成技能必须归属某个伙伴（伙伴级专属成长）。默认体解析复用 registry 单一事实源。
-        let Some(owner) = ({
-            let did = { self.config.read().await.default_companion_id.clone() };
-            self.registry.resolve_default(did.as_deref()).await
-        }) else {
-            run.status = "no_companion".into();
-            run.finished_at = Some(now_ms());
-            return Ok(run);
-        };
-
-        let cursor = self.store.get_state_i64("evolve_cursor_ts").await?;
+        let cursor = self
+            .store
+            .get_companion_state_i64(&owner, EVOLVE_CURSOR_KEY)
+            .await?;
         let (events, _truncated) = {
             let _event_guard = self.event_store_lock.read().await;
             read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN)?
@@ -232,7 +246,9 @@ impl EvolutionEngine {
                 run.status = "error".into();
             }
         } else {
-            self.store.set_state("evolve_cursor_ts", &new_cursor.to_string()).await?;
+            self.store
+                .set_companion_state(&owner, EVOLVE_CURSOR_KEY, &new_cursor.to_string())
+                .await?;
         }
         run.finished_at = Some(now_ms());
         Ok(run)
@@ -385,8 +401,7 @@ impl EvolutionEngine {
         let skill = CompanionSkill {
             companion_skill_id: CompanionSkillId::new().into_string(),
             skill_name: name.clone(),
-            scope_kind: "companion".into(),
-            scope_companion_id: Some(owner.to_owned()),
+            companion_id: Some(owner.to_owned()),
             status: if auto { "active".into() } else { "draft".into() },
             source: "mined".into(),
             confidence,
@@ -428,16 +443,9 @@ impl EvolutionEngine {
                     &skill.skill_name,
                 );
         } else {
-            let action = serde_json::json!({
-                "type": "create_skill",
-                "companion_skill_id": skill.companion_skill_id,
-                "companion_id": owner,
-            });
-            let title = format!("我学会了一个新技能：{name}");
-            let body = format!("你做过「{}」这套操作，我把它固化成了技能，采纳后我就能自动帮你做。", draft.description);
-            if let Ok(created) = self.store.insert_suggestion("create_skill", &title, &body, Some(&action)).await {
-                self.emitter.emit_suggestion_created(&owner, &created);
-            }
+            // Reviewable draft: skill-drafted is the surfacing signal (the
+            // 建议 review card was retired with the suggestion feature — the
+            // draft is reviewed on the companion's 技能 surface instead).
             self.emitter.emit_skill_drafted(
                 owner,
                 &skill.companion_skill_id,
@@ -464,10 +472,18 @@ impl EvolutionEngine {
         }
         nomifun_common::CompanionId::try_from(owner)
             .map_err(|error| AppError::BadRequest(format!("invalid companion id: {error}")))?;
-        let model = {
-            let cfg = self.config.read().await;
-            cfg.evolve.model.clone().or_else(|| cfg.learn.model.clone())
-        };
+        // The demonstrating companion's own model — 进化 优先，退回它的 学习 模型。
+        let model = self
+            .registry
+            .get(owner)
+            .await
+            .and_then(|profile| {
+                profile
+                    .evolve
+                    .model
+                    .clone()
+                    .or_else(|| profile.learn.model.clone())
+            });
         let Some(model) = model else {
             return Err(AppError::BadRequest("尚未配置学习模型".into()));
         };
@@ -518,8 +534,7 @@ impl EvolutionEngine {
             .insert_skill(&CompanionSkill {
                 companion_skill_id: CompanionSkillId::new().into_string(),
                 skill_name: name.clone(),
-                scope_kind: "companion".into(),
-                scope_companion_id: Some(owner.to_owned()),
+                companion_id: Some(owner.to_owned()),
                 status: "draft".into(),
                 source: "demonstrated".into(),
                 confidence: 0.5,
@@ -557,20 +572,6 @@ impl EvolutionEngine {
                 AppError::Internal("demonstrated skill row disappeared after insert".into())
             })?
             .companion_skill_id;
-        let action = serde_json::json!({
-            "type": "create_skill",
-            "companion_skill_id": companion_skill_id,
-            "companion_id": owner,
-        });
-        let title = format!("我学会了你示范的技能：{name}");
-        let body = format!("照你示范的「{}」整理成了技能，采纳后我就能复用。", draft.description);
-        if let Ok(created) = self
-            .store
-            .insert_suggestion("create_skill", &title, &body, Some(&action))
-            .await
-        {
-            self.emitter.emit_suggestion_created(&owner, &created);
-        }
         self.emitter.emit_skill_drafted(owner, &companion_skill_id, &name);
         Ok(Some(name))
     }
@@ -597,9 +598,9 @@ mod tests {
     use crate::collector::{CollectedEvent, append_event};
     use crate::evolution::transcript::test_util::StubTranscript;
     use crate::evolution::transcript::{NoopTranscriptSource, TranscriptTurn};
-    use crate::profile::SharedCompanionConfig;
+    
     use nomifun_realtime::BroadcastEventBus;
-    use tokio::sync::RwLock;
+    
 
     fn conversation_fixture(sequence: u64) -> String {
         let raw = format!("0190f5fe-7c00-7a00-8abc-{sequence:012}");
@@ -677,25 +678,37 @@ mod tests {
         make_engine_with(dir, Arc::new(ScriptedCompleter { draft: draft.to_owned(), approve })).await
     }
 
+    /// The per-companion 进化 block every engine test starts from: enabled, a
+    /// model, and the historical mining thresholds.
+    fn test_evolve_config() -> crate::profile::CompanionEvolveConfig {
+        crate::profile::CompanionEvolveConfig {
+            enabled: true,
+            model: Some(nomifun_common::ProviderWithModel {
+                provider_id: nomifun_common::ProviderId::new().into_string(),
+                model: "test-model".into(),
+                use_model: None,
+            }),
+            min_pattern_count: 3,
+            min_distinct_sessions: 2,
+            ..Default::default()
+        }
+    }
+
     async fn make_engine_with(dir: &std::path::Path, completer: Arc<dyn CompanionCompleter>) -> (EvolutionEngine, String) {
-        let mut config = SharedCompanionConfig::default();
-        config.evolve.enabled = true;
-        config.evolve.model = Some(nomifun_common::ProviderWithModel {
-            provider_id: nomifun_common::ProviderId::new().into_string(),
-            model: "test-model".into(),
-            use_model: None,
-        });
-        config.evolve.min_pattern_count = 3;
-        config.evolve.min_distinct_sessions = 2;
         let registry = Arc::new(
             CompanionRegistry::scan(dir.join("companions"), dir.join("shared"))
                 .unwrap(),
         );
         let companion = registry.create("测试", "ink").await.unwrap();
-        config.default_companion_id = Some(companion.companion_id.clone());
+        registry
+            .patch(
+                &companion.companion_id,
+                serde_json::json!({"evolve": serde_json::to_value(test_evolve_config()).unwrap()}),
+            )
+            .await
+            .unwrap();
         let engine = EvolutionEngine {
             companion_dir: dir.to_path_buf(),
-            config: Arc::new(RwLock::new(config)),
             store: CompanionStore::open_memory().await.unwrap(),
             registry,
             completer,
@@ -703,9 +716,18 @@ mod tests {
             event_store_lock: Arc::new(tokio::sync::RwLock::new(())),
             skill_paths: test_skill_paths(dir),
             transcript: std::sync::RwLock::new(Arc::new(NoopTranscriptSource)),
-            run_lock: Arc::new(Mutex::new(())),
+            run_locks: Arc::new(CompanionRunLocks::new()),
         };
         (engine, companion.companion_id)
+    }
+
+    /// Patch one companion's `evolve` block in place.
+    async fn patch_evolve(engine: &EvolutionEngine, cid: &str, patch: serde_json::Value) {
+        engine
+            .registry
+            .patch(cid, serde_json::json!({"evolve": patch}))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -714,25 +736,21 @@ mod tests {
         seed_tool_calls(dir.path());
         let draft = r#"{"name":"grep-read-edit","description":"查找并修改代码","when_to_use":"改 bug 时","body":"步骤"}"#;
         let (engine, cid) = make_engine(dir.path(), draft, true).await;
-        let run = engine.run_once().await.unwrap();
+        let run = engine.run_for(&cid).await.unwrap();
         assert_eq!(run.status, "ok");
         assert!(run.patterns_found >= 1, "expected a mined pattern");
         assert_eq!(run.drafts_created, 1);
         // 注册表一条 draft 技能
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].status, "draft");
         assert_eq!(skills[0].source, "mined");
-        // 一条 create_skill 建议卡
-        let sugs = engine.store.list_suggestions(Some("new"), 10).await.unwrap();
-        assert_eq!(sugs.len(), 1);
-        assert_eq!(sugs[0].kind, "create_skill");
         // 草稿 SKILL.md 落盘
         let draft_md = dir.path().join("skills/_drafts").join(&cid).join("grep-read-edit/SKILL.md");
         assert!(draft_md.exists(), "draft SKILL.md missing at {}", draft_md.display());
         // cursor 推进；二次运行无新事件
-        assert!(engine.store.get_state_i64("evolve_cursor_ts").await.unwrap() > 0);
-        let run2 = engine.run_once().await.unwrap();
+        assert!(engine.store.get_companion_state_i64(&cid, EVOLVE_CURSOR_KEY).await.unwrap() > 0);
+        let run2 = engine.run_for(&cid).await.unwrap();
         assert_eq!(run2.drafts_created, 0);
     }
 
@@ -740,9 +758,9 @@ mod tests {
     async fn run_once_skips_when_model_unconfigured() {
         let dir = tempfile::tempdir().unwrap();
         seed_tool_calls(dir.path());
-        let (engine, _) = make_engine(dir.path(), "{}", true).await;
-        engine.config.write().await.evolve.model = Default::default();
-        let run = engine.run_once().await.unwrap();
+        let (engine, cid) = make_engine(dir.path(), "{}", true).await;
+        patch_evolve(&engine, &cid, serde_json::json!({"model": null})).await;
+        let run = engine.run_for(&cid).await.unwrap();
         assert_eq!(run.status, "model_unconfigured");
     }
 
@@ -752,9 +770,9 @@ mod tests {
         seed_tool_calls(dir.path());
         let draft = r#"{"name":"x","description":"d","body":"b"}"#;
         let (engine, cid) = make_engine(dir.path(), draft, false).await;
-        let run = engine.run_once().await.unwrap();
+        let run = engine.run_for(&cid).await.unwrap();
         assert_eq!(run.drafts_created, 0);
-        assert_eq!(engine.store.list_skills(&cid, false).await.unwrap().len(), 0);
+        assert_eq!(engine.store.list_skills(&cid).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -762,17 +780,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_tool_calls(dir.path());
         let draft = r#"{"name":"gre","description":"d","when_to_use":"w","body":"b"}"#;
-        let (engine, _cid) = make_engine(dir.path(), draft, true).await;
-        {
-            let mut cfg = engine.config.write().await;
-            cfg.evolve.model = Default::default(); // no dedicated evolve model
-            cfg.learn.model = Some(nomifun_common::ProviderWithModel {
-                provider_id: nomifun_common::ProviderId::new().into_string(),
-                model: "test-model".into(),
-                use_model: None,
-            }); // learn model configured
-        }
-        let run = engine.run_once().await.unwrap();
+        let (engine, cid) = make_engine(dir.path(), draft, true).await;
+        // No dedicated 进化 model, but this companion's 学习 model IS configured.
+        engine
+            .registry
+            .patch(
+                &cid,
+                serde_json::json!({
+                    "evolve": {"model": null},
+                    "learn": {"model": {
+                        "provider_id": nomifun_common::ProviderId::new().into_string(),
+                        "model": "test-model"
+                    }}
+                }),
+            )
+            .await
+            .unwrap();
+        let run = engine.run_for(&cid).await.unwrap();
         assert_ne!(run.status, "model_unconfigured", "should fall back to the learn model");
         assert_eq!(run.drafts_created, 1);
     }
@@ -809,15 +833,13 @@ mod tests {
         );
         let draft = r#"{"name":"auto-skill","description":"d","when_to_use":"w","body":"b"}"#;
         let (engine, cid) = make_engine(dir.path(), draft, true).await;
-        engine.config.write().await.evolve.auto_activate = true;
-        let run = engine.run_once().await.unwrap();
+        patch_evolve(&engine, &cid, serde_json::json!({"auto_activate": true})).await;
+        let run = engine.run_for(&cid).await.unwrap();
         assert_eq!(run.drafts_created, 1);
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].status, "active", "high-confidence pattern should auto-activate");
         assert!(dir.path().join("skills/companion").join(&cid).join("auto-skill").join("SKILL.md").exists());
-        // auto path emits no review card
-        assert!(engine.store.list_suggestions(Some("new"), 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -831,11 +853,11 @@ mod tests {
         let draft = r#"{"name":"single-session-skill","description":"d","when_to_use":"w","body":"b"}"#;
         let (engine, cid) = make_engine(dir.path(), draft, true).await;
 
-        let run = engine.run_once().await.unwrap();
+        let run = engine.run_for(&cid).await.unwrap();
 
         assert_eq!(run.patterns_found, 0);
         assert_eq!(run.drafts_created, 0);
-        assert!(engine.store.list_skills(&cid, false).await.unwrap().is_empty());
+        assert!(engine.store.list_skills(&cid).await.unwrap().is_empty());
     }
 
     struct VersioningCompleter;
@@ -878,8 +900,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
             companion_skill_id: nomifun_common::generate_id(),
                 skill_name: "grep-read-edit".into(),
-                scope_kind: "companion".into(),
-                scope_companion_id: Some(cid.clone()),
+                companion_id: Some(cid.clone()),
                 status: "active".into(),
                 source: "mined".into(),
                 confidence: 0.7,
@@ -896,8 +917,8 @@ mod tests {
             .await
             .unwrap();
 
-        engine.run_once().await.unwrap();
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        engine.run_for(&cid).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         // No duplicate created; the similar existing skill was improved in place + version bumped.
         assert_eq!(skills.len(), 1, "should evolve in place, not duplicate");
         assert_eq!(skills[0].skill_name, "grep-read-edit");
@@ -914,7 +935,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(name.as_deref(), Some("demo-flow"));
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].source, "demonstrated", "demonstrated skills are exempt from decay");
         assert_eq!(skills[0].status, "draft", "demonstration always produces a reviewable draft");
@@ -928,12 +949,12 @@ mod tests {
         let draft = r#"{"name":"grep-read-edit","description":"d","when_to_use":"w","body":"b"}"#;
         let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let completer = Arc::new(CapturingCompleter { draft: draft.into(), approve: true, draft_prompts: seen.clone() });
-        let (engine, _cid) = make_engine_with(dir.path(), completer).await;
+        let (engine, cid) = make_engine_with(dir.path(), completer).await;
         engine.set_transcript(Arc::new(StubTranscript::with(vec![
             TranscriptTurn::user("把日志里的错误找出来改掉"),
             TranscriptTurn::tool("grep", Some("pattern=ERROR".into()), Some("命中 3 处".into())),
         ])));
-        engine.run_once().await.unwrap();
+        engine.run_for(&cid).await.unwrap();
         let prompts = seen.lock().await;
         let dp = prompts.iter().find(|p| p.contains("可复用技能")).expect("a draft prompt was issued");
         assert!(dp.contains("实际操作过程"), "rehydrated transcript section missing: {dp}");
@@ -950,14 +971,14 @@ mod tests {
         let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let completer = Arc::new(CapturingCompleter { draft: draft.into(), approve: true, draft_prompts: seen.clone() });
         let (engine, cid) = make_engine_with(dir.path(), completer).await; // transcript stays Noop
-        let run = engine.run_once().await.unwrap();
+        let run = engine.run_for(&cid).await.unwrap();
         assert!(run.drafts_created >= 1, "must still draft from steps alone");
         let prompts = seen.lock().await;
         let dp = prompts.iter().find(|p| p.contains("可复用技能")).expect("a draft prompt was issued");
         assert!(!dp.contains("实际操作过程"), "degraded draft must carry no transcript section: {dp}");
         // The pattern steps still drive the draft.
         assert!(dp.contains("grep"), "steps still present: {dp}");
-        let skills = engine.store.list_skills(&cid, false).await.unwrap();
+        let skills = engine.store.list_skills(&cid).await.unwrap();
         assert_eq!(skills.len(), 1);
     }
 }

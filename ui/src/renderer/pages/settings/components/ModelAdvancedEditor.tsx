@@ -169,7 +169,7 @@ const ModelAdvancedEditor: React.FC<{
             autoSize={{ minRows: 2, maxRows: 8 }}
           />
           {jsonError && (
-            <div className='text-11px leading-4 text-[rgb(var(--danger-6))]'>
+            <div className='text-11px leading-4 text-danger-6'>
               {t('settings.modelAdvanced.invalidParamsJson', {
                 defaultValue: '参数 JSON 无效，需为 JSON 对象',
               })}
@@ -190,7 +190,7 @@ const ModelAdvancedEditor: React.FC<{
       <Tooltip content={t('settings.modelAdvanced.trigger', { defaultValue: '高级' })}>
         <Button
           size='mini'
-          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${hasOverrides ? 'text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))]' : 'text-t-secondary hover:text-t-primary'}`}
+          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${hasOverrides ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
           icon={<SettingTwo theme='outline' size='14' />}
           onClick={(e) => e.stopPropagation()}
         />

@@ -283,7 +283,8 @@ What you don't get from the IM side (yet):
 
 ## Related
 
-- [Companions](./companions.md) — multi-companion management, shared memory, and the
+- [Companions](./companions.md) — multi-companion management, per-companion
+  memory, and the
   per-companion knowledge bindings that ride on channel conversations.
 - [AutoWork & Requirements](./autowork-requirements.md) — file a
   requirement from a chat, get notified when it lands via a webhook to

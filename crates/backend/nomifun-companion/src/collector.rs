@@ -15,7 +15,7 @@ use nomifun_common::{AppError, CompanionEventId, CompanionId, now_ms, validate_u
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::profile::SharedCompanionConfig;
+use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 
 const MAX_FIELD_CHARS: usize = 2000;
 const MAX_REPLY_CHARS: usize = 4000;
@@ -88,6 +88,10 @@ pub struct Collector {
     /// talking — they must never feed the learner (self-learning loop), but
     /// each completed companion turn earns XP.
     store: crate::store::CompanionStore,
+    /// Needed by [`Collector::prune_now`]: retention's floor is now the min over
+    /// every companion's enabled consumers, so pruning cannot be decided from the
+    /// shared config alone.
+    registry: Arc<crate::registry::CompanionRegistry>,
     /// (conversation_id, msg_id) -> accumulated assistant text.
     reply_buffers: HashMap<(String, String), String>,
     /// Buffer creation order for [`MAX_REPLY_BUFFERS`] eviction. May hold
@@ -392,27 +396,78 @@ fn prune_event_store_at(
     ))
 }
 
+/// Per-companion `companion_runtime_state` key holding how far this companion's
+/// 定时学习 loop has consumed the shared raw-event spool. Install-wide (one row in
+/// `companion_state`) until 2026-08.
+pub const LEARN_CURSOR_KEY: &str = "learn_cursor_ts";
+/// Per-companion `companion_runtime_state` key for the 技能进化 loop's progress
+/// through the same spool.
+pub const EVOLVE_CURSOR_KEY: &str = "evolve_cursor_ts";
+
+/// The oldest raw event any still-hungry consumer has NOT read yet — the floor
+/// retention is not allowed to delete past.
+///
+/// Consumers are per companion: one companion with 定时学习 on and a cursor at
+/// yesterday keeps yesterday's events alive for everyone, even if every other
+/// companion has caught up. So this is the **min over every enabled consumer of
+/// every companion**, and a companion whose consumer is on but has no cursor row
+/// yet contributes `0` — maximum protection, nothing may be pruned — which is
+/// exactly what [`crate::store::CompanionStore::get_companion_state_i64`] returns
+/// for an absent row.
+///
+/// `None` means "no companion has any consumer enabled", i.e. nothing is reading
+/// the spool and pure age/capacity policy governs it. Returning `None` (or any
+/// value above a lagging companion's cursor) while a consumer IS enabled would
+/// silently, irreversibly delete events that companion has never seen — and
+/// pruning runs on a schedule AND after every import/policy change, so the loss
+/// would be immediate.
 pub async fn active_consumer_watermark(
     store: &crate::store::CompanionStore,
-    config: &SharedCompanionConfig,
+    companions: &[CompanionProfileConfig],
 ) -> Result<Option<i64>, AppError> {
-    let mut cursors = Vec::with_capacity(2);
-    if config.learn.enabled {
-        cursors.push(store.get_state_i64("learn_cursor_ts").await?);
-    }
-    if config.evolve.enabled {
-        cursors.push(store.get_state_i64("evolve_cursor_ts").await?);
+    let mut cursors: Vec<i64> = Vec::with_capacity(companions.len() * 2);
+    for profile in companions {
+        if profile.learn.enabled {
+            cursors.push(
+                store
+                    .get_companion_state_i64(&profile.companion_id, LEARN_CURSOR_KEY)
+                    .await?,
+            );
+        }
+        if profile.evolve.enabled {
+            cursors.push(
+                store
+                    .get_companion_state_i64(&profile.companion_id, EVOLVE_CURSOR_KEY)
+                    .await?,
+            );
+        }
     }
     Ok(cursors.into_iter().min())
 }
 
 impl Collector {
+    /// Test collector with an EMPTY roster. Retention pruning is the only thing
+    /// that reads the roster, and it is covered directly through
+    /// [`active_consumer_watermark`]; every other collector behaviour is
+    /// roster-independent.
     #[cfg(test)]
-    pub fn new(companion_dir: PathBuf, config: SharedConfig, store: crate::store::CompanionStore) -> Self {
+    pub fn new(
+        companion_dir: PathBuf,
+        config: SharedConfig,
+        store: crate::store::CompanionStore,
+    ) -> Self {
+        let registry = Arc::new(
+            crate::registry::CompanionRegistry::scan(
+                companion_dir.join("companions"),
+                companion_dir.clone(),
+            )
+            .expect("scan empty test roster"),
+        );
         Self::with_event_store_lock(
             companion_dir,
             config,
             store,
+            registry,
             Arc::new(RwLock::new(())),
         )
     }
@@ -421,6 +476,7 @@ impl Collector {
         companion_dir: PathBuf,
         config: SharedConfig,
         store: crate::store::CompanionStore,
+        registry: Arc<crate::registry::CompanionRegistry>,
         event_store_lock: SharedEventStoreLock,
     ) -> Self {
         Self {
@@ -428,6 +484,7 @@ impl Collector {
             config,
             event_store_lock,
             store,
+            registry,
             reply_buffers: HashMap::new(),
             reply_buffer_order: VecDeque::new(),
         }
@@ -522,13 +579,14 @@ impl Collector {
     async fn prune_now(&self) {
         let event_guard = self.event_store_lock.clone().write_owned().await;
         let config = self.config.read().await.clone();
-        let protected_after_ts = match active_consumer_watermark(&self.store, &config).await {
-            Ok(cursor) => cursor,
-            Err(error) => {
-                tracing::warn!(error = %error, "companion collector failed to read retention cursors");
-                return;
-            }
-        };
+        let protected_after_ts =
+            match active_consumer_watermark(&self.store, &self.registry.list().await).await {
+                Ok(cursor) => cursor,
+                Err(error) => {
+                    tracing::warn!(error = %error, "companion collector failed to read retention cursors");
+                    return;
+                }
+            };
         let companion_dir = self.companion_dir.clone();
         let result = tokio::task::spawn_blocking(move || {
             let _event_guard = event_guard;
@@ -2058,20 +2116,120 @@ mod tests {
         );
     }
 
+    fn profile_fixture(name: &str) -> CompanionProfileConfig {
+        CompanionProfileConfig::new(name, "ink", 1)
+    }
+
     #[tokio::test]
     async fn active_watermark_uses_only_enabled_consumers_and_takes_the_minimum() {
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        store.set_state("learn_cursor_ts", "900").await.unwrap();
-        store.set_state("evolve_cursor_ts", "400").await.unwrap();
-        let mut config = SharedCompanionConfig::default();
+        let mut companion = profile_fixture("独苗");
+        store
+            .set_companion_state(&companion.companion_id, LEARN_CURSOR_KEY, "900")
+            .await
+            .unwrap();
+        store
+            .set_companion_state(&companion.companion_id, EVOLVE_CURSOR_KEY, "400")
+            .await
+            .unwrap();
 
-        assert_eq!(active_consumer_watermark(&store, &config).await.unwrap(), None);
-        config.learn.enabled = true;
-        assert_eq!(active_consumer_watermark(&store, &config).await.unwrap(), Some(900));
-        config.evolve.enabled = true;
-        assert_eq!(active_consumer_watermark(&store, &config).await.unwrap(), Some(400));
-        config.evolve.enabled = false;
-        assert_eq!(active_consumer_watermark(&store, &config).await.unwrap(), Some(900));
+        let roster = |profile: &CompanionProfileConfig| vec![profile.clone()];
+        assert_eq!(
+            active_consumer_watermark(&store, &roster(&companion)).await.unwrap(),
+            None
+        );
+        companion.learn.enabled = true;
+        assert_eq!(
+            active_consumer_watermark(&store, &roster(&companion)).await.unwrap(),
+            Some(900)
+        );
+        companion.evolve.enabled = true;
+        assert_eq!(
+            active_consumer_watermark(&store, &roster(&companion)).await.unwrap(),
+            Some(400)
+        );
+        companion.evolve.enabled = false;
+        assert_eq!(
+            active_consumer_watermark(&store, &roster(&companion)).await.unwrap(),
+            Some(900)
+        );
+    }
+
+    /// THE data-loss guard. Retention may only delete raw events that every
+    /// still-hungry consumer has already read, and consumers are per companion —
+    /// so one companion lagging behind pins the floor for the whole install even
+    /// when every sibling has caught up.
+    ///
+    /// Before 2026-08 this was one global cursor pair, and the obvious
+    /// per-companion rewrite (read the leader, or read only the default companion)
+    /// silently deletes events the laggard has never seen. There is no error and
+    /// no recovery: the JSONL day file is gone.
+    #[tokio::test]
+    async fn active_watermark_protects_a_lagging_companion_from_the_leaders_progress() {
+        let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let mut caught_up = profile_fixture("跑得快");
+        let mut lagging = profile_fixture("落后的");
+        caught_up.learn.enabled = true;
+        lagging.learn.enabled = true;
+        store
+            .set_companion_state(&caught_up.companion_id, LEARN_CURSOR_KEY, "9000")
+            .await
+            .unwrap();
+        store
+            .set_companion_state(&lagging.companion_id, LEARN_CURSOR_KEY, "120")
+            .await
+            .unwrap();
+
+        let roster = vec![caught_up.clone(), lagging.clone()];
+        assert_eq!(
+            active_consumer_watermark(&store, &roster).await.unwrap(),
+            Some(120),
+            "the laggard's cursor is the floor, not the leader's"
+        );
+        // Order must not matter.
+        assert_eq!(
+            active_consumer_watermark(&store, &[lagging.clone(), caught_up.clone()])
+                .await
+                .unwrap(),
+            Some(120)
+        );
+
+        // A companion whose consumer is ON but which has no cursor row yet has
+        // read NOTHING: it must contribute 0, i.e. maximum protection. Anything
+        // else deletes the entire spool out from under a companion that was just
+        // enabled (or just created).
+        let mut brand_new = profile_fixture("刚开的");
+        brand_new.evolve.enabled = true;
+        assert_eq!(
+            store
+                .get_companion_state(&brand_new.companion_id, EVOLVE_CURSOR_KEY)
+                .await
+                .unwrap(),
+            None,
+            "fixture precondition: no cursor row"
+        );
+        assert_eq!(
+            active_consumer_watermark(&store, &[caught_up.clone(), brand_new.clone()])
+                .await
+                .unwrap(),
+            Some(0),
+            "an enabled consumer with no cursor must protect everything"
+        );
+
+        // Turning the laggard's consumer off releases the floor — that is the only
+        // legitimate way the watermark may rise past it.
+        lagging.learn.enabled = false;
+        assert_eq!(
+            active_consumer_watermark(&store, &[caught_up.clone(), lagging]).await.unwrap(),
+            Some(9000)
+        );
+
+        // Nobody consuming at all: age/capacity policy alone governs the spool.
+        caught_up.learn.enabled = false;
+        assert_eq!(
+            active_consumer_watermark(&store, &[caught_up]).await.unwrap(),
+            None
+        );
     }
 
     #[test]
