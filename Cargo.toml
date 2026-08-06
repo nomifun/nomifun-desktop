@@ -111,6 +111,9 @@ jsonwebtoken = "10"
 bcrypt = "0.17"
 aes-gcm = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+# CSPRNG for robot device tokens / activation codes. 0.9 renamed `thread_rng()`
+# to `rng()`; 0.9.x is already in the lockfile via transitive deps.
+rand = "0.9"
 # Public Suffix List (compile-time embedded, offline) for browser domain policy.
 psl = "2"
 
