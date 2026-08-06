@@ -13,6 +13,7 @@ import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { useAllCronJobs } from '@renderer/pages/cron/useCronJobs';
 import { formatSchedule, formatNextRun } from '@renderer/pages/cron/cronUtils';
 import { type ICronJob } from '@/common/adapter/ipcBridge';
+import { HUB_PAGE_TITLE_CLASS } from '@/renderer/components/layout/HubPageShell';
 import type { ConversationId } from '@/common/types/ids';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
 import { useConversationAgents } from '@renderer/pages/conversation/hooks/useConversationAgents';
@@ -154,28 +155,18 @@ const ScheduledTasksPage: React.FC = () => {
           isMobile ? 'gap-14px' : 'gap-16px'
         )}
       >
-        <div className={classNames('flex w-full flex-col', isMobile ? 'gap-6px' : 'gap-8px')}>
-          <div className='flex w-full items-start justify-between gap-12px sm:gap-16px max-[520px]:flex-wrap'>
-            <h1
-              className={classNames(
-                'm-0 min-w-0 flex-1 font-bold text-t-primary',
-                isMobile ? 'text-24px leading-[1.2]' : 'text-28px leading-[1.15]'
-              )}
-            >
+        <div className='flex w-full items-center justify-between gap-12px sm:gap-16px max-[520px]:flex-wrap'>
+          <div className='min-w-0 flex-1'>
+            <h1 className={HUB_PAGE_TITLE_CLASS}>
               {t('cron.scheduledTasks')}
             </h1>
-            <Button type='primary' shape='round' className='shrink-0' onClick={handleOpenCreateDialog}>
-              {t('cron.page.newTask')}
-            </Button>
+            <p className='m-0 mt-6px text-13px leading-18px text-t-tertiary'>
+              {t('cron.page.description')}
+            </p>
           </div>
-          <p
-            className={classNames(
-              'm-0 w-full text-t-secondary',
-              isMobile ? 'text-13px leading-20px' : 'text-14px leading-22px'
-            )}
-          >
-            {t('cron.page.description')}
-          </p>
+          <Button type='primary' shape='round' className='shrink-0' onClick={handleOpenCreateDialog}>
+            {t('cron.page.newTask')}
+          </Button>
         </div>
 
         <div className='grid w-full box-border grid-cols-[minmax(0,1fr)_auto] items-center gap-x-12px gap-y-10px rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-2 px-14px py-12px sm:rounded-14px sm:px-16px max-[520px]:grid-cols-1'>

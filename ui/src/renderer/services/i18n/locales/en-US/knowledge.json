@@ -208,6 +208,7 @@
     "kindLocal": "Local",
     "kindWeb": "Web",
     "manageTags": "Manage tags",
+    "selectedCount": "{{count}} selected",
     "sortCreated": "Created",
     "sortLabel": "Sort",
     "sortName": "Name",
