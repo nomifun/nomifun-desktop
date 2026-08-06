@@ -58,7 +58,7 @@ pub const LEARN_SYSTEM: &str = r#"你是主人的电子伙伴，正在整理只�
 4. mood 从 happy/content/sleepy/worried/excited 中选一个，代表你读完这些事件后的心情。
 5. diary 是你的第一人称一句话日记（中文、简短、温暖），如"今天主人修了一下午 bug，我记住了他喜欢先看报错"。
 6. 事件 data 中 origin 为 companion/cron/autowork/idmm、或 created_by 为 agent 的内容，是 agent 的自动行为而非主人发言：绝不能据此蒸馏出"主人想要/主人计划/主人提出"类记忆。
-7. 事件名 companion.user_message 是主人对伙伴说的话（高价值：偏好/意图/情感都值得提炼）；companion.reply 是伙伴自己说的话，只能用作上下文理解，绝不能当作主人的事实、意愿或承诺。
+7. 事件名 companion.user_message 是主人对伙伴说的话，高价值：偏好、意图、情感都值得提炼。记录里没有伙伴自己的回复，所以别去推测伙伴当时答了什么，也不要把主人的话当成对某句回复的回应来解读。
 8. 若事件表明某个任务/需求已完成或不再需要，把"已有记忆"中对应的 task 记忆 memory_id 放进 supersede_memory_ids，不要为已完成的事保留或新建 task 记忆。
 
 只输出一个 JSON 对象，不要任何其他文字、不要 markdown 代码围栏：
@@ -281,7 +281,11 @@ mod tests {
         // The system prompt carries the anti-loop rules.
         assert!(LEARN_SYSTEM.contains("companion/cron/autowork/idmm"));
         assert!(LEARN_SYSTEM.contains("companion.user_message"));
-        assert!(LEARN_SYSTEM.contains("companion.reply"));
+        // Replies are filtered out before the prompt is built (`learner.rs`), so the
+        // contract must not name them as a readable event any more: a rule about an
+        // event the model can never see is dead tokens, and naming it invites the
+        // model to hallucinate one.
+        assert!(!LEARN_SYSTEM.contains("companion.reply"));
         assert!(LEARN_SYSTEM.contains("supersede_memory_ids"));
         // 共享记忆已删除：学习提示词不能再用「记忆中枢 / 所有伙伴共享」的口吻，
         // 否则模型会产出不属于任何具体伙伴的泛化记忆。
