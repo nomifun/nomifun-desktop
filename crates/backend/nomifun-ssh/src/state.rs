@@ -6,7 +6,6 @@
 //! socket is doing" and "what the operator sees" cannot drift apart.
 use std::time::Duration;
 
-use nomi_ssh::connection::SshError;
 use nomi_ssh::shell::ShellCloseProof;
 use serde::{Deserialize, Serialize};
 
@@ -124,21 +123,6 @@ impl SshLinkState {
     }
 }
 
-/// Whether redialling after `err` could plausibly succeed.
-///
-/// Credential and host-key rejections are terminal: replaying a rejected
-/// credential only walks the account into a server-side lockout, and a host key
-/// that changed under us must never be re-accepted without a human looking at
-/// it. Matched exhaustively so a new transport error has to be classified.
-pub fn is_retryable(err: &SshError) -> bool {
-    match err {
-        SshError::Unreachable(_) | SshError::Disconnected(_) | SshError::Protocol(_) => true,
-        SshError::AuthFailed(_)
-        | SshError::HostKeyUnknown { .. }
-        | SshError::HostKeyChanged { .. } => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,22 +209,5 @@ mod tests {
             .phase(),
             SshLinkPhase::Closed
         );
-    }
-
-    #[test]
-    fn host_key_and_auth_failures_are_not_retryable() {
-        assert!(!is_retryable(&SshError::AuthFailed("bad password".into())));
-        assert!(!is_retryable(&SshError::HostKeyUnknown {
-            host: "example:22".into(),
-            fingerprint: "SHA256:abc".into()
-        }));
-        assert!(!is_retryable(&SshError::HostKeyChanged {
-            host: "example:22".into(),
-            line: 7
-        }));
-
-        assert!(is_retryable(&SshError::Unreachable("timeout".into())));
-        assert!(is_retryable(&SshError::Disconnected("eof".into())));
-        assert!(is_retryable(&SshError::Protocol("kex failed".into())));
     }
 }

@@ -71,61 +71,6 @@ async fn missing_credential_maps_to_credential_error() {
 }
 
 #[tokio::test]
-async fn host_key_and_auth_failures_are_not_retryable() {
-    use nomi_ssh::connection::SshError;
-
-    let auth = SshDialError::from(SshError::AuthFailed("rejected".into()));
-    assert!(matches!(auth, SshDialError::Auth(_)), "{auth:?}");
-    assert!(!auth.is_retryable());
-
-    let unknown = SshDialError::from(SshError::HostKeyUnknown {
-        host: "example".into(),
-        fingerprint: "SHA256:abc".into(),
-    });
-    assert!(matches!(unknown, SshDialError::HostKey(_)), "{unknown:?}");
-    assert!(!unknown.is_retryable());
-
-    let changed = SshDialError::from(SshError::HostKeyChanged {
-        host: "example".into(),
-        line: 7,
-    });
-    assert!(matches!(changed, SshDialError::HostKey(_)), "{changed:?}");
-    assert!(!changed.is_retryable());
-}
-
-#[tokio::test]
-async fn dial_error_retryability_matches_the_state_classifier() {
-    use nomi_ssh::connection::SshError;
-
-    // One classifier, two spellings: the supervisor asks `state::is_retryable`
-    // about a transport error while `acquire`'s caller asks the dial error. They
-    // must never disagree about the same failure.
-    let cases = [
-        SshError::Unreachable("refused".into()),
-        SshError::Disconnected("eof".into()),
-        SshError::Protocol("kex".into()),
-        SshError::AuthFailed("rejected".into()),
-        SshError::HostKeyUnknown {
-            host: "h".into(),
-            fingerprint: "f".into(),
-        },
-        SshError::HostKeyChanged {
-            host: "h".into(),
-            line: 1,
-        },
-    ];
-    for case in cases {
-        let expected = nomifun_ssh::is_retryable(&case);
-        let mapped = SshDialError::from(case);
-        assert_eq!(
-            mapped.is_retryable(),
-            expected,
-            "{mapped:?} disagrees with the state classifier"
-        );
-    }
-}
-
-#[tokio::test]
 async fn a_refused_dial_publishes_dropped_with_the_retryable_flag() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let harness = support::harness(tmp.path().join("known_hosts"), support::brisk_tuning()).await;

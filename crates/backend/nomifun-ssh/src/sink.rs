@@ -53,12 +53,12 @@ pub enum SshDialError {
 impl SshDialError {
     /// Whether dialling again could plausibly work.
     ///
-    /// Deliberately in lockstep with [`crate::state::is_retryable`]: the
-    /// supervisor classifies a transport error while `acquire`'s caller
-    /// classifies a dial error, and the two must never disagree about the same
-    /// failure (pinned by `tests/dial_errors.rs`). Replaying a rejected
-    /// credential only walks the account into a server-side lockout, and a host
-    /// key that changed under us must not be re-accepted without a human.
+    /// The only retryability classifier in this crate: the supervisor's ladder and
+    /// `acquire`'s caller both ask this, so they cannot disagree about the same
+    /// failure. Replaying a rejected credential only walks the account into a
+    /// server-side lockout, and a host key that changed under us must not be
+    /// re-accepted without a human. Matched exhaustively, so a new variant has to
+    /// be classified rather than defaulting to "retry".
     pub fn is_retryable(&self) -> bool {
         match self {
             SshDialError::Unreachable(_) | SshDialError::Protocol(_) => true,
@@ -441,29 +441,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dial_error_retryability_agrees_with_the_state_classifier() {
-        for err in [
-            SshError::Unreachable("refused".into()),
-            SshError::Disconnected("eof".into()),
-            SshError::Protocol("kex".into()),
-            SshError::AuthFailed("rejected".into()),
-            SshError::HostKeyUnknown {
-                host: "h".into(),
-                fingerprint: "f".into(),
-            },
-            SshError::HostKeyChanged {
-                host: "h".into(),
-                line: 1,
-            },
-        ] {
-            let expected = crate::state::is_retryable(&err);
+    fn every_transport_error_maps_to_a_pinned_retryability() {
+        // The one place the "transport error -> can a retry help" table lives.
+        // Written as literal expectations rather than checked against a second
+        // classifier, so the table has an owner instead of a mirror.
+        let cases: [(SshError, bool); 6] = [
+            (SshError::Unreachable("refused".into()), true),
+            (SshError::Disconnected("eof".into()), true),
+            (SshError::Protocol("kex".into()), true),
+            (SshError::AuthFailed("rejected".into()), false),
+            (
+                SshError::HostKeyUnknown {
+                    host: "h".into(),
+                    fingerprint: "f".into(),
+                },
+                false,
+            ),
+            (
+                SshError::HostKeyChanged {
+                    host: "h".into(),
+                    line: 1,
+                },
+                false,
+            ),
+        ];
+        for (err, want) in cases {
             let mapped = SshDialError::from(err);
             assert_eq!(
                 mapped.is_retryable(),
-                expected,
-                "{mapped:?} disagrees with the state classifier"
+                want,
+                "{mapped:?} must{} be retryable",
+                if want { "" } else { " not" }
             );
         }
+
+        // The variant the operator is shown for the two terminal classes, kept
+        // here so the table above is the only place either half is pinned.
+        assert!(matches!(
+            SshDialError::from(SshError::AuthFailed("rejected".into())),
+            SshDialError::Auth(_)
+        ));
+        assert!(matches!(
+            SshDialError::from(SshError::HostKeyChanged {
+                host: "h".into(),
+                line: 7
+            }),
+            SshDialError::HostKey(_)
+        ));
     }
 
     #[test]
