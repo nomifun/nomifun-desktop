@@ -11,13 +11,9 @@ import { Button, Form, Input, InputNumber, Message, Modal, Select } from '@arco-
 import NomiModal from '@renderer/components/base/NomiModal';
 import { Certificate, Download, Edit, Fingerprint, Key, Lock, Plus, Server, Speed } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import useSWR from 'swr';
-import { conversationTarget } from '@/common/types/ids';
 import type { I18nKey } from '@renderer/services/i18n';
-import { emitter } from '@renderer/utils/emitter';
-import { seedConversationCache } from '@renderer/pages/conversation/utils/conversationCache';
-import { useGuidModelSelection } from '@renderer/pages/guid/hooks/useGuidModelSelection';
+import { useOpenSshSession } from '@renderer/pages/conversation/hooks/useOpenSshSession';
 import {
   buildUpdatePayload,
   validateSshHostForm,
@@ -60,10 +56,18 @@ interface FormModalProps {
   visible: boolean;
   editHost?: IApiSshHost;
   onClose: () => void;
-  onSaved: () => void;
+  /** The saved row, so a caller that opened the form to *use* a host can act on it. */
+  onSaved: (host: IApiSshHost) => void;
 }
 
-const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, onClose, onSaved }) => {
+/**
+ * Add / edit form for one SSH host.
+ *
+ * Exported because the session sidebar's remote-session menu opens the very same
+ * form for its "add a host" path — an operator should never meet two different
+ * host forms depending on where they started.
+ */
+export const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, onClose, onSaved }) => {
   const { t } = useTranslation();
   const [form] = Form.useForm<SshHostFormValues>();
   const [saving, setSaving] = useState(false);
@@ -96,9 +100,10 @@ const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, onClose
     }
     setSaving(true);
     try {
+      let saved: IApiSshHost;
       if (editHost) {
         const updates = buildUpdatePayload(values);
-        await ipcBridge.ssh.update.invoke({
+        saved = await ipcBridge.ssh.update.invoke({
           ssh_host_id: editHost.sshHostId,
           updates: {
             name: updates.name,
@@ -114,7 +119,7 @@ const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, onClose
           },
         });
       } else {
-        await ipcBridge.ssh.create.invoke({
+        saved = await ipcBridge.ssh.create.invoke({
           name: values.name,
           host: values.host,
           port: values.port,
@@ -127,7 +132,7 @@ const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, onClose
           sudoPassword: values.sudoPassword ?? undefined,
         });
       }
-      onSaved();
+      onSaved(saved);
       onClose();
     } catch (e) {
       Message.error(String(e));
@@ -386,8 +391,6 @@ const SshConfigImportModal: React.FC<ImportModalProps> = ({ visible, scan, onClo
 
 const SshHostManagement: React.FC = () => {
   const { t } = useTranslation();
-  const navigate = useNavigate();
-  const { current_model } = useGuidModelSelection('nomi');
   const { data: hosts, mutate } = useSWR('ssh-hosts.list', () => ipcBridge.ssh.list.invoke());
   // Scanned once per mount, silently: the empty state is import-first only when
   // there is genuinely something to import. `shouldRetryOnError: false` keeps a
@@ -417,38 +420,8 @@ const SshHostManagement: React.FC = () => {
 
   // Create a nomi conversation bound to this host (extra.ssh_host_id) and jump
   // to it — the factory connects the host and hands the agent the remote tools.
-  const openSession = useCallback(
-    async (host: IApiSshHost) => {
-      if (!current_model) {
-        Message.warning(t('conversation.noModelConfigured'));
-        return;
-      }
-      try {
-        const conversation = await ipcBridge.conversation.create.invoke({
-          type: 'nomi',
-          name: host.name,
-          model: current_model,
-          extra: {
-            workspace: '',
-            custom_workspace: false,
-            default_files: [],
-            ssh_host_id: host.sshHostId,
-          },
-        });
-        if (!conversation || !conversation.id) {
-          Message.error(t('conversation.createFailed'));
-          return;
-        }
-        emitter.emit('chat.history.refresh');
-        seedConversationCache(conversation);
-        void conversationTarget(conversation.id);
-        await navigate(`/conversation/${conversation.id}`);
-      } catch (e) {
-        Message.error(t('conversation.createFailed'));
-      }
-    },
-    [current_model, navigate, t]
-  );
+  // Shared with the sidebar's remote-session menu.
+  const openSession = useOpenSshSession();
 
   const handleDelete = useCallback(
     (host: IApiSshHost) => {
