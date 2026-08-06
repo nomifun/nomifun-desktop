@@ -1253,21 +1253,33 @@
   },
   "modelHub": {
     "title": "Model Management",
-    "subtitle": "Choose free or provider models by how you want to use them.",
+    "subtitle": "Pick models by modality: chat, voice, vision, creation, embedding & retrieval.",
     "railTitle": "Models",
-    "sectionModels": "Provider Models",
+    "sectionModels": "Providers & keys",
     "sectionFree": "Free Models",
     "sectionCreation": "Creation Capabilities",
     "sectionGlobal": "Global Model Settings",
+    "sectionChat": "Chat",
+    "sectionVision": "Vision",
+    "sectionEmbedding": "Embedding & retrieval",
     "globalConfigTip": "Global default model settings for IDMM, the bypass model, memory summarization, and companion chat.",
     "idmmTab": "IDMM Defaults",
     "failoverTab": "Failover Queue",
     "activityTab": "Decision Activity",
+    "modality": {
+      "chatTitle": "Chat models",
+      "chatSubtitle": "Models usable for conversation — the default model for new sessions is set here too.",
+      "visionTitle": "Vision models",
+      "visionSubtitle": "Chat models that can look at images.",
+      "embeddingTitle": "Embedding & retrieval",
+      "embeddingSubtitle": "Embedding and rerank models used by knowledge-base retrieval."
+    },
     "provider": {
-      "title": "Provider Models",
-      "subtitle": "Connect cloud model providers with your own API key.",
+      "title": "Providers & keys",
+      "subtitle": "Connect vendors, manage credentials and connection profiles, and maintain model rows and advanced overrides.",
       "noticeTitle": "Conversations are sent to the model provider",
-      "note": "Provider models run in the cloud, so avoid sending sensitive information. Custom provider models are currently available to Nomi only."
+      "note": "Provider models run in the cloud, so avoid sending sensitive information. Custom provider models are currently available to Nomi only.",
+      "scopeNote": "Finding a model by purpose now lives in the Chat / Voice / Vision / Creation / Embedding sections on the left. This page is only about access and credentials."
     },
     "free": {
       "title": "Free Models",
@@ -1359,7 +1371,7 @@
       "emptyHint": "No configured model is tagged for image/video generation. Tag the capable models on the model management page.",
       "emptyNoProviders": "No model providers are configured. Add a provider and model under \"Provider Models\" first."
     },
-    "sectionSpeech": "Speech to Text",
+    "sectionSpeech": "Voice",
     "speech": {
       "title": "Speech to Text",
       "subtitle": "Choose a configured cloud speech model.",
