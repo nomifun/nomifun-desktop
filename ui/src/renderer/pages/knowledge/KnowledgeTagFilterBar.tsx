@@ -12,15 +12,17 @@
  * echoed in a dedicated second row only when the tag filter is active.
  */
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
-import { Dropdown, Menu } from '@arco-design/web-react';
-import { Check, CloseSmall, Down } from '@icon-park/react';
+import { Dropdown, Menu, Tooltip } from '@arco-design/web-react';
+import { Check, CloseSmall, Down, SortAmountDown, SortAmountUp } from '@icon-park/react';
 import type { TFunction } from 'i18next';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import styles from './KnowledgeTagFilterBar.module.css';
+import type { KnowledgeSort, KnowledgeSortDirection } from './knowledgeSort';
 
 export type KnowledgeKind = IKnowledgeBase['kind'];
 
-export type KnowledgeSort = 'updated' | 'created' | 'name' | 'size';
+export type { KnowledgeSort, KnowledgeSortDirection } from './knowledgeSort';
 
 export interface KnowledgeTagFilterBarProps {
   kindFilter: KnowledgeKind | null;
@@ -32,6 +34,8 @@ export interface KnowledgeTagFilterBarProps {
   tags: IKnowledgeTag[];
   sort: KnowledgeSort;
   onSortChange: (sort: KnowledgeSort) => void;
+  sortDirection: KnowledgeSortDirection;
+  onSortDirectionChange: (direction: KnowledgeSortDirection) => void;
   actions?: React.ReactNode;
 }
 
@@ -56,7 +60,7 @@ const ToolbarSelect: React.FC<{
   value: string;
   menu: React.ReactNode;
   minWidthClass?: string;
-}> = ({ label, value, menu, minWidthClass = 'min-w-148px' }) => (
+}> = ({ label, value, menu, minWidthClass = 'min-w-132px' }) => (
   <Dropdown trigger='click' position='bl' droplist={menu}>
     <div
       role='button'
@@ -69,7 +73,7 @@ const ToolbarSelect: React.FC<{
         }
       }}
       className={[
-        'inline-flex h-38px box-border items-center justify-between gap-12px rounded-10px px-12px',
+        'inline-flex h-34px box-border items-center justify-between gap-8px rounded-9px px-10px',
         'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
         'text-13px text-[var(--color-text-1)] cursor-pointer select-none',
         'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)]',
@@ -77,11 +81,11 @@ const ToolbarSelect: React.FC<{
         minWidthClass,
       ].join(' ')}
     >
-      <span className='min-w-0 truncate'>
+      <span className='min-w-0 truncate leading-18px'>
         <span className='text-[var(--color-text-2)]'>{label}：</span>
         <span className='font-medium'>{value}</span>
       </span>
-      <Down theme='outline' size={12} className='flex-none text-[var(--color-text-3)]' />
+      <Down theme='outline' size={12} className='block flex-none leading-none text-[var(--color-text-3)]' />
     </div>
   </Dropdown>
 );
@@ -95,6 +99,14 @@ const DropdownMenuSurface: React.FC<{ children: React.ReactNode }> = ({ children
   </div>
 );
 
+const COMPACT_MENU_CLASS = [
+  'text-13px',
+  '[&_.arco-menu-inner]:!p-4px',
+  '[&_.arco-menu-item]:!mb-1px',
+  '[&_.arco-menu-item]:!px-9px',
+  '[&_.arco-menu-item]:!leading-30px',
+].join(' ');
+
 const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
   kindFilter,
   tagFilter,
@@ -105,12 +117,23 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
   tags,
   sort,
   onSortChange,
+  sortDirection,
+  onSortDirectionChange,
   actions,
 }) => {
   const { t } = useTranslation();
 
   const totalCount = Object.values(kindCounts).reduce((sum, count) => sum + count, 0);
   const allLabel = t('knowledge.filter.all', { defaultValue: '全部' });
+  const ascendingLabel = t('knowledge.filter.sortAscending', { defaultValue: '正序' });
+  const descendingLabel = t('knowledge.filter.sortDescending', { defaultValue: '倒序' });
+  const currentDirectionLabel = sortDirection === 'asc' ? ascendingLabel : descendingLabel;
+  const nextDirectionLabel = sortDirection === 'asc' ? descendingLabel : ascendingLabel;
+  const sortDirectionTooltip = t('knowledge.filter.sortDirectionTooltip', {
+    defaultValue: '当前：{{current}}，点击切换为{{next}}',
+    current: currentDirectionLabel,
+    next: nextDirectionLabel,
+  });
 
   const kindLabel = (kind: KnowledgeKind): string => {
     switch (kind) {
@@ -141,7 +164,7 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
       <Menu
         selectedKeys={[kindFilter ?? 'all']}
         onClickMenuItem={(key) => onKindChange(key === 'all' ? null : (String(key) as KnowledgeKind))}
-        className='min-w-168px py-4px'
+        className={`min-w-144px ${COMPACT_MENU_CLASS}`}
       >
         <Menu.Item key='all'>
           <div className='flex items-center justify-between gap-20px'>
@@ -163,7 +186,10 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
 
   const tagMenu = (
     <DropdownMenuSurface>
-      <Menu onClickMenuItem={(key) => (key === 'all' ? onTagChange([]) : toggleTag(String(key)))} className='min-w-200px max-h-280px overflow-y-auto py-4px'>
+      <Menu
+        onClickMenuItem={(key) => (key === 'all' ? onTagChange([]) : toggleTag(String(key)))}
+        className={`min-w-168px max-h-248px overflow-y-auto ${COMPACT_MENU_CLASS}`}
+      >
         <Menu.Item key='all'>
           <div className='flex items-center justify-between gap-20px'>
             <span>{allLabel}</span>
@@ -194,7 +220,7 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
       <Menu
         selectedKeys={[sort]}
         onClickMenuItem={(key) => onSortChange(String(key) as KnowledgeSort)}
-        className='min-w-168px py-4px'
+        className={`min-w-144px ${COMPACT_MENU_CLASS}`}
       >
         {SORT_OPTIONS.map((option) => (
           <Menu.Item key={option}>{getSortLabel(option, t)}</Menu.Item>
@@ -204,9 +230,9 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
   );
 
   return (
-    <div className='flex w-full flex-col gap-10px'>
-      <div className='flex w-full flex-wrap items-center justify-between gap-10px'>
-        <div className='flex flex-wrap items-center gap-8px'>
+    <div className={`${styles.toolbarContainer} flex w-full flex-col gap-8px`}>
+      <div className='flex w-full flex-wrap items-center justify-between gap-8px'>
+        <div className='flex flex-wrap items-center gap-6px'>
           <ToolbarSelect
             label={t('knowledge.filter.kindLabel', { defaultValue: '类型' })}
             value={kindFilter ? kindLabel(kindFilter) : allLabel}
@@ -216,20 +242,40 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
             label={t('knowledge.filter.tagLabel', { defaultValue: '标签' })}
             value={selectedTagSummary}
             menu={tagMenu}
-            minWidthClass='min-w-176px'
+            minWidthClass='min-w-148px'
           />
           <ToolbarSelect
             label={t('knowledge.filter.sortLabel', { defaultValue: '排序' })}
             value={getSortLabel(sort, t)}
             menu={sortMenu}
-            minWidthClass='min-w-164px'
+            minWidthClass='min-w-140px'
           />
+          <Tooltip content={sortDirectionTooltip} position='top' mini>
+            <button
+              type='button'
+              aria-label={sortDirectionTooltip}
+              onClick={() => onSortDirectionChange(sortDirection === 'asc' ? 'desc' : 'asc')}
+              className={[
+                'grid h-34px w-34px flex-none place-items-center rounded-9px p-0',
+                'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
+                'text-[var(--color-text-2)] cursor-pointer',
+                'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
+                'focus-visible:outline-none focus-visible:border-primary-6 transition-colors',
+              ].join(' ')}
+            >
+              {sortDirection === 'asc' ? (
+                <SortAmountUp theme='outline' size={15} strokeWidth={3} className='block leading-none' />
+              ) : (
+                <SortAmountDown theme='outline' size={15} strokeWidth={3} className='block leading-none' />
+              )}
+            </button>
+          </Tooltip>
         </div>
         {actions}
       </div>
 
       {tagFilter.length > 0 && (
-        <div className='flex min-h-44px w-full box-border flex-wrap items-center gap-8px rounded-14px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-14px py-7px'>
+        <div className='flex min-h-38px w-full box-border flex-wrap items-center gap-6px rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-10px py-5px'>
           {selectedTags.map((tag) => (
             <div
               key={tag.key}
@@ -242,7 +288,7 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
                   toggleTag(tag.key);
                 }
               }}
-              className='inline-flex items-center gap-7px rounded-full bg-[var(--color-fill-2)] px-11px py-4px text-12px text-[var(--color-text-2)] cursor-pointer hover:bg-[var(--color-fill-3)] hover:text-[var(--color-text-1)] transition-colors'
+              className='inline-flex items-center gap-6px rounded-full bg-[var(--color-fill-2)] px-9px py-3px text-12px leading-16px text-[var(--color-text-2)] cursor-pointer hover:bg-[var(--color-fill-3)] hover:text-[var(--color-text-1)] transition-colors'
             >
               <span className='h-7px w-7px flex-none rounded-full' style={{ backgroundColor: tag.color }} aria-hidden='true' />
               <span>{tag.label}</span>
