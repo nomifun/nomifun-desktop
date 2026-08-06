@@ -57,3 +57,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # Drives the device router in-process (`oneshot`), so route tests exercise the
 # real handlers and extractors instead of calling private functions.
 tower = { workspace = true }
+# The fake-device end-to-end test plays the firmware over a real WebSocket, so
+# the handshake, the frame types and the 401 rejection are all exercised for
+# real rather than asserted about.
+tokio-tungstenite = { workspace = true }
