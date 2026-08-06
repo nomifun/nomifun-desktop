@@ -25,19 +25,28 @@ impl AnswerRule {
     ///
     /// Two forms, and no more: sudo's own `[sudo] password for <user>: `
     /// (classic sudo, whose `passprompt` replaces PAM's prompt), and a bare
-    /// `Password: ` that is the *entire* output so far (sudo-rs — the default
-    /// `sudo` on current Ubuntu — has no prompt of its own and lets libpam ask).
+    /// `Password: ` (sudo-rs — the default `sudo` on current Ubuntu — has no
+    /// prompt of its own and lets libpam ask).
     ///
-    /// Deliberately **not** matched: `password:` at the end of a longer buffer.
-    /// The prompt is tested against everything the command has printed so far,
-    /// so a trailing-`password:` pattern also matches `mysql -p`, a nested
-    /// `ssh`, `git push` over https and every other program that asks for a
-    /// secret — and answering those writes *this host's sudo password* into
-    /// their stdin. The cost of the narrow form is that a PAM-prompt sudo is not
-    /// auto-answered when the submission printed something before sudo ran; a
-    /// leaked sudo password is not recoverable, a re-run is.
+    /// **Both forms are anchored to the end of the output.** A prompt only means
+    /// "a program is waiting for input" when nothing has been printed after it.
+    /// Matching it anywhere in the buffer means a command that merely *prints*
+    /// the text — `cat /var/log/auth.log`, `grep -r sudo /etc` — triggers an
+    /// injection while nothing is reading stdin, so the password lands in the
+    /// shell's input buffer, becomes the next command line, and comes back as
+    /// `sh: <password>: not found` inside the *next* command's captured output —
+    /// i.e. straight into the model's context, which is the one thing this whole
+    /// mechanism exists to prevent.
+    ///
+    /// Deliberately **not** matched: a trailing `password:` on a longer buffer.
+    /// That pattern also fits `mysql -p`, a nested `ssh`, `git push` over https
+    /// and every other program that asks for a secret — and answering those
+    /// writes *this host's sudo password* into their stdin. The cost of the
+    /// narrow forms is that a PAM-prompt sudo is not auto-answered when the
+    /// submission printed something before sudo ran; a leaked sudo password is
+    /// not recoverable, a re-run is.
     pub fn sudo(password: Zeroizing<String>) -> Self {
-        let prompt = Regex::new(r"(?i)\[sudo\] password for .*:|^password:\s*$")
+        let prompt = Regex::new(r"(?i)(\[sudo\] password for .*:|^password:)\s*$")
             .expect("static sudo prompt regex");
         AnswerRule {
             prompt,
@@ -76,6 +85,28 @@ mod tests {
     fn matches_sudos_own_prompt_anywhere_in_the_output() {
         assert!(matches("[sudo] password for rika: "));
         assert!(matches("updating\n[sudo] password for rika: "));
+    }
+
+    /// A command that merely *prints* the prompt text is not a command waiting
+    /// for a password. Answering it writes the password into a shell that is not
+    /// reading stdin, so it becomes the next command line and surfaces in the
+    /// next command's captured output — the one place the password must never
+    /// reach.
+    #[test]
+    fn never_matches_a_prompt_the_command_only_printed() {
+        for sink in [
+            // `cat /var/log/auth.log` — the log records past prompts verbatim
+            "Aug  5 09:12:01 host sudo: [sudo] password for rika: \nAug  5 09:12:02 host sudo: rika : TTY=pts/3\n",
+            // `grep -r sudo /etc`
+            "/etc/sudoers.d/note:# [sudo] password for rika:\n/etc/pam.d/sudo:@include common-auth\n",
+            // the prompt scrolled past, then the command kept working
+            "[sudo] password for rika: \nReading package lists...\n",
+        ] {
+            assert!(
+                !matches(sink),
+                "a printed prompt is not a waiting prompt: {sink:?}"
+            );
+        }
     }
 
     /// sudo implementations with no prompt of their own (sudo-rs, the default
