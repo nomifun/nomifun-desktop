@@ -10,6 +10,11 @@
 # Replace the domain below with yours. For a LAN-only host without a public
 # domain you can use an internal name + `tls internal`, or just skip Caddy and
 # publish port 8787 directly (the in-app login still protects it).
+#
+# ESP32 robots do NOT come through here. A device dials the bare
+# `ws://<ipv4>:<port>` URL it was handed in its OTA response, with no SNI and no
+# certificate validation — so keep the app's port published on the LAN and point
+# NOMIFUN_ROBOT_ADVERTISE at it (see docs/guides/web-server-deployment.md).
 
 your.domain.com {
 	encode zstd gzip

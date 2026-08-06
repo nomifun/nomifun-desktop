@@ -56,6 +56,7 @@ cargo run -p nomifun-web      # 会自动使用默认 --dist=../../ui/dist
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | — | 在启动时预置首个管理员密码，跳过交互式设置。一旦管理员存在则被忽略。 |
 | `--insecure-no-auth` | `NOMIFUN_WEB_INSECURE_NO_AUTH` | `false` | **危险。** 完全禁用认证 (类似桌面的本地模式)。仅在 loopback 或完全可信的私有网络上使用。 |
 | — | `NOMIFUN_HTTPS` | `false` | 当为 `true` 时，session 和 CSRF cookie 会带上 `Secure` 标记。每当应用通过 HTTPS 访问 (例如位于 TLS 反向代理之后) 时都应设置。 |
+| — | `NOMIFUN_ROBOT_ADVERTISE` | — | 局域网机器人 (ESP32) 要拨的地址：`<ipv4>` 或 `<ipv4>:<port>`。**Docker 下必须设置**；裸机部署可不填，会自动探测局域网网卡。取值非法会直接拒绝启动。参见[局域网机器人 (ESP32)](#局域网机器人-esp32)。 |
 | — | `SHELL` | 平台默认 | Agent 引擎派生进程时使用的 shell。在 Linux 服务器上若 `$SHELL` 未设置，请设为 `/bin/bash`。 |
 
 布尔类环境变量接受 `1`、`true`、`yes`、`on` (大小写不敏感)。
@@ -205,6 +206,8 @@ your.domain.com {
 
 对于没有公网域名的仅局域网主机，可以使用一个内部名加上 `tls internal`，或者干脆不加 Caddy 直接发布端口 `8787` (应用内登录依然提供保护)。
 
+如果你要用局域网机器人，第 3 步会切断它们唯一的入口 —— 参见[局域网机器人 (ESP32)](#局域网机器人-esp32)。
+
 ## 其他反向代理：必须保留原始 Host
 
 实时更新 (流式回复、工具调用、任务/队列状态) 全部走 `/ws` 上的 WebSocket。
@@ -241,6 +244,64 @@ location / {
 被拒绝的握手会在服务端以 `WARN` 级别记录具体的 `origin` / `host` /
 `forwarded_host` 值，`docker compose logs | grep "rejected websocket"`
 可以直接看到需要配置的内容。
+
+## 局域网机器人 (ESP32)
+
+`nomifun-web` 同样提供机器人网关 —— 设备面 `/robot/*` 与管理面 `/api/robots*`
+就在桌面版使用的同一个 router 里。唯一与宿主环境相关的事情是：**告诉机器人该连
+到哪个地址。**
+
+机器人只会从 OTA 响应里获知这个地址一次，之后直接以明文 `http`/`ws` 拨过去。所以
+服务端必须知道自己哪个地址是**从机器人所在网络能到达的**：
+
+- **裸机 / systemd 跑在局域网主机上** —— 无需配置，会自动探测本机的局域网 IPv4
+  (优先取路由默认出口的那张网卡)。
+- **Docker / Podman —— 必须设置 `NOMIFUN_ROBOT_ADVERTISE`。** 在容器里自动探测
+  只能得到容器自己的地址 (`172.17.0.2`)，局域网里的设备根本路由不到。这个问题在
+  原理上无法靠探测解决：可达地址属于宿主机，机器人拨的端口是端口映射的宿主机一
+  侧，这两件事进程都看不见。
+
+```bash
+# Compose (或本地 .env)：填运行 Docker 那台机器的局域网 IP。
+NOMIFUN_ROBOT_ADVERTISE=192.168.1.50
+
+# 端口被改过映射 (`-p 9000:8787`)：写机器人要拨的端口，而不是进程绑定的端口。
+NOMIFUN_ROBOT_ADVERTISE=192.168.1.50:9000
+```
+
+规则：
+
+- 取值为 `<ipv4>` 或 `<ipv4>:<port>`。不带端口时，广告的是本进程实际绑定的端口。
+- **只支持 IPv4 字面量。** 主机名和 IPv6 会被拒绝 —— 设备拿到的是一条裸的
+  `ws://<ipv4>:<port>` URL，既没有 TLS 也没有名字解析。带证书的公网主机名属于
+  (尚未发布的) 远程中继阶段，不在这里。
+- 取值非法 (不是 IPv4 字面量、端口不合法、`0.0.0.0`) 会**直接让启动失败**，错误信
+  息里会点名这个变量。这里故意不做静默回落到自动探测：那会让人以为配好了，实际
+  却是坏的。
+- 未设置和设为空字符串等价 (都走自动探测)，因此 Compose 可以无条件透传这个变量名。
+
+验证实际广告出去的地址。该接口需要 owner 认证，最方便的办法是在已登录的 WebUI
+标签页的 DevTools 控制台里执行：
+
+```js
+await fetch('/api/robots/endpoints').then(r => r.json())
+// { ota_urls: ["http://192.168.1.50:9000/robot/ota"], lan_enabled: true }
+```
+
+在 `--insecure-no-auth` 的宿主上可以直接
+`curl http://<server-ip>:8787/api/robots/endpoints`。
+
+`"lan_enabled": false` 或 `ota_urls` 为空，说明没有发布出任何可达地址 —— Docker
+下就是漏了 `NOMIFUN_ROBOT_ADVERTISE`。这里打印出来的 URL 就是要填进固件 OTA 输入
+框的那一个。启动日志给出同样的信息：搜
+`robot: advertising this endpoint to devices`。
+
+**机器人不走 TLS 反向代理。** 设备面就是上面那个地址上的明文 `http`/`ws`，所以即
+使浏览器是通过 Caddy 的 443 访问，那个端口也必须在局域网内可达。如果你为了只暴露
+Caddy 而把 `ports: ["8787:8787"]` 换成了 `expose:`，机器人就没有入口了：请重新发布
+该端口 (只对局域网发布即可) 并让 `NOMIFUN_ROBOT_ADVERTISE` 指向它。把设备面挂到
+Caddy 上**不能**替代这一步 —— 固件拨的是它被告知的那条裸 IPv4 URL，不带 SNI，也不
+做证书校验。
 
 ## systemd (Linux 服务器，无 Docker)
 
@@ -351,6 +412,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 **回复/任务状态只有刷新页面后才更新 (WebUI 一直显示"执行中")。** `/ws` WebSocket 握手被拒绝了 —— 在服务端日志中查找 `rejected websocket upgrade` (WARN，包含具体的 `origin`/`host`/`forwarded_host` 值) 或 `GET /ws` → `403`。几乎总是因为反向代理改写了 `Host`：参见[其他反向代理：必须保留原始 Host](#其他反向代理必须保留原始-host)。
 
 **在 systemd 下 agent 命令失败并报 `bun: command not found`。** 请系统级安装 bun (参见上面的 bun-on-PATH 一节) 或使用 `NOMIFUN_EMBED_BUN=1` 重新构建。
+
+**机器人始终连不上 (固件的 OTA 检查成功，但看不到会话)。** 服务端没有发布出可达地址，于是 OTA 响应里的 websocket URL 是空的。先看 `/api/robots/endpoints`；Docker 下请把 `NOMIFUN_ROBOT_ADVERTISE` 设为**宿主机**的局域网 IP —— 参见[局域网机器人 (ESP32)](#局域网机器人-esp32)。
 
 **健康检查。** 使用 `GET /health` 作为进程存活探针；只有在调用方还需要设置 / 认证状态时，才使用 `GET /api/auth/status`。
 
