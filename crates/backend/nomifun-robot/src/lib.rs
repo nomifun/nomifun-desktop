@@ -5,6 +5,8 @@
 //! public relay reuses the same session core; model capabilities sit behind the
 //! [`services`] trait seam so the pipeline is testable with mocks.
 
+pub mod registry;
+
 /// Domain name used in log fields and event prefixes.
 pub fn robot_domain_name() -> &'static str {
     "robot"
