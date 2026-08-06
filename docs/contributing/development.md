@@ -18,6 +18,7 @@ background.
 | Bun | >= 1.3.13 | Frontend package manager, Vite runner, and runtime dependency for agent tooling. |
 | Tauri CLI v2 | from `devDependencies` | Invoked through `bun run dev`, `bun run build`, and related scripts. |
 | Git | recent | Required by development workflows and several built-in tools. |
+| CMake | >= 3.16 | `opusic-sys` compiles a vendored libopus during a clean build (~25 s). |
 | Native build tools | platform-specific | Needed for SQLite, TLS, libgit2, WebKit/WebView dependencies, and bundled native crates. |
 
 Platform notes:
@@ -25,6 +26,19 @@ Platform notes:
 - Windows: MSVC C++ build tools and WebView2 runtime.
 - macOS: Xcode Command Line Tools.
 - Linux: `build-essential cmake clang pkg-config perl git`; desktop builds also need WebKitGTK 4.1 development headers.
+
+CMake and a C compiler are not optional on any platform: the robot gateway's
+Opus codec is built from source and linked statically, so no machine needs a
+preinstalled libopus and nothing extra ships beside the binary.
+
+### First build needs network access to pyke
+
+The robot gateway's Silero voice-activity detector runs on ONNX Runtime, and
+`ort-sys` downloads a prebuilt static `libonnxruntime.a` (~101 MB) from pyke's
+CDN on the first build, caching it in `~/.cache/ort.pyke.io`. Later builds — and
+a fully offline machine — reuse that cache. Because the runtime is linked
+statically there is no dylib to distribute, and a machine that cannot reach the
+CDN at all fails at build time rather than at runtime.
 
 ## Install
 
