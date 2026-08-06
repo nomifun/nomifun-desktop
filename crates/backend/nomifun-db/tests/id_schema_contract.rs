@@ -1275,9 +1275,9 @@ async fn scalar_external_business_ids_require_uuidv7_without_parent_existence() 
     .expect("external token owner need not have a SQLite parent");
     sqlx::query(
         "INSERT INTO knowledge_bindings \
-         (knowledge_binding_id, target_kind, target_companion_id, enabled, writeback, writeback_mode, \
+         (knowledge_binding_id, target_kind, target_companion_id, enabled, writeback, \
           writeback_eagerness, updated_at, channel_write_enabled) \
-         VALUES (?, 'companion', ?, 1, 0, 'staged', 'conservative', 1, 0)",
+         VALUES (?, 'companion', ?, 1, 0, 'manual', 1, 0)",
     )
     .bind(knowledge_binding_id.as_str())
     .bind(companion_id.as_str())
@@ -1292,11 +1292,15 @@ async fn scalar_external_business_ids_require_uuidv7_without_parent_existence() 
                  'invalid companion', 1, '{}', '1', 1, 1)",
         "INSERT INTO companion_access_token (companion_id, token_hash, created_at) \
          VALUES ('1', 'invalid', 1)",
+        // Every column here must exist, so this statement can only fail for the
+        // reason under test: `target_companion_id = '1'` is not a UUIDv7. A
+        // reference to a dropped column would turn this assertion green for the
+        // wrong reason and silently retire the check.
         "INSERT INTO knowledge_bindings \
-         (knowledge_binding_id, target_kind, target_companion_id, enabled, writeback, writeback_mode, \
+         (knowledge_binding_id, target_kind, target_companion_id, enabled, writeback, \
           writeback_eagerness, updated_at, channel_write_enabled) \
          VALUES ('0190f5fe-7c00-7a00-8000-000000000210', \
-                 'companion', '1', 1, 0, 'staged', 'conservative', 1, 0)",
+                 'companion', '1', 1, 0, 'manual', 1, 0)",
     ] {
         assert!(
             sqlx::query(statement).execute(pool).await.is_err(),

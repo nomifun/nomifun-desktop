@@ -274,7 +274,6 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
         kb_ids: &[String],
         enabled: bool,
         writeback: bool,
-        writeback_mode: &str,
         writeback_eagerness: &str,
         channel_write_enabled: bool,
         updated_at: nomifun_common::TimestampMs,
@@ -311,13 +310,12 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
                 })?;
             sqlx::query(
                 "UPDATE knowledge_bindings \
-                 SET enabled = ?, writeback = ?, writeback_mode = ?, writeback_eagerness = ?, \
+                 SET enabled = ?, writeback = ?, writeback_eagerness = ?, \
                      channel_write_enabled = ?, updated_at = ? \
                  WHERE knowledge_binding_id = ?",
             )
             .bind(enabled)
             .bind(writeback)
-            .bind(writeback_mode)
             .bind(writeback_eagerness)
             .bind(channel_write_enabled)
             .bind(updated_at)
@@ -332,17 +330,16 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
             let insert_sql = format!(
                 "INSERT INTO knowledge_bindings \
                     (knowledge_binding_id, target_kind, {column}, enabled, writeback, \
-                     writeback_mode, writeback_eagerness, channel_write_enabled, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                     writeback_eagerness, channel_write_enabled, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             );
             sqlx::query(&insert_sql)
                 .bind(knowledge_binding_id.as_str())
                 .bind(target_kind)
                 .bind(&target_id)
                 .bind(enabled)
-            .bind(writeback)
-            .bind(writeback_mode)
-            .bind(writeback_eagerness)
+                .bind(writeback)
+                .bind(writeback_eagerness)
                 .bind(channel_write_enabled)
                 .bind(updated_at)
                 .execute(&mut *tx)
@@ -591,8 +588,7 @@ mod tests {
             &[KB_A.to_owned(), KB_B.to_owned()],
             true,
             false,
-            "staged",
-            "conservative",
+            "manual",
             false,
             1,
         )
@@ -677,8 +673,7 @@ mod tests {
                 &[KB_A.to_owned()],
                 true,
                 false,
-                "staged",
-                "conservative",
+                "manual",
                 false,
                 1,
             )
@@ -709,8 +704,7 @@ mod tests {
         );
         assert!(row.enabled);
         assert!(!row.writeback);
-        assert_eq!(row.writeback_mode, "staged");
-        assert_eq!(row.writeback_eagerness, "conservative");
+        assert_eq!(row.writeback_eagerness, "manual");
         assert_eq!(kb_ids, vec![KB_A.to_owned()]);
 
         // Update: same target reuses the UUIDv7 business ID; junction replaced
@@ -722,8 +716,7 @@ mod tests {
                 &[KB_B.to_owned(), KB_A.to_owned()],
                 true,
                 true,
-                "direct",
-                "aggressive",
+                "auto",
                 false,
                 2,
             )
@@ -740,8 +733,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(row.writeback);
-        assert_eq!(row.writeback_mode, "direct");
-        assert_eq!(row.writeback_eagerness, "aggressive");
+        assert_eq!(row.writeback_eagerness, "auto");
         assert_eq!(row.updated_at, 2);
         // Order from kb_ids slice is preserved via position.
         assert_eq!(kb_ids, vec![KB_B.to_owned(), KB_A.to_owned()]);
@@ -768,7 +760,7 @@ mod tests {
         let repo = SqliteKnowledgeRepository::new(db.pool().clone());
 
         let bid = repo
-            .set_binding("workpath", "/work/proj", &[], false, false, "staged", "conservative", false, 5)
+            .set_binding("workpath", "/work/proj", &[], false, false, "manual", false, 5)
             .await
             .unwrap();
         assert!(KnowledgeBindingId::parse(&bid).is_ok());
@@ -794,7 +786,7 @@ mod tests {
         repo.insert_base(&make_base(KB_A)).await.unwrap();
 
         let bid = repo
-            .set_binding("conversation", OTHER_CONVERSATION_ID, &[KB_A.to_owned()], true, false, "staged", "conservative", false, 1)
+            .set_binding("conversation", OTHER_CONVERSATION_ID, &[KB_A.to_owned()], true, false, "manual", false, 1)
             .await
             .unwrap();
 
@@ -846,7 +838,7 @@ mod tests {
         let repo = SqliteKnowledgeRepository::new(db.pool().clone());
 
         assert!(matches!(
-            repo.set_binding("bogus", "x", &[], true, false, "staged", "conservative", false, 1).await,
+            repo.set_binding("bogus", "x", &[], true, false, "manual", false, 1).await,
             Err(DbError::NotFound(_))
         ));
         assert!(repo.get_binding("bogus", "x").await.unwrap().is_none());
@@ -862,14 +854,14 @@ mod tests {
         repo.insert_base(&make_base(KB_A)).await.unwrap();
 
         // Default (false) on a write without the flag set.
-        repo.set_binding("workpath", "/wp", &[KB_A.to_owned()], true, true, "staged", "conservative", false, 1)
+        repo.set_binding("workpath", "/wp", &[KB_A.to_owned()], true, true, "manual", false, 1)
             .await
             .unwrap();
         let (row, _) = repo.get_binding("workpath", "/wp").await.unwrap().unwrap();
         assert!(!row.channel_write_enabled);
 
         // Re-enable on update.
-        repo.set_binding("workpath", "/wp", &[KB_A.to_owned()], true, true, "staged", "conservative", true, 2)
+        repo.set_binding("workpath", "/wp", &[KB_A.to_owned()], true, true, "manual", true, 2)
             .await
             .unwrap();
         let (row, _) = repo.get_binding("workpath", "/wp").await.unwrap().unwrap();
@@ -884,13 +876,13 @@ mod tests {
         repo.insert_base(&make_base(KB_B)).await.unwrap();
 
         // Two workpath bindings use kb_a (one enabled, one disabled); one uses kb_b only.
-        repo.set_binding("workpath", "/p1", &[KB_A.to_owned()], true, false, "staged", "conservative", false, 1)
+        repo.set_binding("workpath", "/p1", &[KB_A.to_owned()], true, false, "manual", false, 1)
             .await
             .unwrap();
-        repo.set_binding("workpath", "/p2", &[KB_A.to_owned(), KB_B.to_owned()], false, false, "staged", "conservative", false, 1)
+        repo.set_binding("workpath", "/p2", &[KB_A.to_owned(), KB_B.to_owned()], false, false, "manual", false, 1)
             .await
             .unwrap();
-        repo.set_binding("workpath", "/p3", &[KB_B.to_owned()], true, false, "staged", "conservative", false, 1)
+        repo.set_binding("workpath", "/p3", &[KB_B.to_owned()], true, false, "manual", false, 1)
             .await
             .unwrap();
 
