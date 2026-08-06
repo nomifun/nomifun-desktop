@@ -40,6 +40,7 @@ use tokio::sync::{Mutex, OnceCell, watch};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::cli::Cli;
+use crate::lan_endpoint::detect_all_lan_ipv4s;
 use crate::{AppServices, bootstrap, create_router};
 use nomifun_auth::AuthPolicy;
 use nomifun_db::IUserRepository;
@@ -1662,71 +1663,6 @@ async fn resolve_admin(user_repo: &dyn IUserRepository) -> (String, bool) {
     }
 }
 
-/// Routing-preferred source IPv4 (the address used to reach off-box hosts).
-/// Connecting a UDP socket only sets its local address; no packets are sent.
-fn routing_primary_ipv4() -> Option<Ipv4Addr> {
-    let sock = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    sock.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
-    match sock.local_addr().ok()? {
-        SocketAddr::V4(a) => {
-            let ip = *a.ip();
-            is_webui_lan_ip_candidate(ip).then_some(ip)
-        }
-        _ => None,
-    }
-}
-
-fn is_webui_lan_ip_candidate(ip: Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    if ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.is_multicast() {
-        return false;
-    }
-    if octets == [255, 255, 255, 255] {
-        return false;
-    }
-    // RFC 2544 benchmarking addresses are commonly created by virtual network
-    // adapters and are not reachable from a phone on the user's LAN.
-    if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
-        return false;
-    }
-    // Documentation-only ranges should never be offered as a real WebUI target.
-    if (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
-        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
-        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
-    {
-        return false;
-    }
-    true
-}
-
-/// All WebUI-usable IPv4 NIC addresses — routing-preferred first, then the rest
-/// (private ranges before public). A multi-homed / VPN host still yields
-/// several; obvious virtual/special-purpose addresses are filtered out.
-fn detect_all_lan_ipv4s() -> Vec<Ipv4Addr> {
-    let mut addrs: Vec<Ipv4Addr> = Vec::new();
-    if let Some(primary) = routing_primary_ipv4() {
-        addrs.push(primary);
-    }
-    let mut rest: Vec<Ipv4Addr> = Vec::new();
-    if let Ok(ifaces) = if_addrs::get_if_addrs() {
-        for iface in ifaces {
-            if iface.is_loopback() {
-                continue;
-            }
-            if let IpAddr::V4(v4) = iface.ip()
-                && is_webui_lan_ip_candidate(v4)
-                && !addrs.contains(&v4)
-                && !rest.contains(&v4)
-            {
-                rest.push(v4);
-            }
-        }
-    }
-    rest.sort_by_key(|ip| !ip.is_private()); // private (false→0) first
-    addrs.extend(rest);
-    addrs
-}
-
 /// Reverse-proxy a SPA request to the vite dev server (DEV only) so remote
 /// browsers receive the exact live frontend the desktop webview loads — instead
 /// of a stale bundled `ui/dist`. Only reached for paths the backend router did
@@ -1834,26 +1770,6 @@ mod tests {
     fn origin_shape_check() {
         assert!(origin_is_ip_or_localhost("http://192.168.1.5:25808"));
         assert!(!origin_is_ip_or_localhost("http://evil.com"));
-    }
-
-    #[test]
-    fn webui_lan_ip_candidate_filters_special_purpose_ranges() {
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(0, 0, 0, 0)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(127, 0, 0, 1)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(169, 254, 10, 20)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(198, 18, 0, 1)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(198, 19, 255, 1)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(224, 0, 0, 1)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(
-            255, 255, 255, 255
-        )));
-    }
-
-    #[test]
-    fn webui_lan_ip_candidate_keeps_private_lan_ranges() {
-        assert!(is_webui_lan_ip_candidate(Ipv4Addr::new(10, 8, 0, 2)));
-        assert!(is_webui_lan_ip_candidate(Ipv4Addr::new(172, 16, 1, 20)));
-        assert!(is_webui_lan_ip_candidate(Ipv4Addr::new(192, 168, 31, 5)));
     }
 
     #[test]

@@ -30,6 +30,9 @@ pub mod channel;
 pub mod cli;
 pub mod commands;
 pub mod desktop;
+// Public because a non-desktop host (`nomifun-web`) has to publish its own
+// LAN-reachable address to the robot endpoint advertiser.
+pub mod lan_endpoint;
 
 pub use config::{AppConfig, derive_encryption_key, load_or_create_data_encryption_key};
 pub use desktop::{
