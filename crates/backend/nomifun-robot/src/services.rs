@@ -61,6 +61,11 @@ pub trait CompanionTurnDispatcher: Send + Sync {
     async fn cancel(&self, conversation_id: &str) -> anyhow::Result<()>;
     /// The companion's endpointing tunables.
     async fn vad_tuning(&self, companion_id: &str) -> VadTuning;
+    /// The companion's chosen endpointing engine (`voice.vad.engine`). Resolved
+    /// by name rather than passed as a built engine because the session builds
+    /// one per connection, and [`crate::vad::build_engine`] owns the fallback
+    /// when the named engine cannot load.
+    async fn vad_engine(&self, companion_id: &str) -> String;
     /// Whether a fallback chat model is configured for this companion.
     async fn has_fallback_model(&self, companion_id: &str) -> bool;
 }
@@ -179,6 +184,7 @@ pub mod mock {
         fallback_dispatches: AtomicUsize,
         has_fallback: AtomicBool,
         tuning: Mutex<Option<VadTuning>>,
+        engine: Mutex<Option<String>>,
     }
 
     impl MockDispatcher {
@@ -197,6 +203,11 @@ pub mod mock {
 
         pub fn set_vad_tuning(&self, tuning: VadTuning) {
             *self.tuning.lock().unwrap() = Some(tuning);
+        }
+
+        /// Pretend the companion profile names this endpointing engine.
+        pub fn set_vad_engine(&self, engine: &str) {
+            *self.engine.lock().unwrap() = Some(engine.to_owned());
         }
 
         pub fn dispatched_text(&self) -> Vec<String> {
@@ -266,6 +277,14 @@ pub mod mock {
 
         async fn vad_tuning(&self, _companion_id: &str) -> VadTuning {
             self.tuning.lock().unwrap().unwrap_or_default()
+        }
+
+        async fn vad_engine(&self, _companion_id: &str) -> String {
+            self.engine
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| crate::vad::DEFAULT_VAD_ENGINE.to_owned())
         }
 
         async fn has_fallback_model(&self, _companion_id: &str) -> bool {

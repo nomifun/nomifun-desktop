@@ -618,6 +618,15 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
         }
     }
 
+    async fn vad_engine(&self, companion_id: &str) -> String {
+        match self.companions.get_companion(companion_id).await {
+            Ok(profile) => profile.voice.vad.engine,
+            // A profile we cannot read is not a reason to pick a different
+            // endpointer than the default one every new profile gets.
+            Err(_) => nomifun_robot::vad::DEFAULT_VAD_ENGINE.to_owned(),
+        }
+    }
+
     async fn has_fallback_model(&self, companion_id: &str) -> bool {
         self.companions
             .get_companion(companion_id)
