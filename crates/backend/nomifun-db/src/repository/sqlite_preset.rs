@@ -83,16 +83,14 @@ fn catalog_record_matches(record: &PresetRecord, p: &PresetWriteParams) -> bool 
         || record.knowledge_policy.as_ref().is_none_or(|policy| {
             (
                 policy.enabled,
-                policy.mode.as_str(),
                 policy.writeback,
                 policy.eagerness.as_deref(),
                 policy.grounded,
             ) != (
                 p.knowledge_policy.0,
-                p.knowledge_policy.1.as_str(),
-                p.knowledge_policy.2,
-                p.knowledge_policy.3.as_deref(),
-                p.knowledge_policy.4,
+                p.knowledge_policy.1,
+                p.knowledge_policy.2.as_deref(),
+                p.knowledge_policy.3,
             )
         })
     {
@@ -346,9 +344,9 @@ async fn replace_bindings(
             .bind(&p.preset_id).bind(skill_name).bind(binding).bind(required).bind(sort_order as i64)
             .execute(&mut **tx).await?;
     }
-    let (enabled, mode, writeback, eagerness, grounded) = &p.knowledge_policy;
-    sqlx::query("INSERT INTO preset_knowledge_policy (preset_id,enabled,mode,writeback,eagerness,grounded) VALUES (?,?,?,?,?,?)")
-        .bind(&p.preset_id).bind(enabled).bind(mode).bind(writeback).bind(eagerness).bind(grounded)
+    let (enabled, writeback, eagerness, grounded) = &p.knowledge_policy;
+    sqlx::query("INSERT INTO preset_knowledge_policy (preset_id,enabled,writeback,eagerness,grounded) VALUES (?,?,?,?,?)")
+        .bind(&p.preset_id).bind(enabled).bind(writeback).bind(eagerness).bind(grounded)
         .execute(&mut **tx).await?;
     for (sort_order, (kb, required)) in p.knowledge_bases.iter().enumerate() {
         sqlx::query("INSERT INTO preset_knowledge_bases (preset_id,knowledge_base_id,sort_order,required) VALUES (?,?,?,?)")
@@ -744,7 +742,7 @@ mod tests {
             agent_preferences: vec![(NOMI_AGENT_ID.into(), false)],
             model_preferences: vec![(Some(FIXTURE_PROVIDER_ID.into()), "model_x".into(), true)],
             skill_bindings: vec![("web-search".into(), "include".into(), true), ("unsafe-auto".into(), "exclude_auto".into(), false)],
-            knowledge_policy: (true, "staged".into(), false, Some("conservative".into()), true),
+            knowledge_policy: (true, false, Some("manual".into()), true),
             knowledge_bases: vec![(FIXTURE_KNOWLEDGE_BASE_ID.into(), true)],
             examples: vec![(String::new(), "Research this topic".into())],
             tag_bindings: vec![(FIXTURE_PRESET_TAG_ID.into(), "audience".into())],
