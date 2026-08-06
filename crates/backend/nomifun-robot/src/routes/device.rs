@@ -9,15 +9,20 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use serde_json::json;
 
 use crate::dto::DeviceReportBody;
 use crate::endpoint::EndpointAdvertiser;
+use crate::lan_source::LanLinkAcceptor;
+use crate::link::{
+    AcceptedLink, Frame, LinkError, RobotIdentity, RobotLinkSink, RobotLinkStream,
+};
 use crate::registry::{RobotRecord, RobotRegistry, RobotReport};
 
 /// Message shown/spoken by the device while waiting to be claimed.
@@ -30,6 +35,7 @@ const ACTIVATION_TIMEOUT_MS: i64 = 30_000;
 pub struct RobotDeviceState {
     pub registry: Arc<RobotRegistry>,
     pub advertiser: Arc<dyn EndpointAdvertiser>,
+    pub acceptor: LanLinkAcceptor,
 }
 
 /// Router for the device face, to be nested under `/robot`.
@@ -37,6 +43,7 @@ pub fn device_router(state: RobotDeviceState) -> Router {
     Router::new()
         .route("/ota", post(ota_report).get(ota_report_get))
         .route("/ota/activate", post(activate))
+        .route("/v1", get(ws_upgrade))
         .with_state(state)
 }
 
@@ -194,6 +201,89 @@ async fn activate(State(state): State<RobotDeviceState>, headers: HeaderMap) -> 
     }
 }
 
+/// The WebSocket the device talks the whole session over. Authentication is the
+/// `Authorization: Bearer <token>` header minted by the last OTA response — a
+/// robot has no cookie, so this route lives outside the session auth layers.
+async fn ws_upgrade(
+    State(state): State<RobotDeviceState>,
+    peer: MaybePeer,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let token = header(&headers, "authorization")
+        .and_then(|v| v.strip_prefix("Bearer ").map(str::to_owned).or(Some(v)))
+        .unwrap_or_default();
+    let Some(record) = state.registry.resolve_token(&token).await else {
+        tracing::warn!("robot: websocket rejected, unknown token");
+        return (StatusCode::UNAUTHORIZED, "unknown device token").into_response();
+    };
+    let identity = RobotIdentity {
+        robot_id: record.robot_id.clone(),
+        client_id: record.client_id.clone(),
+        peer: peer
+            .map(|Extension(ConnectInfo(p))| p.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_owned()),
+    };
+    let acceptor = state.acceptor.clone();
+    upgrade.on_upgrade(move |socket| async move {
+        let (sink, stream) = split_ws(socket);
+        let link = AcceptedLink {
+            identity,
+            sink: Box::new(sink),
+            stream: Box::new(stream),
+        };
+        if acceptor.offer(link).await.is_err() {
+            tracing::error!("robot: gateway not accepting links");
+        }
+    })
+}
+
+struct WsSink(futures_util::stream::SplitSink<WebSocket, Message>);
+struct WsStream(futures_util::stream::SplitStream<WebSocket>);
+
+fn split_ws(socket: WebSocket) -> (WsSink, WsStream) {
+    use futures_util::StreamExt;
+    let (tx, rx) = socket.split();
+    (WsSink(tx), WsStream(rx))
+}
+
+#[async_trait::async_trait]
+impl RobotLinkSink for WsSink {
+    async fn send(&mut self, frame: Frame) -> Result<(), LinkError> {
+        use futures_util::SinkExt;
+        let message = match frame {
+            Frame::Text(t) => Message::Text(t.into()),
+            Frame::Binary(b) => Message::Binary(b),
+        };
+        self.0
+            .send(message)
+            .await
+            .map_err(|e| LinkError::Transport(e.to_string()))
+    }
+
+    async fn close(&mut self) {
+        use futures_util::SinkExt;
+        let _ = self.0.close().await;
+    }
+}
+
+#[async_trait::async_trait]
+impl RobotLinkStream for WsStream {
+    async fn next(&mut self) -> Option<Result<Frame, LinkError>> {
+        use futures_util::StreamExt;
+        loop {
+            match self.0.next().await? {
+                Ok(Message::Text(t)) => return Some(Ok(Frame::Text(t.to_string()))),
+                Ok(Message::Binary(b)) => return Some(Ok(Frame::Binary(b))),
+                Ok(Message::Close(_)) => return None,
+                // Ping/Pong are handled by axum; keep reading.
+                Ok(_) => continue,
+                Err(e) => return Some(Err(LinkError::Transport(e.to_string()))),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,10 +317,12 @@ mod tests {
     async fn state(enabled: bool) -> (RobotDeviceState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(RobotRegistry::load(dir.path()).await.unwrap());
+        let (_source, acceptor) = crate::lan_source::LanWsSource::new();
         (
             RobotDeviceState {
                 registry,
                 advertiser: advertiser(enabled),
+                acceptor,
             },
             dir,
         )
