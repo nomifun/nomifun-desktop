@@ -4,15 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Tooltip } from '@arco-design/web-react';
-import NomiSelect from '@/renderer/components/base/NomiSelect';
-import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
-import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
-import type { ProviderId } from '@/common/types/ids';
+import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
 import type { useCompanion } from './useNomi';
-import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 interface Props {
   /** 伙伴 profile + 乐观 patch 通道。 */
@@ -27,68 +23,17 @@ interface Props {
  * 写入 profile.model —— 全局唯一事实源：本地专属会话与远程连接(IM 机器人)都跟随此模型，
  * 切换后所有会话即时跟随（后端 service.patch_companion 会同步会话行并清空渠道会话）。
  *
- * 供应商下拉列出【所有已启用的供应商】（不再按「是否含主模型」过滤），这样：
- *   - 用户始终能看到自己配置的供应商，当前选择也能正常显示名字（而非生 provider id）；
- *   - 只有图像/视频/嵌入等生成类模型的供应商也可见，其模型下拉为空并给出说明。
- * 模型下拉只列出可作对话主模型的文本模型（chat catalog resolve 权威过滤，图像等
- * 生成类模型不在其中，不能作对话模型）。当前存储的模型若已不在该供应商的可用列表里（供应商改配后失效），
- * 会以「(不可用)」禁用项显式呈现并给出重选提示，避免出现无法解释的残留值。
+ * 供应商下拉用 `scope='all-enabled'`（列出所有已启用供应商，而不只是「含 chat 模型」的
+ * 那些）：这样用户始终看得到自己配置的供应商，已存储的当前供应商也能显示名字而不是生
+ * provider id；只有图像/视频/嵌入类模型的供应商也可见，其模型下拉为空并给出说明。失效
+ * 引用一律由 TaskModelSelect 渲染成禁用的「(不可用)」项。
  */
 const CompanionModelControl: React.FC<Props> = ({ companion, showLabel = true }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
-  // 对话主模型清单来自统一 catalog resolve（task='chat'，无名称启发式）。
-  const { groups: chatGroups } = useModelsForTask('chat');
-  const { data: rawProviders } = useProvidersQuery();
-  const providerLabel = useModelSelectorProviderLabel();
-  const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
-
-  useEffect(() => {
-    setDraftProviderId(profile?.model?.provider_id ?? null);
-  }, [profile?.companion_id, profile?.model?.provider_id]);
-
-  // 所有已启用供应商（默认启用）。不按可用模型过滤，保证用户能看到自己的供应商，
-  // 且已存储的当前供应商能被映射为名字（此前会被过滤掉而显示成生 id）。
-  const enabledProviders = useMemo(() => (rawProviders ?? []).filter((p) => p.enabled !== false), [rawProviders]);
-
-  const currentProvider = useMemo(
-    () => enabledProviders.find((p) => p.id === draftProviderId),
-    [draftProviderId, enabledProviders]
-  );
-
-  const availableModels = useMemo(
-    () =>
-      currentProvider
-        ? (chatGroups.find((group) => group.provider.id === currentProvider.id)?.models ?? [])
-        : [],
-    [chatGroups, currentProvider]
-  );
-
-  // 是否至少有一个供应商提供可用于对话的文本模型。
-  const anyChatModel = chatGroups.length > 0;
+  const configured = Boolean(profile?.model?.provider_id && profile?.model?.model);
 
   if (!profile) return null;
-
-  const providerId = draftProviderId;
-  const selectedModel = profile.model?.provider_id === providerId ? profile.model.model : null;
-  // 当前模型仅在其确实出现在该供应商的可用列表里时才算「有效」。
-  const modelValid = Boolean(selectedModel && availableModels.includes(selectedModel));
-  // 已存储的供应商 id 不在启用列表里（供应商被删）→ 供应商本身也已失效。
-  const providerStale = Boolean(providerId) && !currentProvider;
-  const configured = Boolean(providerId) && !providerStale && modelValid;
-
-  // 当前模型已失效（供应商仍在，但模型已不在其可用列表）→ 作为禁用项显式呈现。
-  const showStaleModel = Boolean(selectedModel) && Boolean(currentProvider) && !modelValid;
-
-  const hint = !anyChatModel
-    ? t('nomi.chat.modelNoTextModel')
-    : providerStale
-      ? t('nomi.chat.modelStale', { model: selectedModel })
-      : currentProvider && availableModels.length === 0
-        ? t('nomi.chat.modelProviderNoChat')
-        : showStaleModel
-          ? t('nomi.chat.modelStale', { model: selectedModel })
-          : '';
 
   return (
     <div className='flex flex-col gap-6px'>
@@ -98,61 +43,22 @@ const CompanionModelControl: React.FC<Props> = ({ companion, showLabel = true })
             <span className='flex items-center gap-4px text-12px text-t-tertiary shrink-0 cursor-help'>
               <span
                 className='w-7px h-7px rd-full shrink-0'
-                style={{ background: configured ? 'rgb(var(--success-6))' : 'rgb(var(--warning-6))' }}
+                style={{
+                  background: configured ? 'rgb(var(--success-6))' : 'rgb(var(--warning-6))',
+                }}
               />
               {t('nomi.chat.modelConfig')}
             </span>
           </Tooltip>
         )}
-        <NomiSelect
-          size='mini'
-          contentFit
-          contentMaxWidth={220}
-          placeholder={t('nomi.chat.modelProvider')}
-          value={providerId ?? undefined}
-          onChange={(provider_id: ProviderId) => setDraftProviderId(provider_id)}
-        >
-          {/* 供应商被删时，把生 id 作为禁用项展示，让用户看到失效来源。 */}
-          {providerStale && providerId && (
-            <NomiSelect.Option key={providerId} value={providerId} disabled>
-              {t('nomi.chat.modelUnavailableOption', { model: providerId })}
-            </NomiSelect.Option>
-          )}
-          {enabledProviders.map((p) => (
-            <NomiSelect.Option key={p.id} value={p.id}>
-              {providerLabel(p)}
-            </NomiSelect.Option>
-          ))}
-        </NomiSelect>
-        <NomiSelect
-          size='mini'
-          contentFit
-          contentMaxWidth={280}
-          placeholder={t('nomi.chat.modelName')}
-          value={selectedModel || undefined}
-          disabled={!currentProvider}
-          onChange={(model: string) => {
-            if (providerId) void patchCompanion({ model: { provider_id: providerId, model } });
-          }}
-        >
-          {/* 失效的当前模型：禁用项，明确标注「(不可用)」，用户须改选有效模型。 */}
-          {showStaleModel && selectedModel && (
-            <NomiSelect.Option key={selectedModel} value={selectedModel} disabled>
-              {t('nomi.chat.modelUnavailableOption', { model: selectedModel })}
-            </NomiSelect.Option>
-          )}
-          {availableModels.map((m) => (
-            <NomiSelect.Option key={m} value={m}>
-              {m}
-            </NomiSelect.Option>
-          ))}
-        </NomiSelect>
+        <TaskModelSelect
+          task='chat'
+          scope='all-enabled'
+          value={profile.model}
+          emptyHint={t('nomi.chat.modelNoTextModel')}
+          onChange={({ provider_id, model }) => void patchCompanion({ model: { provider_id, model } })}
+        />
       </div>
-      {hint && (
-        <span className='text-11px leading-tight' style={{ color: 'rgb(var(--warning-6))' }}>
-          {hint}
-        </span>
-      )}
     </div>
   );
 };
