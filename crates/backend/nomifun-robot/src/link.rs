@@ -27,6 +27,17 @@ pub struct RobotIdentity {
     pub client_id: String,
     /// Human-readable peer description for logs (IP, or relay tunnel id).
     pub peer: String,
+    /// HTTP base **this** connection can reach us on, resolved from the
+    /// advertiser at authentication time. Per-connection rather than per-process
+    /// because a multi-homed host answers different devices on different
+    /// interfaces; `None` means no reachable base, so vision is not advertised.
+    pub vision_base: Option<String>,
+    /// The plaintext bearer token this device authenticated with. Handing the
+    /// same token back over the MCP handshake is what lets the firmware's photo
+    /// upload authenticate as this robot — `/robot/vision/explain` resolves it
+    /// against the registry, and only the hash is stored, so this connection is
+    /// the one and only place the plaintext exists.
+    pub device_token: String,
 }
 
 /// Why a link operation failed.
@@ -133,6 +144,8 @@ mod tests {
                         robot_id: "aa:bb:cc:dd:ee:ff".into(),
                         client_id: "cid".into(),
                         peer: "192.168.1.9".into(),
+                        vision_base: None,
+                        device_token: String::new(),
                     },
                     sink: Box::new(sink),
                     stream: Box::new(stream),

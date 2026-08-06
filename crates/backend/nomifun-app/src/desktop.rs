@@ -429,6 +429,11 @@ pub struct DesktopServer {
     /// close every live remote session — and write the resulting host status — while
     /// the database is still open.
     ssh_pool: nomifun_ssh::SshConnectionPool,
+    /// LAN robot gateway. Held here for two reasons: the unified shutdown path
+    /// stops its accept loop and loopback MCP front, and the LAN listener's
+    /// status is projected into its endpoint advertiser (the OTA response is the
+    /// only channel that can tell a device where to connect).
+    robot: Option<Arc<crate::robot_wiring::RobotServices>>,
     /// Clone of the database pool used by the embedded router. Closing this
     /// clone closes the shared pool, so fatal listener failures cannot leave
     /// the backend's persistent resources alive while the host is exiting.
@@ -738,6 +743,7 @@ impl DesktopServer {
             runtime: Handle::current(),
             terminal_service,
             ssh_pool: services.ssh_pool.clone(),
+            robot: services.robot.clone(),
             database: services.database.clone(),
             _keep_alive: keep_alive.clone(),
             browser_platform_shutdown: services.browser_platform_shutdown.clone(),
@@ -756,12 +762,62 @@ impl DesktopServer {
             status_rx,
         });
         server.spawn_loopback(loopback);
+        server.spawn_robot_endpoint_projection();
         Ok((server, keep_alive))
     }
 
     /// The loopback port the webview connects to (`window.__backendPort`).
     pub fn loopback_port(&self) -> u16 {
         self.loopback_port
+    }
+
+    /// Keep the robot endpoint advertiser in step with the LAN listener.
+    ///
+    /// A robot is told where to connect exactly once, in its OTA response, and
+    /// that address must be an interface the robot can reach — never loopback.
+    /// So the advertiser follows the LAN listener specifically: LAN off means no
+    /// reachable endpoint, and the OTA response then carries an empty websocket
+    /// URL instead of one that dials nowhere.
+    fn spawn_robot_endpoint_projection(self: &Arc<Self>) {
+        let Some(robot) = self.robot.clone() else {
+            return;
+        };
+        let mut status = self.subscribe_status();
+        tokio::spawn(async move {
+            loop {
+                let (running, port) = {
+                    let current = status.borrow_and_update();
+                    (current.running, current.port)
+                };
+                let snapshot = nomifun_robot::endpoint::LanEndpointSnapshot {
+                    enabled: running,
+                    port,
+                    // Re-detected per change rather than cached: a laptop that
+                    // moves between networks keeps the same listener.
+                    ipv4s: if running {
+                        detect_all_lan_ipv4s()
+                    } else {
+                        Vec::new()
+                    },
+                };
+                robot.endpoint_tx.send_if_modified(|current| {
+                    if *current == snapshot {
+                        return false;
+                    }
+                    tracing::info!(
+                        enabled = snapshot.enabled,
+                        port = snapshot.port,
+                        interfaces = snapshot.ipv4s.len(),
+                        "robot: reachable endpoint changed"
+                    );
+                    *current = snapshot;
+                    true
+                });
+                if status.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
     }
 
     /// The per-boot local-trust secret to inject into the webview
@@ -967,12 +1023,19 @@ impl DesktopServer {
             errors.push(format!("browser cleanup failed: {error:#}"));
         }
 
+        // Stop the robot gateway before the listeners go: its accept loop and the
+        // loopback MCP front are pure in-process tasks with nothing durable to
+        // write, so this is unconditional and cannot fail. Live sessions end with
+        // their own sockets when the listener closes.
+        if let Some(robot) = &self.robot {
+            robot.shutdown();
+        }
+
         // Quiesce the SSH pool before the database closes: closing a link walks the
         // host row back from "connected", and a link let go of without exit evidence
         // is a real leak on someone else's machine, so it is reported rather than
         // silently counted as clean.
-        let ssh_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+        let ssh_result = tokio::time::timeout(            std::time::Duration::from_secs(5),
             self.ssh_pool.shutdown_all(),
         )
         .await;

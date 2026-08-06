@@ -247,6 +247,7 @@ nomifun-public.workspace = true
 nomifun-webhook.workspace = true
 nomifun-terminal.workspace = true
 nomifun-preset.workspace = true
+nomifun-robot.workspace = true
 nomifun-runtime.workspace = true
 nomifun-net.workspace = true
 axum.workspace = true

@@ -226,12 +226,16 @@ async fn ws_upgrade(
         tracing::warn!("robot: websocket rejected, unknown token");
         return (StatusCode::UNAUTHORIZED, "unknown device token").into_response();
     };
+    let peer_addr = peer_ip(peer);
     let identity = RobotIdentity {
         robot_id: record.robot_id.clone(),
         client_id: record.client_id.clone(),
-        peer: peer
-            .map(|Extension(ConnectInfo(p))| p.ip().to_string())
-            .unwrap_or_else(|| "unknown".to_owned()),
+        peer: peer_addr.to_string(),
+        // Resolved per connection: a multi-homed host answers different devices
+        // on different interfaces, and the photo upload has to reach the same
+        // address the socket came in on.
+        vision_base: state.advertiser.http_base(peer_addr),
+        device_token: token,
     };
     let acceptor = state.acceptor.clone();
     upgrade.on_upgrade(move |socket| async move {
