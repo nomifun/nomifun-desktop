@@ -41,6 +41,9 @@ ort = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `test-util` is not in tokio's `full`, and the downlink pacer's cadence tests
+# need `start_paused` virtual time rather than real 60 ms sleeps.
+tokio = { workspace = true, features = ["test-util"] }
 # Drives the device router in-process (`oneshot`), so route tests exercise the
 # real handlers and extractors instead of calling private functions.
 tower = { workspace = true }
