@@ -20,6 +20,9 @@ interface HubPageShellProps {
   children: React.ReactNode;
 }
 
+/** Shared visual contract for top-level destinations opened from the app rail. */
+export const HUB_PAGE_TITLE_CLASS = 'm-0 text-22px font-600 leading-tight text-t-primary';
+
 /**
  * HubPageShell — shared chrome for the homepage "hub" destinations (Model
  * Management, Presets, Skills, MCP). Mirrors the scroll container + centered content
@@ -47,7 +50,7 @@ const HubPageShell: React.FC<HubPageShellProps> = ({
     >
       <div className={classNames('mx-auto w-full', maxWidthClass)}>
         <div className='mb-18px'>
-          <div className='text-22px font-600 text-t-primary leading-tight'>{title}</div>
+          <h1 className={HUB_PAGE_TITLE_CLASS}>{title}</h1>
           {subtitle && <div className='mt-6px text-13px leading-18px text-t-tertiary'>{subtitle}</div>}
         </div>
         {toolbar && <div className='mb-20px'>{toolbar}</div>}
