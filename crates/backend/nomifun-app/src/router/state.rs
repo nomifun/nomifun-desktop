@@ -71,6 +71,7 @@ pub struct ModuleStates {
     pub system: SystemRouterState,
     pub conversation: ConversationRouterState,
     pub remote_agent: RemoteAgentRouterState,
+    pub ssh_host: nomifun_ssh::SshHostRouterState,
     pub agent: AgentRouterState,
 
     pub connection_test: ConnectionTestRouterState,
@@ -558,6 +559,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         system: build_system_state(services),
         conversation,
         remote_agent: build_remote_agent_state(services),
+        ssh_host: build_ssh_host_state(services),
         agent: AgentRouterState {
             agent_registry: services.agent_registry.clone(),
             service: agent_service,
@@ -736,6 +738,11 @@ pub fn build_conversation_state(
     conversation_service.with_delete_hook(Arc::new(ConversationTerminalCascade {
         terminals: services.terminal_service.clone(),
     }) as Arc<dyn OnConversationDelete>);
+    // Same rule for a remote session's SSH link: the socket, the remote shell and
+    // its cwd belong to the conversation, so they go when it does — with close
+    // forensics, not by letting the transport rot.
+    conversation_service
+        .with_delete_hook(Arc::new(services.ssh_pool.clone()) as Arc<dyn OnConversationDelete>);
     // Drop this conversation's IDMM decision records (disposable audit trail,
     // polymorphic target_id with no FK —app-level cascade).
     conversation_service.with_delete_hook(Arc::new(IdmmRecordCascade {
@@ -777,6 +784,17 @@ pub fn build_remote_agent_state(services: &AppServices) -> RemoteAgentRouterStat
     let repo = Arc::new(SqliteRemoteAgentRepository::new(pool));
     RemoteAgentRouterState {
         service: Arc::new(RemoteAgentService::new(repo, encryption_key)),
+    }
+}
+
+/// Build the SSH host-book router state on the process connection pool. The pool
+/// carries its own host book, so the routes edit the exact credentials the next
+/// redial will use and the test-connection probe dials through the same gate a
+/// session does.
+pub fn build_ssh_host_state(services: &AppServices) -> nomifun_ssh::SshHostRouterState {
+    nomifun_ssh::SshHostRouterState {
+        service: services.ssh_pool.host_service(),
+        pool: Some(services.ssh_pool.clone()),
     }
 }
 
@@ -2484,6 +2502,82 @@ mod tests {
         let loaded = ext_state.registry.get_loaded_extensions().await;
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "demo-ext");
+
+        services.database.close().await;
+    }
+
+    /// The pill must report on the socket the agent is actually using. Two pools
+    /// (which is what this codebase had before) means the routes describe links
+    /// nobody talks to while the live ones stay invisible — so pin the identity,
+    /// not just the behaviour.
+    #[tokio::test]
+    async fn ssh_pool_is_shared_between_routes_and_the_agent_factory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let config = AppConfig {
+            data_dir: data_dir.clone(),
+            work_dir: data_dir,
+            ..Default::default()
+        };
+        let services = AppServices::from_config(db, &config).await.unwrap();
+
+        let routed = build_ssh_host_state(&services)
+            .pool
+            .expect("the ssh host routes must be backed by the process pool");
+        assert!(
+            routed.is_same_pool(&services.ssh_pool),
+            "build_ssh_host_state must reuse services.ssh_pool instead of building its own"
+        );
+
+        // The handle the agent factory receives, erased to the seam. A link it
+        // opens — including one that failed to dial, which is precisely what the
+        // header pill has to show — must be visible through the routes' handle.
+        let provider: Arc<dyn nomifun_ai_agent::SshBackendProvider> =
+            Arc::new(services.ssh_pool.clone());
+        let unsaved_host = nomifun_common::SshHostId::new();
+        let dialled = provider
+            .connect(
+                services.authoritative_user_id.as_ref(),
+                "conversation-with-no-saved-host",
+                unsaved_host.as_str(),
+                ".",
+            )
+            .await;
+        assert!(
+            dialled.is_err(),
+            "a host that is not in the book cannot be dialled"
+        );
+        assert_eq!(
+            routed.active_link_count(),
+            1,
+            "the routes must see the link the agent's provider just opened"
+        );
+
+        // The factory's deps are sealed inside the factory closure, so the handover
+        // itself can only be pinned where it is written.
+        let services_source = include_str!("../services.rs");
+        let deps_line = services_source
+            .lines()
+            .find(|line| line.trim_start().starts_with("ssh_provider:"))
+            .expect("the agent factory deps must wire an ssh provider");
+        assert!(
+            deps_line.contains("ssh_pool"),
+            "the agent factory must receive the one pool, not a provider of its own: {deps_line}"
+        );
+        assert_eq!(
+            services_source.matches("SshConnectionPool::new(").count(),
+            1,
+            "exactly one ssh connection pool may exist in the process"
+        );
+        let state_source = include_str!("state.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            !state_source.contains("SshConnectionPool::new("),
+            "the router must not build a second pool the agent cannot see"
+        );
 
         services.database.close().await;
     }

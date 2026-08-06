@@ -33,7 +33,6 @@
     "keepOpen": "保持打开",
     "conversationTitle": "关闭此对话的所有浏览器通道？",
     "conversationContent": "将关闭 {{count}} 个浏览器通道，并取消其中正在进行的浏览器操作。对话和执行仍会保持运行。",
-    "conversationContent_one": "将关闭 {{count}} 个浏览器通道，并取消其中正在进行的浏览器操作。对话和执行仍会保持运行。",
     "conversationContent_other": "将关闭 {{count}} 个浏览器通道，并取消其中正在进行的浏览器操作。对话和执行仍会保持运行。",
     "conversationAction": "关闭通道",
     "conversationSuccess": "此对话的浏览器通道已关闭。",
@@ -151,7 +150,6 @@
     "title": "主机诊断",
     "host": "浏览器主机",
     "hostCount": "{{count}} 个主机",
-    "hostCount_one": "{{count}} 个主机",
     "hostCount_other": "{{count}} 个主机",
     "noHosts": "当前没有活动的浏览器主机上报诊断信息。",
     "hostState": {

@@ -117,7 +117,7 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
       </div>
 
       {/* Intent reminder: GROUP_AND_C2C needs console approval. */}
-      <div className='bg-[rgba(var(--primary-rgb),0.08)] rd-12px p-12px border border-[rgba(var(--primary-rgb),0.2)] text-12px text-t-secondary'>
+      <div className='bg-[rgba(var(--primary-rgb),0.08)] rd-12px p-12px border border-solid border-[rgba(var(--primary-rgb),0.2)] text-12px text-t-secondary'>
         {t('settings.qqbot.intentNote', 'In the QQ Open Platform console → bot management → permissions, apply for the "GROUP_AND_C2C" intent, otherwise the bot cannot receive group/private messages.')}
       </div>
 

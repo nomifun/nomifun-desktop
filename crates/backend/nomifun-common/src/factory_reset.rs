@@ -70,6 +70,9 @@ const REPLAYED_COMPLETED_RESET_REQUESTS_DIR: &str =
 const COMPLETED_RESET_CONTROL_DIR: &str = "completed-reset-control";
 const REPLAYED_COMPLETED_RESET_CONTROL_PREFIX: &str =
     "replayed-completed-reset-control";
+/// Quarantine for a pending reset control whose plan was written against a
+/// managed-root registry this build does not recognize.
+const UNUSABLE_RESET_PLANS_DIR: &str = "unrecognized-reset-plans";
 const COMPLETED_RESET_REQUEST_VERSION: u32 = 1;
 const AUTOMATIC_LEGACY_RETIREMENT_FILE: &str =
     "automatic-legacy-retirement.completed.json";
@@ -89,6 +92,9 @@ const DB_FAMILY: &[&str] = &[
 //
 // Never derive this from the current registry: adding a root in a later
 // release must not silently change which historical plan bytes are accepted.
+//
+// See [`released_plan_shape`] for how a plan version selects its frozen
+// registry, and `RELEASED_V2_MANAGED_ROOTS` for the shape written today.
 const RELEASED_V1_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     ("nomifun-backend.db-wal", ManagedRootKind::File),
     ("nomifun-backend.db-shm", ManagedRootKind::File),
@@ -133,6 +139,86 @@ const RELEASED_V1_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     ("extension-states.json", ManagedRootKind::File),
     ("custom-skill-paths.json", ManagedRootKind::File),
     // Legacy cleanup only: the companion credential feature no longer owns this directory.
+    ("browser-secrets", ManagedRootKind::Directory),
+    ("codex-acp-home", ManagedRootKind::Directory),
+    ("agent-executions", ManagedRootKind::Directory),
+    ("terminal-mcp", ManagedRootKind::Directory),
+    ("mcp-endpoints.json", ManagedRootKind::File),
+    ("mcp-endpoints.json.tmp", ManagedRootKind::File),
+    ("local-ai", ManagedRootKind::Directory),
+    (".relocated-from", ManagedRootKind::File),
+    (".relocated-done", ManagedRootKind::File),
+];
+// Exact managed-root registry emitted by the v2 reset planner, which is the
+// planner every current release still uses.
+//
+// This is frozen for the same reason v1 is. The plan is persisted in the user's
+// data directory and is compared element-by-element against this build's
+// registry by `validate_plan` and the completed-plan replay check, so deriving
+// the v2 shape from `MANAGED_DATASET_ROOTS` at runtime would silently
+// invalidate every plan written by an older build the moment that registry
+// changes — which is exactly how the `browser-secrets` regression bricked
+// interrupted resets carried across an upgrade.
+//
+// `released_v2_managed_roots_match_the_current_writer` proves this list is
+// still what the writer produces. If that test fails, the live registry moved;
+// pick one:
+//   * the move is not intended -> restore the registry entry (removals also
+//     abandon data left by older installations, so a retired subsystem's root
+//     stays here marked cleanup-only);
+//   * the move is intended -> mint a new plan version: add
+//     `RELEASED_V3_MANAGED_ROOTS`, add an arm to `released_plan_shape`, and
+//     leave this list untouched so plans already on disk keep validating.
+// Editing this list in place is never correct.
+const RELEASED_V2_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
+    ("nomifun-backend.db-wal", ManagedRootKind::File),
+    ("nomifun-backend.db-shm", ManagedRootKind::File),
+    ("nomifun-backend.db-journal", ManagedRootKind::File),
+    ("nomifun-backend.db.migrate.lock", ManagedRootKind::File),
+    ("nomifun-backend.db", ManagedRootKind::File),
+    ("storage-generation", ManagedRootKind::File),
+    ("dataset-v3.json", ManagedRootKind::File),
+    (".dataset-v3.bootstrap.json", ManagedRootKind::File),
+    ("factory-reset.pending", ManagedRootKind::File),
+    ("encryption_key", ManagedRootKind::File),
+    // `dir-config.json` and the work-root owner are `ResetPolicy::Preserve`
+    // host control files, so unlike v1 the v2 shape does not quarantine them.
+    (".nomifun-work-root-binding.json", ManagedRootKind::File),
+    ("conversations", ManagedRootKind::Directory),
+    ("attachments", ManagedRootKind::Directory),
+    ("knowledge", ManagedRootKind::Directory),
+    ("projects", ManagedRootKind::Directory),
+    ("companion", ManagedRootKind::Directory),
+    ("cron", ManagedRootKind::Directory),
+    ("workshop", ManagedRootKind::Directory),
+    // Legacy root of the retired public-agent domain (cleanup only).
+    ("public-agents", ManagedRootKind::Directory),
+    ("preview-history", ManagedRootKind::Directory),
+    ("agent-process-registry.json", ManagedRootKind::File),
+    ("nomi-sessions", ManagedRootKind::Directory),
+    ("nomi-health-check-sessions", ManagedRootKind::Directory),
+    ("browser-profile", ManagedRootKind::Directory),
+    ("browser-profiles", ManagedRootKind::Directory),
+    ("browser-data", ManagedRootKind::Directory),
+    ("browser-state", ManagedRootKind::Directory),
+    ("login-profile", ManagedRootKind::Directory),
+    ("knowledge-browser", ManagedRootKind::Directory),
+    ("skills", ManagedRootKind::Directory),
+    ("builtin-skills", ManagedRootKind::Directory),
+    ("builtin-rules", ManagedRootKind::Directory),
+    (".builtin-skills.tmp", ManagedRootKind::Directory),
+    (".builtin-skills.old", ManagedRootKind::Directory),
+    (".builtin-skills.lock", ManagedRootKind::File),
+    ("preset-rules", ManagedRootKind::Directory),
+    ("preset-skills", ManagedRootKind::Directory),
+    ("preset-instructions", ManagedRootKind::Directory),
+    ("preset-avatars", ManagedRootKind::Directory),
+    ("extensions", ManagedRootKind::Directory),
+    ("extension-states.json", ManagedRootKind::File),
+    ("custom-skill-paths.json", ManagedRootKind::File),
+    // Legacy cleanup only: the companion credential feature no longer owns
+    // this directory. Removing it changes this frozen shape; see the note on
+    // the registry entry in `dataset_roots`.
     ("browser-secrets", ManagedRootKind::Directory),
     ("codex-acp-home", ManagedRootKind::Directory),
     ("agent-executions", ManagedRootKind::Directory),
@@ -199,20 +285,121 @@ fn dataset_managed_roots(
         .collect()
 }
 
-fn managed_roots_for_plan_version(
-    version: u32,
-) -> Result<Vec<(&'static str, ManagedRootKind)>, AppError> {
+/// Everything about a persisted plan that is fixed by its version.
+///
+/// A plan is a durable contract with older builds, so each released version
+/// pins its own frozen shape here instead of inheriting whatever the current
+/// process happens to compute.
+#[derive(Debug, Clone, Copy)]
+struct ReleasedPlanShape {
+    managed_roots: &'static [(&'static str, ManagedRootKind)],
+    /// v1 predates `persist_work_dir`; every later writer sets it.
+    persists_work_dir: bool,
+}
+
+/// Resolve the frozen shape of a persisted plan version.
+///
+/// Every arm is written out explicitly: an unknown version is refused rather
+/// than treated as "current", so a build that reads a plan from a newer release
+/// cannot execute it against the wrong registry. Adding a version means adding
+/// an arm plus a new `RELEASED_V*_MANAGED_ROOTS` list — never editing one.
+fn released_plan_shape(version: u32) -> Result<ReleasedPlanShape, AppError> {
     match version {
-        LEGACY_PLAN_VERSION => Ok(RELEASED_V1_MANAGED_ROOTS.to_vec()),
-        PLAN_VERSION => {
-            let mut roots = lifecycle_managed_roots().collect::<Vec<_>>();
-            roots.extend(dataset_managed_roots(true));
-            Ok(roots)
-        }
+        LEGACY_PLAN_VERSION => Ok(ReleasedPlanShape {
+            managed_roots: RELEASED_V1_MANAGED_ROOTS,
+            persists_work_dir: false,
+        }),
+        PLAN_VERSION => Ok(ReleasedPlanShape {
+            managed_roots: RELEASED_V2_MANAGED_ROOTS,
+            persists_work_dir: true,
+        }),
         _ => Err(AppError::Internal(format!(
             "unsupported v3 dataset reset plan version {version}"
         ))),
     }
+}
+
+/// The managed-root registry the *current writer* emits.
+///
+/// Live derivation is correct here and only here: arming a new reset, and the
+/// layout/probe checks that describe what a new reset would move, must reflect
+/// the registry this build actually owns. Anything that reads a *persisted*
+/// plan must instead go through [`released_plan_shape`], because those bytes
+/// may have been written by another build.
+///
+/// The two are held together by
+/// `released_v2_managed_roots_match_the_current_writer`. Drift is also
+/// self-announcing at runtime: `arm_v3_dataset_reset` validates the plan it
+/// just built against the frozen shape, so a drifted registry fails before any
+/// data is moved rather than persisting a plan no reader accepts.
+fn current_writer_managed_roots() -> Vec<(&'static str, ManagedRootKind)> {
+    let mut roots = lifecycle_managed_roots().collect::<Vec<_>>();
+    roots.extend(dataset_managed_roots(true));
+    roots
+}
+
+/// Compare a persisted plan's root list against a frozen registry.
+///
+/// The comparison is positional: the quarantine order is part of the crash
+/// safety argument, not an incidental detail.
+fn plan_roots_match_registry(
+    plan: &DatasetResetPlan,
+    managed_roots: &[(&'static str, ManagedRootKind)],
+    expects_work_root: bool,
+) -> bool {
+    let mut expected = managed_roots
+        .iter()
+        .map(|(path, kind)| {
+            (
+                ManagedRootBase::DataDir,
+                *path,
+                *kind,
+                format!("{}/{}", plan.retired_dir, path),
+            )
+        })
+        .collect::<Vec<_>>();
+    if expects_work_root {
+        expected.push((
+            ManagedRootBase::WorkDir,
+            MANAGED_WORKSPACES_DIR,
+            ManagedRootKind::Directory,
+            format!("{}/{}", plan.work_retired_dir, MANAGED_WORKSPACES_DIR),
+        ));
+    }
+    plan.roots.len() == expected.len()
+        && plan
+            .roots
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| {
+                actual.base == expected.0
+                    && actual.relative_path == expected.1
+                    && actual.kind == expected.2
+                    && actual.retired_relative_path == expected.3
+            })
+}
+
+/// Does this plan's root list match the frozen registry of its own version?
+///
+/// A `false` answer means the bytes were written by a build whose managed-root
+/// registry differed from the frozen shape — an upgrade artifact, not an I/O
+/// failure. Callers must treat it as "this is not a plan I can execute", never
+/// as a reason to abort startup while a user's data directory is half moved.
+/// An *unsupported* version still errors: refusing to touch a plan from a newer
+/// release is the correct answer to a downgrade.
+fn plan_roots_match_released_registry(
+    plan: &DatasetResetPlan,
+    data_dir: &Path,
+) -> Result<bool, AppError> {
+    let shape = released_plan_shape(plan.version)?;
+    let canonical_data = canonical_data_dir(data_dir)?;
+    let expects_work_root =
+        !crate::paths::stored_path_matches(&plan.work_dir, &canonical_data);
+    Ok(plan_roots_match_registry(
+        plan,
+        shape.managed_roots,
+        expects_work_root,
+    ))
 }
 
 /// Fixed-shape v3 explicit-reset request.
@@ -1429,7 +1616,7 @@ pub fn require_safe_data_work_root_layout(
 ) -> Result<(), AppError> {
     let canonical_data = canonical_data_dir(data_dir)?;
     let canonical_work = canonical_existing_work_dir(work_dir)?;
-    let managed_roots = managed_roots_for_plan_version(PLAN_VERSION)?;
+    let managed_roots = current_writer_managed_roots();
     validate_safe_reset_data_and_work_roots(
         &canonical_data,
         &canonical_work,
@@ -1539,20 +1726,33 @@ fn bounded_regular_file_matches(
     )
 }
 
-fn validate_completed_plan_replay_identity(
+/// Decide whether these plan bytes can be one of *this* build's own reset
+/// plans, replayed after its control directory was already consumed.
+///
+/// Returns the reason it cannot be, and `None` when it can. Nothing here is an
+/// error: every check is a statement about persisted bytes that another build
+/// may have written, and the callers are predicates that must be able to answer
+/// "no". Genuine I/O failures (an unreadable data root) still propagate — those
+/// are facts about *this* machine, not about the bytes.
+fn completed_plan_replay_mismatch(
     plan: &DatasetResetPlan,
     data_dir: &Path,
-) -> Result<(), AppError> {
-    let managed_roots = managed_roots_for_plan_version(plan.version)?;
-    if (plan.version == PLAN_VERSION) != plan.persist_work_dir {
-        return Err(AppError::Internal(
+) -> Result<Option<String>, AppError> {
+    let Ok(shape) = released_plan_shape(plan.version) else {
+        return Ok(Some(format!(
+            "plan version {} is not a released plan shape",
+            plan.version
+        )));
+    };
+    if shape.persists_work_dir != plan.persist_work_dir {
+        return Ok(Some(
             "completed reset plan replay has an invalid persistence/version pair"
                 .into(),
         ));
     }
     if plan.version == LEGACY_PLAN_VERSION
         && plan.automatic_legacy_retirement
-        || plan.version == PLAN_VERSION
+        || plan.version != LEGACY_PLAN_VERSION
             && matches!(
                 plan.reason,
                 DatasetResetReason::NonV3Dataset
@@ -1563,29 +1763,29 @@ fn validate_completed_plan_replay_identity(
             DatasetResetReason::ExplicitFactoryReset
         ) && plan.automatic_legacy_retirement
     {
-        return Err(AppError::Internal(
+        return Ok(Some(
             "completed reset plan replay has an invalid automatic-retirement flag"
                 .into(),
         ));
     }
-    validate_uuidv7(&plan.operation_id).map_err(|error| {
-        AppError::Internal(format!(
+    if let Err(error) = validate_uuidv7(&plan.operation_id) {
+        return Ok(Some(format!(
             "completed reset plan replay operation ID is invalid: {error}"
-        ))
-    })?;
-    validate_uuidv7(&plan.generation).map_err(|error| {
-        AppError::Internal(format!(
+        )));
+    }
+    if let Err(error) = validate_uuidv7(&plan.generation) {
+        return Ok(Some(format!(
             "completed reset plan replay generation is invalid: {error}"
-        ))
-    })?;
+        )));
+    }
     if plan.requested_at <= 0 {
-        return Err(AppError::Internal(
+        return Ok(Some(
             "completed reset plan replay timestamp is invalid".into(),
         ));
     }
     let canonical_data = canonical_data_dir(data_dir)?;
     if !crate::paths::stored_path_matches(&plan.data_dir, &canonical_data) {
-        return Err(AppError::Internal(
+        return Ok(Some(
             "completed reset plan replay belongs to a different data directory"
                 .into(),
         ));
@@ -1595,15 +1795,14 @@ fn validate_completed_plan_replay_identity(
         || !work_path.is_absolute()
         || crate::workspace_path_has_edge_whitespace_segment(work_path)
     {
-        return Err(AppError::Internal(
-            "completed reset plan replay contains an unsafe work root"
-                .into(),
+        return Ok(Some(
+            "completed reset plan replay contains an unsafe work root".into(),
         ));
     }
-    if plan.reason == DatasetResetReason::WorkDirChange
-        && crate::paths::stored_path_matches(&plan.work_dir, &canonical_data)
-    {
-        return Err(AppError::Internal(
+    let targets_data_root =
+        crate::paths::stored_path_matches(&plan.work_dir, &canonical_data);
+    if plan.reason == DatasetResetReason::WorkDirChange && targets_data_root {
+        return Ok(Some(
             "completed work-dir change replay cannot target its data root"
                 .into(),
         ));
@@ -1613,7 +1812,7 @@ fn validate_completed_plan_replay_identity(
         plan.generation
     );
     if plan.retired_dir != expected_retired_dir {
-        return Err(AppError::Internal(
+        return Ok(Some(
             "completed reset plan replay has an invalid retired directory"
                 .into(),
         ));
@@ -1623,56 +1822,46 @@ fn validate_completed_plan_replay_identity(
         plan.generation
     );
     if plan.work_retired_dir != expected_work_retired_dir {
-        return Err(AppError::Internal(
+        return Ok(Some(
             "completed reset plan replay has an invalid work-retired directory"
                 .into(),
         ));
     }
-    let mut expected_roots = managed_roots
-        .into_iter()
-        .map(|(path, kind)| {
-            (
-                ManagedRootBase::DataDir,
-                path,
-                kind,
-                format!("{}/{}", plan.retired_dir, path),
-            )
-        })
-        .collect::<Vec<_>>();
-    if !crate::paths::stored_path_matches(&plan.work_dir, &canonical_data) {
-        expected_roots.push((
-            ManagedRootBase::WorkDir,
-            MANAGED_WORKSPACES_DIR,
-            ManagedRootKind::Directory,
-            format!("{}/{}", plan.work_retired_dir, MANAGED_WORKSPACES_DIR),
-        ));
+    if !plan_roots_match_registry(
+        plan,
+        shape.managed_roots,
+        !targets_data_root,
+    ) {
+        return Ok(Some(format!(
+            "completed reset plan replay was written against a different \
+             managed-root registry than this build's frozen v{} shape",
+            plan.version
+        )));
     }
-    if plan.roots.len() != expected_roots.len()
-        || plan
-            .roots
-            .iter()
-            .zip(expected_roots.iter())
-            .any(|(actual, expected)| {
-                actual.base != expected.0
-                    || actual.relative_path != expected.1
-                    || actual.kind != expected.2
-                    || actual.retired_relative_path != expected.3
-            })
-    {
-        return Err(AppError::Internal(
-            "completed reset plan replay managed-root registry is invalid"
-                .into(),
-        ));
-    }
-    Ok(())
+    Ok(None)
 }
 
+/// Do these active plan bytes belong to a reset that already completed?
+///
+/// This is a predicate, and it answers `false` — never an error — when the bytes
+/// simply are not one of this build's plans. Erroring instead used to abort
+/// `apply_pending_v3_dataset_reset` with `AppError::Internal` at startup, on a
+/// user's data directory, for nothing worse than a plan written before the
+/// managed-root registry changed.
 fn completed_reset_control_matches_plan_bytes(
     data_dir: &Path,
     plan: &DatasetResetPlan,
     active_plan_bytes: &[u8],
 ) -> Result<bool, AppError> {
-    validate_completed_plan_replay_identity(plan, data_dir)?;
+    if let Some(reason) = completed_plan_replay_mismatch(plan, data_dir)? {
+        tracing::warn!(
+            target: "factory_reset",
+            operation_id = %plan.operation_id,
+            reason = %reason,
+            "active reset plan is not a completed-control replay of this build"
+        );
+        return Ok(false);
+    }
     let retired_root = data_dir.join(RETIRED_DATASETS_DIR);
     let generation_root = data_dir.join(&plan.retired_dir);
     let completed_control =
@@ -1752,7 +1941,18 @@ fn ignored_legacy_reset_control_matches_plan_bytes(
     if plan.version != LEGACY_PLAN_VERSION {
         return Ok(false);
     }
-    validate_completed_plan_replay_identity(plan, data_dir)?;
+    // Same contract as above: an unrecognizable plan is a `false` answer, not a
+    // failure. `plan.operation_id` is used as a path component below, so the
+    // UUID check inside the mismatch classifier gates that too.
+    if let Some(reason) = completed_plan_replay_mismatch(plan, data_dir)? {
+        tracing::warn!(
+            target: "factory_reset",
+            operation_id = %plan.operation_id,
+            reason = %reason,
+            "active legacy reset plan is not an archived-control replay of this build"
+        );
+        return Ok(false);
+    }
 
     let retired_root = data_dir.join(RETIRED_DATASETS_DIR);
     let archive_root = retired_root.join(IGNORED_LEGACY_RESET_PLANS_DIR);
@@ -1988,6 +2188,125 @@ fn archive_active_completed_reset_control_replay(
     Ok(true)
 }
 
+fn warn_unusable_reset_control_shape(plan: &DatasetResetPlan) {
+    tracing::warn!(
+        target: "factory_reset",
+        operation_id = %plan.operation_id,
+        generation = %plan.generation,
+        version = plan.version,
+        "pending reset plan was written against a different managed-root \
+         registry than this build's frozen shape; treating it as no pending \
+         reset and leaving every managed root untouched"
+    );
+}
+
+/// Move a pending reset control directory aside when its plan describes a
+/// managed-root registry this build does not recognize.
+///
+/// Such a plan is unexecutable — `read_pending_v3_reset` reports "no pending
+/// reset" for it — but leaving it in place is not neutral: the control directory
+/// also holds the phase markers, and a stale `generation-installed` marker would
+/// be inherited by the next plan armed in the same directory. Renaming the whole
+/// directory into `retired-datasets` is atomic, keeps the bytes for support, and
+/// destroys nothing: any root the interrupted reset already moved is still in
+/// its retired generation directory.
+///
+/// An *unsupported version* is deliberately not archived. That is the signature
+/// of a downgrade — a plan from a newer release — and the reader's hard refusal
+/// is the right answer there.
+fn archive_unusable_reset_control(
+    data_dir: &Path,
+) -> Result<bool, AppError> {
+    let control_dir = reset_dir(data_dir);
+    match fs::symlink_metadata(&control_dir) {
+        Ok(metadata) => validate_root_metadata(
+            &control_dir,
+            &metadata,
+            ManagedRootKind::Directory,
+        )?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(false);
+        }
+        Err(error) => {
+            return Err(AppError::Internal(format!(
+                "inspect reset control directory {}: {error}",
+                control_dir.display()
+            )));
+        }
+    }
+    let plan_bytes = match read_bounded_regular_file(
+        &plan_path(data_dir),
+        MAX_CONTROL_FILE_BYTES,
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(false);
+        }
+        Err(error) => {
+            return Err(AppError::Internal(format!(
+                "read reset plan while classifying its shape {}: {error}",
+                plan_path(data_dir).display()
+            )));
+        }
+    };
+    // A plan that does not even parse, and one whose version this build does
+    // not know, both stay put: the reader reports those precisely and this
+    // helper must not swallow them.
+    let Ok(plan) = serde_json::from_slice::<DatasetResetPlan>(&plan_bytes)
+    else {
+        return Ok(false);
+    };
+    if released_plan_shape(plan.version).is_err()
+        || plan_roots_match_released_registry(&plan, data_dir)?
+    {
+        return Ok(false);
+    }
+    let retired_root = data_dir.join(RETIRED_DATASETS_DIR);
+    ensure_real_directory(&retired_root, "retired-datasets directory")?;
+    let archive_root = retired_root.join(UNUSABLE_RESET_PLANS_DIR);
+    ensure_real_directory(
+        &archive_root,
+        "unrecognized reset plan directory",
+    )?;
+    // The operation ID comes from an untrusted file, so it is only used as a
+    // path component after proving it is a UUID; the appended fresh UUID keeps
+    // the destination unique across repeated replays either way.
+    let label = if validate_uuidv7(&plan.operation_id).is_ok() {
+        plan.operation_id.as_str()
+    } else {
+        "unidentified"
+    };
+    let destination =
+        archive_root.join(format!("{label}-{}", Uuid::now_v7()));
+    rename_with_retry(&control_dir, &destination).map_err(|error| {
+        AppError::Internal(format!(
+            "archive unrecognized reset control {} -> {}: {error}",
+            control_dir.display(),
+            destination.display()
+        ))
+    })?;
+    sync_parent(&control_dir).map_err(|error| {
+        AppError::Internal(format!(
+            "sync unrecognized reset control removal: {error}"
+        ))
+    })?;
+    sync_parent(&destination).map_err(|error| {
+        AppError::Internal(format!(
+            "sync unrecognized reset control archive: {error}"
+        ))
+    })?;
+    tracing::warn!(
+        target: "factory_reset",
+        operation_id = %plan.operation_id,
+        generation = %plan.generation,
+        version = plan.version,
+        destination = %destination.display(),
+        "quarantined a reset control directory whose plan belongs to a \
+         different managed-root registry; no dataset root was moved"
+    );
+    Ok(true)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StrictWorkDirConfig {
@@ -2101,6 +2420,13 @@ pub fn pending_v3_reset_work_dir(
         )? {
             // A completed plan whose old directory entry reappeared must not
             // redirect resolution to a retired or now-missing work root.
+            return Ok(None);
+        }
+        if !plan_roots_match_released_registry(&plan, data_dir)? {
+            // Not authoritative and not executable: fall back to the ordinary
+            // work-root resolution instead of failing the boot. The control
+            // directory is quarantined by the next mutating entry point.
+            warn_unusable_reset_control_shape(&plan);
             return Ok(None);
         }
         let work_dir = PathBuf::from(&plan.work_dir);
@@ -2423,8 +2749,9 @@ fn validate_plan(
     data_dir: &Path,
     work_dir: &Path,
 ) -> Result<(), AppError> {
-    let managed_roots = managed_roots_for_plan_version(plan.version)?;
-    if (plan.version == PLAN_VERSION) != plan.persist_work_dir {
+    let shape = released_plan_shape(plan.version)?;
+    let managed_roots = shape.managed_roots;
+    if shape.persists_work_dir != plan.persist_work_dir {
         return Err(AppError::Internal(
             "v3 dataset reset plan work-root persistence flag does not match its version"
                 .into(),
@@ -2432,7 +2759,7 @@ fn validate_plan(
     }
     if plan.version == LEGACY_PLAN_VERSION
         && plan.automatic_legacy_retirement
-        || plan.version == PLAN_VERSION
+        || plan.version != LEGACY_PLAN_VERSION
             && matches!(
                 plan.reason,
                 DatasetResetReason::NonV3Dataset
@@ -2537,40 +2864,18 @@ fn validate_plan(
         validate_safe_reset_data_and_work_roots(
             &canonical,
             &canonical_work,
-            &managed_roots,
+            managed_roots,
         )?;
     }
-    let mut expected_roots: Vec<_> = managed_roots
-        .into_iter()
-        .map(|(path, kind)| {
-            (
-                ManagedRootBase::DataDir,
-                path,
-                kind,
-                format!("{}/{}", plan.retired_dir, path),
-            )
-        })
-        .collect();
-    if canonical_work != canonical {
-        expected_roots.push((
-            ManagedRootBase::WorkDir,
-            MANAGED_WORKSPACES_DIR,
-            ManagedRootKind::Directory,
-            format!("{}/{}", plan.work_retired_dir, MANAGED_WORKSPACES_DIR),
-        ));
-    }
-    if plan.roots.len() != expected_roots.len()
-        || plan
-            .roots
-            .iter()
-            .zip(expected_roots.iter())
-            .any(|(actual, expected)| {
-                actual.base != expected.0
-                    || actual.relative_path != expected.1
-                    || actual.kind != expected.2
-                    || actual.retired_relative_path != expected.3
-            })
-    {
+    if !plan_roots_match_registry(
+        plan,
+        managed_roots,
+        canonical_work != canonical,
+    ) {
+        // Reaching here means the caller decided to act on a plan whose shape
+        // it had not classified. `read_pending_v3_reset` and
+        // `pending_v3_reset_work_dir` filter this case out first precisely so
+        // that a plan from another registry shape cannot abort startup.
         return Err(AppError::Internal(
             "v3 dataset reset plan managed-root registry does not match this build".into(),
         ));
@@ -2966,6 +3271,9 @@ pub fn arm_v3_dataset_reset(
     require_data_root_not_owned_as_external_work(data_dir)?;
     archive_active_ignored_legacy_reset_control_replay(data_dir)?;
     archive_active_completed_reset_control_replay(data_dir)?;
+    // A plan this build cannot execute must not leave its phase markers behind
+    // for the plan armed below to inherit.
+    archive_unusable_reset_control(data_dir)?;
     if let Some(existing) = read_pending_v3_reset(data_dir, work_dir)? {
         validate_active_reset_request_against_plan(data_dir, &existing)?;
         if existing.reason == DatasetResetReason::WorkDirChange
@@ -3003,7 +3311,7 @@ pub fn arm_v3_dataset_reset(
             reason,
             DatasetResetReason::ExplicitFactoryReset
         );
-    let managed_roots = managed_roots_for_plan_version(PLAN_VERSION)?;
+    let managed_roots = current_writer_managed_roots();
     if reason == DatasetResetReason::WorkDirChange {
         validate_disjoint_data_and_work_roots(&canonical, &canonical_work)?;
     } else {
@@ -3148,6 +3456,16 @@ pub fn read_pending_v3_reset(
             if completed_reset_control_matches_plan_bytes(
                 data_dir, &plan, &bytes,
             )? {
+                return Ok(None);
+            }
+            if !plan_roots_match_released_registry(&plan, data_dir)? {
+                // These bytes describe a quarantine this build cannot prove it
+                // authored, so there is nothing here to execute. Reporting "no
+                // pending reset" leaves every managed root exactly where it is;
+                // `archive_unusable_reset_control` then moves the control
+                // directory aside so its stale phase markers cannot be
+                // inherited by the next plan.
+                warn_unusable_reset_control_shape(&plan);
                 return Ok(None);
             }
             validate_plan(&plan, data_dir, work_dir)?;
@@ -4419,7 +4737,7 @@ fn fresh_or_interrupted_bootstrap_root(
 ) -> Result<bool, AppError> {
     let mut storage_generation = None;
     let mut binding_present = false;
-    for (root, _) in managed_roots_for_plan_version(PLAN_VERSION)? {
+    for (root, _) in current_writer_managed_roots() {
         let path = data_dir.join(root);
         match fs::symlink_metadata(&path) {
             Ok(_) if root == STORAGE_GENERATION_FILE => {
@@ -4516,6 +4834,7 @@ pub fn prepare_v3_dataset(
     require_data_root_not_owned_as_external_work(data_dir)?;
     archive_active_ignored_legacy_reset_control_replay(data_dir)?;
     archive_active_completed_reset_control_replay(data_dir)?;
+    archive_unusable_reset_control(data_dir)?;
     if let Some(plan) = read_pending_v3_reset(data_dir, work_dir)? {
         // The immutable plan is authoritative. A crash may have happened after
         // the plan commit but before the transient request was removed.
@@ -4717,7 +5036,7 @@ pub fn request_v3_dataset_reset(
     require_data_root_not_owned_as_external_work(data_dir)?;
     let canonical_data = canonical_data_dir(data_dir)?;
     let work_dir = canonical_existing_work_dir(work_dir)?;
-    let managed_roots = managed_roots_for_plan_version(PLAN_VERSION)?;
+    let managed_roots = current_writer_managed_roots();
     validate_safe_reset_data_and_work_roots(
         &canonical_data,
         &work_dir,
@@ -6992,11 +7311,360 @@ mod tests {
         assert!(!data.path().join(DB_FILE).exists());
     }
 
+    /// Managed dataset roots that did not exist when the v1 planner froze its
+    /// registry shape. Every later *addition* must be listed here.
+    const POST_V1_MANAGED_DATASET_ROOTS: &[&str] = &[
+        WORK_ROOT_OWNER_FILE,
+        WORK_ROOT_BINDING_FILE,
+        AGENT_PROCESS_REGISTRY_FILE,
+    ];
+
+    /// The persisted plan shape is a compatibility surface, not an
+    /// implementation detail: `RELEASED_V1_MANAGED_ROOTS` must stay
+    /// reproducible from the live registry, and the v2 registry that
+    /// v0.3.1..=v0.3.7 wrote into user data dirs is the live registry filtered
+    /// by [`ResetPolicy::Retire`].
+    ///
+    /// So dropping a root from `MANAGED_DATASET_ROOTS` — even one whose
+    /// subsystem was deleted — both stops factory reset from sweeping data left
+    /// by older installations and makes previously written plan bytes fail
+    /// `validate_plan` / `completed_plan_replay_mismatch`, which turns
+    /// an interrupted reset on upgrade into a hard startup failure. Removals are
+    /// therefore never compatible; keep the root and mark it cleanup-only.
+    #[test]
+    fn released_v1_managed_roots_stay_reproducible_from_the_live_registry() {
+        let derived = lifecycle_managed_roots()
+            .chain(managed_dataset_roots().filter_map(|root| {
+                if POST_V1_MANAGED_DATASET_ROOTS.contains(&root.path) {
+                    return None;
+                }
+                Some((
+                    root.path,
+                    match root.kind {
+                        DatasetRootKind::File => ManagedRootKind::File,
+                        DatasetRootKind::Directory => ManagedRootKind::Directory,
+                    },
+                ))
+            }))
+            .collect::<Vec<_>>();
+
+        let derived_paths =
+            derived.iter().map(|(path, _)| *path).collect::<Vec<_>>();
+        let frozen_paths = RELEASED_V1_MANAGED_ROOTS
+            .iter()
+            .map(|(path, _)| *path)
+            .collect::<Vec<_>>();
+        let removed = frozen_paths
+            .iter()
+            .filter(|path| !derived_paths.contains(path))
+            .collect::<Vec<_>>();
+        let added = derived_paths
+            .iter()
+            .filter(|path| !frozen_paths.contains(path))
+            .collect::<Vec<_>>();
+        assert!(
+            removed.is_empty(),
+            "managed dataset roots disappeared from the live registry: {removed:?}. \
+             Persisted v1/v2 reset plans still list them, so removal breaks plan \
+             validation on upgrade and abandons data from older installations. \
+             Keep the root and mark it cleanup-only instead."
+        );
+        assert!(
+            added.is_empty(),
+            "new managed dataset roots are not declared as post-v1 additions: \
+             {added:?}. Adding a root changes the v2 plan shape that shipped in \
+             v0.3.1..=v0.3.7, so record it in POST_V1_MANAGED_DATASET_ROOTS and \
+             confirm the persisted-plan compatibility story."
+        );
+        assert_eq!(
+            derived,
+            RELEASED_V1_MANAGED_ROOTS.to_vec(),
+            "the live managed-root registry drifted from the released v1 order \
+             or kinds; persisted plans are compared element-by-element"
+        );
+    }
+
+    /// The v2 plan shape must be a contract, not a snapshot of whatever this
+    /// process computes. `RELEASED_V2_MANAGED_ROOTS` is what readers validate
+    /// persisted plans against, and `current_writer_managed_roots` is what the
+    /// planner writes; if they drift, every plan already on disk stops
+    /// validating and an interrupted reset carried across the upgrade hard-fails
+    /// at startup. That is the `browser-secrets` regression, generalized.
+    ///
+    /// If this fails, do not edit the frozen list. Either restore the live
+    /// registry, or mint a plan version: add `RELEASED_V3_MANAGED_ROOTS`, add an
+    /// arm to `released_plan_shape`, bump `PLAN_VERSION`, and give the new
+    /// version its own `persists_work_dir` answer.
+    #[test]
+    fn released_v2_managed_roots_match_the_current_writer() {
+        let written = current_writer_managed_roots();
+        let frozen = RELEASED_V2_MANAGED_ROOTS.to_vec();
+        let dropped = frozen
+            .iter()
+            .filter(|(path, _)| {
+                !written.iter().any(|(other, _)| other == path)
+            })
+            .collect::<Vec<_>>();
+        let gained = written
+            .iter()
+            .filter(|(path, _)| {
+                !frozen.iter().any(|(other, _)| other == path)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            dropped.is_empty(),
+            "the current writer no longer plans roots that the frozen v2 shape \
+             lists: {dropped:?}. Plans written by released builds still list \
+             them, and a removed root is also data the reset stops sweeping."
+        );
+        assert!(
+            gained.is_empty(),
+            "the current writer plans roots the frozen v2 shape does not list: \
+             {gained:?}. Adding a root changes the persisted plan shape, so it \
+             needs a new plan version rather than an edit to v2."
+        );
+        assert_eq!(
+            written, frozen,
+            "the current writer's managed-root order or kinds drifted from the \
+             frozen v2 shape; persisted plans are compared element-by-element"
+        );
+        assert_eq!(
+            released_plan_shape(PLAN_VERSION).unwrap().managed_roots,
+            RELEASED_V2_MANAGED_ROOTS,
+            "the current plan version must resolve to the frozen v2 shape"
+        );
+        assert!(
+            released_plan_shape(PLAN_VERSION).unwrap().persists_work_dir,
+            "v2 plans always persist their work root"
+        );
+        assert!(
+            !released_plan_shape(LEGACY_PLAN_VERSION)
+                .unwrap()
+                .persists_work_dir,
+            "v1 predates work-root persistence"
+        );
+        assert!(
+            released_plan_shape(PLAN_VERSION + 1).is_err(),
+            "an unknown plan version must be refused, never treated as current"
+        );
+    }
+
+    /// Rewrite the persisted plan so it looks like one written by a build whose
+    /// managed-root registry did not contain `dropped_root` — exactly the shape
+    /// v0.3.8 wrote after `browser-secrets` was deleted from the registry.
+    fn rewrite_plan_with_older_registry_shape(
+        data_dir: &Path,
+        plan: &DatasetResetPlan,
+        dropped_root: &str,
+    ) -> DatasetResetPlan {
+        let mut older = plan.clone();
+        let before = older.roots.len();
+        older
+            .roots
+            .retain(|root| root.relative_path != dropped_root);
+        assert_eq!(
+            older.roots.len() + 1,
+            before,
+            "{dropped_root} must be a planned root for this fixture to mean \
+             anything"
+        );
+        let bytes = serde_json::to_vec_pretty(&older).unwrap();
+        write_atomic(&plan_path(data_dir), &bytes).unwrap();
+        older
+    }
+
+    #[test]
+    fn interrupted_reset_from_an_older_registry_shape_recovers_at_startup() {
+        let data = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        seed_managed_root(data.path(), "knowledge", ManagedRootKind::Directory);
+        request_v3_dataset_reset(data.path(), data.path()).unwrap();
+        let plan = arm_v3_dataset_reset(
+            data.path(),
+            data.path(),
+            DatasetResetReason::ExplicitFactoryReset,
+        )
+        .unwrap();
+        let older = rewrite_plan_with_older_registry_shape(
+            data.path(),
+            &plan,
+            "browser-secrets",
+        );
+
+        // Nothing here may raise: the plan is unexecutable, which is a fact
+        // about the bytes, not a reason to abort a boot on a user's data dir.
+        assert!(
+            read_pending_v3_reset(data.path(), data.path())
+                .unwrap()
+                .is_none(),
+            "a plan from another registry shape is not an actionable plan"
+        );
+        assert!(
+            !apply_pending_v3_dataset_reset(data.path(), data.path())
+                .unwrap(),
+            "an unexecutable plan applies no reset instead of failing startup"
+        );
+        assert!(
+            pending_v3_reset_work_dir(data.path()).unwrap().is_none(),
+            "an unexecutable plan must not redirect work-root resolution"
+        );
+        assert_eq!(
+            prepare_v3_dataset(data.path(), data.path()).unwrap(),
+            DatasetPreparation::Unchanged
+        );
+
+        // The safe path is "touch nothing": no root was quarantined, so the
+        // dataset the user still has is the dataset they had before.
+        assert!(data.path().join(DB_FILE).is_file());
+        assert!(data.path().join("knowledge/sentinel").is_file());
+
+        // The control directory itself is moved aside, because its phase
+        // markers would otherwise be inherited by the next plan armed here.
+        assert!(!reset_dir(data.path()).exists());
+        let archived = fs::read_dir(
+            data.path()
+                .join(RETIRED_DATASETS_DIR)
+                .join(UNUSABLE_RESET_PLANS_DIR),
+        )
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+        assert_eq!(archived.len(), 1);
+        assert!(
+            archived[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&older.operation_id),
+            "the quarantined control keeps its operation ID: {:?}",
+            archived[0]
+        );
+        let archived_plan: DatasetResetPlan = serde_json::from_slice(
+            &fs::read(archived[0].join(V3_DATASET_RESET_PLAN_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            archived_plan.roots.len(),
+            older.roots.len(),
+            "the unusable plan is preserved for support, not deleted"
+        );
+
+        // And the installation is not wedged: an explicit reset still works.
+        request_v3_dataset_reset(data.path(), data.path()).unwrap();
+        assert_eq!(
+            prepare_v3_dataset(data.path(), data.path()).unwrap(),
+            DatasetPreparation::ResetApplied
+        );
+        assert!(!data.path().join("knowledge").exists());
+        assert!(!data.path().join(DB_FILE).exists());
+    }
+
+    #[test]
+    fn committed_reset_from_an_older_registry_shape_recovers_at_startup() {
+        let data = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        seed_managed_root(data.path(), "knowledge", ManagedRootKind::Directory);
+        request_v3_dataset_reset(data.path(), data.path()).unwrap();
+        let plan = arm_v3_dataset_reset(
+            data.path(),
+            data.path(),
+            DatasetResetReason::ExplicitFactoryReset,
+        )
+        .unwrap();
+        apply_pending_v3_dataset_reset(data.path(), data.path()).unwrap();
+        assert!(has_phase(data.path(), "generation-installed"));
+        let older = rewrite_plan_with_older_registry_shape(
+            data.path(),
+            &plan,
+            "browser-secrets",
+        );
+
+        // The destructive half already committed under the older build, so the
+        // recovery to prove is that startup completes and the retired data
+        // stays retired rather than being swept a second time.
+        assert_eq!(
+            prepare_v3_dataset(data.path(), data.path()).unwrap(),
+            DatasetPreparation::Unchanged
+        );
+        assert!(
+            data.path()
+                .join(&older.retired_dir)
+                .join("knowledge/sentinel")
+                .is_file(),
+            "the interrupted reset's retired data must survive recovery"
+        );
+        assert!(!reset_dir(data.path()).exists());
+        assert!(
+            !has_phase(data.path(), "generation-installed"),
+            "the stale phase markers left the active control directory"
+        );
+
+        // Without that quarantine, the stale `generation-installed` marker
+        // would be inherited by the next plan armed in the same directory and
+        // fail its source/destination proof.
+        touch(&data.path().join(DB_FILE));
+        request_v3_dataset_reset(data.path(), data.path()).unwrap();
+        assert_eq!(
+            prepare_v3_dataset(data.path(), data.path()).unwrap(),
+            DatasetPreparation::ResetApplied
+        );
+    }
+
+    #[test]
+    fn completed_control_replay_from_an_older_registry_shape_does_not_fail_startup(
+    ) {
+        let data = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        request_v3_dataset_reset(data.path(), data.path()).unwrap();
+        assert_eq!(
+            prepare_v3_dataset(data.path(), data.path()).unwrap(),
+            DatasetPreparation::ResetApplied
+        );
+        let plan = read_pending_v3_reset(data.path(), data.path())
+            .unwrap()
+            .unwrap();
+        touch(&data.path().join(DB_FILE));
+        write_v3_dataset_receipt(data.path(), &plan.generation).unwrap();
+        let replay = snapshot_active_reset_control(data.path());
+        finalize_v3_dataset_reset(data.path(), data.path()).unwrap();
+
+        let sentinel = data.path().join("knowledge/current-v3-data");
+        fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        touch(&sentinel);
+        let generation =
+            fs::read(data.path().join(STORAGE_GENERATION_FILE)).unwrap();
+
+        // The completed control directory reappears, and its plan predates the
+        // current managed-root registry.
+        restore_active_reset_control(data.path(), &replay);
+        rewrite_plan_with_older_registry_shape(
+            data.path(),
+            &plan,
+            "browser-secrets",
+        );
+
+        assert!(
+            pending_v3_reset_work_dir(data.path()).unwrap().is_none(),
+            "a replayed old-shape control must not redirect work-root resolution"
+        );
+        assert_eq!(
+            prepare_v3_dataset(data.path(), data.path()).unwrap(),
+            DatasetPreparation::Unchanged
+        );
+        assert!(sentinel.is_file(), "the live v3 dataset was not re-reset");
+        assert!(data.path().join(DB_FILE).is_file());
+        assert_eq!(
+            fs::read(data.path().join(STORAGE_GENERATION_FILE)).unwrap(),
+            generation
+        );
+        assert!(!reset_dir(data.path()).exists());
+    }
+
     #[test]
     fn explicit_reset_quarantines_every_registered_side_store_and_db_family_member() {
         let data = tempfile::tempdir().unwrap();
         for (relative_path, kind) in
-            managed_roots_for_plan_version(PLAN_VERSION).unwrap()
+            current_writer_managed_roots()
         {
             seed_managed_root(data.path(), relative_path, kind);
         }
@@ -7019,14 +7687,12 @@ mod tests {
             .collect();
         assert_eq!(
             planned.len(),
-            managed_roots_for_plan_version(PLAN_VERSION)
-                .unwrap()
-                .len(),
+            current_writer_managed_roots().len(),
             "the reset plan must cover the full managed-root registry exactly once"
         );
 
         for (relative_path, kind) in
-            managed_roots_for_plan_version(PLAN_VERSION).unwrap()
+            current_writer_managed_roots()
         {
             let root = planned
                 .get(relative_path)

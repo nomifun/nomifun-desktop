@@ -225,7 +225,7 @@ const AssetDetailModal: React.FC<AssetDetailModalProps> = ({
     <Modal
       title={
         <span className='flex items-center gap-8px'>
-          <KindIcon theme='outline' size={18} strokeWidth={3} className='text-[rgb(var(--primary-6))]' />
+          <KindIcon theme='outline' size={18} strokeWidth={3} className='text-primary-6' />
           <span className='truncate'>{asset.title}</span>
         </span>
       }
@@ -399,9 +399,9 @@ const AssetDetailModal: React.FC<AssetDetailModalProps> = ({
               className={[
                 'inline-flex items-center gap-6px rounded-9px border border-solid px-14px py-7px text-13px font-500 cursor-pointer transition-colors',
                 action.danger
-                  ? 'border-[rgba(var(--danger-6),0.35)] text-[rgb(var(--danger-6))] bg-transparent hover:bg-[rgba(var(--danger-6),0.08)]'
+                  ? 'border-[rgba(var(--danger-6),0.35)] text-danger-6 bg-transparent hover:bg-[rgba(var(--danger-6),0.08)]'
                   : action.key === 'insert'
-                    ? 'border-transparent bg-[rgb(var(--primary-6))] text-white hover:bg-[rgb(var(--primary-5))]'
+                    ? 'border-transparent bg-primary-6 text-white hover:bg-primary-5'
                     : 'border-[var(--color-border-2)] text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
               ].join(' ')}
             >
