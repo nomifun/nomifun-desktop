@@ -220,8 +220,31 @@ impl Learner {
             run.status = "no_events".into();
             return Ok(run);
         }
-        run.events_processed = events.len() as i64;
+        // Taken from the UNFILTERED batch: the cursor must advance past every
+        // record that was read, including the ones dropped just below.
         let new_cursor = events.last().map(|e| e.ts).unwrap_or(cursor);
+
+        // Historical `companion.reply` records. Replies are no longer collected,
+        // but day-files written before that change still hold them until retention
+        // ages them out, and they must never reach the prompt: LEARN_SYSTEM no
+        // longer carries the rule that forbade reading a reply as owner intent, so
+        // a leftover one would arrive with nothing left to stop the model treating
+        // the companion's own words as the owner's facts or wishes.
+        let events: Vec<_> = events
+            .into_iter()
+            .filter(|event| event.name != "companion.reply")
+            .collect();
+        if events.is_empty() {
+            // Nothing but stale replies. Advance anyway — leaving the cursor here
+            // would re-read the same records every run and stall learning until
+            // retention finally deletes them.
+            self.store
+                .set_companion_state(&owner, LEARN_CURSOR_KEY, &new_cursor.to_string())
+                .await?;
+            run.status = "no_events".into();
+            return Ok(run);
+        }
+        run.events_processed = events.len() as i64;
 
         // 选项A：学习产出只由「记忆主人」窗口呈现。主人就是本轮配置的来源 ——
         // 记忆写给谁、气泡/心情落在谁头上、XP 记在谁账上，全是同一个伙伴，
@@ -411,6 +434,21 @@ mod tests {
         }
     }
 
+    /// Records every user prompt it is handed, so a test can assert what did —
+    /// and did not — reach the model.
+    struct RecordingCompleter {
+        reply: String,
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CompanionCompleter for RecordingCompleter {
+        async fn complete(&self, _p: &str, _m: &str, _s: &str, user: &str, _t: u32) -> Result<String, AppError> {
+            self.prompts.lock().unwrap().push(user.to_owned());
+            Ok(self.reply.clone())
+        }
+    }
+
     fn test_learn_config() -> CompanionLearnConfig {
         CompanionLearnConfig {
             enabled: true,
@@ -462,6 +500,90 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// A `companion.reply` record of the kind day-files written before replies
+    /// stopped being collected still hold. Returns its timestamp so a test can
+    /// assert exactly where the cursor landed.
+    fn seed_stale_reply(dir: &std::path::Path, content: &str) -> i64 {
+        let ts = now_ms();
+        append_event(
+            dir,
+            &CollectedEvent {
+                event_id: nomifun_common::generate_id(),
+                ts,
+                source: "companion_dialogues".into(),
+                name: "companion.reply".into(),
+                data: serde_json::json!({"content": content}),
+            },
+        )
+        .unwrap();
+        ts
+    }
+
+    #[tokio::test]
+    async fn stale_replies_never_reach_the_prompt() {
+        // LEARN_SYSTEM no longer carries the rule that forbade reading a reply as
+        // owner intent, so a leftover reply reaching the model would arrive with
+        // nothing to stop it being distilled as the owner's own wish.
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        seed_stale_reply(dir.path(), "我帮你把配置改成深色主题了");
+        let reply = r#"{"memories":[{"kind":"profile","content":"主人是 Rust 工程师","importance":0.9}],
+            "mood":"content","diary":"今天陪主人修了 bug～"}"#;
+        let (learner, companion_id) = make_learner(dir.path(), reply).await;
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let learner = Learner {
+            completer: Arc::new(RecordingCompleter {
+                reply: reply.to_owned(),
+                prompts: prompts.clone(),
+            }),
+            ..learner
+        };
+
+        let run = learner.run_for(&companion_id).await.unwrap();
+        assert_eq!(run.status, "ok");
+        // Only the owner's own message counts as processed.
+        assert_eq!(run.events_processed, 1);
+
+        let sent = prompts.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("帮我看看 Rust 编译错误"));
+        assert!(
+            !sent[0].contains("我帮你把配置改成深色主题了"),
+            "a stale companion.reply must not reach the prompt"
+        );
+        assert!(!sent[0].contains("companion.reply"));
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_only_stale_replies_advances_the_cursor() {
+        // Otherwise the same records are re-read on every scheduled run and
+        // learning stalls until retention finally deletes them.
+        let dir = tempfile::tempdir().unwrap();
+        seed_stale_reply(dir.path(), "好的呀");
+        let last_ts = seed_stale_reply(dir.path(), "已经记下了");
+        let (learner, companion_id) = make_learner(dir.path(), "{}").await;
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let learner = Learner {
+            completer: Arc::new(RecordingCompleter {
+                reply: "{}".to_owned(),
+                prompts: prompts.clone(),
+            }),
+            ..learner
+        };
+
+        let run = learner.run_for(&companion_id).await.unwrap();
+        assert_eq!(run.status, "no_events");
+        assert_eq!(run.memories_added, 0);
+        assert!(prompts.lock().unwrap().is_empty(), "the model must not be called at all");
+        // Exactly the batch's last timestamp, not merely "nonzero": a cursor that
+        // advanced to the wrong place would re-read or skip real events.
+        assert_eq!(
+            learner.store.get_companion_state_i64(&companion_id, LEARN_CURSOR_KEY).await.unwrap(),
+            last_ts,
+            "the cursor must advance to the end of a batch of stale replies"
+        );
     }
 
     #[tokio::test]
