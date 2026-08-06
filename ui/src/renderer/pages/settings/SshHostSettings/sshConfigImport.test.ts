@@ -99,8 +99,8 @@ describe('summarizeImport', () => {
       summarizeImport(
         result({
           imported: [
-            { alias: 'a', sshHostId: id('h1'), needsCredential: false },
-            { alias: 'b', sshHostId: id('h2'), needsCredential: false },
+            { alias: 'a', sshHostId: id('h1'), needsCredential: false, needsUsername: false },
+            { alias: 'b', sshHostId: id('h2'), needsCredential: false, needsUsername: false },
           ],
         })
       )
@@ -116,8 +116,8 @@ describe('summarizeImport', () => {
       summarizeImport(
         result({
           imported: [
-            { alias: 'a', sshHostId: id('h1'), needsCredential: false },
-            { alias: 'b', sshHostId: id('h2'), needsCredential: true },
+            { alias: 'a', sshHostId: id('h1'), needsCredential: false, needsUsername: false },
+            { alias: 'b', sshHostId: id('h2'), needsCredential: true, needsUsername: false },
           ],
         })
       )
@@ -130,13 +130,33 @@ describe('summarizeImport', () => {
     });
   });
 
+  test('a missing username is its own missing piece, not a credential problem', () => {
+    // A stored key does not make a userless host dialable, so folding this into
+    // the credential count (or omitting it) would report the host as ready.
+    expect(
+      summarizeImport(
+        result({
+          imported: [
+            { alias: 'a', sshHostId: id('h1'), needsCredential: false, needsUsername: true },
+          ],
+        })
+      )
+    ).toEqual({
+      level: 'warning',
+      clauses: [
+        { key: 'ssh.import.summaryImported', values: { count: 1 } },
+        { key: 'ssh.import.summaryNeedsUsername', values: { count: 1 } },
+      ],
+    });
+  });
+
   test('duplicates and vanished aliases are reported separately', () => {
     // They are different problems: one means "you already have it", the other
     // means "your config changed under us".
     expect(
       summarizeImport(
         result({
-          imported: [{ alias: 'a', sshHostId: id('h1'), needsCredential: false }],
+          imported: [{ alias: 'a', sshHostId: id('h1'), needsCredential: false, needsUsername: false }],
           skipped: [
             { alias: 'b', reason: 'duplicateName' },
             { alias: 'c', reason: 'duplicateEndpoint' },
