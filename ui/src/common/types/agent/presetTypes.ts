@@ -83,9 +83,13 @@ export interface KnowledgeBaseBinding {
 
 export interface PresetKnowledgePolicy {
   enabled: boolean;
-  mode: string;
   writeback: boolean;
-  eagerness?: 'conservative' | 'aggressive';
+  /**
+   * Write-back disposition ("回写意识"). 'manual' (the backend default when
+   * absent) writes back only on an explicit user request; 'auto' lets the agent
+   * decide on its own against a high bar.
+   */
+  eagerness?: 'manual' | 'auto';
   grounded: boolean;
 }
 

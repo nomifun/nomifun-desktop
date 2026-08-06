@@ -2874,7 +2874,6 @@ export interface IKnowledgeWritebackEvent {
   written?: Array<{
     kb_id?: KnowledgeBaseId | null;
     rel_path?: string | null;
-    staged?: boolean;
   }>;
   failures?: Array<{
     kb_id?: KnowledgeBaseId | null;
@@ -5424,8 +5423,6 @@ export interface IKnowledgeBase {
   tags: string[];
   /** Source kind discriminator. */
   kind: 'blank' | 'local' | 'web';
-  /** Number of unreviewed staged inbox proposals. */
-  pending_inbox: number;
 }
 
 /** A knowledge-base tag (for categorization / filtering). */
@@ -5473,24 +5470,25 @@ export interface IKnowledgeFileContent {
 export interface IKnowledgeBinding {
   enabled: boolean;
   writeback: boolean;
-  /** 'staged' = writes confined to _inbox/{conversation_id}/ (conflict-free, default); 'direct' = agent may edit the base body. */
-  writeback_mode: KnowledgeWritebackMode;
-  /** Write-back disposition ("回写意识"), orthogonal to writeback_mode: 'conservative' (restrained, default) only writes clearly-useful knowledge; 'aggressive' captures anything plausibly relevant. */
+  /**
+   * Write-back disposition ("回写意识"). 'manual' (default) writes back ONLY
+   * when the user explicitly asks — the turn-final extractor is not scheduled
+   * at all; 'auto' lets the agent decide on its own against a high bar
+   * (durable, reusable, clearly correct — no trivia, no transient state, no
+   * duplicates).
+   */
   writeback_eagerness: KnowledgeWritebackEagerness;
   /**
    * Opt-in switch letting an unattended IM-channel (bot) session write back to
-   * the base. Off by default; channel writes are ALWAYS staged into the review
-   * inbox even when on. Set by the gateway/MCP path (the bot), not the in-app
-   * control — but it MUST round-trip through `setBinding` so an in-app edit
-   * (toggling bases / write-back) never silently clears it.
+   * the base. Off by default. Set by the gateway/MCP path (the bot), not the
+   * in-app control — but it MUST round-trip through `setBinding` so an in-app
+   * edit (toggling bases / write-back) never silently clears it.
    */
   channel_write_enabled: boolean;
   kb_ids: KnowledgeBaseId[];
 }
 
-export type KnowledgeWritebackMode = 'staged' | 'direct';
-
-export type KnowledgeWritebackEagerness = 'conservative' | 'aggressive';
+export type KnowledgeWritebackEagerness = 'manual' | 'auto';
 
 export type KnowledgeBindingKind = 'conversation' | 'terminal' | 'companion' | 'workpath';
 export type KnowledgeBindingTarget =
@@ -5504,29 +5502,6 @@ type KnowledgeBindingTargetInput = {
   kind: KnowledgeBindingKind;
   target_id: unknown;
 };
-
-/** One staged write-back proposal under `_inbox/{scope}/{rel_path}`. */
-export interface IKnowledgeInboxEntry {
-  /** First path segment under `_inbox/` — the session/conversation id that staged it. */
-  scope: string;
-  /** Base-relative path the proposal mirrors. */
-  rel_path: string;
-  size: number;
-  modified_at: number | null;
-}
-
-/** A staged proposal vs. its current base version (for the review panel). */
-export interface IKnowledgeInboxDiff {
-  scope: string;
-  rel_path: string;
-  inbox_content: string;
-  /** Current base document; absent when the proposal would create a new file. */
-  base_content?: string | null;
-  /** Server-computed unified diff, ready for the diff renderer. */
-  unified_diff: string;
-  /** true when there's no existing base document (a brand-new doc). */
-  is_new: boolean;
-}
 
 /** A consumer (binding) of a base — a workspace/conversation/etc. that mounts it. */
 export interface IKnowledgeConsumer {
@@ -5910,10 +5885,9 @@ export const knowledge = {
       return `/api/knowledge/binding/${target.kind}/${encodeURIComponent(target.target_id)}`;
     },
     // Forward EVERY binding field by destructuring off the routing params only.
-    // A hand-maintained whitelist here silently dropped writeback_mode,
-    // writeback_eagerness and channel_write_enabled in turn (the backend POST
-    // is a full replace), so any new IKnowledgeBinding field stays in the body
-    // automatically.
+    // A hand-maintained whitelist here silently dropped writeback_eagerness and
+    // channel_write_enabled in turn (the backend POST is a full replace), so any
+    // new IKnowledgeBinding field stays in the body automatically.
     (p) => {
       const { kind: _kind, target_id: _target_id, ...body } = p;
       return body;
@@ -5926,28 +5900,8 @@ export const knowledge = {
   ),
   /** Import a knowledge-base bundle — a new managed base is provisioned (name conflicts get a "(2)" suffix). */
   importBase: withResponseMap(httpPost<IKnowledgeBase, { src_path: string }>('/api/knowledge/bases/import'), fromApiKnowledgeBase),
-  // ── P4 inbox review (staged write-back proposals) ──
-  /** List staged write-back proposals under `_inbox/` (group by `scope` client-side). */
-  listInbox: httpGet<IKnowledgeInboxEntry[], { knowledge_base_id: KnowledgeBaseId }>((p) => `/api/knowledge/bases/${p.knowledge_base_id}/inbox`, { timeoutMs: KB_READ_TIMEOUT_MS }),
-  /** Server-computed unified diff of one proposal vs. the current base document. */
-  getInboxDiff: httpGet<IKnowledgeInboxDiff, { knowledge_base_id: KnowledgeBaseId; scope: string; path: string }>(
-    (p) =>
-      `/api/knowledge/bases/${p.knowledge_base_id}/inbox/diff?scope=${encodeURIComponent(p.scope)}&path=${encodeURIComponent(p.path)}`
-  ),
-  /** Accept a proposal: overwrite the base document and drop the staged copy. */
-  mergeInbox: httpPost<{ merged_path: string }, { knowledge_base_id: KnowledgeBaseId; scope: string; path: string }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/inbox/merge`,
-    (p) => ({ scope: p.scope, path: p.path })
-  ),
-  /** Discard a proposal (delete the staged copy, base untouched). */
-  discardInbox: httpPost<void, { knowledge_base_id: KnowledgeBaseId; scope: string; path: string }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/inbox/discard`,
-    (p) => ({ scope: p.scope, path: p.path })
-  ),
   /** Bindings currently mounting this base (enabled AND disabled). */
   listConsumers: httpGet<IKnowledgeConsumer[], { knowledge_base_id: KnowledgeBaseId }>((p) => `/api/knowledge/bases/${p.knowledge_base_id}/consumers`, { timeoutMs: KB_READ_TIMEOUT_MS }),
-  /** Total unreviewed staged proposals across all bases (sidebar red-dot signal). */
-  pendingInboxCount: httpGet<number, void>('/api/knowledge/inbox/pending-count', { timeoutMs: KB_READ_TIMEOUT_MS }),
   onBaseCreated: wsMappedEmitter<IKnowledgeBase>('knowledge.base-created', fromApiKnowledgeBase),
   onBaseUpdated: wsMappedEmitter<IKnowledgeBase>('knowledge.base-updated', fromApiKnowledgeBase),
   onBaseDeleted: wsMappedEmitter<{ knowledge_base_id: KnowledgeBaseId }>(
@@ -5984,13 +5938,4 @@ export const knowledge = {
       limit: p.limit,
     })
   ), (hits) => hits.map((hit) => ({ ...hit, kb_id: parseKnowledgeBaseId(hit.kb_id) }))),
-  // ── Batch inbox operations ──
-  mergeAllInbox: httpPost<void, { kbId: KnowledgeBaseId; scope?: string }>(
-    '/api/knowledge/inbox/merge-all',
-    (p) => ({ kbId: p.kbId, scope: p.scope })
-  ),
-  discardAllInbox: httpPost<void, { kbId: KnowledgeBaseId; scope?: string }>(
-    '/api/knowledge/inbox/discard-all',
-    (p) => ({ kbId: p.kbId, scope: p.scope })
-  ),
 };
