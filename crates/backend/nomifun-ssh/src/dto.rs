@@ -205,16 +205,29 @@ pub struct SshStatusEvent {
     /// and `detail` is free-form operator text: string-matching it for the answer
     /// is how "authentication failed" ends up rendered as a transient blip.
     pub retryable: Option<bool>,
+    /// When the link entered this state — not when this projection was built.
+    ///
+    /// The client compares it against the timestamp it already holds to discard
+    /// out-of-order deliveries, and anchors the reconnect countdown to it. Both
+    /// break if a re-read reports the time of the question, so it is supplied by
+    /// the caller that knows when the transition happened rather than sampled
+    /// here.
     pub changed_at: TimestampMs,
 }
 
 impl SshStatusEvent {
     /// Project a link state onto the wire. Total over the state enum so a new
     /// variant cannot ship without deciding what the client should see.
+    ///
+    /// `changed_at` is a parameter, not a clock reading: `publish` passes the
+    /// instant of the transition it is announcing and the pool's snapshot passes
+    /// the instant the link remembers, so the pushed event and a later re-fetch
+    /// carry the same value for the same transition.
     pub fn from_state(
         ssh_host_id: &str,
         conversation_id: &str,
         state: &crate::state::SshLinkState,
+        changed_at: TimestampMs,
     ) -> Self {
         use crate::state::{SshLinkState, SshTeardown};
 
@@ -228,7 +241,7 @@ impl SshStatusEvent {
             detail: None,
             reaped: None,
             retryable: None,
-            changed_at: nomifun_common::now_ms(),
+            changed_at,
         };
         match state {
             SshLinkState::Idle => {}
@@ -268,7 +281,7 @@ mod tests {
     use crate::state::{SshLinkPhase, SshLinkState, SshTeardown};
 
     fn event_of(state: &SshLinkState) -> SshStatusEvent {
-        SshStatusEvent::from_state("host-1", "conv-1", state)
+        SshStatusEvent::from_state("host-1", "conv-1", state, 1_700_000_000_000)
     }
 
     #[test]

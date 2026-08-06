@@ -15,7 +15,7 @@
 //! and "what the operator's browser was told" cannot drift apart. Everything else
 //! in this file reads that value; nothing else writes it.
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -122,6 +122,11 @@ pub struct SshLink {
     /// `$HOME` is worse than a visible failure.
     last_cwd: std::sync::Mutex<String>,
     state_tx: watch::Sender<SshLinkState>,
+    /// When the link last actually changed state. Kept beside the `watch` because
+    /// the value the client orders by has to survive being re-read: a snapshot
+    /// that stamped itself with the current time would report when it was asked,
+    /// not when anything happened.
+    changed_at: AtomicI64,
     /// Serializes dial / recycle / close for this link, so two of them cannot
     /// both decide what the `handle` slot should contain.
     transition: tokio::sync::Mutex<()>,
@@ -139,6 +144,7 @@ impl SshLink {
             handle: RwLock::new(None),
             last_cwd: std::sync::Mutex::new(remote_cwd.to_string()),
             state_tx,
+            changed_at: AtomicI64::new(nomifun_common::now_ms()),
             transition: tokio::sync::Mutex::new(()),
             wake: Notify::new(),
         }
@@ -158,6 +164,11 @@ impl SshLink {
 
     pub fn subscribe(&self) -> watch::Receiver<SshLinkState> {
         self.state_tx.subscribe()
+    }
+
+    /// When this link last changed state.
+    pub fn changed_at(&self) -> nomifun_common::TimestampMs {
+        self.changed_at.load(Ordering::Relaxed)
     }
 
     /// The last cwd proven by a command sentinel (or the cwd the session was
@@ -411,6 +422,7 @@ impl SshConnectionPool {
                     entry.key.ssh_host_id.as_str(),
                     &entry.key.conversation_id,
                     &entry.state(),
+                    entry.changed_at(),
                 )
             })
             .collect()
@@ -681,11 +693,17 @@ impl PoolInner {
     /// actually changed: the realtime channel is shared per user, and an idle
     /// session whose liveness tick found everything fine must stay silent.
     fn publish(&self, link: &SshLink, next: SshLinkState) {
+        let at = nomifun_common::now_ms();
         let changed = link.state_tx.send_if_modified(|current| {
             if *current == next {
                 false
             } else {
                 *current = next.clone();
+                // Stamped inside the closure, so it is already visible when the
+                // watch wakes a subscriber: a client that reacts to the change by
+                // re-reading the snapshot must not find the old timestamp on the
+                // new state.
+                link.changed_at.store(at, Ordering::Relaxed);
                 true
             }
         });
@@ -702,6 +720,7 @@ impl PoolInner {
             link.key.ssh_host_id.as_str(),
             &link.key.conversation_id,
             &next,
+            at,
         );
         self.events.emit_status(&link.owner_id, &event);
     }
