@@ -6069,6 +6069,7 @@ dependencies = [
  "nomifun-public",
  "nomifun-realtime",
  "nomifun-requirement",
+ "nomifun-robot",
  "nomifun-runtime",
  "nomifun-shell",
  "nomifun-ssh",
