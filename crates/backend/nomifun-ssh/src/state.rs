@@ -27,18 +27,6 @@ pub const SSH_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// reporting the teardown as unproven.
 pub const SSH_CLOSE_BUDGET: Duration = Duration::from_secs(5);
 
-/// How long to wait before retry number `attempt` (1-based): the initial backoff
-/// doubled once per previous attempt, capped at [`SSH_RECONNECT_MAX_BACKOFF_MS`].
-pub fn reconnect_delay(attempt: u32) -> Duration {
-    let doublings = attempt.saturating_sub(1);
-    let ms = match SSH_RECONNECT_INITIAL_BACKOFF_MS.checked_shl(doublings) {
-        Some(ms) => ms.min(SSH_RECONNECT_MAX_BACKOFF_MS),
-        // Beyond 63 doublings the shift overflows; the cap is the answer anyway.
-        None => SSH_RECONNECT_MAX_BACKOFF_MS,
-    };
-    Duration::from_millis(ms)
-}
-
 /// The coarse, machine-readable half of a link state — what the UI colours by.
 /// Payload-free on purpose: clients pick a colour from this and never string-
 /// match on `detail`.
@@ -154,22 +142,6 @@ pub fn is_retryable(err: &SshError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reconnect_delay_doubles_and_caps_at_60s() {
-        let expected_ms = [
-            1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000, 60_000, 60_000,
-            60_000,
-        ];
-        for (i, want) in expected_ms.iter().enumerate() {
-            let attempt = (i + 1) as u32;
-            assert_eq!(
-                reconnect_delay(attempt),
-                std::time::Duration::from_millis(*want),
-                "attempt {attempt}"
-            );
-        }
-    }
 
     #[test]
     fn max_attempts_and_backoff_constants_are_pinned() {
