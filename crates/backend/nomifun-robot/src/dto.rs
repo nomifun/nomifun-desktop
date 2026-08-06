@@ -38,6 +38,19 @@ impl From<&RobotRecord> for RobotDto {
     }
 }
 
+/// Live phase of one robot. Shares the wire shape between the REST snapshot
+/// (`GET /api/robots/statuses`) and the `robot.status` WebSocket event, so the
+/// UI's three-stage consumer can merge them by `changed_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RobotStatusDto {
+    pub robot_id: String,
+    pub companion_id: Option<String>,
+    /// One of `offline` | `idle` | `listening` | `speaking`.
+    pub phase: String,
+    /// Milliseconds since the epoch.
+    pub changed_at: i64,
+}
+
 /// The fields we read out of the firmware's device report body. Everything else
 /// in the report (partition table, chip info, heap) is ignored on purpose.
 #[derive(Debug, Clone, Default, Deserialize)]
