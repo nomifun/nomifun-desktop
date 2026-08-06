@@ -6703,6 +6703,8 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
+ "nomifun-api-types",
+ "nomifun-realtime",
  "rand 0.9.4",
  "serde",
  "serde_json",

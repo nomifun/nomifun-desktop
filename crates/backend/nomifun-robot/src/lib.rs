@@ -7,10 +7,12 @@
 
 pub mod dto;
 pub mod endpoint;
+pub mod events;
 pub mod link;
 pub mod protocol;
 pub mod registry;
 pub mod routes;
+pub mod status;
 
 /// Domain name used in log fields and event prefixes.
 pub fn robot_domain_name() -> &'static str {
