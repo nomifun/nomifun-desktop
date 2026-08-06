@@ -99,7 +99,7 @@ describe('Knowledge detail document action bar', () => {
     expect(detailSource.includes('knowledge-detail-add-tag')).toBe(true);
     expect(detailSource.includes('knowledge-detail-tabs')).toBe(true);
     expect(detailSource.includes('knowledge-detail-settings-input')).toBe(true);
-    expect(detailSource.includes('knowledge-detail-danger-panel')).toBe(true);
+    expect(detailSource.includes('knowledge-settings-danger-section')).toBe(true);
     expect(detailSource.includes("textClass: 'text-[rgb(var(--primary-5))]'")).toBe(false);
     expect(detailSource.includes("textClass: 'text-[rgb(var(--success-5))]'")).toBe(false);
     expect(detailSource.includes("textClass: 'text-[rgb(var(--warning-5))]'")).toBe(false);

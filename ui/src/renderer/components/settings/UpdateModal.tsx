@@ -426,7 +426,7 @@ const UpdateModal: React.FC = () => {
                   </Button>
                 ) : autoUpdateAvailable ? (
                   <Button type='primary' size='small' onClick={startDownload} className='!px-16px'>
-                    {t('update.downloadAndInstall')}
+                    {t('update.downloadButton')}
                   </Button>
                 ) : (
                   <Button type='primary' size='small' onClick={startDownload} className='!px-16px'>
@@ -535,7 +535,6 @@ const UpdateModal: React.FC = () => {
         );
 
       case 'installing': {
-        const isDownloadingPackage = installPhase === 'downloading';
         const isHandingOff = installPhase === 'installing';
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
@@ -554,25 +553,6 @@ const UpdateModal: React.FC = () => {
                 {isHandingOff ? t('update.installingDesc') : t('update.preparingInstallDesc')}
               </div>
             </div>
-            {isDownloadingPackage && (
-              <div className='w-full max-w-320px mt-20px'>
-                <Progress
-                  percent={progress.percent}
-                  status='normal'
-                  showText={false}
-                  strokeWidth={6}
-                  className='!mb-12px'
-                />
-                <div className='flex justify-between text-12px text-t-tertiary'>
-                  <span>
-                    {progress.total > 0
-                      ? `${formatSize(progress.transferred)} / ${formatSize(progress.total)}`
-                      : formatSize(progress.transferred)}
-                  </span>
-                  <span className='text-primary-6 font-500'>{progress.speed}</span>
-                </div>
-              </div>
-            )}
           </div>
         );
       }
