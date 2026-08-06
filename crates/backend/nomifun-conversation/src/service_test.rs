@@ -11545,13 +11545,14 @@ async fn send_message_turn_writeback_runs_after_system_continuation_final_answer
     let rel_path = writeback.data["written"][0]["rel_path"]
         .as_str()
         .expect("written rel_path");
-    assert!(rel_path.starts_with(&format!("_inbox/{}/", conv.conversation_id)));
-    assert!(rel_path.ends_with("/patterns/cron-final.md"));
-    let staged = knowledge
+    // The write lands in the base body at the document the model addressed —
+    // there is no session-scoped staging directory in front of it any more.
+    assert_eq!(rel_path, "patterns/cron-final.md");
+    let written_doc = knowledge
         .read_file(&kb.knowledge_base_id, rel_path)
         .await
         .unwrap();
-    assert!(staged.content.contains("final answer after cron continuation"));
+    assert!(written_doc.content.contains("final answer after cron continuation"));
 
     let prompts = completer.prompts();
     assert_eq!(prompts.len(), 1);
@@ -11832,10 +11833,6 @@ async fn slow_turn_writeback_completes_turn_immediately_and_never_blocks_next_se
     assert!(
         stored_content["knowledge_writeback"]["source_message_id"].is_string(),
         "manual retry needs the exact originating user message"
-    );
-    assert!(
-        stored_content["knowledge_writeback"]["scope"].is_string(),
-        "manual retry needs the original idempotency scope"
     );
     assert!(
         stored_content["knowledge_writeback"]["finished_at"]

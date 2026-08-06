@@ -843,7 +843,6 @@ mod tests {
             channel_platform: None,
             knowledge_mounts: vec![],
             knowledge_writeback: false,
-            knowledge_writeback_mode: None,
             knowledge_writeback_eagerness: None,
         };
         let user = vec![user_stdio("ctx7"), user_stdio("playwright")];
@@ -890,7 +889,6 @@ mod tests {
             channel_platform: None,
             knowledge_mounts: vec![],
             knowledge_writeback: false,
-            knowledge_writeback_mode: None,
             knowledge_writeback_eagerness: None,
         };
         let (servers, _leases) =

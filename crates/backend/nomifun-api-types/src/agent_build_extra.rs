@@ -212,15 +212,10 @@ pub struct AcpBuildExtra {
     /// writable on disk.
     #[serde(default)]
     pub knowledge_writeback: bool,
-    /// Write-back mode while `knowledge_writeback` is true: `staged` confines
-    /// writes to `_inbox/{conversation_id}/` (conflict-free across sessions,
-    /// the default), `direct` allows editing the base body.
-    #[serde(default)]
-    pub knowledge_writeback_mode: Option<String>,
     /// Write-back disposition ("回写意识") while `knowledge_writeback` is true:
-    /// `conservative` (restrained, the default) only persists clearly-useful
-    /// knowledge, `aggressive` captures anything plausibly relevant. Orthogonal
-    /// to `knowledge_writeback_mode`.
+    /// `manual` (the default) writes back only what the user explicitly asked
+    /// for; `auto` lets the agent decide against a high bar. It is the only
+    /// write-back knob — placement is always the base body.
     #[serde(default)]
     pub knowledge_writeback_eagerness: Option<String>,
 }
@@ -371,20 +366,13 @@ pub struct NomiBuildExtra {
     /// writable on disk. Same shape as `AcpBuildExtra::knowledge_writeback`.
     #[serde(default)]
     pub knowledge_writeback: bool,
-    /// Write-back mode while `knowledge_writeback` is true: `staged` confines
-    /// writes to `_inbox/{conversation_id}/` (conflict-free across sessions,
-    /// the default), `direct` allows editing the base body. Same shape as
-    /// `AcpBuildExtra::knowledge_writeback_mode`.
-    #[serde(default)]
-    pub knowledge_writeback_mode: Option<String>,
     /// Write-back disposition ("回写意识") while `knowledge_writeback` is true:
-    /// `conservative` (the default) or `aggressive`. Orthogonal to
-    /// `knowledge_writeback_mode`; same shape as
+    /// `manual` (the default) or `auto`; same shape as
     /// `AcpBuildExtra::knowledge_writeback_eagerness`.
     #[serde(default)]
     pub knowledge_writeback_eagerness: Option<String>,
     /// Opt-in for unattended IM-channel (bot) sessions to write back. Off by
-    /// default; channel writes are always staged. The nomi factory reconstructs
+    /// default. The nomi factory reconstructs
     /// the knowledge binding from this build-extra to resolve the per-surface
     /// write policy, so this MUST be threaded through — otherwise the
     /// reconstructed binding defaults it to `false` and `WriteSurface::ExternalChannel`
