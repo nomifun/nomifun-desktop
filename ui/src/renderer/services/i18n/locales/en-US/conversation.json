@@ -476,37 +476,6 @@
     "tokenLine": "{{used}} tokens used, {{max}} total",
     "tooltip": "Context {{used}} / {{max}} tokens ({{pct}}%). Auto-compacts near the limit."
   },
-  "sessionMetrics": {
-    "tab": "Metrics",
-    "title": "Session metrics",
-    "subtitle": "Based on usage data reported by the Nomi engine",
-    "notice": "Due to limitations in data collection, these metrics are for reference only and should not be treated as conclusive.",
-    "emptyTitle": "No metrics yet",
-    "emptyDesc": "Finish one Nomi response to show duration, tokens, context, and cache data.",
-    "elapsed": "This response",
-    "elapsedCaption": "Latest completed duration",
-    "sessionSpan": "Session span",
-    "sessionSpanCaption": "Created to last update",
-    "contextTitle": "Context usage",
-    "contextCached": "Cache hit",
-    "contextFresh": "Fresh context",
-    "contextRemaining": "Remaining window",
-    "tokensTitle": "Token usage",
-    "totalTokens": "Session total",
-    "inputTokens": "Input",
-    "outputTokens": "Output",
-    "cacheHitRate": "Cache hit rate",
-    "cacheHitCaption": "Cache read / input",
-    "cacheTitle": "Cache details",
-    "cacheReadTokens": "Cache read",
-    "cacheWriteTokens": "Cache write",
-    "status": {
-      "unknown": "No data",
-      "healthy": "Healthy",
-      "warming": "Elevated",
-      "tight": "Tight"
-    }
-  },
   "skill_generator": {
     "title": "Generate Skill/Rule",
     "generate": "Generate",

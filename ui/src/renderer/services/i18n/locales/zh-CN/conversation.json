@@ -476,37 +476,6 @@
     "tokenLine": "已用 {{used}} 标记，共 {{max}}",
     "tooltip": "上下文 {{used}} / {{max}} tokens（{{pct}}%）。接近上限将自动压缩。"
   },
-  "sessionMetrics": {
-    "tab": "指标",
-    "title": "会话指标",
-    "subtitle": "基于 Nomi 引擎已上报的使用数据",
-    "notice": "因数据采集手段问题，数据仅供参考，不可作为定论",
-    "emptyTitle": "暂无指标",
-    "emptyDesc": "完成一次 Nomi 响应后会显示耗时、token、上下文和缓存数据。",
-    "elapsed": "本次响应",
-    "elapsedCaption": "最近一次完成耗时",
-    "sessionSpan": "会话跨度",
-    "sessionSpanCaption": "创建到最近更新",
-    "contextTitle": "上下文占用",
-    "contextCached": "缓存命中",
-    "contextFresh": "非缓存上下文",
-    "contextRemaining": "剩余窗口",
-    "tokensTitle": "Token 用量",
-    "totalTokens": "会话累计",
-    "inputTokens": "输入",
-    "outputTokens": "输出",
-    "cacheHitRate": "缓存命中率",
-    "cacheHitCaption": "读取缓存 / 输入",
-    "cacheTitle": "缓存明细",
-    "cacheReadTokens": "缓存读取",
-    "cacheWriteTokens": "缓存写入",
-    "status": {
-      "unknown": "暂无数据",
-      "healthy": "充足",
-      "warming": "偏高",
-      "tight": "紧张"
-    }
-  },
   "skill_generator": {
     "title": "生成 Skill/规则",
     "generate": "生成",
