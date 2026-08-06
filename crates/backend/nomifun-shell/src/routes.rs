@@ -8,7 +8,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use nomifun_api_types::{
     ApiResponse, CheckToolInstalledRequest, CheckToolInstalledResponse, ClientPreferencesResponse,
     OpenExternalRequest, OpenFileRequest, OpenFolderWithRequest, ShowItemInFolderRequest,
-    SpeechToTextConfig, SpeechToTextProvider, TtsApiRequest,
+    SpeechToTextConfig, SpeechToTextProvider, TextToSpeechConfig, TtsApiRequest,
 };
 use nomifun_common::AppError;
 use nomifun_model_invoke::{ModelRef, ProducedData, TaskOutcome, TaskRequest, TaskResult, TtsRequest};
@@ -280,6 +280,20 @@ fn speech_to_text_config_from_preferences(prefs: &ClientPreferencesResponse) -> 
         })
 }
 
+/// The install-wide speech-synthesis default, or `None` when the user has not
+/// picked one. Mirrors [`speech_to_text_config_from_preferences`] minus the
+/// legacy-key fallback: `tools.textToSpeech` has no un-namespaced predecessor.
+///
+/// Read here rather than inside `/api/tts` on purpose — that route takes its
+/// `(provider_id, model)` from the request body. This is the resolver the
+/// companion/robot voice paths consult when a companion's own `voice.tts` slot
+/// is empty.
+pub fn text_to_speech_config_from_preferences(
+    prefs: &ClientPreferencesResponse,
+) -> Option<TextToSpeechConfig> {
+    TextToSpeechConfig::from_preferences(prefs)
+}
+
 /// Validate the stored speech preference against the provider catalog and
 /// produce the invoke-layer coordinates ([`CloudSttRoute`]). The execution
 /// protocol is NOT chosen here — the invoke layer's platform routing (plus any
@@ -513,6 +527,23 @@ mod tests {
             config.openai.as_ref().map(|value| value.api_key.as_str()),
             Some("legacy-key")
         );
+    }
+
+    #[test]
+    fn text_to_speech_preference_is_read_through_the_shared_reader() {
+        let provider_id = "0190f5fe-7c00-7a00-8000-0000000000aa";
+        let prefs = ClientPreferencesResponse::from([(
+            "tools.textToSpeech".into(),
+            json!({ "provider_id": provider_id, "model": "tts-1", "voice": "alloy" }),
+        )]);
+        let config = text_to_speech_config_from_preferences(&prefs).unwrap();
+        assert_eq!(config.provider_id, provider_id);
+        assert_eq!(config.model, "tts-1");
+        assert_eq!(config.voice.as_deref(), Some("alloy"));
+        // Unlike STT there is no legacy un-namespaced key and no enabled switch.
+        let legacy_only =
+            ClientPreferencesResponse::from([("textToSpeech".into(), json!({"model": "tts-1"}))]);
+        assert!(text_to_speech_config_from_preferences(&legacy_only).is_none());
     }
 
     #[tokio::test]

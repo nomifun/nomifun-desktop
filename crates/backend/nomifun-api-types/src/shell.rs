@@ -69,6 +69,43 @@ pub struct TtsApiRequest {
     pub format: Option<String>,
 }
 
+/// Preference key holding the install-wide speech-synthesis default.
+/// Deliberately parallel to `tools.speechToText`, minus the `enabled` switch:
+/// speech synthesis has no input-box affordance to gate, so the key's PRESENCE
+/// is the configuration and a second boolean would only be able to disagree
+/// with it.
+pub const TEXT_TO_SPEECH_PREFERENCE_KEY: &str = "tools.textToSpeech";
+
+/// The install-wide speech-synthesis default: which catalog model speaks and in
+/// which provider voice. Every companion whose `voice.tts` slot is empty falls
+/// back to this.
+///
+/// There is no legacy un-namespaced twin (the key is new in this release), so
+/// unlike [`SpeechToTextConfig`] there is nothing to migrate and no embedded
+/// credential shape to reject.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextToSpeechConfig {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
+    pub provider_id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
+    pub model: String,
+    /// Provider voice id (free text). `None` = the provider's own default voice.
+    #[serde(default)]
+    pub voice: Option<String>,
+}
+
+impl TextToSpeechConfig {
+    /// Read the global default out of a preferences snapshot. A missing or
+    /// malformed value answers `None` — "no global default" — because a caller
+    /// that cannot synthesize must say so, not fail the whole request.
+    pub fn from_preferences(prefs: &crate::ClientPreferencesResponse) -> Option<Self> {
+        prefs
+            .get(TEXT_TO_SPEECH_PREFERENCE_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Speech-to-text types
 // ---------------------------------------------------------------------------
@@ -189,6 +226,7 @@ impl<'de> Deserialize<'de> for SpeechToTextConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ClientPreferencesResponse;
     use serde_json::json;
 
     // -- ToolType --
@@ -506,5 +544,50 @@ mod tests {
         assert!(config.detect_language.is_none());
         assert!(config.punctuate.is_none());
         assert!(config.smart_format.is_none());
+    }
+
+    // -- TextToSpeechConfig --
+
+    #[test]
+    fn text_to_speech_config_reads_the_tools_preference_key() {
+        let provider_id = "0190f5fe-7c00-7a00-8000-0000000000aa";
+        let prefs = ClientPreferencesResponse::from([(
+            TEXT_TO_SPEECH_PREFERENCE_KEY.to_owned(),
+            json!({ "provider_id": provider_id, "model": "tts-1", "voice": "alloy" }),
+        )]);
+        let config = TextToSpeechConfig::from_preferences(&prefs).unwrap();
+        assert_eq!(config.provider_id, provider_id);
+        assert_eq!(config.model, "tts-1");
+        assert_eq!(config.voice.as_deref(), Some("alloy"));
+    }
+
+    #[test]
+    fn text_to_speech_config_has_no_enabled_switch_and_fails_closed() {
+        let provider_id = "0190f5fe-7c00-7a00-8000-0000000000aa";
+        // Presence of the key IS the configuration — an `enabled` field would be
+        // a second source of truth and is rejected outright.
+        assert!(
+            serde_json::from_value::<TextToSpeechConfig>(json!({
+                "provider_id": provider_id,
+                "model": "tts-1",
+                "voice": null,
+                "enabled": true
+            }))
+            .is_err()
+        );
+        for invalid in [
+            json!({ "provider_id": "prov_legacy", "model": "tts-1", "voice": null }),
+            json!({ "provider_id": provider_id, "model": " ", "voice": null }),
+            json!({ "model": "tts-1", "voice": null }),
+        ] {
+            assert!(serde_json::from_value::<TextToSpeechConfig>(invalid).is_err());
+        }
+        // An absent or malformed preference is "no global default", never a panic.
+        assert!(TextToSpeechConfig::from_preferences(&ClientPreferencesResponse::new()).is_none());
+        let broken = ClientPreferencesResponse::from([(
+            TEXT_TO_SPEECH_PREFERENCE_KEY.to_owned(),
+            json!("nonsense"),
+        )]);
+        assert!(TextToSpeechConfig::from_preferences(&broken).is_none());
     }
 }
