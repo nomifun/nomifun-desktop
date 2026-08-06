@@ -8,7 +8,9 @@ repository.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+axum = { workspace = true }
 bytes = { workspace = true }
+chrono = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,3 +21,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Drives the device router in-process (`oneshot`), so route tests exercise the
+# real handlers and extractors instead of calling private functions.
+tower = { workspace = true }
