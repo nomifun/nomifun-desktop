@@ -12,7 +12,8 @@ use nomifun_db::{
 use zeroize::Zeroizing;
 
 use crate::dto::{
-    CreateSshHostRequest, SshHostResponse, UpdateSshHostRequest, SECRET_MASK,
+    CreateSshHostRequest, ImportedSshHost, SshHostResponse, SshImportResult, SshImportSkipReason,
+    SkippedSshHost, UpdateSshHostRequest, SECRET_MASK,
 };
 
 /// Errors surfaced by the host-book service.
@@ -169,6 +170,103 @@ impl SshHostService {
     /// Delete an owned host.
     pub async fn delete(&self, user_id: &str, id: &SshHostId) -> Result<(), SshServiceError> {
         self.repo.delete(user_id, id).await.map_err(map_not_found)
+    }
+
+    /// Add the confirmed `~/.ssh/config` candidates to the book.
+    ///
+    /// Goes through [`Self::create`] host by host, so imported rows are encrypted
+    /// and validated by exactly the code path the form uses — there is no second
+    /// way into this table.
+    ///
+    /// `available` is the server's own scan of its ssh config (never anything the
+    /// client supplied), and `requested` selects from it by alias. Anything that
+    /// does not become a host is reported rather than dropped: a duplicate is
+    /// skipped, an alias the config no longer has is named, and a host imported
+    /// without a usable credential is flagged.
+    pub async fn import_hosts(
+        &self,
+        user_id: &str,
+        requested: &[String],
+        available: &[crate::ssh_config::SshConfigHost],
+    ) -> Result<SshImportResult, SshServiceError> {
+        // The existing book, read once. Masked responses are enough: duplicate
+        // detection compares names and endpoints, never secrets.
+        let existing = self.list(user_id).await?;
+        let mut names: std::collections::HashSet<String> =
+            existing.iter().map(|h| h.name.clone()).collect();
+        let mut endpoints: std::collections::HashSet<(String, i64, String)> = existing
+            .iter()
+            .map(|h| (h.host.clone(), h.port, h.username.clone()))
+            .collect();
+
+        let mut result = SshImportResult::default();
+        for alias in requested {
+            let Some(candidate) = available.iter().find(|c| &c.alias == alias) else {
+                result.skipped.push(SkippedSshHost {
+                    alias: alias.clone(),
+                    reason: SshImportSkipReason::NotInConfig,
+                });
+                continue;
+            };
+            if names.contains(&candidate.alias) {
+                result.skipped.push(SkippedSshHost {
+                    alias: candidate.alias.clone(),
+                    reason: SshImportSkipReason::DuplicateName,
+                });
+                continue;
+            }
+            let username = candidate.username.clone().unwrap_or_default();
+            let endpoint = (candidate.host.clone(), candidate.port, username.clone());
+            if endpoints.contains(&endpoint) {
+                result.skipped.push(SkippedSshHost {
+                    alias: candidate.alias.clone(),
+                    reason: SshImportSkipReason::DuplicateEndpoint,
+                });
+                continue;
+            }
+
+            // Read the key the config points at and store it, so an import
+            // produces hosts that actually connect instead of a list of stubs
+            // waiting for the paste the import was supposed to save.
+            let private_key = candidate
+                .identity_file
+                .as_deref()
+                .and_then(|path| crate::ssh_config::read_identity_file(std::path::Path::new(path)));
+            // A host that names an identity file authenticates by key even when
+            // we could not read it — that is the truth about the host, and it
+            // opens the edit form on the right field. One that names none is left
+            // on the password default.
+            let auth_type = if candidate.identity_file.is_some() {
+                "key"
+            } else {
+                "password"
+            };
+            let created = self
+                .create(
+                    user_id,
+                    CreateSshHostRequest {
+                        name: candidate.alias.clone(),
+                        host: candidate.host.clone(),
+                        port: candidate.port,
+                        username,
+                        auth_type: auth_type.to_string(),
+                        password: None,
+                        private_key: private_key.as_deref().cloned(),
+                        passphrase: None,
+                        certificate: None,
+                        sudo_password: None,
+                    },
+                )
+                .await?;
+            names.insert(candidate.alias.clone());
+            endpoints.insert(endpoint);
+            result.imported.push(ImportedSshHost {
+                alias: candidate.alias.clone(),
+                ssh_host_id: created.ssh_host_id,
+                needs_credential: private_key.is_none(),
+            });
+        }
+        Ok(result)
     }
 
     /// Stamp a host as connected now, recording its fingerprint (best-effort;
