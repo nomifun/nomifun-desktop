@@ -104,7 +104,7 @@ pub async fn assemble_acp_params(
     // Knowledge is delivered separately from preset_context (see
     // `AcpSessionParams::knowledge_context` and `KnowledgeContextHook`), so it
     // reaches resumed sessions too — not only `session/new`.
-    let knowledge_context = build_knowledge_context_section(&config, &conversation_id);
+    let knowledge_context = build_knowledge_context_section(&config);
 
     AcpSessionParams {
         conversation_id,
@@ -320,25 +320,20 @@ fn append_launch_nudge(
 /// new-session `[Assistant Rules]` prelude) so it can be delivered on the
 /// first prompt of EVERY session open — including `session/load` / claude
 /// resume — via `KnowledgeContextHook`. Returns `None` when nothing is mounted.
-fn build_knowledge_context_section(
-    config: &AcpBuildExtra,
-    conversation_id: &str,
-) -> Option<String> {
+fn build_knowledge_context_section(config: &AcpBuildExtra) -> Option<String> {
     build_knowledge_context(
         &config.knowledge_mounts,
         &KnowledgeContextOptions {
             format: KnowledgeContextFormat::PromptSection,
             writeback: config.knowledge_writeback,
-            writeback_mode: config.knowledge_writeback_mode.as_deref(),
             writeback_eagerness: config.knowledge_writeback_eagerness.as_deref(),
-            target_id: conversation_id,
             has_search_tool: config.knowledge_mcp_config.is_some()
                 && !config.knowledge_mounts.is_empty(),
             // ACP/terminal sessions now have a real knowledge_write tool via the
             // scoped MCP bridge (P2): when write-back is enabled and the MCP is
             // injected with mounted bases, point the model at knowledge_write
             // (handle/base+rel_path) instead of the file-write prose. The server
-            // resolves staged/direct placement from the workpath binding.
+            // decides from the workpath binding whether the write is allowed.
             has_write_tool: config.knowledge_writeback
                 && config.knowledge_mcp_config.is_some()
                 && !config.knowledge_mounts.is_empty(),
@@ -681,7 +676,7 @@ mod tests {
     #[test]
     fn knowledge_context_section_is_none_without_mounts() {
         let config = AcpBuildExtra::default();
-        assert_eq!(build_knowledge_context_section(&config, "0190f5fe-7c00-7a00-8abc-012345678963"), None);
+        assert_eq!(build_knowledge_context_section(&config), None);
     }
 
     #[test]
@@ -776,13 +771,12 @@ mod tests {
                 live_sources: vec![],
             }],
             knowledge_writeback: false,
-            knowledge_writeback_mode: None,
             ..Default::default()
         };
 
         // The section is standalone (no preset prefix) — it is delivered by its
         // own hook, not folded into the [Assistant Rules] prelude.
-        let readonly = build_knowledge_context_section(&config, conversation_id).unwrap();
+        let readonly = build_knowledge_context_section(&config).unwrap();
         assert!(readonly.starts_with("## Knowledge bases (extended knowledge source)"));
         assert!(readonly.contains("领域知识"));
         assert!(readonly.contains(".nomi/knowledge/领域知识"));
@@ -796,22 +790,20 @@ mod tests {
         assert!(readonly.contains("Covers team conventions and domain terms."));
         assert!(readonly.contains("When to consult"));
 
-        // writeback on + default (staged) mode → inbox path scoped to the session.
+        // Write-back on → the enabled contract, with no staging vocabulary and
+        // no session-scoped inbox path left to leak into the prompt.
         config.knowledge_writeback = true;
-        let staged = build_knowledge_context_section(&config, conversation_id).unwrap();
-        assert!(staged.contains("STAGED mode"));
-        assert!(staged.contains(&format!("_inbox/{conversation_id}/")));
-
-        config.knowledge_writeback_mode = Some("direct".into());
-        let direct = build_knowledge_context_section(&config, conversation_id).unwrap();
-        assert!(direct.contains("DIRECT mode"));
-        assert!(!direct.contains("_inbox/"));
-        // Disposition (回写意识) threads from build-extra → contract; defaults
-        // to conservative, flips to aggressive when set.
-        assert!(direct.contains("Disposition — CONSERVATIVE"));
-        config.knowledge_writeback_eagerness = Some("aggressive".into());
-        let eager = build_knowledge_context_section(&config, conversation_id).unwrap();
-        assert!(eager.contains("Disposition — AGGRESSIVE"));
+        let enabled = build_knowledge_context_section(&config).unwrap();
+        assert!(enabled.contains("Write-back is ENABLED"));
+        assert!(!enabled.contains("STAGED"));
+        assert!(!enabled.contains("_inbox"));
+        assert!(!enabled.contains(conversation_id));
+        // Disposition (回写意识) threads from build-extra → contract; defaults to
+        // manual, flips to auto when set.
+        assert!(enabled.contains("Disposition — MANUAL"));
+        config.knowledge_writeback_eagerness = Some("auto".into());
+        let eager = build_knowledge_context_section(&config).unwrap();
+        assert!(eager.contains("Disposition — AUTO"));
     }
 
     fn user_stdio(name: &str) -> McpServer {
@@ -1240,7 +1232,7 @@ mod tests {
             knowledge_mounts: vec![knowledge_mount("0190f5fe-7c00-7a00-8abc-012345678969")],
             ..Default::default()
         };
-        let section = build_knowledge_context_section(&with, "0190f5fe-7c00-7a00-8abc-012345678964").expect("section renders");
+        let section = build_knowledge_context_section(&with).expect("section renders");
         assert!(
             section.contains("knowledge_search"),
             "section must advertise the search tool when injected, got {section}"
@@ -1252,7 +1244,7 @@ mod tests {
             ..Default::default()
         };
         let section_no =
-            build_knowledge_context_section(&without, "0190f5fe-7c00-7a00-8abc-012345678964").expect("section renders");
+            build_knowledge_context_section(&without).expect("section renders");
         assert!(
             !section_no.contains("knowledge_search"),
             "section must NOT advertise an uninjected search tool, got {section_no}"
