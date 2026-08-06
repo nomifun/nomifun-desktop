@@ -83,6 +83,7 @@ pub mod mock {
         synthesized: Mutex<Vec<String>>,
         tts_rate: Mutex<u32>,
         vision_answer: Mutex<String>,
+        vision_failure: Mutex<Option<String>>,
     }
 
     impl MockSpeech {
@@ -109,6 +110,11 @@ pub mod mock {
 
         pub fn set_vision_answer(&self, text: &str) {
             *self.vision_answer.lock().unwrap() = text.to_owned();
+        }
+
+        /// Make the next `explain_image` fail.
+        pub fn fail_next_vision(&self, message: &str) {
+            *self.vision_failure.lock().unwrap() = Some(message.to_owned());
         }
 
         pub fn transcribe_calls(&self) -> usize {
@@ -156,6 +162,9 @@ pub mod mock {
             _jpeg: Vec<u8>,
             _question: &str,
         ) -> anyhow::Result<String> {
+            if let Some(message) = self.vision_failure.lock().unwrap().take() {
+                anyhow::bail!(message);
+            }
             Ok(self.vision_answer.lock().unwrap().clone())
         }
     }

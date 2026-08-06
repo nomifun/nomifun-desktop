@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Multipart, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +24,11 @@ use crate::link::{
     AcceptedLink, Frame, LinkError, RobotIdentity, RobotLinkSink, RobotLinkStream,
 };
 use crate::registry::{RobotRecord, RobotRegistry, RobotReport};
+use crate::services::SpeechServices;
+
+/// Largest photo we will accept. A 640×480 quality-80 JPEG is 30–60 KB; this is
+/// generous headroom without letting a bad actor stream forever.
+pub const VISION_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Message shown/spoken by the device while waiting to be claimed.
 const ACTIVATION_MESSAGE: &str = "请在 nomifun 中输入此码绑定伙伴";
@@ -36,6 +41,9 @@ pub struct RobotDeviceState {
     pub registry: Arc<RobotRegistry>,
     pub advertiser: Arc<dyn EndpointAdvertiser>,
     pub acceptor: LanLinkAcceptor,
+    /// Vision lives here rather than on the session because the firmware uploads
+    /// photos over plain HTTP, outside any websocket session.
+    pub speech: Arc<dyn SpeechServices>,
 }
 
 /// Router for the device face, to be nested under `/robot`.
@@ -44,6 +52,7 @@ pub fn device_router(state: RobotDeviceState) -> Router {
         .route("/ota", post(ota_report).get(ota_report_get))
         .route("/ota/activate", post(activate))
         .route("/v1", get(ws_upgrade))
+        .route("/vision/explain", post(vision_explain))
         .with_state(state)
 }
 
@@ -238,6 +247,86 @@ async fn ws_upgrade(
     })
 }
 
+/// Photo understanding.
+///
+/// The firmware streams `multipart/form-data` in **chunked** encoding with no
+/// `Content-Length`, in many small chunks, using a boundary it hardcodes — so the
+/// boundary must be read from the header, and the body must be parsed as a
+/// stream. It also collapses every non-200 into "Failed to upload photo", which
+/// is why failures here are reported as 200 with `success: false`: that way the
+/// reason reaches the model instead of vanishing.
+///
+/// The device's own HTTP timeout is a hardcoded 30 s, so the vision call behind
+/// [`SpeechServices::explain_image`] must cap itself below that; this handler
+/// deliberately adds no second timeout layer.
+async fn vision_explain(
+    State(state): State<RobotDeviceState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    let token = header(&headers, "authorization")
+        .and_then(|v| v.strip_prefix("Bearer ").map(str::to_owned))
+        .unwrap_or_default();
+    let Some(record) = state.registry.resolve_token(&token).await else {
+        return (StatusCode::UNAUTHORIZED, "unknown device token").into_response();
+    };
+    let Some(companion_id) = record.companion_id.clone() else {
+        return Json(json!({ "success": false, "message": "这台机器人还没有绑定伙伴" }))
+            .into_response();
+    };
+
+    let mut question = String::new();
+    let mut jpeg: Option<Vec<u8>> = None;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) => {
+                return Json(
+                    json!({ "success": false, "message": format!("上传解析失败: {error}") }),
+                )
+                .into_response();
+            }
+        };
+        match field.name().unwrap_or_default() {
+            "question" => question = field.text().await.unwrap_or_default(),
+            "file" => match field.bytes().await {
+                Ok(bytes) if bytes.len() <= VISION_MAX_BYTES => jpeg = Some(bytes.to_vec()),
+                Ok(bytes) => {
+                    return Json(json!({
+                        "success": false,
+                        "message": format!("图片过大: {} bytes", bytes.len())
+                    }))
+                    .into_response();
+                }
+                Err(error) => {
+                    return Json(
+                        json!({ "success": false, "message": format!("读取图片失败: {error}") }),
+                    )
+                    .into_response();
+                }
+            },
+            _ => {}
+        }
+    }
+
+    let Some(jpeg) = jpeg else {
+        return Json(json!({ "success": false, "message": "缺少 file 表单字段" })).into_response();
+    };
+
+    let ctx = crate::services::SpeechContext {
+        robot_id: record.robot_id.clone(),
+        companion_id,
+    };
+    match state.speech.explain_image(&ctx, jpeg, &question).await {
+        Ok(result) => Json(json!({ "success": true, "result": result })).into_response(),
+        Err(error) => {
+            tracing::warn!(robot_id = %record.robot_id, %error, "robot: vision explain failed");
+            Json(json!({ "success": false, "message": error.to_string() })).into_response()
+        }
+    }
+}
+
 struct WsSink(futures_util::stream::SplitSink<WebSocket, Message>);
 struct WsStream(futures_util::stream::SplitStream<WebSocket>);
 
@@ -314,23 +403,60 @@ mod tests {
         Arc::new(LanAdvertiser::new(rx))
     }
 
-    async fn state(enabled: bool) -> (RobotDeviceState, tempfile::TempDir) {
+    /// The device face plus a handle on the speech mock behind it, so vision
+    /// tests can script answers and failures.
+    async fn state(
+        enabled: bool,
+    ) -> (
+        RobotDeviceState,
+        Arc<crate::services::mock::MockSpeech>,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(RobotRegistry::load(dir.path()).await.unwrap());
         let (_source, acceptor) = crate::lan_source::LanWsSource::new();
+        let speech = Arc::new(crate::services::mock::MockSpeech::new());
         (
             RobotDeviceState {
                 registry,
                 advertiser: advertiser(enabled),
                 acceptor,
+                speech: speech.clone(),
             },
+            speech,
             dir,
         )
     }
 
+    /// Bind a fresh robot to a companion and hand back its device token.
+    async fn claimed(state: &RobotDeviceState, robot_id: &str) -> String {
+        let (record, token) = state
+            .registry
+            .upsert_on_report(
+                RobotReport {
+                    robot_id: robot_id.to_owned(),
+                    client_id: "cid".into(),
+                    board: "esp32-s3n16r8-emoji".into(),
+                    firmware_version: "1.9.0".into(),
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        state
+            .registry
+            .claim(
+                record.activation_code.as_deref().unwrap(),
+                "0190f5fe-7c00-7a00-8000-0000000000aa",
+            )
+            .await
+            .unwrap();
+        token
+    }
+
     #[tokio::test]
     async fn ota_response_never_contains_mqtt_and_always_contains_websocket() {
-        let (state, _dir) = state(true).await;
+        let (state, _speech, _dir) = state(true).await;
         let app = device_router(state);
 
         let response = app
@@ -368,7 +494,7 @@ mod tests {
 
     #[tokio::test]
     async fn bound_device_gets_no_activation_section() {
-        let (state, _dir) = state(true).await;
+        let (state, _speech, _dir) = state(true).await;
         let (record, _) = state
             .registry
             .upsert_on_report(
@@ -412,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn activate_returns_202_until_bound_then_200() {
-        let (state, _dir) = state(true).await;
+        let (state, _speech, _dir) = state(true).await;
         let registry = state.registry.clone();
         let (record, _) = registry
             .upsert_on_report(
@@ -464,7 +590,7 @@ mod tests {
 
     #[tokio::test]
     async fn ota_still_answers_when_lan_is_off_but_omits_the_url() {
-        let (state, _dir) = state(false).await;
+        let (state, _speech, _dir) = state(false).await;
         let app = device_router(state);
         let response = app
             .oneshot(
@@ -517,5 +643,145 @@ mod tests {
             "echo the device's own version: no upgrade"
         );
         assert_eq!(value["firmware"]["url"], "");
+    }
+
+    /// Build a chunked-style multipart body by hand. The firmware hardcodes this
+    /// boundary and sends **no Content-Length**, so the parser must work off the
+    /// header's boundary and a streaming body.
+    fn multipart_body(question: &str, jpeg: &[u8]) -> Vec<u8> {
+        let boundary = "----ESP32_CAMERA_BOUNDARY";
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"question\"\r\n\r\n");
+        body.extend_from_slice(question.as_bytes());
+        body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"camera.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n",
+        );
+        body.extend_from_slice(jpeg);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        body
+    }
+
+    #[tokio::test]
+    async fn vision_explain_returns_the_model_answer_as_200_json() {
+        let (state, speech, _dir) = state(true).await;
+        let token = claimed(&state, "aa:bb:cc:dd:ee:10").await;
+        speech.set_vision_answer("桌上有一杯咖啡。");
+
+        let response = device_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/vision/explain")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Device-Id", "aa:bb:cc:dd:ee:10")
+                    .header(
+                        "content-type",
+                        "multipart/form-data; boundary=----ESP32_CAMERA_BOUNDARY",
+                    )
+                    .body(Body::from(multipart_body("看到什么", b"\xff\xd8\xff\xd9")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["success"], true);
+        assert_eq!(
+            value["result"], "桌上有一杯咖啡。",
+            "the firmware hands this body straight to the model as the tool result"
+        );
+    }
+
+    #[tokio::test]
+    async fn vision_failures_are_still_200_so_the_model_can_read_why() {
+        let (state, speech, _dir) = state(true).await;
+        let token = claimed(&state, "aa:bb:cc:dd:ee:11").await;
+        speech.fail_next_vision("no vision model configured");
+
+        let response = device_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/vision/explain")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header(
+                        "content-type",
+                        "multipart/form-data; boundary=----ESP32_CAMERA_BOUNDARY",
+                    )
+                    .body(Body::from(multipart_body("看到什么", b"\xff\xd8\xff\xd9")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a non-200 is collapsed by the firmware into 'Failed to upload photo', hiding the reason"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["success"], false);
+        assert!(value["message"].as_str().unwrap().contains("vision model"));
+    }
+
+    #[tokio::test]
+    async fn vision_requires_a_valid_device_token() {
+        let (state, _speech, _dir) = state(true).await;
+        let response = device_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/vision/explain")
+                    .header("Authorization", "Bearer nope")
+                    .header(
+                        "content-type",
+                        "multipart/form-data; boundary=----ESP32_CAMERA_BOUNDARY",
+                    )
+                    .body(Body::from(multipart_body("q", b"\xff\xd8\xff\xd9")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn vision_rejects_a_body_with_no_file_part() {
+        let (state, _speech, _dir) = state(true).await;
+        let token = claimed(&state, "aa:bb:cc:dd:ee:12").await;
+        let boundary = "----ESP32_CAMERA_BOUNDARY";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"question\"\r\n\r\nq\r\n--{boundary}--\r\n"
+        );
+        let response = device_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/vision/explain")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["success"], false);
     }
 }
