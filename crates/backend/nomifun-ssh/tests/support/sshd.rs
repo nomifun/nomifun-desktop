@@ -133,9 +133,11 @@ fn wait_until_refused(port: u16) {
 
 const SIGKILL: i32 = 9;
 
-/// Signal one process, or a whole process group when `pid` is negative. Declared
-/// locally rather than pulling `libc` into this crate's dev-dependencies,
-/// mirroring `nomifun-mcp`'s test helper.
+/// Signal one process. Callers pass a verified, still-live pid — never a negative
+/// value, because a process-group signal from a test fixture is one snapshot race
+/// away from killing something that was never ours. Declared locally rather than
+/// pulling `libc` into this crate's dev-dependencies, mirroring `nomifun-mcp`'s
+/// test helper.
 #[cfg(unix)]
 fn signal(pid: i32, signal: i32) -> bool {
     unsafe extern "C" {
@@ -150,29 +152,55 @@ fn signal(_pid: i32, _signal: i32) -> bool {
 
 /// Kill `root` and everything below it, deepest first — killing the root before
 /// its children would reparent them to init and lose the trail.
+///
+/// Every descendant is re-verified immediately before it is signalled. We hold a
+/// `Child` for `root`, so its pid cannot be recycled while we work, but the
+/// descendants are pids we merely observed in `/proc`: one of them can exit in
+/// the window between the snapshot and the signal, and on a busy machine the
+/// kernel hands that number straight to somebody else's process. Signalling
+/// blind there means SIGKILL to an innocent bystander — a developer's shell, or
+/// a compiler job. Checking that the pid still names an sshd with the same
+/// parent costs one `/proc` read and removes that whole class of accident.
+///
+/// For the same reason there is no process-*group* signal here. It would be
+/// redundant on Linux (the descendants have already left the group via `setsid`)
+/// and it is the one call that could take out an entire unrelated group at once.
 fn kill_tree(root: i32) {
-    for pid in descendants_deepest_first(root) {
-        signal(pid, SIGKILL);
+    let table = process_table();
+    for (pid, ppid) in descendants_deepest_first(root, &table) {
+        if still_sshd_child_of(pid, ppid) {
+            signal(pid, SIGKILL);
+        }
     }
-    // The group signal is redundant on Linux but catches platforms where the
-    // /proc walk found nothing.
-    signal(-root, SIGKILL);
     signal(root, SIGKILL);
 }
 
-/// Descendants of `root`, deepest generation first. Empty when `/proc` is not
-/// available.
-fn descendants_deepest_first(root: i32) -> Vec<i32> {
-    let table = process_table();
-    let mut generations: Vec<Vec<i32>> = vec![vec![root]];
+/// True when `pid` is still an sshd process whose parent is still `expected_ppid`
+/// — i.e. still the process we saw in the snapshot, not a recycled number.
+fn still_sshd_child_of(pid: i32, expected_ppid: i32) -> bool {
+    let Some((comm, ppid)) = read_comm_and_ppid(pid) else {
+        return false; // already gone; nothing to kill and nothing to risk
+    };
+    ppid == expected_ppid && comm.contains("sshd")
+}
+
+/// Descendants of `root`, deepest generation first, paired with the parent we
+/// observed them under so the kill path can re-verify them.
+fn descendants_deepest_first(root: i32, table: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let mut generations: Vec<Vec<(i32, i32)>> = vec![vec![(root, 0)]];
     // sshd's tree is listener → session → session-child; the bound just keeps a
     // pathological /proc snapshot from looping.
     while generations.len() < 8 {
-        let parents = generations.last().expect("seeded with the root");
-        let children: Vec<i32> = table
+        let parents: Vec<i32> = generations
+            .last()
+            .expect("seeded with the root")
+            .iter()
+            .map(|(pid, _)| *pid)
+            .collect();
+        let children: Vec<(i32, i32)> = table
             .iter()
             .filter(|(pid, ppid)| parents.contains(ppid) && *pid != root)
-            .map(|(pid, _)| *pid)
+            .map(|(pid, ppid)| (*pid, *ppid))
             .collect();
         if children.is_empty() {
             break;
@@ -196,23 +224,22 @@ fn process_table() -> Vec<(i32, i32)> {
         else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            continue;
-        };
-        // `comm` may contain spaces and parentheses, so the fields after it are
-        // only unambiguous from the LAST ')': then state, then ppid.
-        let Some((_, after_comm)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        if let Some(ppid) = after_comm
-            .split_whitespace()
-            .nth(1)
-            .and_then(|p| p.parse::<i32>().ok())
-        {
+        if let Some((_, ppid)) = read_comm_and_ppid(pid) {
             table.push((pid, ppid));
         }
     }
     table
+}
+
+/// `(comm, ppid)` straight from `/proc/<pid>/stat`, or `None` if the process is
+/// gone. `comm` may contain spaces and parentheses, so the fields after it are
+/// only unambiguous from the LAST ')': then state, then ppid.
+fn read_comm_and_ppid(pid: i32) -> Option<(String, i32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (before_close, after_comm) = stat.rsplit_once(')')?;
+    let comm = before_close.split_once('(').map(|(_, c)| c)?.to_string();
+    let ppid = after_comm.split_whitespace().nth(1)?.parse::<i32>().ok()?;
+    Some((comm, ppid))
 }
 
 /// Start sshd as the leader of its own process group so [`TestSshd::stop`] can
