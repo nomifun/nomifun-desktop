@@ -5038,6 +5038,15 @@ fn merge_direct_turn_writeback(existing: &str, proposal: &str) -> String {
     if proposal.is_empty() || contains_markdown_block(existing, proposal) {
         return existing.to_owned();
     }
+    // A model that ignores the contract and resends the whole document plus its
+    // addition would otherwise get the document appended to itself. When the
+    // proposal demonstrably contains every existing line, taking it wholesale
+    // loses nothing — every original byte is inside it — and yields what the
+    // model actually meant. This only catches a verbatim restatement; a
+    // reworded or reordered rewrite still appends, which is the safe direction.
+    if !existing.trim().is_empty() && contains_markdown_block(proposal, existing.trim()) {
+        return format!("{proposal}\n");
+    }
     let separator = if existing.is_empty() || existing.ends_with("\n\n") {
         ""
     } else if existing.ends_with('\n') {
@@ -6708,6 +6717,34 @@ mod tests {
             merged,
             "manual retry must not append the same proposal twice"
         );
+    }
+
+    #[test]
+    fn direct_turn_writeback_absorbs_a_verbatim_restatement_instead_of_doubling() {
+        // The contract tells the model to send only new material, but a model
+        // that resends the document plus its addition must not end up with the
+        // document twice. Every original line is inside the proposal, so taking
+        // it wholesale is lossless.
+        let existing = "# 术语表\n\n市盈率 = PER\n";
+        let proposal = "# 术语表\n\n市盈率 = PER\nROE = 净资产收益率";
+        let merged = merge_direct_turn_writeback(existing, proposal);
+
+        assert_eq!(merged.matches("市盈率 = PER").count(), 1, "doubled: {merged:?}");
+        assert!(merged.contains("ROE = 净资产收益率"), "{merged:?}");
+        assert_eq!(merged.matches("# 术语表").count(), 1, "heading doubled: {merged:?}");
+    }
+
+    #[test]
+    fn direct_turn_writeback_appends_a_reworded_rewrite_rather_than_replacing() {
+        // A rewrite that does NOT contain the original verbatim must never win:
+        // appending is the only direction that cannot lose curated content.
+        let existing = "# 术语表\n\n市盈率 = PER\n";
+        let proposal = "# 术语表\n\n市盈率（PER）\nROE = 净资产收益率";
+        let merged = merge_direct_turn_writeback(existing, proposal);
+
+        assert!(merged.starts_with(existing), "existing bytes were rewritten: {merged:?}");
+        assert!(merged.contains("市盈率 = PER"), "the original wording must survive: {merged:?}");
+        assert!(merged.contains("ROE = 净资产收益率"), "{merged:?}");
     }
 
     #[test]

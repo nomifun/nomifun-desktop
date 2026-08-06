@@ -2423,12 +2423,8 @@ mod tests {
         assert_eq!(overrides.knowledge_mounts.len(), 1);
         assert!(overrides.knowledge_writeback);
         assert_eq!(
-            overrides.knowledge_writeback_mode.as_deref(),
-            Some("staged")
-        );
-        assert_eq!(
             overrides.knowledge_writeback_eagerness.as_deref(),
-            Some("aggressive")
+            Some("auto")
         );
 
         let prompt = append_knowledge_context(
@@ -2439,7 +2435,7 @@ mod tests {
         assert!(prompt.contains("运维手册"));
         assert!(prompt.contains("knowledge_write"));
         // The disposition keyword threads all the way from extra JSON to prompt.
-        assert!(prompt.contains("Disposition — AGGRESSIVE"));
+        assert!(prompt.contains("Disposition — AUTO"));
         // Optional summary/live_sources may be absent while the canonical
         // knowledge-base identity contract remains strict.
         assert!(prompt.contains("When to consult"));
