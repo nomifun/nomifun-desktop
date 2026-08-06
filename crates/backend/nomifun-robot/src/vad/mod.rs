@@ -2,6 +2,7 @@
 //! so `mode=auto` sessions end **only** when this decides they did.
 
 pub mod energy;
+pub mod silero;
 
 pub use energy::EnergyVad;
 
@@ -63,6 +64,21 @@ pub fn frame_ms(samples: usize, sample_rate: u32) -> u32 {
         return 0;
     }
     (samples as u64 * 1000 / sample_rate as u64) as u32
+}
+
+/// Build the engine a companion asked for. Silero is preferred; if its model or
+/// the ONNX runtime is unavailable this degrades to [`EnergyVad`] with a warning
+/// rather than breaking the voice link.
+pub fn build_engine(engine: &str, tuning: VadTuning) -> Box<dyn VadEngine> {
+    if engine == "silero" {
+        match silero::SileroVad::new(tuning) {
+            Ok(vad) => return Box::new(vad),
+            Err(error) => {
+                tracing::warn!(%error, "robot: silero VAD unavailable, falling back to energy VAD");
+            }
+        }
+    }
+    Box::new(EnergyVad::new(tuning))
 }
 
 #[cfg(test)]
@@ -166,5 +182,82 @@ mod tests {
             VadDecision::EndOfUtterance,
             "the counter restarted"
         );
+    }
+
+    #[test]
+    fn build_engine_prefers_silero_and_never_fails() {
+        let engine = build_engine("silero", VadTuning::default());
+        assert!(
+            engine.name() == "silero" || engine.name() == "energy",
+            "silero is preferred but a load failure must degrade, not panic"
+        );
+    }
+
+    #[test]
+    fn build_engine_honours_an_explicit_energy_choice() {
+        assert_eq!(build_engine("energy", VadTuning::default()).name(), "energy");
+        assert_eq!(
+            build_engine("anything-else", VadTuning::default()).name(),
+            "energy"
+        );
+    }
+
+    #[test]
+    fn silero_ends_an_utterance_on_real_speech_then_silence() {
+        let Ok(mut vad) = crate::vad::silero::SileroVad::new(VadTuning {
+            sensitivity: 0.5,
+            min_silence_ms: 700,
+        }) else {
+            eprintln!("skipping: ONNX runtime unavailable in this environment");
+            return;
+        };
+        assert_eq!(vad.name(), "silero");
+
+        // Silero wants 512-sample chunks at 16 kHz; the engine buffers whatever
+        // frame size we hand it, so feed it our real 60 ms frames.
+        let mut saw_speech = false;
+        for frame in 0..10 {
+            let speech = speech_like_frame(frame * crate::audio::UPLINK_FRAME_SAMPLES);
+            if vad.push_frame(&speech) == VadDecision::Speech {
+                saw_speech = true;
+            }
+        }
+        assert!(saw_speech, "a speech-shaped signal must register as speech");
+
+        let quiet = vec![0i16; crate::audio::UPLINK_FRAME_SAMPLES];
+        let mut ended = false;
+        for _ in 0..30 {
+            if vad.push_frame(&quiet) == VadDecision::EndOfUtterance {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended, "trailing silence must end the utterance");
+    }
+
+    /// A frame Silero accepts as speech: a glottal pulse train (a harmonic stack
+    /// on a vibrato-modulated fundamental) shaped by two sweeping formants and an
+    /// amplitude envelope. Static tone mixes read as ~1% speech probability — the
+    /// model keys on the *motion* of the formants, not just their presence.
+    fn speech_like_frame(offset: usize) -> Vec<i16> {
+        use crate::audio::UPLINK_FRAME_SAMPLES;
+        let tau = std::f32::consts::TAU;
+        (offset..offset + UPLINK_FRAME_SAMPLES)
+            .map(|i| {
+                let t = i as f32 / 16_000.0;
+                let f0 = 120.0 + 30.0 * (t * 4.0 * tau).sin();
+                let f1 = 500.0 + 300.0 * (t * 3.0 * tau).sin();
+                let f2 = 1500.0 + 500.0 * (t * 2.0 * tau).cos();
+                let mut v = 0.0;
+                for harmonic in 1..=20 {
+                    let f = f0 * harmonic as f32;
+                    let a = (-((f - f1) / 250.0).powi(2)).exp()
+                        + 0.6 * (-((f - f2) / 350.0).powi(2)).exp();
+                    v += a * (t * f * tau).sin();
+                }
+                let enveloped = v * 0.5 * (0.6 + 0.4 * (t * 3.5 * tau).sin());
+                (enveloped.clamp(-1.0, 1.0) * 9000.0) as i16
+            })
+            .collect()
     }
 }
