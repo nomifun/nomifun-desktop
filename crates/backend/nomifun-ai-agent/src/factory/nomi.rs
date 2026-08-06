@@ -721,8 +721,11 @@ pub(super) async fn build(
     // SSH-bound session: connect the saved host now (decrypt credential, dial,
     // open shell + SFTP) so the runtime gets the remote tool family. A binding
     // without a configured provider, or a failed connect, fails the build with a
-    // clear error rather than silently running against the local machine.
-    let ssh_backend = if let Some(ssh_host_id) = overrides.ssh_host_id.clone() {
+    // clear error rather than silently running against the local machine. The
+    // conversation id goes with the request: the provider pools one link per
+    // (conversation, host), so a runtime rebuilt by a model switch rejoins the
+    // session its predecessor was using instead of dialling again.
+    let ssh_session = if let Some(ssh_host_id) = overrides.ssh_host_id.clone() {
         let user_id = overrides.user_id.clone().unwrap_or_default();
         let remote_cwd = overrides
             .ssh_remote_cwd
@@ -731,7 +734,12 @@ pub(super) async fn build(
         match &deps.ssh_provider {
             Some(provider) => Some(
                 provider
-                    .connect(&user_id, &ssh_host_id, &remote_cwd)
+                    .connect(
+                        &user_id,
+                        ctx.conversation_id.as_str(),
+                        &ssh_host_id,
+                        &remote_cwd,
+                    )
                     .await
                     .map_err(|e| AppError::Internal(format!("SSH connect failed: {e}")))?,
             ),
@@ -747,7 +755,8 @@ pub(super) async fn build(
     let host_wiring = NomiHostWiring {
         #[cfg(feature = "browser-use")]
         browser_lane_binding,
-        ssh_backend,
+        ssh_backend: ssh_session.as_ref().map(|s| Arc::clone(&s.backend)),
+        ssh_lease: ssh_session.map(|s| s.lease),
     };
     let agent = NomiAgentManager::new_with_host_wiring(
         ctx.conversation_id,

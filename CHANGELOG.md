@@ -429,6 +429,27 @@ notes at a high level rather than a complete historical log.
   approval gates or command interception. The UI/API contract version was
   bumped accordingly.
 
+- SSH remote sessions, live link state: a host-bound session's connection is
+  now held by a process-level pool keyed by (conversation, host), so it
+  survives model switches and idle stretches instead of being rebuilt per
+  turn — the remote cwd, exported environment and open files are still there
+  on the next turn. A link that dies is noticed by a keepalive round trip and
+  walked back up a 1s→60s backoff ladder (10 attempts) that replays the last
+  cwd the remote shell actually proved, while a rejected credential or a
+  changed host key stops the ladder instead of hammering the host towards an
+  account lockout. Closing a session now reports what could be *proven* about
+  the remote shell's exit rather than assuming it died, and deleting a
+  conversation (or a host) takes its links with it. Every transition is pushed
+  to the owner over `/ws` as `ssh.status` and the same shape is readable as a
+  snapshot from the new `GET /api/ssh-hosts/statuses` route (instance-owner
+  only), so a client that missed an event cannot be told a different story.
+  The conversation header carries a host pill — which machine this session
+  drives, whether the link is up, the retry countdown, and, when a retry
+  cannot help, what has to be fixed by hand. Host-bound sessions also get
+  their own top-level group in the session sidebar, so one is no longer
+  unreachable after navigating away. The UI/API contract version was bumped
+  accordingly.
+
 - WebUI realtime delivery behind reverse proxies: the `/ws` WebSocket
   handshake no longer rejects browsers whose proxy rewrites the `Host` header
   (e.g. nginx's default `proxy_set_header Host $proxy_host`). The

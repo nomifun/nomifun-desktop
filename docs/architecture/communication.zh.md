@@ -54,10 +54,13 @@ CSRF 中间件（[`crates/backend/nomifun-auth/src/csrf.rs`](../../crates/backen
 | `message.stream` | 模型按块发出 token 时 | `nomifun-conversation::stream_relay` |
 | `conversation.artifact` | 工具产生了产物（文件 / 图像 / 预览） | `nomifun-conversation::routes_aux` |
 | `terminal.output` | PTY 产生输出 | `nomifun-terminal` |
+| `ssh.status` | 某会话的 SSH 链路状态发生真实变化 | `nomifun-ssh::events` |
 | 审批请求 / 响应 | 工具调用需要用户批准 | `nomifun-conversation`（经接缝） |
 | `agentExecution.changed` / `agentExecution.leadThinking` | 持久化 Agent 协作状态与发起 Agent 的瞬时思考流 | `nomifun-agent-execution` |
 | `auth-expired` / 关闭 1008 | 会话 JWT 中途失效 | `nomifun-realtime` |
 | 心跳（`ping` / `pong`） | 连接保活 | `nomifun-realtime` |
+
+`ssh.status` 是某个会话 SSH 链路的 owner-scoped 投影:`{ sshHostId, conversationId, state, attempt, nextRetryInMs, hostFingerprint, detail, retryable, reaped, changedAt }`,`state` 取 `idle` / `connecting` / `connected` / `degraded` / `reconnecting` / `dropped` / `closed` 之一。它走用户总线而非 per-turn 的 agent 流,因为链路恰恰会在会话空闲、没有任何 turn 可承载消息时掉线与重连;`SshConnectionPool` 只在状态**真实变化**时发布,所以一条健康的空闲链路不占用总线。`GET /api/ssh-hosts/statuses` 从同一个 watch 值提供同样的载荷,供重连后补齐快照。
 
 升级由 `nomifun_realtime::ws_upgrade_handler`（[`crates/backend/nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs)）处理，它校验通过 cookie 或 `Sec-WebSocket-Protocol` header 携带的 JWT（header 的取值会被原样回显以使握手正确完成）。认证失败时它会发送 `auth-expired` 消息并以 1008 关闭；SPA 同时监听这两个信号（参见 [`browser.ts`](../../ui/src/common/adapter/browser.ts)），并在任一路径上重定向到 `/login`。
 

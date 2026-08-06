@@ -1,6 +1,7 @@
 //! SFTP file operations against a real sshd (internal-sftp subsystem).
 mod support;
 
+
 #[tokio::test(flavor = "multi_thread")]
 async fn write_then_read_roundtrips() {
     let Some(sshd) = support::start_pubkey_sshd() else {
@@ -50,4 +51,38 @@ async fn stat_and_list_work() {
     let _ = entries;
     let canon = fs.canonicalize("/tmp/../tmp").await.expect("canonicalize");
     assert_eq!(canon, "/tmp", "canonicalize should resolve to /tmp, got {canon}");
+}
+
+/// An atomic write starts by creating a sibling temp file, so a missing *parent
+/// directory* fails on a path the caller never named. Reported bare, the SFTP
+/// status reads "no such file" about `/srv/app/config.yml` — and the natural
+/// misreading is "create the file", when the fix is `mkdir -p /srv/app`. The
+/// message has to carry the directory and say which file could not be created.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_into_a_missing_directory_names_the_directory() {
+    let Some(sshd) = support::start_pubkey_sshd() else {
+        eprintln!("SKIP: no usable sshd");
+        return;
+    };
+    let fs = support::connect(&sshd).await.open_sftp().await.unwrap();
+    let dir = format!("/tmp/nomi_absent_dir_{}", std::process::id());
+    let err = fs
+        .write_file_atomic(&format!("{dir}/config.yml"), b"key: value\n")
+        .await
+        .expect_err("writing under a missing directory must fail");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&dir),
+        "the message must name the directory that is missing, got: {msg}"
+    );
+    assert!(
+        msg.contains("mkdir"),
+        "the message must point at the actual fix, got: {msg}"
+    );
+    assert!(
+        msg.contains("temporary"),
+        "the message must say the failure was creating the temp file, not the \
+         target, got: {msg}"
+    );
 }

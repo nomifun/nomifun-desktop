@@ -30,6 +30,9 @@ import type { ChannelPluginId, CompanionId } from '@/common/types/ids';
 import { useTranslation } from 'react-i18next';
 import { useCompanions } from '../../../useNomi';
 
+const CREATE_BOT_BUTTON_CLASS =
+  '!rounded-8px !bg-fill-2 !text-t-secondary hover:!bg-fill-3 hover:!text-t-primary';
+
 /**
  * 伙伴设置页「远程连接」节：每伙伴视角的多机器人管理。
  * 每个机器人 = 一个 channel plugin 实体（companion_id 绑宠，UNIQUE(type,bot_key)
@@ -322,6 +325,8 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
           actions = (
             <>
               <Switch
+                size='small'
+                className='compact-dark-switch shrink-0'
                 checked={myRow.enabled}
                 loading={busyPluginId === myRow.plugin_id}
                 onChange={(checked: boolean) => void handleToggleEnabled(myRow, id, checked)}
@@ -374,14 +379,24 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
               >
                 {t('nomi.settings.remoteMoveHere')}
               </Button>
-              <Button size='small' onClick={() => setConfigTarget({ platform: id })}>
+              <Button
+                size='small'
+                type='secondary'
+                className={CREATE_BOT_BUTTON_CLASS}
+                onClick={() => setConfigTarget({ platform: id })}
+              >
                 {t('nomi.settings.remoteCreateBot')}
               </Button>
             </>
           );
         } else {
           actions = (
-            <Button size='small' type='primary' onClick={() => setConfigTarget({ platform: id })}>
+            <Button
+              size='small'
+              type='secondary'
+              className={CREATE_BOT_BUTTON_CLASS}
+              onClick={() => setConfigTarget({ platform: id })}
+            >
               {t('nomi.settings.remoteCreateBot')}
             </Button>
           );
@@ -390,6 +405,7 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
         return (
           <NomiSettingRow
             key={id}
+            className='!py-8px'
             leading={<img src={logo} alt={title} className='h-18px w-18px shrink-0 object-contain' />}
             title={
               <div className='flex min-w-0 items-center gap-6px flex-wrap'>

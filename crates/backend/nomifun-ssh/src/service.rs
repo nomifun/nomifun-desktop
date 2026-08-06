@@ -12,7 +12,8 @@ use nomifun_db::{
 use zeroize::Zeroizing;
 
 use crate::dto::{
-    CreateSshHostRequest, SshHostResponse, UpdateSshHostRequest, SECRET_MASK,
+    CreateSshHostRequest, ImportedSshHost, SshHostResponse, SshImportResult, SshImportSkipReason,
+    SkippedSshHost, UpdateSshHostRequest, SECRET_MASK,
 };
 
 /// Errors surfaced by the host-book service.
@@ -171,6 +172,105 @@ impl SshHostService {
         self.repo.delete(user_id, id).await.map_err(map_not_found)
     }
 
+    /// Add the confirmed `~/.ssh/config` candidates to the book.
+    ///
+    /// Goes through [`Self::create`] host by host, so imported rows are encrypted
+    /// and validated by exactly the code path the form uses — there is no second
+    /// way into this table.
+    ///
+    /// `available` is the server's own scan of its ssh config (never anything the
+    /// client supplied), and `requested` selects from it by alias. Anything that
+    /// does not become a host is reported rather than dropped: a duplicate is
+    /// skipped, an alias the config no longer has is named, and a host imported
+    /// without a usable credential is flagged.
+    pub async fn import_hosts(
+        &self,
+        user_id: &str,
+        requested: &[String],
+        available: &[crate::ssh_config::SshConfigHost],
+    ) -> Result<SshImportResult, SshServiceError> {
+        // The existing book, read once. Masked responses are enough: duplicate
+        // detection compares names and endpoints, never secrets.
+        let existing = self.list(user_id).await?;
+        let mut names: std::collections::HashSet<String> =
+            existing.iter().map(|h| h.name.clone()).collect();
+        let mut endpoints: std::collections::HashSet<(String, i64, String)> = existing
+            .iter()
+            .map(|h| (h.host.clone(), h.port, h.username.clone()))
+            .collect();
+
+        let mut result = SshImportResult::default();
+        for alias in requested {
+            let Some(candidate) = available.iter().find(|c| &c.alias == alias) else {
+                result.skipped.push(SkippedSshHost {
+                    alias: alias.clone(),
+                    reason: SshImportSkipReason::NotInConfig,
+                });
+                continue;
+            };
+            if names.contains(&candidate.alias) {
+                result.skipped.push(SkippedSshHost {
+                    alias: candidate.alias.clone(),
+                    reason: SshImportSkipReason::DuplicateName,
+                });
+                continue;
+            }
+            let username = candidate.username.clone().unwrap_or_default();
+            let endpoint = (candidate.host.clone(), candidate.port, username.clone());
+            if endpoints.contains(&endpoint) {
+                result.skipped.push(SkippedSshHost {
+                    alias: candidate.alias.clone(),
+                    reason: SshImportSkipReason::DuplicateEndpoint,
+                });
+                continue;
+            }
+
+            // Read the key the config points at and store it, so an import
+            // produces hosts that actually connect instead of a list of stubs
+            // waiting for the paste the import was supposed to save.
+            let private_key = candidate
+                .identity_file
+                .as_deref()
+                .and_then(|path| crate::ssh_config::read_identity_file(std::path::Path::new(path)));
+            // A host that names an identity file authenticates by key even when
+            // we could not read it — that is the truth about the host, and it
+            // opens the edit form on the right field. One that names none is left
+            // on the password default.
+            let auth_type = if candidate.identity_file.is_some() {
+                "key"
+            } else {
+                "password"
+            };
+            let created = self
+                .create(
+                    user_id,
+                    CreateSshHostRequest {
+                        name: candidate.alias.clone(),
+                        host: candidate.host.clone(),
+                        port: candidate.port,
+                        username,
+                        auth_type: auth_type.to_string(),
+                        password: None,
+                        private_key: private_key.as_deref().cloned(),
+                        passphrase: None,
+                        certificate: None,
+                        sudo_password: None,
+                    },
+                )
+                .await?;
+            names.insert(candidate.alias.clone());
+            endpoints.insert(endpoint);
+            let needs_username = created.username.is_empty();
+            result.imported.push(ImportedSshHost {
+                alias: candidate.alias.clone(),
+                ssh_host_id: created.ssh_host_id,
+                needs_credential: private_key.is_none(),
+                needs_username,
+            });
+        }
+        Ok(result)
+    }
+
     /// Stamp a host as connected now, recording its fingerprint (best-effort;
     /// called after a successful dial).
     pub async fn mark_connected(
@@ -181,6 +281,38 @@ impl SshHostService {
     ) -> Result<(), SshServiceError> {
         self.repo
             .update_status(user_id, id, "connected", Some(nomifun_common::now_ms()), fingerprint)
+            .await
+            .map_err(map_not_found)
+    }
+
+    /// Walk a host's status back to `disconnected` after a dial or a live link
+    /// failed. Until this existed `mark_connected` was the only writer of the
+    /// column, so a host read `connected` forever after its first successful dial.
+    ///
+    /// The column is per-HOST while links are per-CONVERSATION, so treat it as a
+    /// last-known hint for the host book — the live truth is the pool's `watch`
+    /// per link. `detail` is logged rather than stored: the column holds a bare
+    /// status word, and a diagnostic string persisted next to a credential is a
+    /// leak waiting to happen.
+    pub async fn mark_unreachable(
+        &self,
+        user_id: &str,
+        id: &SshHostId,
+        detail: &str,
+    ) -> Result<(), SshServiceError> {
+        tracing::debug!(ssh_host_id = %id, detail = %detail, "ssh host marked unreachable");
+        // `update_status` assigns `last_connected_at` unconditionally (only the
+        // fingerprint is COALESCEd), so passing `None` would erase the very hint
+        // this column exists to provide. Read it back and hand it straight in.
+        let last_connected_at = self
+            .repo
+            .find(user_id, id)
+            .await
+            .map_err(|e| SshServiceError::Internal(e.to_string()))?
+            .ok_or(SshServiceError::NotFound)?
+            .last_connected_at;
+        self.repo
+            .update_status(user_id, id, "disconnected", last_connected_at, None)
             .await
             .map_err(map_not_found)
     }

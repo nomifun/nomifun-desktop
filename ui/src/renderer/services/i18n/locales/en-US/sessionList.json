@@ -13,6 +13,15 @@
   "createProject": "Create project",
   "createProjectSuccess": "Project created",
   "createProjectFailed": "Failed to create project",
+  "actionChat": "Chat",
+  "actionTerminal": "Terminal",
+  "actionProject": "Project",
+  "actionRemote": "Remote",
+  "newRemoteSession": "New remote session",
+  "remoteHint": "Pick a host to start a remote session",
+  "remoteLoading": "Loading hosts…",
+  "remoteEmptyHint": "Add an SSH host and the agent can operate it for you from a session.",
+  "remoteAddHost": "Add remote host…",
   "batchSelect": "Batch select",
   "exitBatchSelect": "Exit selection",
   "displaySettings": "Display settings",
@@ -46,5 +55,5 @@
   "removeWorkpathSuccess": "Workspace removed",
   "collapseList": "Hide conversations",
   "expandList": "Show conversations",
-  "empty": "No sessions yet — click \"New Conversation\" or \"Create project\" above to start"
+  "empty": "No sessions yet — click \"+ Chat\" or \"+ Project\" above to start"
 }
