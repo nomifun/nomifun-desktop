@@ -15,6 +15,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
+import { Tooltip } from '@arco-design/web-react';
 import { Delete, EditTwo, LinkOne } from '@icon-park/react';
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import { formatSize } from './useKnowledge';
@@ -79,6 +80,8 @@ function StatusBadges({
   return badges.length > 0 ? <>{badges}</> : null;
 }
 
+const MAX_VISIBLE_TAGS = 5;
+
 /** User tag chips row with colored dots. */
 function TagChips({
   tags,
@@ -95,23 +98,38 @@ function TagChips({
 
   if (!resolved.length) return null;
 
-  return (
-    <div className='flex flex-wrap items-center gap-6px'>
-      {resolved.map((tag) => (
-        <div
-          key={tag.key}
-          className='inline-flex items-center gap-5px text-11px text-[var(--color-text-2)] bg-[var(--color-fill-2)] border border-solid border-[var(--color-border-2)] rounded-6px px-8px py-2px'
-        >
-          {tag.color && (
-            <i
-              className='w-6px h-6px rounded-full flex-none'
-              style={{ background: tag.color }}
-            />
-          )}
-          {tag.label}
-        </div>
-      ))}
+  const visibleTags = resolved.slice(0, MAX_VISIBLE_TAGS);
+  const overflowCount = resolved.length - visibleTags.length;
+  const tooltipContent = (
+    <div className='max-w-280px whitespace-normal break-words text-12px leading-18px'>
+      {resolved.map((tag) => tag.label).join(' · ')}
     </div>
+  );
+
+  return (
+    <Tooltip content={tooltipContent} position='top'>
+      <div className='knowledge-card-tags flex flex-wrap items-center gap-5px'>
+        {visibleTags.map((tag) => (
+          <div
+            key={tag.key}
+            className='inline-flex items-center gap-5px rounded-6px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-2)] px-7px py-1px text-11px leading-16px text-[var(--color-text-2)]'
+          >
+            {tag.color && (
+              <i
+                className='h-6px w-6px flex-none rounded-full'
+                style={{ background: tag.color }}
+              />
+            )}
+            {tag.label}
+          </div>
+        ))}
+        {overflowCount > 0 && (
+          <div className='inline-flex items-center rounded-6px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-2)] px-7px py-1px text-11px font-600 leading-16px text-[var(--color-text-2)]'>
+            +{overflowCount}
+          </div>
+        )}
+      </div>
+    </Tooltip>
   );
 }
 
@@ -152,8 +170,8 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
   return (
     <div
       className={[
-        'group relative flex flex-col gap-11px rounded-16px border border-solid',
-        'border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-18px box-border cursor-pointer',
+        'group relative flex flex-col gap-8px rounded-16px border border-solid',
+        'border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-18px pt-18px pb-8px box-border cursor-pointer',
         'min-h-188px',
         'transition-all duration-160',
         'hover:border-[var(--color-border-3)] hover:shadow-[0_14px_38px_rgba(0,0,0,0.15)] hover:-translate-y-2px',
@@ -187,7 +205,7 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
 
       {/* Description (2-line clamp) */}
       <div
-        className='text-13px leading-[1.55] text-[var(--color-text-2)] flex-1'
+        className='max-h-40px min-h-0 flex-1 overflow-hidden break-words text-13px leading-20px text-[var(--color-text-2)]'
         style={{
           display: '-webkit-box',
           WebkitLineClamp: 2,
@@ -201,7 +219,7 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
       {/* User tags row */}
       <TagChips tags={base.tags} tagMap={tagMap} />
 
-      <div className='knowledge-card-footer mt-auto flex min-h-32px items-center gap-10px pt-2px'>
+      <div className='knowledge-card-footer mt-auto flex min-h-26px items-center gap-10px'>
         <div className='knowledge-card-meta flex min-w-0 flex-wrap items-center gap-7px text-12px leading-16px text-[var(--color-text-3)]'>
           {metaItems.map((item, index) => (
             <React.Fragment key={`${item}-${index}`}>
@@ -218,7 +236,7 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
           <div
             onClick={() => onOpen?.(base)}
             className={[
-              'grid h-30px w-30px place-items-center rounded-8px',
+              'grid h-26px w-26px place-items-center rounded-7px',
               'border border-solid border-transparent',
               'bg-transparent text-[var(--color-text-3)] cursor-pointer',
               'hover:border-[var(--color-border-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
@@ -231,7 +249,7 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
           <div
             onClick={() => onEdit?.(base)}
             className={[
-              'grid h-30px w-30px place-items-center rounded-8px',
+              'grid h-26px w-26px place-items-center rounded-7px',
               'border border-solid border-transparent',
               'bg-transparent text-[var(--color-text-3)] cursor-pointer',
               'hover:border-[var(--color-border-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
@@ -244,7 +262,7 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
           <div
             onClick={(e) => onDelete?.(base, e)}
             className={[
-              'grid h-30px w-30px place-items-center rounded-8px',
+              'grid h-26px w-26px place-items-center rounded-7px',
               'border border-solid border-transparent',
               'bg-transparent text-[var(--color-text-3)] cursor-pointer',
               'hover:border-[rgba(var(--danger-6),0.28)] hover:bg-[rgba(var(--danger-6),0.08)] hover:text-danger-6',
