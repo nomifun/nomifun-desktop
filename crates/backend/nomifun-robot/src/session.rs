@@ -43,13 +43,6 @@ pub struct SessionDeps {
     pub status: Arc<RobotStatusRegistry>,
     pub speech: Arc<dyn SpeechServices>,
     pub dispatcher: Arc<dyn CompanionTurnDispatcher>,
-    /// HTTP base the device can reach us on, e.g. `http://192.168.1.20:25808`.
-    /// The MCP `initialize` handshake is the only channel that can configure the
-    /// firmware's photo-explain endpoint, so with no reachable base we simply do
-    /// not advertise vision.
-    pub vision_base: Option<String>,
-    /// Bearer token the device presents on `/robot/vision/explain`.
-    pub device_token: String,
     /// Where discovered device tools are published for the MCP proxy.
     pub tools: Arc<crate::tool_registry::RobotToolRegistry>,
 }
@@ -384,8 +377,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
         sink,
         mut stream,
     } = link;
-    let robot_id = identity.robot_id.clone();
-    let (writer, writer_task) = Writer::spawn(sink);
+    let robot_id = identity.robot_id.clone();    let (writer, writer_task) = Writer::spawn(sink);
 
     let mut session_id: Option<String> = None;
     let mut companion_id: Option<String> = None;
@@ -514,8 +506,8 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                 ));
                                 mcp = Some(client.clone());
                                 if hello.mcp {
-                                    let vision_base = deps.vision_base.clone();
-                                    let device_token = deps.device_token.clone();
+                                    let vision_base = identity.vision_base.clone();
+                                    let device_token = identity.device_token.clone();
                                     let discovering = robot_id.clone();
                                     let tool_registry = deps.tools.clone();
                                     discovery_task = Some(tokio::spawn(async move {
@@ -799,6 +791,8 @@ mod tests {
                 robot_id: "aa:bb:cc:dd:ee:ff".into(),
                 client_id: "cid".into(),
                 peer: "192.168.1.9".into(),
+                vision_base: None,
+                device_token: "tok".to_owned(),
             },
             sink: Box::new(RecordingSink(written.clone())),
             stream: Box::new(ChannelStream(rx)),
@@ -808,8 +802,6 @@ mod tests {
             status,
             speech: speech.clone(),
             dispatcher: dispatcher.clone(),
-            vision_base: None,
-            device_token: "tok".to_owned(),
             tools: Arc::new(crate::tool_registry::RobotToolRegistry::default()),
         };
         (

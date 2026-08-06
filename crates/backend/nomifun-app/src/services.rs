@@ -1491,6 +1491,13 @@ pub struct AppServices {
     /// conversation-delete cascade — a per-consumer pool would report status about
     /// sockets the agent is not using. `clone()` is a handle to the same pool.
     pub ssh_pool: nomifun_ssh::SshConnectionPool,
+    /// LAN robot gateway: device registry, live status, tool registry, loopback
+    /// MCP front and the speech stack. `None` when the registry could not be
+    /// loaded — every robot entry point is then simply absent, which is a better
+    /// failure than refusing to boot the desktop over a robot file. The accept
+    /// loop is attached during router assembly, where the `ConversationService`
+    /// the sessions dispatch through exists.
+    pub robot: Option<Arc<crate::robot_wiring::RobotServices>>,
     pub acp_session_sync: Arc<AcpSessionSyncService>,
     /// Raw JWT secret string, used only for authentication/session signing.
     pub jwt_secret_raw: String,
@@ -2904,6 +2911,33 @@ impl AppServices {
             )
         };
 
+        // LAN robot gateway. Everything that does not need a
+        // `ConversationService` is built here so the device face and the OTA
+        // response are live the moment a listener comes up; the accept loop is
+        // attached during router assembly. A failure is domain-local: the
+        // desktop boots without robot support rather than not at all.
+        let robot = match crate::robot_wiring::RobotServices::build(
+            &data_dir,
+            authoritative_user_id.as_ref(),
+            event_bus.clone(),
+            model_invoke_service.clone(),
+            companion_service.clone(),
+            provider_repo_for_services.clone(),
+            provider_model_repo.clone(),
+            Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
+                database.pool().clone(),
+            )),
+            encryption_key,
+        )
+        .await
+        {
+            Ok(services) => Some(Arc::new(services)),
+            Err(error) => {
+                tracing::error!(%error, "robot: gateway unavailable this boot");
+                None
+            }
+        };
+
         let factory = build_agent_factory(AgentFactoryDeps {
             authoritative_user_id: authoritative_user_id.clone(),
             skill_manager: AcpSkillManager::new(skill_paths.clone()),
@@ -3022,6 +3056,7 @@ impl AppServices {
             requirement_service,
             terminal_service,
             ssh_pool,
+            robot,
             acp_session_sync: acp_agent_service,
             jwt_secret_raw: secret,
             encryption_key,
