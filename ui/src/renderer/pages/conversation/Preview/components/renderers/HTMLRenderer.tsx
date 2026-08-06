@@ -277,7 +277,7 @@ const HTMLRenderer: React.FC<HTMLRendererProps> = ({ content, file_path, workspa
   return (
     <div
       ref={containerRef || divRef}
-      className={`h-full w-full overflow-auto relative ${currentTheme === 'dark' ? 'bg-bg-1' : 'bg-white'}`}
+      className={`h-full w-full overflow-auto relative ${currentTheme === 'dark' ? 'bg-1' : 'bg-white'}`}
     >
       <iframe
         ref={iframeRef}

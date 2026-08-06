@@ -41,7 +41,7 @@ const WorkspacePanelHeader: React.FC<WorkspaceHeaderProps> = ({
   activeTab = 'files',
 }) => (
   <div
-    className='workspace-panel-header flex items-center justify-start px-12px py-4px gap-12px border-b border-[var(--bg-3)]'
+    className='workspace-panel-header flex items-center justify-start px-12px py-4px gap-12px border-b border-b-solid border-[var(--bg-3)]'
     style={{ height: WORKSPACE_HEADER_HEIGHT, minHeight: WORKSPACE_HEADER_HEIGHT }}
   >
     {showToggle && togglePlacement === 'left' && (

@@ -128,13 +128,13 @@ function ImageNodeImpl({ id, data, selected }: NodeProps<ImageFlowNode>) {
               style={{ background: 'var(--color-fill-1)' }}
             />
           ) : media.status === 'error' ? (
-            <div className='flex h-full w-full flex-col items-center justify-center gap-6px px-12px text-center text-[rgb(var(--danger-6))]'>
+            <div className='flex h-full w-full flex-col items-center justify-center gap-6px px-12px text-center text-danger-6'>
               <Info theme='outline' size={20} strokeWidth={3} />
               <span className='text-11px'>{t('workshopCanvas.node.image.loadFailed', { defaultValue: '图片加载失败' })}</span>
             </div>
           ) : (
             <div className='flex h-full w-full items-center justify-center'>
-              <span className='h-18px w-18px animate-spin rounded-full border-2 border-solid border-[var(--color-fill-3)] border-t-[rgb(var(--primary-6))]' />
+              <span className='h-18px w-18px animate-spin rounded-full border-2px border-solid border-[var(--color-fill-3)] border-t-[rgba(var(--primary-6),1)]' />
             </div>
           )}
         </NodeCard>

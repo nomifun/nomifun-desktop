@@ -158,7 +158,11 @@ const WorkspaceFolderSelect: React.FC<WorkspaceFolderSelectProps> = ({
         className={`flex items-center gap-10px rounded-10px border px-12px py-10px transition-all ${
           menuVisible
             ? 'border-primary-5 bg-fill-2 shadow-sm'
-            : 'border-border-2 bg-fill-1 hover:border-border-1 hover:bg-fill-2'
+            // Hover must strengthen the outline, matching the darker hover fill.
+            // The old hover class named the dead `border-border` colour and so
+            // emitted nothing; nobody noticed it pointed at Arco's *lightest*
+            // border token, i.e. the wrong direction. Arco 3 is darker than 2.
+            : 'border-arco-2 bg-fill-1 hover:border-arco-3 hover:bg-fill-2'
         }`}
       >
         <FolderOpen
@@ -215,7 +219,7 @@ const WorkspaceFolderSelect: React.FC<WorkspaceFolderSelectProps> = ({
             WebkitBackdropFilter: 'none',
             isolation: 'isolate',
           }}
-          className='overflow-x-hidden overflow-y-auto rounded-12px border border-border-1 p-6px shadow-[0_18px_48px_rgba(0,0,0,0.42)]'
+          className='overflow-x-hidden overflow-y-auto rounded-12px border border-solid border-arco-1 p-6px shadow-[0_18px_48px_rgba(0,0,0,0.42)]'
         >
           {recentWorkspaces.length > 0 && (
             <>
@@ -254,7 +258,11 @@ const WorkspaceFolderSelect: React.FC<WorkspaceFolderSelectProps> = ({
                   </div>
                 );
               })}
-              <div className='mx-2px my-4px h-1px bg-border-2' />
+              {/* 这条分隔线唯一的可见物就是背景色，而 `bg-border-2` 查的是一个叫
+                  「border-2」的颜色（theme 里没有），产出 0 条 CSS。取和菜单外框
+                  （border-arco-1）同一档的 --color-border-1。
+                  The separator's only visual was a background that compiled to nothing. */}
+              <div className='mx-2px my-4px h-1px bg-[var(--color-border-1)]' />
             </>
           )}
 

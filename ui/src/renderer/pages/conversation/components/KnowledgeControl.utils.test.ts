@@ -6,6 +6,8 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { createGenerator } from 'unocss';
+import unoConfig from '../../../../../uno.config';
 import {
   filterKnowledgeBasesByQuery,
   shouldShowKnowledgeBaseSearch,
@@ -41,13 +43,34 @@ describe('KnowledgeControl search helpers', () => {
     expect(filterKnowledgeBasesByQuery(bases, '', tagLabels, kindLabels)).toEqual(bases);
   });
 
-  test('uses theme-aware selected states without white text or white hit targets', () => {
+  test('uses theme-aware selected states without white text or white hit targets', async () => {
     const source = readFileSync(new URL('./KnowledgeControl.tsx', import.meta.url), 'utf8');
 
     expect(source.includes('text-white')).toBe(false);
     expect(source.includes('bg-[rgb(var(--primary-6))]')).toBe(false);
     expect(source.includes('border-[rgba(var(--primary-6),0.38)]')).toBe(true);
-    expect(source.includes('bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))]')).toBe(true);
+
+    // Intent, not a literal: every selected state that paints the translucent
+    // primary tint must also carry a text utility that compiles to a real colour.
+    // The old assertion pinned `text-[rgb(var(--primary-6))]`, which UnoCSS turns
+    // into `rgb(var(--primary-6) / var(--un-text-opacity))` — unparseable against a
+    // comma-triplet ramp variable, so the label silently kept its inherited colour.
+    const uno = await createGenerator(unoConfig);
+    const tintedSelections = source
+      .split('\n')
+      .filter((line) => line.includes('bg-[rgba(var(--primary-6),0.12)]'));
+    expect(tintedSelections.length).toBeGreaterThan(0);
+
+    for (const line of tintedSelections) {
+      const textUtility = line.split(/[\s'`]+/).find((token) => /^text-(?!\d|\[?\d)/.test(token));
+      expect(textUtility).toBeDefined();
+
+      const { css } = await uno.generate(textUtility as string, { preflights: false });
+      const color = css.match(/(?:^|[;{])\s*color\s*:\s*([^;}]+)/)?.[1]?.trim() ?? '';
+      expect(color).not.toBe('');
+      expect(/\/\s*var\(--un-/.test(color)).toBe(false);
+      expect(['transparent', 'currentColor', 'inherit'].includes(color)).toBe(false);
+    }
   });
 
   test('keeps kind and freshness/file-count metadata on the title row', () => {

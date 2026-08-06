@@ -236,7 +236,7 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
       </div>
 
       {/* Separator */}
-      <div className='border-t border-solid border-[var(--color-border-2)]' />
+      <div className='border-t border-t-solid border-[var(--color-border-2)]' />
 
       {/* Row 2: Tag filter + manage */}
       <div className='flex items-center gap-9px flex-wrap py-9px'>
@@ -276,7 +276,7 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
             'inline-flex items-center gap-5px select-none cursor-pointer rounded-full px-12px py-4px flex-shrink-0 ml-auto',
             'text-12px font-medium border border-dashed transition-all duration-150',
             'bg-transparent text-[var(--color-text-3)] border-[var(--color-border-3)]',
-            'hover:text-[rgb(var(--primary-6))] hover:border-[var(--color-primary-light-3)] hover:bg-[var(--color-primary-light-1)]',
+            'hover:text-primary-6 hover:border-[var(--color-primary-light-3)] hover:bg-[var(--color-primary-light-1)]',
           ].join(' ')}
         >
           <SettingTwo theme='outline' size={13} strokeWidth={3} />

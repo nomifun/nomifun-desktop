@@ -32,6 +32,14 @@ const semanticColors = {
 // Numeric keys support bg-* and border-* simultaneously
 // 📝 text-1 到 text-4 通过自定义规则支持，指向 Arco 的 --color-text-*
 // text-1 to text-4 are supported via custom rules, pointing to Arco's --color-text-*
+// ⚠️ 键名就是类名的后半段，没有 `bg` 这一层：所以 `bg-1` 是对的，`bg-bg-1` 查的是一个
+//    叫「bg-1」的颜色，查不到，产出 0 条 CSS（元素完全透明）。同理 `bg-0` 也是死的
+//    —— 下面没有 `0` 键，要主背景写 `bg-base`。
+// ⚠️ There is no `bg` level in these keys: `bg-bg-1` looks up a colour literally
+//    named "bg-1", finds nothing, and emits ZERO CSS. `bg-0` is dead too (no `0` key).
+// ⚠️ 数字键还会劫持带方向的边框类：`border-b-2` 不是「下边框 2px」，而是
+//    `border-bottom-color: var(--bg-2)`（方向解析先发生，再拿 `2` 查到这里）。
+//    宽度要写 `border-b-2px`。详见 ui/src/renderer/styles/MIGRATION.md 第 6 条。
 const backgroundColors = {
   base: 'var(--bg-base)', // bg-base, border-base - 主背景
   1: 'var(--bg-1)', // bg-1, border-1 - 次级背景
@@ -48,13 +56,17 @@ const backgroundColors = {
 };
 
 // ==================== 边框颜色 / Border Colors ====================
-const borderColors = {
-  'b-base': 'var(--border-base)', // border-b-base - 基础边框
-  'b-light': 'var(--border-light)', // border-b-light - 浅色边框
-  'b-1': 'var(--bg-3)', // border-b-1 - 基于 bg-3
-  'b-2': 'var(--bg-4)', // border-b-2 - 基于 bg-4
-  'b-3': 'var(--bg-5)', // border-b-3 - 基于 bg-5
-};
+// ⚠️ 这里曾有一个 borderColors = { 'b-base', 'b-light', 'b-1'... } 配置块，已删除：
+//    它永远不可达。UnoCSS 解析 `border-b-*` 时先吃掉 `-b-`（bottom 方向），再去
+//    theme.colors 里查剩下的键，所以 `border-b-base` 命中的是 backgroundColors.base，
+//    输出 `border-bottom-color: var(--bg-base)`，而不是 `var(--border-base)`。
+//    删除前后整站产出 CSS 逐字节相同（见 ui/src/renderer/styles/MIGRATION.md 的
+//    「-b- 方向陷阱」一节）。
+// ⚠️ A borderColors block used to live here and was deleted: it was unreachable.
+//    UnoCSS consumes `-b-` as the bottom direction before looking the remainder up
+//    in theme.colors, so `border-b-base` resolves against backgroundColors.base.
+//    要给元素上「基础边框色」，用 `border-[var(--border-base)]`。
+//    For a base border color use `border-[var(--border-base)]`.
 
 // ==================== 品牌色 / Brand Colors ====================
 const brandColors = {
@@ -137,6 +149,16 @@ export default defineConfig({
     ['bg-fill-0', { 'background-color': 'var(--fill-0)' }],
   ],
   // Preflights - Global base styles 全局基础样式
+  // ⚠️ 这里**只有** `color: inherit`，而且是故意的：没有引入
+  //    `@unocss/reset/tailwind.css`，也没有 `* { border-width: 0; border-style: solid }`。
+  //    后果是 border-style 保持 CSS 初始值 none —— `border-b border-arco-2` 这种「有宽度
+  //    有颜色、没样式」的写法一个像素都不画，必须显式补 `border-b-solid`（同方向！
+  //    无方向的 `border-solid` 会让没有宽度类的另外三边回落到 medium≈3px）。
+  //    加全局 reset 的方案评估过并否决：那条 `*` 规则会抹掉原生表单控件的默认边框，
+  //    影响面覆盖 1000+ 文件且无法逐一回归。理由与替代方案见
+  //    ui/src/renderer/styles/MIGRATION.md 的「为什么不加全局 border reset」。
+  // ⚠️ Intentionally the only preflight: no Tailwind reset, so `border-style` stays at
+  //    its initial `none`. Width + colour without a style class paints nothing.
   preflights: [
     {
       getCSS: () => `
@@ -157,7 +179,6 @@ export default defineConfig({
       ...textColors,
       ...semanticColors,
       ...backgroundColors,
-      ...borderColors,
       ...brandColors,
       ...aouColors,
       ...componentColors,

@@ -118,7 +118,7 @@ Participant/Step/Attempt/Template Participant、知识库、附件、Remote Agen
 `participant_id`、`step_id`、`attempt_id`、`template_participant_id`、
 `channel_plugin_id`、`channel_user_id`、`channel_session_id`。
 受管 Companion side-store 中可被 API、文件或其他记录再次定位的 Memory、
-Suggestion、Session Window、Collected Event、Skill 与 Skill Pattern 同样使用
+Session Window、Collected Event、Skill 与 Skill Pattern 同样使用
 各自具名的 UUIDv7 newtype；只在当前调用结果中存在的临时 learning / evolution
 结果是不含 ID 的瞬时值，不升级为稳定实体。
 

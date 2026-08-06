@@ -17,13 +17,13 @@ use crate::profile::{HeadBox, CompanionProfileConfig, SharedCompanionConfig};
 use crate::memory_search::MemoryStatusFilter;
 use crate::learner::CompanionLearnResult;
 use crate::service::{
-    CompanionSkillContent, CompanionSkillViewPage, CompanionStatus, CompanionWeeklyDigest,
+    CompanionHistoryDay, CompanionSkillContent, CompanionSkillViewPage, CompanionStatus, CompanionWeeklyDigest,
     MemoryListItem, MemoryListPage, MemoryMergeGroup, SourceStats,
 };
 use crate::state::CompanionRouterState;
 use crate::store::{
-    MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryScope,
-    CompanionMemory, CompanionSkill, CompanionSuggestion, SuggestionPage,
+    MemoryActor, MemoryBatchAction, MemoryFilter, MemoryListSort,
+    CompanionMemory, CompanionSkill,
 };
 
 pub fn companion_routes(state: CompanionRouterState) -> Router {
@@ -59,14 +59,13 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
         .route("/api/companion/memories/batch", post(batch_memories))
         .route("/api/companion/memories/merge-suggestions", post(memory_merge_suggestions))
         .route("/api/companion/memories/merge", post(merge_memories))
-        .route("/api/companion/suggestions", get(list_suggestions))
-        .route(
-            "/api/companion/suggestions/{suggestion_id}/decide",
-            post(decide_suggestion),
-        )
         .route("/api/companion/companions/{companion_id}/skills", get(list_companion_skills))
         .route("/api/companion/companions/{companion_id}/weekly-digest", get(weekly_digest))
         .route("/api/companion/companions/{companion_id}/digests", get(list_day_digests))
+        .route(
+            "/api/companion/companions/{companion_id}/history/days",
+            get(history_days),
+        )
         .route(
             "/api/companion/companions/{companion_id}/skills/{companion_skill_id}",
             get(get_companion_skill).put(update_companion_skill),
@@ -80,10 +79,9 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
             post(draft_skill_from_session),
         )
         .route(
-            "/api/companion/companions/{companion_id}/skills/{companion_skill_id}/gift",
-            post(gift_companion_skill),
+            "/api/companion/companions/{companion_id}/learn/run",
+            post(run_learn),
         )
-        .route("/api/companion/learn/run", post(run_learn))
         .route("/api/companion/events/stats", get(event_stats))
         .route("/api/companion/events/storage", get(event_storage))
         .route("/api/companion/consent", post(apply_consent))
@@ -127,47 +125,16 @@ async fn patch_config(
     Ok(Json(ApiResponse::ok(state.service.patch_config(patch).await?)))
 }
 
-/// Build an optional [`MemoryScope`] from wire parts without accepting empty-ID
-/// sentinels. Both fields absent means "leave unchanged"; shared is exactly
-/// `scope_kind = "user"` with no owner, and private requires a canonical owner.
-fn scope_from_parts(
-    scope_kind: Option<&str>,
-    scope_companion_id: Option<&str>,
-) -> Result<Option<MemoryScope>, AppError> {
-    match (scope_kind, scope_companion_id) {
-        (None, None) => Ok(None),
-        (Some("user"), None) => Ok(Some(MemoryScope::Shared)),
-        (Some("companion"), Some(companion_id)) => {
-            nomifun_common::CompanionId::try_from(companion_id).map_err(|error| {
-                AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
-            })?;
-            Ok(Some(MemoryScope::Companion(companion_id.to_owned())))
-        }
-        (Some(kind), _) if kind != "user" && kind != "companion" => {
-            Err(AppError::BadRequest(format!("invalid memory scope_kind {kind:?}")))
-        }
-        (Some("user"), Some(_)) => Err(AppError::BadRequest(
-            "shared memory scope must not include scope_companion_id".into(),
-        )),
-        (Some("companion"), None) => Err(AppError::BadRequest(
-            "private memory scope requires scope_companion_id".into(),
-        )),
-        (None, Some(_)) => Err(AppError::BadRequest(
-            "scope_companion_id requires an explicit scope_kind".into(),
-        )),
-        _ => unreachable!(),
-    }
-}
-
 #[derive(Deserialize)]
 struct ListMemoriesQuery {
     kind: Option<String>,
     q: Option<String>,
     /// `active` (default) / `archived` / `all`.
     status: Option<String>,
-    /// When set, scope the list to memories visible to this companion (shared +
-    /// its own private). Absent = cross-companion "all" view.
-    scope_companion_id: Option<String>,
+    /// When set, list only what this companion can read: its own memories plus
+    /// any vestigial unowned row the boot migration has not re-homed yet.
+    /// Absent = every memory (the owner's administrative view).
+    companion_id: Option<String>,
     /// `relevance` (default with `q`) / `time` / `importance`.
     sort: Option<String>,
     limit: Option<i64>,
@@ -179,10 +146,8 @@ async fn list_memories(
     Extension(_user): Extension<CurrentUser>,
     Query(query): Query<ListMemoriesQuery>,
 ) -> Result<Json<ApiResponse<MemoryListPage>>, AppError> {
-    if let Some(companion_id) = query.scope_companion_id.as_deref() {
-        nomifun_common::CompanionId::try_from(companion_id).map_err(|error| {
-            AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
-        })?;
+    if let Some(companion_id) = query.companion_id.as_deref() {
+        validate_companion_id(companion_id)?;
     }
     let status = query.status.filter(|s| !s.is_empty()).unwrap_or_else(|| "active".into());
     let kind = query.kind.filter(|k| !k.is_empty());
@@ -207,7 +172,7 @@ async fn list_memories(
         let sort = sort.as_deref().unwrap_or("relevance");
         let page = state
             .service
-            .search_memory_page(&q, kind, status, query.scope_companion_id, sort, limit, offset)
+            .search_memory_page(&q, kind, status, query.companion_id, sort, limit, offset)
             .await?;
         return Ok(Json(ApiResponse::ok(page)));
     }
@@ -227,7 +192,7 @@ async fn list_memories(
         kind,
         q: None,
         status: status_filter,
-        scope_companion_id: query.scope_companion_id,
+        companion_id: query.companion_id,
         limit,
         offset,
     };
@@ -248,9 +213,10 @@ struct AddMemoryRequest {
     content: String,
     #[serde(default)]
     tags: Vec<String>,
-    /// Owning canonical companion for a private memory; absent = shared.
+    /// The owning companion. Absent lets the server resolve the owner (explicit
+    /// default → oldest companion); it never means "shared" — that concept is gone.
     #[serde(default)]
-    scope_companion_id: Option<String>,
+    companion_id: Option<String>,
 }
 
 async fn add_memory(
@@ -259,25 +225,50 @@ async fn add_memory(
     body: Result<Json<AddMemoryRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CompanionMemory>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let scope = match req.scope_companion_id.as_deref() {
-        Some(companion_id) => scope_from_parts(Some("companion"), Some(companion_id))?
-            .expect("explicit scope"),
-        None => MemoryScope::Shared,
-    };
+    if let Some(companion_id) = req.companion_id.as_deref() {
+        validate_companion_id(companion_id)?;
+    }
     Ok(Json(ApiResponse::ok(
-        state.service.add_memory(&req.kind, &req.content, &req.tags, scope).await?,
+        state
+            .service
+            .add_memory(&req.kind, &req.content, &req.tags, req.companion_id.as_deref())
+            .await?,
     )))
 }
 
+/// Content / pin / lifecycle only — `companion_id` is the CALLER, not a
+/// target: it says which companion is asking, and a memory owned by any other
+/// companion is not addressable. It can never re-home a memory, because the owner
+/// is fixed at write time and no wire carries a new one.
 #[derive(Deserialize)]
 struct UpdateMemoryRequest {
     content: Option<String>,
     pinned: Option<bool>,
     status: Option<String>,
-    /// `'user'` (shared) or `'companion'` (private). Present together with
-    /// `scope_companion_id` to re-home a memory; both absent = scope unchanged.
-    scope_kind: Option<String>,
-    scope_companion_id: Option<String>,
+    companion_id: String,
+}
+
+/// The asking companion for a mutation that has no body to carry it (DELETE).
+#[derive(Deserialize)]
+struct MemoryActorQuery {
+    companion_id: String,
+}
+
+/// Reject a malformed `companion_id` before it reaches the store, on every
+/// memory route that takes one.
+fn validate_companion_id(companion_id: &str) -> Result<(), AppError> {
+    nomifun_common::CompanionId::try_from(companion_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid companion_id: {error}")))?;
+    Ok(())
+}
+
+/// The companion a memory mutation is made ON BEHALF OF. Required: the workspace
+/// always knows whose memory list it is showing, and an absent owner would mean
+/// "check nothing". The cross-companion administrative view is the owner agent's
+/// MCP surface, which passes [`MemoryActor::AnyOwner`] explicitly.
+fn memory_actor(companion_id: &str) -> Result<MemoryActor, AppError> {
+    validate_companion_id(companion_id)?;
+    Ok(MemoryActor::Companion(companion_id.to_owned()))
 }
 
 async fn update_memory(
@@ -287,7 +278,6 @@ async fn update_memory(
     body: Result<Json<UpdateMemoryRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let scope = scope_from_parts(req.scope_kind.as_deref(), req.scope_companion_id.as_deref())?;
     state
         .service
         .update_memory(
@@ -295,7 +285,7 @@ async fn update_memory(
             req.content.as_deref(),
             req.pinned,
             req.status.as_deref(),
-            scope,
+            &memory_actor(&req.companion_id)?,
         )
         .await?;
     Ok(Json(ApiResponse::ok(())))
@@ -305,8 +295,12 @@ async fn delete_memory(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(memory_id): Path<String>,
+    Query(query): Query<MemoryActorQuery>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.delete_memory(&memory_id).await?;
+    state
+        .service
+        .delete_memory(&memory_id, &memory_actor(&query.companion_id)?)
+        .await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -318,6 +312,8 @@ struct BatchMemoriesRequest {
     /// Target kind — required for `reclassify`, ignored otherwise.
     #[serde(default)]
     kind: Option<String>,
+    /// The asking companion; every id in the batch must be one of its memories.
+    companion_id: String,
 }
 
 /// Atomic batch memory operation (single transaction; any bad id rolls back).
@@ -340,16 +336,31 @@ async fn batch_memories(
             return Err(AppError::BadRequest(format!("invalid batch action '{other}'")));
         }
     };
-    state.service.batch_memories(&req.ids, &action).await?;
+    state
+        .service
+        .batch_memories(&req.ids, &action, &memory_actor(&req.companion_id)?)
+        .await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
-/// Merge-assistant dry run: suspected-duplicate groups (active layer only).
+/// Merge-assistant dry run for ONE companion: suspected-duplicate groups over the
+/// active layer it can see. `companion_id` is required — the response
+/// carries memory CONTENT, so it is scoped here and never filtered client-side.
+#[derive(Deserialize)]
+struct MergeSuggestionsRequest {
+    companion_id: String,
+}
+
 async fn memory_merge_suggestions(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<MergeSuggestionsRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<MemoryMergeGroup>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.memory_merge_suggestions().await?)))
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    validate_companion_id(&req.companion_id)?;
+    Ok(Json(ApiResponse::ok(
+        state.service.memory_merge_suggestions(&req.companion_id).await?,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -357,6 +368,8 @@ struct MergeMemoriesRequest {
     group: Vec<String>,
     merged_content: String,
     kind: String,
+    /// The asking companion; every member of the group must be one of its memories.
+    companion_id: String,
 }
 
 /// Merge-assistant confirm: insert the merged memory, archive the source group.
@@ -369,55 +382,20 @@ async fn merge_memories(
     Ok(Json(ApiResponse::ok(
         state
             .service
-            .merge_memories(&req.group, &req.merged_content, &req.kind)
+            .merge_memories(
+                &req.group,
+                &req.merged_content,
+                &req.kind,
+                &memory_actor(&req.companion_id)?,
+            )
             .await?,
     )))
 }
 
-#[derive(Deserialize)]
-struct ListSuggestionsQuery {
-    status: Option<String>,
-    limit: Option<i64>,
-    offset: Option<i64>,
-}
-
-async fn list_suggestions(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Query(query): Query<ListSuggestionsQuery>,
-) -> Result<Json<ApiResponse<SuggestionPage>>, AppError> {
-    let status = query.status.filter(|s| !s.is_empty());
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .list_suggestion_page(status.as_deref(), query.limit.unwrap_or(100), query.offset.unwrap_or(0))
-            .await?,
-    )))
-}
-
-#[derive(Deserialize)]
-struct DecideSuggestionRequest {
-    accept: bool,
-}
-
-async fn decide_suggestion(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(suggestion_id): Path<String>,
-    body: Result<Json<DecideSuggestionRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<CompanionSuggestion>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .decide_suggestion(&suggestion_id, req.accept)
-            .await?,
-    )))
-}
-
+/// A companion's own skills. There is deliberately no cross-companion
+/// parameter: 共享技能 is gone, so the owner in the path IS the whole scope.
 #[derive(Deserialize)]
 struct ListSkillsQuery {
-    include_shared: Option<bool>,
     status: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -434,7 +412,6 @@ async fn list_companion_skills(
         .service
         .list_companion_skill_page(
             &companion_id,
-            q.include_shared.unwrap_or(true),
             status.as_deref(),
             q.limit.unwrap_or(100),
             q.offset.unwrap_or(0),
@@ -494,6 +471,18 @@ async fn list_day_digests(
             .await?
     };
     Ok(Json(ApiResponse::ok(digests)))
+}
+
+/// The companion's complete history day index (聊天历史 的日期索引). Read-only: no
+/// session is ever minted, and a companion that has never chatted returns `[]`.
+async fn history_days(
+    State(state): State<CompanionRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(companion_id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<CompanionHistoryDay>>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.history_day_index(&companion_id).await?,
+    )))
 }
 
 async fn get_companion_skill(
@@ -571,35 +560,17 @@ async fn draft_skill_from_session(
     )))
 }
 
-#[derive(Deserialize)]
-struct GiftSkillRequest {
-    to_companion_id: String,
-}
-
-async fn gift_companion_skill(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path((companion_id, companion_skill_id)): Path<(String, String)>,
-    body: Result<Json<GiftSkillRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<CompanionSkill>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .gift_companion_skill(
-                &companion_id,
-                &companion_skill_id,
-                &req.to_companion_id,
-            )
-            .await?,
-    )))
-}
-
+/// Run ONE companion's 定时学习 pass now. Companion-scoped since the loop is:
+/// the run lock lives per companion, so asking A to learn is never refused
+/// because B happens to be mid-run.
 async fn run_learn(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
+    Path(companion_id): Path<String>,
 ) -> Result<Json<ApiResponse<CompanionLearnResult>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.run_learn_now().await?)))
+    Ok(Json(ApiResponse::ok(
+        state.service.run_learn_now(&companion_id).await?,
+    )))
 }
 
 async fn event_stats(
@@ -983,15 +954,6 @@ async fn get_active_thread(
 
 // ----- cross-machine bundle export / import (§4.8) -----
 
-/// The live shared store + shared dir for export/import. `CompanionService` keeps
-/// its store private, so the boot-time registration in `crate::store` is the
-/// only crate-visible handle. `None` means the production store was not opened,
-/// so the endpoints refuse to operate.
-fn live_store() -> Result<(&'static std::path::Path, &'static crate::store::CompanionStore), AppError> {
-    crate::store::live_store()
-        .ok_or_else(|| AppError::Internal("伙伴持久化存储尚未初始化，无法导入导出".into()))
-}
-
 #[derive(Deserialize)]
 struct ExportMemoryRequest {
     dest_path: String,
@@ -1022,6 +984,18 @@ struct ExportCompanionRequest {
     /// frontend (the companion crate never reaches into the knowledge domain).
     #[serde(default)]
     knowledge_names: Vec<String>,
+    /// Carry this companion's own memories (default on). Its settings are always
+    /// included, and its custom figure travels whenever it wears one.
+    #[serde(default = "default_true")]
+    include_memories: bool,
+    /// Carry its skills — rows plus their `SKILL.md` bodies. Off by default:
+    /// skill bodies are executable, so exporting them is an explicit choice.
+    #[serde(default)]
+    include_skills: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 async fn export_companion(
@@ -1031,16 +1005,18 @@ async fn export_companion(
     body: Result<Json<ExportCompanionRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<crate::export::ExportSummary>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    // Existence gate: an unknown companion must 404 before any file is written.
-    let profile = state.service.get_companion(&companion_id).await?;
-    let (_, store) = live_store()?;
-    let summary = crate::export::export_companion_bundle(
-        store,
-        &profile,
-        std::path::Path::new(&req.dest_path),
-        &req.knowledge_names,
-    )
-    .await?;
+    let summary = state
+        .service
+        .export_companion_bundle(
+            &companion_id,
+            std::path::Path::new(&req.dest_path),
+            &req.knowledge_names,
+            crate::export::CompanionBundleScope {
+                memories: req.include_memories,
+                skills: req.include_skills,
+            },
+        )
+        .await?;
     Ok(Json(ApiResponse::ok(summary)))
 }
 
@@ -1116,14 +1092,33 @@ mod tests {
     #[tokio::test]
     async fn learn_endpoint_returns_only_a_transient_result_and_history_route_is_retired() {
         let dir = tempfile::tempdir().unwrap();
-        let (app, _) = test_app(dir.path()).await;
+        let (app, service) = test_app(dir.path()).await;
+        let companion_id = service
+            .create_companion("学习者", "ink")
+            .await
+            .unwrap()
+            .companion_id;
 
-        let response = app
+        // The run is companion-scoped: the install-wide route is gone.
+        let unscoped = app
             .clone()
             .oneshot(
                 Request::post("/api/companion/learn/run")
                     .body(Body::empty())
                     .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unscoped.status(), StatusCode::NOT_FOUND);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/companion/companions/{companion_id}/learn/run"
+                ))
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -1137,7 +1132,6 @@ mod tests {
             "events_processed",
             "memories_added",
             "status",
-            "suggestions_added",
             "summary",
         ]
         .into_iter()
@@ -1235,43 +1229,107 @@ mod tests {
         }
     }
 
+    /// The history rail is read-only and complete: no session is ever minted, a
+    /// companion that never chatted is an empty list (not a 400 for an
+    /// unconfigured model, and not a 404), and a day that only has an archived
+    /// digest is still reachable.
+    #[tokio::test]
+    async fn history_days_reads_without_minting_and_keeps_digest_only_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let companion = service.create_companion("小南", "ink").await.unwrap();
+
+        let days = |uri: String| {
+            let app = app.clone();
+            async move { app.oneshot(Request::get(&uri).body(Body::empty()).unwrap()).await.unwrap() }
+        };
+
+        // No conversation yet: an empty index, and nothing was minted.
+        let uri = format!(
+            "/api/companion/companions/{}/history/days",
+            companion.companion_id
+        );
+        let response = days(uri.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["data"], serde_json::json!([]));
+        assert!(
+            service.store.list_companion_threads(None).await.unwrap().is_empty(),
+            "a history read must never create a session"
+        );
+
+        // An archived digest makes its day reachable even with no messages left.
+        let conversation_id = nomifun_common::ConversationId::new().into_string();
+        let window = service
+            .store
+            .ensure_open_window(&companion.companion_id, &conversation_id, 0)
+            .await
+            .unwrap();
+        service
+            .store
+            .close_window(&window.session_window_id, "archived", Some("聊了部署"), None, 12)
+            .await
+            .unwrap();
+        let body = json_body(days(uri).await).await;
+        assert_eq!(
+            body["data"],
+            serde_json::json!([{
+                "day": window.session_day,
+                "message_count": 0,
+                "has_digest": true,
+            }]),
+            "{body}"
+        );
+
+        // An unknown companion is a 404, never an empty index.
+        let missing = nomifun_common::CompanionId::new().into_string();
+        let response = days(format!("/api/companion/companions/{missing}/history/days")).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn batch_endpoint_applies_all_actions_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let a = service.add_memory("episode", "上周试了埃塞俄比亚豆", &[], MemoryScope::Shared).await.unwrap();
-        let b = service.add_memory("episode", "昨天喝了危地马拉豆", &[], MemoryScope::Shared).await.unwrap();
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let a = service
+            .add_memory("episode", "上周试了埃塞俄比亚豆", &[], Some(&owner))
+            .await
+            .unwrap();
+        let b = service
+            .add_memory("episode", "昨天喝了危地马拉豆", &[], Some(&owner))
+            .await
+            .unwrap();
 
         // archive both
         let resp = app
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "archive" }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "archive", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(service.store.count_memories("archived").await.unwrap(), 2);
+        assert_eq!(service.store.count_memories("archived", Some(&owner)).await.unwrap(), 2);
 
         // restore both
         let resp = app
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "restore" }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "restore", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(service.store.count_memories("active").await.unwrap(), 2);
+        assert_eq!(service.store.count_memories("active", Some(&owner)).await.unwrap(), 2);
 
         // reclassify one; an invalid kind is a 400 and changes nothing
         let resp = app
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "knowledge" }),
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "knowledge", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
@@ -1281,7 +1339,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "bogus" }),
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "bogus", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
@@ -1293,39 +1351,296 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), missing.as_str()], "action": "delete" }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), missing.as_str()], "action": "delete", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert!(service.store.get_memory(&a.memory_id).await.unwrap().is_some(), "failed batch must roll back");
 
+        // another companion cannot batch A's rows, and the refusal changes nothing
+        let stranger = service.create_companion("乙", "ink").await.unwrap().companion_id;
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/batch",
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "delete", "companion_id": stranger.as_str() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(service.store.get_memory(&a.memory_id).await.unwrap().is_some());
+
         // delete both
         let resp = app
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/batch",
-                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "delete" }),
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "delete", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(service.store.count_memories("active").await.unwrap(), 0);
+        assert_eq!(service.store.count_memories("active", Some(&owner)).await.unwrap(), 0);
     }
 
+    /// The memory wire names the owner exactly what the column names it:
+    /// `companion_id`. Two retired spellings must never come back — `scope_kind`
+    /// (the discriminator that used to travel beside the owner) and
+    /// `scope_companion_id` (the owner's own historical name, which outlived the
+    /// column rename as a bare `#[serde(rename)]`). Asserted on the response BODY,
+    /// because a rename that stops at the struct field is invisible to every test
+    /// that reads typed rows.
+    #[tokio::test]
+    async fn memory_wire_names_the_owner_companion_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+
+        // The write takes the owner under the same name the read gives it back.
+        let created = json_body(
+            app.clone()
+                .oneshot(post_json(
+                    "/api/companion/memories",
+                    serde_json::json!({
+                        "kind": "preference",
+                        "content": "主人喜欢深烘焙咖啡",
+                        "companion_id": owner.as_str(),
+                    }),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(created["data"]["companion_id"], serde_json::json!(owner.as_str()), "{created}");
+
+        let listed = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get(format!("/api/companion/memories?companion_id={owner}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let items = listed["data"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "the query param filters by the same name: {listed}");
+        for row in [&created["data"], &items[0]] {
+            let object = row.as_object().unwrap();
+            assert_eq!(object["companion_id"], serde_json::json!(owner.as_str()), "{row}");
+            for retired in ["scope_companion_id", "scope_kind"] {
+                assert!(!object.contains_key(retired), "retired `{retired}` is back on the wire: {row}");
+            }
+        }
+    }
+
+    /// The skill wire names the owner exactly what the column names it, the same
+    /// way the memory wire above does. `scope_companion_id` outlived the column
+    /// rename on this half of the codebase as a bare `#[serde(rename)]`, so it must
+    /// be asserted on the response BODY: a rename that stops at the struct field is
+    /// invisible to every test that reads typed rows. `scope_kind` — the retired
+    /// shared/private discriminator — must stay gone too.
+    #[tokio::test]
+    async fn skill_wire_names_the_owner_companion_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+
+        // The list route fails closed without a real SKILL.md, so seed both halves:
+        // the file under the owner's scope and the registry row that points at it.
+        let paths = nomifun_extension::skill_service::resolve_skill_paths(dir.path(), dir.path());
+        nomifun_extension::skill_service::create_skill(
+            &paths,
+            &nomifun_extension::skill_service::SkillScope::Companion(owner.clone()),
+            true,
+            &nomifun_extension::skill_service::SkillDraftInput {
+                name: "research".into(),
+                description: "一个可复用的调研流程".into(),
+                when_to_use: None,
+                allowed_tools: None,
+                paths: None,
+                body: "步骤".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let now = nomifun_common::now_ms();
+        service
+            .store
+            .insert_skill(&CompanionSkill {
+                companion_skill_id: nomifun_common::CompanionSkillId::new().into_string(),
+                skill_name: "research".into(),
+                companion_id: Some(owner.clone()),
+                status: "draft".into(),
+                source: "mined".into(),
+                confidence: 0.9,
+                provenance_event_ids: vec![],
+                strength: 1.0,
+                version: 1,
+                skill_pattern_id: None,
+                usage_count: 0,
+                last_used_at: None,
+                created_at: now,
+                updated_at: now,
+                signature: String::new(),
+            })
+            .await
+            .unwrap();
+
+        let listed = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get(format!("/api/companion/companions/{owner}/skills"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let items = listed["data"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{listed}");
+        let row = items[0].as_object().unwrap();
+        // `get`, not `[]`: an absent key is the exact regression under test, and
+        // indexing a `Map` panics without naming what was missing.
+        assert_eq!(
+            row.get("companion_id"),
+            Some(&serde_json::json!(owner.as_str())),
+            "the skill wire must name the owner `companion_id`: {listed}"
+        );
+        for retired in ["scope_companion_id", "scope_kind"] {
+            assert!(!row.contains_key(retired), "retired `{retired}` is back on the wire: {listed}");
+        }
+    }
+
+    /// PUT and DELETE address a memory by id alone, so the ASKING companion has to
+    /// travel with the request (body field / query param) or the store cannot
+    /// enforce ownership. A foreign companion gets a 404 and the row survives;
+    /// omitting the field at all is a 400, never an unchecked mutation.
+    #[tokio::test]
+    async fn single_memory_mutations_are_scoped_to_the_asking_companion() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let stranger = service.create_companion("乙", "ink").await.unwrap().companion_id;
+        let mine = service
+            .add_memory("preference", "主人喜欢深烘焙咖啡", &[], Some(&owner))
+            .await
+            .unwrap();
+        let put = |body: serde_json::Value| {
+            Request::put(format!("/api/companion/memories/{}", mine.memory_id))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // Foreign asker: 404, and the content is untouched.
+        let resp = app
+            .clone()
+            .oneshot(put(serde_json::json!({ "content": "篡改", "companion_id": stranger.as_str() })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete(format!(
+                    "/api/companion/memories/{}?companion_id={stranger}",
+                    mine.memory_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let row = service.store.get_memory(&mine.memory_id).await.unwrap().unwrap();
+        assert_eq!(row.content, "主人喜欢深烘焙咖啡");
+
+        // No asker at all: refused as a bad request, not silently unchecked.
+        let resp = app.clone().oneshot(put(serde_json::json!({ "content": "谁都能改" }))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/companion/memories/{}", mine.memory_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(service.store.get_memory(&mine.memory_id).await.unwrap().is_some());
+
+        // The owner can do both.
+        let resp = app
+            .clone()
+            .oneshot(put(serde_json::json!({ "content": "主人现在只喝浅烘焙", "companion_id": owner.as_str() })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            service.store.get_memory(&mine.memory_id).await.unwrap().unwrap().content,
+            "主人现在只喝浅烘焙"
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete(format!(
+                    "/api/companion/memories/{}?companion_id={owner}",
+                    mine.memory_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(service.store.get_memory(&mine.memory_id).await.unwrap().is_none());
+    }
+
+    /// The merge assistant end to end, plus the leak it used to have: the dry run
+    /// is scoped to the asking companion IN THE STORE, so another companion's
+    /// memory text never reaches the response the client renders.
     #[tokio::test]
     async fn merge_flow_groups_then_archives_sources_with_audit_tag() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
+        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let stranger = service.create_companion("乙", "ink").await.unwrap().companion_id;
         // Two normalized-similar actives of one kind (dedup guard skips exact
         // duplicates, so use containment ≥0.6 variants) + one unrelated.
-        let a = service.store.insert_memory("preference", "主人喜欢深烘焙咖啡", &[], 0.8, "manual").await.unwrap();
-        let b = service.store.insert_memory("preference", "主人喜欢深烘焙咖啡豆手冲", &[], 0.6, "manual").await.unwrap();
-        let other = service.store.insert_memory("task", "帮主人整理周报", &[], 0.8, "manual").await.unwrap();
+        // Written through the store: `add_memory`'s dedup guard uses the very
+        // similarity rule the merge assistant groups by, so it would fold the pair
+        // into one row before it ever became a suggestion.
+        let owned = |companion_id: &str, kind: &str, content: &str| {
+            let owner = companion_id.to_owned();
+            let (kind, content) = (kind.to_owned(), content.to_owned());
+            let store = &service.store;
+            async move {
+                store
+                    .insert_memory_scoped(&kind, &content, &[], 0.8, "manual", Some(&owner))
+                    .await
+                    .unwrap()
+            }
+        };
+        let a = owned(&owner, "preference", "主人喜欢深烘焙咖啡").await;
+        let b = owned(&owner, "preference", "主人喜欢深烘焙咖啡豆手冲").await;
+        let other = owned(&owner, "task", "帮主人整理周报").await;
+        // The other companion has a duplicate pair of its own. It must not appear
+        // in 甲's suggestions in any form — not as a group, and not as content.
+        let secret = "乙的私事：主人周五要体检";
+        owned(&stranger, "episode", secret).await;
+        owned(&stranger, "episode", "乙的私事：主人周五要体检，别忘了空腹").await;
 
         let resp = app
             .clone()
-            .oneshot(post_json("/api/companion/memories/merge-suggestions", serde_json::json!({})))
+            .oneshot(post_json(
+                "/api/companion/memories/merge-suggestions",
+                serde_json::json!({ "companion_id": owner.as_str() }),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1340,6 +1655,34 @@ mod tests {
             .collect();
         assert!(ids.contains(&a.memory_id.as_str()) && ids.contains(&b.memory_id.as_str()));
         assert!(!ids.contains(&other.memory_id.as_str()));
+        assert!(
+            !v.to_string().contains(secret),
+            "another companion's memory content must never be on this wire: {v}"
+        );
+
+        // Missing owner is a 400, not an install-wide scan.
+        let resp = app
+            .clone()
+            .oneshot(post_json("/api/companion/memories/merge-suggestions", serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Another companion cannot merge 甲's group.
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/merge",
+                serde_json::json!({
+                    "group": [a.memory_id.as_str(), b.memory_id.as_str()],
+                    "merged_content": "抢来的",
+                    "kind": "preference",
+                    "companion_id": stranger.as_str(),
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         // Confirm merge: merged row active, sources archived + audit-tagged.
         let resp = app
@@ -1350,6 +1693,7 @@ mod tests {
                     "group": [a.memory_id.as_str(), b.memory_id.as_str()],
                     "merged_content": "主人喜欢深烘焙咖啡豆，常用手冲",
                     "kind": "preference",
+                    "companion_id": owner.as_str(),
                 }),
             ))
             .await
@@ -1374,7 +1718,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/companion/memories/merge",
-                serde_json::json!({ "group": [a.memory_id.as_str(), b.memory_id.as_str()], "merged_content": "x", "kind": "bogus" }),
+                serde_json::json!({ "group": [a.memory_id.as_str(), b.memory_id.as_str()], "merged_content": "x", "kind": "bogus", "companion_id": owner.as_str() }),
             ))
             .await
             .unwrap();
@@ -1400,8 +1744,7 @@ mod tests {
             created_at: updated_at,
             updated_at,
             last_reinforced_at: updated_at,
-            scope_kind: "user".into(),
-            scope_companion_id: None,
+            companion_id: None,
         };
         let old_archived = raw("主人上月研究了咖啡烘焙曲线", 0.9, "archived", 1_000);
         let new_active = raw("主人今天又聊起咖啡豆产区", 0.2, "active", 2_000);

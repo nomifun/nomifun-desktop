@@ -316,7 +316,7 @@ const ProviderConnectionsSection: React.FC<{ provider: IProvider }> = ({ provide
                 backgroundColor: 'rgba(var(--primary-6),0.06)',
               }}
             >
-              <span className='text-12px leading-5 text-[rgb(var(--primary-6))] min-w-0'>
+              <span className='text-12px leading-5 text-primary-6 min-w-0'>
                 {t('settings.connections.voiceHint', {
                   defaultValue: '语音识别/合成需要独立的语音连接档案（role: voice）',
                 })}

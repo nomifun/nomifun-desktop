@@ -38,7 +38,7 @@ const outcomeBadgeStyle = (outcome: string): React.CSSProperties => {
 const IdmmInterventionRow: React.FC<{ rec: IIdmmIntervention }> = ({ rec }) => {
   const { t } = useTranslation();
   return (
-    <div className='flex flex-col gap-2px rounded-6px bg-[rgb(var(--gray-2))] px-8px py-6px'>
+    <div className='flex flex-col gap-2px rounded-6px bg-[rgba(var(--gray-2),1)] px-8px py-6px'>
       <div className='flex items-center gap-6px flex-wrap'>
         <span className='text-t-tertiary text-10px tabular-nums'>{formatLogTime(rec.at)}</span>
         <span

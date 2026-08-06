@@ -29,11 +29,11 @@ const CsAgentCard: React.FC<{ agent: ICsAgent; onOpen: () => void }> = ({ agent,
           onOpen();
         }
       }}
-      className='group flex flex-col gap-10px rd-16px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-16px py-14px cursor-pointer outline-none transition-all hover:border-[rgba(var(--primary-6),0.5)] hover:shadow-[0_12px_30px_rgba(var(--primary-6),0.12)] hover:-translate-y-2px focus-visible:border-[rgb(var(--primary-6))]'
+      className='group flex flex-col gap-10px rd-16px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-16px py-14px cursor-pointer outline-none transition-all hover:border-[rgba(var(--primary-6),0.5)] hover:shadow-[0_12px_30px_rgba(var(--primary-6),0.12)] hover:-translate-y-2px focus-visible:border-primary-6'
     >
       <div className='flex items-center gap-10px'>
         <span
-          className='flex items-center justify-center w-38px h-38px rd-10px shrink-0 text-[rgb(var(--primary-6))]'
+          className='flex items-center justify-center w-38px h-38px rd-10px shrink-0 text-primary-6'
           style={{
             background: 'linear-gradient(150deg, rgba(var(--primary-5),0.16) 0%, rgba(var(--primary-6),0.26) 100%)',
             border: '1px solid rgba(var(--primary-6),0.22)',
@@ -88,7 +88,7 @@ const CustomerServiceRosterPage: React.FC = () => {
         <div className='flex items-start justify-between gap-16px flex-wrap'>
           <div className='flex items-start gap-12px min-w-0'>
             <span
-              className='flex items-center justify-center w-40px h-40px rd-11px shrink-0 text-[rgb(var(--primary-6))]'
+              className='flex items-center justify-center w-40px h-40px rd-11px shrink-0 text-primary-6'
               style={{
                 background: 'linear-gradient(150deg, rgba(var(--primary-5),0.16) 0%, rgba(var(--primary-6),0.26) 100%)',
                 border: '1px solid rgba(var(--primary-6),0.22)',
@@ -141,7 +141,7 @@ const CustomerServiceRosterPage: React.FC = () => {
         ) : agents.length === 0 ? (
           <div className='flex flex-col items-center justify-center gap-14px px-24px py-64px text-center'>
             <span
-              className='flex items-center justify-center w-72px h-72px rounded-full text-[rgb(var(--primary-6))]'
+              className='flex items-center justify-center w-72px h-72px rounded-full text-primary-6'
               style={{
                 background: 'var(--color-fill-2)',
               }}

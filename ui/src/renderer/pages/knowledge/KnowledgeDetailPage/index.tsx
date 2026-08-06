@@ -59,6 +59,8 @@ import {
 } from '@icon-park/react';
 import type { IKnowledgeBase, IKnowledgeTag, IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
 import Markdown from '@renderer/components/Markdown';
+import NomiInput from '@/renderer/components/base/NomiInput';
+import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { ipcBridge } from '@/common';
 import {
@@ -254,125 +256,136 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
   };
 
   return (
-    <div className='flex flex-col gap-16px max-w-560px'>
+    <div className='knowledge-settings-layout flex max-w-900px flex-col gap-18px'>
       {/* ─── Basic info: name / description / tags ─── */}
-      <div className='flex flex-col gap-16px'>
-        {/* Name */}
-        <div className='flex flex-col gap-7px'>
-          <label className={knowledgeDetailSettingsLabelClass}>
-            {t('knowledge.detail.settings.labelName', { defaultValue: '名称' })}
-          </label>
-          <Input
-            value={editName}
-            onChange={setEditName}
-            className={knowledgeDetailSettingsInputClass}
-            placeholder={t('knowledge.detail.settings.namePlaceholder', { defaultValue: '知识库名称' })}
-          />
-        </div>
+      <NomiSettingList>
+        <NomiSettingRow
+          title={t('knowledge.detail.settings.labelName', { defaultValue: '名称' })}
+          description={t('knowledge.detail.settings.nameHint', {
+            defaultValue: '知识库的名称，会显示在列表与挂载选择中。',
+          })}
+          controls={
+            <NomiInput
+              contentFit
+              contentMaxWidth={320}
+              value={editName}
+              onChange={setEditName}
+              placeholder={t('knowledge.detail.settings.namePlaceholder', { defaultValue: '知识库名称' })}
+            />
+          }
+        />
+      </NomiSettingList>
 
-        {/* Description */}
-        <div className='flex flex-col gap-7px'>
-          <label className={knowledgeDetailSettingsLabelClass}>
-            {t('knowledge.detail.settings.labelDesc', { defaultValue: '描述（注入会话提示词）' })}
-          </label>
-          <Input.TextArea
-            value={editDesc}
-            onChange={setEditDesc}
-            autoSize={{ minRows: 3, maxRows: 8 }}
-            className={knowledgeDetailSettingsInputClass}
-            placeholder={t('knowledge.detail.settings.descPlaceholder', { defaultValue: '简要描述知识库内容和用途' })}
-          />
-        </div>
+      <NomiSettingSection
+        title={t('knowledge.detail.settings.labelDesc', { defaultValue: '描述' })}
+        description={t('knowledge.detail.settings.descHint', {
+          defaultValue: '向模型说明此知识库的内容与适用场景，帮助判断何时检索此库。',
+        })}
+      >
+        <Input.TextArea
+          value={editDesc}
+          onChange={setEditDesc}
+          autoSize={{ minRows: 3, maxRows: 10 }}
+          className={`${knowledgeDetailSettingsInputClass} knowledge-settings-description-input`}
+          placeholder={t('knowledge.detail.settings.descPlaceholder', { defaultValue: '简要描述知识库内容和用途' })}
+        />
+      </NomiSettingSection>
 
-        {/* Tags */}
-        <div className='flex flex-col gap-7px'>
-          <label className={knowledgeDetailSettingsLabelClass}>
-            {t('knowledge.detail.settings.labelTags', { defaultValue: '标签' })}
-          </label>
+      <section className='knowledge-settings-tags-section flex flex-col gap-8px'>
+        <label className={knowledgeDetailSettingsLabelClass}>
+          {t('knowledge.detail.settings.labelTags', { defaultValue: '标签' })}
+        </label>
+        <div className='knowledge-settings-tag-picker'>
           <TagPicker value={editTags} onChange={setEditTags} tags={allTags} createTag={createTag} />
         </div>
-
-        {/* Save button */}
-        <div>
-          <Button type='primary' loading={saving} disabled={!isDirty} onClick={() => void handleSaveInfo()}>
+        <div className='mt-8px'>
+          <Button
+            className='knowledge-settings-save-button'
+            type='primary'
+            loading={saving}
+            disabled={!isDirty}
+            onClick={() => void handleSaveInfo()}
+          >
             {t('knowledge.detail.settings.save', { defaultValue: '保存修改' })}
           </Button>
         </div>
-      </div>
+      </section>
 
       {/* ─── Source section (varies by kind) ─── */}
-      <div className='flex flex-col gap-7px'>
-        <label className={knowledgeDetailSettingsLabelClass}>
-          {t('knowledge.detail.settings.labelSource', { defaultValue: '来源' })}
-          {' · '}
-          {base.kind === 'local' && t('knowledge.card.kindLocal', { defaultValue: '本地文件夹' })}
-          {base.kind === 'web' && t('knowledge.card.kindWeb', { defaultValue: '网页' })}
-          {base.kind === 'blank' && t('knowledge.card.kindBlank', { defaultValue: '空白' })}
-        </label>
-
-        {base.kind === 'local' && (
-          <div className='flex items-center gap-9px'>
-            <Input value={base.root_path} readOnly className={`${knowledgeDetailSettingsInputClass} flex-1`} />
-            <Button
-              icon={<FolderOpen theme='outline' size='14' />}
-              onClick={() => {
-                void ipcBridge.shell.openFolderWith.invoke({ folder_path: base.root_path, tool: 'explorer' }).catch((e: unknown) => Message.error(String(e)));
-              }}
-            >
-              {t('knowledge.detail.settings.openFolder', { defaultValue: '打开' })}
-            </Button>
-          </div>
-        )}
-
-        {base.kind === 'web' && (
-          <div className='flex items-center gap-9px'>
-            <span className='text-12px text-[var(--color-text-3)]'>
-              {t('knowledge.detail.settings.webHint', { defaultValue: '网页来源 — 点击"刷新"重新抓取所有 URL。' })}
-            </span>
-            <Button
-              icon={<Refresh theme='outline' size='14' />}
-              loading={sourceLoading}
-              onClick={() => void handleRefreshSource()}
-            >
-              {t('knowledge.detail.settings.refreshSource', { defaultValue: '刷新' })}
-            </Button>
-          </div>
-        )}
-      </div>
+      <NomiSettingList>
+        <NomiSettingRow
+          className='knowledge-settings-source-row'
+          title={
+            <>
+              {t('knowledge.detail.settings.labelSource', { defaultValue: '来源' })}
+              {' · '}
+              {base.kind === 'local' && t('knowledge.card.kindLocal', { defaultValue: '本地文件夹' })}
+              {base.kind === 'web' && t('knowledge.card.kindWeb', { defaultValue: '网页' })}
+              {base.kind === 'blank' && t('knowledge.card.kindBlank', { defaultValue: '空白' })}
+            </>
+          }
+          description={
+            base.kind === 'web'
+              ? t('knowledge.detail.settings.webHint', { defaultValue: '网页来源 — 点击“刷新”重新抓取所有 URL。' })
+              : undefined
+          }
+          controls={
+            base.kind === 'local' ? (
+              <>
+                <NomiInput contentFit contentMinWidth={220} contentMaxWidth={520} value={base.root_path} readOnly />
+                <Button
+                  icon={<FolderOpen theme='outline' size='14' />}
+                  onClick={() => {
+                    void ipcBridge.shell.openFolderWith
+                      .invoke({ folder_path: base.root_path, tool: 'explorer' })
+                      .catch((e: unknown) => Message.error(String(e)));
+                  }}
+                >
+                  {t('knowledge.detail.settings.openFolder', { defaultValue: '打开' })}
+                </Button>
+              </>
+            ) : base.kind === 'web' ? (
+              <Button
+                icon={<Refresh theme='outline' size='14' />}
+                loading={sourceLoading}
+                onClick={() => void handleRefreshSource()}
+              >
+                {t('knowledge.detail.settings.refreshSource', { defaultValue: '刷新' })}
+              </Button>
+            ) : undefined
+          }
+        />
+      </NomiSettingList>
 
       {/* ─── Danger zone ─── */}
-      <div className='knowledge-detail-danger-panel box-border rd-12px border border-solid p-16px mt-8px'>
-        <div className='knowledge-detail-danger-title text-13px font-700 text-[var(--color-text-1)] mb-10px'>
-          {t('knowledge.detail.settings.dangerTitle', { defaultValue: '危险操作' })}
-        </div>
-        {/* Export */}
-        <div className='flex items-center justify-between gap-12px mb-9px'>
-          <p className='m-0 text-12px text-[var(--color-text-2)]'>
-            {t('knowledge.detail.settings.exportDesc', { defaultValue: '导出为 .zip 备份包' })}
-          </p>
-          <Button size='small' loading={exporting} onClick={() => void handleExport()}>
-            {t('knowledge.detail.settings.exportBtn', { defaultValue: '导出' })}
-          </Button>
-        </div>
-        {/* Delete */}
-        <div className='flex items-center justify-between gap-12px'>
-          <p className='m-0 text-12px text-[var(--color-text-2)]'>
-            {t('knowledge.detail.settings.deleteDesc', { defaultValue: '删除此知识库' })}
-            {!base.managed && (
-              <span className='block text-11px mt-2px text-[var(--color-text-2)]'>
-                {t('knowledge.detail.settings.deleteLocalHint', { defaultValue: '（本地引用目录不会被删除）' })}
-              </span>
-            )}
-          </p>
-          <Button
-            size='small'
-            status='danger'
-            onClick={() => setDeleteModalVisible(true)}
-          >
-            {t('knowledge.detail.settings.deleteBtn', { defaultValue: '删除知识库' })}
-          </Button>
-        </div>
-      </div>
+      <NomiSettingSection
+        className='knowledge-settings-danger-section'
+        title={t('knowledge.detail.settings.dangerTitle', { defaultValue: '危险操作' })}
+      >
+        <NomiSettingList>
+          <NomiSettingRow
+            title={t('knowledge.detail.settings.exportDesc', { defaultValue: '导出为 .zip 备份包' })}
+            controls={
+              <Button size='mini' loading={exporting} onClick={() => void handleExport()}>
+                {t('knowledge.detail.settings.exportBtn', { defaultValue: '导出' })}
+              </Button>
+            }
+          />
+          <NomiSettingRow
+            title={t('knowledge.detail.settings.deleteDesc', { defaultValue: '删除此知识库' })}
+            description={
+              !base.managed
+                ? t('knowledge.detail.settings.deleteLocalHint', { defaultValue: '（本地引用目录不会被删除）' })
+                : undefined
+            }
+            controls={
+              <Button size='mini' status='danger' onClick={() => setDeleteModalVisible(true)}>
+                {t('knowledge.detail.settings.deleteBtn', { defaultValue: '删除知识库' })}
+              </Button>
+            }
+          />
+        </NomiSettingList>
+      </NomiSettingSection>
 
       {/* Delete confirmation modal */}
       <Modal
@@ -944,7 +957,7 @@ const KnowledgeDetailPage: React.FC = () => {
         {/* ─── Back link ─────────────────────────────────────────────────────── */}
         <button
           type='button'
-          className='knowledge-detail-back-link inline-flex h-24px items-center gap-6px border-0 bg-transparent p-0 font-[inherit] text-12px leading-none text-[var(--color-text-3)] appearance-none cursor-pointer transition-colors hover:text-[rgb(var(--primary-6))] focus-visible:outline-none focus-visible:text-[rgb(var(--primary-6))]'
+          className='knowledge-detail-back-link inline-flex h-24px items-center gap-6px border-0 bg-transparent p-0 font-[inherit] text-12px leading-none text-[var(--color-text-3)] appearance-none cursor-pointer transition-colors hover:text-primary-6 focus-visible:outline-none focus-visible:text-primary-6'
           onClick={() => navigate('/knowledge')}
         >
           <span className='knowledge-detail-back-icon inline-flex h-14px w-14px items-center justify-center leading-none [&_svg]:block'>
@@ -963,7 +976,7 @@ const KnowledgeDetailPage: React.FC = () => {
                 {base?.name ?? '...'}
                 {/* Pen icon — edit entry point (actual editing in D5/Settings tab) */}
                 <span
-                  className='text-12px text-[var(--color-text-3)] cursor-pointer hover:text-[rgb(var(--primary-6))]'
+                  className='text-12px text-[var(--color-text-3)] cursor-pointer hover:text-primary-6'
                   onClick={() => setTab('set')}
                   title={t('knowledge.detail.editName', { defaultValue: '编辑名称' })}
                 >
@@ -1031,7 +1044,7 @@ const KnowledgeDetailPage: React.FC = () => {
                   <Menu.Item key='openFolder' onClick={() => void handleOpenFolder()}>
                     {t('knowledge.actions.openFolder', { defaultValue: '打开文件夹' })}
                   </Menu.Item>
-                  <Menu.Item key='delete' className='!text-[rgb(var(--danger-6))]' onClick={() => setTab('set')}>
+                  <Menu.Item key='delete' className='!text-danger-6' onClick={() => setTab('set')}>
                     {t('knowledge.detail.delete', { defaultValue: '删除知识库' })}
                   </Menu.Item>
                 </Menu>
@@ -1063,7 +1076,7 @@ const KnowledgeDetailPage: React.FC = () => {
             {/* ── Document tree + viewer (D2 redesign) ── */}
             <div
               className={classNames(
-                'knowledge-doc-workspace flex w-full gap-14px pt-16px',
+                'knowledge-doc-workspace flex w-full gap-14px',
                 isMobile ? 'flex-col' : 'flex-row',
                 isMobile ? 'min-h-720px' : 'h-[clamp(500px,calc(100vh-300px),760px)] min-h-500px'
               )}
@@ -1233,7 +1246,7 @@ const KnowledgeDetailPage: React.FC = () => {
                                           {t('knowledge.actions.rename', { defaultValue: '重命名' })}
                                         </span>
                                       </Menu.Item>
-                                      <Menu.Item key='delete' className='!text-[rgb(var(--danger-6))]'>
+                                      <Menu.Item key='delete' className='!text-danger-6'>
                                         <span className='inline-flex items-center gap-4px'>
                                           <Delete theme='outline' size='11' />
                                           {t('knowledge.actions.delete', { defaultValue: '删除' })}
@@ -1385,7 +1398,7 @@ const KnowledgeDetailPage: React.FC = () => {
               </span>
             }
           >
-            <div className='pt-16px'>
+            <div>
               {base && (inboxLoading || inboxItems.length > 0) ? (
                 <InboxReviewPanel baseId={base.knowledge_base_id} items={inboxItems} loading={inboxLoading} onChanged={handleInboxChanged} />
               ) : (
@@ -1396,126 +1409,121 @@ const KnowledgeDetailPage: React.FC = () => {
 
           {/* Tab: Mount & Usage */}
           <Tabs.TabPane key='use' title={t('knowledge.detail.tabUse', { defaultValue: '挂载与使用' })}>
-            <div className='flex flex-col gap-16px pt-16px'>
-              {/* ── Three-step tutorial hero cards ── */}
-              <div className={classNames('grid gap-12px', isMobile ? 'grid-cols-1' : 'grid-cols-3')}>
-                {/* Step 1 */}
-                <div className='box-border rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-16px'>
-                  <div className='w-26px h-26px rd-8px grid place-items-center mb-10px text-13px font-700 bg-[rgba(var(--primary-6),0.1)] text-[rgb(var(--primary-5))] border border-solid border-[rgba(var(--primary-6),0.4)]'>
-                    1
-                  </div>
-                  <b className='block text-13px text-[var(--color-text-1)] mb-5px'>
-                    {t('knowledge.detail.use.step1Title', { defaultValue: '挂载到一个会话' })}
-                  </b>
-                  <p className='m-0 text-12px leading-relaxed text-[var(--color-text-3)]'>
-                    {t('knowledge.detail.use.step1Desc', {
-                      defaultValue: '把知识库挂到会话 / 终端 / 数字伙伴上，它就成为该处模型的扩展知识。一个库可被多处复用。',
-                    })}
-                  </p>
-                </div>
-                {/* Step 2 */}
-                <div className='box-border rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-16px'>
-                  <div className='w-26px h-26px rd-8px grid place-items-center mb-10px text-13px font-700 bg-[rgba(var(--primary-6),0.1)] text-[rgb(var(--primary-5))] border border-solid border-[rgba(var(--primary-6),0.4)]'>
-                    2
-                  </div>
-                  <b className='block text-13px text-[var(--color-text-1)] mb-5px'>
-                    {t('knowledge.detail.use.step2Title', { defaultValue: '模型自动检索' })}
-                  </b>
-                  <p className='m-0 text-12px leading-relaxed text-[var(--color-text-3)]'>
-                    {t('knowledge.detail.use.step2Desc', {
-                      defaultValue: '模型会在 .nomi/knowledge/ 下按需检索，命中的内容用于回答——原文不塞进上下文，省 token。',
-                    })}
-                  </p>
-                </div>
-                {/* Step 3 */}
-                <div className='box-border rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-16px'>
-                  <div className='w-26px h-26px rd-8px grid place-items-center mb-10px text-13px font-700 bg-[rgba(var(--primary-6),0.1)] text-[rgb(var(--primary-5))] border border-solid border-[rgba(var(--primary-6),0.4)]'>
-                    3
-                  </div>
-                  <b className='block text-13px text-[var(--color-text-1)] mb-5px'>
-                    {t('knowledge.detail.use.step3Title', { defaultValue: '（可选）回血沉淀' })}
-                  </b>
-                  <p className='m-0 text-12px leading-relaxed text-[var(--color-text-3)]'>
-                    {t('knowledge.detail.use.step3Desc', {
-                      defaultValue: '开启回血后，会话里新学到的知识可暂存到「待审」由你确认，知识库越用越厚。',
-                    })}
-                  </p>
-                </div>
-              </div>
-
-              {/* ── Consumers section: who is mounting this base ── */}
-              <div className='box-border rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-16px'>
-                <div className='knowledge-mount-heading mb-12px flex flex-wrap items-start gap-x-10px gap-y-4px'>
-                  <span className='shrink-0 text-13px font-700 leading-20px text-[var(--color-text-1)]'>
-                    {t('knowledge.detail.use.mountedTitle', { defaultValue: '已挂载' })}
-                  </span>
-                  <div className='knowledge-mount-hint flex min-w-0 flex-1 items-start gap-6px pt-1px'>
-                    <LinkOne theme='outline' size='13' className='text-[var(--color-text-4)] shrink-0 mt-2px' />
-                    <span className='min-w-0 text-12px text-[var(--color-text-3)] leading-relaxed'>
-                      {t('knowledge.detail.use.mountHint', {
-                        defaultValue: '挂载操作在会话侧的「挂载知识库」控件中进行——打开任意会话 / 终端 / 数字伙伴，点击知识库按钮即可将本库挂载上去。',
-                      })}
-                    </span>
-                  </div>
-                </div>
+            <div
+              className={classNames(
+                'knowledge-use-shell grid min-h-470px overflow-hidden rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)]',
+                isMobile ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_320px]'
+              )}
+            >
+              <div className='flex min-w-0 flex-col gap-14px p-16px'>
                 {base ? <KnowledgeConsumersSection baseId={base.knowledge_base_id} /> : null}
-              </div>
 
-              {/* ── Writeback explanation (honest: per-binding, no fake global toggle) ── */}
-              <div className='box-border rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-16px'>
-                <div className='text-13px font-700 text-[var(--color-text-1)] mb-10px'>
-                  {t('knowledge.detail.use.writebackTitle', { defaultValue: '回血（让会话把新知识写回本库）' })}
-                </div>
-                <div className='text-12px text-[var(--color-text-2)] leading-relaxed space-y-6px'>
-                  <p className='m-0'>
-                    {t('knowledge.detail.use.writebackDesc', {
-                      defaultValue: '回血模式在每个会话的「挂载知识库」控件里按工作区设置——不是全局统一开关。每个挂载可独立选择：',
+                <section className='box-border rd-9px bg-[var(--color-fill-1)] px-12px py-10px'>
+                  <div className='text-12px font-700 leading-18px text-[var(--color-text-1)]'>
+                    {t('knowledge.detail.use.cliTitle', { defaultValue: '终端 CLI 接入' })}
+                  </div>
+                  <p className='mb-8px mt-3px text-11px leading-17px text-[var(--color-text-3)]'>
+                    {t('knowledge.detail.use.cliDesc', {
+                      defaultValue: '给 claude / codex / gemini 一键注入只读的 knowledge_search 工具，让命令行里的 Agent 也能查这个库。请在终端页面使用「接入知识库」按钮完成注册。',
                     })}
                   </p>
-                  <ul className='m-0 pl-18px text-[var(--color-text-3)]'>
-                    <li>
-                      <span className='text-[var(--color-text-2)] font-500'>
-                        {t('knowledge.detail.use.writebackOff', { defaultValue: '关闭' })}
-                      </span>
-                      {' — '}
-                      {t('knowledge.detail.use.writebackOffDesc', { defaultValue: '纯只读，不回写' })}
-                    </li>
-                    <li>
-                      <span className='text-[var(--color-text-2)] font-500'>
-                        {t('knowledge.detail.use.writebackStaged', { defaultValue: '暂存审阅' })}
-                      </span>
-                      {' — '}
-                      {t('knowledge.detail.use.writebackStagedDesc', { defaultValue: '新知识先进「待审」，你确认后才并入（推荐）' })}
-                    </li>
-                    <li>
-                      <span className='text-[var(--color-text-2)] font-500'>
-                        {t('knowledge.detail.use.writebackDirect', { defaultValue: '直接写入' })}
-                      </span>
-                      {' — '}
-                      {t('knowledge.detail.use.writebackDirectDesc', { defaultValue: '模型直接改库，适合个人/数字伙伴' })}
-                    </li>
-                  </ul>
-                </div>
+                  <Button
+                    size='mini'
+                    icon={<LinkCloud theme='outline' size='13' />}
+                    onClick={() => navigate('/terminal')}
+                  >
+                    {t('knowledge.detail.use.goTerminal', { defaultValue: '前往终端注册' })}
+                  </Button>
+                </section>
               </div>
 
-              {/* ── Terminal CLI registration entry ── */}
-              <div className='box-border rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-16px'>
-                <div className='text-13px font-700 text-[var(--color-text-1)] mb-8px'>
-                  {t('knowledge.detail.use.cliTitle', { defaultValue: '终端 CLI 接入' })}
+              <aside
+                className={classNames(
+                  'knowledge-use-rules box-border min-w-0 p-16px',
+                  isMobile ? 'knowledge-use-rules-mobile' : 'knowledge-use-rules-desktop'
+                )}
+              >
+                <h3 className='m-0 text-14px font-700 leading-20px text-[var(--color-text-1)]'>
+                  {t('knowledge.detail.use.rulesTitle', { defaultValue: '使用规则' })}
+                </h3>
+
+                <div className='mt-18px flex flex-col gap-18px'>
+                  <div className='knowledge-use-step'>
+                    <div className='knowledge-use-step-number'>1</div>
+                    <div className='min-w-0 pt-2px'>
+                      <b className='block text-12px leading-18px text-[var(--color-text-1)]'>
+                        {t('knowledge.detail.use.step1Title', { defaultValue: '挂载到一个会话' })}
+                      </b>
+                      <p className='mb-0 mt-3px text-11px leading-17px text-[var(--color-text-3)]'>
+                        {t('knowledge.detail.use.step1Desc', {
+                          defaultValue: '把知识库挂到会话 / 终端 / 数字伙伴上，它就成为该处模型的扩展知识。一个库可被多处复用。',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className='knowledge-use-step'>
+                    <div className='knowledge-use-step-number'>2</div>
+                    <div className='min-w-0 pt-2px'>
+                      <b className='block text-12px leading-18px text-[var(--color-text-1)]'>
+                        {t('knowledge.detail.use.step2Title', { defaultValue: '模型自动检索' })}
+                      </b>
+                      <p className='mb-0 mt-3px text-11px leading-17px text-[var(--color-text-3)]'>
+                        {t('knowledge.detail.use.step2Desc', {
+                          defaultValue: '模型会在 .nomi/knowledge/ 下按需检索，命中的内容用于回答——原文不塞进上下文，省 token。',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className='knowledge-use-step'>
+                    <div className='knowledge-use-step-number'>3</div>
+                    <div className='min-w-0 pt-2px'>
+                      <b className='block text-12px leading-18px text-[var(--color-text-1)]'>
+                        {t('knowledge.detail.use.step3Title', { defaultValue: '（可选）回血沉淀' })}
+                      </b>
+                      <p className='mb-0 mt-3px text-11px leading-17px text-[var(--color-text-3)]'>
+                        {t('knowledge.detail.use.step3Desc', {
+                          defaultValue: '开启回血后，会话里新学到的知识可暂存到「待审」由你确认，知识库越用越厚。',
+                        })}
+                      </p>
+                      <div className='mt-9px rd-8px bg-[var(--color-fill-1)] px-9px py-8px text-10px leading-16px text-[var(--color-text-3)]'>
+                        <div className='font-600 text-[var(--color-text-2)]'>
+                          {t('knowledge.detail.use.writebackTitle', { defaultValue: '回血（让会话把新知识写回本库）' })}
+                        </div>
+                        <p className='mb-5px mt-2px'>
+                          {t('knowledge.detail.use.writebackDesc', {
+                            defaultValue: '回血模式在每个会话的「挂载知识库」控件里按工作区设置——不是全局统一开关。每个挂载可独立选择：',
+                          })}
+                        </p>
+                        <ul className='m-0 pl-14px'>
+                          <li>
+                            <span className='font-500 text-[var(--color-text-2)]'>
+                              {t('knowledge.detail.use.writebackOff', { defaultValue: '关闭' })}
+                            </span>
+                            {' — '}
+                            {t('knowledge.detail.use.writebackOffDesc', { defaultValue: '纯只读，不回写' })}
+                          </li>
+                          <li>
+                            <span className='font-500 text-[var(--color-text-2)]'>
+                              {t('knowledge.detail.use.writebackStaged', { defaultValue: '暂存审阅' })}
+                            </span>
+                            {' — '}
+                            {t('knowledge.detail.use.writebackStagedDesc', { defaultValue: '新知识先进「待审」，你确认后才并入（推荐）' })}
+                          </li>
+                          <li>
+                            <span className='font-500 text-[var(--color-text-2)]'>
+                              {t('knowledge.detail.use.writebackDirect', { defaultValue: '直接写入' })}
+                            </span>
+                            {' — '}
+                            {t('knowledge.detail.use.writebackDirectDesc', { defaultValue: '模型直接改库，适合个人/数字伙伴' })}
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <p className='m-0 text-12px text-[var(--color-text-3)] leading-relaxed mb-12px'>
-                  {t('knowledge.detail.use.cliDesc', {
-                    defaultValue: '给 claude / codex / gemini 一键注入只读的 knowledge_search 工具，让命令行里的 Agent 也能查这个库。请在终端页面使用「接入知识库」按钮完成注册。',
-                  })}
-                </p>
-                <Button
-                  size='small'
-                  icon={<LinkCloud theme='outline' size='14' />}
-                  onClick={() => navigate('/terminal')}
-                >
-                  {t('knowledge.detail.use.goTerminal', { defaultValue: '前往终端注册' })}
-                </Button>
-              </div>
+              </aside>
             </div>
           </Tabs.TabPane>
 
@@ -1529,7 +1537,7 @@ const KnowledgeDetailPage: React.FC = () => {
               </span>
             }
           >
-            <div className='pt-16px'>
+            <div>
               {base && (
                 <SettingsTab
                   base={base}
