@@ -10,7 +10,6 @@ import type { DependencyList } from 'react';
 import { useEffect } from 'react';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import type { PreviewContentType } from '@/common/types/office/preview';
-import type { TokenUsageData } from '@/common/config/storage';
 
 export type ReplyQuote = {
   /** Durable message identity used only as quote metadata. */
@@ -24,7 +23,6 @@ interface EventTypes {
   'nomi.selected.file.append': [Array<string | FileOrFolderItem>];
   'nomi.selected.file.clear': void;
   'nomi.workspace.refresh': void;
-  'nomi.usage.updated': [{ conversation_id: ConversationId; tokenUsage: TokenUsageData }];
   'acp.selected.file': [Array<string | FileOrFolderItem>];
   'acp.selected.file.append': [Array<string | FileOrFolderItem>];
   'acp.selected.file.clear': void;
