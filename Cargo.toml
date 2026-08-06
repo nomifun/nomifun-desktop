@@ -42,6 +42,7 @@ nomifun-customer-service = { path = "crates/backend/nomifun-customer-service" }
 nomifun-workshop = { path = "crates/backend/nomifun-workshop" }
 nomifun-creation = { path = "crates/backend/nomifun-creation" }
 nomifun-app = { path = "crates/backend/nomifun-app" }
+nomifun-robot = { path = "crates/backend/nomifun-robot" }
 nomifun-browser-platform = { path = "crates/backend/nomifun-browser-platform" }
 
 # --- Internal crates: shared ---
