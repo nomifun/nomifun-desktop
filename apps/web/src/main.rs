@@ -219,6 +219,9 @@ fn main() -> Result<ExitCode> {
     // Fail before runtime, database, and auth initialization. API-only mode is
     // the explicit Vite-development bypass and never mounts the static bundle.
     let _static_manifest = validate_static_dist(&args)?;
+    // Same reason, for the address robots are told to dial: a typo there is
+    // otherwise invisible until a device fails to connect hours later.
+    let robot_advertise = nomifun_app::lan_endpoint::robot_advertise_from_env()?;
 
     // Authentication is ON by default; `--insecure-no-auth` (or the env var)
     // opts into the desktop-style no-auth local mode. The env is read manually
@@ -247,10 +250,15 @@ fn main() -> Result<ExitCode> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(serve(cli, merged_path, args))
+    runtime.block_on(serve(cli, merged_path, args, robot_advertise))
 }
 
-async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> Result<ExitCode> {
+async fn serve(
+    cli: nomifun_app::cli::Cli,
+    merged_path: String,
+    args: Args,
+    robot_advertise: Option<nomifun_app::lan_endpoint::RobotAdvertiseAddr>,
+) -> Result<ExitCode> {
     // Resolve the bind address up front so a bad --host fails fast with a clear
     // message instead of a cryptic socket error.
     let ip: IpAddr = args.host.parse().with_context(|| {
@@ -348,6 +356,13 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
         );
     }
     nomifun_app::bootstrap::announce_bound_port(&cli.data_dir, &args.host, actual_port);
+    // Tell the robot gateway where devices can reach us. The router already
+    // serves `/robot/*`, but until this snapshot lands the advertiser reports no
+    // endpoint, so every OTA response hands the device an empty websocket URL.
+    // Uses the port actually bound unless `NOMIFUN_ROBOT_ADVERTISE` states one —
+    // a container whose port is remapped (`-p 9000:8787`) must advertise the
+    // host-side port, which this process cannot know.
+    nomifun_app::lan_endpoint::publish_robot_endpoint(&services, actual_port, robot_advertise);
     // ConnectInfo gives the rate limiter each client's real peer address. Without
     // it every browser in the deployment collapses into one shared "unknown"
     // bucket: a single user's login failures 429-lock everyone out, and aggregate
