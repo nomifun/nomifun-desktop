@@ -12,7 +12,6 @@ import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
-import { useKnowledgeInboxPending } from '@renderer/pages/knowledge/useKnowledge';
 import {
   isBrowserCapabilityUnavailable,
   useBrowserOverview,
@@ -64,7 +63,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const isMobile = layout?.isMobile ?? false;
   const location = useLocation();
   const { pathname, search, hash } = location;
-  const { count: pendingInboxCount } = useKnowledgeInboxPending();
   const {
     overview: browserOverview,
     unavailable: browserUnavailable,
@@ -232,7 +230,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleKnowledgeClick}
-              dot={pendingInboxCount > 0}
             />
             {/* Asset library — unified management of creative-workshop assets */}
             <SiderAssetLibraryEntry

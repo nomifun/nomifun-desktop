@@ -102,8 +102,7 @@ export const rebuildKnowledgeBinding = async (
       target_id: outcome.companion_id,
       enabled: true,
       writeback: false,
-      writeback_mode: 'staged',
-      writeback_eagerness: 'conservative',
+      writeback_eagerness: 'manual',
       channel_write_enabled: false,
       kb_ids: matchedIds,
     });

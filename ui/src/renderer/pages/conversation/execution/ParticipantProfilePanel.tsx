@@ -224,8 +224,7 @@ const ParticipantProfilePanel: React.FC<{ detail: TAgentExecutionDetail }> = ({ 
           fallback_allowed: true,
           knowledge_policy: {
             enabled: false,
-            mode: 'inherit',
-            writeback: false,
+                    writeback: false,
             grounded: false,
           },
         };

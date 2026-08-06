@@ -17,17 +17,7 @@ interface SiderKnowledgeEntryProps {
   collapsed: boolean;
   siderTooltipProps: SiderTooltipProps;
   onClick: () => void;
-  /** Red dot — set when there are unreviewed knowledge write-back proposals. */
-  dot?: boolean;
 }
-
-/** Small red badge dot for the "unreviewed proposals" signal. */
-const RedDot: React.FC = () => (
-  <span
-    className='absolute rounded-full bg-red-500'
-    style={{ width: 7, height: 7, top: -1, right: -1 }}
-  />
-);
 
 const SiderKnowledgeEntry: React.FC<SiderKnowledgeEntryProps> = ({
   isMobile,
@@ -35,7 +25,6 @@ const SiderKnowledgeEntry: React.FC<SiderKnowledgeEntryProps> = ({
   collapsed,
   siderTooltipProps,
   onClick,
-  dot = false,
 }) => {
   const { t } = useTranslation();
 
@@ -51,7 +40,6 @@ const SiderKnowledgeEntry: React.FC<SiderKnowledgeEntryProps> = ({
         >
           <span className='relative block leading-none shrink-0' style={{ lineHeight: 0 }}>
             <BookOne theme='outline' size='20' fill='currentColor' className='block leading-none' />
-            {dot && <RedDot />}
           </span>
         </div>
       </Tooltip>
@@ -76,7 +64,6 @@ const SiderKnowledgeEntry: React.FC<SiderKnowledgeEntryProps> = ({
             className='block leading-none'
             style={{ lineHeight: 0 }}
           />
-          {dot && <RedDot />}
         </span>
         <span className='collapsed-hidden text-14px font-[500] leading-24px'>
           {t('knowledge.title')}

@@ -148,11 +148,17 @@ is `('companion', companionId)`). Scope of effect:
   directories aggregated beyond that), plus an explicit retrieval
   protocol — the agent is told to look things up rather than answer
   from memory.
-- **Write-back** comes in two modes, briefly:
-  - **staged** — knowledge produced during a conversation first lands
-    in the base's `_inbox/` (isolated per conversation) for you to
-    review on the knowledge page before it is committed;
-  - **direct** — skips staging and writes straight into the base.
+- **Write-back** has exactly one landing spot — the base's body — and an
+  update **appends** the new material to the existing document under
+  compare-and-swap, so a write-back can add to the text you curated but
+  never overwrite it. Whether it happens at all is the **write-back
+  disposition**, set per binding:
+  - **manual** (the default) — the companion writes back only when you
+    ask for it in the conversation; nothing is mined out of a turn
+    behind your back;
+  - **automatic** — the companion decides for itself, against a high
+    bar: only knowledge that is durable, reusable and clearly correct,
+    with trivia, transient state and duplicates filtered out.
 - **AI bootstrap**: the **AI generate** button on the knowledge page
   (list edit modal and detail page) calls
   `POST /api/knowledge/bases/{id}/autogen` to produce the base's

@@ -647,16 +647,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                     <NomiSelect.Option key={base.knowledge_base_id} value={base.knowledge_base_id}>{base.name}</NomiSelect.Option>
                   ))}
                 </NomiSelect>
-                <div className='grid grid-cols-1 md:grid-cols-3 gap-10px'>
-                  <Select
-                    value={knowledgePolicy.mode}
-                    disabled={readOnly}
-                    onChange={(mode) => setKnowledgePolicy({ ...knowledgePolicy, mode: String(mode) })}
-                  >
-                    <Select.Option value='inherit'>{t('settings.presetKnowledgeModeInherit', { defaultValue: 'Inherit defaults' })}</Select.Option>
-                    <Select.Option value='staged'>{t('settings.presetKnowledgeModeStaged', { defaultValue: 'Selected bases (staged)' })}</Select.Option>
-                    <Select.Option value='direct'>{t('settings.presetKnowledgeModeDirect', { defaultValue: 'Selected bases (direct)' })}</Select.Option>
-                  </Select>
+                <div className='grid grid-cols-1 md:grid-cols-2 gap-10px'>
                   <Checkbox checked={knowledgePolicy.grounded} disabled={readOnly} onChange={(grounded) => setKnowledgePolicy({ ...knowledgePolicy, grounded })}>
                     {t('settings.presetKnowledgeGrounded', { defaultValue: 'Require grounding' })}
                   </Checkbox>
@@ -667,23 +658,23 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                 {knowledgePolicy.writeback && (
                   <div className='grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(180px,0.45fr)] gap-10px items-center'>
                     <div className='text-12px text-t-secondary'>
-                      {t('knowledge.mount.eagernessLabel', { defaultValue: 'Write-back eagerness' })}
+                      {t('knowledge.mount.eagernessLabel', { defaultValue: 'Write-back disposition' })}
                     </div>
                     <Select
-                      value={knowledgePolicy.eagerness ?? 'conservative'}
+                      value={knowledgePolicy.eagerness ?? 'manual'}
                       disabled={readOnly}
                       onChange={(eagerness) =>
                         setKnowledgePolicy({
                           ...knowledgePolicy,
-                          eagerness: eagerness as 'conservative' | 'aggressive',
+                          eagerness: eagerness as 'manual' | 'auto',
                         })
                       }
                     >
-                      <Select.Option value='conservative'>
-                        {t('knowledge.control.eagernessConservative', { defaultValue: 'Conservative' })}
+                      <Select.Option value='manual'>
+                        {t('knowledge.control.eagernessManual', { defaultValue: 'Manual (recommended)' })}
                       </Select.Option>
-                      <Select.Option value='aggressive'>
-                        {t('knowledge.control.eagernessAggressive', { defaultValue: 'Aggressive' })}
+                      <Select.Option value='auto'>
+                        {t('knowledge.control.eagernessAuto', { defaultValue: 'Automatic' })}
                       </Select.Option>
                     </Select>
                   </div>

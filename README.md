@@ -164,7 +164,7 @@ You give the orders; NomiFun reliably does the work.
 Pull the knowledge scattered across your system into one managed, trackable place.
 
 - **Centralized management & tracking** — create, mount, and track consumers across conversations, terminals, and companions.
-- **Safe write-back** — a code-enforced, per-surface write policy. By default, writes are **staged into a review inbox** with unified-diff preview and merge/discard — so agents never scribble into the wrong place.
+- **Safe write-back** — a code-enforced, per-surface write policy. Every mount picks its **write-back disposition**: **manual** (the default — nothing is written back unless you ask for it in the conversation) or **automatic** (the agent decides on its own, and only writes what it is confident is durably worth keeping). Either way an update **appends** to the existing document under compare-and-swap, so a write-back can add to the text you curated but never overwrite it.
 - **Real-time URL snapshot** — turn any web page into a knowledge source (SSRF-guarded fetch, HTML→Markdown), in *snapshot* (persisted, re-fetchable) or *live* mode.
 - **Scoped retrieval** — agents call a `knowledge_search` tool whose scope is decided server-side and cannot be widened.
 

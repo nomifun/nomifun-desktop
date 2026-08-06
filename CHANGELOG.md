@@ -5,6 +5,30 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Behaviour change + migration.** Knowledge write-back has exactly one landing
+  spot now: the knowledge base body. The 知识库-待审 review surface is gone — the
+  tab, the unified-diff preview, the merge/discard actions, the pending badge and
+  the seven inbox routes behind them — because staging never protected a document,
+  it only deferred the decision, and a queue nobody drains is a queue that quietly
+  swallows what was learned. Proposals already staged on disk are **not** deleted:
+  they stay exactly where they are under `_inbox/{conversation_id}/` and from now on
+  read as ordinary documents — in the tree, in search results and in an export — so
+  nothing is lost, and nothing sits behind a gate that no longer exists. The 回写意识
+  on a mount changed both its values and its meaning: 保守型 → **手动型** (the new
+  default) writes back only when you ask for it in the conversation, and the
+  turn-final extractor is not scheduled for that binding at all — so **an existing
+  保守型 mount stops writing back on its own**, which is the point of the rename
+  rather than a side effect of it; 激进型 → **自动型** lets the agent decide for
+  itself against a high bar (durable, reusable, clearly correct — no trivia, no
+  transient state, no duplicates). The retired literals are REJECTED with a 400
+  instead of being mapped, because a tolerated retired value is how a stale caller
+  keeps a setting the UI no longer offers. Updating an existing document now
+  **appends** the new material under compare-and-swap rather than replacing the
+  file, so the write path can no longer rewrite a whole document — the worst a bad
+  write-back can do is add a paragraph you delete. `writeback_mode` is gone from the
+  binding row and the wire and `pending_inbox` from `KnowledgeBaseInfo`, so the
+  UI/API contract version was bumped.
+
 - **Fixed (appearance + accessibility).** Row separators, focus rings and keyboard
   focus outlines that never painted, and borders that painted 3px where the class
   said 1px. All of it is the same numeric-theme-key hijack as the entry below,

@@ -8,7 +8,7 @@
  * KnowledgeCard — A grid item for the knowledge base list.
  * Mirrors PresetCard visual language (rounded-16px bordered surface, soft hover)
  * with knowledge-specific additions: kind icon + badge, status tags, user tag chips,
- * meta row, pending-inbox badge, and hover-revealed actions.
+ * meta row, and hover-revealed actions.
  *
  * Theme variables only; `<div onClick>` for clickables (no <button>).
  */
@@ -160,21 +160,6 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
       ].join(' ')}
       onClick={() => onOpen?.(base)}
     >
-      {/* Pending inbox badge (top-right) */}
-      {base.pending_inbox > 0 && (
-        <span
-          className={[
-            'absolute top-14px right-14px inline-flex items-center gap-5px',
-            'rounded-full px-9px py-3px',
-            'text-11px font-600',
-            'bg-[rgba(var(--warning-6),0.14)] text-warning-5 border border-solid border-[rgba(var(--warning-6),0.4)]',
-          ].join(' ')}
-        >
-          <i className='w-6px h-6px rounded-full bg-warning-6 shadow-[0_0_8px_rgb(var(--warning-6))]' />
-          {t('knowledge.card.pending', { count: base.pending_inbox, defaultValue: '{{count}} 待审' })}
-        </span>
-      )}
-
       {/* Header: icon + name + badges */}
       <div className='flex items-center gap-12px'>
         <KindIcon kind={base.kind} config={kindConfig} />
