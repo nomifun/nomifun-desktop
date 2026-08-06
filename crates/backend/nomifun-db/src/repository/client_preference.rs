@@ -8,6 +8,7 @@ const NOMI_DEFAULT_MODEL_KEY: &str = "nomi.defaultModel";
 const KNOWLEDGE_AUTOGEN_MODEL_KEY: &str = "knowledge.autogenModel";
 const IMAGE_GENERATION_MODEL_KEY: &str = "tools.imageGenerationModel";
 const SPEECH_TO_TEXT_KEY: &str = "tools.speechToText";
+const TEXT_TO_SPEECH_KEY: &str = "tools.textToSpeech";
 
 /// Client preference data access abstraction.
 ///
@@ -71,9 +72,13 @@ fn provider_preference_kind(key: &str) -> Option<ProviderPreferenceKind> {
         IDMM_BACKUP_PROVIDER_KEY => Some(ProviderPreferenceKind::IdmmBackupProvider),
         MODEL_FAILOVER_KEY => Some(ProviderPreferenceKind::ModelFailover),
         COLLABORATION_MODELS_KEY => Some(ProviderPreferenceKind::CollaborationModels),
-        NOMI_DEFAULT_MODEL_KEY | KNOWLEDGE_AUTOGEN_MODEL_KEY | IMAGE_GENERATION_MODEL_KEY => {
-            Some(ProviderPreferenceKind::RequiredModelObject)
-        }
+        NOMI_DEFAULT_MODEL_KEY
+        | KNOWLEDGE_AUTOGEN_MODEL_KEY
+        | IMAGE_GENERATION_MODEL_KEY
+        // TTS has no enabled switch: `provider_id` and `model` are both required,
+        // so a Provider deletion drops the whole key ("no global default") rather
+        // than leaving a half-broken reference behind.
+        | TEXT_TO_SPEECH_KEY => Some(ProviderPreferenceKind::RequiredModelObject),
         SPEECH_TO_TEXT_KEY => Some(ProviderPreferenceKind::OptionalObjectProviderId),
         _ if is_channel_default_model_key(key) => {
             Some(ProviderPreferenceKind::RequiredModelObject)
@@ -418,6 +423,12 @@ mod provider_reference_tests {
                 1,
             ),
             (
+                TEXT_TO_SPEECH_KEY,
+                serde_json::json!({"provider_id": PROVIDER_A, "model": "tts-1", "voice": null})
+                    .to_string(),
+                1,
+            ),
+            (
                 "channels.telegram.defaultModel",
                 serde_json::json!({"provider_id": PROVIDER_A, "model": "a"}).to_string(),
                 1,
@@ -535,6 +546,31 @@ mod provider_reference_tests {
                 "provider_id": null,
                 "model": "whisper"
             })
+        );
+    }
+
+    #[test]
+    fn text_to_speech_preference_is_a_required_model_reference() {
+        // A malformed global TTS default must be refused at the write boundary,
+        // not stored and then discovered by the robot gateway at speak time.
+        for value in [
+            r#"{"model":"tts-1"}"#,
+            r#"{"provider_id":"prov_legacy","model":"tts-1"}"#,
+            r#"{"provider_id":"0190f5fe-7c00-7a00-8000-000000000001","model":" "}"#,
+        ] {
+            assert!(normalize_provider_preference(TEXT_TO_SPEECH_KEY, value).is_err());
+        }
+        // Deleting the Provider deletes the default outright — a half-broken
+        // default would silently pick the wrong voice on the next turn.
+        assert_eq!(
+            provider_preference_delete_action(
+                TEXT_TO_SPEECH_KEY,
+                &serde_json::json!({"provider_id": PROVIDER_A, "model": "tts-1", "voice": "alloy"})
+                    .to_string(),
+                PROVIDER_A,
+            )
+            .unwrap(),
+            ProviderPreferenceDeleteAction::Delete
         );
     }
 }

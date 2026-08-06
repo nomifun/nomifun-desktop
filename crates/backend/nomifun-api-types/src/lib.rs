@@ -209,7 +209,7 @@ pub use shell::{
     CheckToolInstalledRequest, CheckToolInstalledResponse, DeepgramSpeechToTextConfig,
     OpenAISpeechToTextConfig, OpenExternalRequest, OpenFileRequest, OpenFolderWithRequest,
     ShowItemInFolderRequest, SpeechToTextConfig, SpeechToTextProvider, SpeechToTextResult,
-    ToolType, TtsApiRequest,
+    TEXT_TO_SPEECH_PREFERENCE_KEY, TextToSpeechConfig, ToolType, TtsApiRequest,
 };
 pub use skill::{
     AddExternalPathRequest, BuiltinAutoSkillResponse, ExportSkillRequest,
