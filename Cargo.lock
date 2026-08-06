@@ -6699,6 +6699,8 @@ name = "nomifun-robot"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "bytes",
  "rand 0.9.4",
  "serde",
  "serde_json",
