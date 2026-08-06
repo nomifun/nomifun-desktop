@@ -6695,6 +6695,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-robot"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nomifun-runtime"
 version = "0.4.1"
 dependencies = [
