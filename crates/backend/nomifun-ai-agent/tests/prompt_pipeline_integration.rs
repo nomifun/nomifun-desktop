@@ -73,7 +73,6 @@ async fn fixture_params(
         channel_platform: None,
         knowledge_mounts: vec![],
         knowledge_writeback: false,
-        knowledge_writeback_mode: None,
         knowledge_writeback_eagerness: None,
     };
 

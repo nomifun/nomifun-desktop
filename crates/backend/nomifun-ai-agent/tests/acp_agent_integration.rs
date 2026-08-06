@@ -95,7 +95,6 @@ async fn make_mock_agent(script: &str, backend: &str) -> (Arc<AcpAgentManager>, 
         channel_platform: None,
         knowledge_mounts: vec![],
         knowledge_writeback: false,
-        knowledge_writeback_mode: None,
         knowledge_writeback_eagerness: None,
     };
 
