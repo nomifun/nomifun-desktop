@@ -50,6 +50,8 @@ pub struct SessionDeps {
     pub vision_base: Option<String>,
     /// Bearer token the device presents on `/robot/vision/explain`.
     pub device_token: String,
+    /// Where discovered device tools are published for the MCP proxy.
+    pub tools: Arc<crate::tool_registry::RobotToolRegistry>,
 }
 
 fn now_ms() -> i64 {
@@ -515,6 +517,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                     let vision_base = deps.vision_base.clone();
                                     let device_token = deps.device_token.clone();
                                     let discovering = robot_id.clone();
+                                    let tool_registry = deps.tools.clone();
                                     discovery_task = Some(tokio::spawn(async move {
                                         let url = vision_base
                                             .map(|base| format!("{base}{}", crate::endpoint::VISION_PATH));
@@ -525,12 +528,20 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                             return;
                                         }
                                         match client.list_tools().await {
-                                            Ok(tools) => tracing::info!(
-                                                robot_id = %discovering,
-                                                count = tools.len(),
-                                                names = ?tools.iter().map(|t| &t.exposed_name).collect::<Vec<_>>(),
-                                                "robot: device tools discovered"
-                                            ),
+                                            Ok(tools) => {
+                                                tracing::info!(
+                                                    robot_id = %discovering,
+                                                    count = tools.len(),
+                                                    names = ?tools.iter().map(|t| &t.exposed_name).collect::<Vec<_>>(),
+                                                    "robot: device tools discovered"
+                                                );
+                                                // Publishing here is what makes the
+                                                // tools reachable from the model, via
+                                                // the loopback MCP proxy.
+                                                tool_registry
+                                                    .attach(&discovering, client.clone(), tools)
+                                                    .await;
+                                            }
                                             Err(error) => tracing::warn!(robot_id = %discovering, %error, "robot: tools/list failed"),
                                         }
                                     }));
@@ -675,6 +686,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
         task.abort();
         let _ = task.await;
     }
+    deps.tools.detach(&robot_id).await;
     drop(mcp);
     pacer.flush();
     pacer_task.abort();
@@ -798,6 +810,7 @@ mod tests {
             dispatcher: dispatcher.clone(),
             vision_base: None,
             device_token: "tok".to_owned(),
+            tools: Arc::new(crate::tool_registry::RobotToolRegistry::default()),
         };
         (
             Harness {
