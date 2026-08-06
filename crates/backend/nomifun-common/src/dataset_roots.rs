@@ -267,6 +267,18 @@ pub const MANAGED_DATASET_ROOTS: &[ManagedDatasetRoot] = &[
         backup: BackupPolicy::Exclude(HOST_LOCAL_REFERENCE),
     },
     ManagedDatasetRoot {
+        // Legacy root of the removed companion-credential subsystem. Kept ONLY
+        // so factory reset still sweeps, and backup still carries, the data left
+        // behind by installations up to v0.3.7; no live code writes here.
+        //
+        // Both the path/kind order and the backup policy are compatibility
+        // surfaces, so neither may change:
+        //   * dropping the entry changes the persisted reset-plan shape, so plan
+        //     bytes written by v0.3.1..=v0.3.7 stop validating — see
+        //     `factory_reset::RELEASED_V1_MANAGED_ROOTS`;
+        //   * `BackupCoverage::validate` demands an exact match against this
+        //     registry, so anything other than `Include` here rejects every
+        //     backup bundle those releases produced.
         path: "browser-secrets",
         kind: DatasetRootKind::Directory,
         reset: ResetPolicy::Retire,

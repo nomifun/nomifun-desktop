@@ -2,23 +2,134 @@
 //!
 //! 「零联网安装、不依赖 PATH」的兑现点。旧 Playwright provision 正是在此失败
 //! （ENOENT / npm 不走代理），故此处直接用 `nomifun_net::http_client`（代理感知）
-//! 下载 + `.part`→rename + zip 解压，全部自包含、不依赖外部 node / npm / PATH。
+//! 分块下载 + 唯一 staging + 有界 zip 解压 + completion sentinel + 原子目录发布，
+//! 全部自包含、不依赖外部 node / npm / PATH。
 //!
 //! 注：下载 / 解压 / `no_window_command` / `strip_quarantine` 的写法是
 //! `nomifun-app::provision::install` 同款的**复刻**而非引用——后者位于 backend
 //! 二进制 crate，agent crate 反向依赖它会造成依赖倒置，故在此本地复刻并对齐版本
 //! （zip = "2" / flate2 同 workspace；本模块只需 zip，CfT 三平台包都是 .zip）。
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::engine::BrowserError;
+use fs2::FileExt;
+use tokio::io::AsyncWriteExt;
 
 /// chrome zip 单次下载超时。CfT chrome 包 ~150MB；裸 reqwest client 无默认超时，
 /// 停滞连接会永久挂起，故显式封顶（对齐 provision::install 的 600s）。
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// known-good JSON 抓取超时（小文件，宽松即可）。
 const METADATA_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A corrupt/misdirected response must not fill the disk forever. Current CfT
+/// Chrome archives are far below this bound, while the extracted tree is
+/// larger than the archive and therefore has its own bound below.
+const MAX_ARCHIVE_BYTES: u64 = 1_024 * 1_024 * 1_024;
+const MAX_EXTRACTED_BYTES: u64 = 3 * 1_024 * 1_024 * 1_024;
+const MAX_ZIP_ENTRIES: usize = 20_000;
+/// Validation counts every directory entry (files, directories, and symlinks),
+/// not just regular files. This mirrors the archive entry ceiling while also
+/// bounding directories created implicitly by nested zip paths.
+const MAX_PAYLOAD_TREE_ENTRIES: usize = MAX_ZIP_ENTRIES;
+/// A breadth-heavy tree must not turn the depth-first directory frontier into
+/// an unbounded collection of retained paths. Boxed paths have no spare
+/// capacity, so this limits their encoded backing storage directly; the
+/// separate entry ceiling bounds the small Vec/Box metadata overhead.
+const MAX_PAYLOAD_FRONTIER_PATH_BYTES: usize = 16 * 1024 * 1024;
+const MAX_METADATA_BYTES: u64 = 8 * 1_024 * 1_024;
+const MIN_INSTALL_BYTES: u64 = 8 * 1_024 * 1_024;
+const MIN_INSTALL_FILES: u64 = 8;
+const INSTALL_SENTINEL: &str = ".nomifun-cft-complete.json";
+const INSTALL_SENTINEL_SCHEMA: u32 = 1;
+const STAGING_SUBDIR: &str = ".staging";
+const ACQUIRE_LOCK_FILE: &str = ".acquire.lock";
+const ACQUIRE_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const ACQUIRE_LOCK_POLL: Duration = Duration::from_millis(100);
+
+fn process_acquire_gate() -> &'static tokio::sync::Mutex<()> {
+    static GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct InstallSentinel {
+    schema: u32,
+    version: String,
+    platform: String,
+    payload_file_count: u64,
+    payload_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TreeStats {
+    files: u64,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PayloadTreeLimits {
+    entries: usize,
+    frontier_path_bytes: usize,
+}
+
+const PAYLOAD_TREE_LIMITS: PayloadTreeLimits = PayloadTreeLimits {
+    entries: MAX_PAYLOAD_TREE_ENTRIES,
+    frontier_path_bytes: MAX_PAYLOAD_FRONTIER_PATH_BYTES,
+};
+
+/// The lock file lives beside all managed versions, so separate application
+/// processes cannot download/extract/publish the same installation at once.
+struct CrossProcessAcquireLock {
+    file: File,
+}
+
+impl Drop for CrossProcessAcquireLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+/// Cancellation safety for the only large temporary state. Normal paths
+/// explicitly remove it; if a future is aborted, Drop still removes it while
+/// the cross-process lock is held. A later acquisition also performs a strict
+/// stale sweep before allocating another staging tree.
+struct StagingDirGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagingDirGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn cleanup(&mut self) -> std::io::Result<()> {
+        if self.armed && self.path.exists() {
+            std::fs::remove_dir_all(&self.path)?;
+        }
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for StagingDirGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) = std::fs::remove_dir_all(&self.path) {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "failed to clean cancelled CfT staging directory; next acquire will retry"
+                );
+            }
+        }
+    }
+}
 
 /// 把 (os, arch) 映射到 Chrome for Testing 的 platform id。
 pub fn cft_platform_id(os: &str, arch: &str) -> Option<&'static str> {
@@ -156,11 +267,9 @@ fn cft_chrome_path(
         }
     }
     // 数据目录（运行时已下载）：<data>/nomifun-browser/<version>/chrome-<platform>/...
-    let cand = data_dir
-        .join(BROWSER_SUBDIR)
-        .join(PINNED_CHROME_VERSION)
-        .join(sub);
-    exists(&cand).then_some(cand)
+    let version_dir = data_dir.join(BROWSER_SUBDIR).join(PINNED_CHROME_VERSION);
+    let cand = version_dir.join(sub);
+    (exists(&cand) && managed_install_is_complete(platform, &version_dir)).then_some(cand)
 }
 
 /// 纯优先级查找：按 env > 打包目录 > 数据目录 顺序找**已存在**的 chrome 可执行（**不含**系统
@@ -347,26 +456,109 @@ pub async fn resolve_chrome_path_with_source(
     })
 }
 
-/// 下载钉死版本 chrome 到 `<data_dir>/nomifun-browser/<version>/`，解压，
-/// mac 上去 quarantine。代理感知（`nomifun_net::http_client`）、`.part`→rename。
+/// 下载钉死版本 chrome 到 `<data_dir>/nomifun-browser/<version>/`。
+///
+/// 安装协议：进程内 single-flight → 跨进程文件锁 → 清理 stale staging → 流式下载到
+/// 唯一 staging → 有界解压与整树校验 → 写 completion sentinel → 同文件系统 rename 原子发布。
+/// 最终目录在 sentinel 和完整 payload 同时就绪前不会被解析器看见。
 async fn download_chrome(platform: &str, data_dir: &Path) -> Result<(), BrowserError> {
     let other = |e: String| BrowserError::Other(e);
-
-    // 先取 known-good JSON，挑出钉死版本的下载 url。
-    let url = fetch_chrome_url(platform).await?;
-
+    let _process_gate = tokio::time::timeout(ACQUIRE_LOCK_TIMEOUT, process_acquire_gate().lock())
+        .await
+        .map_err(|_| other("timed out waiting for in-process CfT acquire single-flight".into()))?;
+    let browser_root = data_dir.join(BROWSER_SUBDIR);
     let version_dir = data_dir.join(BROWSER_SUBDIR).join(PINNED_CHROME_VERSION);
+    std::fs::create_dir_all(&browser_root)
+        .map_err(|e| other(format!("mkdir {}: {e}", browser_root.display())))?;
+    let _cross_process_lock = acquire_cross_process_lock(&browser_root).await?;
+
+    cleanup_stale_staging(&browser_root).map_err(|e| {
+        other(format!(
+            "clean stale Chrome for Testing staging under {}: {e}",
+            browser_root.display()
+        ))
+    })?;
     std::fs::create_dir_all(&version_dir)
         .map_err(|e| other(format!("mkdir {}: {e}", version_dir.display())))?;
 
-    // 下载 zip → .part → rename（部分文件绝不冒充完成）。
-    let zip_path = version_dir.join(format!("chrome-{platform}.zip"));
+    // Double-check only after both locks. Another process may have completed the
+    // install while this caller waited. A complete legacy install is adopted
+    // only after full-tree validation and only when the old .zip/.part is gone.
+    if prepare_existing_install(platform, &version_dir)? {
+        return Ok(());
+    }
+
+    // Metadata/download are deliberately inside the gates: at most one archive
+    // body and one extracted staging tree exist per process, and the filesystem
+    // lock extends that guarantee to processes sharing this data directory.
+    let url = fetch_chrome_url(platform).await?;
+    let staging_path = create_unique_staging_dir(&browser_root, platform)
+        .map_err(|e| other(format!("create unique CfT staging directory: {e}")))?;
+    let mut staging = StagingDirGuard::new(staging_path.clone());
+    let zip_path = staging_path.join("chrome.zip");
     download_to(&url, &zip_path).await?;
 
-    // 解压到版本目录（CfT zip 顶层即 chrome-<platform>/）。
-    extract_zip_into(&zip_path, &version_dir).map_err(|e| other(format!("extract chrome zip: {e}")))?;
-    // 解压成功后删掉 zip，省空间；失败不致命。
-    let _ = std::fs::remove_file(&zip_path);
+    let payload_dir = staging_path.join("payload");
+    // This deliberately stays in the owning future instead of a detached
+    // spawn_blocking task. Acquisition is a one-time slow path; synchronous
+    // extraction means task cancellation cannot release the filesystem lock
+    // and delete staging while an orphan worker is still writing into it.
+    extract_zip_into(&zip_path, &payload_dir)
+        .map_err(|e| other(format!("extract Chrome for Testing zip: {e}")))?;
+    std::fs::remove_file(&zip_path)
+        .map_err(|e| other(format!("remove staged archive {}: {e}", zip_path.display())))?;
+
+    let stats = validate_install_payload(platform, &payload_dir)
+        .map_err(|e| other(format!("validate staged Chrome for Testing: {e}")))?;
+    write_install_sentinel(platform, &payload_dir, stats)
+        .map_err(|e| other(format!("write Chrome for Testing completion sentinel: {e}")))?;
+
+    let staged_install = install_root(platform, &payload_dir);
+    let final_install = install_root(platform, &version_dir);
+    if final_install.exists() {
+        if managed_install_is_complete(platform, &version_dir) {
+            staging.cleanup().map_err(|e| {
+                other(format!(
+                    "remove redundant CfT staging {}: {e}",
+                    staging_path.display()
+                ))
+            })?;
+            return Ok(());
+        }
+        // This should be impossible for cooperating processes because the lock
+        // is held. Never overwrite an unexpected incomplete tree: fail closed
+        // so a foreign writer cannot be hidden by our publication.
+        return Err(other(format!(
+            "Chrome for Testing publish collision at {}",
+            final_install.display()
+        )));
+    }
+    if let Err(error) = std::fs::rename(&staged_install, &final_install) {
+        // A lockless/weak-lock filesystem can still race between the existence
+        // check and rename. A fully verified winner is success; anything else
+        // remains a fail-closed collision.
+        if managed_install_is_complete(platform, &version_dir) {
+            staging.cleanup().map_err(|e| {
+                other(format!(
+                    "remove redundant CfT staging {}: {e}",
+                    staging_path.display()
+                ))
+            })?;
+            return Ok(());
+        }
+        return Err(other(format!(
+            "atomically publish Chrome for Testing {} -> {}: {error}",
+            staged_install.display(),
+            final_install.display()
+        )));
+    }
+
+    if !managed_install_is_complete(platform, &version_dir) {
+        return Err(other(format!(
+            "published Chrome for Testing failed completion verification at {}",
+            final_install.display()
+        )));
+    }
 
     // mac：去 quarantine，免 Gatekeeper 首次执行拦截。仅 mac，cfg 隔离。
     #[cfg(target_os = "macos")]
@@ -386,38 +578,473 @@ async fn download_chrome(platform: &str, data_dir: &Path) -> Result<(), BrowserE
         }
     }
 
+    staging.cleanup().map_err(|e| {
+        other(format!(
+            "remove completed CfT staging {}: {e}",
+            staging_path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+async fn acquire_cross_process_lock(
+    browser_root: &Path,
+) -> Result<CrossProcessAcquireLock, BrowserError> {
+    let lock_path = browser_root.join(ACQUIRE_LOCK_FILE);
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| {
+            BrowserError::Other(format!("open CfT acquire lock {}: {e}", lock_path.display()))
+        })?;
+    let deadline = tokio::time::Instant::now() + ACQUIRE_LOCK_TIMEOUT;
+    loop {
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => return Ok(CrossProcessAcquireLock { file }),
+            Err(error) if lock_is_contended(&error) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(BrowserError::Other(format!(
+                        "timed out waiting for CfT acquire lock {}",
+                        lock_path.display()
+                    )));
+                }
+                // Polling a non-blocking OS lock keeps cancellation exact: no
+                // detached spawn_blocking waiter can accumulate after callers
+                // abandon their Browser task.
+                tokio::time::sleep(ACQUIRE_LOCK_POLL).await;
+            }
+            Err(error) => {
+                return Err(BrowserError::Other(format!(
+                    "lock CfT acquire lock {}: {error}",
+                    lock_path.display()
+                )));
+            }
+        }
+    }
+}
+
+fn lock_is_contended(error: &std::io::Error) -> bool {
+    let expected = fs2::lock_contended_error();
+    match (error.raw_os_error(), expected.raw_os_error()) {
+        (Some(actual), Some(expected)) => actual == expected,
+        _ => error.kind() == expected.kind(),
+    }
+}
+
+fn install_root(platform: &str, version_like_dir: &Path) -> PathBuf {
+    version_like_dir.join(format!("chrome-{platform}"))
+}
+
+fn create_unique_staging_dir(browser_root: &Path, platform: &str) -> std::io::Result<PathBuf> {
+    let root = browser_root.join(STAGING_SUBDIR);
+    std::fs::create_dir_all(&root)?;
+    for _ in 0..16 {
+        let mut random = [0_u8; 16];
+        getrandom::getrandom(&mut random)
+            .map_err(|e| std::io::Error::other(format!("secure random staging id: {e}")))?;
+        let path = root.join(format!(
+            "{}-{platform}-{}-{}",
+            PINNED_CHROME_VERSION,
+            std::process::id(),
+            hex::encode(random)
+        ));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique CfT staging directory",
+    ))
+}
+
+fn cleanup_stale_staging(browser_root: &Path) -> std::io::Result<()> {
+    let root = browser_root.join(STAGING_SUBDIR);
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&root)? {
+        let path = entry?.path();
+        remove_any_path(&path)?;
+    }
+    Ok(())
+}
+
+fn remove_any_path(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+/// Returns true when a complete installation already exists. Old releases
+/// wrote directly into the final tree without a sentinel; those trees are
+/// adopted only after the archive sidecars are absent and the entire payload
+/// passes the same bounded validation as a fresh extraction.
+fn prepare_existing_install(
+    platform: &str,
+    version_dir: &Path,
+) -> Result<bool, BrowserError> {
+    if managed_install_is_complete(platform, version_dir) {
+        cleanup_legacy_archive_sidecars(platform, version_dir)?;
+        return Ok(true);
+    }
+
+    let final_install = install_root(platform, version_dir);
+    let legacy_zip = version_dir.join(format!("chrome-{platform}.zip"));
+    let legacy_part = version_dir.join(format!("chrome-{platform}.part"));
+    let sentinel = final_install.join(INSTALL_SENTINEL);
+    if final_install.is_dir()
+        && !sentinel.exists()
+        && !legacy_zip.exists()
+        && !legacy_part.exists()
+    {
+        if let Ok(stats) = validate_install_payload(platform, version_dir) {
+            write_install_sentinel(platform, version_dir, stats).map_err(|e| {
+                BrowserError::Other(format!(
+                    "adopt validated legacy CfT install at {}: {e}",
+                    final_install.display()
+                ))
+            })?;
+            if managed_install_is_complete(platform, version_dir) {
+                return Ok(true);
+            }
+        }
+    }
+
+    // A marker with mismatching stats, an old partial archive, or an invalid
+    // tree is never considered usable merely because chrome.exe exists.
+    remove_any_path(&final_install).map_err(|e| {
+        BrowserError::Other(format!(
+            "remove incomplete CfT install {}: {e}",
+            final_install.display()
+        ))
+    })?;
+    cleanup_legacy_archive_sidecars(platform, version_dir)?;
+    Ok(false)
+}
+
+fn cleanup_legacy_archive_sidecars(
+    platform: &str,
+    version_dir: &Path,
+) -> Result<(), BrowserError> {
+    for path in [
+        version_dir.join(format!("chrome-{platform}.zip")),
+        version_dir.join(format!("chrome-{platform}.part")),
+    ] {
+        remove_any_path(&path).map_err(|e| {
+            BrowserError::Other(format!("remove stale CfT sidecar {}: {e}", path.display()))
+        })?;
+    }
+    Ok(())
+}
+
+fn managed_install_is_complete(platform: &str, version_dir: &Path) -> bool {
+    let install = install_root(platform, version_dir);
+    let sentinel_path = install.join(INSTALL_SENTINEL);
+    let metadata = match std::fs::symlink_metadata(&sentinel_path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= 16 * 1024 => metadata,
+        _ => return false,
+    };
+    if metadata.len() == 0 {
+        return false;
+    }
+    let raw = match std::fs::read(&sentinel_path) {
+        Ok(raw) => raw,
+        Err(_) => return false,
+    };
+    let sentinel: InstallSentinel = match serde_json::from_slice(&raw) {
+        Ok(sentinel) => sentinel,
+        Err(_) => return false,
+    };
+    if sentinel.schema != INSTALL_SENTINEL_SCHEMA
+        || sentinel.version != PINNED_CHROME_VERSION
+        || sentinel.platform != platform
+    {
+        return false;
+    }
+    match validate_install_payload(platform, version_dir) {
+        Ok(stats) => {
+            stats.files == sentinel.payload_file_count && stats.bytes == sentinel.payload_bytes
+        }
+        Err(_) => false,
+    }
+}
+
+fn validate_install_payload(platform: &str, version_like_dir: &Path) -> std::io::Result<TreeStats> {
+    let install = install_root(platform, version_like_dir);
+    if !install.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("install root missing: {}", install.display()),
+        ));
+    }
+
+    let required_files: &[&str] = match platform {
+        "win64" => &[
+            "chrome.exe",
+            "chrome.dll",
+            "chrome_elf.dll",
+            "icudtl.dat",
+            "resources.pak",
+        ],
+        "linux64" => &["chrome", "chrome_sandbox", "icudtl.dat", "resources.pak"],
+        "mac-arm64" | "mac-x64" => &[
+            "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            "Google Chrome for Testing.app/Contents/Info.plist",
+        ],
+        _ => {
+            return Err(std::io::Error::other(format!(
+                "unsupported CfT platform {platform}"
+            )))
+        }
+    };
+    for relative in required_files {
+        let path = install.join(relative);
+        let metadata = std::fs::metadata(&path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("required CfT file missing {}: {e}", path.display()),
+            )
+        })?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(std::io::Error::other(format!(
+                "required CfT file is empty or not regular: {}",
+                path.display()
+            )));
+        }
+    }
+    if matches!(platform, "mac-arm64" | "mac-x64") {
+        for relative in [
+            "Google Chrome for Testing.app/Contents/Frameworks",
+            "Google Chrome for Testing.app/Contents/Resources",
+        ] {
+            let path = install.join(relative);
+            if !path.is_dir() {
+                return Err(std::io::Error::other(format!(
+                    "required CfT directory missing: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    let stats = payload_tree_stats(&install)?;
+    if stats.files < MIN_INSTALL_FILES || stats.bytes < MIN_INSTALL_BYTES {
+        return Err(std::io::Error::other(format!(
+            "CfT payload is implausibly small: {} files / {} bytes",
+            stats.files, stats.bytes
+        )));
+    }
+    Ok(stats)
+}
+
+/// Walk a CfT payload without collecting a directory snapshot. Callers receive
+/// only scalar statistics, so a later verification cannot retain or multiply a
+/// previous walk's frontier. Symlinks remain leaf entries and are never
+/// followed.
+fn payload_tree_stats(root: &Path) -> std::io::Result<TreeStats> {
+    payload_tree_stats_with_limits(root, PAYLOAD_TREE_LIMITS)
+}
+
+fn payload_tree_stats_with_limits(
+    root: &Path,
+    limits: PayloadTreeLimits,
+) -> std::io::Result<TreeStats> {
+    let root_path_bytes = root.as_os_str().as_encoded_bytes().len();
+    if root_path_bytes > limits.frontier_path_bytes {
+        return Err(std::io::Error::other(format!(
+            "CfT payload traversal frontier exceeds {} path bytes",
+            limits.frontier_path_bytes
+        )));
+    }
+
+    // `into_boxed_path` removes PathBuf spare capacity. Therefore the tracked
+    // encoded lengths bound the actual path-content backing allocations held
+    // by this frontier; `limits.entries` independently bounds pointer metadata.
+    let mut pending: Vec<(Box<Path>, usize)> = vec![(
+        root.to_path_buf().into_boxed_path(),
+        root_path_bytes,
+    )];
+    let mut frontier_path_bytes = root_path_bytes;
+    let mut entries = 0_usize;
+    let mut files = 0_u64;
+    let mut bytes = 0_u64;
+    while let Some((dir, dir_path_bytes)) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            // Check a conservative joined-path upper bound before allocating a
+            // PathBuf. A directory entry name cannot contain a separator, so
+            // `dir + separator + name` is exact or one byte too large when
+            // `dir` already ends in a separator.
+            let entry_path_upper_bound = dir_path_bytes
+                .checked_add(1)
+                .and_then(|bytes| {
+                    bytes.checked_add(file_name.as_os_str().as_encoded_bytes().len())
+                })
+                .ok_or_else(|| std::io::Error::other("CfT payload entry path-byte overflow"))?;
+            if entry_path_upper_bound > limits.frontier_path_bytes {
+                return Err(std::io::Error::other(format!(
+                    "CfT payload entry path exceeds {} bytes",
+                    limits.frontier_path_bytes
+                )));
+            }
+            entries = entries
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("CfT payload entry-count overflow"))?;
+            if entries > limits.entries {
+                return Err(std::io::Error::other(format!(
+                    "CfT payload exceeds validation entry limit {}",
+                    limits.entries
+                )));
+            }
+            // DirEntry::metadata is explicitly non-following for symlinks and
+            // avoids constructing a full path for ordinary file leaves.
+            let metadata = entry.metadata()?;
+            let is_root_sentinel = dir.as_ref() == root
+                && file_name.as_os_str() == INSTALL_SENTINEL;
+            if is_root_sentinel {
+                if !metadata.is_file() {
+                    let path = dir.join(&file_name);
+                    return Err(std::io::Error::other(format!(
+                        "CfT completion sentinel is not a regular file: {}",
+                        path.display()
+                    )));
+                }
+                continue;
+            }
+            if metadata.is_dir() {
+                let path = dir.join(&file_name);
+                let entry_path_bytes = path.as_os_str().as_encoded_bytes().len();
+                debug_assert!(entry_path_bytes <= entry_path_upper_bound);
+                let next_frontier_path_bytes = frontier_path_bytes
+                    .checked_add(entry_path_bytes)
+                    .ok_or_else(|| {
+                        std::io::Error::other("CfT payload frontier path-byte overflow")
+                    })?;
+                if next_frontier_path_bytes > limits.frontier_path_bytes {
+                    return Err(std::io::Error::other(format!(
+                        "CfT payload traversal frontier exceeds {} path bytes",
+                        limits.frontier_path_bytes
+                    )));
+                }
+                pending.push((path.into_boxed_path(), entry_path_bytes));
+                frontier_path_bytes = next_frontier_path_bytes;
+                continue;
+            }
+            if !metadata.is_file() && !metadata.file_type().is_symlink() {
+                let path = dir.join(&file_name);
+                return Err(std::io::Error::other(format!(
+                    "unsupported entry type in CfT payload: {}",
+                    path.display()
+                )));
+            }
+            files = files
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("CfT payload file-count overflow"))?;
+            bytes = bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| std::io::Error::other("CfT payload size overflow"))?;
+            if bytes > MAX_EXTRACTED_BYTES {
+                return Err(std::io::Error::other("CfT payload exceeds validation bounds"));
+            }
+        }
+        drop(dir);
+        frontier_path_bytes = frontier_path_bytes
+            .checked_sub(dir_path_bytes)
+            .ok_or_else(|| std::io::Error::other("CfT payload frontier accounting underflow"))?;
+    }
+    Ok(TreeStats { files, bytes })
+}
+
+fn write_install_sentinel(
+    platform: &str,
+    version_like_dir: &Path,
+    stats: TreeStats,
+) -> std::io::Result<()> {
+    let install = install_root(platform, version_like_dir);
+    let path = install.join(INSTALL_SENTINEL);
+    let temp = install.join(format!("{INSTALL_SENTINEL}.tmp"));
+    let sentinel = InstallSentinel {
+        schema: INSTALL_SENTINEL_SCHEMA,
+        version: PINNED_CHROME_VERSION.to_string(),
+        platform: platform.to_string(),
+        payload_file_count: stats.files,
+        payload_bytes: stats.bytes,
+    };
+    let encoded = serde_json::to_vec(&sentinel)
+        .map_err(|e| std::io::Error::other(format!("serialize sentinel: {e}")))?;
+    remove_any_path(&temp)?;
+    let mut file = OpenOptions::new().create_new(true).write(true).open(&temp)?;
+    file.write_all(&encoded)?;
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&temp, &path)?;
     Ok(())
 }
 
 /// 取 known-good JSON 并挑出钉死版本+平台的 chrome 下载 url。
 async fn fetch_chrome_url(platform: &str) -> Result<String, BrowserError> {
     let client = nomifun_net::http_client();
-    let json = client
+    let mut response = client
         .get(KNOWN_GOOD_URL)
         .timeout(METADATA_TIMEOUT)
         .send()
         .await
         .map_err(|e| BrowserError::Other(format!("GET {KNOWN_GOOD_URL}: {e}")))?
         .error_for_status()
-        .map_err(|e| BrowserError::Other(format!("non-2xx from {KNOWN_GOOD_URL}: {e}")))?
-        .text()
+        .map_err(|e| BrowserError::Other(format!("non-2xx from {KNOWN_GOOD_URL}: {e}")))?;
+    if response.content_length().is_some_and(|len| len > MAX_METADATA_BYTES) {
+        return Err(BrowserError::Other(format!(
+            "Chrome for Testing metadata exceeds {MAX_METADATA_BYTES} bytes"
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| BrowserError::Other(format!("read body {KNOWN_GOOD_URL}: {e}")))?;
-    pick_chrome_url(&json, PINNED_CHROME_VERSION, platform).ok_or_else(|| {
+        .map_err(|e| BrowserError::Other(format!("read body {KNOWN_GOOD_URL}: {e}")))?
+    {
+        let next_len = (body.len() as u64)
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| BrowserError::Other("CfT metadata length overflow".into()))?;
+        if next_len > MAX_METADATA_BYTES {
+            return Err(BrowserError::Other(format!(
+                "Chrome for Testing metadata exceeds {MAX_METADATA_BYTES} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let json = std::str::from_utf8(&body)
+        .map_err(|e| BrowserError::Other(format!("CfT metadata is not UTF-8: {e}")))?;
+    pick_chrome_url(json, PINNED_CHROME_VERSION, platform).ok_or_else(|| {
         BrowserError::Other(format!(
             "no chrome download for version {PINNED_CHROME_VERSION} platform {platform} in known-good list"
         ))
     })
 }
 
-/// 代理感知下载 `url` 到 `dest`，经 `.part` 旁车再 rename（同 provision::install::download）。
+/// 代理感知下载 `url` 到唯一 staging 内的 `dest`。响应分块直接写文件，不把整个
+/// ~150MB archive 聚合进堆；`.part` 仅在 fsync 后 rename。
 async fn download_to(url: &str, dest: &Path) -> Result<(), BrowserError> {
     let other = |e: String| BrowserError::Other(e);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| other(format!("mkdir {}: {e}", parent.display())))?;
     }
     let client = nomifun_net::http_client();
-    let resp = client
+    let mut response = client
         .get(url)
         .timeout(DOWNLOAD_TIMEOUT)
         .send()
@@ -425,28 +1052,88 @@ async fn download_to(url: &str, dest: &Path) -> Result<(), BrowserError> {
         .map_err(|e| other(format!("GET {url}: {e}")))?
         .error_for_status()
         .map_err(|e| other(format!("non-2xx from {url}: {e}")))?;
-    let bytes = resp.bytes().await.map_err(|e| other(format!("read body {url}: {e}")))?;
+    if response.content_length().is_some_and(|len| len > MAX_ARCHIVE_BYTES) {
+        return Err(other(format!(
+            "Chrome for Testing archive exceeds {MAX_ARCHIVE_BYTES} bytes"
+        )));
+    }
     let part = dest.with_extension("part");
-    std::fs::write(&part, &bytes).map_err(|e| other(format!("write {}: {e}", part.display())))?;
-    std::fs::rename(&part, dest).map_err(|e| other(format!("rename into {}: {e}", dest.display())))?;
-    Ok(())
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&part)
+            .await
+            .map_err(|e| other(format!("create staged archive {}: {e}", part.display())))?;
+        let mut written = 0_u64;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| other(format!("stream body {url}: {e}")))?
+        {
+            written = written
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| other("CfT archive length overflow".into()))?;
+            if written > MAX_ARCHIVE_BYTES {
+                return Err(other(format!(
+                    "Chrome for Testing archive exceeds {MAX_ARCHIVE_BYTES} bytes"
+                )));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| other(format!("write staged archive {}: {e}", part.display())))?;
+        }
+        if written == 0 {
+            return Err(other("Chrome for Testing archive response was empty".into()));
+        }
+        file.flush()
+            .await
+            .map_err(|e| other(format!("flush staged archive {}: {e}", part.display())))?;
+        file.sync_all()
+            .await
+            .map_err(|e| other(format!("sync staged archive {}: {e}", part.display())))?;
+        drop(file);
+        tokio::fs::rename(&part, dest)
+            .await
+            .map_err(|e| other(format!("rename archive into {}: {e}", dest.display())))?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&part).await;
+    }
+    result
 }
 
 /// 解压 zip 到 `dest_dir`，保留 zip 内顶层目录（CfT 包顶层即 `chrome-<platform>/`）。
-/// 复刻 `provision::install::extract_zip`：跳过 traversal-unsafe 名、unix 保留权限位。
+/// 拒绝 traversal-unsafe 名、重复输出和超过上限的 archive；unix 保留权限位。
 fn extract_zip_into(archive: &Path, dest_dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest_dir)?;
     let f = std::fs::File::open(archive)?;
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(f))
         .map_err(|e| std::io::Error::other(format!("read zip: {e}")))?;
+    if zip.len() > MAX_ZIP_ENTRIES {
+        return Err(std::io::Error::other(format!(
+            "zip has {} entries; maximum is {MAX_ZIP_ENTRIES}",
+            zip.len()
+        )));
+    }
+    let mut extracted = 0_u64;
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
             .map_err(|e| std::io::Error::other(format!("zip entry {i}: {e}")))?;
-        let Some(rel) = entry.enclosed_name() else {
-            // traversal-unsafe（含 .. / 绝对路径）→ 跳过。
-            continue;
-        };
+        let rel = entry.enclosed_name().ok_or_else(|| {
+            std::io::Error::other(format!("zip entry {i} has traversal-unsafe path"))
+        })?;
+        extracted = extracted
+            .checked_add(entry.size())
+            .ok_or_else(|| std::io::Error::other("zip extracted-size overflow"))?;
+        if extracted > MAX_EXTRACTED_BYTES {
+            return Err(std::io::Error::other(format!(
+                "zip expands beyond {MAX_EXTRACTED_BYTES} bytes"
+            )));
+        }
         let out = dest_dir.join(rel);
         if entry.is_dir() {
             std::fs::create_dir_all(&out)?;
@@ -455,14 +1142,70 @@ fn extract_zip_into(archive: &Path, dest_dir: &Path) -> std::io::Result<()> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut w = std::fs::File::create(&out)?;
-        std::io::copy(&mut entry, &mut w)?;
+        let entry_is_symlink = entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000);
+        #[cfg(unix)]
+        let unix_mode = entry.unix_mode();
+        let expected = entry.size();
+        if entry_is_symlink {
+            #[cfg(unix)]
+            {
+                use std::io::Read as _;
+                use std::os::unix::ffi::OsStringExt as _;
+
+                if expected > 4 * 1024 {
+                    return Err(std::io::Error::other(format!(
+                        "zip symlink entry {i} target is implausibly long"
+                    )));
+                }
+                let mut target = Vec::with_capacity(expected as usize);
+                entry.read_to_end(&mut target)?;
+                if target.len() as u64 != expected || target.contains(&0) {
+                    return Err(std::io::Error::other(format!(
+                        "zip symlink entry {i} has invalid target"
+                    )));
+                }
+                let target = PathBuf::from(std::ffi::OsString::from_vec(target));
+                if target.as_os_str().is_empty()
+                    || target.is_absolute()
+                    || target.components().any(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::ParentDir
+                                | std::path::Component::RootDir
+                                | std::path::Component::Prefix(_)
+                        )
+                    })
+                {
+                    return Err(std::io::Error::other(format!(
+                        "zip symlink entry {i} escapes the staging tree"
+                    )));
+                }
+                std::os::unix::fs::symlink(target, &out)?;
+                continue;
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(std::io::Error::other(format!(
+                    "zip entry {i} is an unexpected symlink on this platform"
+                )));
+            }
+        }
+        let mut w = OpenOptions::new().create_new(true).write(true).open(&out)?;
+        let copied = std::io::copy(&mut entry, &mut w)?;
+        if copied != expected {
+            return Err(std::io::Error::other(format!(
+                "zip entry {i} size mismatch: expected {expected}, copied {copied}"
+            )));
+        }
+        w.flush()?;
         #[cfg(unix)]
         {
             // TODO(verify-linux): chrome 可执行位需实机核对（保留 zip 权限位），见
             // docs/superpowers/specs/browser-use/PLATFORM-VERIFICATION.md
             use std::os::unix::fs::PermissionsExt;
-            if let Some(mode) = entry.unix_mode() {
+            if let Some(mode) = unix_mode {
                 let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode));
             }
         }
@@ -537,6 +1280,37 @@ mod tests {
         p
     }
 
+    fn populate_complete_win64_version(version_dir: &Path) -> PathBuf {
+        let install = install_root("win64", &version_dir);
+        for name in [
+            "chrome.exe",
+            "chrome.dll",
+            "chrome_elf.dll",
+            "icudtl.dat",
+            "resources.pak",
+            "locales/en-US.pak",
+            "v8_context_snapshot.bin",
+        ] {
+            touch(&install, name);
+        }
+        let filler = touch(&install, "test-payload.bin");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&filler)
+            .unwrap()
+            .set_len(MIN_INSTALL_BYTES)
+            .unwrap();
+        let stats = validate_install_payload("win64", &version_dir).unwrap();
+        write_install_sentinel("win64", &version_dir, stats).unwrap();
+        version_dir.join("chrome-win64/chrome.exe")
+    }
+
+    fn make_complete_win64_install(data_dir: &Path) -> PathBuf {
+        populate_complete_win64_version(
+            &data_dir.join(BROWSER_SUBDIR).join(PINNED_CHROME_VERSION),
+        )
+    }
+
     #[test]
     fn env_path_wins_when_present() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -594,10 +1368,7 @@ mod tests {
     fn data_dir_used_when_no_env_no_bundled() {
         let tmp = tempfile::TempDir::new().unwrap();
         let data = tmp.path().join("data");
-        let data_exe = touch(
-            &data.join(BROWSER_SUBDIR).join(PINNED_CHROME_VERSION),
-            "chrome-win64/chrome.exe",
-        );
+        let data_exe = make_complete_win64_install(&data);
 
         // 无 env、无打包目录 → 数据目录命中。
         let got = resolve_chrome_path_in("win64", |_| None, None, &data);
@@ -617,6 +1388,324 @@ mod tests {
         std::fs::create_dir_all(&data).unwrap();
         // 全空：env 无、打包目录无、数据目录无 → None（交给下载兜底）。
         assert!(resolve_chrome_path_in("win64", |_| None, None, &data).is_none());
+    }
+
+    #[test]
+    fn managed_install_never_accepts_only_chrome_exe() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data = tmp.path().join("data");
+        let version = data.join(BROWSER_SUBDIR).join(PINNED_CHROME_VERSION);
+        touch(&version, "chrome-win64/chrome.exe");
+        assert!(!managed_install_is_complete("win64", &version));
+        assert!(resolve_chrome_path_in("win64", |_| None, None, &data).is_none());
+    }
+
+    #[test]
+    fn completion_sentinel_binds_full_tree_stats() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let version = tmp.path().join("version");
+        populate_complete_win64_version(&version);
+        assert!(managed_install_is_complete("win64", &version));
+
+        std::fs::write(install_root("win64", &version).join("chrome.dll"), b"tampered")
+            .unwrap();
+        assert!(
+            !managed_install_is_complete("win64", &version),
+            "payload changes must invalidate the completion sentinel"
+        );
+    }
+
+    #[test]
+    fn payload_tree_counts_wide_empty_directories_against_one_entry_limit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("wide-empty-tree");
+        std::fs::create_dir_all(&root).unwrap();
+        const ALLOWED_ENTRIES: usize = 32;
+        for index in 0..=ALLOWED_ENTRIES {
+            std::fs::create_dir(root.join(format!("empty-{index:03}"))).unwrap();
+        }
+
+        let error = payload_tree_stats_with_limits(
+            &root,
+            PayloadTreeLimits {
+                entries: ALLOWED_ENTRIES,
+                frontier_path_bytes: MAX_PAYLOAD_FRONTIER_PATH_BYTES,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("entry limit 32"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
+    fn payload_tree_counts_deep_empty_directories_against_one_entry_limit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("deep-empty-tree");
+        std::fs::create_dir_all(&root).unwrap();
+        const ALLOWED_ENTRIES: usize = 16;
+        let mut cursor = root.clone();
+        for index in 0..=ALLOWED_ENTRIES {
+            cursor = cursor.join(format!("d{index:02}"));
+            std::fs::create_dir(&cursor).unwrap();
+        }
+
+        let error = payload_tree_stats_with_limits(
+            &root,
+            PayloadTreeLimits {
+                entries: ALLOWED_ENTRIES,
+                frontier_path_bytes: MAX_PAYLOAD_FRONTIER_PATH_BYTES,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("entry limit 16"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
+    fn payload_tree_does_not_hide_nested_sentinel_named_directories() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("sentinel-name-tree");
+        std::fs::create_dir_all(
+            root.join("parent")
+                .join(INSTALL_SENTINEL)
+                .join("nested-empty"),
+        )
+        .unwrap();
+
+        let error = payload_tree_stats_with_limits(
+            &root,
+            PayloadTreeLimits {
+                entries: 2,
+                frontier_path_bytes: MAX_PAYLOAD_FRONTIER_PATH_BYTES,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("entry limit 2"),
+            "nested sentinel-named directories must be traversed: {error}"
+        );
+    }
+
+    #[test]
+    fn payload_tree_bounds_long_paths_retained_in_the_frontier() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("long-frontier");
+        std::fs::create_dir_all(&root).unwrap();
+        let children = [
+            root.join(format!("a{}", "a".repeat(120))),
+            root.join(format!("b{}", "b".repeat(120))),
+        ];
+        for child in &children {
+            std::fs::create_dir(child).unwrap();
+        }
+        let root_bytes = root.as_os_str().as_encoded_bytes().len();
+        let largest_child_bytes = children
+            .iter()
+            .map(|path| path.as_os_str().as_encoded_bytes().len())
+            .max()
+            .unwrap();
+
+        // The active root and either child fit, but retaining both children in
+        // the breadth frontier does not. The result is independent of the
+        // filesystem's directory enumeration order.
+        let frontier_path_bytes = root_bytes + largest_child_bytes;
+        let error = payload_tree_stats_with_limits(
+            &root,
+            PayloadTreeLimits {
+                entries: MAX_PAYLOAD_TREE_ENTRIES,
+                frontier_path_bytes,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("payload traversal frontier exceeds"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
+    fn representative_cft_install_remains_within_production_tree_budgets() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let version = tmp.path().join("representative-version");
+        populate_complete_win64_version(&version);
+
+        let stats = payload_tree_stats(&install_root("win64", &version)).unwrap();
+        assert!(stats.files >= MIN_INSTALL_FILES);
+        assert!(stats.bytes >= MIN_INSTALL_BYTES);
+        assert!(managed_install_is_complete("win64", &version));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn payload_tree_treats_directory_symlinks_as_leaf_entries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("payload");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("must-not-be-walked"), vec![0_u8; 4096]).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("directory-link")).unwrap();
+
+        let stats = payload_tree_stats(&root).unwrap();
+        assert_eq!(stats.files, 1, "the symlink itself is the only payload leaf");
+        assert!(
+            stats.bytes < 4096,
+            "the traversal must not follow a directory symlink"
+        );
+    }
+
+    #[test]
+    fn validated_legacy_tree_is_adopted_but_active_partial_is_replaced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let version = tmp.path().join("version");
+        populate_complete_win64_version(&version);
+        std::fs::remove_file(install_root("win64", &version).join(INSTALL_SENTINEL)).unwrap();
+        assert!(prepare_existing_install("win64", &version).unwrap());
+        assert!(managed_install_is_complete("win64", &version));
+
+        std::fs::remove_file(install_root("win64", &version).join(INSTALL_SENTINEL)).unwrap();
+        std::fs::write(version.join("chrome-win64.part"), b"still downloading").unwrap();
+        assert!(!prepare_existing_install("win64", &version).unwrap());
+        assert!(!install_root("win64", &version).exists());
+        assert!(!version.join("chrome-win64.part").exists());
+    }
+
+    #[test]
+    fn stale_staging_is_swept_before_new_unique_staging() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let browser_root = tmp.path().join(BROWSER_SUBDIR);
+        let stale = browser_root.join(STAGING_SUBDIR).join("old-partial");
+        touch(&stale, "payload/chrome-win64/chrome.exe");
+        cleanup_stale_staging(&browser_root).unwrap();
+        assert!(!stale.exists());
+
+        let one = create_unique_staging_dir(&browser_root, "win64").unwrap();
+        let two = create_unique_staging_dir(&browser_root, "win64").unwrap();
+        assert_ne!(one, two);
+        assert!(one.is_dir() && two.is_dir());
+    }
+
+    #[test]
+    fn staged_install_is_complete_before_atomic_publication() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let staging_payload = tmp.path().join("staging/payload");
+        populate_complete_win64_version(&staging_payload);
+        let final_version = tmp.path().join("final-version");
+        std::fs::create_dir_all(&final_version).unwrap();
+        let staged = install_root("win64", &staging_payload);
+        let final_install = install_root("win64", &final_version);
+        assert!(!final_install.exists());
+        std::fs::rename(&staged, &final_install).unwrap();
+        assert!(managed_install_is_complete("win64", &final_version));
+    }
+
+    #[tokio::test]
+    async fn cross_process_lock_serializes_acquirers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let browser_root = tmp.path().join(BROWSER_SUBDIR);
+        std::fs::create_dir_all(&browser_root).unwrap();
+        let first = acquire_cross_process_lock(&browser_root).await.unwrap();
+        let ready = tmp.path().join("lock-child-ready");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "acquire::tests::cross_process_lock_child",
+                "--ignored",
+            ])
+            .env("NOMIFUN_TEST_CFT_LOCK_ROOT", &browser_root)
+            .env("NOMIFUN_TEST_CFT_LOCK_READY", &ready)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "lock child exited before attempting the filesystem lock"
+            );
+            assert!(
+                tokio::time::Instant::now() < ready_deadline,
+                "lock child did not reach the filesystem lock"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "child process must wait while the filesystem lock is held"
+        );
+        drop(first);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "lock child failed with {status}");
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("child process did not acquire lock after release");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[ignore = "helper subprocess for cross_process_lock_serializes_acquirers"]
+    #[tokio::test]
+    async fn cross_process_lock_child() {
+        let browser_root = PathBuf::from(
+            std::env::var_os("NOMIFUN_TEST_CFT_LOCK_ROOT").expect("lock root env"),
+        );
+        let ready = PathBuf::from(
+            std::env::var_os("NOMIFUN_TEST_CFT_LOCK_READY").expect("lock ready env"),
+        );
+        std::fs::write(ready, b"ready").unwrap();
+        let lock = acquire_cross_process_lock(&browser_root).await.unwrap();
+        drop(lock);
+    }
+
+    #[tokio::test]
+    async fn archive_download_streams_into_staging_file() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nfirst-second",
+                )
+                .await
+                .unwrap();
+        });
+        let tmp = tempfile::TempDir::new().unwrap();
+        let destination = tmp.path().join("unique-staging/chrome.zip");
+        download_to(&format!("http://{address}/chrome.zip"), &destination)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"first-second");
+        assert!(!destination.with_extension("part").exists());
+    }
+
+    #[test]
+    fn staging_guard_cleans_cancelled_partial_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let staging = tmp.path().join("cancelled-staging");
+        touch(&staging, "payload/chrome-win64/chrome.exe");
+        {
+            let _guard = StagingDirGuard::new(staging.clone());
+        }
+        assert!(!staging.exists());
     }
 
     #[test]

@@ -273,6 +273,7 @@ async fn t8_2_pagination() {
         order: None,
         content_mode: None,
         cursor: None,
+        day: None,
     };
     let result = svc.list_messages(USER_ID, &conv.conversation_id.to_string(), query).await.unwrap();
     assert_eq!(result.items.len(), 3);

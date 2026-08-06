@@ -85,6 +85,10 @@ name = "remote_agent_e2e"
 path = "tests/remote_agent_e2e.rs"
 
 [[test]]
+name = "ssh_host_e2e"
+path = "tests/ssh_host_e2e.rs"
+
+[[test]]
 name = "auxiliary_e2e"
 path = "tests/auxiliary_e2e.rs"
 
@@ -204,6 +208,7 @@ browser-use = [
     "dep:nomi-browser",
     "dep:nomi-browser-engine",
     "dep:nomifun-browser-platform",
+    "dep:nomi-process-runtime",
     "dep:sysinfo",
     "dep:nomi-config",
     "dep:nomi-tools",
@@ -223,6 +228,7 @@ nomifun-office.workspace = true
 nomifun-shell.workspace = true
 nomifun-model-invoke.workspace = true
 nomifun-ai-agent.workspace = true
+nomifun-ssh.workspace = true
 nomifun-mcp.workspace = true
 nomifun-conversation.workspace = true
 nomifun-extension.workspace = true
@@ -239,8 +245,6 @@ nomifun-creation.workspace = true
 nomifun-gateway.workspace = true
 nomifun-public.workspace = true
 nomifun-webhook.workspace = true
-# P3-X2: per-pet browser-use credential secret CRUD endpoints (web feature mounts routes).
-nomifun-secret = { workspace = true, features = ["web"] }
 nomifun-terminal.workspace = true
 nomifun-preset.workspace = true
 nomifun-runtime.workspace = true
@@ -251,6 +255,7 @@ dirs.workspace = true
 # (bootstrap/server_lock.rs) — same dep nomifun-db's migrate lock uses.
 fs2.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
@@ -288,6 +293,7 @@ nomi-browser = { workspace = true, optional = true }
 # engine. Only the browser-use feature pulls this dependency.
 nomi-browser-engine = { workspace = true, optional = true }
 nomifun-browser-platform = { workspace = true, optional = true }
+nomi-process-runtime = { workspace = true, optional = true }
 sysinfo = { workspace = true, optional = true }
 nomi-config = { workspace = true, optional = true }
 nomi-tools = { workspace = true, optional = true }

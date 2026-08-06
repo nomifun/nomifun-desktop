@@ -99,7 +99,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
           <section
             key={group.key}
             className={classNames(
-              'overflow-hidden rd-12px border border-solid bg-bg-1 transition-[border-color,box-shadow,transform] duration-200',
+              'overflow-hidden rd-12px border border-solid bg-1 transition-[border-color,box-shadow,transform] duration-200',
               isCurrentConversation
                 ? 'border-[rgba(var(--primary-6),0.30)] shadow-[0_5px_16px_rgba(var(--primary-6),0.07)]'
                 : 'border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] shadow-[0_3px_12px_rgba(15,23,42,0.025)]'
@@ -162,7 +162,14 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
                         <div key={lane.lane_id} data-browser-lane-id={lane.lane_id}>
                           <div
                             className={classNames(
-                              'group relative flex items-center gap-6px rd-9px px-9px py-8px cursor-pointer outline-none transition-[background-color,box-shadow,color] duration-150 focus-visible:outline-2 focus-visible:outline-[rgba(var(--primary-6),0.48)] focus-visible:outline-offset-1',
+                              // `outline-none` above removes the native focus ring, so this outline IS the
+                              // keyboard focus indicator. `outline-2` set outline-COLOUR, not width — a numeric
+                              // suffix resolves against the theme's numeric colour keys — and since `.outline-2`
+                              // is emitted after `.outline-[…]` it also overrode the intended colour with
+                              // `var(--bg-2)`, the page background in both themes. `outline-2px` is the width
+                              // spelling, and `outline-solid` is required because nothing in this project sets
+                              // an outline-style.
+                              'group relative flex items-center gap-6px rd-9px px-9px py-8px cursor-pointer outline-none transition-[background-color,box-shadow,color] duration-150 focus-visible:outline-2px focus-visible:outline-solid focus-visible:outline-[rgba(var(--primary-6),0.48)] focus-visible:outline-offset-1px',
                               active
                                 ? 'bg-[rgba(var(--primary-6),0.10)] text-primary-6 shadow-[inset_3px_0_0_rgb(var(--primary-6)),0_3px_10px_rgba(var(--primary-6),0.08)]'
                                 : 'hover:bg-fill-2 text-t-primary hover:shadow-[0_2px_8px_rgba(0,0,0,0.04)]'

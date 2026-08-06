@@ -32,7 +32,6 @@ mod remote_agent;
 mod requirement;
 mod response;
 mod serde_util;
-mod secret;
 mod shell;
 mod skill;
 mod system;
@@ -206,7 +205,6 @@ pub use requirement::{
     ResumeTagRequest, TagPausedPayload, TagSummary, UpdateRequirementRequest, UpdateStatusRequest,
 };
 pub use response::{ApiResponse, ErrorResponse};
-pub use secret::{RegisterSecretRequest, SecretListItem};
 pub use shell::{
     CheckToolInstalledRequest, CheckToolInstalledResponse, DeepgramSpeechToTextConfig,
     OpenAISpeechToTextConfig, OpenExternalRequest, OpenFileRequest, OpenFolderWithRequest,
@@ -242,7 +240,8 @@ pub use mcp_bridge::{
     REQUIREMENT_CAPABILITY_DOMAIN, REQUIREMENT_COMPLETE_TOOL,
     REQUIREMENT_UPDATE_STATUS_TOOL, RequirementCapabilityClaims,
     RequirementCapabilityScope, RequirementMcpChildConfig, RequirementMcpConfig,
-    ScopedMcpChildBootstrap, ScopedMcpChildConfig, browser_tool_operation,
+    MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY, ScopedMcpChildBootstrap,
+    ScopedMcpChildConfig, browser_tool_operation,
 };
 pub use terminal::{
     CreateTerminalRequest, TerminalExitEvent, TerminalInputRequest, TerminalOutputEvent,

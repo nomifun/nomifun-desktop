@@ -172,7 +172,7 @@ const GuidCollaborationTemplatePicker: React.FC<Props> = ({
   );
 
   return (
-    <div className='mt-10px border-t border-t-[var(--color-border-2)] pt-10px' data-testid='collaboration-template-picker'>
+    <div className='mt-10px border-t border-t-solid border-t-[var(--color-border-2)] pt-10px' data-testid='collaboration-template-picker'>
       <div className='mb-7px flex items-center justify-between gap-8px'>
         <div className='text-12px font-600 text-t-primary'>
           {t('collaboration.template.title', { defaultValue: '协作方案' })}

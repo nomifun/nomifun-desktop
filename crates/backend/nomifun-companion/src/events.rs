@@ -53,23 +53,11 @@ impl CompanionEventEmitter {
         );
     }
 
-    pub fn emit_suggestion_created(&self, companion_id: &str, suggestion: &crate::store::CompanionSuggestion) {
-        self.broadcast_scoped("companion.suggestion-created", companion_id, suggestion);
-    }
-
-    /// A suggestion was accepted/dismissed. Lets every open surface (panel,
-    /// desktop bubble, console) drop the now-decided card live instead of
-    /// leaving a stale `new` snapshot that 404s on the next decide. Payload is
-    /// the decided suggestion (carries `suggestion_id` + new `status`).
-    pub fn emit_suggestion_decided(&self, suggestion: &crate::store::CompanionSuggestion) {
-        self.broadcast("companion.suggestion-decided", suggestion);
-    }
-
     pub fn emit_learn_started(&self, companion_id: &str) {
         self.broadcast("companion.learn-started", &serde_json::json!({ "companion_id": companion_id }));
     }
 
-    pub fn emit_learn_finished(&self, companion_id: &str, run: &crate::store::CompanionLearnRun) {
+    pub fn emit_learn_finished(&self, companion_id: &str, run: &crate::learner::CompanionLearnResult) {
         self.broadcast_scoped("companion.learn-finished", companion_id, run);
     }
 

@@ -17,6 +17,7 @@ type are shared from `@/common/config/i18n`.
 services/i18n/
 ├── index.ts
 ├── i18n-keys.d.ts
+├── localeKeyParity.ts
 └── locales/
     ├── zh-CN/
     │   ├── index.ts
@@ -88,11 +89,28 @@ await changeLanguage('en-US');
 
 4. Use the generated key at call sites.
 
+## Plurals
+
+i18next resolves `count` through a `_<category>` suffix (JSON v4), and the
+categories differ per language: `en-US` has `one` and `other`, `zh-CN` has only
+`other` because Chinese does not inflect for number. So a `_one` variant belongs
+in `en-US` and is unreachable dead weight in `zh-CN` — key symmetry stops at the
+plural suffix.
+
+`localeKeyParity.ts` is the one implementation of that rule. Both
+`bun run check:i18n` and the per-namespace locale tests import it, so neither can
+start demanding a variant the other forbids:
+
+- a key with no plural suffix must exist in every locale (real drift, an error);
+- a `_<category>` variant is required only of locales that have that category;
+- a variant outside a locale's categories is reported as unreachable.
+
 ## Rules
 
 - Do not hardcode user-visible product text in components.
 - Prefer stable semantic keys such as `cron.detail.runNow`.
-- Keep Chinese and English keys symmetric.
+- Keep Chinese and English keys symmetric, except for plural variants (see
+  [Plurals](#plurals)).
 - Add a new module only when the feature boundary is real; otherwise extend the
   nearest existing module.
 - Run `bun run check:i18n` before submitting locale changes.

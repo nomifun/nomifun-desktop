@@ -1,11 +1,11 @@
 //! Shared test fixtures for the knowledge crate: an in-memory
-//! `IKnowledgeRepository`, a no-op event broadcaster, and a service factory.
+//! `IKnowledgeRepository`, a no-op event broadcaster, and service factories.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nomifun_common::{
-    CompanionId, ConversationId, KnowledgeBindingId, TerminalId, TimestampMs,
+    CompanionId, ConversationId, KnowledgeBaseId, KnowledgeBindingId, TerminalId, TimestampMs,
 };
 use nomifun_db::models::{CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeTagRow, UpdateKnowledgeTagParams};
 use nomifun_db::{DbError, IKnowledgeRepository};
@@ -31,7 +31,6 @@ fn binding_row(
     target_id: &str,
     enabled: bool,
     writeback: bool,
-    writeback_mode: &str,
     writeback_eagerness: &str,
     channel_write_enabled: bool,
     updated_at: TimestampMs,
@@ -46,7 +45,6 @@ fn binding_row(
         target_companion_id: None,
         enabled,
         writeback,
-        writeback_mode: writeback_mode.to_owned(),
         writeback_eagerness: writeback_eagerness.to_owned(),
         channel_write_enabled,
         updated_at,
@@ -131,7 +129,6 @@ impl IKnowledgeRepository for MemRepo {
         kb_ids: &[String],
         enabled: bool,
         writeback: bool,
-        writeback_mode: &str,
         writeback_eagerness: &str,
         channel_write_enabled: bool,
         updated_at: TimestampMs,
@@ -158,7 +155,6 @@ impl IKnowledgeRepository for MemRepo {
             id,
             enabled,
             writeback,
-            writeback_mode,
             writeback_eagerness,
             channel_write_enabled,
             updated_at,
@@ -258,4 +254,30 @@ pub(crate) fn make_service(data_dir: &Path) -> KnowledgeService {
             Arc::from(owner_id.into_string()),
         ),
     )
+}
+
+/// Service plus one managed base provisioned on disk, seeded with `docs` as
+/// `(rel_path, content)` pairs. Seeding goes through the real `write_file`
+/// path so fixture documents land exactly where production writes place them
+/// instead of in a hand-built tree. The base root is returned separately
+/// because the create-time `KnowledgeBaseInfo` file stats are already stale
+/// once `docs` have landed.
+pub(crate) async fn make_service_with_base(
+    data_dir: &Path,
+    name: &str,
+    docs: &[(&str, &str)],
+) -> (KnowledgeService, KnowledgeBaseId, PathBuf) {
+    let service = make_service(data_dir);
+    let info = service
+        .create_base(name, "", None, None)
+        .await
+        .expect("fixture base creation must succeed");
+    for (rel_path, content) in docs {
+        service
+            .write_file(&info.knowledge_base_id, rel_path, content)
+            .await
+            .expect("fixture document seeding must succeed");
+    }
+    let root = PathBuf::from(&info.root_path);
+    (service, info.knowledge_base_id, root)
 }

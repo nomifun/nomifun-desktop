@@ -393,7 +393,7 @@ const SkillsHubSettings: React.FC = () => {
         </div>
 
         {/* Usage tip */}
-        <div className='px-16px md:px-[24px] py-20px bg-base border border-b-base shadow-sm rd-16px flex items-start gap-12px text-t-secondary'>
+        <div className='px-16px md:px-[24px] py-20px bg-base border border-solid border-[var(--border-base)] shadow-sm rd-16px flex items-start gap-12px text-t-secondary'>
           <Info size={18} className='text-primary-6 mt-2px shrink-0' />
           <div className='flex flex-col gap-4px'>
             <span className='font-bold text-t-primary text-14px'>

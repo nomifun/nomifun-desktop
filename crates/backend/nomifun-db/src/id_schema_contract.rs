@@ -81,6 +81,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "requirement_tags",
     "requirements",
     "skill_tags",
+    "ssh_hosts",
     "system_settings",
     "tag_settings",
     "terminal_scrollback",
@@ -131,6 +132,7 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("providers", "provider_id"),
     ("remote_agents", "remote_agent_id"),
     ("requirements", "requirement_id"),
+    ("ssh_hosts", "ssh_host_id"),
     ("terminal_sessions", "terminal_id"),
     ("terminal_turn_admissions", "turn_token"),
     ("users", "user_id"),
@@ -206,6 +208,7 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("remote_agents", "remote_agent_id"),
     ("remote_agents", "device_id"),
     ("requirements", "requirement_id"),
+    ("ssh_hosts", "ssh_host_id"),
     ("terminal_sessions", "terminal_id"),
     ("terminal_turn_admissions", "turn_token"),
     ("users", "user_id"),
@@ -529,6 +532,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("messages", "msg_id" => "messages", "message_id", true, "idx_messages_msg_id", KeepHistory)
         .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
     text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, "idx_terminal_sessions_user_id", Cascade),
+    text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, "idx_ssh_hosts_user_id", Cascade),
     // Delivery receipts intentionally survive Terminal/Requirement deletion so
     // a replay can never regain PTY write authority.
     text_ref!("terminal_turn_admissions", "terminal_id" => "terminal_sessions", "terminal_id", false, "idx_terminal_turn_admissions_terminal_epoch", KeepHistory),
@@ -838,6 +842,11 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "conversations", "extra", "$.remote_agent_id",
         "SELECT json_extract(extra, '$.remote_agent_id') AS value FROM conversations" =>
         "remote_agents", "remote_agent_id", "idx_conversations_extra_remote_agent_id", Restrict, RequireParent
+    ),
+    json_text_ref!(
+        "conversations", "extra", "$.ssh_host_id",
+        "SELECT json_extract(extra, '$.ssh_host_id') AS value FROM conversations" =>
+        "ssh_hosts", "ssh_host_id", "idx_conversations_extra_ssh_host_id", Restrict, RequireParent
     ),
     json_text_ref!(
         "conversations", "extra", "$.agent_id",

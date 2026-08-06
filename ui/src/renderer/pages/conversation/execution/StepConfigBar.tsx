@@ -50,7 +50,7 @@ const StepConfigBar: React.FC<StepConfigBarProps> = ({ step, participant, onAppl
       </div>
 
       {/* Composer-shaped config bar — same pills + transparent skin as a real composer. */}
-      <div className='shrink-0 border-t border-solid border-[var(--color-border-2)] px-16px py-12px'>
+      <div className='shrink-0 border-t border-t-solid border-[var(--color-border-2)] px-16px py-12px'>
         <div className={composerStyles.composerToolbar}>
           <StepModelPill
             currentModel={

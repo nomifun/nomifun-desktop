@@ -280,6 +280,7 @@ async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusPar
                 order: Some("desc".to_owned()),
                 content_mode: None,
                 cursor: None,
+                day: None,
             },
         )
         .await

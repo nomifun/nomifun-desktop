@@ -15,7 +15,7 @@ use std::path::Path;
 use nomifun_common::AppError;
 use serde::Deserialize;
 
-use crate::service::{KB_INBOX_REL_DIR, is_md};
+use crate::service::is_md;
 
 /// LLM seam for knowledge autogen (same pattern as `CompanionCompleter` in
 /// `nomifun-companion`). The knowledge crate holds only the trait; provider/model
@@ -219,10 +219,9 @@ pub fn build_polish_prompt(name: &str, draft: &str) -> String {
     prompt
 }
 
-/// Sample the markdown corpus under `root` for the overview prompt:
-/// `_inbox/` (unreviewed staged write-backs) and the root `README.md` (the
-/// artifact being regenerated) are excluded; files are taken in sorted-path
-/// order up to [`SAMPLE_MAX_FILES`], each excerpt capped at
+/// Sample the markdown corpus under `root` for the overview prompt: the root
+/// `README.md` (the artifact being regenerated) is excluded; files are taken
+/// in sorted-path order up to [`SAMPLE_MAX_FILES`], each excerpt capped at
 /// [`SAMPLE_MAX_PER_FILE`] bytes, total capped at [`SAMPLE_MAX_TOTAL`].
 pub async fn sample_base_files(root: &Path) -> Vec<(String, String)> {
     let root = root.to_path_buf();
@@ -241,8 +240,7 @@ fn sample_base_files_blocking(root: &Path) -> Vec<(String, String)> {
         .filter(|e| e.file_type().is_file() && is_md(e.path()))
         .filter_map(|e| {
             let rel = e.path().strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
-            let keep = !rel.starts_with(&format!("{KB_INBOX_REL_DIR}/")) && rel != "README.md";
-            keep.then_some(rel)
+            (rel != "README.md").then_some(rel)
         })
         .collect();
     rels.sort();
@@ -309,13 +307,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sampling_skips_inbox_and_readme_and_caps_budgets() {
+    async fn sampling_skips_readme_and_caps_budgets() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         std::fs::write(root.join("README.md"), "# old readme").unwrap();
-        let inbox = root.join("_inbox/0190f5fe-7c00-7a00-8000-000000000001");
-        std::fs::create_dir_all(&inbox).unwrap();
-        std::fs::write(inbox.join("draft.md"), "# draft").unwrap();
         // 25 real files, one larger than the per-file cap.
         for i in 0..25 {
             std::fs::write(root.join(format!("f{i:02}.md")), format!("# 文件 {i}\n正文")).unwrap();
@@ -324,7 +319,7 @@ mod tests {
 
         let samples = sample_base_files(root).await;
         assert_eq!(samples.len(), SAMPLE_MAX_FILES, "{:?}", samples.iter().map(|s| &s.0).collect::<Vec<_>>());
-        assert!(samples.iter().all(|(rel, _)| rel != "README.md" && !rel.starts_with("_inbox/")));
+        assert!(samples.iter().all(|(rel, _)| rel != "README.md"));
         let big = samples.iter().find(|(rel, _)| rel == "big.md").expect("big.md sampled (sorted first)");
         assert!(big.1.len() <= SAMPLE_MAX_PER_FILE);
         let total: usize = samples.iter().map(|(_, s)| s.len()).sum();

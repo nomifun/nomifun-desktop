@@ -19,12 +19,14 @@
 //! - 错误类型 [`TransportError`] 自成一体，**不**强耦合 `BrowserError`（镜像 progress
 //!   模块的 `ProgressError`；错误映射留给后续 task）。
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use chromiumoxide::types::{CallId, Error as CdpError};
 use serde::Deserialize;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
 /// 根（browser）session 在注册表里的 key。CDP 根连接的消息无 `sessionId` 字段，
 /// 我们用一个固定哨兵 key 统一登记，避免 `Option<String>` 在两处分叉。
@@ -33,6 +35,64 @@ pub const ROOT_SESSION: &str = "";
 /// 事件订阅广播通道容量。CDP 事件可能突发（如导航期 lifecycle / 大量 attachedToTarget），
 /// 给足缓冲；订阅者落后只丢老事件（`broadcast` 语义），不阻塞 read loop。
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Maximum number of outstanding control events per reliable subscriber.
+///
+/// The public receiver remains Tokio's `UnboundedReceiver` for compatibility
+/// with the existing control-loop structs, but every queued event owns a slot
+/// token and dispatch refuses to enqueue beyond this hard limit. Saturation
+/// poisons the whole CDP connection: a security/lifecycle event must never be
+/// silently discarded while the browser continues running.
+pub(crate) const RELIABLE_EVENT_CAPACITY: usize = 256;
+const RELIABLE_EVENT_BYTE_CAPACITY: usize = 16 * 1024 * 1024;
+/// Aggregate reliable-queue payload retained by one Chromium Host/connection.
+/// Every reliable copy, including task-attributed copies, is charged here.
+#[doc(hidden)]
+pub const RELIABLE_HOST_EVENT_CAPACITY: usize = 512;
+#[doc(hidden)]
+pub const RELIABLE_HOST_EVENT_BYTE_CAPACITY: usize = 4 * 1024 * 1024;
+/// Cross-Host aggregate retained by a trusted task's temporary act consumers.
+/// Host-owned router/firewall/download subscribers are not assigned to one
+/// task on shared Primary/Anonymous Hosts. Their separate 4 MiB Host bound,
+/// combined with the platform's hard 32-Lane/task limit (one Host per Isolated
+/// Lane), caps the fixed-Host component for one fully isolated task at
+/// 128 MiB. Temporary act copies have this independent 128 MiB task authority,
+/// giving a conservative 256 MiB structural retained-payload ceiling. Changing
+/// Host/Lane ids cannot mint extra act capacity.
+#[doc(hidden)]
+pub const RELIABLE_TASK_EVENT_CAPACITY: usize = 4_096;
+#[doc(hidden)]
+pub const RELIABLE_TASK_EVENT_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
+#[doc(hidden)]
+pub const RELIABLE_TASK_SUBSCRIBER_CAPACITY: usize = 64;
+const MAX_RELIABLE_SUBSCRIBERS: usize = 256;
+const MAX_BROADCAST_SUBSCRIPTIONS: usize = 2_048;
+const MAX_LIVE_SESSIONS: usize = 4_096;
+/// A worker/OOPIF burst from one trusted Lane must stay far below the Host's
+/// final 4,096-session fuse. Top-level pages have a separate tab authority.
+#[doc(hidden)]
+pub const MAX_AUXILIARY_SESSIONS_PER_LANE: usize = 64;
+/// Multiple Lanes owned by one task share this aggregate authority. Changing a
+/// Lane id therefore cannot mint more worker/service-worker capacity.
+#[doc(hidden)]
+pub const MAX_AUXILIARY_SESSIONS_PER_TASK_FAMILY: usize = 256;
+/// Root-attached service/shared workers do not carry trustworthy Lane lineage.
+/// They are deliberately charged to one small Host bucket instead of guessing
+/// an owner from attacker-controlled URL/title fields.
+#[doc(hidden)]
+pub const MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST: usize = 64;
+/// An attached page can briefly precede the Host target router's trusted
+/// nonce/opener decision. Pending entries are bounded independently so that
+/// this attribution window cannot be used to approach the Host fuse.
+const MAX_PENDING_SESSION_AUTHORITIES: usize = 64;
+const MAX_PENDING_CALLBACKS_PER_SESSION: usize = 1_024;
+const MAX_PENDING_CALLBACKS_PER_CONNECTION: usize = 4_096;
+const DEAD_SESSION_CAPACITY: usize = 1_024;
+const DEAD_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
+pub(crate) const MAX_CDP_IDENTIFIER_BYTES: usize = 4 * 1024;
+const MAX_CDP_METHOD_BYTES: usize = 512;
+const MAX_CDP_TARGET_TYPE_BYTES: usize = 256;
+const MAX_CDP_EVENT_HEAP_BYTES: usize = 16 * 1024 * 1024;
 
 /// 传输/会话层自有错误枚举。**不**耦合 `BrowserError`（错误映射留后续 task）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -60,6 +120,40 @@ pub enum TransportError {
 /// 一次命令调用的结果：成功 `result` 的 JSON，或失败的 [`TransportError`]。
 pub type CommandResult = Result<serde_json::Value, TransportError>;
 
+/// Host-only authority attached to a CDP session. Both fields originate in the
+/// Lane/router configuration; neither is deserialized from model/tool input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TaskSessionAuthority {
+    pub(crate) task_resource_family_key: String,
+    pub(crate) lane_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SessionResourceScope {
+    /// Diagnostic/legacy connections without a Host target router retain their
+    /// historical behavior and are still protected by the Host-global fuse.
+    LegacyUnscoped,
+    /// A top-level page (or a child delivered in the same short race window)
+    /// remains paused until trusted nonce/opener/parent authority resolves it.
+    PendingAuthority {
+        parent_session_id: Option<String>,
+    },
+    /// Exact task-family and Lane attribution.
+    Task(TaskSessionAuthority),
+    /// Root service/shared workers cannot always be mapped to one Lane. This
+    /// explicit state is intentionally not presented as precise attribution.
+    HostUnattributedAuxiliary,
+}
+
+/// Decision consumed by the transport attach worker before it releases a
+/// target from `waitForDebuggerOnStart`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TaskSessionAdmission {
+    Admitted,
+    PendingAuthority,
+    Rejected,
+}
+
 /// 单个 CDP session 的状态：登记在 [`SessionRegistry`] 内。
 ///
 /// 持有该 session 上**进行中**的命令回调表（`CallId -> oneshot::Sender`），以及生命
@@ -71,6 +165,10 @@ pub struct Session {
     /// target 类型（`page` / `iframe` / `service_worker` / `browser`…），来自
     /// `attachedToTarget` 的 `targetInfo.type`；根 session 为 `browser`。
     pub target_type: String,
+    /// Target identity and host-only resource attribution. These are private so
+    /// callers cannot manufacture authority by mutating a Session value.
+    target_id: Option<String>,
+    resource_scope: SessionResourceScope,
     /// 进行中的命令：CallId → 等待结果的 oneshot 发送端。
     callbacks: HashMap<CallId, oneshot::Sender<CommandResult>>,
     /// target 崩溃（粘性）。
@@ -84,6 +182,8 @@ impl Session {
         Self {
             session_id: session_id.into(),
             target_type: target_type.into(),
+            target_id: None,
+            resource_scope: SessionResourceScope::LegacyUnscoped,
             callbacks: HashMap::new(),
             crashed: false,
             closed: false,
@@ -135,6 +235,340 @@ pub struct CdpEvent {
     pub session_id: String,
     /// 事件 params（原样 JSON；订阅者按需 `serde_json::from_value` 成具体类型）。
     pub params: serde_json::Value,
+    /// A reliable-delivery slot is released only after the receiver (and any
+    /// clones it made) drops the event. Ordinary broadcast events carry none.
+    reliable_slot: Option<Arc<ReliableQueueSlot>>,
+}
+
+impl CdpEvent {
+    fn approximate_heap_bytes(&self) -> usize {
+        self.method
+            .len()
+            .saturating_add(self.session_id.len())
+            .saturating_add(approximate_json_heap_bytes(&self.params))
+    }
+}
+
+fn approximate_json_heap_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 1,
+        serde_json::Value::Bool(_) => 1,
+        serde_json::Value::Number(_) => 16,
+        serde_json::Value::String(value) => value.len(),
+        serde_json::Value::Array(values) => values.iter().fold(
+            values.len().saturating_mul(std::mem::size_of::<serde_json::Value>()),
+            |total, value| total.saturating_add(approximate_json_heap_bytes(value)),
+        ),
+        serde_json::Value::Object(values) => values.iter().fold(
+            values.len().saturating_mul(
+                std::mem::size_of::<String>() + std::mem::size_of::<serde_json::Value>(),
+            ),
+            |total, (key, value)| {
+                total
+                    .saturating_add(key.len())
+                    .saturating_add(approximate_json_heap_bytes(value))
+            },
+        ),
+    }
+}
+
+#[derive(Debug)]
+struct ReliableQueueSlot {
+    _subscriber: ReliableQueueReservation,
+    _host: ReliableQueueReservation,
+    _task: Option<ReliableQueueReservation>,
+}
+
+#[derive(Debug)]
+struct ReliableQueueBudget {
+    outstanding_events: AtomicUsize,
+    outstanding_bytes: AtomicUsize,
+    event_limit: usize,
+    byte_limit: usize,
+}
+
+impl ReliableQueueBudget {
+    fn new(event_limit: usize, byte_limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            outstanding_events: AtomicUsize::new(0),
+            outstanding_bytes: AtomicUsize::new(0),
+            event_limit,
+            byte_limit,
+        })
+    }
+
+    fn try_reserve(self: &Arc<Self>, bytes: usize) -> Option<ReliableQueueReservation> {
+        if !try_reserve(&self.outstanding_events, 1, self.event_limit) {
+            return None;
+        }
+        if !try_reserve(&self.outstanding_bytes, bytes, self.byte_limit) {
+            self.outstanding_events.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(ReliableQueueReservation {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    #[cfg(test)]
+    fn counts(&self) -> (usize, usize) {
+        (
+            self.outstanding_events.load(Ordering::Acquire),
+            self.outstanding_bytes.load(Ordering::Acquire),
+        )
+    }
+}
+
+#[derive(Debug)]
+struct ReliableQueueReservation {
+    budget: Arc<ReliableQueueBudget>,
+    bytes: usize,
+}
+
+impl Drop for ReliableQueueReservation {
+    fn drop(&mut self) {
+        self.budget
+            .outstanding_events
+            .fetch_sub(1, Ordering::AcqRel);
+        self.budget
+            .outstanding_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+/// Opaque task-wide temporary-act reliable-event authority. Production construction is
+/// keyed only from the trusted Lane configuration after the Host has applied
+/// standalone/platform ownership rules; it is never accepted from tool input.
+pub(crate) struct ReliableEventTaskBudget {
+    queue: Arc<ReliableQueueBudget>,
+    subscribers: AtomicUsize,
+    subscriber_limit: usize,
+}
+
+impl ReliableEventTaskBudget {
+    pub(crate) fn for_trusted_task(task_resource_key: &str) -> Arc<Self> {
+        debug_assert!(!task_resource_key.trim().is_empty());
+        static BY_TRUSTED_TASK: OnceLock<Mutex<HashMap<String, Weak<ReliableEventTaskBudget>>>> =
+            OnceLock::new();
+        let budgets = BY_TRUSTED_TASK.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut budgets = budgets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        budgets.retain(|_, budget| budget.strong_count() > 0);
+        if let Some(existing) = budgets.get(task_resource_key).and_then(Weak::upgrade) {
+            return existing;
+        }
+        let budget = Self::new_with_limits(
+            RELIABLE_TASK_EVENT_CAPACITY,
+            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
+            RELIABLE_TASK_SUBSCRIBER_CAPACITY,
+        );
+        budgets.insert(task_resource_key.to_owned(), Arc::downgrade(&budget));
+        budget
+    }
+
+    /// Direct legacy `from_launched` callers have one Host and no trusted
+    /// cross-Host task identity, so they receive one non-shareable authority.
+    pub(crate) fn new_opaque() -> Arc<Self> {
+        Self::new_with_limits(
+            RELIABLE_TASK_EVENT_CAPACITY,
+            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
+            RELIABLE_TASK_SUBSCRIBER_CAPACITY,
+        )
+    }
+
+    fn new_with_limits(
+        event_limit: usize,
+        byte_limit: usize,
+        subscriber_limit: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            queue: ReliableQueueBudget::new(event_limit, byte_limit),
+            subscribers: AtomicUsize::new(0),
+            subscriber_limit,
+        })
+    }
+
+    fn try_reserve_subscriber(
+        self: &Arc<Self>,
+    ) -> Option<ReliableTaskSubscriberReservation> {
+        if !try_reserve(&self.subscribers, 1, self.subscriber_limit) {
+            return None;
+        }
+        Some(ReliableTaskSubscriberReservation {
+            budget: Arc::clone(self),
+        })
+    }
+
+    #[cfg(test)]
+    fn counts(&self) -> (usize, usize, usize) {
+        let (events, bytes) = self.queue.counts();
+        (events, bytes, self.subscribers.load(Ordering::Acquire))
+    }
+}
+
+struct ReliableTaskSubscriberReservation {
+    budget: Arc<ReliableEventTaskBudget>,
+}
+
+impl Drop for ReliableTaskSubscriberReservation {
+    fn drop(&mut self) {
+        self.budget.subscribers.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Receiver used only by task-scoped temporary control subscriptions.  Its
+/// subscriber permit is returned synchronously when cancellation drops it;
+/// queued event permits are independently returned as their events are
+/// received/dropped.
+pub(crate) struct ReliableTaskEventReceiver {
+    receiver: mpsc::UnboundedReceiver<CdpEvent>,
+    _subscriber: ReliableTaskSubscriberReservation,
+}
+
+impl ReliableTaskEventReceiver {
+    pub(crate) async fn recv(&mut self) -> Option<CdpEvent> {
+        self.receiver.recv().await
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReliableBudgetScope {
+    Subscriber,
+    Host,
+    Task,
+}
+
+impl ReliableBudgetScope {
+    fn limits(self) -> (&'static str, usize, usize) {
+        match self {
+            Self::Subscriber => (
+                "subscriber",
+                RELIABLE_EVENT_CAPACITY,
+                RELIABLE_EVENT_BYTE_CAPACITY,
+            ),
+            Self::Host => (
+                "Host aggregate",
+                RELIABLE_HOST_EVENT_CAPACITY,
+                RELIABLE_HOST_EVENT_BYTE_CAPACITY,
+            ),
+            Self::Task => (
+                "task aggregate",
+                RELIABLE_TASK_EVENT_CAPACITY,
+                RELIABLE_TASK_EVENT_BYTE_CAPACITY,
+            ),
+        }
+    }
+}
+
+struct ReliableSubscriber {
+    sender: mpsc::UnboundedSender<CdpEvent>,
+    subscriber_budget: Arc<ReliableQueueBudget>,
+    host_budget: Arc<ReliableQueueBudget>,
+    task_budget: Option<Arc<ReliableEventTaskBudget>>,
+}
+
+impl ReliableSubscriber {
+    fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
+    fn try_send(&self, event: &CdpEvent, bytes: usize) -> Result<(), ReliableSendError> {
+        if self.sender.is_closed() {
+            return Err(ReliableSendError::Closed);
+        }
+        // Reserve all logical memory before the deep `serde_json::Value`
+        // clone. A saturated peer therefore cannot force one transient clone
+        // per subscriber while admission is already known to be impossible.
+        let subscriber = self
+            .subscriber_budget
+            .try_reserve(bytes)
+            .ok_or(ReliableSendError::Full(ReliableBudgetScope::Subscriber))?;
+        let host = self
+            .host_budget
+            .try_reserve(bytes)
+            .ok_or(ReliableSendError::Full(ReliableBudgetScope::Host))?;
+        let task = self
+            .task_budget
+            .as_ref()
+            .map(|budget| {
+                budget
+                    .queue
+                    .try_reserve(bytes)
+                    .ok_or(ReliableSendError::Full(ReliableBudgetScope::Task))
+            })
+            .transpose()?;
+
+        let mut event = event.clone();
+        debug_assert!(event.reliable_slot.is_none());
+        event.reliable_slot = Some(Arc::new(ReliableQueueSlot {
+            _subscriber: subscriber,
+            _host: host,
+            _task: task,
+        }));
+        self.sender
+            .send(event)
+            .map_err(|_| ReliableSendError::Closed)
+    }
+}
+
+fn try_reserve(counter: &AtomicUsize, amount: usize, limit: usize) -> bool {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        let Some(next) = current.checked_add(amount) else {
+            return false;
+        };
+        if next > limit {
+            return false;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            next,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn validate_text_bound(
+    kind: &str,
+    value: &str,
+    limit: usize,
+) -> Result<(), TransportError> {
+    if value.len() > limit {
+        Err(TransportError::Protocol(format!(
+            "CDP {kind} exceeds hard limit: {} bytes > {limit} bytes",
+            value.len()
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Shared pure admission check for every retained CDP identifier (session,
+/// target, frame, execution-context, and object ids). Keeping one helper
+/// prevents background routers from silently drifting above the registry's
+/// 4 KiB invariant.
+pub(crate) fn validate_cdp_identifier(
+    kind: &str,
+    value: &str,
+) -> Result<(), TransportError> {
+    validate_text_bound(kind, value, MAX_CDP_IDENTIFIER_BYTES)
+}
+
+enum ReliableSendError {
+    Closed,
+    Full(ReliableBudgetScope),
+}
+
+struct DeadSession {
+    session_id: String,
+    crashed: bool,
+    expires_at: Instant,
 }
 
 /// 事件订阅键：(method, session)。`session=None` 表示订阅**任意 session** 的该事件
@@ -145,6 +579,9 @@ type SubKey = (String, Option<String>);
 /// 入参字符串 + 改内部表），单测可直接构造并喂 JSON。
 pub struct SessionRegistry {
     inner: Mutex<RegistryInner>,
+    fatal: watch::Sender<Option<TransportError>>,
+    reliable_host_budget: Arc<ReliableQueueBudget>,
+    authority_changed: Notify,
 }
 
 struct RegistryInner {
@@ -153,14 +590,296 @@ struct RegistryInner {
     /// Target-to-session routing for lifecycle events such as
     /// `Target.targetCrashed`, whose payload has a targetId but no sessionId.
     target_sessions: HashMap<String, String>,
+    /// Enabled only by HostTargetRouter construction. Once enabled, production
+    /// attach handling may not fall back to unscoped double-registration.
+    task_session_routing_enabled: bool,
+    task_family_auxiliary_sessions: HashMap<String, usize>,
+    lane_auxiliary_sessions: HashMap<(String, String), usize>,
+    unattributed_auxiliary_sessions: usize,
+    pending_session_authorities: usize,
     /// 事件订阅：(method, Option<session>) → broadcast 发送端。
     subscriptions: HashMap<SubKey, broadcast::Sender<CdpEvent>>,
     /// Security/lifecycle control events must never be dropped merely because
-    /// a consumer was briefly busy. These subscribers use an unbounded queue;
-    /// they are reserved for the attach and Fetch-paused control paths.
-    reliable_subscriptions: HashMap<SubKey, Vec<mpsc::UnboundedSender<CdpEvent>>>,
+    /// a consumer was briefly busy. The compatibility-facing Tokio channel is
+    /// guarded by a strict outstanding-event quota; overflow poisons the
+    /// connection instead of silently dropping the control event.
+    reliable_subscriptions: HashMap<SubKey, Vec<ReliableSubscriber>>,
+    /// Recently dead sessions are tombstones, not live routing entries. Crash
+    /// classification is sticky only within this bounded TTL/LRU cache.
+    dead_sessions: VecDeque<DeadSession>,
+    /// Total live command callbacks, maintained alongside the per-session maps
+    /// so admission does not need to scan every session.
+    pending_callbacks: usize,
     /// 整个连接是否已关闭（粘性）。置位后所有 send 短路 `Closed`。
     connection_closed: bool,
+}
+
+impl RegistryInner {
+    fn session_admission(&self, session_id: &str) -> TaskSessionAdmission {
+        match self.sessions.get(session_id).map(|session| &session.resource_scope) {
+            Some(SessionResourceScope::PendingAuthority { .. }) => {
+                TaskSessionAdmission::PendingAuthority
+            }
+            Some(_) => TaskSessionAdmission::Admitted,
+            None => TaskSessionAdmission::Rejected,
+        }
+    }
+
+    fn task_auxiliary_capacity_available(&self, authority: &TaskSessionAuthority) -> bool {
+        let family_count = self
+            .task_family_auxiliary_sessions
+            .get(&authority.task_resource_family_key)
+            .copied()
+            .unwrap_or(0);
+        let lane_key = (
+            authority.task_resource_family_key.clone(),
+            authority.lane_id.clone(),
+        );
+        let lane_count = self
+            .lane_auxiliary_sessions
+            .get(&lane_key)
+            .copied()
+            .unwrap_or(0);
+        family_count < MAX_AUXILIARY_SESSIONS_PER_TASK_FAMILY
+            && lane_count < MAX_AUXILIARY_SESSIONS_PER_LANE
+    }
+
+    fn reserve_task_auxiliary(&mut self, authority: &TaskSessionAuthority) -> bool {
+        if !self.task_auxiliary_capacity_available(authority) {
+            return false;
+        }
+        let family_count = self
+            .task_family_auxiliary_sessions
+            .get(&authority.task_resource_family_key)
+            .copied()
+            .unwrap_or(0);
+        let lane_key = (
+            authority.task_resource_family_key.clone(),
+            authority.lane_id.clone(),
+        );
+        let lane_count = self
+            .lane_auxiliary_sessions
+            .get(&lane_key)
+            .copied()
+            .unwrap_or(0);
+        self.task_family_auxiliary_sessions.insert(
+            authority.task_resource_family_key.clone(),
+            family_count + 1,
+        );
+        self.lane_auxiliary_sessions.insert(lane_key, lane_count + 1);
+        true
+    }
+
+    fn bind_session_to_authority(
+        &mut self,
+        session_id: &str,
+        authority: &TaskSessionAuthority,
+    ) -> Result<TaskSessionAdmission, TransportError> {
+        let Some(mut session) = self.sessions.remove(session_id) else {
+            return Ok(TaskSessionAdmission::Rejected);
+        };
+        if let SessionResourceScope::Task(existing) = &session.resource_scope {
+            if existing != authority {
+                self.sessions.insert(session_id.to_owned(), session);
+                return Err(TransportError::Protocol(format!(
+                    "refused to transfer CDP session {session_id} between trusted task/Lane authorities"
+                )));
+            }
+            self.sessions.insert(session_id.to_owned(), session);
+            return Ok(TaskSessionAdmission::Admitted);
+        }
+
+        let auxiliary = is_auxiliary_target_type(&session.target_type);
+        if auxiliary && !self.task_auxiliary_capacity_available(authority) {
+            self.sessions.insert(session_id.to_owned(), session);
+            self.remove_session(session_id, TransportError::SessionClosed);
+            self.remember_dead_session(session_id, false);
+            return Ok(TaskSessionAdmission::Rejected);
+        }
+
+        self.release_session_scope(&session.target_type, &session.resource_scope);
+        if auxiliary {
+            let reserved = self.reserve_task_auxiliary(authority);
+            debug_assert!(reserved, "capacity was checked under the same registry lock");
+        }
+        session.resource_scope = SessionResourceScope::Task(authority.clone());
+        self.sessions.insert(session_id.to_owned(), session);
+        Ok(TaskSessionAdmission::Admitted)
+    }
+
+    fn resolve_pending_parent_authority(
+        &mut self,
+        session_id: &str,
+    ) -> Result<TaskSessionAdmission, TransportError> {
+        let parent_session_id = self.sessions.get(session_id).and_then(|session| {
+            if let SessionResourceScope::PendingAuthority { parent_session_id } =
+                &session.resource_scope
+            {
+                parent_session_id.clone()
+            } else {
+                None
+            }
+        });
+        let Some(parent_session_id) = parent_session_id else {
+            return Ok(self.session_admission(session_id));
+        };
+        let authority = self
+            .sessions
+            .get(&parent_session_id)
+            .and_then(|session| match &session.resource_scope {
+                SessionResourceScope::Task(authority) => Some(authority.clone()),
+                _ => None,
+            });
+        match authority {
+            Some(authority) => self.bind_session_to_authority(session_id, &authority),
+            None => Ok(self.session_admission(session_id)),
+        }
+    }
+
+    fn release_task_auxiliary(&mut self, authority: &TaskSessionAuthority) {
+        decrement_or_remove(
+            &mut self.task_family_auxiliary_sessions,
+            &authority.task_resource_family_key,
+        );
+        decrement_or_remove(
+            &mut self.lane_auxiliary_sessions,
+            &(
+                authority.task_resource_family_key.clone(),
+                authority.lane_id.clone(),
+            ),
+        );
+    }
+
+    fn release_session_scope(&mut self, target_type: &str, scope: &SessionResourceScope) {
+        match scope {
+            SessionResourceScope::PendingAuthority { .. } => {
+                self.pending_session_authorities =
+                    self.pending_session_authorities.saturating_sub(1);
+            }
+            SessionResourceScope::Task(authority)
+                if is_auxiliary_target_type(target_type) =>
+            {
+                self.release_task_auxiliary(authority);
+            }
+            SessionResourceScope::HostUnattributedAuxiliary => {
+                self.unattributed_auxiliary_sessions =
+                    self.unattributed_auxiliary_sessions.saturating_sub(1);
+            }
+            SessionResourceScope::LegacyUnscoped | SessionResourceScope::Task(_) => {}
+        }
+    }
+
+    fn remove_session(&mut self, session_id: &str, error: TransportError) {
+        if let Some(mut session) = self.sessions.remove(session_id) {
+            let callback_count = session.callbacks.len();
+            self.release_session_scope(&session.target_type, &session.resource_scope);
+            for (_id, tx) in session.callbacks.drain() {
+                let _ = tx.send(Err(error.clone()));
+            }
+            self.pending_callbacks = self.pending_callbacks.saturating_sub(callback_count);
+        }
+        self.subscriptions
+            .retain(|(_, subscribed_session), _| subscribed_session.as_deref() != Some(session_id));
+        self.reliable_subscriptions
+            .retain(|(_, subscribed_session), _| subscribed_session.as_deref() != Some(session_id));
+        self.target_sessions
+            .retain(|_, mapped_session| mapped_session != session_id);
+    }
+
+    fn prune_dead_sessions(&mut self, now: Instant) {
+        self.dead_sessions
+            .retain(|record| record.expires_at > now);
+        while self.dead_sessions.len() > DEAD_SESSION_CAPACITY {
+            self.dead_sessions.pop_front();
+        }
+    }
+
+    fn dead_error(&mut self, session_id: &str) -> Option<TransportError> {
+        self.prune_dead_sessions(Instant::now());
+        self.dead_sessions
+            .iter()
+            .rev()
+            .find(|record| record.session_id == session_id)
+            .map(|record| {
+                if record.crashed {
+                    TransportError::SessionCrashed
+                } else {
+                    TransportError::SessionClosed
+                }
+            })
+    }
+
+    fn clear_dead_session(&mut self, session_id: &str) {
+        self.dead_sessions
+            .retain(|record| record.session_id != session_id);
+    }
+
+    fn remember_dead_session(&mut self, session_id: &str, crashed: bool) {
+        self.prune_dead_sessions(Instant::now());
+        self.clear_dead_session(session_id);
+        self.dead_sessions.push_back(DeadSession {
+            session_id: session_id.to_owned(),
+            crashed,
+            expires_at: Instant::now() + DEAD_SESSION_TTL,
+        });
+        while self.dead_sessions.len() > DEAD_SESSION_CAPACITY {
+            self.dead_sessions.pop_front();
+        }
+    }
+
+    fn prune_subscriptions(&mut self) {
+        self.subscriptions
+            .retain(|_, sender| sender.receiver_count() > 0);
+        self.reliable_subscriptions.retain(|_, subscribers| {
+            subscribers.retain(|subscriber| !subscriber.is_closed());
+            !subscribers.is_empty()
+        });
+    }
+
+    fn reliable_subscriber_count(&self) -> usize {
+        self.reliable_subscriptions.values().map(Vec::len).sum()
+    }
+
+    fn fail_connection(&mut self) {
+        if self.connection_closed {
+            return;
+        }
+        self.connection_closed = true;
+        for session in self.sessions.values_mut() {
+            for (_id, tx) in session.callbacks.drain() {
+                let _ = tx.send(Err(TransportError::Closed));
+            }
+        }
+        self.pending_callbacks = 0;
+        self.sessions.clear();
+        self.dead_sessions.clear();
+        self.subscriptions.clear();
+        self.reliable_subscriptions.clear();
+        self.target_sessions.clear();
+        self.task_family_auxiliary_sessions.clear();
+        self.lane_auxiliary_sessions.clear();
+        self.unattributed_auxiliary_sessions = 0;
+        self.pending_session_authorities = 0;
+    }
+}
+
+fn decrement_or_remove<K>(counts: &mut HashMap<K, usize>, key: &K)
+where
+    K: std::hash::Hash + Eq,
+{
+    let remove = if let Some(count) = counts.get_mut(key) {
+        *count = count.saturating_sub(1);
+        *count == 0
+    } else {
+        false
+    };
+    if remove {
+        counts.remove(key);
+    }
+}
+
+fn is_auxiliary_target_type(target_type: &str) -> bool {
+    !matches!(target_type, "page" | "browser")
 }
 
 impl Default for SessionRegistry {
@@ -173,6 +892,7 @@ impl SessionRegistry {
     /// 新建注册表，并登记根（browser）session。
     pub fn new() -> Self {
         let mut sessions = HashMap::new();
+        let (fatal, _initial_receiver) = watch::channel(None);
         sessions.insert(
             ROOT_SESSION.to_string(),
             Session::new(ROOT_SESSION, "browser"),
@@ -181,10 +901,23 @@ impl SessionRegistry {
             inner: Mutex::new(RegistryInner {
                 sessions,
                 target_sessions: HashMap::new(),
+                task_session_routing_enabled: false,
+                task_family_auxiliary_sessions: HashMap::new(),
+                lane_auxiliary_sessions: HashMap::new(),
+                unattributed_auxiliary_sessions: 0,
+                pending_session_authorities: 0,
                 subscriptions: HashMap::new(),
                 reliable_subscriptions: HashMap::new(),
+                dead_sessions: VecDeque::new(),
+                pending_callbacks: 0,
                 connection_closed: false,
             }),
+            fatal,
+            reliable_host_budget: ReliableQueueBudget::new(
+                RELIABLE_HOST_EVENT_CAPACITY,
+                RELIABLE_HOST_EVENT_BYTE_CAPACITY,
+            ),
+            authority_changed: Notify::new(),
         }
     }
 
@@ -193,10 +926,41 @@ impl SessionRegistry {
     pub fn register_session(&self, session_id: impl Into<String>, target_type: impl Into<String>) {
         let session_id = session_id.into();
         let target_type = target_type.into();
+        if let Err(error) = validate_cdp_identifier("session id", &session_id)
+        .and_then(|()| {
+            validate_text_bound("target type", &target_type, MAX_CDP_TARGET_TYPE_BYTES)
+        }) {
+            self.poison_connection(error);
+            return;
+        }
         let mut g = self.inner.lock().unwrap();
+        if g.connection_closed {
+            return;
+        }
+        if g.task_session_routing_enabled {
+            // Production attach events were already atomically admitted by
+            // register_attached in the read loop. Never let a later legacy
+            // register call resurrect a quota-rejected session or mutate the
+            // target type used by its charged resource scope.
+            return;
+        }
+        if !g.sessions.contains_key(&session_id) && g.sessions.len() >= MAX_LIVE_SESSIONS {
+            self.poison_connection_locked(
+                &mut g,
+                TransportError::Protocol(format!(
+                    "live CDP session limit exceeded ({MAX_LIVE_SESSIONS})"
+                )),
+            );
+            return;
+        }
+        g.clear_dead_session(&session_id);
         g.sessions
             .entry(session_id.clone())
-            .and_modify(|s| s.target_type = target_type.clone())
+            .and_modify(|s| {
+                s.target_type = target_type.clone();
+                s.closed = false;
+                s.crashed = false;
+            })
             .or_insert_with(|| Session::new(session_id, target_type));
     }
 
@@ -204,25 +968,264 @@ impl SessionRegistry {
     /// `Target.attachedToTarget`. The read loop calls this before broadcasting
     /// the event, so other subscribers cannot race their first session command
     /// against a separate attach worker.
-    pub fn register_attached(
+    pub(crate) fn register_attached(
         &self,
+        parent_session_id: &str,
         session_id: impl Into<String>,
         target_id: impl Into<String>,
         target_type: impl Into<String>,
-    ) {
+        opener_target_id: Option<&str>,
+    ) -> TaskSessionAdmission {
         let session_id = session_id.into();
         let target_id = target_id.into();
         let target_type = target_type.into();
-        let mut g = self.inner.lock().unwrap();
-        g.sessions
-            .entry(session_id.clone())
-            .and_modify(|session| {
-                session.target_type = target_type.clone();
-                session.closed = false;
-                session.crashed = false;
+        if let Err(error) = validate_cdp_identifier("session id", &session_id)
+        .and_then(|()| validate_cdp_identifier("target id", &target_id))
+        .and_then(|()| validate_cdp_identifier("parent session id", parent_session_id))
+        .and_then(|()| {
+            opener_target_id.map_or(Ok(()), |opener_target_id| {
+                validate_cdp_identifier("opener target id", opener_target_id)
             })
-            .or_insert_with(|| Session::new(session_id.clone(), target_type));
+        })
+        .and_then(|()| {
+            validate_text_bound("target type", &target_type, MAX_CDP_TARGET_TYPE_BYTES)
+        }) {
+            self.poison_connection(error);
+            return TaskSessionAdmission::Rejected;
+        }
+        let mut g = self.inner.lock().unwrap();
+        if g.connection_closed {
+            return TaskSessionAdmission::Rejected;
+        }
+
+        // This engine never intentionally multi-attaches one target. Allowing
+        // a second live session to overwrite the target->session map would
+        // make a later targetDestroyed event retire only the newest alias and
+        // strand the older session/quota forever. Treat that protocol shape as
+        // Host-fatal instead of weakening authoritative absence cleanup.
+        if let Some(existing_session_id) = g.target_sessions.get(&target_id)
+            && existing_session_id != &session_id
+        {
+            let error = TransportError::Protocol(format!(
+                "CDP target {target_id} was attached through multiple live sessions"
+            ));
+            self.poison_connection_locked(&mut g, error);
+            return TaskSessionAdmission::Rejected;
+        }
+
+        // Idempotent duplicate delivery must never charge a second slot or
+        // weaken an authority already established by the Host router.
+        if let Some(session) = g.sessions.get(&session_id)
+            && (session.target_id.as_deref() != Some(target_id.as_str())
+                || session.target_type != target_type)
+        {
+            let error = TransportError::Protocol(format!(
+                "duplicate CDP session {session_id} changed target identity or type"
+            ));
+            self.poison_connection_locked(&mut g, error);
+            return TaskSessionAdmission::Rejected;
+        }
+        if let Some(session) = g.sessions.get_mut(&session_id) {
+            session.closed = false;
+            session.crashed = false;
+            g.target_sessions
+                .retain(|_, mapped_session| mapped_session != &session_id);
+            g.target_sessions.insert(target_id, session_id.clone());
+            return g.session_admission(&session_id);
+        }
+
+        // Unlike the legacy direct registration API, attached-target overflow
+        // is local: leave the new session absent so the attach worker closes
+        // exactly that target. The 4,096 value remains the final Host fuse, but
+        // it no longer poisons healthy sibling sessions merely because a new
+        // target was refused.
+        if g.sessions.len() >= MAX_LIVE_SESSIONS {
+            return TaskSessionAdmission::Rejected;
+        }
+
+        let inherited_authority = g
+            .sessions
+            .get(parent_session_id)
+            .and_then(|session| match &session.resource_scope {
+                SessionResourceScope::Task(authority) => Some(authority.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                opener_target_id
+                    .and_then(|target_id| g.target_sessions.get(target_id))
+                    .and_then(|session_id| g.sessions.get(session_id))
+                    .and_then(|session| match &session.resource_scope {
+                        SessionResourceScope::Task(authority) => Some(authority.clone()),
+                        _ => None,
+                    })
+            });
+        let pending_parent = (!parent_session_id.is_empty())
+            .then(|| g.sessions.get(parent_session_id))
+            .flatten()
+            .and_then(|session| {
+                matches!(
+                    session.resource_scope,
+                    SessionResourceScope::PendingAuthority { .. }
+                )
+                .then(|| parent_session_id.to_owned())
+            });
+
+        let resource_scope = if !g.task_session_routing_enabled {
+            SessionResourceScope::LegacyUnscoped
+        } else if let Some(authority) = inherited_authority {
+            if is_auxiliary_target_type(&target_type) && !g.reserve_task_auxiliary(&authority) {
+                return TaskSessionAdmission::Rejected;
+            }
+            SessionResourceScope::Task(authority)
+        } else if pending_parent.is_some() || target_type == "page" {
+            if g.pending_session_authorities >= MAX_PENDING_SESSION_AUTHORITIES {
+                return TaskSessionAdmission::Rejected;
+            }
+            g.pending_session_authorities += 1;
+            SessionResourceScope::PendingAuthority {
+                parent_session_id: pending_parent,
+            }
+        } else {
+            // A root service/shared worker has no trustworthy Lane signal. Do
+            // not guess from URL/title: admit only into the explicit Host bucket.
+            if g.unattributed_auxiliary_sessions
+                >= MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST
+            {
+                return TaskSessionAdmission::Rejected;
+            }
+            g.unattributed_auxiliary_sessions += 1;
+            SessionResourceScope::HostUnattributedAuxiliary
+        };
+
+        g.clear_dead_session(&session_id);
+        let admission = match &resource_scope {
+            SessionResourceScope::PendingAuthority { .. } => {
+                TaskSessionAdmission::PendingAuthority
+            }
+            _ => TaskSessionAdmission::Admitted,
+        };
+        let mut session = Session::new(session_id.clone(), target_type);
+        session.target_id = Some(target_id.clone());
+        session.resource_scope = resource_scope;
+        g.sessions.insert(session_id.clone(), session);
+        g.target_sessions
+            .retain(|_, mapped_session| mapped_session != &session_id);
         g.target_sessions.insert(target_id, session_id);
+        drop(g);
+        self.authority_changed.notify_waiters();
+        admission
+    }
+
+    /// Activates trusted task/Lane admission for this Host connection. The
+    /// HostTargetRouter calls this once during construction, before auto-attach
+    /// can release any renderer target.
+    pub(crate) fn enable_task_session_quota_routing(&self) {
+        self.inner.lock().unwrap().task_session_routing_enabled = true;
+    }
+
+    pub(crate) fn task_session_quota_routing_enabled(&self) -> bool {
+        self.inner.lock().unwrap().task_session_routing_enabled
+    }
+
+    /// Atomically binds a page session to trusted Host-side authority. Pending
+    /// child workers inherit this authority when the transport reaches their
+    /// attach event; no URL/title/model field participates in the decision.
+    pub(crate) fn claim_task_session_authority(
+        &self,
+        session_id: &str,
+        task_resource_family_key: &str,
+        lane_id: &str,
+    ) -> Result<TaskSessionAdmission, TransportError> {
+        validate_cdp_identifier("task resource family key", task_resource_family_key)?;
+        validate_cdp_identifier("task session Lane id", lane_id)?;
+        let authority = TaskSessionAuthority {
+            task_resource_family_key: task_resource_family_key.to_owned(),
+            lane_id: lane_id.to_owned(),
+        };
+        let mut g = self.inner.lock().unwrap();
+        if g.connection_closed {
+            return Err(TransportError::Closed);
+        }
+        let admission = g.bind_session_to_authority(session_id, &authority)?;
+        drop(g);
+        self.authority_changed.notify_waiters();
+        Ok(admission)
+    }
+
+    /// Waits only for the short trusted-router correlation window. Timeout is
+    /// a local rejection: the exact new target is closed by the attach worker,
+    /// while sibling sessions remain registered and routable.
+    pub(crate) async fn wait_for_task_session_admission(
+        &self,
+        session_id: &str,
+        timeout: Duration,
+    ) -> TaskSessionAdmission {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.authority_changed.notified();
+            let admission = {
+                let mut g = self.inner.lock().unwrap();
+                g.resolve_pending_parent_authority(session_id)
+                    .unwrap_or(TaskSessionAdmission::Rejected)
+            };
+            if admission != TaskSessionAdmission::PendingAuthority {
+                return admission;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                let mut g = self.inner.lock().unwrap();
+                let admission = g
+                    .resolve_pending_parent_authority(session_id)
+                    .unwrap_or(TaskSessionAdmission::Rejected);
+                if admission == TaskSessionAdmission::PendingAuthority {
+                    g.remove_session(session_id, TransportError::SessionClosed);
+                    g.remember_dead_session(session_id, false);
+                    drop(g);
+                    self.authority_changed.notify_waiters();
+                    return TaskSessionAdmission::Rejected;
+                }
+                return admission;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_session_authority(
+        &self,
+        session_id: &str,
+    ) -> Option<TaskSessionAuthority> {
+        self.inner
+            .lock()
+            .unwrap()
+            .sessions
+            .get(session_id)
+            .and_then(|session| match &session.resource_scope {
+                SessionResourceScope::Task(authority) => Some(authority.clone()),
+                _ => None,
+            })
+    }
+
+    #[cfg(test)]
+    fn task_session_quota_counts(
+        &self,
+        task_resource_family_key: &str,
+        lane_id: &str,
+    ) -> (usize, usize, usize, usize) {
+        let g = self.inner.lock().unwrap();
+        (
+            g.task_family_auxiliary_sessions
+                .get(task_resource_family_key)
+                .copied()
+                .unwrap_or(0),
+            g.lane_auxiliary_sessions
+                .get(&(
+                    task_resource_family_key.to_owned(),
+                    lane_id.to_owned(),
+                ))
+                .copied()
+                .unwrap_or(0),
+            g.unattributed_auxiliary_sessions,
+            g.pending_session_authorities,
+        )
     }
 
     /// 该 session 当前是否已登记。
@@ -233,12 +1236,14 @@ impl SessionRegistry {
     /// Returns the sticky crash state for a registered session. Unknown or
     /// normally-closed sessions are not reported as crashed.
     pub fn is_session_crashed(&self, session_id: &str) -> bool {
-        self.inner
-            .lock()
-            .unwrap()
-            .sessions
+        let mut g = self.inner.lock().unwrap();
+        if g.sessions
             .get(session_id)
             .is_some_and(|session| session.crashed)
+        {
+            return true;
+        }
+        matches!(g.dead_error(session_id), Some(TransportError::SessionCrashed))
     }
 
     /// 该 session 的 target 类型（未登记 → None）。
@@ -274,6 +1279,33 @@ impl SessionRegistry {
         self.inner.lock().unwrap().connection_closed
     }
 
+    #[cfg(test)]
+    pub(crate) fn pending_callback_count(&self) -> usize {
+        self.inner.lock().unwrap().pending_callbacks
+    }
+
+    /// Subscribe to sticky abnormal-termination notifications. Explicit
+    /// [`fail_connection`](Self::fail_connection) shutdown does not publish a
+    /// fatal signal; protocol/queue/read-loop failures do.
+    pub fn subscribe_fatal(&self) -> watch::Receiver<Option<TransportError>> {
+        self.fatal.subscribe()
+    }
+
+    /// Poison the connection after an invariant or transport failure. This is
+    /// distinct from normal explicit shutdown and wakes lifecycle supervisors.
+    pub fn poison_connection(&self, error: TransportError) {
+        let mut g = self.inner.lock().unwrap();
+        self.poison_connection_locked(&mut g, error);
+    }
+
+    fn poison_connection_locked(&self, g: &mut RegistryInner, error: TransportError) {
+        let first_failure = !g.connection_closed;
+        g.fail_connection();
+        if first_failure {
+            self.fatal.send_replace(Some(error));
+        }
+    }
+
     /// 订阅某 method（可选限定 session）的事件流。返回 broadcast 接收端。
     /// `session=None` 订阅任意 session 的该事件。
     ///
@@ -285,9 +1317,36 @@ impl SessionRegistry {
         method: impl Into<String>,
         session_id: Option<&str>,
     ) -> broadcast::Receiver<CdpEvent> {
-        let key: SubKey = (method.into(), session_id.map(|s| s.to_string()));
+        let method = method.into();
+        if let Err(error) = validate_text_bound("method", &method, MAX_CDP_METHOD_BYTES)
+            .and_then(|()| {
+                session_id.map_or(Ok(()), |session_id| {
+                    validate_cdp_identifier("subscription session id", session_id)
+                })
+            })
+        {
+            self.poison_connection(error);
+            let (tx, rx) = broadcast::channel(1);
+            drop(tx);
+            return rx;
+        }
+        let key: SubKey = (method, session_id.map(|s| s.to_string()));
         let mut g = self.inner.lock().unwrap();
         if g.connection_closed {
+            let (tx, rx) = broadcast::channel(1);
+            drop(tx);
+            return rx;
+        }
+        g.prune_subscriptions();
+        if !g.subscriptions.contains_key(&key)
+            && g.subscriptions.len() >= MAX_BROADCAST_SUBSCRIPTIONS
+        {
+            self.poison_connection_locked(
+                &mut g,
+                TransportError::Protocol(format!(
+                    "CDP broadcast subscription limit exceeded ({MAX_BROADCAST_SUBSCRIPTIONS})"
+                )),
+            );
             let (tx, rx) = broadcast::channel(1);
             drop(tx);
             return rx;
@@ -307,13 +1366,104 @@ impl SessionRegistry {
         method: impl Into<String>,
         session_id: Option<&str>,
     ) -> mpsc::UnboundedReceiver<CdpEvent> {
-        let key: SubKey = (method.into(), session_id.map(str::to_owned));
+        let method = method.into();
+        let (tx, rx) = mpsc::unbounded_channel();
+        if let Err(error) = validate_text_bound("method", &method, MAX_CDP_METHOD_BYTES)
+            .and_then(|()| {
+                session_id.map_or(Ok(()), |session_id| {
+                    validate_cdp_identifier("subscription session id", session_id)
+                })
+            })
+        {
+            self.poison_connection(error);
+            return rx;
+        }
+        let key: SubKey = (method, session_id.map(str::to_owned));
+        let mut g = self.inner.lock().unwrap();
+        if g.connection_closed {
+            return rx;
+        }
+        g.prune_subscriptions();
+        if g.reliable_subscriber_count() >= MAX_RELIABLE_SUBSCRIBERS {
+            self.poison_connection_locked(
+                &mut g,
+                TransportError::Protocol(format!(
+                    "reliable CDP subscriber limit exceeded ({MAX_RELIABLE_SUBSCRIBERS})"
+                )),
+            );
+            return rx;
+        }
+        g.reliable_subscriptions
+            .entry(key)
+            .or_default()
+            .push(ReliableSubscriber {
+                sender: tx,
+                subscriber_budget: ReliableQueueBudget::new(
+                    RELIABLE_EVENT_CAPACITY,
+                    RELIABLE_EVENT_BYTE_CAPACITY,
+                ),
+                host_budget: Arc::clone(&self.reliable_host_budget),
+                task_budget: None,
+            });
+        rx
+    }
+
+    /// Register a temporary reliable consumer owned by one trusted task.
+    /// Its queued copies are charged to subscriber + Host + task budgets.
+    pub(crate) fn subscribe_reliable_for_task(
+        &self,
+        method: impl Into<String>,
+        session_id: Option<&str>,
+        task_budget: &Arc<ReliableEventTaskBudget>,
+    ) -> Result<ReliableTaskEventReceiver, TransportError> {
+        let method = method.into();
+        if let Err(error) = validate_text_bound("method", &method, MAX_CDP_METHOD_BYTES).and_then(
+            |()| {
+                session_id.map_or(Ok(()), |session_id| {
+                    validate_cdp_identifier("subscription session id", session_id)
+                })
+            },
+        ) {
+            self.poison_connection(error.clone());
+            return Err(error);
+        }
+        let key: SubKey = (method, session_id.map(str::to_owned));
         let (tx, rx) = mpsc::unbounded_channel();
         let mut g = self.inner.lock().unwrap();
-        if !g.connection_closed {
-            g.reliable_subscriptions.entry(key).or_default().push(tx);
+        if g.connection_closed {
+            return Err(TransportError::Closed);
         }
-        rx
+        g.prune_subscriptions();
+        if g.reliable_subscriber_count() >= MAX_RELIABLE_SUBSCRIBERS {
+            let error = TransportError::Protocol(format!(
+                "reliable CDP subscriber limit exceeded ({MAX_RELIABLE_SUBSCRIBERS})"
+            ));
+            self.poison_connection_locked(&mut g, error.clone());
+            return Err(error);
+        }
+        let Some(subscriber_reservation) = task_budget.try_reserve_subscriber() else {
+            let error = TransportError::Protocol(format!(
+                "reliable CDP task subscriber limit exceeded ({RELIABLE_TASK_SUBSCRIBER_CAPACITY})"
+            ));
+            self.poison_connection_locked(&mut g, error.clone());
+            return Err(error);
+        };
+        g.reliable_subscriptions
+            .entry(key)
+            .or_default()
+            .push(ReliableSubscriber {
+                sender: tx,
+                subscriber_budget: ReliableQueueBudget::new(
+                    RELIABLE_EVENT_CAPACITY,
+                    RELIABLE_EVENT_BYTE_CAPACITY,
+                ),
+                host_budget: Arc::clone(&self.reliable_host_budget),
+                task_budget: Some(Arc::clone(task_budget)),
+            });
+        Ok(ReliableTaskEventReceiver {
+            receiver: rx,
+            _subscriber: subscriber_reservation,
+        })
     }
 
     /// Whether a live lossless subscriber exists for `method` (exact-session
@@ -323,7 +1473,8 @@ impl SessionRegistry {
     /// whose event found no subscriber is silently dropped and CDP never
     /// re-emits it — that session's network would be wedged forever.
     pub fn has_reliable_subscriber(&self, method: &str) -> bool {
-        let g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap();
+        g.prune_subscriptions();
         g.reliable_subscriptions
             .iter()
             .any(|((subscribed_method, _), senders)| {
@@ -346,6 +1497,16 @@ impl SessionRegistry {
         if g.connection_closed {
             return Err(TransportError::Closed);
         }
+        if g.pending_callbacks >= MAX_PENDING_CALLBACKS_PER_CONNECTION {
+            return Err(TransportError::Protocol(format!(
+                "pending CDP command limit exceeded ({MAX_PENDING_CALLBACKS_PER_CONNECTION})"
+            )));
+        }
+        if !g.sessions.contains_key(session_id) {
+            return Err(g
+                .dead_error(session_id)
+                .unwrap_or(TransportError::SessionClosed));
+        }
         let session = g
             .sessions
             .get_mut(session_id)
@@ -353,8 +1514,20 @@ impl SessionRegistry {
         if session.is_dead() {
             return Err(session.dead_error());
         }
+        if session.callbacks.len() >= MAX_PENDING_CALLBACKS_PER_SESSION {
+            return Err(TransportError::Protocol(format!(
+                "pending CDP command limit exceeded for session {session_id} \
+                 ({MAX_PENDING_CALLBACKS_PER_SESSION})"
+            )));
+        }
+        if session.callbacks.contains_key(&call_id) {
+            return Err(TransportError::Protocol(format!(
+                "duplicate pending CDP call id {call_id:?} for session {session_id}"
+            )));
+        }
         let (tx, rx) = oneshot::channel();
         session.callbacks.insert(call_id, tx);
+        g.pending_callbacks += 1;
         Ok(rx)
     }
 
@@ -362,7 +1535,9 @@ impl SessionRegistry {
     pub fn cancel_command(&self, session_id: &str, call_id: CallId) {
         let mut g = self.inner.lock().unwrap();
         if let Some(s) = g.sessions.get_mut(session_id) {
-            s.callbacks.remove(&call_id);
+            if s.callbacks.remove(&call_id).is_some() {
+                g.pending_callbacks = g.pending_callbacks.saturating_sub(1);
+            }
         }
     }
 
@@ -383,6 +1558,10 @@ impl SessionRegistry {
             .session_id
             .clone()
             .unwrap_or_else(|| ROOT_SESSION.to_string());
+        if let Err(error) = validate_cdp_identifier("message session id", &session_key) {
+            self.poison_connection(error.clone());
+            return Err(error);
+        }
 
         match env.id {
             // ── 命令回包 ────────────────────────────────────────────────
@@ -404,9 +1583,14 @@ impl SessionRegistry {
                         "CDP message has neither id nor method: {raw}"
                     )));
                 };
+                if let Err(error) =
+                    validate_text_bound("event method", &method, MAX_CDP_METHOD_BYTES)
+                {
+                    self.poison_connection(error.clone());
+                    return Err(error);
+                }
                 let params = env.params.unwrap_or(serde_json::Value::Null);
-                self.handle_event(&method, &session_key, params);
-                Ok(())
+                self.handle_event(&method, &session_key, params)
             }
         }
     }
@@ -417,13 +1601,31 @@ impl SessionRegistry {
         if let Some(session) = g.sessions.get_mut(session_key)
             && let Some(tx) = session.callbacks.remove(&call_id)
         {
+            g.pending_callbacks = g.pending_callbacks.saturating_sub(1);
             // 接收端可能已 drop（调用方放弃等待）——忽略发送失败。
             let _ = tx.send(result);
         }
     }
 
     /// 处理一条事件：先做生命周期副作用（attach/detach/crash），再广播给订阅者。
-    fn handle_event(&self, method: &str, session_key: &str, params: serde_json::Value) {
+    fn handle_event(
+        &self,
+        method: &str,
+        session_key: &str,
+        params: serde_json::Value,
+    ) -> Result<(), TransportError> {
+        let event_bytes = method
+            .len()
+            .saturating_add(session_key.len())
+            .saturating_add(approximate_json_heap_bytes(&params));
+        if event_bytes > MAX_CDP_EVENT_HEAP_BYTES {
+            let error = TransportError::Protocol(format!(
+                "CDP event exceeds heap bound: {event_bytes} bytes > \
+                 {MAX_CDP_EVENT_HEAP_BYTES} bytes"
+            ));
+            self.poison_connection(error.clone());
+            return Err(error);
+        }
         // 生命周期副作用：登记子 session / 标记死亡。这些只改本注册表，不发 CDP
         // 命令（runIfWaitingForDebugger 由传输层在「先装监听」之后补发）。
         match method {
@@ -436,15 +1638,42 @@ impl SessionRegistry {
                 let target_type = target_info
                     .and_then(|value| value.get("type"))
                     .and_then(|value| value.as_str());
+                let opener_target_id = target_info
+                    .and_then(|value| value.get("openerId"))
+                    .and_then(|value| value.as_str());
                 if let (Some(session_id), Some(target_id), Some(target_type)) =
                     (session_id, target_id, target_type)
                 {
-                    self.register_attached(session_id, target_id, target_type);
+                    let _ = self.register_attached(
+                        session_key,
+                        session_id,
+                        target_id,
+                        target_type,
+                        opener_target_id,
+                    );
                 }
             }
             "Target.detachedFromTarget" => {
                 if let Some(sid) = params.get("sessionId").and_then(|v| v.as_str()) {
                     self.fail_session(sid, false);
+                }
+            }
+            "Target.targetDestroyed" => {
+                // Some worker/service-worker lifecycles publish authoritative
+                // target absence without a preceding detachedFromTarget. Use
+                // the target map to refund the exact auxiliary quota instead
+                // of leaving an unattributed bucket slot stranded.
+                if let Some(target_id) = params.get("targetId").and_then(|value| value.as_str()) {
+                    let session_id = self
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .target_sessions
+                        .get(target_id)
+                        .cloned();
+                    if let Some(session_id) = session_id {
+                        self.fail_session(&session_id, false);
+                    }
                 }
             }
             "Target.targetCrashed" => {
@@ -467,6 +1696,14 @@ impl SessionRegistry {
                     self.fail_session(sid, true);
                 }
             }
+            "Inspector.detached" => {
+                // Inspector detach closes only this CDP session. The target
+                // router independently retains physical page/quota ownership
+                // and performs an exact close/absence cleanup.
+                if !session_key.is_empty() {
+                    self.fail_session(session_key, false);
+                }
+            }
             _ => {}
         }
 
@@ -474,14 +1711,20 @@ impl SessionRegistry {
             method: method.to_string(),
             session_id: session_key.to_string(),
             params,
+            reliable_slot: None,
         };
-        self.broadcast_event(event);
+        self.broadcast_event(event)
     }
 
     /// 广播一个事件给：① 精确 (method, session) 订阅者；② 通配 (method, None) 订阅者。
     /// 无人订阅 → 静默丢弃（合法：不是所有事件都有人关心）。
-    fn broadcast_event(&self, event: CdpEvent) {
+    fn broadcast_event(&self, event: CdpEvent) -> Result<(), TransportError> {
+        let event_bytes = event.approximate_heap_bytes();
         let mut g = self.inner.lock().unwrap();
+        if g.connection_closed {
+            return Err(TransportError::Closed);
+        }
+        g.prune_subscriptions();
         let exact: SubKey = (event.method.clone(), Some(event.session_id.clone()));
         let wildcard: SubKey = (event.method.clone(), None);
         if let Some(tx) = g.subscriptions.get(&exact) {
@@ -490,51 +1733,61 @@ impl SessionRegistry {
         if let Some(tx) = g.subscriptions.get(&wildcard) {
             let _ = tx.send(event.clone());
         }
-        if let Some(subscribers) = g.reliable_subscriptions.get_mut(&exact) {
-            subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+        for key in [&exact, &wildcard] {
+            let mut saturated = None;
+            if let Some(subscribers) = g.reliable_subscriptions.get_mut(key) {
+                subscribers.retain(|subscriber| {
+                    if saturated.is_some() {
+                        return !subscriber.is_closed();
+                    }
+                    match subscriber.try_send(&event, event_bytes) {
+                        Ok(()) => true,
+                        Err(ReliableSendError::Closed) => false,
+                        Err(ReliableSendError::Full(scope)) => {
+                            saturated = Some(scope);
+                            true
+                        }
+                    }
+                });
+            }
+            if let Some(scope) = saturated {
+                let (scope, event_limit, byte_limit) = scope.limits();
+                let detail = format!(
+                    "reliable CDP event queue saturated for {} at {scope} scope \
+                     ({event_limit} events / {byte_limit} bytes)",
+                    event.method
+                );
+                let error = TransportError::Protocol(detail);
+                self.poison_connection_locked(&mut g, error.clone());
+                return Err(error);
+            }
         }
-        if let Some(subscribers) = g.reliable_subscriptions.get_mut(&wildcard) {
-            subscribers.retain(|tx| tx.send(event.clone()).is_ok());
-        }
+        g.prune_subscriptions();
+        Ok(())
     }
 
     /// 标记某 session 死亡（崩溃或关闭），并 drain 其所有挂起回调为对应错误，
     /// 使等待中的 `send` 立即解除（绝不悬挂）。粘性：之后该 session 上 `send` 短路。
     pub fn fail_session(&self, session_id: &str, crashed: bool) {
         let mut g = self.inner.lock().unwrap();
-        if let Some(session) = g.sessions.get_mut(session_id) {
-            if crashed {
-                session.crashed = true;
-            } else {
-                session.closed = true;
-            }
-            let err = session.dead_error();
-            for (_id, tx) in session.callbacks.drain() {
-                let _ = tx.send(Err(err.clone()));
-            }
+        let error = if crashed {
+            TransportError::SessionCrashed
+        } else {
+            TransportError::SessionClosed
+        };
+        g.remove_session(session_id, error);
+        if crashed {
+            g.remember_dead_session(session_id, true);
         }
-        g.subscriptions
-            .retain(|(_, subscribed_session), _| subscribed_session.as_deref() != Some(session_id));
-        g.reliable_subscriptions
-            .retain(|(_, subscribed_session), _| subscribed_session.as_deref() != Some(session_id));
-        g.target_sessions
-            .retain(|_, mapped_session| mapped_session != session_id);
+        drop(g);
+        self.authority_changed.notify_waiters();
     }
 
     /// 标记整个连接关闭（WS 断开）：drain 所有 session 的所有挂起回调为 `Closed`，
     /// 并置 `connection_closed`，使之后所有 `register_command` 短路 `Closed`。
     pub fn fail_connection(&self) {
         let mut g = self.inner.lock().unwrap();
-        g.connection_closed = true;
-        for session in g.sessions.values_mut() {
-            session.closed = true;
-            for (_id, tx) in session.callbacks.drain() {
-                let _ = tx.send(Err(TransportError::Closed));
-            }
-        }
-        g.subscriptions.clear();
-        g.reliable_subscriptions.clear();
-        g.target_sessions.clear();
+        g.fail_connection();
     }
 }
 
@@ -628,6 +1881,7 @@ mod tests {
     #[tokio::test]
     async fn connection_failure_closes_event_subscriptions() {
         let reg = SessionRegistry::new();
+        let fatal = reg.subscribe_fatal();
         let mut events = reg.subscribe("Target.attachedToTarget", None);
         let mut reliable = reg.subscribe_reliable("Fetch.requestPaused", None);
         reg.fail_connection();
@@ -636,6 +1890,10 @@ mod tests {
             Err(broadcast::error::RecvError::Closed)
         ));
         assert!(reliable.recv().await.is_none());
+        assert!(
+            fatal.borrow().is_none(),
+            "normal explicit shutdown must not be reported as fatal"
+        );
     }
 
     /// **F17**：`fail_connection` 之后再 `subscribe` 的迟到订阅者绝不能拿到一个
@@ -691,22 +1949,478 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reliable_control_subscription_does_not_drop_a_burst() {
+    async fn reliable_control_subscription_delivers_up_to_its_hard_bound() {
         let reg = SessionRegistry::new();
         reg.register_session("S1", "page");
         let mut events = reg.subscribe_reliable("Fetch.requestPaused", None);
 
-        for index in 0..(EVENT_CHANNEL_CAPACITY * 3) {
+        for index in 0..RELIABLE_EVENT_CAPACITY {
             reg.dispatch_message(&format!(
                 r#"{{"method":"Fetch.requestPaused","sessionId":"S1","params":{{"index":{index}}}}}"#
             ))
             .unwrap();
         }
 
-        for index in 0..(EVENT_CHANNEL_CAPACITY * 3) {
+        for index in 0..RELIABLE_EVENT_CAPACITY {
             let event = events.recv().await.expect("reliable event");
             assert_eq!(event.params["index"], index);
         }
+    }
+
+    #[tokio::test]
+    async fn reliable_control_subscription_overflow_poisons_connection() {
+        let reg = SessionRegistry::new();
+        reg.register_session("S1", "page");
+        let fatal = reg.subscribe_fatal();
+        let pending = reg.register_command("S1", call(9)).unwrap();
+        let mut events = reg.subscribe_reliable("Fetch.requestPaused", None);
+
+        for index in 0..RELIABLE_EVENT_CAPACITY {
+            reg.dispatch_message(&format!(
+                r#"{{"method":"Fetch.requestPaused","sessionId":"S1","params":{{"index":{index}}}}}"#
+            ))
+            .unwrap();
+        }
+        let error = reg
+            .dispatch_message(
+                r#"{"method":"Fetch.requestPaused","sessionId":"S1","params":{"overflow":true}}"#,
+            )
+            .expect_err("the first event beyond the bound must poison the connection");
+        assert!(matches!(error, TransportError::Protocol(_)));
+        assert!(reg.is_connection_closed());
+        assert_eq!(fatal.borrow().as_ref(), Some(&error));
+        assert_eq!(pending.await.unwrap(), Err(TransportError::Closed));
+        assert_eq!(
+            reg.register_command("S1", call(10)).unwrap_err(),
+            TransportError::Closed
+        );
+
+        for _ in 0..RELIABLE_EVENT_CAPACITY {
+            assert!(events.recv().await.is_some());
+        }
+        assert!(events.recv().await.is_none());
+    }
+
+    #[test]
+    fn reliable_control_subscription_has_a_byte_bound_too() {
+        let reg = SessionRegistry::new();
+        let _events = reg.subscribe_reliable("Fetch.requestPaused", None);
+        let event = CdpEvent {
+            method: "Fetch.requestPaused".to_owned(),
+            session_id: ROOT_SESSION.to_owned(),
+            params: serde_json::Value::String("x".repeat(RELIABLE_EVENT_BYTE_CAPACITY + 1)),
+            reliable_slot: None,
+        };
+        let inner = reg.inner.lock().unwrap();
+        let subscriber = &inner
+            .reliable_subscriptions
+            .values()
+            .next()
+            .expect("reliable subscription key")[0];
+        let bytes = event.approximate_heap_bytes();
+        assert!(matches!(
+            subscriber.try_send(&event, bytes),
+            Err(ReliableSendError::Full(
+                ReliableBudgetScope::Subscriber
+            ))
+        ));
+        assert_eq!(subscriber.subscriber_budget.counts(), (0, 0));
+        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn reliable_host_budget_is_aggregate_and_drop_returns_every_reservation() {
+        let reg = SessionRegistry::new();
+        let receivers = (0..3)
+            .map(|_| reg.subscribe_reliable("Target.detachedFromTarget", None))
+            .collect::<Vec<_>>();
+
+        // 170 events x three deep-copied subscribers = 510 Host slots. No
+        // individual subscriber is near its 256-event limit.
+        for index in 0..170 {
+            reg.dispatch_message(&format!(
+                r#"{{"method":"Target.detachedFromTarget","params":{{"index":{index}}}}}"#
+            ))
+            .expect("aggregate Host budget still has room");
+        }
+        let error = reg
+            .dispatch_message(
+                r#"{"method":"Target.detachedFromTarget","params":{"overflow":true}}"#,
+            )
+            .expect_err("the third copy must hit the aggregate Host event bound");
+        assert!(error.to_string().contains("Host aggregate"));
+        assert_eq!(
+            reg.reliable_host_budget.counts().0,
+            RELIABLE_HOST_EVENT_CAPACITY,
+            "only successfully enqueued deep copies remain charged"
+        );
+
+        // Poison clears senders, and dropping their receivers drops every
+        // queued CdpEvent. Each event's RAII token returns subscriber + Host.
+        drop(receivers);
+        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn task_event_token_stays_charged_after_recv_until_the_event_is_dropped() {
+        let reg = SessionRegistry::new();
+        let task = ReliableEventTaskBudget::new_with_limits(8, 1024 * 1024, 2);
+        let mut receiver = reg
+            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
+            .expect("task-scoped subscription");
+        reg.dispatch_message(r#"{"method":"Target.targetCrashed","params":{"targetId":"T1"}}"#)
+            .unwrap();
+        assert_eq!(task.counts().0, 1);
+        assert_eq!(reg.reliable_host_budget.counts().0, 1);
+
+        let event = receiver.recv().await.expect("queued event");
+        assert_eq!(
+            task.counts().0,
+            1,
+            "recv transfers the token to the consumer; it does not release early"
+        );
+        drop(event);
+        assert_eq!(task.counts(), (0, 0, 1));
+        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
+        drop(receiver);
+        assert_eq!(task.counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn dropped_task_receiver_returns_queued_events_and_subscriber_permit() {
+        let reg = SessionRegistry::new();
+        let task = ReliableEventTaskBudget::new_with_limits(8, 1024 * 1024, 2);
+        let receiver = reg
+            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
+            .expect("task-scoped subscription");
+        reg.dispatch_message(r#"{"method":"Target.targetCrashed","params":{"targetId":"T1"}}"#)
+            .unwrap();
+        assert_eq!(task.counts().0, 1);
+
+        // Tokio drops every queued value synchronously with the receiver.
+        // The wrapper independently returns the active-subscriber permit.
+        drop(receiver);
+        assert_eq!(task.counts(), (0, 0, 0));
+        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
+    }
+
+    #[test]
+    fn fixed_host_subscriptions_never_charge_a_task_authority() {
+        let reg = SessionRegistry::new();
+        let task = ReliableEventTaskBudget::new_opaque();
+        let fixed = reg.subscribe_reliable("Browser.downloadWillBegin", None);
+        reg.dispatch_message(
+            r#"{"method":"Browser.downloadWillBegin","params":{"guid":"G1"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(task.counts(), (0, 0, 0));
+        assert_eq!(reg.reliable_host_budget.counts().0, 1);
+        drop(fixed);
+        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
+    }
+
+    #[test]
+    fn trusted_task_authority_is_shared_across_hosts_but_not_across_tasks() {
+        static NEXT_TEST_TASK: AtomicUsize = AtomicUsize::new(1);
+        let suffix = NEXT_TEST_TASK.fetch_add(1, Ordering::Relaxed);
+        let key = format!("reliable-budget-test-task-{suffix}");
+        let same_host_or_lane = ReliableEventTaskBudget::for_trusted_task(&key);
+        let isolated_host = ReliableEventTaskBudget::for_trusted_task(&key);
+        let sibling_task =
+            ReliableEventTaskBudget::for_trusted_task(&format!("{key}-sibling"));
+
+        assert!(Arc::ptr_eq(&same_host_or_lane, &isolated_host));
+        assert!(!Arc::ptr_eq(&same_host_or_lane, &sibling_task));
+    }
+
+    #[test]
+    fn trusted_task_weak_registry_reclaims_drop_debt_without_aba_resurrection() {
+        static NEXT_TEST_TASK: AtomicUsize = AtomicUsize::new(1);
+        let suffix = NEXT_TEST_TASK.fetch_add(1, Ordering::Relaxed);
+        let key = format!("reliable-budget-drop-aba-{suffix}");
+        let reg = SessionRegistry::new();
+        let original = ReliableEventTaskBudget::for_trusted_task(&key);
+        let original_weak = Arc::downgrade(&original);
+        let receiver = reg
+            .subscribe_reliable_for_task("Target.targetCrashed", None, &original)
+            .unwrap();
+        drop(original);
+        assert!(
+            original_weak.upgrade().is_some(),
+            "live subscriber authority must keep the exact generation pinned"
+        );
+
+        drop(receiver);
+        // The registry sender is now closed; normal subscription maintenance
+        // drops its final task-budget Arc and therefore the old generation.
+        assert!(!reg.has_reliable_subscriber("Target.targetCrashed"));
+        assert!(original_weak.upgrade().is_none());
+
+        let replacement = ReliableEventTaskBudget::for_trusted_task(&key);
+        assert_eq!(replacement.counts(), (0, 0, 0));
+        assert!(
+            original_weak.upgrade().is_none(),
+            "reusing the trusted key must never revive an old/debited authority"
+        );
+    }
+
+    #[test]
+    fn task_aggregate_overflow_poisons_only_the_host_that_observed_it() {
+        let task = ReliableEventTaskBudget::new_with_limits(4, 1024 * 1024, 4);
+        let host_a = SessionRegistry::new();
+        let host_b = SessionRegistry::new();
+        let receiver_a = host_a
+            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
+            .unwrap();
+        let receiver_b = host_b
+            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
+            .unwrap();
+
+        for index in 0..2 {
+            host_a
+                .dispatch_message(&format!(
+                    r#"{{"method":"Target.targetCrashed","params":{{"host":"a","index":{index}}}}}"#
+                ))
+                .unwrap();
+            host_b
+                .dispatch_message(&format!(
+                    r#"{{"method":"Target.targetCrashed","params":{{"host":"b","index":{index}}}}}"#
+                ))
+                .unwrap();
+        }
+        let error = host_b
+            .dispatch_message(
+                r#"{"method":"Target.targetCrashed","params":{"host":"b","overflow":true}}"#,
+            )
+            .expect_err("fifth cross-Host copy exceeds the trusted task budget");
+        assert!(error.to_string().contains("task aggregate"));
+        assert!(host_b.is_connection_closed());
+        assert!(
+            !host_a.is_connection_closed(),
+            "task saturation must not globally poison sibling Host connections"
+        );
+        assert_eq!(task.counts().0, 4);
+
+        drop(receiver_b);
+        assert_eq!(task.counts().0, 2);
+        drop(receiver_a);
+        assert_eq!(task.counts(), (0, 0, 0));
+        assert_eq!(host_a.reliable_host_budget.counts(), (0, 0));
+        assert_eq!(host_b.reliable_host_budget.counts(), (0, 0));
+    }
+
+    #[test]
+    fn failed_task_reservation_rolls_back_subscriber_and_host_layers() {
+        let reg = SessionRegistry::new();
+        let task = ReliableEventTaskBudget::new_with_limits(0, 1024, 1);
+        let receiver = reg
+            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
+            .unwrap();
+        let error = reg
+            .dispatch_message(
+                r#"{"method":"Target.targetCrashed","params":{"targetId":"T1"}}"#,
+            )
+            .expect_err("zero-sized task queue rejects its first event");
+        assert!(error.to_string().contains("task aggregate"));
+        assert_eq!(task.counts(), (0, 0, 1));
+        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
+        drop(receiver);
+        assert_eq!(task.counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn task_subscriber_admission_is_cross_host_bounded_and_raii_released() {
+        let task = ReliableEventTaskBudget::new_with_limits(
+            RELIABLE_TASK_EVENT_CAPACITY,
+            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
+            RELIABLE_TASK_SUBSCRIBER_CAPACITY,
+        );
+        let hosts = (0..=RELIABLE_TASK_SUBSCRIBER_CAPACITY)
+            .map(|_| SessionRegistry::new())
+            .collect::<Vec<_>>();
+        let receivers = hosts[..RELIABLE_TASK_SUBSCRIBER_CAPACITY]
+            .iter()
+            .map(|host| {
+                host.subscribe_reliable_for_task("Target.targetCrashed", None, &task)
+                    .expect("subscriber within cross-Host task cap")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(task.counts().2, RELIABLE_TASK_SUBSCRIBER_CAPACITY);
+
+        let error = hosts[RELIABLE_TASK_SUBSCRIBER_CAPACITY]
+            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
+            .err()
+            .expect("subscriber N+1 must be rejected");
+        assert!(error.to_string().contains("task subscriber limit"));
+        assert!(hosts[RELIABLE_TASK_SUBSCRIBER_CAPACITY].is_connection_closed());
+        assert!(hosts[..RELIABLE_TASK_SUBSCRIBER_CAPACITY]
+            .iter()
+            .all(|host| !host.is_connection_closed()));
+
+        drop(receivers);
+        assert_eq!(task.counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn isolated_host_math_bounds_fixed_plus_dynamic_task_queues_at_default_and_max_lanes() {
+        // Must stay aligned with
+        // `nomifun_browser_platform::MAX_TASK_OPEN_LANES`. Isolated mode maps
+        // every Lane to a distinct HostKey, so this is also its Host maximum.
+        const DEFAULT_ISOLATED_HOSTS: usize = 4;
+        const MAX_ISOLATED_HOSTS: usize = 32;
+        const MIB: usize = 1024 * 1024;
+        let default_fixed_host_ceiling =
+            DEFAULT_ISOLATED_HOSTS * RELIABLE_HOST_EVENT_BYTE_CAPACITY;
+        let max_fixed_host_ceiling =
+            MAX_ISOLATED_HOSTS * RELIABLE_HOST_EVENT_BYTE_CAPACITY;
+        assert_eq!(
+            default_fixed_host_ceiling,
+            16 * MIB,
+            "four isolated Hosts retain at most 16 MiB of Host-owned copies"
+        );
+        assert_eq!(
+            max_fixed_host_ceiling,
+            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
+            "32 isolated Hosts retain at most 128 MiB of Host-owned copies"
+        );
+        assert_eq!(
+            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
+            128 * MIB,
+            "temporary act copies are independently bounded across all Hosts"
+        );
+        assert_eq!(
+            default_fixed_host_ceiling + RELIABLE_TASK_EVENT_BYTE_CAPACITY,
+            144 * MIB,
+            "default four-Host conservative fixed + dynamic task ceiling"
+        );
+        assert_eq!(
+            max_fixed_host_ceiling + RELIABLE_TASK_EVENT_BYTE_CAPACITY,
+            256 * MIB,
+            "maximum 32-Host conservative fixed + dynamic task ceiling"
+        );
+        assert_eq!(
+            MAX_ISOLATED_HOSTS * RELIABLE_HOST_EVENT_CAPACITY
+                + RELIABLE_TASK_EVENT_CAPACITY,
+            20_480,
+            "event-count structural ceiling is finite too"
+        );
+    }
+
+    #[test]
+    fn dropped_subscription_churn_does_not_grow_registry_maps() {
+        let reg = SessionRegistry::new();
+        for index in 0..10_000 {
+            drop(reg.subscribe(format!("Page.test{index}"), None));
+            drop(reg.subscribe_reliable(format!("Target.test{index}"), None));
+        }
+        let mut inner = reg.inner.lock().unwrap();
+        inner.prune_subscriptions();
+        assert!(inner.subscriptions.is_empty());
+        assert!(inner.reliable_subscriptions.is_empty());
+        assert!(!inner.connection_closed);
+    }
+
+    #[test]
+    fn detached_and_crashed_session_churn_keeps_only_bounded_tombstones() {
+        let reg = SessionRegistry::new();
+        for index in 0..(DEAD_SESSION_CAPACITY * 4) {
+            let session_id = format!("S{index}");
+            reg.register_session(&session_id, "page");
+            reg.fail_session(&session_id, index % 2 == 0);
+        }
+        let inner = reg.inner.lock().unwrap();
+        assert_eq!(inner.sessions.len(), 1, "only the root session stays live");
+        assert!(inner.sessions.contains_key(ROOT_SESSION));
+        assert!(inner.dead_sessions.len() <= DEAD_SESSION_CAPACITY);
+        assert_eq!(inner.pending_callbacks, 0);
+    }
+
+    #[test]
+    fn live_session_admission_is_hard_bounded_and_fail_closed() {
+        let reg = SessionRegistry::new();
+        let fatal = reg.subscribe_fatal();
+        for index in 1..MAX_LIVE_SESSIONS {
+            reg.register_session(format!("S{index}"), "page");
+        }
+        assert_eq!(reg.inner.lock().unwrap().sessions.len(), MAX_LIVE_SESSIONS);
+
+        reg.register_session("OVERFLOW", "page");
+
+        assert!(reg.is_connection_closed());
+        assert!(matches!(
+            fatal.borrow().as_ref(),
+            Some(TransportError::Protocol(_))
+        ));
+        assert!(reg.inner.lock().unwrap().sessions.is_empty());
+    }
+
+    #[test]
+    fn expired_crash_tombstone_loses_sticky_classification() {
+        let reg = SessionRegistry::new();
+        reg.register_session("S1", "page");
+        reg.fail_session("S1", true);
+        assert!(reg.is_session_crashed("S1"));
+        reg.inner.lock().unwrap().dead_sessions[0].expires_at = Instant::now();
+
+        assert!(!reg.is_session_crashed("S1"));
+        assert!(reg.inner.lock().unwrap().dead_sessions.is_empty());
+        assert_eq!(
+            reg.register_command("S1", call(1)).unwrap_err(),
+            TransportError::SessionClosed
+        );
+    }
+
+    #[test]
+    fn oversized_session_identifier_poisons_instead_of_becoming_retained_state() {
+        let reg = SessionRegistry::new();
+        let fatal = reg.subscribe_fatal();
+        reg.register_session("S".repeat(MAX_CDP_IDENTIFIER_BYTES + 1), "page");
+
+        assert!(reg.is_connection_closed());
+        assert!(matches!(
+            fatal.borrow().as_ref(),
+            Some(TransportError::Protocol(_))
+        ));
+        assert!(reg.inner.lock().unwrap().sessions.is_empty());
+    }
+
+    #[test]
+    fn repeated_command_cancellation_releases_callback_entries() {
+        let reg = SessionRegistry::new();
+        reg.register_session("S1", "page");
+        for index in 0..10_000 {
+            let id = call(index);
+            let receiver = reg.register_command("S1", id).unwrap();
+            drop(receiver);
+            reg.cancel_command("S1", id);
+        }
+        let inner = reg.inner.lock().unwrap();
+        assert_eq!(inner.pending_callbacks, 0);
+        assert!(inner.sessions["S1"].callbacks.is_empty());
+    }
+
+    #[test]
+    fn pending_callback_admission_is_hard_bounded() {
+        let reg = SessionRegistry::new();
+        reg.register_session("S1", "page");
+        let mut receivers = Vec::new();
+        for index in 0..MAX_PENDING_CALLBACKS_PER_SESSION {
+            receivers.push(reg.register_command("S1", call(index)).unwrap());
+        }
+        let error = reg
+            .register_command("S1", call(MAX_PENDING_CALLBACKS_PER_SESSION))
+            .expect_err("one session may not retain callbacks past its hard limit");
+        assert!(matches!(error, TransportError::Protocol(_)));
+        assert_eq!(
+            reg.inner.lock().unwrap().pending_callbacks,
+            MAX_PENDING_CALLBACKS_PER_SESSION
+        );
+        for index in 0..MAX_PENDING_CALLBACKS_PER_SESSION {
+            reg.cancel_command("S1", call(index));
+        }
+        drop(receivers);
+        assert_eq!(reg.inner.lock().unwrap().pending_callbacks, 0);
     }
 
     /// **F1-sec (I1)**: session_ids_of_type 按 target_type 枚举已登记 session（SW 启动竞态补挂用）。
@@ -809,6 +2523,9 @@ mod tests {
         let reg = SessionRegistry::new();
         reg.register_session("S1", "page");
         reg.fail_session("S1", true);
+        // Chromium commonly emits detachedFromTarget after targetCrashed; the
+        // later close must not erase the bounded crash classification.
+        reg.fail_session("S1", false);
         let err = reg.register_command("S1", call(1)).unwrap_err();
         assert_eq!(err, TransportError::SessionCrashed);
     }
@@ -943,10 +2660,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(rx.await.unwrap().unwrap_err(), TransportError::SessionClosed);
+        assert!(
+            !reg.has_session("S1"),
+            "a detached session must be removed from the live routing map"
+        );
         // 之后该 session 上 send 短路。
         assert_eq!(
             reg.register_command("S1", call(2)).unwrap_err(),
             TransportError::SessionClosed
+        );
+    }
+
+    #[tokio::test]
+    async fn inspector_detached_closes_only_the_session() {
+        let reg = SessionRegistry::new();
+        reg.register_session("S-inspector", "page");
+        let rx = reg.register_command("S-inspector", call(3)).unwrap();
+
+        reg.dispatch_message(
+            r#"{"method":"Inspector.detached","sessionId":"S-inspector","params":{"reason":"replaced_with_devtools"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(rx.await.unwrap().unwrap_err(), TransportError::SessionClosed);
+        assert!(!reg.has_session("S-inspector"));
+        assert!(
+            !reg.is_connection_closed(),
+            "an Inspector session detach must not poison the whole Host transport"
         );
     }
 
@@ -992,5 +2732,308 @@ mod tests {
         let rx = reg.register_command("S1", call(1)).unwrap();
         reg.dispatch_message(r#"{"id":1,"sessionId":"S1"}"#).unwrap();
         assert_eq!(rx.await.unwrap().unwrap(), serde_json::Value::Null);
+    }
+
+    fn attach_and_claim_page(
+        reg: &SessionRegistry,
+        session_id: &str,
+        target_id: &str,
+        family: &str,
+        lane: &str,
+    ) {
+        assert_eq!(
+            reg.register_attached(ROOT_SESSION, session_id, target_id, "page", None),
+            TaskSessionAdmission::PendingAuthority
+        );
+        assert_eq!(
+            reg.claim_task_session_authority(session_id, family, lane)
+                .unwrap(),
+            TaskSessionAdmission::Admitted
+        );
+    }
+
+    #[test]
+    fn hostile_worker_family_and_lane_quotas_do_not_kill_siblings() {
+        let reg = SessionRegistry::new();
+        reg.enable_task_session_quota_routing();
+
+        // Four Lanes fill one task family's aggregate 256 auxiliary slots.
+        for lane_index in 0..4 {
+            let lane = format!("lane-a-{lane_index}");
+            let page_session = format!("page-a-{lane_index}");
+            let page_target = format!("target-page-a-{lane_index}");
+            attach_and_claim_page(&reg, &page_session, &page_target, "family-a", &lane);
+            for worker_index in 0..MAX_AUXILIARY_SESSIONS_PER_LANE {
+                assert_eq!(
+                    reg.register_attached(
+                        &page_session,
+                        format!("worker-a-{lane_index}-{worker_index}"),
+                        format!("target-worker-a-{lane_index}-{worker_index}"),
+                        "worker",
+                        None,
+                    ),
+                    TaskSessionAdmission::Admitted
+                );
+            }
+            assert_eq!(
+                reg.task_session_quota_counts("family-a", &lane).1,
+                MAX_AUXILIARY_SESSIONS_PER_LANE
+            );
+        }
+        assert_eq!(
+            reg.task_session_quota_counts("family-a", "lane-a-0").0,
+            MAX_AUXILIARY_SESSIONS_PER_TASK_FAMILY
+        );
+
+        attach_and_claim_page(
+            &reg,
+            "page-a-overflow",
+            "target-page-a-overflow",
+            "family-a",
+            "lane-a-overflow",
+        );
+        assert_eq!(
+            reg.register_attached(
+                "page-a-overflow",
+                "worker-a-overflow",
+                "target-worker-a-overflow",
+                "service_worker",
+                None,
+            ),
+            TaskSessionAdmission::Rejected
+        );
+        assert!(!reg.has_session("worker-a-overflow"));
+
+        // The old attach worker's second register call cannot resurrect it.
+        reg.register_session("worker-a-overflow", "service_worker");
+        assert!(!reg.has_session("worker-a-overflow"));
+
+        // A session initially admitted only to the conservative root bucket
+        // may later receive trusted lineage. If that family is already full,
+        // rejection must drain every retained callback/subscription/mapping.
+        assert_eq!(
+            reg.register_attached(
+                ROOT_SESSION,
+                "migrating-sw",
+                "migrating-sw-target",
+                "service_worker",
+                None,
+            ),
+            TaskSessionAdmission::Admitted
+        );
+        let mut callback = reg.register_command("migrating-sw", call(77)).unwrap();
+        let mut broadcast = reg.subscribe("Runtime.consoleAPICalled", Some("migrating-sw"));
+        let mut reliable =
+            reg.subscribe_reliable("Runtime.exceptionThrown", Some("migrating-sw"));
+        assert_eq!(
+            reg.claim_task_session_authority("migrating-sw", "family-a", "lane-a-overflow")
+                .unwrap(),
+            TaskSessionAdmission::Rejected
+        );
+        assert_eq!(
+            callback.try_recv().unwrap(),
+            Err(TransportError::SessionClosed)
+        );
+        assert!(matches!(
+            broadcast.try_recv(),
+            Err(broadcast::error::TryRecvError::Closed)
+        ));
+        assert!(matches!(
+            reliable.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        {
+            let state = reg.inner.lock().unwrap();
+            assert!(!state.sessions.contains_key("migrating-sw"));
+            assert!(!state
+                .target_sessions
+                .contains_key("migrating-sw-target"));
+            assert!(state.subscriptions.keys().all(|(_, session)| {
+                session.as_deref() != Some("migrating-sw")
+            }));
+            assert!(state.reliable_subscriptions.keys().all(|(_, session)| {
+                session.as_deref() != Some("migrating-sw")
+            }));
+        }
+
+        // A sibling task family remains fully routable on the same Host.
+        attach_and_claim_page(
+            &reg,
+            "page-b",
+            "target-page-b",
+            "family-b",
+            "lane-b",
+        );
+        assert_eq!(
+            reg.register_attached(
+                "page-b",
+                "worker-b",
+                "target-worker-b",
+                "worker",
+                None,
+            ),
+            TaskSessionAdmission::Admitted
+        );
+        assert!(reg.has_session("worker-b"));
+        assert!(!reg.is_connection_closed());
+
+        // Detach refunds the exact family/Lane charge.
+        reg.fail_session("worker-a-0-0", false);
+        assert_eq!(
+            reg.register_attached(
+                "page-a-overflow",
+                "worker-a-after-refund",
+                "target-worker-a-after-refund",
+                "worker",
+                None,
+            ),
+            TaskSessionAdmission::Admitted
+        );
+    }
+
+    #[test]
+    fn hostile_root_service_workers_use_bounded_unattributed_bucket() {
+        let reg = SessionRegistry::new();
+        reg.enable_task_session_quota_routing();
+
+        for index in 0..MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST {
+            assert_eq!(
+                reg.register_attached(
+                    ROOT_SESSION,
+                    format!("root-sw-{index}"),
+                    format!("root-sw-target-{index}"),
+                    "service_worker",
+                    None,
+                ),
+                TaskSessionAdmission::Admitted
+            );
+        }
+        assert_eq!(
+            reg.register_attached(
+                ROOT_SESSION,
+                "root-sw-overflow",
+                "root-sw-target-overflow",
+                "service_worker",
+                None,
+            ),
+            TaskSessionAdmission::Rejected
+        );
+        assert_eq!(
+            reg.task_session_quota_counts("unused", "unused").2,
+            MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST
+        );
+        assert!(!reg.has_session("root-sw-overflow"));
+        assert!(!reg.is_connection_closed());
+
+        reg.dispatch_message(
+            r#"{"method":"Target.targetDestroyed","params":{"targetId":"root-sw-target-0"}}"#,
+        )
+        .unwrap();
+        // Duplicate authoritative absence is intentionally idempotent: it
+        // must neither underflow the bucket nor retire another session.
+        reg.dispatch_message(
+            r#"{"method":"Target.targetDestroyed","params":{"targetId":"root-sw-target-0"}}"#,
+        )
+        .unwrap();
+        assert!(!reg.has_session("root-sw-0"));
+        assert_eq!(
+            reg.task_session_quota_counts("unused", "unused").2,
+            MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST - 1
+        );
+        assert_eq!(
+            reg.register_attached(
+                ROOT_SESSION,
+                "root-sw-after-refund",
+                "root-sw-target-after-refund",
+                "shared_worker",
+                None,
+            ),
+            TaskSessionAdmission::Admitted
+        );
+    }
+
+    #[test]
+    fn hostile_target_session_alias_cannot_create_destroyed_event_ghost() {
+        let reg = SessionRegistry::new();
+        reg.enable_task_session_quota_routing();
+
+        assert_eq!(
+            reg.register_attached(
+                ROOT_SESSION,
+                "original-worker-session",
+                "shared-target-id",
+                "service_worker",
+                None,
+            ),
+            TaskSessionAdmission::Admitted
+        );
+        assert_eq!(
+            reg.register_attached(
+                ROOT_SESSION,
+                "alias-worker-session",
+                "shared-target-id",
+                "service_worker",
+                None,
+            ),
+            TaskSessionAdmission::Rejected
+        );
+
+        assert!(reg.is_connection_closed());
+        assert!(!reg.has_session("original-worker-session"));
+        assert!(!reg.has_session("alias-worker-session"));
+        assert_eq!(reg.task_session_quota_counts("unused", "unused").2, 0);
+    }
+
+    #[tokio::test]
+    async fn child_worker_waits_for_trusted_parent_authority_then_inherits_it() {
+        let reg = SessionRegistry::new();
+        reg.enable_task_session_quota_routing();
+        assert_eq!(
+            reg.register_attached(ROOT_SESSION, "pending-page", "pending-target", "page", None),
+            TaskSessionAdmission::PendingAuthority
+        );
+        assert_eq!(
+            reg.register_attached(
+                "pending-page",
+                "pending-worker",
+                "pending-worker-target",
+                "worker",
+                None,
+            ),
+            TaskSessionAdmission::PendingAuthority
+        );
+        assert_eq!(reg.task_session_quota_counts("family", "lane").3, 2);
+
+        reg.claim_task_session_authority("pending-page", "family", "lane")
+            .unwrap();
+        assert_eq!(
+            reg.wait_for_task_session_admission("pending-worker", Duration::from_millis(10))
+                .await,
+            TaskSessionAdmission::Admitted
+        );
+        assert_eq!(
+            reg.task_session_authority("pending-worker"),
+            Some(TaskSessionAuthority {
+                task_resource_family_key: "family".into(),
+                lane_id: "lane".into(),
+            })
+        );
+        assert_eq!(reg.task_session_quota_counts("family", "lane"), (1, 1, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn unresolved_page_authority_times_out_locally_without_host_poison() {
+        let reg = SessionRegistry::new();
+        reg.enable_task_session_quota_routing();
+        reg.register_attached(ROOT_SESSION, "unknown-page", "unknown-target", "page", None);
+
+        assert_eq!(
+            reg.wait_for_task_session_admission("unknown-page", Duration::from_millis(1))
+                .await,
+            TaskSessionAdmission::Rejected
+        );
+        assert!(!reg.has_session("unknown-page"));
+        assert!(!reg.is_connection_closed());
+        assert_eq!(reg.task_session_quota_counts("unused", "unused").3, 0);
     }
 }

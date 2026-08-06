@@ -474,7 +474,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
             <div className='flex items-center justify-between gap-8px'>
               <span className={fieldLabelClass}>{t('idmm.watch.bypassModel')}</span>
               {backupErrorKey ? (
-                <span className='rounded-full bg-[rgb(var(--warning-1))] px-6px py-2px text-10px text-[rgb(var(--warning-6))]'>
+                <span className='rounded-full bg-warning-1 px-6px py-2px text-10px text-warning-6'>
                   {t(backupErrorKey)}
                 </span>
               ) : null}
@@ -507,7 +507,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
             </div>
             <span className='text-t-tertiary text-11px leading-16px'>{t('idmm.sessionBackupHint')}</span>
             {backupErrorKey ? (
-              <span className='text-11px text-[rgb(var(--warning-6))]'>{t(backupErrorKey)}</span>
+              <span className='text-11px text-warning-6'>{t(backupErrorKey)}</span>
             ) : null}
           </div>
         ) : null}
@@ -1004,7 +1004,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
               </button>
               {logOpen && log.length > 0 ? (
                 <span
-                  className='shrink-0 text-t-tertiary text-11px cursor-pointer hover:text-[rgb(var(--danger-6))]'
+                  className='shrink-0 text-t-tertiary text-11px cursor-pointer hover:text-danger-6'
                   onClick={clearLog}
                 >
                   {t('idmm.log.clear')}

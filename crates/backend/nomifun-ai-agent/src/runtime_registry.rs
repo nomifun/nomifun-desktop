@@ -240,7 +240,6 @@ fn options_carry_knowledge_metadata(extra: &serde_json::Value) -> bool {
         "knowledge_binding_signature",
         "knowledge_mounts_signature",
         "knowledge_writeback",
-        "knowledge_writeback_mode",
         "knowledge_writeback_eagerness",
         "knowledge_channel_write_enabled",
     ]

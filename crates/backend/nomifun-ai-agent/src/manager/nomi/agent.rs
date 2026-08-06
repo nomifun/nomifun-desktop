@@ -8,7 +8,7 @@ use nomi_agent::companion_tools::{
     RecallMemoriesTool, SaveMemoryTool,
 };
 use nomi_agent::summon_tools::{
-    ProposeCompanionMemoryTool, SummonContextContributor, SummonContextSink, SummonProposalSink,
+    SummonContextContributor, SummonContextSink,
 };
 use nomi_agent::engine::AgentEngine;
 use nomi_agent::knowledge_tools::{KnowledgeReadTool, KnowledgeSearchTool, KnowledgeWriteTool};
@@ -117,6 +117,11 @@ pub struct NomiAgentManager {
     /// this runtime; final Drop is the construction/abrupt-teardown backstop.
     #[cfg(feature = "browser-use")]
     browser_lane_binding: Option<crate::BrowserLaneBinding>,
+    /// This runtime's claim on the pooled SSH link behind an SSH-bound session.
+    /// Held for the runtime's whole life and released — never closed — at
+    /// teardown; the link belongs to the conversation, which outlives every
+    /// runtime the operator's model switches create and destroy.
+    ssh_lease: Option<Arc<dyn crate::SshSessionLease>>,
     approval_manager: Arc<ToolApprovalManager>,
     confirmations: Arc<std::sync::RwLock<Vec<Confirmation>>>,
     /// Durable per-turn cancellation token. Unlike `Notify`, cancellation is
@@ -331,6 +336,13 @@ pub(crate) fn map_engine_stop_reason(
 pub(crate) struct NomiHostWiring {
     #[cfg(feature = "browser-use")]
     pub browser_lane_binding: Option<crate::BrowserLaneBinding>,
+    /// A ready remote backend when the session is SSH-bound (the factory already
+    /// connected it via the SshBackendProvider). Selects the remote tool family.
+    pub ssh_backend: Option<Arc<dyn crate::SshBackend>>,
+    /// This runtime's claim on that remote session. Retained (not moved into the
+    /// engine) so teardown has something to report on: a runtime that dropped its
+    /// lease could never say whether the operator's shell survived it.
+    pub ssh_lease: Option<Arc<dyn crate::SshSessionLease>>,
 }
 
 impl Default for NomiHostWiring {
@@ -338,18 +350,20 @@ impl Default for NomiHostWiring {
         Self {
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
+            ssh_backend: None,
+            ssh_lease: None,
         }
     }
 }
 
 /// Wiring for a summoned-companion work session (spec §设计 B2/B3):
-/// read-only recall over the summoned companion's memories, confirmation-style
-/// `propose_companion_memory`, and the per-turn live memory-snapshot
-/// contributor. `save_memory` is deliberately absent from this bundle — it is
-/// never registered under summon, and the memory sink refuses writes anyway.
+/// read-only recall over the summoned companion's memories plus the per-turn
+/// live memory-snapshot contributor. Every write path is deliberately absent:
+/// `save_memory` is never registered under summon, the memory sink refuses
+/// writes, and the confirmation-style `propose_companion_memory` tool retired
+/// with the 建议 feature.
 pub struct NomiSummonWiring {
     pub memory_sink: Arc<dyn CompanionMemorySink>,
-    pub proposal_sink: Arc<dyn SummonProposalSink>,
     pub context_sink: Arc<dyn SummonContextSink>,
 }
 
@@ -371,7 +385,6 @@ impl NomiAgentManager {
             Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>,
         >,
         knowledge_write_bases: Vec<(nomifun_common::KnowledgeBaseId, String)>,
-        knowledge_writeback_staged: bool,
         companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
     ) -> Result<Self, AppError> {
         Self::new_with_host_wiring(
@@ -386,7 +399,6 @@ impl NomiAgentManager {
             knowledge_prelude,
             knowledge_writeback_sink,
             knowledge_write_bases,
-            knowledge_writeback_staged,
             companion_skill_sink,
             None,
             NomiHostWiring::default(),
@@ -407,7 +419,6 @@ impl NomiAgentManager {
         knowledge_prelude: Option<String>,
         knowledge_writeback_sink: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>>,
         knowledge_write_bases: Vec<(nomifun_common::KnowledgeBaseId, String)>,
-        knowledge_writeback_staged: bool,
         companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
         summon_wiring: Option<NomiSummonWiring>,
         host_wiring: NomiHostWiring,
@@ -416,8 +427,7 @@ impl NomiAgentManager {
         let loopback_capability_leases = config_extra.loopback_capability_leases.clone();
         #[cfg(feature = "browser-use")]
         let browser_lane_binding = host_wiring.browser_lane_binding;
-        #[cfg(not(feature = "browser-use"))]
-        let _ = host_wiring;
+        let ssh_lease = host_wiring.ssh_lease;
         let image_read_root = config_extra
             .write_root
             .as_deref()
@@ -544,16 +554,12 @@ impl NomiAgentManager {
             ]);
         }
         // Summoned-companion work session (spec §设计 B): the read-only recall
-        // and the confirmation-style propose tool touch only the companion's
-        // own memory.db / suggestion box — never user files — so they skip the
-        // approval gate like the companion tools above. `save_memory` is
-        // intentionally NOT allow-listed and never registered under summon.
+        // touches only the companion's own memory.db — never user files — so it
+        // skips the approval gate like the companion tools above. `save_memory`
+        // is intentionally NOT allow-listed and never registered under summon.
         // Must be set BEFORE bootstrap; registration happens after build().
         if summon_wiring.is_some() {
-            config.tools.allow_list.extend([
-                "recall_memories".to_owned(),
-                "propose_companion_memory".to_owned(),
-            ]);
+            config.tools.allow_list.push("recall_memories".to_owned());
         }
         // Companion self-evolved skill invocation (yolo, no approval UI) — must be
         // allow-listed BEFORE bootstrap or the call parks forever. Registration of
@@ -613,13 +619,8 @@ impl NomiAgentManager {
                 config_extra.install_embedded_agent_execution,
             )
             .approval_manager(approval_manager.clone());
-        // Thread the application-shared browser secret vault (path +
-        // machine-bound key) to the Hub-backed Browser tool policy. It resolves
-        // registered `secret:NAME` values under origin checks and derives the
-        // egress allowlist from `allowed_origins`; it is not a profile or
-        // per-runtime browser owner. None keeps the compatibility empty store.
-        if let Some(vault) = config_extra.browser_secret_vault {
-            bootstrap = bootstrap.browser_secret_source(vault.vault_path, vault.key);
+        if let Some(key) = config_extra.persistent_login_key {
+            bootstrap = bootstrap.persistent_login_key(key);
         }
         // Phase D: when the user opted into takeover/approval (`agent.browserUse.takeover`),
         // give bootstrap a desktop approval gate sharing the session's confirmation store +
@@ -655,6 +656,18 @@ impl NomiAgentManager {
                 "Resuming nomi session"
             );
             bootstrap = bootstrap.resume(session);
+        }
+
+        // SSH-bound session: hand the runtime the pre-connected remote backend so
+        // the remote tool family takes over Read/Write/Edit/Bash/Grep/Glob. The
+        // backend is cloned rather than moved: the engine gets one handle, and the
+        // lease kept above is what reports on the link when this runtime dies.
+        if let Some(ssh_backend) = &host_wiring.ssh_backend {
+            info!(
+                conversation_id = %conversation_id,
+                "Nomi session bound to a remote SSH host"
+            );
+            bootstrap = bootstrap.ssh_session(Arc::clone(ssh_backend));
         }
 
         let result = bootstrap
@@ -700,12 +713,6 @@ impl NomiAgentManager {
             engine
                 .registry_mut()
                 .register(Box::new(RecallMemoriesTool::new(summon.memory_sink, conversation_id.clone())));
-            engine
-                .registry_mut()
-                .register(Box::new(ProposeCompanionMemoryTool::new(
-                    summon.proposal_sink,
-                    conversation_id.clone(),
-                )));
             engine.register_context_contributor(Arc::new(SummonContextContributor::new(
                 summon.context_sink,
             )));
@@ -743,26 +750,19 @@ impl NomiAgentManager {
         }
         // Native knowledge_write (回血): registered only when the binding has
         // write-back enabled (factory passes the sink) AND there are bound bases.
-        // STAGED placement is encoded as `WriteMode::Staged { scope }` (the
-        // service prepends `_inbox/{scope}/`); DIRECT writes the base body. The
-        // tool was already added to the engine allow_list above so it bypasses
-        // the approval gate. Placement enforcement now lives in the service
-        // (write_document), so the tool only forwards the mode.
+        // The tool was already added to the engine allow_list above so it
+        // bypasses the approval gate. Where a write lands and whether it may
+        // land at all is enforced entirely in the service (write_document), so
+        // the tool carries no placement of its own.
         if let Some(sink) = knowledge_writeback_sink {
             if register_knowledge_write {
-                let mode = if knowledge_writeback_staged {
-                    nomi_agent::knowledge_tools::WriteMode::Staged { scope: conversation_id.clone() }
-                } else {
-                    nomi_agent::knowledge_tools::WriteMode::Direct
-                };
                 let bound_kb_ids: Vec<nomifun_common::KnowledgeBaseId> =
                     knowledge_write_bases.iter().map(|(id, _)| id.clone()).collect();
                 engine
                     .registry_mut()
-                    .register(Box::new(KnowledgeWriteTool::new(sink, knowledge_write_bases, mode, bound_kb_ids)));
+                    .register(Box::new(KnowledgeWriteTool::new(sink, knowledge_write_bases, bound_kb_ids)));
                 debug!(
                     conversation_id = %conversation_id,
-                    staged = knowledge_writeback_staged,
                     "Registered knowledge_write tool"
                 );
             }
@@ -804,6 +804,7 @@ impl NomiAgentManager {
             loopback_capability_leases,
             #[cfg(feature = "browser-use")]
             browser_lane_binding,
+            ssh_lease,
             approval_manager,
             confirmations,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -1562,6 +1563,7 @@ struct NomiTeardownResults {
     process: Result<(), AppError>,
     #[cfg(feature = "browser-use")]
     browser_lane_binding: Option<crate::BrowserLaneBinding>,
+    ssh_lease: Option<Arc<dyn crate::SshSessionLease>>,
 }
 
 #[derive(Default)]
@@ -1618,6 +1620,29 @@ impl NomiTeardownFailures {
     }
 }
 
+/// Turn a released SSH lease into a teardown verdict.
+///
+/// A link the pool deliberately kept for the conversation is the ordinary outcome
+/// of a model switch, and a proven close is a clean one — both are success. A link
+/// that went away without proof its remote shell died is a genuine failure, for
+/// the same reason `PtyExit::Lost` is never accepted as one: an unproven cleanup
+/// is indistinguishable from a leaked process on someone else's machine.
+fn describe_ssh_release(release: crate::SshLeaseRelease) -> Result<(), AppError> {
+    match release {
+        crate::SshLeaseRelease::Retained { detail } => {
+            debug!(detail = %detail, "SSH session link retained for the conversation");
+            Ok(())
+        }
+        crate::SshLeaseRelease::Reaped { detail } => {
+            debug!(detail = %detail, "SSH session link closed with exit evidence");
+            Ok(())
+        }
+        crate::SshLeaseRelease::Lost { detail } => Err(AppError::Internal(format!(
+            "Nomi SSH session link was let go of without proof the remote shell died: {detail}"
+        ))),
+    }
+}
+
 /// Finish every already-started Nomi teardown stage without allowing an early
 /// failure to skip the Browser owner cleanup. In particular, `kill()` already
 /// issues a synchronous best-effort revoke, but this function is the
@@ -1634,6 +1659,13 @@ async fn finish_nomi_teardown(results: NomiTeardownResults) -> Result<(), AppErr
         // on their success. The Hub retains the cleanup flight if this waiter
         // itself reports a timeout, so a later lifecycle sweep can retry it.
         failures.record("Browser owner lease", binding.shutdown().await);
+    }
+
+    // Same posture for the remote session: last, and unconditional. A failed kill
+    // must not cost us the one report that says whether the operator's shell is
+    // still there — releasing is not closing, so this is safe to do late.
+    if let Some(lease) = results.ssh_lease {
+        failures.record("SSH session link", describe_ssh_release(lease.release().await));
     }
 
     failures.finish()
@@ -1762,6 +1794,7 @@ impl NomiAgentManager {
         let mcp_managers = self.mcp_managers.clone();
         #[cfg(feature = "browser-use")]
         let browser_lane_binding = self.browser_lane_binding.clone();
+        let ssh_lease = self.ssh_lease.clone();
         Box::pin(async move {
             // Every cleanup stage is attempted even if an earlier one failed.
             // In particular, a synchronous `kill()` failure or an inexact MCP
@@ -1788,6 +1821,7 @@ impl NomiAgentManager {
                 process: process_result,
                 #[cfg(feature = "browser-use")]
                 browser_lane_binding,
+                ssh_lease,
             })
             .await?;
             // No total timeout: runtime-registry quarantine remains authoritative
@@ -2265,6 +2299,7 @@ mod tests {
             mcp,
             process,
             browser_lane_binding: Some(binding),
+            ssh_lease: None,
         }));
 
         tokio::select! {
@@ -2331,6 +2366,136 @@ mod tests {
         .await;
     }
 
+    /// A lease that reports whatever the pool would have told it, and counts how
+    /// often it was asked. The real one lives in `nomifun-ssh`; the seam is what
+    /// this crate can see.
+    struct RecordingSshLease {
+        release: crate::SshLeaseRelease,
+        releases: AtomicUsize,
+    }
+
+    impl RecordingSshLease {
+        fn new(release: crate::SshLeaseRelease) -> Arc<Self> {
+            Arc::new(Self {
+                release,
+                releases: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::SshSessionLease for RecordingSshLease {
+        async fn release(&self) -> crate::SshLeaseRelease {
+            self.releases.fetch_add(1, Ordering::SeqCst);
+            self.release.clone()
+        }
+    }
+
+    fn ssh_teardown_results(
+        kill: Result<(), AppError>,
+        lease: Arc<RecordingSshLease>,
+    ) -> NomiTeardownResults {
+        NomiTeardownResults {
+            kill,
+            mcp: Ok(()),
+            process: Ok(()),
+            #[cfg(feature = "browser-use")]
+            browser_lane_binding: None,
+            ssh_lease: Some(lease),
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_lease_is_released_even_when_kill_fails() {
+        let lease = RecordingSshLease::new(crate::SshLeaseRelease::Retained {
+            detail: "link still connected".to_owned(),
+        });
+
+        let error = finish_nomi_teardown(ssh_teardown_results(
+            Err(AppError::Internal("kill failed".to_owned())),
+            Arc::clone(&lease),
+        ))
+        .await
+        .expect_err("the kill failure must still be reported");
+
+        assert!(
+            matches!(&error, AppError::Internal(message) if message == "kill failed"),
+            "a failed kill must keep its exact error: {error:?}"
+        );
+        assert_eq!(
+            lease.releases.load(Ordering::SeqCst),
+            1,
+            "a failed kill must not skip the SSH lease report"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retained_link_is_not_a_failure() {
+        let lease = RecordingSshLease::new(crate::SshLeaseRelease::Retained {
+            detail: "link kept for the conversation".to_owned(),
+        });
+
+        finish_nomi_teardown(ssh_teardown_results(Ok(()), Arc::clone(&lease)))
+            .await
+            .expect("a deliberately retained link is the normal model-switch outcome");
+        assert_eq!(lease.releases.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reaped_link_is_not_a_failure() {
+        let lease = RecordingSshLease::new(crate::SshLeaseRelease::Reaped {
+            detail: "remote shell exited with status 0".to_owned(),
+        });
+
+        finish_nomi_teardown(ssh_teardown_results(Ok(()), Arc::clone(&lease)))
+            .await
+            .expect("a proven close is a successful teardown");
+        assert_eq!(lease.releases.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_lost_ssh_link_is_a_teardown_failure() {
+        let lease = RecordingSshLease::new(crate::SshLeaseRelease::Lost {
+            detail: "link vanished without exit evidence".to_owned(),
+        });
+
+        let error = finish_nomi_teardown(ssh_teardown_results(Ok(()), Arc::clone(&lease)))
+            .await
+            .expect_err("a link let go of without proof is not a clean teardown");
+
+        let AppError::Internal(message) = error else {
+            panic!("a lost SSH link must be an Internal teardown failure");
+        };
+        assert!(
+            message.contains("link vanished without exit evidence"),
+            "the failure must say what could not be proven: {message}"
+        );
+        assert_eq!(lease.releases.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_lost_ssh_link_is_aggregated_with_prior_failures() {
+        let lease = RecordingSshLease::new(crate::SshLeaseRelease::Lost {
+            detail: "transport gone".to_owned(),
+        });
+
+        let error = finish_nomi_teardown(ssh_teardown_results(
+            Err(AppError::Internal("kill failed".to_owned())),
+            Arc::clone(&lease),
+        ))
+        .await
+        .expect_err("both failures should be reported");
+
+        let AppError::Internal(message) = error else {
+            panic!("the primary Internal error variant must be preserved");
+        };
+        assert!(message.contains("kill failed"));
+        assert!(
+            message.contains("SSH session link"),
+            "the aggregate must name the SSH stage: {message}"
+        );
+    }
+
     #[cfg(feature = "browser-use")]
     #[tokio::test]
     async fn finish_nomi_teardown_aggregates_browser_and_prior_failures() {
@@ -2343,6 +2508,7 @@ mod tests {
             mcp: Err(AppError::Internal("MCP failed".to_owned())),
             process: Err(AppError::Internal("process failed".to_owned())),
             browser_lane_binding: Some(binding),
+            ssh_lease: None,
         })
         .await
         .expect_err("all teardown failures should be reported");
@@ -2630,7 +2796,7 @@ mod tests {
             browser_unrestricted_approval: false,
             browser_visual_fallback: false,
             goal: None,
-            browser_secret_vault: None,
+            persistent_login_key: None,
             owner_token: None,
             install_embedded_agent_execution: true,
             allowed_tools: Vec::new(),
@@ -2932,6 +3098,7 @@ mod tests {
             loopback_capability_leases: Default::default(),
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
+            ssh_lease: None,
             approval_manager,
             confirmations,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -3127,6 +3294,7 @@ mod tests {
             loopback_capability_leases: Default::default(),
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
+            ssh_lease: None,
             approval_manager,
             confirmations: Arc::new(std::sync::RwLock::new(Vec::new())),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -3961,7 +4129,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_returns_correct_type() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert_eq!(agent.agent_type(), AgentType::Nomi);
@@ -3985,7 +4153,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
         )
         .await
@@ -4032,7 +4199,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
         )
         .await
@@ -4060,7 +4226,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
         )
         .await
@@ -4075,22 +4240,13 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_initial_status_is_pending() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert_eq!(agent.status(), Some(ConversationStatus::Pending));
     }
 
     // -- summoned-companion sessions (spec §设计 B) ----------------------------
-
-    struct StubSummonProposalSink;
-
-    #[async_trait::async_trait]
-    impl SummonProposalSink for StubSummonProposalSink {
-        async fn propose(&self, _conv: &str, _kind: &str, _content: &str, _reason: &str) -> Result<String, String> {
-            Ok(String::new())
-        }
-    }
 
     struct StubSummonContextSink;
 
@@ -4104,16 +4260,15 @@ mod tests {
     fn stub_summon_wiring() -> NomiSummonWiring {
         NomiSummonWiring {
             memory_sink: Arc::new(StubCompanionSink),
-            proposal_sink: Arc::new(StubSummonProposalSink),
             context_sink: Arc::new(StubSummonContextSink),
         }
     }
 
     #[tokio::test]
     async fn summon_session_registers_readonly_tools_never_save_memory() {
-        // Read-only boundary (spec §B3): a summoned work session gets recall +
-        // propose, and must NEVER see the direct-write save_memory or the
-        // companion-only list_recent_events.
+        // Read-only boundary (spec §B3): a summoned work session gets recall
+        // only, and must NEVER see the direct-write save_memory, the retired
+        // propose_companion_memory, or the companion-only list_recent_events.
         let agent = NomiAgentManager::new_with_host_wiring(
             "conv-summon".into(),
             "/project".into(),
@@ -4126,7 +4281,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
             Some(stub_summon_wiring()),
             NomiHostWiring::default(),
@@ -4135,7 +4289,10 @@ mod tests {
         .unwrap();
         let names = agent.engine.lock().await.tool_names();
         assert!(names.iter().any(|n| n == "recall_memories"), "{names:?}");
-        assert!(names.iter().any(|n| n == "propose_companion_memory"), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n == "propose_companion_memory"),
+            "the retired propose tool must never come back: {names:?}"
+        );
         assert!(
             !names.iter().any(|n| n == "save_memory"),
             "save_memory must never be registered under summon: {names:?}"
@@ -4160,7 +4317,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
         )
         .await
@@ -4172,7 +4328,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_subscribe_returns_receiver() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         let _rx = agent.subscribe();
@@ -4180,7 +4336,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_kill_succeeds() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert!(agent.kill(None).is_ok());
@@ -4193,7 +4349,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_kill_with_reason_succeeds() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert!(agent.kill(Some(AgentKillReason::IdleTimeout)).is_ok());
@@ -4201,7 +4357,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_kill_running_turn_cancels_turn_token() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         agent.runtime.reset_for_new_turn(ConversationStatus::Running);
@@ -4222,7 +4378,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_kill_idle_turn_does_not_leave_stale_stop_signal() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
 
@@ -4323,7 +4479,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_confirmations_initially_empty() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert!(agent.get_confirmations().is_empty());
@@ -4331,7 +4487,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_get_slash_commands_does_not_wait_for_engine_lock() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
 
@@ -4346,7 +4502,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_check_approval_returns_false_by_default() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert!(!agent.check_approval("any_action", None));
@@ -4358,7 +4514,7 @@ mod tests {
         // event and transition to Finished — otherwise a subscribed relay hangs
         // forever in a 'running' spinner because no Finish/Error ever arrives.
         // (Phase 0 F0.2)
-        let agent = NomiAgentManager::new("conv-stop".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-stop".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         let mut rx = agent.subscribe();
@@ -4472,7 +4628,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_can_emit_error_and_finish() {
-        let agent = NomiAgentManager::new("conv-err".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-err".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         let mut rx = agent.subscribe();

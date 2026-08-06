@@ -30,7 +30,6 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer, ServiceExt};
-use rmcp::transport;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -63,9 +62,14 @@ pub async fn run_gateway_stdio() -> ExitCode {
     );
 
     let lifecycle = client.clone();
-    let server = GatewayStdioServer { client };
+    let request_budget = super::stdio_common::ProcessRequestBudget::default();
+    let server = GatewayStdioServer {
+        client,
+        request_budget: request_budget.clone(),
+    };
 
-    let transport = transport::io::stdio();
+    let transport = super::stdio_common::bounded_stdio_transport(request_budget.clone());
+    let server = super::stdio_common::panic_shield_stdio_service(server, request_budget);
     let exit = match server.serve(transport).await {
         Ok(peer) => {
             eprintln!("[mcp-gateway-stdio] MCP session started, waiting for completion...");
@@ -88,6 +92,7 @@ pub async fn run_gateway_stdio() -> ExitCode {
 #[derive(Clone)]
 struct GatewayStdioServer {
     client: super::stdio_common::ScopedBridgeClient<GatewayCapabilityScope>,
+    request_budget: super::stdio_common::ProcessRequestBudget,
 }
 
 fn validate_gateway_claims(
@@ -262,8 +267,12 @@ impl ServerHandler for GatewayStdioServer {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        mut context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let _request_permit = super::stdio_common::take_stdio_request_permit(
+            &mut context,
+            &self.request_budget,
+        )?;
         let claims = self.require_operation(GATEWAY_LIST_TOOLS_OPERATION).await?;
         let tools: Vec<Tool> = Self::visible_tool_specs(&claims)
             .into_iter()
@@ -279,8 +288,12 @@ impl ServerHandler for GatewayStdioServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        mut context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let _request_permit = super::stdio_common::take_stdio_request_permit(
+            &mut context,
+            &self.request_budget,
+        )?;
         let claims = self.require_operation(GATEWAY_CALL_TOOL_OPERATION).await?;
         if let Some(blocked) = Self::blocked_tool_message(&claims, &request.name) {
             return Ok(build_tool_result(ForwardToolOutcome::Error(blocked)));

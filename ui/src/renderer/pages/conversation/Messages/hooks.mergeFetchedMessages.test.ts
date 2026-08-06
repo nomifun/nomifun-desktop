@@ -1453,8 +1453,7 @@ describe('normalizeDbMessage', () => {
             written: [
               {
                 kb_id: '0190f5fe-7c00-7a00-8000-000000000001',
-                rel_path: '_inbox/1/patterns/final.md',
-                staged: true,
+                rel_path: 'patterns/final.md',
               },
             ],
           },
@@ -1466,7 +1465,39 @@ describe('normalizeDbMessage', () => {
     if (normalized.type !== 'text') throw new Error('expected text message');
     expect(normalized.content.content).toBe('Final answer.');
     expect(normalized.content.knowledge_writeback?.status).toBe('written');
-    expect(normalized.content.knowledge_writeback?.written?.[0]?.rel_path).toBe('_inbox/1/patterns/final.md');
+    expect(normalized.content.knowledge_writeback?.written?.[0]?.rel_path).toBe('patterns/final.md');
+  });
+
+  test('drops the retired staged flag from a row persisted before write-back landed in the base body', () => {
+    const normalized = normalizeDbMessage(
+      baseMessage({
+        id: 'assistant-turn-1',
+        msg_id: 'assistant-turn-1',
+        type: 'text',
+        content: {
+          content: 'Final answer.',
+          knowledge_writeback: {
+            status: 'written',
+            updated_at: 20,
+            written: [
+              {
+                kb_id: '0190f5fe-7c00-7a00-8000-000000000001',
+                rel_path: '_inbox/1/patterns/final.md',
+                staged: true,
+              },
+            ],
+          },
+        } as any,
+      })
+    );
+
+    expect(normalized.type).toBe('text');
+    if (normalized.type !== 'text') throw new Error('expected text message');
+    const written = normalized.content.knowledge_writeback?.written?.[0];
+    // The legacy path is kept verbatim — it simply keys differently on retry —
+    // but the placement flag is gone from the projection entirely.
+    expect(written?.rel_path).toBe('_inbox/1/patterns/final.md');
+    expect(Object.prototype.hasOwnProperty.call(written ?? {}, 'staged')).toBe(false);
   });
 
   test('keeps newer persisted writeback state while preserving longer streaming text', () => {

@@ -95,7 +95,7 @@ const TagRow: React.FC<{
             onKeyDown={(e) => {
               if (e.key === 'Enter') commit();
             }}
-            className='flex-shrink-0 flex items-center justify-center w-22px h-22px rounded-6px cursor-pointer text-[rgb(var(--primary-6))] hover:bg-[var(--color-primary-light-1)] transition-colors'
+            className='flex-shrink-0 flex items-center justify-center w-22px h-22px rounded-6px cursor-pointer text-primary-6 hover:bg-[var(--color-primary-light-1)] transition-colors'
           >
             <Check theme='outline' size={14} strokeWidth={3} />
           </div>
@@ -139,7 +139,7 @@ const TagRow: React.FC<{
             onKeyDown={(e) => {
               if (e.key === 'Enter') onDelete(tag);
             }}
-            className='flex-shrink-0 flex items-center justify-center w-22px h-22px rounded-6px cursor-pointer text-[var(--color-text-3)] opacity-0 group-hover:opacity-100 hover:text-[rgb(var(--danger-6))] hover:bg-[rgba(var(--danger-6),0.08)] transition-all'
+            className='flex-shrink-0 flex items-center justify-center w-22px h-22px rounded-6px cursor-pointer text-[var(--color-text-3)] opacity-0 group-hover:opacity-100 hover:text-danger-6 hover:bg-[rgba(var(--danger-6),0.08)] transition-all'
           >
             <Delete theme='outline' size={14} strokeWidth={3} />
           </div>
@@ -220,7 +220,7 @@ const TagColumn: React.FC<{
             'flex-shrink-0 inline-flex items-center gap-4px rounded-8px px-10px h-30px text-12px font-medium cursor-pointer',
             'border border-solid transition-all duration-150',
             newLabel.trim() && !busy
-              ? 'bg-[var(--color-primary-light-1)] text-[rgb(var(--primary-6))] border-[var(--color-primary-light-3)] hover:bg-[var(--color-primary-light-2)]'
+              ? 'bg-[var(--color-primary-light-1)] text-primary-6 border-[var(--color-primary-light-3)] hover:bg-[var(--color-primary-light-2)]'
               : 'bg-[var(--color-fill-2)] text-[var(--color-text-3)] border-[var(--color-border-2)] cursor-not-allowed',
           ].join(' ')}
         >

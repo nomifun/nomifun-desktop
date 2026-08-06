@@ -12,7 +12,6 @@ import type {
   IKnowledgeBase,
   IKnowledgeConsumer,
   IKnowledgeFileEntry,
-  IKnowledgeInboxEntry,
   IKnowledgeSource,
   IKnowledgeSourceFetchSummary,
   IKnowledgeTreeEntry,
@@ -100,46 +99,6 @@ export function useKnowledgeBase(id: KnowledgeBaseId | undefined) {
   return { base, files, tree, loading, error, refresh };
 }
 
-/**
- * Staged write-back proposals under `_inbox/` for the review panel. Refreshes
- * on `knowledge.base-updated` (a merge re-emits it) and exposes `refresh` for
- * the optimistic refetch after a merge/discard action.
- */
-export function useKnowledgeInbox(id: KnowledgeBaseId | undefined) {
-  const [items, setItems] = useState<IKnowledgeInboxEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    if (!id) return;
-    setLoading(true);
-    try {
-      const res = await ipcBridge.knowledge.listInbox.invoke({ knowledge_base_id: id });
-      setItems(res);
-      setError(null);
-    } catch (e) {
-      console.error('Failed to load knowledge inbox', e);
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [id]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    if (!id) return;
-    const unsub = ipcBridge.knowledge.onBaseUpdated.on((b) => {
-      if (b.knowledge_base_id === id) void refresh();
-    });
-    return () => unsub();
-  }, [id, refresh]);
-
-  return { items, loading, error, refresh };
-}
-
 /** Bindings (workspaces/conversations/…) currently mounting a base. */
 export function useKnowledgeConsumers(id: KnowledgeBaseId | undefined) {
   const [consumers, setConsumers] = useState<IKnowledgeConsumer[]>([]);
@@ -171,36 +130,6 @@ export function useKnowledgeConsumers(id: KnowledgeBaseId | undefined) {
   }, [refresh]);
 
   return { consumers, loading, error, refresh };
-}
-
-/** Total unreviewed staged proposals across all bases (sidebar red-dot signal).
- * Refreshes on base create/update/delete (a merge re-emits base-updated). */
-export function useKnowledgeInboxPending(): { count: number; refresh: () => void } {
-  const [count, setCount] = useState(0);
-
-  const refresh = useCallback(async () => {
-    try {
-      const n = await ipcBridge.knowledge.pendingInboxCount.invoke();
-      setCount(typeof n === 'number' ? n : 0);
-    } catch (e) {
-      console.error('Failed to load pending inbox count', e);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    const unsubs = [
-      ipcBridge.knowledge.onBaseUpdated.on(() => void refresh()),
-      ipcBridge.knowledge.onBaseCreated.on(() => void refresh()),
-      ipcBridge.knowledge.onBaseDeleted.on(() => void refresh()),
-    ];
-    return () => unsubs.forEach((u) => u());
-  }, [refresh]);
-
-  return { count, refresh: () => void refresh() };
 }
 
 /** Null-safe accessor for a base's URL source config (top-level `source` on the wire). */
