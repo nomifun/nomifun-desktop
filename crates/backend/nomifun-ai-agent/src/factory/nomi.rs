@@ -300,10 +300,6 @@ pub(super) async fn build(
         &nomifun_knowledge::KnowledgeBinding {
             enabled: true,
             writeback: overrides.knowledge_writeback,
-            writeback_mode: overrides
-                .knowledge_writeback_mode
-                .clone()
-                .unwrap_or_else(|| "staged".to_owned()),
             // Threaded from the binding via MountOutcome → build-extra so the
             // external-IM-channel opt-in actually reaches resolve_write_policy;
             // a `..Default::default()` here would pin it to `false` and keep
@@ -311,15 +307,10 @@ pub(super) async fn build(
             channel_write_enabled: overrides.knowledge_channel_write_enabled,
             ..Default::default()
         },
-        &ctx.conversation_id,
     );
     let knowledge_write_enabled = !matches!(
         knowledge_write_policy.mode,
         nomifun_knowledge::WriteMode::Disabled
-    );
-    let knowledge_writeback_staged = matches!(
-        knowledge_write_policy.mode,
-        nomifun_knowledge::WriteMode::Staged { .. }
     );
 
     // Knowledge bases: append the mounted-bases section (per-base TOC +
@@ -329,7 +320,6 @@ pub(super) async fn build(
     overrides.system_prompt = append_knowledge_context(
         overrides.system_prompt.take(),
         &overrides,
-        &ctx.conversation_id,
         knowledge_write_enabled,
     );
 
@@ -775,7 +765,6 @@ pub(super) async fn build(
         knowledge_prelude,
         knowledge_writeback_sink,
         knowledge_write_bases,
-        knowledge_writeback_staged,
         if is_instance_owner && overrides.companion {
             deps.companion_skill_sink.clone()
         } else {
@@ -976,7 +965,6 @@ fn output_language_directive(lang: &str) -> &'static str {
 fn append_knowledge_context(
     base: Option<String>,
     config: &NomiBuildExtra,
-    conversation_id: &str,
     has_write_tool: bool,
 ) -> Option<String> {
     use nomifun_knowledge::context::{
@@ -988,9 +976,7 @@ fn append_knowledge_context(
         &KnowledgeContextOptions {
             format: KnowledgeContextFormat::PromptSection,
             writeback: config.knowledge_writeback,
-            writeback_mode: config.knowledge_writeback_mode.as_deref(),
             writeback_eagerness: config.knowledge_writeback_eagerness.as_deref(),
-            target_id: conversation_id,
             has_search_tool: true,
             // The nomi engine registers the native knowledge_write tool whenever
             // the backend wired a write-back sink; the contract must then point
@@ -2353,11 +2339,11 @@ mod tests {
     fn append_knowledge_context_without_mounts_is_passthrough() {
         let config = NomiBuildExtra::default();
         assert_eq!(
-            append_knowledge_context(None, &config, "0190f5fe-7c00-7a00-8abc-012345678963", true),
+            append_knowledge_context(None, &config, true),
             None
         );
         assert_eq!(
-            append_knowledge_context(Some("hello".into()), &config, "0190f5fe-7c00-7a00-8abc-012345678963", true),
+            append_knowledge_context(Some("hello".into()), &config, true),
             Some("hello".into())
         );
     }
@@ -2383,7 +2369,7 @@ mod tests {
         };
 
         let readonly =
-            append_knowledge_context(Some("base".into()), &config, conversation_id, true).unwrap();
+            append_knowledge_context(Some("base".into()), &config, true).unwrap();
         assert!(readonly.starts_with("base\n\n"));
         assert!(readonly.contains("## Knowledge bases"));
         assert!(readonly.contains("领域知识"));
@@ -2395,31 +2381,27 @@ mod tests {
         assert!(readonly.contains("Covers deployment flows and runbooks."));
         assert!(readonly.contains("When to consult"));
 
-        // nomi surface has the native tool → write-back contract points at it,
-        // and the staged inbox path stays internal (not advertised to the model).
+        // nomi surface has the native tool → the write-back contract points at
+        // it, and no session id or inbox path can leak into the prompt any more.
         config.knowledge_writeback = true;
-        let staged = append_knowledge_context(None, &config, conversation_id, true).unwrap();
-        assert!(staged.contains("STAGED mode"));
-        assert!(staged.contains("knowledge_write"));
+        let tooled = append_knowledge_context(None, &config, true).unwrap();
+        assert!(tooled.contains("Write-back is ENABLED"));
+        assert!(tooled.contains("knowledge_write"));
+        assert!(!tooled.contains("STAGED"));
+        assert!(!tooled.contains("_inbox"));
         assert!(
-            !staged.contains(&format!("_inbox/{conversation_id}/")),
-            "tool contract must not leak the inbox path: {staged}"
+            !tooled.contains(conversation_id),
+            "the contract must not carry a session id: {tooled}"
         );
         // Flag plumbs through: without the tool, the file-based prose returns.
-        let staged_files = append_knowledge_context(None, &config, conversation_id, false).unwrap();
-        assert!(staged_files.contains(&format!("_inbox/{conversation_id}/")));
-        assert!(!staged_files.contains("knowledge_write"));
-
-        config.knowledge_writeback_mode = Some("direct".into());
-        let direct = append_knowledge_context(None, &config, conversation_id, true).unwrap();
-        assert!(direct.contains("DIRECT mode"));
-        assert!(direct.contains("knowledge_write"));
-        assert!(!direct.contains("_inbox/"));
+        let file_based = append_knowledge_context(None, &config, false).unwrap();
+        assert!(file_based.contains("knowledge base directory"));
+        assert!(!file_based.contains("knowledge_write"));
         // Disposition (回写意识) threads from build-extra → contract.
-        assert!(direct.contains("Disposition — CONSERVATIVE"));
-        config.knowledge_writeback_eagerness = Some("aggressive".into());
-        let eager = append_knowledge_context(None, &config, conversation_id, true).unwrap();
-        assert!(eager.contains("Disposition — AGGRESSIVE"));
+        assert!(tooled.contains("Disposition — MANUAL"));
+        config.knowledge_writeback_eagerness = Some("auto".into());
+        let eager = append_knowledge_context(None, &config, true).unwrap();
+        assert!(eager.contains("Disposition — AUTO"));
     }
 
     #[test]
@@ -2435,8 +2417,7 @@ mod tests {
                 "toc": ["deploy.md — 部署"],
             }],
             "knowledge_writeback": true,
-            "knowledge_writeback_mode": "staged",
-            "knowledge_writeback_eagerness": "aggressive",
+            "knowledge_writeback_eagerness": "auto",
         });
         let overrides: NomiBuildExtra = serde_json::from_value(json).unwrap();
         assert_eq!(overrides.knowledge_mounts.len(), 1);
@@ -2451,10 +2432,7 @@ mod tests {
         );
 
         let prompt = append_knowledge_context(
-            None,
-            &overrides,
-            "0190f5fe-7c00-7a00-8abc-012345678963",
-            true,
+            None, &overrides, true,
         )
         .unwrap();
         assert!(prompt.contains("Knowledge bases"));
@@ -2492,25 +2470,21 @@ mod tests {
         assert!(on.knowledge_channel_write_enabled);
 
         // Reconstruct the binding exactly as build_nomi does and confirm the
-        // policy flips from Disabled to Staged for an external channel.
+        // opt-in is what flips an unattended channel from refusing writes to
+        // making them. This switch is the only thing left standing between a
+        // bot and the base body, so it must keep working end to end.
         let reconstruct = |extra: &NomiBuildExtra| KnowledgeBinding {
             enabled: true,
             writeback: extra.knowledge_writeback,
-            writeback_mode: extra
-                .knowledge_writeback_mode
-                .clone()
-                .unwrap_or_else(|| "staged".to_owned()),
             channel_write_enabled: extra.knowledge_channel_write_enabled,
             ..Default::default()
         };
 
-        let disabled =
-            resolve_write_policy(WriteSurface::ExternalChannel, &reconstruct(&off), "conv-c");
+        let disabled = resolve_write_policy(WriteSurface::ExternalChannel, &reconstruct(&off));
         assert!(matches!(disabled.mode, WriteMode::Disabled));
 
-        let staged =
-            resolve_write_policy(WriteSurface::ExternalChannel, &reconstruct(&on), "conv-c");
-        assert!(matches!(staged.mode, WriteMode::Staged { .. }));
+        let enabled = resolve_write_policy(WriteSurface::ExternalChannel, &reconstruct(&on));
+        assert!(matches!(enabled.mode, WriteMode::Direct));
     }
 }
 

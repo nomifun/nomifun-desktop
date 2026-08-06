@@ -697,7 +697,6 @@ async fn apply_preset(
         )
         .await?;
     if let Some(knowledge) = state.knowledge_service.as_ref() {
-        let mode = if snapshot.knowledge_policy.mode == "direct" { "direct" } else { "staged" };
         knowledge
             .set_binding(
                 "companion",
@@ -705,12 +704,13 @@ async fn apply_preset(
                 nomifun_knowledge::KnowledgeBinding {
                     enabled: snapshot.knowledge_policy.enabled,
                     writeback: snapshot.knowledge_policy.writeback,
-                    writeback_mode: mode.to_owned(),
+                    // A preset that left the disposition unspecified gets the
+                    // restrained one, never the self-directed one.
                     writeback_eagerness: snapshot
                         .knowledge_policy
                         .eagerness
                         .clone()
-                        .unwrap_or_else(|| "conservative".to_owned()),
+                        .unwrap_or_else(|| "manual".to_owned()),
                     channel_write_enabled: false,
                     kb_ids: snapshot.knowledge_base_ids.clone(),
                 },

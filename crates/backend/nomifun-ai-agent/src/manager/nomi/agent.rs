@@ -375,7 +375,6 @@ impl NomiAgentManager {
             Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>,
         >,
         knowledge_write_bases: Vec<(nomifun_common::KnowledgeBaseId, String)>,
-        knowledge_writeback_staged: bool,
         companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
     ) -> Result<Self, AppError> {
         Self::new_with_host_wiring(
@@ -390,7 +389,6 @@ impl NomiAgentManager {
             knowledge_prelude,
             knowledge_writeback_sink,
             knowledge_write_bases,
-            knowledge_writeback_staged,
             companion_skill_sink,
             None,
             NomiHostWiring::default(),
@@ -411,7 +409,6 @@ impl NomiAgentManager {
         knowledge_prelude: Option<String>,
         knowledge_writeback_sink: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>>,
         knowledge_write_bases: Vec<(nomifun_common::KnowledgeBaseId, String)>,
-        knowledge_writeback_staged: bool,
         companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
         summon_wiring: Option<NomiSummonWiring>,
         host_wiring: NomiHostWiring,
@@ -742,26 +739,19 @@ impl NomiAgentManager {
         }
         // Native knowledge_write (回血): registered only when the binding has
         // write-back enabled (factory passes the sink) AND there are bound bases.
-        // STAGED placement is encoded as `WriteMode::Staged { scope }` (the
-        // service prepends `_inbox/{scope}/`); DIRECT writes the base body. The
-        // tool was already added to the engine allow_list above so it bypasses
-        // the approval gate. Placement enforcement now lives in the service
-        // (write_document), so the tool only forwards the mode.
+        // The tool was already added to the engine allow_list above so it
+        // bypasses the approval gate. Where a write lands and whether it may
+        // land at all is enforced entirely in the service (write_document), so
+        // the tool carries no placement of its own.
         if let Some(sink) = knowledge_writeback_sink {
             if register_knowledge_write {
-                let mode = if knowledge_writeback_staged {
-                    nomi_agent::knowledge_tools::WriteMode::Staged { scope: conversation_id.clone() }
-                } else {
-                    nomi_agent::knowledge_tools::WriteMode::Direct
-                };
                 let bound_kb_ids: Vec<nomifun_common::KnowledgeBaseId> =
                     knowledge_write_bases.iter().map(|(id, _)| id.clone()).collect();
                 engine
                     .registry_mut()
-                    .register(Box::new(KnowledgeWriteTool::new(sink, knowledge_write_bases, mode, bound_kb_ids)));
+                    .register(Box::new(KnowledgeWriteTool::new(sink, knowledge_write_bases, bound_kb_ids)));
                 debug!(
                     conversation_id = %conversation_id,
-                    staged = knowledge_writeback_staged,
                     "Registered knowledge_write tool"
                 );
             }
@@ -3969,7 +3959,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_returns_correct_type() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert_eq!(agent.agent_type(), AgentType::Nomi);
@@ -3993,7 +3983,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
         )
         .await
@@ -4040,7 +4029,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
         )
         .await
@@ -4068,7 +4056,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
         )
         .await
@@ -4083,7 +4070,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_initial_status_is_pending() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert_eq!(agent.status(), Some(ConversationStatus::Pending));
@@ -4124,7 +4111,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
             Some(stub_summon_wiring()),
             NomiHostWiring::default(),
@@ -4161,7 +4147,6 @@ mod tests {
             None,
             None,
             Vec::new(),
-            false,
             None,
         )
         .await
@@ -4173,7 +4158,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_subscribe_returns_receiver() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         let _rx = agent.subscribe();
@@ -4181,7 +4166,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_kill_succeeds() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert!(agent.kill(None).is_ok());
@@ -4194,7 +4179,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_kill_with_reason_succeeds() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert!(agent.kill(Some(AgentKillReason::IdleTimeout)).is_ok());
@@ -4202,7 +4187,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_kill_running_turn_cancels_turn_token() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         agent.runtime.reset_for_new_turn(ConversationStatus::Running);
@@ -4223,7 +4208,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_kill_idle_turn_does_not_leave_stale_stop_signal() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
 
@@ -4324,7 +4309,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_confirmations_initially_empty() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert!(agent.get_confirmations().is_empty());
@@ -4332,7 +4317,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_get_slash_commands_does_not_wait_for_engine_lock() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
 
@@ -4347,7 +4332,7 @@ mod tests {
 
     #[tokio::test]
     async fn nomi_agent_check_approval_returns_false_by_default() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         assert!(!agent.check_approval("any_action", None));
@@ -4359,7 +4344,7 @@ mod tests {
         // event and transition to Finished — otherwise a subscribed relay hangs
         // forever in a 'running' spinner because no Finish/Error ever arrives.
         // (Phase 0 F0.2)
-        let agent = NomiAgentManager::new("conv-stop".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-stop".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         let mut rx = agent.subscribe();
@@ -4473,7 +4458,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_can_emit_error_and_finish() {
-        let agent = NomiAgentManager::new("conv-err".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
+        let agent = NomiAgentManager::new("conv-err".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
             .unwrap();
         let mut rx = agent.subscribe();
