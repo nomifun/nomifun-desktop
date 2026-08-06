@@ -105,7 +105,7 @@ struct PersistedProviderModel {
     model: String,
 }
 
-fn deserialize_provider_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+pub(crate) fn deserialize_provider_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

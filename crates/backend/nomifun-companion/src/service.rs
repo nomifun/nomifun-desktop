@@ -513,8 +513,10 @@ impl CompanionService {
         self.registry.list().await
     }
 
-    /// Every desktop-companion reference to `provider_id`: per companion, its chat
-    /// model plus its own 学习 / 进化 models (one install-wide pair until 2026-08).
+    /// Every desktop-companion reference to `provider_id`, slot by slot: each
+    /// companion's chat / 备用 / 视觉 models, its own 学习 / 进化 models (one
+    /// install-wide pair until 2026-08) and its 语音识别 / 语音合成 selections —
+    /// i.e. exactly `CompanionProfileConfig::provider_model_slots`.
     /// Malformed provider IDs never match.
     /// The provider deletion coordinator invokes this while holding the shared
     /// lifecycle write guard; all parent checks below therefore observe the
@@ -536,21 +538,20 @@ impl CompanionService {
         }
         let mut out = Vec::new();
         for p in self.list_companions().await {
-            for (model, what) in [
-                (p.model.as_ref(), None),
-                (p.learn.model.as_ref(), Some("学习模型")),
-                (p.evolve.model.as_ref(), Some("进化模型")),
-            ] {
-                if model.is_some_and(|model| model.provider_id == provider_id.as_str()) {
-                    out.push(ProviderUsage {
-                        feature: ProviderUsageFeature::DesktopCompanion,
-                        label: match what {
-                            None => p.name.clone(),
-                            Some(what) => format!("{}·{what}", p.name),
-                        },
-                        target_id: Some(p.companion_id.clone()),
-                    });
+            for (slot, model) in p.provider_model_slots() {
+                if model.provider_id != provider_id.as_str() {
+                    continue;
                 }
+                let suffix = slot_display_label(slot);
+                out.push(ProviderUsage {
+                    feature: ProviderUsageFeature::DesktopCompanion,
+                    label: if suffix.is_empty() {
+                        p.name.clone()
+                    } else {
+                        format!("{}·{suffix}", p.name)
+                    },
+                    target_id: Some(p.companion_id.clone()),
+                });
             }
         }
         out
@@ -2020,6 +2021,20 @@ impl nomifun_ai_agent::CompanionSummonProvider for CompanionService {
         )
         .await;
         Ok(())
+    }
+}
+
+/// Display suffix for one profile Provider slot in the deletion-blocking usage
+/// report. Empty = the companion's own chat model, which needs no suffix.
+fn slot_display_label(slot: &str) -> &'static str {
+    match slot {
+        "learn" => "学习模型",
+        "evolve" => "进化模型",
+        "fallback" => "备用模型",
+        "vision" => "视觉模型",
+        "asr" => "语音识别模型",
+        "tts" => "语音合成模型",
+        _ => "",
     }
 }
 
