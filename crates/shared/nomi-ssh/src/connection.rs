@@ -9,9 +9,11 @@
 //!   (the known_hosts file is shared with the operator's own `ssh`).
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use russh::client::{self, Handle};
-use russh::keys::{HashAlg, PrivateKeyWithHashAlg, decode_secret_key};
+use russh::keys::ssh_key::certificate::CertType;
+use russh::keys::{Certificate, HashAlg, PrivateKey, PrivateKeyWithHashAlg, decode_secret_key};
 
 use crate::credential::{Auth, SshCredential};
 
@@ -145,8 +147,7 @@ impl std::fmt::Debug for SshConnection {
 
 impl SshConnection {
     /// Connect to `cred.host:cred.port`, validate the host key per `policy`, and
-    /// authenticate. Phase 1 implements Password and PrivateKey; Certificate and
-    /// Agent are wired in Phase 3.
+    /// authenticate with whichever of the four methods `cred.auth` names.
     pub async fn connect(cred: &SshCredential, policy: HostKeyPolicy) -> Result<Self, SshError> {
         let config = Arc::new(client::Config::default());
         let state = Arc::new(Mutex::new(HandlerState {
@@ -208,12 +209,35 @@ impl SshConnection {
                     .await?
                     .success()
             }
-            Auth::Certificate { .. } | Auth::Agent => {
-                // Phase 3: certificate and ssh-agent authentication.
-                return Err(SshError::AuthFailed(format!(
-                    "{} auth is not yet supported (Phase 3)",
-                    cred.auth.kind()
+            Auth::Certificate {
+                key_pem,
+                cert,
+                passphrase,
+            } => {
+                let (key, cert) = certificate_material(
+                    key_pem.as_str(),
+                    cert,
+                    passphrase.as_deref().map(|s| s.as_str()),
+                )?;
+                if handle
+                    .authenticate_openssh_cert(cred.username.clone(), key, cert.clone())
+                    .await?
+                    .success()
+                {
+                    return Ok(());
+                }
+                // The server never says *why* it refused a certificate, but the
+                // certificate itself distinguishes the causes that matter.
+                return Err(SshError::AuthFailed(certificate_rejection(
+                    &cert,
+                    &cred.username,
                 )));
+            }
+            Auth::Agent => {
+                // Phase 3: ssh-agent authentication.
+                return Err(SshError::AuthFailed(
+                    "agent auth is not yet supported (Phase 3)".to_string(),
+                ));
             }
         };
         if ok {
@@ -256,5 +280,86 @@ impl SshConnection {
             .disconnect(russh::Disconnect::ByApplication, "", "en")
             .await
             .map_err(|e| SshError::Disconnected(e.to_string()))
+    }
+}
+
+/// Decode a private key plus the certificate issued for it, refusing up front the
+/// two paste errors we can detect without asking the server: a body that is not a
+/// user certificate, and a certificate belonging to some other key. Both would
+/// otherwise come back as an indistinguishable "rejected by server".
+fn certificate_material(
+    key_pem: &str,
+    cert_body: &str,
+    passphrase: Option<&str>,
+) -> Result<(Arc<PrivateKey>, Certificate), SshError> {
+    let key = decode_secret_key(key_pem, passphrase)
+        .map_err(|e| SshError::AuthFailed(format!("private key: {e}")))?;
+    // `from_openssh` only tolerates trailing whitespace; a pasted cert routinely
+    // has leading whitespace too.
+    let cert = Certificate::from_openssh(cert_body.trim()).map_err(|e| {
+        SshError::AuthFailed(format!(
+            "certificate: {e} — expected the contents of a `*-cert.pub` file"
+        ))
+    })?;
+    if cert.cert_type() != CertType::User {
+        return Err(SshError::AuthFailed(
+            "certificate: this is a host certificate, not a user certificate".to_string(),
+        ));
+    }
+    if cert.public_key() != key.public_key().key_data() {
+        return Err(SshError::AuthFailed(
+            "certificate: it was issued for a different public key and does not match the \
+             private key supplied"
+                .to_string(),
+        ));
+    }
+    Ok((Arc::new(key), cert))
+}
+
+/// Why the server most likely refused a certificate we consider well-formed.
+///
+/// SSH gives the client no reason code for an auth failure, so a bare
+/// "authentication failed" leaves the operator guessing between three unrelated
+/// fixes. The certificate itself settles the first two, and the third is what is
+/// left over.
+fn certificate_rejection(cert: &Certificate, username: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now > cert.valid_before() {
+        return format!(
+            "certificate expired {} ago; ask your CA to re-issue it",
+            duration_words(now - cert.valid_before())
+        );
+    }
+    if now < cert.valid_after() {
+        return format!(
+            "certificate is not valid for another {}; check this machine's clock",
+            duration_words(cert.valid_after() - now)
+        );
+    }
+    let principals = cert.valid_principals();
+    if !principals.is_empty() && !principals.iter().any(|p| p == username) {
+        return format!(
+            "certificate is valid for principals [{}] but you are connecting as {username:?}",
+            principals.join(", ")
+        );
+    }
+    format!(
+        "server rejected the certificate; its signing CA (fingerprint {}) is most likely absent \
+         from the server's TrustedUserCAKeys",
+        cert.signature_key().fingerprint(HashAlg::Sha256)
+    )
+}
+
+/// Coarse single-unit rendering, so an expiry message reads "21m" instead of a
+/// unix timestamp the operator has to convert by hand.
+fn duration_words(secs: u64) -> String {
+    match secs {
+        s if s < 120 => format!("{s}s"),
+        s if s < 7_200 => format!("{}m", s / 60),
+        s if s < 172_800 => format!("{}h", s / 3_600),
+        s => format!("{}d", s / 86_400),
     }
 }

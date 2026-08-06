@@ -372,11 +372,31 @@ fn to_ssh_credential(cred: &DecryptedCredential) -> Result<SshCredential, SshDia
                 .as_ref()
                 .map(|p| Zeroizing::new(p.as_str().to_string())),
         },
-        "certificate" | "agent" => {
-            return Err(SshDialError::Credential(format!(
-                "{} auth is not supported in Phase 1",
-                cred.auth_type
-            )));
+        "certificate" => Auth::Certificate {
+            key_pem: clone_secret(
+                cred.private_key.as_ref(),
+                "certificate auth selected but no private key stored",
+            )?,
+            // The certificate is public material (it is what gets shown to the
+            // server), so unlike the key it needs no `Zeroizing`.
+            cert: cred
+                .certificate
+                .as_ref()
+                .map(|c| c.as_str().to_string())
+                .ok_or_else(|| {
+                    SshDialError::Credential(
+                        "certificate auth selected but no certificate stored".to_string(),
+                    )
+                })?,
+            passphrase: cred
+                .passphrase
+                .as_ref()
+                .map(|p| Zeroizing::new(p.as_str().to_string())),
+        },
+        "agent" => {
+            return Err(SshDialError::Credential(
+                "agent auth is not supported in Phase 1".to_string(),
+            ));
         }
         other => {
             return Err(SshDialError::Credential(format!(
