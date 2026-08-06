@@ -6,7 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
-import type { ConversationId, MessageId } from '@/common/types/ids';
+import type { ConversationId, MessageId, SshHostId } from '@/common/types/ids';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import {
   getConversationRuntimeAuthority,
@@ -124,8 +124,24 @@ export const shouldAcceptSidebarTurnCompletion = ({
   return !activeTurnId || !completedTurnId || activeTurnId === completedTurnId;
 };
 
+/** Host id of an SSH-bound session, or undefined for every other conversation. */
+const sshHostIdOf = (conversation: TChatConversation): SshHostId | undefined =>
+  (conversation.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
+
+/**
+ * Snapshot arrays must keep their identity while the underlying rows are
+ * unchanged, otherwise every `useSyncExternalStore` consumer re-renders on each
+ * refresh (and refreshes are frequent: every stream/turn/list event triggers one).
+ */
+const isSameConversationList = (previous: TChatConversation[], next: TChatConversation[]): boolean =>
+  previous.length === next.length &&
+  previous.every((item, index) => item.id === next[index].id && item.modified_at === next[index].modified_at);
+
 type ConversationListSyncSnapshot = {
   conversations: TChatConversation[];
+  /** SSH-bound sessions, excluded from `conversations` and grouped by host in
+   *  their own sidebar section (SshSessionGroup). */
+  sshConversations: TChatConversation[];
   generatingConversationIds: Set<ConversationId>;
   completionUnreadConversationIds: Set<ConversationId>;
 };
@@ -134,6 +150,7 @@ const listeners = new Set<() => void>();
 
 let isStoreInitialized = false;
 let conversationsState: TChatConversation[] = [];
+let sshConversationsState: TChatConversation[] = [];
 let generatingConversationIdsState = new Set<ConversationId>();
 let completionUnreadConversationIdsState = new Set<ConversationId>();
 let conversation_idsState = new Set<ConversationId>();
@@ -141,6 +158,7 @@ let activeTurnIdsState = new Map<ConversationId, MessageId>();
 let activeConversationIdState: ConversationId | null = null;
 let snapshotState: ConversationListSyncSnapshot = {
   conversations: conversationsState,
+  sshConversations: sshConversationsState,
   generatingConversationIds: generatingConversationIdsState,
   completionUnreadConversationIds: completionUnreadConversationIdsState,
 };
@@ -148,6 +166,7 @@ let snapshotState: ConversationListSyncSnapshot = {
 const emitStoreChange = () => {
   snapshotState = {
     conversations: conversationsState,
+    sshConversations: sshConversationsState,
     generatingConversationIds: generatingConversationIdsState,
     completionUnreadConversationIds: completionUnreadConversationIdsState,
   };
@@ -169,20 +188,33 @@ const refreshConversations = () => {
     .then((result) => {
       const items = result?.items;
       if (items && Array.isArray(items)) {
-        const filteredData = items.filter((conv) => {
-          // Legacy rows from the pre-provider-probe health check flow are hidden
-          // from normal history. New health checks must not create conversations.
-          // Companion conversations — the desktop bubble, the chat tab, AND every
-          // IM-channel turn — all share ONE per-companion session that lives in
-          // 桌面伙伴→伙伴→聊天, never in this work conversation list. Hide every
-          // companion row, identified by any companion marker in `extra`
-          // (companionSession / companionId / channelPlatform). The previous
-          // carve-out that KEPT channel-sourced companion sessions visible here
-          // is exactly what leaked IM chats into the work space — it is removed,
-          // which also fixes Slack/Discord (source==='nomifun') being mis-bucketed.
-          return isOrdinaryWorkConversation(conv);
-        });
+        // Legacy rows from the pre-provider-probe health check flow are hidden
+        // from normal history. New health checks must not create conversations.
+        // Companion conversations — the desktop bubble, the chat tab, AND every
+        // IM-channel turn — all share ONE per-companion session that lives in
+        // 桌面伙伴→伙伴→聊天, never in this work conversation list. Hide every
+        // companion row, identified by any companion marker in `extra`
+        // (companionSession / companionId / channelPlatform). The previous
+        // carve-out that KEPT channel-sourced companion sessions visible here
+        // is exactly what leaked IM chats into the work space — it is removed,
+        // which also fixes Slack/Discord (source==='nomifun') being mis-bucketed.
+        //
+        // SSH-bound sessions are the one excluded family that still needs a
+        // sidebar home (spec §10 top-level group): collect them in the SAME pass
+        // so the group never costs a second full fetch.
+        const filteredData: TChatConversation[] = [];
+        const sshConversations: TChatConversation[] = [];
+        for (const conversation of items) {
+          if (isOrdinaryWorkConversation(conversation)) {
+            filteredData.push(conversation);
+          } else if (sshHostIdOf(conversation) != null) {
+            sshConversations.push(conversation);
+          }
+        }
         conversationsState = filteredData;
+        sshConversationsState = isSameConversationList(sshConversationsState, sshConversations)
+          ? sshConversationsState
+          : sshConversations;
         for (const conversation of items) {
           const activeTurnId = getExactSidebarActiveTurnId(conversation);
           if (activeTurnId) {
@@ -201,6 +233,7 @@ const refreshConversations = () => {
       }
 
       conversationsState = [];
+      sshConversationsState = sshConversationsState.length === 0 ? sshConversationsState : [];
       conversation_idsState = new Set();
       activeTurnIdsState = new Map();
       generatingConversationIdsState = new Set();
@@ -209,6 +242,7 @@ const refreshConversations = () => {
     .catch((error) => {
       console.error('[SessionList] Failed to load conversations:', error);
       conversationsState = [];
+      sshConversationsState = sshConversationsState.length === 0 ? sshConversationsState : [];
       conversation_idsState = new Set();
       activeTurnIdsState = new Map();
       generatingConversationIdsState = new Set();
@@ -383,11 +417,8 @@ export const useConversationListSync = () => {
     initializeConversationListSyncStore();
   }, []);
 
-  const { conversations, generatingConversationIds, completionUnreadConversationIds } = useSyncExternalStore(
-    subscribeConversationListSync,
-    getConversationListSyncSnapshot,
-    getConversationListSyncSnapshot
-  );
+  const { conversations, sshConversations, generatingConversationIds, completionUnreadConversationIds } =
+    useSyncExternalStore(subscribeConversationListSync, getConversationListSyncSnapshot, getConversationListSyncSnapshot);
 
   const clearCompletionUnread = useCallback((conversation_id: ConversationId) => {
     clearCompletionUnreadState(conversation_id);
@@ -413,6 +444,7 @@ export const useConversationListSync = () => {
 
   return {
     conversations,
+    sshConversations,
     isConversationGenerating,
     hasCompletionUnread,
     clearCompletionUnread,

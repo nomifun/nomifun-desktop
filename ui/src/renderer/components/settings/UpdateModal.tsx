@@ -354,7 +354,7 @@ const UpdateModal: React.FC = () => {
   };
 
   const renderDisclaimer = (className = '') => (
-    <div className={`text-12px leading-18px text-[rgb(var(--warning-6))] ${className}`}>{t('update.disclaimer')}</div>
+    <div className={`text-12px leading-18px text-warning-6 ${className}`}>{t('update.disclaimer')}</div>
   );
 
   const renderBaiduManualDownloadButton = (className = '') => (
@@ -373,9 +373,13 @@ const UpdateModal: React.FC = () => {
       case 'checking':
         return (
           <div className='flex flex-col items-center justify-center py-48px'>
+            {/* 环形 spinner：border-3 是颜色类（--bg-3）而不是 3px 宽度，配上本仓库没有
+                border-style 全局重置，两层圆环一条边都画不出来。宽度/样式/颜色分开写。
+                `border-3` is a colour (--bg-3), not a width — with no border-style
+                reset in this repo both rings painted nothing. */}
             <div className='w-48px h-48px mb-20px relative'>
-              <div className='absolute inset-0 border-3 border-fill-3 rounded-full' />
-              <div className='absolute inset-0 border-3 border-primary border-t-transparent rounded-full animate-spin' />
+              <div className='absolute inset-0 border-3px border-solid border-[var(--color-fill-3)] rounded-full' />
+              <div className='absolute inset-0 border-3px border-solid border-primary border-t-transparent rounded-full animate-spin' />
             </div>
             <div className='text-15px text-t-primary font-500'>{t('update.checking')}</div>
             <div className='mt-16px'>{renderBaiduManualDownloadButton()}</div>
@@ -385,7 +389,7 @@ const UpdateModal: React.FC = () => {
       case 'upToDate':
         return (
           <div className='flex flex-col items-center justify-center py-48px'>
-            <div className='w-56px h-56px bg-[rgb(var(--success-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--success-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <CheckOne theme='filled' size='28' fill='rgb(var(--success-6))' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.upToDateTitle')}</div>
@@ -400,16 +404,16 @@ const UpdateModal: React.FC = () => {
         return (
           <div className='flex flex-col h-full'>
             {/* Version info header */}
-            <div className='flex items-center justify-between px-24px py-16px border-b border-border-2 bg-fill-1'>
+            <div className='flex items-center justify-between px-24px py-16px border-b border-b-solid border-arco-2 bg-fill-1'>
               <div className='flex items-center gap-12px'>
-                <div className='w-40px h-40px bg-[rgb(var(--primary-6))]/12 rounded-10px flex items-center justify-center'>
+                <div className='w-40px h-40px bg-[rgba(var(--primary-6),0.12)] rounded-10px flex items-center justify-center'>
                   <Download size='20' fill='rgb(var(--primary-6))' />
                 </div>
                 <div>
                   <div className='text-15px font-600 text-t-primary'>{t('update.availableTitle')}</div>
                   <div className='text-12px text-t-tertiary mt-2px'>
                     {currentVersion} →{' '}
-                    <span className='text-[rgb(var(--primary-6))] font-500'>
+                    <span className='text-primary-6 font-500'>
                       {updateInfo?.version || autoUpdateInfo?.version}
                     </span>
                   </div>
@@ -422,7 +426,7 @@ const UpdateModal: React.FC = () => {
                   </Button>
                 ) : autoUpdateAvailable ? (
                   <Button type='primary' size='small' onClick={startDownload} className='!px-16px'>
-                    {t('update.downloadAndInstall')}
+                    {t('update.downloadButton')}
                   </Button>
                 ) : (
                   <Button type='primary' size='small' onClick={startDownload} className='!px-16px'>
@@ -434,7 +438,7 @@ const UpdateModal: React.FC = () => {
             </div>
 
             {!hasCompatibleManualAsset && !autoUpdateAvailable && (
-              <div className='mx-24px mt-12px px-12px py-10px text-12px rounded-8px bg-[rgb(var(--warning-6))]/10 text-[rgb(var(--warning-6))]'>
+              <div className='mx-24px mt-12px px-12px py-10px text-12px rounded-8px bg-[rgba(var(--warning-6),0.1)] text-warning-6'>
                 {t('update.noCompatibleAssetManual')}
               </div>
             )}
@@ -447,7 +451,7 @@ const UpdateModal: React.FC = () => {
                   type='button'
                   onClick={openBaiduReleaseMirror}
                   title={BAIDU_RELEASE_MIRROR_URL}
-                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-[rgb(var(--primary-6))] underline-offset-2 hover:underline'
+                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-primary-6 underline-offset-2 hover:underline'
                 >
                   {t('update.baiduMirrorLink')}
                 </button>
@@ -458,7 +462,7 @@ const UpdateModal: React.FC = () => {
                   type='button'
                   onClick={openProductWebsite}
                   title={PRODUCT_WEBSITE_URL}
-                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-[rgb(var(--primary-6))] underline-offset-2 hover:underline'
+                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-primary-6 underline-offset-2 hover:underline'
                 >
                   {PRODUCT_WEBSITE_URL}
                 </button>
@@ -482,7 +486,7 @@ const UpdateModal: React.FC = () => {
       case 'downloading':
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
-            <div className='w-56px h-56px bg-[rgb(var(--primary-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--primary-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <Download size='24' fill='rgb(var(--primary-6))' className='animate-bounce' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-20px'>{t('update.downloadingTitle')}</div>
@@ -498,7 +502,7 @@ const UpdateModal: React.FC = () => {
                 <span>
                   {formatSize(progress.transferred)} / {formatSize(progress.total)}
                 </span>
-                <span className='text-[rgb(var(--primary-6))] font-500'>{progress.speed}</span>
+                <span className='text-primary-6 font-500'>{progress.speed}</span>
               </div>
             </div>
             <div className='mt-16px'>{renderBaiduManualDownloadButton()}</div>
@@ -508,11 +512,11 @@ const UpdateModal: React.FC = () => {
       case 'downloaded':
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
-            <div className='w-56px h-56px bg-[rgb(var(--success-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--success-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <CheckOne theme='filled' size='28' fill='rgb(var(--success-6))' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.readyToInstall')}</div>
-            <div className='mb-24px text-13px text-[rgb(var(--warning-6))] max-w-360px text-center'>
+            <div className='mb-24px text-13px text-warning-6 max-w-360px text-center'>
               {t('update.installWarning')}
             </div>
             <div className='flex flex-wrap justify-center gap-12px'>
@@ -531,13 +535,12 @@ const UpdateModal: React.FC = () => {
         );
 
       case 'installing': {
-        const isDownloadingPackage = installPhase === 'downloading';
         const isHandingOff = installPhase === 'installing';
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
             <div className='w-56px h-56px mb-20px relative'>
-              <div className='absolute inset-0 border-3 border-fill-3 rounded-full' />
-              <div className='absolute inset-0 border-3 border-primary border-t-transparent rounded-full animate-spin' />
+              <div className='absolute inset-0 border-3px border-solid border-[var(--color-fill-3)] rounded-full' />
+              <div className='absolute inset-0 border-3px border-solid border-primary border-t-transparent rounded-full animate-spin' />
               <div className='absolute inset-0 flex items-center justify-center'>
                 <Install size='20' fill='rgb(var(--primary-6))' />
               </div>
@@ -550,25 +553,6 @@ const UpdateModal: React.FC = () => {
                 {isHandingOff ? t('update.installingDesc') : t('update.preparingInstallDesc')}
               </div>
             </div>
-            {isDownloadingPackage && (
-              <div className='w-full max-w-320px mt-20px'>
-                <Progress
-                  percent={progress.percent}
-                  status='normal'
-                  showText={false}
-                  strokeWidth={6}
-                  className='!mb-12px'
-                />
-                <div className='flex justify-between text-12px text-t-tertiary'>
-                  <span>
-                    {progress.total > 0
-                      ? `${formatSize(progress.transferred)} / ${formatSize(progress.total)}`
-                      : formatSize(progress.transferred)}
-                  </span>
-                  <span className='text-[rgb(var(--primary-6))] font-500'>{progress.speed}</span>
-                </div>
-              </div>
-            )}
           </div>
         );
       }
@@ -576,7 +560,7 @@ const UpdateModal: React.FC = () => {
       case 'success':
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
-            <div className='w-56px h-56px bg-[rgb(var(--success-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--success-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <CheckOne theme='filled' size='28' fill='rgb(var(--success-6))' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.downloadCompleteTitle')}</div>
@@ -598,7 +582,7 @@ const UpdateModal: React.FC = () => {
       case 'error':
         return (
           <div className='flex flex-col items-center justify-center py-48px px-32px'>
-            <div className='w-56px h-56px bg-[rgb(var(--danger-6))]/12 rounded-full flex items-center justify-center mb-20px'>
+            <div className='w-56px h-56px bg-[rgba(var(--danger-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
               <CloseOne theme='filled' size='28' fill='rgb(var(--danger-6))' />
             </div>
             <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.errorTitle')}</div>
@@ -638,8 +622,14 @@ const UpdateModal: React.FC = () => {
     >
       <div className='flex flex-col h-full w-full'>
         <div className='min-h-0 flex-1'>{renderContent()}</div>
+        {/* 同方向的 border-t-solid：无方向的 border-solid 会给四边都上样式，另外三边没有
+            宽度类会回落到 medium≈3px。bg-fill-1/60 也是死写法（bg-fill-N 规则以 $ 锚定，
+            斜杠透明度让它一条都匹配不上），改用 color-mix 拿到同样的 60% 填充。
+            Same-direction style + a fill that actually compiles: `bg-fill-1/60` matched
+            no rule at all, so this strip had no background of any kind.
+            注意 updateDisclaimer.test.ts 用正则要求类名字符串紧跟在括号后面。 */}
         {renderDisclaimer(
-          'shrink-0 border-t border-solid border-[rgba(var(--warning-6),0.18)] bg-fill-1/60 px-20px py-10px text-center'
+          'shrink-0 border-t border-t-solid border-[rgba(var(--warning-6),0.18)] bg-[color-mix(in_srgb,var(--color-fill-1)_60%,transparent)] px-20px py-10px text-center'
         )}
       </div>
     </NomiModal>

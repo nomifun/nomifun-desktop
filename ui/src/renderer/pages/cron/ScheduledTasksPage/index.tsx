@@ -204,7 +204,7 @@ const ScheduledTasksPage: React.FC = () => {
               value={searchQuery}
               onChange={handleSearchChange}
               placeholder={t('cron.page.searchPlaceholder', { defaultValue: '搜索任务名称、会话、指令或调度规则' })}
-              className='w-full [&_.arco-input-inner-wrapper]:!rounded-full [&_.arco-input-inner-wrapper]:!border [&_.arco-input-inner-wrapper]:!border-solid [&_.arco-input-inner-wrapper]:!border-[var(--color-border-2)] [&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)] [&_.arco-input-inner-wrapper-focus]:!border-[rgb(var(--primary-6))]'
+              className='w-full [&_.arco-input-inner-wrapper]:!rounded-full [&_.arco-input-inner-wrapper]:!border [&_.arco-input-inner-wrapper]:!border-solid [&_.arco-input-inner-wrapper]:!border-[var(--color-border-2)] [&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)] [&_.arco-input-inner-wrapper-focus]:!border-primary-6'
             />
             <div className='flex items-center gap-4px' aria-label={t('cron.page.statusFilter.label')}>
               {(['all', 'active', 'paused'] as const).map((status) => {
@@ -231,7 +231,7 @@ const ScheduledTasksPage: React.FC = () => {
         )}
 
         {loading ? (
-          <div className='flex min-h-220px items-center justify-center rounded-16px border border-dashed border-border-2 bg-fill-1'>
+          <div className='flex min-h-220px items-center justify-center rounded-16px border border-dashed border-arco-2 bg-fill-1'>
             <Spin />
           </div>
         ) : jobs.length === 0 ? (
@@ -258,7 +258,13 @@ const ScheduledTasksPage: React.FC = () => {
               <span>{t('cron.page.form.executionMode')}</span>
             </div>
 
-            <div className='grid w-full grid-cols-1 items-start gap-8px md:block md:divide-y md:divide-solid md:divide-[var(--color-border-2)]'>
+            {/*
+              `md:divide-x-0` is not decoration. `md:divide-solid` sets border-style on all four
+              sides, and only the top/bottom widths come from `md:divide-y`, so without it the unset
+              left/right widths fall back to the CSS initial `medium` and every row after the first
+              grew a 3px vertical rule. Each class needs its own `md:` prefix.
+            */}
+            <div className='grid w-full grid-cols-1 items-start gap-8px md:block md:divide-y md:divide-x-0 md:divide-solid md:divide-[var(--color-border-2)]'>
               {pagedJobs.map((job) => {
                 const agentMeta = getJobAgentMeta(job, cliAgents);
                 const isManualOnly = job.schedule.kind === 'cron' && !job.schedule.expr;

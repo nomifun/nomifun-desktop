@@ -11,6 +11,12 @@ export interface SegmentedTabItem {
   key: string;
   label: React.ReactNode;
   icon?: React.ReactNode;
+  /**
+   * Show a small attention dot on this segment. Deliberately a dot and not a
+   * count: a tab strip directs attention, it does not report numbers — the
+   * exact figure belongs inside the panel the dot points at.
+   */
+  dot?: boolean;
 }
 
 interface SegmentedTabsProps {
@@ -78,6 +84,12 @@ const SegmentedTabs: React.FC<SegmentedTabsProps> = ({ items, activeKey, onChang
               </span>
             )}
             <span className='whitespace-nowrap'>{item.label}</span>
+            {item.dot && (
+              <span
+                aria-hidden
+                className='shrink-0 w-6px h-6px rd-full bg-primary-6'
+              />
+            )}
           </button>
         );
       })}

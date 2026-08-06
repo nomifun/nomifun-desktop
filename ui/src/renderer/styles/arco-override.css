@@ -336,6 +336,65 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
   box-shadow: inset 0 0 0 1px var(--color-border-2);
 }
 
+/* Keep every knowledge detail tab equally close to its content. Arco adds
+   16px by default; individual panes must not stack another top padding. */
+.knowledge-detail-tabs > .arco-tabs-content {
+  padding-top: 10px;
+}
+
+/* Mount & Usage: one workspace-like frame, with a bounded consumer list and
+   a quiet rules rail. The split changes direction on compact screens. */
+.knowledge-use-shell {
+  box-shadow: inset 0 0 0 1px rgba(var(--primary-6), 0.015);
+}
+
+.knowledge-use-rules-desktop {
+  border-left: 1px solid var(--color-border-2);
+}
+
+.knowledge-use-rules-mobile {
+  border-top: 1px solid var(--color-border-2);
+}
+
+.knowledge-use-step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.knowledge-use-step:not(:last-child)::after {
+  position: absolute;
+  top: 32px;
+  bottom: -18px;
+  left: 14px;
+  width: 1px;
+  background: var(--color-border-3);
+  content: '';
+}
+
+.knowledge-use-step-number {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--color-border-3);
+  border-radius: 50%;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.knowledge-consumers-list-expanded {
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* Section chrome is deliberately one-sided: no implicit top/left/right edges. */
 .knowledge-doc-divider-bottom {
   border: 0 !important;
@@ -516,13 +575,51 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
   opacity: 1 !important;
 }
 
-.knowledge-detail-danger-panel {
-  background: color-mix(in srgb, var(--danger) 7%, var(--color-bg-2));
-  border-color: color-mix(in srgb, var(--danger) 30%, var(--color-border-2)) !important;
+/* The description remains a document-like writing surface; short metadata
+   uses the shared NomiSettingRow / NomiInput components without overrides. */
+.knowledge-settings-description-input,
+.knowledge-settings-description-input.arco-textarea {
+  min-height: 96px;
+  padding: 12px 14px !important;
+  border-radius: 10px !important;
+  background-color: var(--color-bg-2) !important;
+  font-size: 13px;
+  line-height: 1.65;
+  resize: vertical;
 }
 
-.knowledge-detail-danger-title {
+.knowledge-settings-save-button.arco-btn {
+  border-radius: 8px;
+}
+
+/* Pull only the final danger section toward the source row; the remaining
+   settings sections keep their shared vertical rhythm. */
+.knowledge-settings-danger-section {
+  margin-top: -8px;
+}
+
+/* Editing remains visibly focused without introducing a large theme-tinted
+   surface. This applies only inside the knowledge settings tab. */
+.knowledge-settings-layout .nomi-input.arco-input-focus,
+.knowledge-settings-layout .nomi-input:focus,
+.knowledge-settings-description-input.arco-textarea-focus,
+.knowledge-settings-description-input:focus {
+  border-color: var(--color-border-3) !important;
+  background-color: var(--color-bg-2) !important;
+  box-shadow: 0 0 0 2px var(--color-fill-2) !important;
+}
+
+/* The settings page keeps tags as the original neutral chips below the
+   description instead of presenting them as another preference row. */
+.knowledge-settings-tag-picker .knowledge-studio-tag-chip-check {
+  display: none;
+}
+
+.knowledge-settings-tag-picker .knowledge-studio-tag-chip-active {
+  border-color: rgba(var(--primary-6), 0.52) !important;
+  background: color-mix(in srgb, rgb(var(--primary-6)) 14%, var(--color-bg-2)) !important;
   color: var(--color-text-1) !important;
+  box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.1) !important;
 }
 
 /* Modal form controls need visible idle outlines so fields don't disappear into the dialog surface. */
@@ -700,8 +797,106 @@ body[arco-theme='dark'] .arco-message-error {
   background-color: var(--color-fill-3) !important;
 }
 
-/* Alert styles - content is now displayed below the Alert card, so these rules are no longer needed */
-/* Alert 样式 - 内容现在显示在 Alert 卡片下方，因此不再需要这些规则 */
+/* ===== Alert 可读性契约 / Alert readability contract =====
+ *
+ * 明暗模式在本应用里由两个属性同时表达：`<html data-theme>` 与 `<body arco-theme>`。
+ * Arco 把 Alert 的底色挂在 `--color-{primary,success,warning,danger}-light-1` 上，而这些
+ * token 的暗色值只写在 Arco 自己的 `body[arco-theme='dark']` 块里；正文色 `--color-text-1`
+ * 却被氛围预设按 `[data-theme='dark'] body` + `!important` 重写。也就是说底色听 arco-theme、
+ * 字色听 data-theme —— 两侧一旦不同步（任何只给 documentElement 上色的表面都会这样），
+ * 暗色 warning Alert 就变成"奶油底 rgb(255,247,232) + 近白字"，实测 1.02–1.07:1，
+ * 等于看不见。另一处是无条件的：预设把 `--color-primary-light-1` 改成不透明品牌色
+ * （如 #f6c468/#b1a3ff），info Alert 因此实测掉到 1.41–3.06:1。
+ *
+ * 所以四种 Alert 的底色与字色全部改挂在 data-theme 这一侧的语义 token 上：
+ * 底色 = 语义色 16% 混入卡片面 `--bg-1`，字色 = 主题自己的正文色 `--text-primary`。
+ * 面色只吃 16%，混出来的底几乎保留了主题"正文 vs 卡片面"的原始对比度，
+ * 明暗两侧都 ≥ 11:1，也不会因为压上一块饱和品牌色而变刺眼。
+ * 契约由 styles/alertContrastContract.test.ts 逐主题算数校验。
+ *
+ * Light/dark is expressed by two attributes here (`html[data-theme]` and
+ * `body[arco-theme]`). Arco keys the Alert surface off tokens whose dark values
+ * live only under `body[arco-theme='dark']`, while ambiance presets rewrite the
+ * text token under `[data-theme='dark'] body`. Surface and text therefore follow
+ * different attributes, and any surface that themes only the documentElement
+ * renders the dark warning Alert as near-white text on Arco's light cream
+ * (measured 1.02–1.07:1). Separately, presets replace `--color-primary-light-1`
+ * with an opaque brand colour, which measures 1.41–3.06:1 for info. Both classes
+ * disappear once every type derives from data-theme-keyed semantic tokens.
+ */
+.arco-alert-info {
+  background-color: color-mix(in srgb, var(--info, #165dff) 16%, var(--bg-1, #f9fafb)) !important;
+  border-color: color-mix(in srgb, var(--info, #165dff) 34%, var(--bg-1, #f9fafb)) !important;
+}
+
+.arco-alert-success {
+  background-color: color-mix(in srgb, var(--success, #00b42a) 16%, var(--bg-1, #f9fafb)) !important;
+  border-color: color-mix(in srgb, var(--success, #00b42a) 34%, var(--bg-1, #f9fafb)) !important;
+}
+
+.arco-alert-warning {
+  background-color: color-mix(in srgb, var(--warning, #ff7d00) 16%, var(--bg-1, #f9fafb)) !important;
+  border-color: color-mix(in srgb, var(--warning, #ff7d00) 34%, var(--bg-1, #f9fafb)) !important;
+}
+
+.arco-alert-error {
+  background-color: color-mix(in srgb, var(--danger, #f53f3f) 16%, var(--bg-1, #f9fafb)) !important;
+  border-color: color-mix(in srgb, var(--danger, #f53f3f) 34%, var(--bg-1, #f9fafb)) !important;
+}
+
+/* 标题与单行正文用主色文字；带标题时 Arco 把正文降一级，这里同步降到 --text-secondary，
+   两者都是 A 表变量，预设的亮/暗块都必须提供，因此不会漏出亮色值。
+   Titles and single-line content take the primary text token; the with-title
+   body copy steps down to the secondary one, mirroring Arco's own hierarchy. */
+.arco-alert-info .arco-alert-title,
+.arco-alert-info .arco-alert-content,
+.arco-alert-success .arco-alert-title,
+.arco-alert-success .arco-alert-content,
+.arco-alert-warning .arco-alert-title,
+.arco-alert-warning .arco-alert-content,
+.arco-alert-error .arco-alert-title,
+.arco-alert-error .arco-alert-content {
+  color: var(--text-primary, #1d2129) !important;
+}
+
+.arco-alert-info.arco-alert-with-title .arco-alert-content,
+.arco-alert-success.arco-alert-with-title .arco-alert-content,
+.arco-alert-warning.arco-alert-with-title .arco-alert-content,
+.arco-alert-error.arco-alert-with-title .arco-alert-content {
+  color: var(--text-secondary, #4e5969) !important;
+}
+
+/* 关闭按钮同样不能用 --color-text-*，否则暗色下会跟着漏出亮色。 */
+.arco-alert-close-btn {
+  color: var(--text-secondary, #4e5969) !important;
+}
+
+.arco-alert-close-btn:hover {
+  color: var(--text-primary, #1d2129) !important;
+}
+
+/* 图标同理：Arco 用 `rgb(var(--primary-6))` 这类 arco-theme 侧的色阶，
+   且原色在自家浅底上只有 1.9–2.4:1，达不到 WCAG 1.4.11 对非文本图形的 3:1。
+   这里把语义色朝主题正文色推 30%：亮色下往黑推（橙变深琥珀），暗色下往白推
+   （橙变浅琥珀），色相不变、方向自动跟着明暗走。
+   Push the semantic hue 30% toward the theme's text colour: it darkens in light
+   themes and lightens in dark ones, so the icon keeps its hue and clears 3:1 in
+   both directions without a per-mode colour table. */
+.arco-alert-info .arco-alert-icon-wrapper svg {
+  color: color-mix(in srgb, var(--info, #165dff) 70%, var(--text-primary, #1d2129)) !important;
+}
+
+.arco-alert-success .arco-alert-icon-wrapper svg {
+  color: color-mix(in srgb, var(--success, #00b42a) 70%, var(--text-primary, #1d2129)) !important;
+}
+
+.arco-alert-warning .arco-alert-icon-wrapper svg {
+  color: color-mix(in srgb, var(--warning, #ff7d00) 70%, var(--text-primary, #1d2129)) !important;
+}
+
+.arco-alert-error .arco-alert-icon-wrapper svg {
+  color: color-mix(in srgb, var(--danger, #f53f3f) 70%, var(--text-primary, #1d2129)) !important;
+}
 
 /* Settings modal mobile tabs styles */
 /* 设置弹窗移动端 Tabs 样式 */
@@ -809,8 +1004,10 @@ body[arco-theme='dark'] .arco-message-error {
  * that use this shared pagination treatment. */
 .requirements-pagination .arco-pagination-item-active,
 .scheduled-tasks-pagination .arco-pagination-item-active,
+.memory-pagination .arco-pagination-item-active,
 .requirements-pagination .arco-pagination-item-active:hover,
-.scheduled-tasks-pagination .arco-pagination-item-active:hover {
+.scheduled-tasks-pagination .arco-pagination-item-active:hover,
+.memory-pagination .arco-pagination-item-active:hover {
   background-color: var(--color-fill-2) !important;
   border-color: transparent !important;
   color: var(--color-text-1) !important;
@@ -818,22 +1015,27 @@ body[arco-theme='dark'] .arco-message-error {
 }
 
 .requirements-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover,
-.scheduled-tasks-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover {
+.scheduled-tasks-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover,
+.memory-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover {
   color: var(--color-text-1) !important;
   background-color: var(--color-fill-1) !important;
 }
 
 .requirements-pagination .arco-pagination-item-prev,
 .scheduled-tasks-pagination .arco-pagination-item-prev,
+.memory-pagination .arco-pagination-item-prev,
 .requirements-pagination .arco-pagination-item-next,
-.scheduled-tasks-pagination .arco-pagination-item-next {
+.scheduled-tasks-pagination .arco-pagination-item-next,
+.memory-pagination .arco-pagination-item-next {
   color: var(--color-text-2) !important;
 }
 
 .requirements-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
 .scheduled-tasks-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
+.memory-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
 .requirements-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover,
-.scheduled-tasks-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover {
+.scheduled-tasks-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover,
+.memory-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover {
   color: var(--color-text-1) !important;
   background-color: var(--color-fill-1) !important;
 }

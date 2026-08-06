@@ -722,6 +722,13 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
+    // SSH host book (owner-only): saved connection profiles + test-connection.
+    let ssh_host_authenticated = protect_instance_owner(
+        nomifun_ssh::ssh_host_routes(states.ssh_host),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
     // Unified agent listing/refresh/test routes protected by auth middleware
     let agent_authenticated = protect_instance_owner(
         agent_routes(states.agent),
@@ -1055,6 +1062,7 @@ pub fn create_router_with_all_state(
         .merge(conversation_authenticated)
         .merge(conversation_ops_authenticated)
         .merge(remote_agent_authenticated)
+        .merge(ssh_host_authenticated)
         .merge(agent_authenticated)
         .merge(model_failover_authenticated)
         .merge(connection_test_authenticated)

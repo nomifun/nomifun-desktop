@@ -23,7 +23,7 @@ const MessageCronTrigger: React.FC<{ artifact: ICronTriggerArtifact }> = ({ arti
       onClick={() => navigate(`/scheduled/${cron_job_id}`)}
     >
       <div
-        className='flex items-center gap-8px px-16px py-12px rd-12px b-1 b-solid bg-fill-0 hover:bg-fill-1 transition-colors'
+        className='flex items-center gap-8px px-16px py-12px rd-12px b-1px b-solid bg-fill-0 hover:bg-fill-1 transition-colors'
         style={{ borderColor: 'color-mix(in srgb, var(--color-border-2) 70%, transparent)' }}
       >
         <AlarmClock

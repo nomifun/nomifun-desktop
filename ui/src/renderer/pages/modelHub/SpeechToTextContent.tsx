@@ -102,7 +102,7 @@ const SpeechToTextContent: React.FC = () => {
   return (
     <div className='flex min-h-0 flex-col rd-16px bg-2 px-24px py-16px'>
       {messageContext}
-      <header className='flex items-center gap-9px border-b border-[var(--color-border-2)] pb-14px'>
+      <header className='flex items-center gap-9px border-b border-b-solid border-[var(--color-border-2)] pb-14px'>
         <span className='size-30px shrink-0 flex items-center justify-center rd-9px bg-primary-1 text-primary-6'>
           <HeadsetOne theme='outline' size='18' strokeWidth={3} />
         </span>

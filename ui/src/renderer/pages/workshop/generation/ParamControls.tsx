@@ -64,7 +64,7 @@ const PillGroup: React.FC<{ options: PillOption[]; value: string; onSelect: (key
             'nodrag rounded-7px border border-solid px-8px py-4px text-11px font-500 cursor-pointer transition-colors select-none text-center',
             fill ? 'box-border flex-1 min-w-max max-w-full' : '',
             active
-              ? 'border-[rgb(var(--primary-6))] bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))]'
+              ? 'border-primary-6 bg-[rgba(var(--primary-6),0.12)] text-primary-6'
               : 'border-[var(--color-border-2)] bg-[var(--color-fill-1)] text-[var(--color-text-2)] hover:border-[var(--color-border-3)]',
           ].join(' ')}
         >
@@ -113,7 +113,7 @@ const Toggle: React.FC<{ label: string; checked: boolean; onChange: (v: boolean)
     <span
       className={[
         'relative h-16px w-28px shrink-0 rounded-full transition-colors',
-        checked ? 'bg-[rgb(var(--primary-6))]' : 'bg-[var(--color-fill-3)]',
+        checked ? 'bg-primary-6' : 'bg-[var(--color-fill-3)]',
       ].join(' ')}
     >
       <span
@@ -136,7 +136,7 @@ const NumberBox: React.FC<{
       if (Number.isFinite(n)) onChange(Math.round(n));
     }}
     onKeyDown={(e) => e.stopPropagation()}
-    className='nodrag w-full min-w-0 box-border rounded-7px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px text-12px text-[var(--color-text-1)] outline-none focus:border-[rgb(var(--primary-6))]'
+    className='nodrag w-full min-w-0 box-border rounded-7px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px text-12px text-[var(--color-text-1)] outline-none focus:border-primary-6'
   />
 );
 
@@ -175,7 +175,7 @@ const ParamControls: React.FC<ParamControlsProps> = ({ mode, params, onChange })
             placeholder={t('workshopGeneration.param.voiceCustomPlaceholder', {
               defaultValue: '自定义音色 ID…',
             })}
-            className='nodrag w-full min-w-0 box-border rounded-7px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px text-12px text-[var(--color-text-1)] outline-none focus:border-[rgb(var(--primary-6))] placeholder:text-[var(--color-text-3)]'
+            className='nodrag w-full min-w-0 box-border rounded-7px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px text-12px text-[var(--color-text-1)] outline-none focus:border-primary-6 placeholder:text-[var(--color-text-3)]'
           />
         </FieldRow>
       </div>

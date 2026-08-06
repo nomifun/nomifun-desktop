@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 import enBrowser from '../../services/i18n/locales/en-US/browser.json';
 import zhBrowser from '../../services/i18n/locales/zh-CN/browser.json';
+import { diffLocaleKeys } from '../../services/i18n/localeKeyParity';
 
 const readSource = (url: URL): string => readFileSync(url, 'utf8');
 
@@ -49,14 +50,48 @@ describe('Browser UI localization', () => {
     const en = flatten(enBrowser);
     const zh = flatten(zhBrowser);
 
-    expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort());
-    for (const key of Object.keys(en)) {
-      expect(typeof en[key]).toBe('string');
-      expect((en[key] as string).trim()).toBeTruthy();
-      expect(typeof zh[key]).toBe('string');
-      expect((zh[key] as string).trim()).toBeTruthy();
-      expect(placeholders(zh[key] as string)).toEqual(placeholders(en[key] as string));
+    // Plural-aware parity, borrowed from the `check:i18n` gate rather than
+    // re-implemented: a literal key-for-key comparison here demanded that zh-CN carry
+    // an `_one` variant for every English one, even though Chinese has a single plural
+    // category (`other`) and i18next can therefore never select `_one`. Those dead
+    // zh-CN keys existed only to satisfy this assertion, and the gate warned about
+    // every one of them on every build.
+    const { errors, warnings } = diffLocaleKeys({
+      'en-US': Object.keys(en).map((key) => `browser.${key}`),
+      'zh-CN': Object.keys(zh).map((key) => `browser.${key}`),
+    });
+    const oneSided = errors.map(({ locale, key, reason }) => `${locale} lacks ${key} (${reason})`);
+    expect(oneSided).toEqual([]);
+    // A variant for a category the locale does not have is dead weight: nothing
+    // resolves it, nothing updates it when the sibling copy changes.
+    const unreachable = warnings.map(({ locale, key }) => `${locale} ${key}`);
+    expect(unreachable).toEqual([]);
+
+    const blank: string[] = [];
+    for (const [locale, leaves] of [
+      ['en-US', en],
+      ['zh-CN', zh],
+    ] as const) {
+      for (const key of Object.keys(leaves)) {
+        const leaf = leaves[key];
+        if (typeof leaf !== 'string' || !leaf.trim()) blank.push(`${locale} ${key}`);
+      }
     }
+    expect(blank).toEqual([]);
+
+    // Placeholders are compared only where both locales define the key: a plural
+    // variant the other locale legitimately does not have (English `_one`) has no
+    // counterpart to compare against, and its base key is checked here anyway.
+    const mismatchedPlaceholders: string[] = [];
+    for (const key of Object.keys(en)) {
+      if (!(key in zh)) continue;
+      const enPlaceholders = placeholders(en[key] as string).join(',');
+      const zhPlaceholders = placeholders(zh[key] as string).join(',');
+      if (enPlaceholders !== zhPlaceholders) {
+        mismatchedPlaceholders.push(`${key} (en-US {${enPlaceholders}} vs zh-CN {${zhPlaceholders}})`);
+      }
+    }
+    expect(mismatchedPlaceholders).toEqual([]);
   });
 
   test('routes every Browser surface through the Browser translation namespace', () => {

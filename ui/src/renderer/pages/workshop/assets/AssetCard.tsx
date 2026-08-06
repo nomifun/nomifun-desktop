@@ -85,7 +85,7 @@ const HoverActions: React.FC<{ actions: HoverAction[] }> = ({ actions }) => (
           'border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] backdrop-blur-sm',
           'transition-colors',
           action.danger
-            ? 'text-[var(--color-text-3)] hover:!border-[rgba(var(--danger-6),0.4)] hover:!text-[rgb(var(--danger-6))] hover:!bg-[rgba(var(--danger-6),0.08)]'
+            ? 'text-[var(--color-text-3)] hover:!border-[rgba(var(--danger-6),0.4)] hover:!text-danger-6 hover:!bg-[rgba(var(--danger-6),0.08)]'
             : 'text-[var(--color-text-3)] hover:border-[var(--color-border-3)] hover:text-[var(--color-text-1)] hover:bg-[var(--color-fill-2)]',
         ].join(' ')}
       >
@@ -191,7 +191,7 @@ const AssetCard: React.FC<AssetCardProps> = ({
       className={[
         'absolute left-8px top-8px z-10 grid h-22px w-22px place-items-center rounded-6px cursor-pointer border border-solid transition-all',
         selected
-          ? 'border-transparent bg-[rgb(var(--primary-6))] text-white opacity-100'
+          ? 'border-transparent bg-primary-6 text-white opacity-100'
           : 'border-[var(--color-border-2)] bg-[var(--color-bg-2)] text-transparent opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:border-[var(--color-border-3)]',
       ].join(' ')}
     >
@@ -221,15 +221,18 @@ const AssetCard: React.FC<AssetCardProps> = ({
         'border-[var(--color-border-2)] bg-[var(--color-bg-2)] box-border',
         'transition-all duration-150',
         'hover:border-[var(--color-border-3)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.14)] hover:-translate-y-1px',
-        selected ? 'ring-2 ring-[rgb(var(--primary-6))] !border-[rgb(var(--primary-6))]' : '',
-        dragging ? 'opacity-45 ring-2 ring-[rgba(var(--primary-6),0.5)]' : '',
+        // `ring-2` set only `--un-ring-color` — the numeric suffix hits the theme's numeric colour
+        // keys, never a width — so the selected/dragging highlight painted nothing. `ring-2px` is
+        // the width spelling and is what emits the box-shadow chain.
+        selected ? 'ring-2px ring-[rgba(var(--primary-6),1)] !border-primary-6' : '',
+        dragging ? 'opacity-45 ring-2px ring-[rgba(var(--primary-6),0.5)]' : '',
       ].join(' ')}
     >
       {selectBox}
       {isText ? (
         // ── Text snippet ────────────────────────────────────────────────────
         <div className='flex flex-col gap-8px p-12px'>
-          <div className='flex items-center gap-6px text-[rgb(var(--primary-6))]'>
+          <div className='flex items-center gap-6px text-primary-6'>
             <FileText theme='outline' size={14} strokeWidth={3} />
             <span className='truncate text-13px font-600 text-[var(--color-text-1)]'>{asset.title}</span>
           </div>

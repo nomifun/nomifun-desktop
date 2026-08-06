@@ -75,7 +75,7 @@ export type AutoUpdateStatusType =
   | 'error'
   | 'cancelled';
 
-export type AutoUpdateInstallPhase = 'preparing' | 'downloading' | 'installing';
+export type AutoUpdateInstallPhase = 'preparing' | 'installing';
 
 export interface AutoUpdateProgress {
   bytesPerSecond: number;

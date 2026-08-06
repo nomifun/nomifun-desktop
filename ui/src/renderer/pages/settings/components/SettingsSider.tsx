@@ -6,9 +6,11 @@ import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSe
 import {
   Computer,
   Cpu,
+  DataLock,
   Earth,
   Info,
   Puzzle,
+  Server,
   System,
 } from '@icon-park/react';
 import classNames from 'classnames';
@@ -22,7 +24,9 @@ import { buildSettingsNavItems } from './settingsNavigation';
 /** Builtin settings tab IDs in display order (must match router paths). */
 export const BUILTIN_TAB_IDS = [
   'system',
+  'privacy',
   'execution-engines',
+  'ssh-hosts',
   'browser-use',
   'computer-use',
   'about',
@@ -67,7 +71,19 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
         icon: <Cpu />,
         path: 'execution-engines',
       },
+      'ssh-hosts': {
+        id: 'ssh-hosts',
+        label: t('ssh.title'),
+        icon: <Server />,
+        path: 'ssh-hosts',
+      },
       system: { id: 'system', label: t('settings.system'), icon: <System />, path: 'system' },
+      privacy: {
+        id: 'privacy',
+        label: t('settings.privacy.nav', { defaultValue: '数据采集' }),
+        icon: <DataLock />,
+        path: 'privacy',
+      },
       'browser-use': {
         id: 'browser-use',
         label: t('settings.browserUseNav'),
