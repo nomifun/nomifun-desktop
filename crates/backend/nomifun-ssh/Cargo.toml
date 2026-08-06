@@ -22,9 +22,16 @@ serde_json.workspace = true
 dashmap.workspace = true
 zeroize.workspace = true
 axum.workspace = true
+# Home-directory resolution for the read-only `~/.ssh/config` importer. Already a
+# workspace dependency (and already in this binary's graph via eleven other
+# crates), so this adds nothing to the lockfile.
+dirs.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile.workspace = true
 sqlx.workspace = true
 serde_json.workspace = true
+# Drives the host-book router in-process (`oneshot`), so a route test exercises
+# the real handlers and extractors instead of calling private functions.
+tower.workspace = true

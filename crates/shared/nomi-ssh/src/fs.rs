@@ -86,7 +86,19 @@ impl RemoteFs {
         // new path; create + write_all + fsync the temp file explicitly.
         {
             use tokio::io::AsyncWriteExt;
-            let mut file = self.sftp.create(&tmp).await?;
+            // This step fails on the *temp* path, so a missing parent directory
+            // surfaces as a bare "no such file" about a file the caller never
+            // named — which reads as "the target file does not exist yet" and
+            // invites exactly the wrong fix. Say where the failure happened and
+            // what has to be true of that directory.
+            let mut file = self.sftp.create(&tmp).await.map_err(|e| {
+                SshError::Protocol(format!(
+                    "sftp: cannot create the temporary file {tmp} that an atomic write of {path} \
+                     needs: {e} — the directory {dir} has to exist already and be writable by \
+                     this user (create it with `mkdir -p {dir}`); the target file itself does not \
+                     have to exist"
+                ))
+            })?;
             file.write_all(bytes).await.map_err(|e| SshError::Protocol(format!("sftp write: {e}")))?;
             file.sync_all().await?;
             file.shutdown().await.ok();

@@ -2,8 +2,6 @@
 //! probe. Mounted under the instance-owner guard by the app router (mirrors
 //! `remote_agent_routes`). Every handler scopes to `CurrentUser.id`, so a
 //! cross-owner id is indistinguishable from NotFound.
-use std::sync::Arc;
-
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, State};
@@ -12,20 +10,34 @@ use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, SshHostId};
 
-use crate::dto::{CreateSshHostRequest, SshHostResponse, UpdateSshHostRequest};
+use crate::dto::{
+    CreateSshHostRequest, ImportSshHostsRequest, SshHostResponse, SshImportResult, SshStatusEvent,
+    UpdateSshHostRequest,
+};
+use crate::pool::SshConnectionPool;
 use crate::service::{SshHostService, SshServiceError};
+use crate::ssh_config::SshConfigScan;
 
-/// Router state: just the host-book service (cheap to clone).
+/// Router state: the host book plus the process connection pool (both cheap
+/// handles). The pool is the same one the agent factory dials through, so a probe
+/// here and a session there cannot disagree about a host.
 #[derive(Clone)]
 pub struct SshHostRouterState {
     pub service: SshHostService,
-    /// Connection prober for test-connection (optional; None → probe unsupported).
-    pub provider: Option<Arc<dyn nomifun_ai_agent::SshBackendProvider>>,
+    /// `None` → this server has no SSH support wired, and test-connection is
+    /// refused rather than answered with a guess.
+    pub pool: Option<SshConnectionPool>,
 }
 
 pub fn ssh_host_routes(state: SshHostRouterState) -> Router {
     Router::new()
         .route("/api/ssh-hosts", get(list).post(create))
+        // Before the `{ssh_host_id}` capture for the reader's sake; axum 0.8
+        // prefers a literal segment over a capture regardless of order, and no
+        // real host id can spell `statuses` because every one of them is a uuid.
+        .route("/api/ssh-hosts/statuses", get(statuses))
+        .route("/api/ssh-hosts/import-candidates", get(import_candidates))
+        .route("/api/ssh-hosts/import", post(import_from_ssh_config))
         .route(
             "/api/ssh-hosts/{ssh_host_id}",
             get(get_one).put(update).delete(delete_one),
@@ -105,7 +117,34 @@ async fn delete_one(
         .delete(user.id.as_str(), &ssh_host_id)
         .await
         .map_err(map_err)?;
+    // The row is gone, so the links must go too: a live transport outlives its
+    // host row happily, the supervisor's probe keeps succeeding, and the agent
+    // goes on running commands on a machine the operator just deleted — with no
+    // pill on screen, because the pill needs the row to render.
+    if let Some(pool) = &state.pool {
+        pool.close_for_host(&ssh_host_id).await;
+    }
     Ok(Json(ApiResponse::ok(())))
+}
+
+/// Every live link the caller owns, in the *same* wire shape the realtime
+/// `ssh.status` event carries. A client that missed an event and re-fetches can
+/// therefore never be told a different story than the one it was pushed.
+///
+/// Unlike test-connection, a missing pool is answered with an empty list rather
+/// than an error: a build with no SSH support truthfully owns no links, and this
+/// route is polled whenever a session opens — turning "not configured" into a
+/// failed request would break screens that are merely uninterested in SSH.
+async fn statuses(
+    State(state): State<SshHostRouterState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<Vec<SshStatusEvent>>>, AppError> {
+    let items = state
+        .pool
+        .as_ref()
+        .map(|pool| pool.snapshot(user.id.as_str()))
+        .unwrap_or_default();
+    Ok(Json(ApiResponse::ok(items)))
 }
 
 /// Result of a test-connection probe.
@@ -113,7 +152,8 @@ async fn delete_one(
 #[serde(rename_all = "camelCase")]
 struct TestConnectionResult {
     ok: bool,
-    /// Present on success: the host's SHA256 fingerprint (also persisted).
+    /// Why, in the operator's terms — the probe's own detail, so a failure names
+    /// the setting to fix instead of a generic "could not connect".
     message: String,
 }
 
@@ -122,30 +162,56 @@ async fn test_connection(
     Extension(user): Extension<CurrentUser>,
     Path(ssh_host_id): Path<SshHostId>,
 ) -> Result<Json<ApiResponse<TestConnectionResult>>, AppError> {
-    let Some(provider) = &state.provider else {
+    let Some(pool) = &state.pool else {
         return Err(AppError::BadRequest(
             "SSH support is not configured on this server".into(),
         ));
     };
-    // Connect with the remote $HOME (".") and run a trivial probe. A dropped
-    // connection is closed when the returned backend is dropped at scope end.
-    match provider
-        .connect(user.id.as_str(), ssh_host_id.as_str(), ".")
+    // The pool's probe dials, runs one trivial command and closes with the same
+    // forensics a session close uses — so "test" proves the connection instead of
+    // leaving a socket behind for the runtime to trip over.
+    let outcome = pool.probe(user.id.as_str(), &ssh_host_id).await;
+    Ok(Json(ApiResponse::ok(TestConnectionResult {
+        ok: outcome.ok,
+        message: outcome.detail,
+    })))
+}
+
+/// Hosts in this account's `~/.ssh/config` that could be added to the book.
+///
+/// Non-secret by construction: a candidate names the identity *file*, never its
+/// contents (`the_candidate_list_never_carries_private_key_material` pins that).
+/// Read-only, and the config is the only file read.
+///
+/// The `CurrentUser` extractor is kept even though the scan is per-machine rather
+/// than per-owner: this router is mounted under the instance-owner guard, and a
+/// handler that asks for no identity is one refactor away from being mounted
+/// somewhere that grants none.
+async fn import_candidates(
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<SshConfigScan>>, AppError> {
+    let scan = crate::ssh_config::scan_default_ssh_config()
+        .map_err(|e| AppError::Internal(format!("read ssh config: {e}")))?;
+    Ok(Json(ApiResponse::ok(scan)))
+}
+
+/// Add the confirmed candidates to the book.
+async fn import_from_ssh_config(
+    State(state): State<SshHostRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    body: Result<Json<ImportSshHostsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<SshImportResult>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    // Re-scan instead of trusting the client's copy of the candidates. The only
+    // files this route may read are the ones this account's own ssh config names;
+    // accepting host/port/key paths from the request body would turn an import
+    // into an arbitrary-file-read primitive.
+    let scan = crate::ssh_config::scan_default_ssh_config()
+        .map_err(|e| AppError::Internal(format!("read ssh config: {e}")))?;
+    let result = state
+        .service
+        .import_hosts(user.id.as_str(), &req.aliases, &scan.hosts)
         .await
-    {
-        Ok(backend) => match backend.run_command("true", 15_000).await {
-            Ok(_) => Ok(Json(ApiResponse::ok(TestConnectionResult {
-                ok: true,
-                message: "connection succeeded".into(),
-            }))),
-            Err(e) => Ok(Json(ApiResponse::ok(TestConnectionResult {
-                ok: false,
-                message: format!("connected but probe failed: {e}"),
-            }))),
-        },
-        Err(e) => Ok(Json(ApiResponse::ok(TestConnectionResult {
-            ok: false,
-            message: e,
-        }))),
-    }
+        .map_err(map_err)?;
+    Ok(Json(ApiResponse::ok(result)))
 }

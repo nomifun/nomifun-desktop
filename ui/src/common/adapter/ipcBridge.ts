@@ -1836,7 +1836,135 @@ export interface IApiCreateSshHost {
 
 export type IApiUpdateSshHost = Partial<IApiCreateSshHost>;
 
+/**
+ * Live phase of one conversation↔host link (backend `SshLinkPhase`).
+ *
+ * `degraded` = the transport is fine and the remote shell is being recycled.
+ * `dropped` = the link is gone; `detail` says why. `closed` is a finished link,
+ * whose `reaped` flag says whether the remote shell was *proven* to have exited.
+ */
+export type ISshLinkPhase =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'degraded'
+  | 'reconnecting'
+  | 'dropped'
+  | 'closed';
+
+/**
+ * The single wire shape for link state: the realtime `ssh.status` event and the
+ * `/api/ssh-hosts/statuses` snapshot both carry it, so a link cannot look
+ * different depending on how the client learned about it. Every field is always
+ * present — "unknown" is an explicit null, never an omitted key.
+ *
+ * This — not {@link IApiSshHost.status} — is live link state. The host row's
+ * `status` column is a per-host hint that is written on first connect and never
+ * walked back, so it is permanently green once a host has ever worked.
+ */
+export interface IApiSshStatus {
+  sshHostId: SshHostId;
+  conversationId: string;
+  state: ISshLinkPhase;
+  /** Which dial attempt this is; 0 outside connecting/reconnecting. */
+  attempt: number;
+  nextRetryInMs: number | null;
+  hostFingerprint: string | null;
+  /** Operator-facing transport diagnostics — never credential material. */
+  detail: string | null;
+  /** Non-null only for `closed`; `false` there means the exit was NOT proven. */
+  reaped: boolean | null;
+  /**
+   * Non-null only for `dropped`. `false` means a retry cannot fix it — a
+   * credential was rejected or the host key changed, and a person has to act.
+   * Never infer this from `detail`, which is free-form operator text.
+   */
+  retryable: boolean | null;
+  changedAt: number;
+}
+
 const fromApiSshHost = (value: IApiSshHost): IApiSshHost => ({
+  ...value,
+  sshHostId: parseSshHostId(value.sshHostId),
+});
+
+/**
+ * A host the server found in this machine's `~/.ssh/config` and could add to the
+ * host book.
+ *
+ * Non-secret by construction: `identityFile` is a *path*. The server reads that
+ * file's contents only during an import the user confirmed, and never puts key
+ * material in this payload.
+ */
+export interface IApiSshConfigHost {
+  /** The `Host` alias, which becomes the host's display name. */
+  alias: string;
+  /** `HostName`, or the alias itself when the config gives none (ssh semantics). */
+  host: string;
+  port: number;
+  /** `null` when the config names no user — the form asks rather than guesses. */
+  username: string | null;
+  /** `IdentityFile` with `~/` expanded, or `null`. A path, never contents. */
+  identityFile: string | null;
+}
+
+/** One read of `~/.ssh/config`, including what it could not offer and why. */
+export interface IApiSshConfigScan {
+  /** The file that was read, `null` only when this account has no home dir. */
+  configPath: string | null;
+  hosts: IApiSshConfigHost[];
+  /**
+   * Aliases left out because they go through a jump host (unsupported in v1).
+   * Named rather than dropped: a user whose config is entirely bastion-fronted
+   * would otherwise see an empty list with no explanation.
+   */
+  skippedProxy: string[];
+  /**
+   * How many `Include` directives the parser did not follow. Reported so a short
+   * candidate list is never a silent one.
+   */
+  skippedIncludes: number;
+}
+
+export interface IApiSshImportedHost {
+  alias: string;
+  sshHostId: SshHostId;
+  /**
+   * The row was created but holds no credential — the config named no identity
+   * file, or the one it named had no readable private key. Everything else about
+   * the host is right; it just cannot connect until someone supplies a secret.
+   */
+  needsCredential: boolean;
+  /**
+   * The config named no `User`, so the row's username is empty. A separate
+   * missing piece from {@link needsCredential}: a host whose key was read fine is
+   * still undialable without a username.
+   */
+  needsUsername: boolean;
+}
+
+export type IApiSshImportSkipReason = 'duplicateName' | 'duplicateEndpoint' | 'notInConfig';
+
+export interface IApiSshImportSkipped {
+  alias: string;
+  reason: IApiSshImportSkipReason;
+}
+
+/** What an import did, per alias. A report — never credential material. */
+export interface IApiSshImportResult {
+  imported: IApiSshImportedHost[];
+  skipped: IApiSshImportSkipped[];
+}
+
+const fromApiSshImportResult = (value: IApiSshImportResult): IApiSshImportResult => ({
+  ...value,
+  imported: value.imported.map((item) => ({
+    ...item,
+    sshHostId: parseSshHostId(item.sshHostId),
+  })),
+});
+
+const fromApiSshStatus = (value: IApiSshStatus): IApiSshStatus => ({
   ...value,
   sshHostId: parseSshHostId(value.sshHostId),
 });
@@ -1868,6 +1996,30 @@ export const ssh = {
   ),
   testConnection: httpPost<{ ok: boolean; message: string }, { ssh_host_id: SshHostId }>(
     (p) => `/api/ssh-hosts/${p.ssh_host_id}/test-connection`
+  ),
+  /**
+   * Snapshot of every live link the caller owns. Plural on purpose: a singular
+   * `/api/ssh-hosts/status` would be shadowed by the `/{ssh_host_id}` capture
+   * on the same prefix.
+   */
+  statuses: withResponseMap(
+    httpGet<IApiSshStatus[], void>('/api/ssh-hosts/statuses'),
+    (items) => items.map(fromApiSshStatus)
+  ),
+  /** Every link transition, owner-scoped. Same payload as `statuses`. */
+  onStatus: wsMappedEmitter<IApiSshStatus>('ssh.status', (raw) =>
+    fromApiSshStatus(raw as IApiSshStatus)
+  ),
+  /** Hosts in this machine's `~/.ssh/config` that are not in the book yet. */
+  importCandidates: httpGet<IApiSshConfigScan, void>('/api/ssh-hosts/import-candidates'),
+  /**
+   * Add the confirmed candidates to the book. Aliases only: the server re-reads
+   * its own config to learn what they point at, so the client can never name a
+   * file for the server to read.
+   */
+  importHosts: withResponseMap(
+    httpPost<IApiSshImportResult, { aliases: string[] }>('/api/ssh-hosts/import'),
+    fromApiSshImportResult
   ),
 };
 

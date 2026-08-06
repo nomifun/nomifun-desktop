@@ -1,4 +1,68 @@
 {
+  "collect": {
+    "loadFailed": "Data collection settings are temporarily unreadable.",
+    "sources": {
+      "title": "Collection sources",
+      "desc": "Turning one off stops new records of that kind; the ones already kept still feed learning until the retention policy below removes them. These switches belong to this device — every companion learns from the same records.",
+      "today": "Today",
+      "total": "Stored",
+      "sensitivity": {
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High"
+      },
+      "items": {
+        "tool_calls": {
+          "name": "Tool calls",
+          "desc": "Which tools were called in work sessions: only the tool name and the param shape (top-level arg names and types) — never arg values, never results."
+        },
+        "chat_user_messages": {
+          "name": "Chat prompts",
+          "desc": "The verbatim questions you send in conversations (very long ones are truncated)."
+        },
+        "requirements": {
+          "name": "Requirements",
+          "desc": "Titles, descriptions and tags of requirements you create."
+        },
+        "terminal_sessions": {
+          "name": "Terminal session metadata",
+          "desc": "Terminal create/exit records — no commands and no output content."
+        },
+        "companion_dialogues": {
+          "name": "Messages to companions",
+          "desc": "The verbatim things you say to a desktop companion (long ones are truncated). The companion’s own replies are not recorded; replies stored by earlier versions still take up space but no longer feed learning, and the retention policy cleans them up. On by default."
+        }
+      }
+    },
+    "retention": {
+      "title": "Retention policy",
+      "desc": "Retention is counted in local-date day-files, today included. These records belong to this device and are shared by every companion. An expired day-file is not deleted right away: it goes only once every enabled learning consumer of every companion (periodic learning, skill generation) has read that day. Only when every companion has both switched off does expired mean deleted.",
+      "days": "Target retention",
+      "daysDesc": "How many days raw events are kept at most ({{min}}–{{max}}).",
+      "daysUnit": "days",
+      "capacity": "Storage limit",
+      "capacityDesc": "A hard cap on the event directory ({{min}}–{{max}} MiB) that overrides retention: once usage exceeds it, the oldest day-files are deleted first, even if learning has not read them yet.",
+      "usageTitle": "Current usage",
+      "usage": "Usage: {{used}} / {{max}}",
+      "range": "Stored range: {{from}} to {{to}} ({{count}} daily files)",
+      "empty": "No collected event files are stored.",
+      "loading": "Loading storage status…",
+      "unavailable": "Storage status is temporarily unavailable.",
+      "apply": "Apply retention policy",
+      "applied": "Retention policy applied",
+      "lowerConfirm": "Lowering retention or the storage limit runs a cleanup immediately, which may delete the oldest raw records and cannot be undone. These records are shared by every companion, so the cleanup affects all of them. Extracted memories and skills are kept. Continue?"
+    },
+    "stopAll": {
+      "title": "Stop everything",
+      "desc": "Turn off every collection source above and stop periodic learning and skill generation for every companion in one go.",
+      "action": "Turn everything off",
+      "actionDesc": "Switches only, no deletion: models and intervals stay as they are, learned skills and memories are kept, and already-collected raw records are still cleaned by the retention policy above. It stops learning for every companion, not just the one whose tab this is.",
+      "confirm": "Turn off every collection source and stop periodic learning and skill generation for every companion? You can re-enable at any time with no model reconfiguration. Already-collected raw records are not deleted.",
+      "partial": "Collection has stopped, but learning could not be stopped for some companions. Press again to retry — the ones already stopped are unaffected.",
+      "failed": "Could not turn things off. Please retry.",
+      "done": "Everything turned off"
+    }
+  },
   "title": "Desktop Companion",
   "openChat": "Open chat",
   "tabs": {
@@ -202,9 +266,6 @@
   },
   "evolution": {
     "loadFailed": "Learning and evolution settings are temporarily unavailable.",
-    "collectionScopeTitle": "Where learning material comes from",
-    "collectionScopeDesc": "A companion can only learn from the work data this machine records. What is recorded and how long it is kept belongs to this machine — every companion reads the same recording.",
-    "openCollectionSettings": "Open data collection settings",
     "learningDesc": "This companion reviews your work records on the schedule below and files what it distills under its own name.",
     "learnEnabledDesc": "When off, periodic learning stops; memories and skills already distilled are left untouched.",
     "modelDesc": "The chat model used to review records and distill memories and skills.",

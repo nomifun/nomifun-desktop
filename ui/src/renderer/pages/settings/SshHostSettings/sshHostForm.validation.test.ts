@@ -7,7 +7,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
   buildUpdatePayload,
-  canTestConnection,
   isMaskedSecret,
   isRealSecret,
   validateSshHostForm,
@@ -87,10 +86,15 @@ describe('SSH host form validation', () => {
     expect(out.name).toBe('x');
   });
 
-  test('canTestConnection blocks an invalid form', () => {
-    expect(canTestConnection(base({ password: '' }), false)).toBe(false);
-    expect(canTestConnection(base(), false)).toBe(true);
-    // masked-only password on edit is testable (server still holds it)
-    expect(canTestConnection(base({ password: '***' }), true)).toBe(true);
+  test('Test Connection is gated by the same rule as Save', () => {
+    // The button has no rule of its own: it calls `validateSshHostForm(values,
+    // isEdit)` exactly like Save. What it depends on is the `isEdit` relaxation
+    // below — an edit-mode host whose password is still the mask is testable,
+    // because the server holds the real one.
+    expect(validateSshHostForm(base({ password: '' }), false)).toBe(
+      'ssh.validation.passwordRequired'
+    );
+    expect(validateSshHostForm(base(), false)).toBeNull();
+    expect(validateSshHostForm(base({ password: '***' }), true)).toBeNull();
   });
 });

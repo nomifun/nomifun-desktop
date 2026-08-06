@@ -169,16 +169,77 @@ describe('deleted features stay deleted', () => {
     expect(
       offenders(({ code }) => /installWideNote|installWide|ownsLearningOutput|InstallWideNote/.test(code))
     ).toEqual([]);
-    // The tab must write through the per-companion profile, never the shared config.
+    // 学习 / 进化 are per-companion profile fields and must be written through the
+    // profile. 采集 is the one thing in this tab that is still device-wide, so the
+    // shared config is reachable — but from exactly one file, so two rows can never
+    // disagree about one global value.
     expect(
       offenders(
-        ({ name, code }) => name.includes('tabs/EvolutionTab/') && /patchSharedConfig|getSharedConfig/.test(code)
+        ({ name, code }) =>
+          name.includes('tabs/EvolutionTab/') &&
+          !name.endsWith('useCollectSettings.ts') &&
+          /patchSharedConfig|getSharedConfig/.test(code)
       )
     ).toEqual([]);
   });
 
   test('no cross-companion 共享 domain switch', () => {
     expect(offenders(({ code }) => /nomi\.domains\.|SHARED_TABS|useCompanionShared/.test(code))).toEqual([]);
+  });
+});
+
+describe('数据采集 lives in the 进化 tab', () => {
+  // The 2026-08-04 redesign moved these controls to /settings/privacy on the
+  // reasoning that "what this machine records" is an app-level privacy setting.
+  // It is not: collection exists only to feed companion learning, so splitting it
+  // from 学习配置 made configuring learning a trip out of the workspace. These
+  // assertions pin the controls back where the learning they feed is configured —
+  // t() keys and a lazy route are strings tsc cannot check.
+  const evolutionTab = read('workspace/tabs/EvolutionTab/index.tsx');
+
+  test('the 进化 tab renders the three collect sections', () => {
+    for (const section of ['CollectionSourcesSection', 'RetentionSection', 'StopAllSection']) {
+      expect(evolutionTab.includes(`<${section} settings={collect}`)).toBe(true);
+    }
+    expect(evolutionTab.includes('useCollectSettings()')).toBe(true);
+  });
+
+  test('the kill switch survives a failed collect read', () => {
+    // 一键全关 needs no current config to work — it only calls `disableAll` — so it
+    // must not be gated on one. A panic switch that vanishes exactly when something
+    // is wrong is worse than useless, and the natural tidy-up (grouping all three
+    // collect sections together inside `collectBody`) is precisely what breaks it.
+    //
+    // This asserts on the `collectBody` initialiser, not on one gate SYNTAX. The
+    // first version of this test looked for `{collect.collect && <StopAllSection`
+    // — a form this file never uses, since the other two sections are gated by a
+    // ternary — so it passed whether the switch was gated or not.
+    const bodyStart = evolutionTab.indexOf('const collectBody =');
+    const bodyEnd = evolutionTab.indexOf('return (', bodyStart);
+    expect(bodyStart > 0 && bodyEnd > bodyStart).toBe(true);
+    const collectBody = evolutionTab.slice(bodyStart, bodyEnd);
+    // Sanity: the slice really is the gated group, so the next assertion has teeth.
+    expect(collectBody.includes('CollectionSourcesSection')).toBe(true);
+    expect(collectBody.includes('RetentionSection')).toBe(true);
+    expect(collectBody.includes('StopAllSection')).toBe(false);
+    // Exactly one call site, and it is the one outside the gate.
+    expect(evolutionTab.split('<StopAllSection').length - 1).toBe(1);
+  });
+
+  test('nothing in the workspace links to the retired settings page', () => {
+    expect(offenders(({ code }) => /settings\/privacy/.test(code))).toEqual([]);
+    // The link row's own i18n keys are deleted, so a leftover call site would
+    // render its defaultValue and offer a dead link with no other test failing.
+    expect(offenders(({ code }) => /openCollectionSettings|collectionScopeTitle|collectionScopeDesc/.test(code))).toEqual(
+      []
+    );
+  });
+
+  test('the collect copy moved to the nomi namespace with it', () => {
+    // Keys left under `settings.privacy.*` would name a page that no longer
+    // exists, and `check:i18n` only guards cross-locale parity, not naming.
+    expect(offenders(({ code }) => /settings\.privacy\./.test(code))).toEqual([]);
+    expect(evolutionTab.includes('nomi.collect.loadFailed')).toBe(true);
   });
 });
 

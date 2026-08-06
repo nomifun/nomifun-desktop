@@ -17,9 +17,11 @@
  * along with the two flags that gated them.
  *
  * The `collect.*` fields of the shared config are deliberately NOT read or
- * written here: collection is machine-level (which events this DEVICE records)
- * and owned solely by `pages/settings/privacy` (设置 › 数据采集). This tab only
- * links there.
+ * written here. They are still device-wide (which events this MACHINE records),
+ * so they have a separate owner in this same tab — `useCollectSettings` — and one
+ * writer between them. Keeping the two hooks apart is what lets the per-companion
+ * and device-wide halves sit on one screen without either pretending to be the
+ * other; `shell.structure.test.ts` pins the split.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';

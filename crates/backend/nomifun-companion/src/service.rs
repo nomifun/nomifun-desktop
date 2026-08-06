@@ -1175,7 +1175,18 @@ impl CompanionService {
             }
         });
         let cfg = self.patch_config(patch).await?;
-        self.set_learning_enabled_for_every_companion(true).await?;
+        let (attempted, failed) = self.set_learning_enabled_for_every_companion(true).await;
+        if !failed.is_empty() {
+            // Leave the consent flag UNSET so a retry finishes the roster. Setting it
+            // here would turn this path into a permanent no-op with those companions
+            // never enabled, and the retry is idempotent for the ones that landed.
+            return Err(AppError::Internal(format!(
+                "collection defaults applied, but learning could not be enabled for {}/{} companions: {}",
+                failed.len(),
+                attempted,
+                failed.join(", ")
+            )));
+        }
         self.store.set_state(CONSENT_KEY, "1").await?;
         Ok(cfg)
     }
@@ -1191,6 +1202,13 @@ impl CompanionService {
     /// file, learning is N profiles. Collection is turned off FIRST so the worst
     /// interleaving leaves loops running over a spool nothing is adding to, rather
     /// than collection running with no consumer to advance the retention watermark.
+    ///
+    /// Because of that split there are exactly two failure shapes, and the caller
+    /// must be able to tell them apart: `patch_config` failing means nothing
+    /// happened, whereas a per-companion failure means collection is already off.
+    /// Reporting the second as a bare error reads as "nothing happened" and invites
+    /// the user to hit the switch again while their events have in fact already
+    /// stopped being recorded — so the error says which half landed.
     pub async fn disable_all(&self) -> Result<SharedCompanionConfig, AppError> {
         let patch = serde_json::json!({
             "collect": {
@@ -1202,24 +1220,46 @@ impl CompanionService {
             }
         });
         let cfg = self.patch_config(patch).await?;
-        self.set_learning_enabled_for_every_companion(false).await?;
+        let (attempted, failed) = self.set_learning_enabled_for_every_companion(false).await;
+        if !failed.is_empty() {
+            return Err(AppError::Internal(format!(
+                "collection is now off, but learning could not be stopped for {}/{} companions: {}",
+                failed.len(),
+                attempted,
+                failed.join(", ")
+            )));
+        }
         Ok(cfg)
     }
 
     /// Flip `learn.enabled` + `evolve.enabled` on every companion, emitting one
     /// profile-updated event each so live surfaces follow.
-    async fn set_learning_enabled_for_every_companion(
-        &self,
-        enabled: bool,
-    ) -> Result<(), AppError> {
+    ///
+    /// Best effort by design, returning `(attempted, failed_ids)`. One unwritable
+    /// profile must not leave the rest of the roster untouched: aborting on the
+    /// first error is the worst of both outcomes for a kill switch — it stops some
+    /// companions, reports total failure, and leaves the user unable to tell which.
+    /// Every companion is attempted and the failures are named instead.
+    async fn set_learning_enabled_for_every_companion(&self, enabled: bool) -> (usize, Vec<String>) {
         let patch = serde_json::json!({
             "learn": { "enabled": enabled },
             "evolve": { "enabled": enabled }
         });
-        for companion_id in self.registry.ids().await {
-            self.patch_companion(&companion_id, patch.clone()).await?;
+        let ids = self.registry.ids().await;
+        let attempted = ids.len();
+        let mut failed = Vec::new();
+        for companion_id in ids {
+            if let Err(error) = self.patch_companion(&companion_id, patch.clone()).await {
+                tracing::warn!(
+                    companion_id = %companion_id,
+                    enabled,
+                    error = %error,
+                    "companion learning toggle failed; continuing with the rest of the roster"
+                );
+                failed.push(companion_id);
+            }
         }
-        Ok(())
+        (attempted, failed)
     }
 
     // ----- status -----
@@ -2662,6 +2702,83 @@ mod tests {
             assert_eq!(profile.learn.interval_minutes, 30);
             assert_eq!(profile.evolve.model.as_ref().unwrap().provider_id, provider_id);
         }
+    }
+
+    /// A kill switch that gives up half way is the worst outcome: it stops some
+    /// companions, reports total failure, and leaves the user unable to tell which.
+    /// So one unwritable profile must not spare the rest of the roster, and the
+    /// error must say that collection已经 stopped — reporting a bare failure reads as
+    /// "nothing happened" and invites a second press while events have in fact
+    /// already stopped being recorded.
+    #[tokio::test]
+    async fn disable_all_stops_the_rest_of_the_roster_when_one_profile_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        svc.patch_config(serde_json::json!({
+            "collect": { "tool_calls": true, "companion_dialogues": true }
+        }))
+        .await
+        .unwrap();
+        let mut ids = Vec::new();
+        for name in ["甲", "乙", "丙"] {
+            let companion = svc.create_companion(name, "ink").await.unwrap();
+            svc.patch_companion(
+                &companion.companion_id,
+                serde_json::json!({"learn": { "enabled": true }, "evolve": { "enabled": true }}),
+            )
+            .await
+            .unwrap();
+            ids.push(companion.companion_id);
+        }
+
+        // Block exactly one profile. `save_bytes_atomic` creates its temp file inside
+        // the companion's own directory, so a non-writable directory fails the save —
+        // and `registry::patch` saves BEFORE inserting, so that companion keeps
+        // `learn.enabled = true` in memory too.
+        let blocked = ids[1].clone();
+        let blocked_dir = dir
+            .path()
+            .join(crate::COMPANION_COMPANIONS_REL_DIR)
+            .join(&blocked);
+        let original = std::fs::metadata(&blocked_dir).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&blocked_dir, readonly).unwrap();
+
+        // A root runner writes straight through the permission bits, so the failure
+        // this test needs cannot be expressed there. Say so instead of asserting it.
+        let probe = blocked_dir.join(".write-probe");
+        if std::fs::File::create(&probe).is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            std::fs::set_permissions(&blocked_dir, original).unwrap();
+            eprintln!("skipped: this runner writes through a read-only directory (root?)");
+            return;
+        }
+
+        let error = svc.disable_all().await.unwrap_err().to_string();
+        std::fs::set_permissions(&blocked_dir, original).unwrap();
+
+        // The half that landed, and the user must be told it landed.
+        {
+            let cfg = svc.config.read().await;
+            assert!(!cfg.collect.tool_calls);
+            assert!(!cfg.collect.companion_dialogues);
+        }
+        assert!(
+            error.contains("collection is now off"),
+            "the error must not read as 'nothing happened': {error}"
+        );
+        assert!(error.contains(&blocked), "the error must name the companion that failed: {error}");
+
+        // Best effort: a mid-roster failure does not spare the companions after it.
+        for id in [&ids[0], &ids[2]] {
+            let profile = svc.get_companion(id).await.unwrap();
+            assert!(!profile.learn.enabled, "the rest of the roster must still stop");
+            assert!(!profile.evolve.enabled);
+        }
+        // And the blocked one is honestly still running — nothing was faked.
+        let still_on = svc.get_companion(&blocked).await.unwrap();
+        assert!(still_on.learn.enabled, "a failed save must not report success in memory");
     }
 
     #[tokio::test]
