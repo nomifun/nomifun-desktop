@@ -7,6 +7,10 @@ mod support;
 use nomifun_ssh::dto::CreateSshHostRequest;
 use nomifun_ssh::{SshDialError, SshLinkKey, SshLinkState};
 
+/// Distinctive enough that a substring search for it is meaningful — the point of
+/// a negative security assertion is that it would actually catch the leak.
+const SECRET: &str = "hunter2_supersecret";
+
 fn host_req(auth_type: &str, password: Option<&str>) -> CreateSshHostRequest {
     CreateSshHostRequest {
         name: "unreachable".into(),
@@ -74,7 +78,7 @@ async fn missing_credential_maps_to_credential_error() {
 async fn a_refused_dial_publishes_dropped_with_the_retryable_flag() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let harness = support::harness(tmp.path().join("known_hosts"), support::brisk_tuning()).await;
-    let id = harness.add_host(host_req("password", Some("pw"))).await;
+    let id = harness.add_host(host_req("password", Some(SECRET))).await;
     let key = SshLinkKey {
         conversation_id: "conv-1".into(),
         ssh_host_id: id.clone(),
@@ -102,6 +106,42 @@ async fn a_refused_dial_publishes_dropped_with_the_retryable_flag() {
             assert!(retryable, "a refused connection is retryable: {detail}");
         }
         other => panic!("expected dropped, got {other:?}"),
+    }
+
+    // The third face credentials can leak through. `Debug` is pinned by the
+    // transport's own tests and the host-book DTO by `host_service.rs`; this is
+    // the wire projection, whose `detail` is free-form operator text built from a
+    // dial error and rendered verbatim in the status pill's popover.
+    //
+    // The host really does hold the secret — checked first, because an assertion
+    // that a passwordless host leaks no password proves nothing at all.
+    let cred = harness
+        .service()
+        .decrypt_credential(&harness.user_id, &id)
+        .await
+        .expect("the host stores a credential");
+    assert_eq!(
+        cred.password.as_ref().map(|p| p.as_str()),
+        Some(SECRET),
+        "the fixture must hold the secret whose absence is being asserted"
+    );
+
+    let snapshot = serde_json::to_string(&harness.pool.snapshot(&harness.user_id))
+        .expect("serialize the status snapshot");
+    assert!(
+        !snapshot.contains(SECRET),
+        "the status snapshot leaked the host password: {snapshot}"
+    );
+    let pushed = harness.events.status_payloads();
+    assert!(
+        !pushed.is_empty(),
+        "the failed dial must have announced itself"
+    );
+    for payload in &pushed {
+        assert!(
+            !payload.to_string().contains(SECRET),
+            "an ssh.status payload leaked the host password: {payload}"
+        );
     }
 }
 
