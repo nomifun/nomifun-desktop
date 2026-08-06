@@ -313,8 +313,8 @@ fn append_launch_nudge(
 /// any. Rendering is delegated to the shared builder
 /// (`nomifun_knowledge::context::build_knowledge_context`, `PromptSection`
 /// format) — the single source of truth for the retrieval protocol, per-base
-/// sections, and the write-back ("回血") contract: read-only, staged
-/// (`_inbox/{conversation_id}/`), or direct.
+/// sections, and the write-back ("回血") contract: read-only, or enabled with
+/// the mount's disposition (manual / auto) appended.
 ///
 /// The section is kept SEPARATE from `preset_context` (it is NOT part of the
 /// new-session `[Assistant Rules]` prelude) so it can be delivered on the
