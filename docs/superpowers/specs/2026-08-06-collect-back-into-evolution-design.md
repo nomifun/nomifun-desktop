@@ -180,6 +180,21 @@ bun run test:crate     # companion crate
 - `companion_replies_are_never_collected` 原本用默认配置，而 `message.stream` 的守卫已收窄为 `if collect.tool_calls`（默认 false），分支根本不执行——测试证明的是"守卫关着"，不是"分支忽略回复内容"。已强制打开 `tool_calls`，并追加一条"同一事件名仍能采集到 tool.call"的断言，证明分支确实在跑。
 - `the kill switch survives a failed collect read` 原本匹配 `{collect.collect && <StopAllSection`——这个文件从不使用 `&&` 门控（另两个分区走三元）。三名验证者各自把 `StopAllSection` 挪进 `collectBody` 的三元分支，测试全部照过。**这个改动在实施过程中真实发生了一次**，测试没有拦住。已改为对 `collectBody` 初始化式切片做结构断言，并限定只有一个调用点；已用变异测试确认该改动现在会让测试失败。
 
-### 7.4 未处理，明确留下
+### 7.4 一键全关的部分失败，已收尾
 
-`disable_all` 非原子（一份共享 collect 文件 + N 个 profile），失败时 UI 只弹 `Message.error`，读起来像"什么都没发生"，而实际上采集可能已全部关闭、部分伙伴已停。补一套部分失败的交互属于新设计，不在本次范围。
+`disable_all` 是两次独立写入（一份共享 collect 文件，然后 N 个 profile），所以"失败"不是一种结果而是两种，而原实现把两者压成同一条裸错误：
+
+- `patch_config` 失败 → 什么都没变，报错准确。
+- per-companion 循环失败 → **采集必定已全部关闭**，但报错读起来像"什么都没发生"，会诱使用户再按一次，而他的事件其实早已停止记录。
+
+更糟的是循环用 `?` 在首个失败处中止：名册里第 3 个伙伴写不进去，第 4–N 个就完全没被尝试。对一个总闸来说这是最差的结果——停掉了一部分、报告全盘失败、且用户无从得知是哪些。
+
+三处改动：
+
+1. **后端改为尽力而为。** `set_learning_enabled_for_every_companion` 不再中止，逐个尝试全名册，返回 `(attempted, failed_ids)` 并逐条 warn。`disable_all` 在有失败时返回一条**指明哪一半已生效**的错误（含失败的伙伴 id）。`apply_default_on_consent` 同样处理，但**不写 consent 标记**——写了会让这条路径永久变成 no-op，那些伙伴再也不会被开启，而重试对已成功的是幂等的。
+2. **UI 自己判断落地状态。** `disableAll` 改为返回 `DisableAllOutcome`（`complete` / `collectionStopped` / `error`）而非抛异常：失败时重读一次共享配置，用"五个源是否全关"判定采集那半是否已落地。不需要改 wire——`ICompanionCollectConfig` 与路由一行未动，`ui-api-contract-version.txt` 无需递增。重读同时会重绘开关，用户在读到提示的同时**看见**采集确实已关。
+3. **文案分三态。** 全成功、"采集已停但有伙伴没停下（再按一次即可重试，已停下的不受影响）"、以及彻底没生效。新增 `nomi.collect.stopAll.partial` / `.failed` 两语言。
+
+守护测试 `disable_all_stops_the_rest_of_the_roster_when_one_profile_cannot_be_written`：把名册中间那个伙伴的目录改为不可写（`save_bytes_atomic` 的临时文件建在该目录内，故写入失败），断言采集已关、错误文本指明"collection is now off"并含失败的 id、**其余伙伴仍被停掉**、且失败的那个在内存里诚实地仍为 enabled（`registry::patch` 先存盘后插入内存，不会假报成功）。root 环境下权限位无效，测试打印原因并跳过而非空过。已用变异测试确认：改回首次失败即中止，该测试报 `the rest of the roster must still stop`。
+
+仍然不是原子的——这是文件布局决定的，不打算改。变的是失败后用户被告知的内容是真的。
