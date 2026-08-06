@@ -1,7 +1,7 @@
 # 数据采集归位「进化」标签，并停止采集模型回复
 
 - 日期：2026-08-06
-- 状态：设计已确认，待实施。分支 `feat/collect-back-into-evolution-tab`。
+- 状态：已实施（见 §7）。分支 `feat/collect-back-into-evolution-tab`，未推远端。
 - 影响面：`ui/src/renderer/pages/nomi/workspace/tabs/EvolutionTab/**`、`ui/src/renderer/pages/settings/**`（删除）、`ui/src/renderer/components/layout/Router.tsx`、i18n 两语、`crates/backend/nomifun-companion/src/{collector,prompt,learner,config}.rs`、`docs/guides/companions.zh.md`
 
 ## 1. 问题陈述
@@ -155,3 +155,31 @@ bun run test:crate     # companion crate
 
 - `docs/guides/companions.zh.md`：更新采集配置的位置描述。
 - `2026-08-04-companion-workspace-redesign-design.md`：§4.5 与 §5.2 断言采集迁往应用设置。不改写历史结论，追加一条指向本文的修正说明——该 spec 的 §4.2/§4.3 已有同样的"实施时作废"先例，沿用其体例。
+
+## 7. 实施状态（2026-08-06）
+
+全部实施完成。基线对齐：UI 1764→1772 pass / 0 fail（新增 4 条结构测试 + 4 条 locale 测试），`cargo test -p nomifun-companion` 268 pass / 0 fail（前后一致：采集器删 3 加 1，学习器加 2），`bun run check` 与 UI 生产打包均通过。活服务端已实测 `GET/PATCH /api/companion/config`、`events/stats`、`events/storage`、`POST /disable-all`。
+
+对 diff 做了六维度审查 + 每条发现三视角对抗验证。以下是相对本文的落地修正：
+
+### 7.1 文案：三处断言与代码不符，已改
+
+搬迁把采集控件放进了 per-companion 的标签页，于是"这个开关影响谁"必须由文案自己讲清。三处没讲清或讲错的：
+
+- `retention.desc` 沿用了 `learn`/`evolve` **per-companion 化之前**的语义："两者都关着时，过期即删"。实际 `active_consumer_watermark`（`collector.rs`）对**所有伙伴**已启用的 learn/evolve 游标取 min，所以只有每个伙伴的两项都关掉才成立。这句话紧挨着本标签页的两个开关，误读风险被搬迁放大了。已改写为按名册表述，`lowerConfirm` 也补上"记录由所有伙伴共用，清理对每个伙伴都生效"。
+- `stopAll.actionDesc` 一度写成"这是本页唯一影响所有伙伴的操作"——**假的**：同屏的采集来源开关与保留策略写的是同一份装机级 `CollectConfig`。已改为直述"它会停掉所有伙伴的学习，不只是当前这个"。
+- 组件内联的 `defaultValue` 兜底文案未随 JSON 同步更新，键一旦解析失败就会显示旧口径（隐去名册范围）。已与 JSON 对齐。
+
+### 7.2 注释：两处过强断言，已改
+
+- `collector.rs` 模块头一度写成"model output is not a collection source in any shape"。`tool_calls` 记录的工具名与参数形状就是模型的产出（只是不含值），这句话会让隐私审计得出错误结论。已收窄为"No model PROSE is recorded"，并点明 `tool_calls` 是唯一例外。
+- 两条测试注释仍在描述已删除的缓冲机制（"buffered text dropped"、"companion_dialogues 保持 arm guard active"）。新守卫是 `if collect.tool_calls`，默认配置下该分支根本不匹配——注释会让维护者以为存在一层不存在的分支内早返回。已改。
+
+### 7.3 测试：两条守护形同虚设，已补强
+
+- `companion_replies_are_never_collected` 原本用默认配置，而 `message.stream` 的守卫已收窄为 `if collect.tool_calls`（默认 false），分支根本不执行——测试证明的是"守卫关着"，不是"分支忽略回复内容"。已强制打开 `tool_calls`，并追加一条"同一事件名仍能采集到 tool.call"的断言，证明分支确实在跑。
+- `the kill switch survives a failed collect read` 原本匹配 `{collect.collect && <StopAllSection`——这个文件从不使用 `&&` 门控（另两个分区走三元）。三名验证者各自把 `StopAllSection` 挪进 `collectBody` 的三元分支，测试全部照过。**这个改动在实施过程中真实发生了一次**，测试没有拦住。已改为对 `collectBody` 初始化式切片做结构断言，并限定只有一个调用点；已用变异测试确认该改动现在会让测试失败。
+
+### 7.4 未处理，明确留下
+
+`disable_all` 非原子（一份共享 collect 文件 + N 个 profile），失败时 UI 只弹 `Message.error`，读起来像"什么都没发生"，而实际上采集可能已全部关闭、部分伙伴已停。补一套部分失败的交互属于新设计，不在本次范围。

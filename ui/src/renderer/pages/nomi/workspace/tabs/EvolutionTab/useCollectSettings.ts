@@ -7,15 +7,16 @@
 /**
  * The one owner of `CollectConfig` in the UI.
  *
- * Collection is machine-level, not companion-level: every field here lives in the
- * cross-companion shared config (`GET|PATCH /api/companion/config`), so exactly
- * one surface — 设置 › 数据采集 — may write it. A companion page that also wrote
- * these fields would let two screens disagree about one global value, which is
- * why 进化 only links here now.
+ * Collection exists to feed companion learning, so its controls live beside 学习配置
+ * in the 进化 tab. The config itself is still ONE cross-companion object
+ * (`GET|PATCH /api/companion/config`) rather than a per-companion field, so the
+ * sections built on this hook are the same device-wide values whichever companion
+ * is selected — their copy has to say so, and this file must stay the only place in
+ * the tab that touches the shared config (guarded in `shell.structure.test.ts`).
  *
- * Alongside the config this exposes the two read-only measurements the page needs
- * to be honest about what is on disk: per-source counters (`eventStats`) and the
- * event spool's size/date bounds (`eventStorage`).
+ * Alongside the config this exposes the two read-only measurements the sections
+ * need to be honest about what is on disk: per-source counters (`eventStats`) and
+ * the event spool's size/date bounds (`eventStorage`).
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
