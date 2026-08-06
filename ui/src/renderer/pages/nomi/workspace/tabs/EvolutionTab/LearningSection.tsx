@@ -6,9 +6,7 @@
 
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import { Message, Switch } from '@arco-design/web-react';
-import { Right } from '@icon-park/react';
 import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import LearningModelRow from './LearningModelRow';
 import NumberSetting from './NumberSetting';
@@ -23,42 +21,12 @@ interface Props {
 }
 
 /**
- * Pointer to 设置 › 数据采集, which owns every `collect.*` field.
- *
- * This row used to be three switches writing `collect.tool_calls` /
- * `chat_user_messages` / `requirements` — the same global fields the settings page
- * edits. Two surfaces writing one global value is worse than one, so this tab only
- * links now. It is deliberately NOT a per-companion source selector: no such field
- * exists on the profile yet.
- */
-const CollectionLink: React.FC = () => {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const open = () => {
-    void navigate('/settings/privacy');
-  };
-  return (
-    <div
-      role='button'
-      tabIndex={0}
-      onClick={open}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          open();
-        }
-      }}
-      className='flex cursor-pointer items-center gap-4px text-12px leading-18px text-primary-6 hover:opacity-80'
-    >
-      <span>{t('nomi.evolution.openCollectionSettings', { defaultValue: '前往数据采集设置' })}</span>
-      <Right theme='outline' size='12' fill='currentColor' strokeWidth={3} className='line-height-0 shrink-0' />
-    </div>
-  );
-};
-
-/**
  * 学习配置 — whether this companion reviews your work records on a schedule,
  * how often, and with which model.
+ *
+ * What it may review is 采集来源, immediately below in this same tab. This section
+ * used to end with a link out to 设置 › 数据采集; the two belong on one screen, so
+ * there is nothing left to link to.
  */
 const LearningSection: React.FC<Props> = ({ config, needsModel }) => {
   const { t } = useTranslation();
@@ -104,14 +72,6 @@ const LearningSection: React.FC<Props> = ({ config, needsModel }) => {
           }
         />
         <LearningModelRow learn={learn} patchLearn={patchLearn} missing={needsModel} />
-        <NomiSettingRow
-          title={t('nomi.evolution.collectionScopeTitle', { defaultValue: '学习素材来自哪里' })}
-          description={t('nomi.evolution.collectionScopeDesc', {
-            defaultValue:
-              '伙伴只能学到这台设备记录下来的工作数据。记什么、留多久属于这台设备，所有伙伴共用同一份记录。',
-          })}
-          controls={<CollectionLink />}
-        />
       </NomiSettingList>
     </NomiSettingSection>
   );

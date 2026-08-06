@@ -28,14 +28,17 @@ import {
  *   - Day-files are bucketed by LOCAL date; the cutoff is
  *     `today - (retention_days - 1)`, so the window includes today.
  *   - An expired day-file is deleted only once every *enabled* consumer's cursor
- *     (`active_consumer_watermark` = min over learn/evolve, and only for the ones
- *     switched on) has passed all of its events. With both consumers off the
- *     watermark is `None` and expired files go immediately.
+ *     has passed all of its events. `active_consumer_watermark` is the min over
+ *     the enabled learn/evolve cursors of EVERY companion in the roster — not
+ *     just the one whose tab this is — so "both toggles off" only means
+ *     delete-on-expiry when that holds for every companion. The copy says so;
+ *     it used to describe the pre-per-companion behaviour.
  *   - The byte cap then runs unconditionally and deletes oldest-first *ignoring
  *     the cursors*, so it can drop days nothing has read. It is enforced both by
  *     the 6-hourly prune and by every single append, so the cap always wins.
  *   - `patch_config` prunes immediately when either number changes, which is why
- *     lowering one asks for confirmation.
+ *     lowering one asks for confirmation — and why that confirm names the scope:
+ *     one shared spool, so the deletion reaches every companion's material.
  */
 const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ settings }) => {
   const { t } = useTranslation();
@@ -79,7 +82,7 @@ const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setti
     try {
       await patch({ event_retention_days: retentionDraft, event_max_storage_mb: capacityDraft });
       refreshMeasurements(true);
-      Message.success(t('settings.privacy.retention.applied', { defaultValue: '保留策略已应用' }));
+      Message.success(t('nomi.collect.retention.applied', { defaultValue: '保留策略已应用' }));
     } catch (error) {
       Message.error(String(error));
     } finally {
@@ -95,7 +98,7 @@ const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setti
       loading={applying}
       onClick={lowers ? undefined : () => void apply()}
     >
-      {t('settings.privacy.retention.apply', { defaultValue: '应用保留策略' })}
+      {t('nomi.collect.retention.apply', { defaultValue: '应用保留策略' })}
     </Button>
   );
 
@@ -103,21 +106,21 @@ const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setti
     if (storageState === 'error') {
       return (
         <span className='text-t-tertiary'>
-          {t('settings.privacy.retention.unavailable', { defaultValue: '暂时无法读取存储状态。' })}
+          {t('nomi.collect.retention.unavailable', { defaultValue: '暂时无法读取存储状态。' })}
         </span>
       );
     }
     if (!storage) {
       return (
         <span className='text-t-tertiary'>
-          {t('settings.privacy.retention.loading', { defaultValue: '正在读取存储状态…' })}
+          {t('nomi.collect.retention.loading', { defaultValue: '正在读取存储状态…' })}
         </span>
       );
     }
     return (
       <span className='flex flex-wrap items-center gap-x-16px gap-y-2px'>
         <span>
-          {t('settings.privacy.retention.usage', {
+          {t('nomi.collect.retention.usage', {
             used: formatBytes(storage.total_bytes),
             max: formatBytes(storage.max_bytes),
             defaultValue: '当前占用：{{used}} / {{max}}',
@@ -125,13 +128,13 @@ const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setti
         </span>
         <span>
           {storage.oldest_day && storage.newest_day
-            ? t('settings.privacy.retention.range', {
+            ? t('nomi.collect.retention.range', {
                 from: storage.oldest_day,
                 to: storage.newest_day,
                 count: storage.file_count,
                 defaultValue: '数据范围：{{from}} 至 {{to}}（{{count}} 个日文件）',
               })
-            : t('settings.privacy.retention.empty', { defaultValue: '当前没有采集事件文件。' })}
+            : t('nomi.collect.retention.empty', { defaultValue: '当前没有采集事件文件。' })}
         </span>
       </span>
     );
@@ -139,17 +142,17 @@ const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setti
 
   return (
     <NomiSettingSection
-      title={t('settings.privacy.retention.title', { defaultValue: '保留策略' })}
-      description={t('settings.privacy.retention.desc', {
+      title={t('nomi.collect.retention.title', { defaultValue: '保留策略' })}
+      description={t('nomi.collect.retention.desc', {
         defaultValue:
-          '保留期按本地日期分文件计算，含今天在内。过期的日文件不会立刻删除：只有当所有已开启的学习任务（定时学习、技能生成）都读过那一天的记录后才会删；两者都关着时，过期即删。',
+          '保留期按本地日期分文件计算，含今天在内。这份记录属于这台设备，所有伙伴共用。过期的日文件不会立刻删除：只有当所有伙伴已开启的学习任务（定时学习、技能生成）都读过那一天的记录后才会删；只有每个伙伴的这两项都关着时，过期才即删。',
       })}
       action={
         lowers ? (
           <Popconfirm
-            title={t('settings.privacy.retention.lowerConfirm', {
+            title={t('nomi.collect.retention.lowerConfirm', {
               defaultValue:
-                '调低保留期或容量上限会立即执行一次清理，可能删掉最旧的原始记录，且无法恢复。已提炼的记忆和技能会保留。继续？',
+                '调低保留期或容量上限会立即执行一次清理，可能删掉最旧的原始记录，且无法恢复。这份记录由所有伙伴共用，清理对每个伙伴都生效。已提炼的记忆和技能会保留。继续？',
             })}
             okButtonProps={{ status: 'danger' }}
             onOk={apply}
@@ -163,8 +166,8 @@ const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setti
     >
       <NomiSettingList>
         <NomiSettingRow
-          title={t('settings.privacy.retention.days', { defaultValue: '目标保留期' })}
-          description={t('settings.privacy.retention.daysDesc', {
+          title={t('nomi.collect.retention.days', { defaultValue: '目标保留期' })}
+          description={t('nomi.collect.retention.daysDesc', {
             min: RETENTION_DAYS_MIN,
             max: RETENTION_DAYS_MAX,
             defaultValue: '原始事件最长保留多少天（{{min}}–{{max}}）。',
@@ -180,12 +183,12 @@ const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setti
                 const parsed = Number(value);
                 setRetentionDraft(Number.isFinite(parsed) ? parsed : null);
               }}
-              suffix={t('settings.privacy.retention.daysUnit', { defaultValue: '天' })}
+              suffix={t('nomi.collect.retention.daysUnit', { defaultValue: '天' })}
             />
           }
         />
         <NomiSettingRow
-          title={t('settings.privacy.retention.capacity', { defaultValue: '容量上限' })}
+          title={t('nomi.collect.retention.capacity', { defaultValue: '容量上限' })}
           leading={
             <Attention
               theme='filled'
@@ -199,7 +202,7 @@ const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setti
               className='line-height-0 shrink-0 text-danger-6'
             />
           }
-          description={t('settings.privacy.retention.capacityDesc', {
+          description={t('nomi.collect.retention.capacityDesc', {
             min: CAPACITY_MB_MIN,
             max: CAPACITY_MB_MAX,
             defaultValue:
@@ -221,7 +224,7 @@ const RetentionSection: React.FC<{ settings: CollectSettingsHandle }> = ({ setti
           }
         />
         <NomiSettingRow
-          title={t('settings.privacy.retention.usageTitle', { defaultValue: '当前占用' })}
+          title={t('nomi.collect.retention.usageTitle', { defaultValue: '当前占用' })}
           description={usage}
         />
       </NomiSettingList>

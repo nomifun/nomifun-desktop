@@ -2,6 +2,7 @@
 
 - 日期：2026-08-04
 - 状态：已实施（见 §11）。分支 `feat/companion-workspace-redesign`，未推远端。
+- **部分作废（2026-08-06）**：§4.5 与 §5.2 把数据采集判为「应用级隐私设置」并迁出本页，这个判断已被推翻——采集存在的唯一目的是给伙伴学习提供素材，迁出让配置路径无谓变长。采集已归位到「进化」标签，`设置 › 数据采集` 入口删除。见 [2026-08-06 设计](2026-08-06-collect-back-into-evolution-design.md)。本文其余结论不受影响。
 - 影响面：`ui/src/renderer/pages/nomi/**`、`crates/backend/nomifun-companion/**`、`crates/backend/nomifun-gateway/src/caps_*.rs`、`ui/src/common/adapter/ipcBridge.ts`、i18n 两语、`docs/guides/companions*.md`
 
 ## 1. 问题陈述
@@ -119,7 +120,7 @@ Stage 4（**已完成**，见 §7）：表重建，把 `(scope_kind, scope_compa
 
 ### 4.5 顺带清理的死代码
 
-- `tabs/CollectTab.tsx` 迁出本页（→ 应用设置 · 隐私与数据采集）。
+- `tabs/CollectTab.tsx` 迁出本页（→ 应用设置 · 隐私与数据采集）。**已作废（2026-08-06）**：该迁移当时并未真正完成（控件一度完全没有 UI，后由 `e2699069` 在 `/settings/privacy` 重建），现已整体迁回「进化」标签。见文首说明。
 - `index.structure.test.ts`（266 行硬编码当前 IA 的字符串断言）删除重写。
 - `uno.config.ts:51-55` 的 `borderColors` 块：`border-b-*` 被 UnoCSS 解析为 border-bottom-color，这五个键不可达。连同 `MIGRATION.md` 里错误的指引一并修正。
 - `border-border-2` / `border-border-3`（36 处，15 文件）**不产生任何 CSS**——本页范围内全部换成 `border border-solid border-[var(--color-border-2)]`，并记录为全仓清理待办。
@@ -156,6 +157,8 @@ pub enum EvolvePreference { Conservative, Aggressive }
 - `休眠时段`（`appearance.quiet_start/end`，今天只有渲染进程的桌宠窗口读它）新增服务端语义：休眠时段内跳过该伙伴的学习与进化调度。不影响 IM 自动回复（那会造成意外静默）。
 
 ### 5.2 采集配置迁出
+
+**本节已作废（2026-08-06）。** 见文首说明：采集已迁回「进化」标签。下述判断保留作记录，但结论是错的——把"这台机器记录什么"当成独立于伙伴的隐私设置，忽略了它唯一的下游就是伙伴学习。
 
 `CollectConfig`（记录哪些事件源）本质是"这台机器记录什么"的隐私设置，不是伙伴属性。后端保持装机级不变，UI 从 `tabs/CollectTab.tsx` 迁至应用设置的隐私分区。伙伴侧只保留"从已记录的源中，这个伙伴学习哪些"（`CompanionLearnConfig.sources`）。两级模型，边界清晰。
 
