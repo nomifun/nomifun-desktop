@@ -26,6 +26,10 @@ tracing = { workspace = true }
 # `v7` feature; naming it here keeps the crate compiling on its own rather than
 # relying on workspace feature unification.
 uuid = { workspace = true, features = ["v4"] }
+# Statically linked vendored libopus (see the workspace entry for why this and
+# not `audiopus`/`opus`); the FFI is wrapped in `src/audio/opus.rs`.
+opusic-sys = { workspace = true }
+symphonia = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
