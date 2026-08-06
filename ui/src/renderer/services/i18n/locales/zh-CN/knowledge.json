@@ -208,6 +208,7 @@
     "kindLocal": "本地",
     "kindWeb": "网页",
     "manageTags": "管理标签",
+    "selectedCount": "已选 {{count}} 个",
     "sortCreated": "创建时间",
     "sortLabel": "排序",
     "sortName": "名称",
