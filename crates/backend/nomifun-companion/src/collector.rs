@@ -1,11 +1,14 @@
 //! Opt-in event collector. Subscribes to the global broadcast bus and appends
 //! normalized JSONL records to `{companion_dir}/events/YYYYMMDD.jsonl` for the
-//! sources the user has enabled. Companion replies are accumulated per
-//! `(conversation_id, msg_id)` from `message.stream` content chunks and only
-//! flushed on `turn.completed` — the bus has no single "assistant reply
-//! finished" event carrying the full text.
+//! sources the user has enabled. No model PROSE is recorded: companion replies
+//! used to be accumulated per `(conversation_id, msg_id)` from `message.stream`
+//! chunks and flushed on `turn.completed`, but the learner was never allowed to
+//! read a reply as owner intent, so that half of the source cost disk and tokens
+//! without ever producing a memory. `tool_calls` is the one source that records
+//! something the model chose rather than the owner — and only the tool NAME and
+//! param SHAPE, never a value.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,18 +21,11 @@ use tokio::sync::RwLock;
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 
 const MAX_FIELD_CHARS: usize = 2000;
-const MAX_REPLY_CHARS: usize = 4000;
 /// Defense in depth for abnormal live-bus payloads. Normal collection records
 /// are only a few KiB after the field-level truncation. Legacy/imported JSONL
 /// remains readable so the new policy never strands existing learning data.
 const MAX_EVENT_LINE_BYTES: usize = 64 * 1024;
 const EVENT_PRUNE_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
-/// Global cap on concurrently buffered assistant replies. A `turn.completed`
-/// lost to a Lagged bus receiver orphans its buffers; without a cap they
-/// accumulate for the life of the process. `companion_dialogues` defaults ON,
-/// so concurrent companion conversations may buffer. Oldest-created entries
-/// are evicted first.
-const MAX_REPLY_BUFFERS: usize = 64;
 
 /// One normalized JSONL record.
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,7 +39,7 @@ pub struct CollectedEvent {
     pub data: serde_json::Value,
 }
 
-/// Lightweight filesystem status for the collection settings page. Date
+/// Lightweight filesystem status for the 采集 sections of the 进化 tab. Date
 /// bounds come from validated day-file names and therefore require no payload
 /// scan.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -92,11 +88,6 @@ pub struct Collector {
     /// every companion's enabled consumers, so pruning cannot be decided from the
     /// shared config alone.
     registry: Arc<crate::registry::CompanionRegistry>,
-    /// (conversation_id, msg_id) -> accumulated assistant text.
-    reply_buffers: HashMap<(String, String), String>,
-    /// Buffer creation order for [`MAX_REPLY_BUFFERS`] eviction. May hold
-    /// tombstones for already-flushed keys; pruned lazily.
-    reply_buffer_order: VecDeque<(String, String)>,
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -485,8 +476,6 @@ impl Collector {
             event_store_lock,
             store,
             registry,
-            reply_buffers: HashMap::new(),
-            reply_buffer_order: VecDeque::new(),
         }
     }
 
@@ -610,31 +599,6 @@ impl Collector {
         }
     }
 
-    /// Mutable access to one reply buffer, creating it under the global
-    /// [`MAX_REPLY_BUFFERS`] cap (oldest-created entries evicted first).
-    fn reply_buffer_mut(&mut self, key: (String, String)) -> &mut String {
-        if !self.reply_buffers.contains_key(&key) {
-            while self.reply_buffers.len() >= MAX_REPLY_BUFFERS {
-                let Some(oldest) = self.reply_buffer_order.pop_front() else { break };
-                if self.reply_buffers.remove(&oldest).is_some() {
-                    tracing::debug!(
-                        conversation_id = %oldest.0,
-                        msg_id = %oldest.1,
-                        "companion collector evicted oldest reply buffer (global cap)"
-                    );
-                }
-            }
-            // Flushed buffers leave tombstone keys in the order queue; prune
-            // them once they dominate so the queue stays O(cap).
-            if self.reply_buffer_order.len() >= MAX_REPLY_BUFFERS * 4 {
-                let live = &self.reply_buffers;
-                self.reply_buffer_order.retain(|k| live.contains_key(k));
-            }
-            self.reply_buffer_order.push_back(key.clone());
-        }
-        self.reply_buffers.entry(key).or_default()
-    }
-
     async fn handle(&mut self, msg: &WebSocketMessage<serde_json::Value>) {
         let config = self.config.read().await.clone();
         let collect = &config.collect;
@@ -677,150 +641,73 @@ impl Collector {
                 });
                 self.append("chat_user_messages", &msg.name, data).await;
             }
-            "message.stream" if collect.companion_dialogues || collect.tool_calls => {
-                // Accumulate visible content chunks; flushed on turn.completed.
+            // Tool calls are the only thing collected off the stream, and the arm
+            // is gated on that source alone. Companion
+            // replies used to be buffered here and flushed on `turn.completed`;
+            // they are no longer a collection source at all. The learner was always
+            // forbidden from reading a reply as owner intent (LEARN_SYSTEM in
+            // `prompt.rs`), so the bulkier half of `companion_dialogues` could never
+            // produce a memory on its own — it only cost disk and tokens.
+            "message.stream" if collect.tool_calls => {
                 let kind = msg.data.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 // Tool-call signal (design §5.1): the primary skill-mining input.
                 // Tool calls arrive on this same bus event with type=="tool_call".
                 // We persist ONLY the tool name + a normalized param SHAPE (sorted
                 // top-level arg keys + JSON types) — NEVER arg/input/output values
                 // (secrets). One record per call (on Completed only).
-                if kind == "tool_call" {
-                    if !collect.tool_calls {
-                        return;
-                    }
-                    // Same anti-self-reinforcement guard as the content path: agent-
-                    // driven turns (companion/cron/autowork/idmm) are not owner work.
-                    if payload_origin(&msg.data).is_some() {
-                        return;
-                    }
-                    if msg.data.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
-                        return;
-                    }
-                    let d = msg.data.get("data");
-                    if d.and_then(|x| x.get("status")).and_then(|s| s.as_str()) != Some("completed") {
-                        return; // one record per call (skip the earlier "running" update)
-                    }
-                    let name = d.and_then(|x| x.get("name")).and_then(|n| n.as_str()).unwrap_or("");
-                    if name.is_empty() {
-                        return;
-                    }
-                    let shape = d.and_then(|x| x.get("args")).map(param_shape).unwrap_or_default();
-                    let data = serde_json::json!({
-                        "name": name,
-                        "param_shape": shape,
-                        "conversation_id": msg.data.get("conversation_id"),
-                        "call_id": d.and_then(|x| x.get("call_id")).and_then(|c| c.as_str()).unwrap_or(""),
-                    });
-                    self.append("tool_calls", "tool.call", data).await;
+                if kind != "tool_call" {
                     return;
                 }
-                if kind != "content" && kind != "text" {
-                    return;
-                }
-                let (Some(conv), Some(mid)) = (
-                    msg.data.get("conversation_id").and_then(|v| v.as_str()),
-                    msg.data.get("msg_id").and_then(|v| v.as_str()),
-                ) else {
-                    return;
-                };
-                let key = (conv.to_owned(), mid.to_owned());
-                // Agent-driven turns (origin: companion/cron/autowork/idmm, stamped
-                // by the stream relay) are NOT the owner's work — buffering
-                // their replies would let companion/cron-driven output be distilled
-                // as owner intent (the indirect feedback loop). Mirrors the
-                // userCreated origin filter; drop anything already buffered.
+                // Agent-driven turns (companion/cron/autowork/idmm) are not the
+                // owner working; mining them would re-execute the system's own
+                // output. Mirrors the `message.userCreated` origin filter.
                 if payload_origin(&msg.data).is_some() {
-                    self.reply_buffers.remove(&key);
                     return;
                 }
-                if !collect.companion_dialogues || !self.is_companion_event(&msg.data).await {
-                    self.reply_buffers.remove(&key);
+                if msg.data.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
                     return;
                 }
-                let chunk = match msg.data.get("data") {
-                    Some(serde_json::Value::String(s)) => s.clone(),
-                    Some(obj) => obj
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .map(str::to_owned)
-                        .unwrap_or_default(),
-                    None => String::new(),
-                };
-                let hidden = msg.data.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
-                let replace = msg.data.get("replace").and_then(|r| r.as_bool()).unwrap_or(false);
-                // Middleware final-text overrides (`replace: true`) rewrite
-                // what the user actually sees (e.g. cron directives stripped
-                // from the reply). They must be applied BEFORE the hidden
-                // check: a hidden override means "this text was cleaned
-                // away" — keeping the raw buffer would persist content the
-                // user never saw (including directive originals).
-                if replace {
-                    if hidden || chunk.is_empty() {
-                        self.reply_buffers.remove(&key);
-                    } else {
-                        *self.reply_buffer_mut(key) = chunk;
-                    }
+                let d = msg.data.get("data");
+                if d.and_then(|x| x.get("status")).and_then(|s| s.as_str()) != Some("completed") {
+                    return; // one record per call (skip the earlier "running" update)
+                }
+                let name = d.and_then(|x| x.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+                if name.is_empty() {
                     return;
                 }
-                if hidden || chunk.is_empty() {
-                    return;
-                }
-                let buf = self.reply_buffer_mut(key);
-                buf.push_str(&chunk);
-                // Hard cap so a runaway stream can't balloon memory.
-                if buf.chars().count() > MAX_REPLY_CHARS * 2 {
-                    *buf = truncate_chars(buf, MAX_REPLY_CHARS);
-                }
+                let shape = d.and_then(|x| x.get("args")).map(param_shape).unwrap_or_default();
+                let data = serde_json::json!({
+                    "name": name,
+                    "param_shape": shape,
+                    "conversation_id": msg.data.get("conversation_id"),
+                    "call_id": d.and_then(|x| x.get("call_id")).and_then(|c| c.as_str()).unwrap_or(""),
+                });
+                self.append("tool_calls", "tool.call", data).await;
             }
             "turn.completed" => {
-                let Some(conv) = msg.data.get("conversation_id").and_then(|v| v.as_str()) else {
+                // A turn with no conversation cannot be attributed. The previous
+                // code bailed here before awarding XP, so a bare `companion: true`
+                // flag (which `is_companion_event` would accept on its own) must
+                // still not earn XP.
+                if msg.data.get("conversation_id").and_then(|v| v.as_str()).is_none() {
                     return;
-                };
+                }
                 // Agent-driven turn (origin: companion/cron/autowork/idmm): nothing
-                // here is the owner working or chatting. Drop the buffered
-                // replies unflushed (defense in depth alongside the per-chunk
-                // origin filter) and skip XP — a cron job must not farm
-                // companion XP.
+                // here is the owner working or chatting, so skip XP — a cron job
+                // must not farm companion XP.
                 if payload_origin(&msg.data).is_some() {
-                    self.reply_buffers.retain(|(c, _), _| c != conv);
                     return;
                 }
                 // Companion turn: award XP to the owning companion (the old
-                // in-crate chat gave +2 per turn; the conversation engine
-                // path keeps the same curve). With companion_dialogues enabled the
-                // buffered companion reply is collected as `companion.reply` (context for
-                // the learner — its rules forbid reading it as owner intent);
-                // with it disabled the reply is dropped as before.
+                // in-crate chat gave +2 per turn; the conversation engine path
+                // keeps the same curve). Nothing about the reply itself is
+                // recorded — `companion_dialogues` now collects only what the owner
+                // said, on `message.userCreated`.
                 if self.is_companion_event(&msg.data).await {
-                    let companion_id = self.resolve_companion_id(&msg.data).await;
-                    if let Some(companion_id) = &companion_id {
-                        let _ = self.store.add_companion_xp(companion_id, 2).await;
+                    if let Some(companion_id) = self.resolve_companion_id(&msg.data).await {
+                        let _ = self.store.add_companion_xp(&companion_id, 2).await;
                     }
-                    let drained: Vec<(String, String)> = self
-                        .reply_buffers
-                        .keys()
-                        .filter(|(c, _)| c == conv)
-                        .cloned()
-                        .collect();
-                    for key in drained {
-                        let Some(text) = self.reply_buffers.remove(&key) else { continue };
-                        if !collect.companion_dialogues || text.trim().is_empty() {
-                            continue;
-                        }
-                        let data = serde_json::json!({
-                            "conversation_id": key.0,
-                            "companion_id": companion_id,
-                            "content": truncate_chars(&text, MAX_REPLY_CHARS),
-                        });
-                        self.append("companion_dialogues", "companion.reply", data).await;
-                    }
-                    return;
                 }
-                // Work-session model replies are not a collection source. Drop
-                // only this conversation's speculative buffers; another
-                // companion conversation may still have a reply flush pending.
-                self.reply_buffers.retain(|(c, _), _| c != conv);
             }
             "requirement.created" if collect.requirements => {
                 // Agent-created requirements (gateway tools, autowork) are
@@ -1246,7 +1133,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
         let conversation = conversation_fixture(21);
-        // tool_calls defaults false; companion_dialogues default true keeps the arm guard active.
+        // tool_calls defaults false, and the `message.stream` arm is now gated on
+        // that source alone — so with the default config the arm does not match at
+        // all. That IS the behaviour under test here.
         let config = SharedCompanionConfig::default();
         let mut collector = Collector::new(dir.path().to_path_buf(), Arc::new(RwLock::new(config)), store);
         collector
@@ -1304,7 +1193,6 @@ mod tests {
 
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
         assert!(events.is_empty());
-        assert!(collector.reply_buffers.is_empty());
     }
 
     #[tokio::test]
@@ -1343,8 +1231,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data["conversation_id"], work_conversation);
 
-        // Companion reply stream + turn.completed: buffered text dropped, XP
-        // awarded to the owning companion only.
+        // Companion reply stream + turn.completed: the stream event is simply
+        // unhandled now (no buffer to drop — the arm is gated on tool_calls, which
+        // is off here), and XP is awarded to the owning companion only.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
@@ -1383,7 +1272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn companion_dialogues_collects_companion_dialogue_by_default() {
+    async fn companion_dialogues_collects_only_the_owners_words_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
         let companion_conversation = conversation_fixture(1);
@@ -1406,7 +1295,9 @@ mod tests {
                 serde_json::json!({"conversation_id": companion_conversation, "content": "记得我喜欢深色主题"}),
             ))
             .await;
-        // Companion replying → buffered, flushed as companion.reply on turn.completed.
+        // The companion's own reply is NOT a collection source: the learner was
+        // never allowed to read it as owner intent, so it only cost disk and
+        // tokens. The stream event must leave nothing behind.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
@@ -1421,15 +1312,12 @@ mod tests {
             .await;
 
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1, "the reply must not be collected");
         assert_eq!(events[0].source, "companion_dialogues");
         assert_eq!(events[0].name, "companion.user_message");
         assert_eq!(events[0].data["companion_id"], companion);
         assert_eq!(events[0].data["content"], "记得我喜欢深色主题");
-        assert_eq!(events[1].name, "companion.reply");
-        assert_eq!(events[1].data["content"], "记住啦！");
-        assert_eq!(events[1].data["companion_id"], companion);
-        // +2 turn XP preserved.
+        // +2 turn XP preserved — XP never depended on collecting the reply.
         assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
 
         // Normal conversation messages stay un-collected (work sources off).
@@ -1440,7 +1328,7 @@ mod tests {
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1, "a work-session message must add nothing");
     }
 
     #[tokio::test]
@@ -1485,10 +1373,9 @@ mod tests {
             .await;
 
         let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1, "the reply must not be collected");
         assert_eq!(events[0].name, "companion.user_message");
         assert_eq!(events[0].data["companion_id"], companion);
-        assert_eq!(events[1].name, "companion.reply");
         // XP credited via the wire companion_id, not the (empty) registry chain.
         assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
         // And the message never leaked into the generic work-chat source.
@@ -1543,195 +1430,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn origin_marked_and_work_turn_replies_are_never_collected() {
+    async fn companion_replies_are_never_collected() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let companion_conversation = conversation_fixture(1);
         let work_conversation = conversation_fixture(2);
         let cron_conversation = conversation_fixture(4);
+        let companion = companion_fixture(1);
+        store.insert_companion_thread(&companion_conversation, &companion, "聊天").await.unwrap();
+        // Default config has companion_dialogues ON — the exact configuration that
+        // used to collect replies.
         let config = SharedCompanionConfig::default();
+        assert!(config.collect.companion_dialogues);
         let mut collector = Collector::new(
             dir.path().to_path_buf(),
             Arc::new(RwLock::new(config)),
             store.clone(),
         );
 
-        // Companion-driven work turn: every stream fragment carries origin="companion"
-        // (stamped by the relay) — nothing may be buffered or flushed.
+        // Model output is no longer a collection source in ANY shape. This one test
+        // replaces three that pinned the buffering machinery itself (eviction cap,
+        // `replace` override, origin-marked drop) — there is no buffer left to
+        // evict, override or flush, so what is worth pinning is only the outcome.
+
+        // A plain companion reply.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": work_conversation, "msg_id": "m1", "type": "content",
+                serde_json::json!({"conversation_id": &companion_conversation, "msg_id": "m1",
+                                   "type": "content", "data": "记住啦！"}),
+            ))
+            .await;
+        // A `replace: true` override — the middleware's cleaned final text, which
+        // used to supersede the raw buffer.
+        collector
+            .handle(&WebSocketMessage::new(
+                "message.stream",
+                serde_json::json!({"conversation_id": &companion_conversation, "msg_id": "m1",
+                                   "type": "content", "data": "好的", "replace": true}),
+            ))
+            .await;
+        // A companion-driven work turn (origin stamped by the stream relay).
+        collector
+            .handle(&WebSocketMessage::new(
+                "message.stream",
+                serde_json::json!({"conversation_id": &work_conversation, "msg_id": "m2", "type": "content",
                                    "data": "报表任务已创建", "origin": "companion"}),
             ))
             .await;
-        collector
-            .handle(&WebSocketMessage::new(
-                "turn.completed",
-                serde_json::json!({"conversation_id": work_conversation, "origin": "companion"}),
-            ))
-            .await;
-        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert!(events.is_empty(), "companion-driven replies must not become work-reply events");
-
-        // Defense in depth: chunks already buffered (e.g. before a Lagged
-        // skip) are dropped the moment an origin-marked fragment or
-        // turn.completed for the conversation arrives.
+        // A cron-driven turn.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": cron_conversation, "msg_id": "m2", "type": "content", "data": "先囤一点"}),
+                serde_json::json!({"conversation_id": &cron_conversation, "msg_id": "m3", "type": "content",
+                                   "data": "先囤一点", "origin": "cron"}),
             ))
             .await;
-        collector
-            .handle(&WebSocketMessage::new(
-                "turn.completed",
-                serde_json::json!({"conversation_id": cron_conversation, "origin": "cron"}),
-            ))
-            .await;
-        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert!(events.is_empty(), "origin-marked turn must drop buffered replies unflushed");
-        assert!(collector.reply_buffers.is_empty());
-
-        // origin: null → an owner-driven work turn, also not collected.
-        collector
-            .handle(&WebSocketMessage::new(
-                "message.stream",
-                serde_json::json!({"conversation_id": work_conversation, "msg_id": "m3", "type": "content",
-                                   "data": "修好了", "origin": null}),
-            ))
-            .await;
-        collector
-            .handle(&WebSocketMessage::new(
-                "turn.completed",
-                serde_json::json!({"conversation_id": work_conversation, "origin": null}),
-            ))
-            .await;
-        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert!(events.is_empty());
-        assert!(collector.reply_buffers.is_empty());
-    }
-
-    #[tokio::test]
-    async fn replace_override_rewrites_buffer_even_when_hidden() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        let conversation_a = conversation_fixture(11);
-        let conversation_b = conversation_fixture(12);
-        let companion = companion_fixture(11);
-        let config = SharedCompanionConfig::default();
-        let mut collector = Collector::new(
-            dir.path().to_path_buf(),
-            Arc::new(RwLock::new(config)),
-            store.clone(),
-        );
-
-        // Visible override: the cleaned text supersedes the raw buffer.
-        collector
-            .handle(&WebSocketMessage::new(
-                "message.stream",
-                serde_json::json!({"conversation_id": conversation_a, "msg_id": "m1", "type": "content",
-                                   "data": "好的 [CRON_CREATE {\"name\":\"备份\"}]",
-                                   "companion": true, "companion_id": &companion}),
-            ))
-            .await;
-        collector
-            .handle(&WebSocketMessage::new(
-                "message.stream",
-                serde_json::json!({"conversation_id": conversation_a, "msg_id": "m1", "type": "content",
-                                   "data": {"content": "好的"}, "hidden": false, "replace": true,
-                                   "companion": true, "companion_id": &companion}),
-            ))
-            .await;
-        collector
-            .handle(&WebSocketMessage::new(
-                "turn.completed",
-                serde_json::json!({"conversation_id": conversation_a, "companion": true, "companion_id": &companion}),
-            ))
-            .await;
-        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].source, "companion_dialogues");
-        assert_eq!(events[0].data["content"], "好的", "collected reply must be the cleaned text");
-
-        // Hidden override (middleware emptied the whole reply): the raw
-        // directive text the user never saw must NOT be persisted.
-        collector
-            .handle(&WebSocketMessage::new(
-                "message.stream",
-                serde_json::json!({"conversation_id": conversation_b, "msg_id": "m2", "type": "content",
-                                   "data": "[CRON_DELETE job_1]",
-                                   "companion": true, "companion_id": &companion}),
-            ))
-            .await;
-        collector
-            .handle(&WebSocketMessage::new(
-                "message.stream",
-                serde_json::json!({"conversation_id": conversation_b, "msg_id": "m2", "type": "content",
-                                   "data": {"content": ""}, "hidden": true, "replace": true,
-                                   "companion": true, "companion_id": &companion}),
-            ))
-            .await;
-        collector
-            .handle(&WebSocketMessage::new(
-                "turn.completed",
-                serde_json::json!({"conversation_id": conversation_b, "companion": true, "companion_id": &companion}),
-            ))
-            .await;
-        let (events, _) = read_events_since(dir.path(), 0, 10).unwrap();
-        assert_eq!(events.len(), 1, "hidden replace must clear the buffer, not flush the original");
-    }
-
-    #[tokio::test]
-    async fn reply_buffers_enforce_global_entry_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        let config = SharedCompanionConfig::default();
-        let mut collector = Collector::new(
-            dir.path().to_path_buf(),
-            Arc::new(RwLock::new(config)),
-            store.clone(),
-        );
-
-        // 10 over the cap, no turn.completed in between (orphan scenario).
-        let total = MAX_REPLY_BUFFERS + 10;
-        for i in 0..total {
-            let conversation_id = conversation_fixture(i as u64 + 100);
+        for conversation in [&companion_conversation, &work_conversation, &cron_conversation] {
             collector
                 .handle(&WebSocketMessage::new(
-                    "message.stream",
-                    serde_json::json!({"conversation_id": conversation_id, "msg_id": "m", "type": "content",
-                                       "data": format!("回复 {i}"), "companion": true,
-                                       "companion_id": companion_fixture(i as u64 + 100)}),
+                    "turn.completed",
+                    serde_json::json!({"conversation_id": conversation}),
                 ))
                 .await;
         }
-        assert_eq!(collector.reply_buffers.len(), MAX_REPLY_BUFFERS);
-        // Oldest evicted, newest retained.
-        assert!(
-            !collector
-                .reply_buffers
-                .contains_key(&(conversation_fixture(100), "m".to_owned()))
-        );
-        assert!(
-            collector
-                .reply_buffers
-                .contains_key(&(conversation_fixture(total as u64 + 99), "m".to_owned()))
-        );
-        // A surviving buffer still flushes normally.
-        collector
-            .handle(&WebSocketMessage::new(
-                "turn.completed",
-                serde_json::json!({
-                    "conversation_id": conversation_fixture(total as u64 + 99),
-                    "companion": true,
-                    "companion_id": companion_fixture(total as u64 + 99),
-                }),
-            ))
-            .await;
-        let (events, _) = read_events_since(dir.path(), 0, 200).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data["content"], format!("回复 {}", total - 1));
-        assert_eq!(collector.reply_buffers.len(), MAX_REPLY_BUFFERS - 1);
+
+        let (events, _) = read_events_since(dir.path(), 0, 50).unwrap();
+        assert!(events.is_empty(), "no model reply may be collected, in any shape");
+        // The companion turn still earns its +2 XP: XP never depended on collecting
+        // the reply, and only the companion thread is a companion turn.
+        assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
     }
 
     #[tokio::test]
