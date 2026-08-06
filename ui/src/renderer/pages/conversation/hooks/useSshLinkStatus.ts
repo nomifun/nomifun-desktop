@@ -29,7 +29,9 @@ import type { SshHostId } from '@/common/types/ids';
  *
  * Listeners are installed before the snapshot is requested, so a transition
  * emitted mid-flight cannot fall into a snapshot/subscribe gap; the newest
- * `changedAt` wins if it does arrive out of order.
+ * `changedAt` wins if it does arrive out of order — and because the server
+ * reports `changedAt` as the instant the link changed rather than the instant it
+ * was asked, that comparison is meaningful across both paths.
  */
 export function useSshLinkStatus(
   conversationId: string,
@@ -63,7 +65,15 @@ export function useSshLinkStatus(
           );
           // A link absent from the snapshot genuinely has no state: the pool
           // forgets a link once it is closed, so clearing is the honest move.
-          setStatus(mine ?? null);
+          if (mine == null) {
+            setStatus(null);
+            return;
+          }
+          // Through `apply`, not straight into state: a re-fetch is a *read* of
+          // the same transitions the events carry (the server stamps both from
+          // when the link changed), so an in-flight snapshot that answers after a
+          // newer event must not walk the pill backwards.
+          apply(mine);
         } catch {
           // A failed snapshot leaves whatever we already knew in place rather
           // than blanking a link that is probably still up.

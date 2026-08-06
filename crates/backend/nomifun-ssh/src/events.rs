@@ -72,6 +72,7 @@ mod tests {
                 attempt: 2,
                 next_retry_in_ms: 2_000,
             },
+            1_700_000_000_000,
         );
 
         emitter.emit_status("0190f5fe-7c00-7a00-8000-000000000001", &payload);
