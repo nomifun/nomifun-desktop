@@ -53,13 +53,13 @@ const SiderFooter: React.FC<SiderFooterProps> = ({
   );
 
   return (
-    <div className='shrink-0 sider-footer pb-8px'>
-      <div className={classNames('flex', collapsed ? 'flex-col gap-2px' : 'items-center gap-2px')}>
+    <div className='shrink-0 sider-footer pb-5px'>
+      <div className={classNames('flex', collapsed ? 'flex-col gap-1px' : 'items-center gap-1px')}>
         <Tooltip {...siderTooltipProps} content={isSettings ? t('common.back') : t('common.settings')} position='right'>
           <div
             onClick={onSettingsClick}
             className={classNames(
-              'group h-34px flex items-center rd-0.5rem cursor-pointer transition-colors',
+              'group h-32px flex items-center rd-0.5rem cursor-pointer transition-colors',
               collapsed ? 'w-full justify-center' : 'flex-1 min-w-0 justify-start gap-8px pl-10px pr-8px',
               isMobile && 'sider-footer-btn-mobile',
               {

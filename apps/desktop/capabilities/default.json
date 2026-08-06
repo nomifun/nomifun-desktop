@@ -32,7 +32,6 @@
     "notification:allow-request-permission",
     "deep-link:default",
     "updater:allow-check",
-    "updater:allow-download",
     "process:default",
     "autostart:default"
   ]

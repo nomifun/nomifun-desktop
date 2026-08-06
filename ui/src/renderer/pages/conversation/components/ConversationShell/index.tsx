@@ -160,7 +160,7 @@ const ConversationShell: React.FC = () => {
       ariaLabel={t('sessionList.title')}
       resizeHandle={isMobile ? undefined : sessionResize.createDragHandle({ className: 'right-0' })}
     >
-      <div className='px-8px pb-8px'>
+      <div className='px-8px pb-6px'>
         <WorkpathSessionList
           collapsed={false}
           tooltipEnabled={false}

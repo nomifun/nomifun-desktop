@@ -19,11 +19,11 @@ const capability = JSON.parse(
 
 describe('desktop updater security boundary', () => {
   test('renderer exposes download but no raw updater install path', () => {
-    expect(updaterSource.includes('download(onEvent?')).toBe(true);
+    expect(updaterSource.includes('download(onEvent?')).toBe(false);
     expect(updaterSource.includes('install(): Promise<void>')).toBe(false);
     expect(updaterSource.includes('downloadAndInstall')).toBe(false);
     expect(updaterSource.includes('.install(')).toBe(false);
-    expect(updaterSource.includes('tauriInstallUpdate(version, reportInstallProgress)')).toBe(true);
+    expect(updaterSource.includes('await tauriInstallUpdate(version)')).toBe(true);
   });
 
   test('install goes through the fail-closed preflight/fatal-exit contract', () => {
@@ -33,15 +33,20 @@ describe('desktop updater security boundary', () => {
     expect(updaterSource.includes('installUpdateWithPreflight({')).toBe(true);
     expect(updaterSource.includes('fatalExit')).toBe(true);
     expect(updaterSource.includes('prepareShutdown')).toBe(true);
-    expect(/await\s+tauriInstallUpdate\(/.test(updaterSource)).toBe(false);
+    expect(updaterSource.includes('install: async () => {')).toBe(true);
   });
 
-  test('native re-check and download report progress without exposing raw install permissions', () => {
-    expect(shellSource.includes('new Channel<TauriInstallUpdateProgress>(onProgress)')).toBe(true);
-    expect(desktopSource.includes('tauri::ipc::Channel<InstallUpdateProgress>')).toBe(true);
+  test('native download owns progress and install consumes only the retained package', () => {
+    expect(shellSource.includes('new Channel<TauriDownloadUpdateProgress>(onProgress)')).toBe(true);
+    expect(desktopSource.includes('tauri::ipc::Channel<DownloadUpdateProgress>')).toBe(true);
     expect(desktopSource.includes('phase: "downloading"')).toBe(true);
-    expect(desktopSource.includes('.download(|_, _| {}, || {})')).toBe(false);
-    expect(updaterSource.includes("installPhase: 'downloading'")).toBe(true);
+    expect(desktopSource.includes('downloaded.take_ready(&requested_version)?')).toBe(true);
+    expect(desktopSource.includes('package.update.install(&package.bytes)')).toBe(true);
+    const installStart = desktopSource.indexOf('async fn install_update(');
+    const installEnd = desktopSource.indexOf('const UPDATER_SHUTDOWN_MAX_ATTEMPTS', installStart);
+    const installCommand = desktopSource.slice(installStart, installEnd);
+    expect(installCommand.includes('.check()')).toBe(false);
+    expect(installCommand.includes('.download(')).toBe(false);
     expect(updaterSource.includes("throw new Error('No downloaded update is ready to install')")).toBe(true);
   });
 
@@ -53,10 +58,9 @@ describe('desktop updater security boundary', () => {
     expect(desktopSource.includes('.on_before_exit(')).toBe(true);
   });
 
-  test('capability permits only updater check and download', () => {
+  test('renderer capability permits updater check only', () => {
     expect(capability.permissions.filter((permission) => permission.startsWith('updater:'))).toEqual([
       'updater:allow-check',
-      'updater:allow-download',
     ]);
   });
 });

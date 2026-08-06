@@ -132,7 +132,7 @@ const CompanionSessionGroup: React.FC<Props> = ({
 
   if (collapsed) {
     return (
-      <div className='min-w-0 flex flex-col items-center gap-4px mb-4px'>
+      <div className='min-w-0 flex flex-col items-center gap-2px mb-3px'>
         {companions.map((c) => {
           const active =
             activeConversationId != null &&
@@ -144,7 +144,7 @@ const CompanionSessionGroup: React.FC<Props> = ({
                 aria-label={c.name}
                 onClick={() => void handleOpen(c)}
                 className={classNames(
-                  'flex items-center justify-center w-36px h-36px rd-10px cursor-pointer transition-colors',
+                  'flex items-center justify-center w-34px h-34px rd-10px cursor-pointer transition-colors',
                   active ? '!bg-primary-1' : 'hover:bg-fill-2 active:bg-fill-3'
                 )}
               >
@@ -178,12 +178,12 @@ const CompanionSessionGroup: React.FC<Props> = ({
   );
 
   return (
-    <div className='min-w-0 mb-2px'>
+    <div className='min-w-0 mb-1px'>
       {/* 与「项目/工作路径」完全同款的纯 section 标题（无边框/盒子/箭头，只有标签 + 数字）。
           点击整行切换持久化折叠态（默认展开）。 */}
       <div className='px-2px'>
         <div
-          className='h-22px px-2px flex items-center justify-between gap-8px select-none cursor-pointer min-w-0'
+          className='h-20px px-2px flex items-center justify-between gap-8px select-none cursor-pointer min-w-0'
           onClick={() => onToggleExpanded?.()}
         >
           <span className='text-13px text-t-tertiary font-[500] leading-none tracking-wide truncate min-w-0'>
@@ -194,8 +194,8 @@ const CompanionSessionGroup: React.FC<Props> = ({
       </div>
 
       {expanded && (
-        <div className='flex flex-col gap-2px mt-2px'>
-          <div className='mx-6px mb-2px flex min-h-28px items-center gap-6px rounded-8px bg-[rgba(var(--primary-6),0.06)] px-8px py-5px text-11px text-t-tertiary'>
+        <div className='flex flex-col gap-1px mt-1px'>
+          <div className='mx-6px mb-1px flex min-h-26px items-center gap-6px rounded-8px bg-[rgba(var(--primary-6),0.06)] px-8px py-4px text-11px text-t-tertiary'>
             <span className='inline-flex h-16px w-16px shrink-0 items-center justify-center text-primary opacity-70'>
               <Info theme='outline' size='13' fill='currentColor' className='block leading-none' />
             </span>
@@ -211,7 +211,7 @@ const CompanionSessionGroup: React.FC<Props> = ({
                 key={c.companion_id}
                 onClick={() => void handleOpen(c)}
                 className={classNames(
-                  'group flex items-center gap-8px shrink-0 rd-10px px-8px py-6px cursor-pointer transition-colors box-border',
+                  'group flex items-center gap-8px shrink-0 rd-10px px-8px py-4px cursor-pointer transition-colors box-border',
                   active ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
                 )}
               >
