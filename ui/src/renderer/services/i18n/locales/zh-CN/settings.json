@@ -1253,21 +1253,33 @@
   },
   "modelHub": {
     "title": "模型管理",
-    "subtitle": "按使用方式选择免费模型或供应商模型。",
+    "subtitle": "按模态挑模型：对话、语音、视觉、创作、嵌入与检索。",
     "railTitle": "模型管理",
-    "sectionModels": "供应商模型",
+    "sectionModels": "供应商与密钥",
     "sectionFree": "免费模型",
     "sectionCreation": "创作能力",
     "sectionGlobal": "全局模型设置",
+    "sectionChat": "对话",
+    "sectionVision": "视觉",
+    "sectionEmbedding": "嵌入与检索",
     "globalConfigTip": "IDMM、旁路模型、记忆总结、伙伴对话等全局默认模型对话配置入口。",
     "idmmTab": "IDMM 默认配置",
     "failoverTab": "故障转移队列",
     "activityTab": "决策活动",
+    "modality": {
+      "chatTitle": "对话模型",
+      "chatSubtitle": "能用来对话的模型；新会话的默认模型也在这里设。",
+      "visionTitle": "视觉模型",
+      "visionSubtitle": "带「看图」能力的对话模型。",
+      "embeddingTitle": "嵌入与检索",
+      "embeddingSubtitle": "向量嵌入与重排序模型，供知识库检索使用。"
+    },
     "provider": {
-      "title": "供应商模型",
-      "subtitle": "使用自己的 API 密钥，接入云端模型供应商。",
+      "title": "供应商与密钥",
+      "subtitle": "接入厂商、管理凭证与连接档案，并维护模型行与高级覆写。",
       "noticeTitle": "对话内容会发送到模型供应商",
-      "note": "供应商模型在云端运行，请不要发送敏感信息。当前，自定义供应商模型仅可供 Nomi 使用。"
+      "note": "供应商模型在云端运行，请不要发送敏感信息。当前，自定义供应商模型仅可供 Nomi 使用。",
+      "scopeNote": "「按用途找模型」已经搬到左侧的对话 / 语音 / 视觉 / 创作 / 嵌入与检索分区，这里只管接入与凭证。"
     },
     "free": {
       "title": "免费模型",
@@ -1359,7 +1371,7 @@
       "emptyHint": "已配置的模型中没有打上图像/视频生成标签的。请到模型管理页为具备能力的模型打标。",
       "emptyNoProviders": "尚未配置任何模型供应商。请先在「供应商模型」中添加供应商与模型。"
     },
-    "sectionSpeech": "语音转文字",
+    "sectionSpeech": "语音",
     "speech": {
       "title": "语音转文字",
       "subtitle": "选择一个已录入的云端语音模型。",

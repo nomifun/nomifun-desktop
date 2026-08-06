@@ -8,7 +8,16 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Navigate, useSearchParams } from 'react-router-dom';
 import classNames from 'classnames';
-import { HeadsetOne, LinkCloud, SettingTwo, Platte, Lightning } from '@icon-park/react';
+import {
+  Comment,
+  HeadsetOne,
+  LinkCloud,
+  SettingTwo,
+  Platte,
+  Lightning,
+  PreviewOpen,
+  SafeRetrieval,
+} from '@icon-park/react';
 import ContentSider from '@/renderer/components/layout/ContentSider';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
@@ -18,15 +27,21 @@ import ModelModalContent from '@/renderer/components/settings/SettingsModal/cont
 import GlobalModelConfig from './GlobalModelConfig';
 import CreationModelsContent from './CreationModelsContent';
 import FreeModelsContent from './FreeModelsContent';
-import SpeechToTextContent from './SpeechToTextContent';
+import SpeechModelsContent from './SpeechModelsContent';
+import ChatModelsContent from './ChatModelsContent';
+import VisionModelsContent from './VisionModelsContent';
+import EmbeddingModelsContent from './EmbeddingModelsContent';
 
-type Section = 'models' | 'free' | 'speech' | 'creation' | 'global';
+type Section = 'chat' | 'speech' | 'vision' | 'creation' | 'embedding' | 'free' | 'models' | 'global';
 
 const isSection = (value: string | null): value is Section =>
-  value === 'models' ||
-  value === 'free' ||
+  value === 'chat' ||
   value === 'speech' ||
+  value === 'vision' ||
   value === 'creation' ||
+  value === 'embedding' ||
+  value === 'free' ||
+  value === 'models' ||
   value === 'global';
 
 const MODELHUB_SIDER_STORAGE_KEY = 'nomifun:modelhub-sider-width';
@@ -38,16 +53,18 @@ interface SectionDef {
 }
 
 /**
- * ModelHubPage (/models) — "Model Management". The primary level is a
- * content-area secondary sidebar (mirroring the conversation `ContentSider`):
- * a left section list (provider / free / speech / creation / global settings)
+ * ModelHubPage (/models) — "Model Management", a MODALITY-first view. The primary
+ * level is a content-area secondary sidebar (mirroring the conversation
+ * `ContentSider`): a left section list (chat / voice / vision / creation /
+ * embedding & retrieval / free models / providers & keys / global settings)
  * drives the right content pane. Execution engines live independently under
  * Settings and are intentionally not mixed into model management.
  *
  * The sidebar width is drag-resizable and persisted. On mobile the left sidebar
  * collapses to a horizontal segmented bar above the content.
  *
- * The level syncs to `?section=`.
+ * The level syncs to `?section=`; the previous provider-first keys (`models`,
+ * `free`, `speech`, `creation`, `global`) still resolve so old bookmarks work.
  */
 const ModelHubPage: React.FC = () => {
   const { t } = useTranslation();
@@ -57,7 +74,7 @@ const ModelHubPage: React.FC = () => {
 
   const [section, setSection] = useState<Section>(() => {
     const param = searchParams.get('section');
-    return isSection(param) ? param : 'models';
+    return isSection(param) ? param : 'chat';
   });
 
   useEffect(() => {
@@ -99,10 +116,13 @@ const ModelHubPage: React.FC = () => {
 
   const sections: SectionDef[] = useMemo(
     () => [
-      { key: 'models', label: t('settings.modelHub.sectionModels'), icon: <LinkCloud theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'free', label: t('settings.modelHub.sectionFree'), icon: <Lightning theme='outline' size='16' strokeWidth={3} /> },
+      { key: 'chat', label: t('settings.modelHub.sectionChat'), icon: <Comment theme='outline' size='16' strokeWidth={3} /> },
       { key: 'speech', label: t('settings.modelHub.sectionSpeech'), icon: <HeadsetOne theme='outline' size='16' strokeWidth={3} /> },
+      { key: 'vision', label: t('settings.modelHub.sectionVision'), icon: <PreviewOpen theme='outline' size='16' strokeWidth={3} /> },
       { key: 'creation', label: t('settings.modelHub.sectionCreation'), icon: <Platte theme='outline' size='16' strokeWidth={3} /> },
+      { key: 'embedding', label: t('settings.modelHub.sectionEmbedding'), icon: <SafeRetrieval theme='outline' size='16' strokeWidth={3} /> },
+      { key: 'free', label: t('settings.modelHub.sectionFree'), icon: <Lightning theme='outline' size='16' strokeWidth={3} /> },
+      { key: 'models', label: t('settings.modelHub.sectionModels'), icon: <LinkCloud theme='outline' size='16' strokeWidth={3} /> },
       { key: 'global', label: t('settings.modelHub.sectionGlobal'), icon: <SettingTwo theme='outline' size='16' strokeWidth={3} /> },
     ],
     [t]
@@ -110,10 +130,13 @@ const ModelHubPage: React.FC = () => {
 
   const content = (
     <>
-      {section === 'models' && <ModelModalContent />}
-      {section === 'free' && <FreeModelsContent />}
-      {section === 'speech' && <SpeechToTextContent />}
+      {section === 'chat' && <ChatModelsContent />}
+      {section === 'speech' && <SpeechModelsContent />}
+      {section === 'vision' && <VisionModelsContent />}
       {section === 'creation' && <CreationModelsContent />}
+      {section === 'embedding' && <EmbeddingModelsContent />}
+      {section === 'free' && <FreeModelsContent />}
+      {section === 'models' && <ModelModalContent />}
       {section === 'global' && <GlobalModelConfig />}
     </>
   );

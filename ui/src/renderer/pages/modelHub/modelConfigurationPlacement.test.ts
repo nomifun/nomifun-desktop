@@ -27,8 +27,9 @@ describe('model-owned tool configuration placement', () => {
     expect(source.includes('const visibleMcpServers = useMemo(() => mcpServers, [mcpServers])')).toBe(true);
   });
 
-  test('speech-to-text has a dedicated peer section and old copied cards are removed', () => {
+  test('speech has a dedicated peer section and old copied cards are removed', () => {
     const hubSource = readSource('./index.tsx');
+    const speechHost = readSource('./SpeechModelsContent.tsx');
     const speechSource = readSource('./SpeechToTextContent.tsx');
     const creationSource = readSource('./CreationModelsContent.tsx');
     const providerSource = readSource(
@@ -36,7 +37,9 @@ describe('model-owned tool configuration placement', () => {
     );
 
     expect(hubSource.includes("key: 'speech'")).toBe(true);
-    expect(hubSource.includes('<SpeechToTextContent />')).toBe(true);
+    expect(hubSource.includes('<SpeechModelsContent />')).toBe(true);
+    // The 语音 section hosts ASR, TTS and the local VAD entry.
+    expect(speechHost.includes('<SpeechToTextContent />')).toBe(true);
     // Candidates come from the authoritative catalog resolve, not provider
     // rows + name guessing.
     expect(speechSource.includes("useModelsForTask('speech_recognition')")).toBe(true);
