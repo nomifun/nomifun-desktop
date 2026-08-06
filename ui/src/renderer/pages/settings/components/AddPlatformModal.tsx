@@ -645,7 +645,7 @@ const AddPlatformModal = ModalHOC<{
                     <Info
                       theme='outline'
                       size={14}
-                      className='text-t-secondary hover:text-[rgb(var(--primary-6))] flex'
+                      className='text-t-secondary hover:text-primary-6 flex'
                     />
                   </span>
                 </Popover>

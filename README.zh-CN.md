@@ -130,10 +130,10 @@
 每天与你对话的伙伴，会悄悄变成那个最懂你的助理。
 
 - **专属形象。** 上传自定义伙伴形象（DIY），或从与具体伙伴解耦的独立**形象库**中挑选。
-- **一脑多面。** 运行多个伙伴，共享统一记忆中枢，同时各自保留**专属**私有记忆，并可挂载不同领域的知识库。你只需教好*一个*伙伴，再让它去教其他伙伴。
+- **一家人，而非一个脑。** 运行多个伙伴并同时使用，每一个都是完整的独立个体：**各自**的聊天模型、人格、记忆和领域知识库。每条记忆都只属于一个伙伴——你对工作伙伴说的话，不会漏进你在家里聊天的那一个。
 - **聊天入口回到主会话。** 伙伴聊天现在直接进入主 **会话** 体系，并在侧边栏拥有独立的「桌面伙伴」分组；`/nomi` 则专注于伙伴管理。
 - **它在学你（默认开启，首启动一次性确认）。** 后台 Learner 把你的使用蒸馏为长期记忆；确定性的进化引擎从你反复出现的多步工具序列中挖掘出 **skill 草稿**，提交给你审阅。记忆**完全可见、可编辑**。
-- **会传播的 skill。** 伙伴自动总结、生成 skill 并与你商议，还能把 skill **赠予**另一个伙伴（对方得到一份副本）—— 开启跨伙伴的共享学习。
+- **自己写 skill。** 伙伴从真实工作里自动总结、生成 skill 并与你商议，确认后才留下。
 - **不只是伙伴，更是超级网关。** 每个伙伴都是完整、独立的个体，可连接多个 IM 渠道。只要有网络和社交平台，随时随地一条消息，就能指挥伙伴帮你操作电脑。每个伙伴都能完整驱动桌面的系统能力。
 
 ### 🧠 Agent 协作
@@ -421,6 +421,7 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | **运行（组装好的应用）** | |
 | `bun run serve:web` | 启动 Web 服务器，托管已构建的前端 |
 | **测试** | |
+| `bun run test:git-attribution` | Validate the repository-local human-only Git attribution policy. |
 | `bun run test` | 运行全部 Rust 测试（含 doctest） |
 | `bun run test:fast` | 用 nextest 快速跑 Rust 测试（日常） |
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
@@ -432,14 +433,16 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
 | `bun run check:browser-platform-boundary` | Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
-| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
+| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
+| `bun run check:dead-css` | 死 CSS 工具类棘轮：拦住新增的 {text,bg,border}-[rgb(var(--ramp-N))] / border-border-N / border-b-base / border-b-light（存量记在脚本 BASELINE，只许变少） |
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
 | **维护 / 工具** | |
+| `bun run setup:git-hooks` | Enable this repository's human-only Git attribution hooks without changing global Git config. |
 | `bun run clean` | 深度回收构建空间（debug 产物 + flycheck + 旧安装包） |
 | `bun run seed:dev` | 用生产数据目录播种 dev 数据目录 |
 | `bun run bump` | 统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag |

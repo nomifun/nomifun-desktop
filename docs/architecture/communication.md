@@ -38,8 +38,18 @@ The SPA bridge in `ui/src/common/adapter/httpBridge.ts` selects:
 - `http://127.0.0.1:<window.__backendPort>` for the desktop webview.
 
 `/ws` is a singleton connection per page lifetime. The backend event bus fans
-conversation, terminal, cron/requirement, channel, companion, and other events
-into the WebSocket manager.
+conversation, terminal, cron/requirement, channel, companion, SSH link, and
+other events into the WebSocket manager.
+
+`ssh.status` is the owner-scoped projection of one conversation's SSH link:
+`{ sshHostId, conversationId, state, attempt, nextRetryInMs, hostFingerprint,
+detail, retryable, reaped, changedAt }`, where `state` is one of `idle`,
+`connecting`, `connected`, `degraded`, `reconnecting`, `dropped`, `closed`. It
+rides the user bus rather than the per-turn agent stream because a link drops
+and reconnects while a session sits idle, when no turn is open to carry the
+news. `SshConnectionPool` publishes it only on a real state change, so a healthy
+idle link costs the bus nothing, and `GET /api/ssh-hosts/statuses` serves the
+same payload from the same watch value for reconnect resync.
 
 Persistent Agent collaboration has exactly two realtime projections:
 `agentExecution.changed { execution_id, sequence, change_kind }` invalidates

@@ -193,20 +193,25 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
   const preferActionButtonsInFront = Boolean(leftExtra);
 
   const toolbarBtn =
-    'flex items-center gap-2px px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 text-12px font-medium text-t-secondary hover:text-t-primary hover:bg-bg-3';
+    'flex items-center gap-2px px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 text-12px font-medium text-t-secondary hover:text-t-primary hover:bg-3';
   const toolbarBtnActive = '!text-white bg-brand hover:!text-white hover:bg-brand-hover';
   const toolbarIconSize = 12;
 
   return (
-    <div className='flex items-center justify-between h-32px px-10px bg-bg-2 flex-shrink-0 border-b border-border-1 overflow-x-auto'>
+    <div className='flex items-center justify-between h-32px px-10px bg-2 flex-shrink-0 border-b border-b-solid border-arco-1 overflow-x-auto'>
       <div className='flex items-center justify-between gap-8px w-full' style={{ minWidth: 'max-content' }}>
         {/* 左侧：Tabs（Markdown/HTML）+ 文件名 / Left: Tabs (Markdown/HTML) + Filename */}
         <div className='flex items-center h-full gap-8px'>
           {(isMarkdown || isHTML || isDiff) && (
             <>
+              {/* 选中态下划线：曾写 `border-b-4 border-brand`，但 `border-b-4` 会被 UnoCSS
+                  解析成「下边框颜色 = --bg-4」而不是 4px 宽度，还把 border-brand 覆盖掉；
+                  再加上仓库没有 border-style 重置，这条下划线一直不存在。宽度/样式/颜色分开写。
+                  The active-tab underline never rendered: `border-b-4` is a bottom *colour*
+                  (--bg-4), not a 4px width, and it also overrode border-brand. */}
               <div className='flex items-center h-full gap-0'>
                 <div
-                  className={`flex items-center h-full px-10px cursor-pointer transition-all duration-150 text-12px font-medium ${viewMode === 'source' ? 'text-brand bg-aou-2 border-b-4 border-brand' : 'text-t-secondary hover:text-t-primary hover:bg-bg-3'}`}
+                  className={`flex items-center h-full px-10px cursor-pointer transition-all duration-150 text-12px font-medium ${viewMode === 'source' ? 'text-brand bg-aou-2 border-b-4px border-b-solid border-brand' : 'text-t-secondary hover:text-t-primary hover:bg-3'}`}
                   onClick={() => {
                     try {
                       onViewModeChange('source');
@@ -218,7 +223,7 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
                   {isHTML ? t('preview.code') : t('preview.source')}
                 </div>
                 <div
-                  className={`flex items-center h-full px-10px cursor-pointer transition-all duration-150 text-12px font-medium ${viewMode === 'preview' ? 'text-brand bg-aou-2 border-b-4 border-brand' : 'text-t-secondary hover:text-t-primary hover:bg-bg-3'}`}
+                  className={`flex items-center h-full px-10px cursor-pointer transition-all duration-150 text-12px font-medium ${viewMode === 'preview' ? 'text-brand bg-aou-2 border-b-4px border-b-solid border-brand' : 'text-t-secondary hover:text-t-primary hover:bg-3'}`}
                   onClick={() => {
                     try {
                       onViewModeChange('preview');
@@ -232,7 +237,7 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
               </div>
               {!isDiff && (
                 <div
-                  className={`flex items-center px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 ${isSplitScreenEnabled ? toolbarBtnActive : 'text-t-secondary hover:bg-bg-3'}`}
+                  className={`flex items-center px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 ${isSplitScreenEnabled ? toolbarBtnActive : 'text-t-secondary hover:bg-3'}`}
                   onClick={() => {
                     try {
                       onSplitScreenToggle();
@@ -282,7 +287,7 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
 
           {isEditable && isEditMode && (
             <div
-              className={`flex items-center px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 ${isSplitScreenEnabled ? toolbarBtnActive : 'text-t-secondary hover:bg-bg-3'}`}
+              className={`flex items-center px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 ${isSplitScreenEnabled ? toolbarBtnActive : 'text-t-secondary hover:bg-3'}`}
               onClick={() => {
                 try {
                   onSplitScreenToggle();

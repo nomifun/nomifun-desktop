@@ -95,7 +95,7 @@ $ bun run build
 ~/Library/Application Support/NomiFun/    # macOS（Windows/Linux 路径见上文）
 ├── nomifun-backend.db        # SQLite 状态（会话、设置、session 等）
 ├── logs/                     # nomicore.log
-├── companion/                # 伙伴 + 共享记忆中枢
+├── companion/                # 伙伴 + 记忆数据库（整机一个文件，每行记忆各归其主）
 ├── knowledge/                # 受管理的知识库
 ├── runtime/                  # 解压出的 Bun 运行时缓存（可再生）
 └── server.lock               # 后端运行期间持有的排他锁

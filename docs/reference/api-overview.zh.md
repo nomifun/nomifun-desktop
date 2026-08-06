@@ -75,6 +75,7 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 会话 | `/api/conversations/*`、`/api/messages/search` | 已鉴权 | [`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs)、[`routes_aux.rs`](../../crates/backend/nomifun-conversation/src/routes_aux.rs) |
 | 智能体（本地 CLI 智能体） | `/api/agents/*` | 已鉴权 | [`nomifun-ai-agent/src/routes/agent.rs`](../../crates/backend/nomifun-ai-agent/src/routes/agent.rs) |
 | 远程智能体 | `/api/remote-agents/*` | 已鉴权 | [`nomifun-ai-agent/src/routes/remote.rs`](../../crates/backend/nomifun-ai-agent/src/routes/remote.rs) |
+| SSH 主机 | `/api/ssh-hosts/*` | 仅实例主人 | [`nomifun-ssh/src/routes.rs`](../../crates/backend/nomifun-ssh/src/routes.rs) |
 | 设定 | `/api/presets/*` | 已鉴权 | [`nomifun-preset/src/routes.rs`](../../crates/backend/nomifun-preset/src/routes.rs) |
 | 设定标签 | `/api/preset-tags/*` | 已鉴权 | 同上 |
 | MCP 服务 | `/api/mcp/*` | 已鉴权 | [`nomifun-mcp/src/routes.rs`](../../crates/backend/nomifun-mcp/src/routes.rs) |

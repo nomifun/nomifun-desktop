@@ -124,7 +124,7 @@ const CanvasCard: React.FC<CanvasCardProps> = ({ canvas, onOpen, onRename, onDel
                 'border border-solid border-[var(--color-border-2)]',
                 'bg-[var(--color-bg-2)] backdrop-blur-sm',
                 action.danger
-                  ? 'text-[var(--color-text-3)] hover:!border-[rgba(var(--danger-6),0.4)] hover:!text-[rgb(var(--danger-6))] hover:!bg-[rgba(var(--danger-6),0.08)]'
+                  ? 'text-[var(--color-text-3)] hover:!border-[rgba(var(--danger-6),0.4)] hover:!text-danger-6 hover:!bg-[rgba(var(--danger-6),0.08)]'
                   : 'text-[var(--color-text-3)] hover:border-[var(--color-border-3)] hover:text-[var(--color-text-1)] hover:bg-[var(--color-fill-2)]',
                 'transition-colors',
               ].join(' ')}
@@ -288,7 +288,7 @@ const WorkshopListPage: React.FC = () => {
         <div className='flex w-full flex-wrap items-start justify-between gap-x-20px gap-y-12px'>
           <div className='flex items-start gap-12px min-w-0'>
             <span
-              className='flex items-center justify-center w-40px h-40px rd-11px shrink-0 text-[rgb(var(--primary-6))]'
+              className='flex items-center justify-center w-40px h-40px rd-11px shrink-0 text-primary-6'
               style={{
                 background: 'linear-gradient(150deg, rgba(var(--primary-5),0.16) 0%, rgba(var(--primary-6),0.26) 100%)',
                 border: '1px solid rgba(var(--primary-6),0.22)',
@@ -299,7 +299,7 @@ const WorkshopListPage: React.FC = () => {
             <div className='min-w-0'>
               <h1 className='m-0 mb-3px flex items-center gap-8px text-22px font-bold text-[var(--color-text-1)] tracking-tight'>
                 {t('workshop.title', { defaultValue: '创意工坊' })}
-                <span className='shrink-0 text-10px font-600 leading-none tracking-wide uppercase px-6px py-3px rd-5px bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))]'>
+                <span className='shrink-0 text-10px font-600 leading-none tracking-wide uppercase px-6px py-3px rd-5px bg-[rgba(var(--primary-6),0.12)] text-primary-6'>
                   {t('workshop.beta.tag', { defaultValue: 'Beta' })}
                 </span>
               </h1>
@@ -358,7 +358,7 @@ const WorkshopListPage: React.FC = () => {
         ) : canvases.length === 0 ? (
           <div className='flex flex-col items-center justify-center gap-14px px-24px py-64px text-center'>
             <span
-              className='flex items-center justify-center w-72px h-72px rounded-full text-[rgb(var(--primary-6))]'
+              className='flex items-center justify-center w-72px h-72px rounded-full text-primary-6'
               style={{
                 background: 'var(--color-fill-2)',
               }}
@@ -412,7 +412,7 @@ const WorkshopListPage: React.FC = () => {
                     'flex flex-col items-center justify-center gap-8px cursor-pointer select-none',
                     'rounded-16px border border-dashed border-[var(--color-border-3)] bg-transparent',
                     'text-[var(--color-text-3)]',
-                    'hover:border-[var(--color-primary-light-3)] hover:text-[rgb(var(--primary-6))] hover:bg-[var(--color-primary-light-1)]',
+                    'hover:border-[var(--color-primary-light-3)] hover:text-primary-6 hover:bg-[var(--color-primary-light-1)]',
                     'transition-all duration-150',
                   ].join(' ')}
                   style={{ aspectRatio: '16 / 12.5' }}

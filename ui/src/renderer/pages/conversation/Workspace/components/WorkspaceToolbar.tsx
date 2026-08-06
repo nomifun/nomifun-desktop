@@ -91,7 +91,7 @@ const WorkspaceToolbar: React.FC<WorkspaceToolbarProps> = ({
       )}
 
       {/* Border divider below search */}
-      {!isWorkspaceCollapsed && (showSearch || searchText) && <div className='border-b border-b-base' />}
+      {!isWorkspaceCollapsed && (showSearch || searchText) && <div className='border-b border-b-solid border-b-[var(--border-base)]' />}
 
       {/* Directory name with collapse and action icons */}
       <div className='workspace-toolbar-row flex items-center justify-between gap-8px'>

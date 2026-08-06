@@ -1,15 +1,29 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * generate-i18n-types.mjs — regenerate ui/src/renderer/services/i18n/i18n-keys.d.ts
- * from the en-US locale JSON files (source of truth).
+ * from the en-US locale JSON files (source of truth), and enforce that every
+ * shipped locale carries the same keys.
  *
  * Usage:
- *   node scripts/generate-i18n-types.mjs           # write the d.ts
- *   node scripts/generate-i18n-types.mjs --check   # no write; exit 1 if the
- *                                                  # committed d.ts drifts from
- *                                                  # the locale key set
+ *   bun scripts/generate-i18n-types.mjs             # write the d.ts
+ *   bun scripts/generate-i18n-types.mjs --check     # no write; exit 1 if the
+ *                                                   # committed d.ts drifts from
+ *                                                   # the locale key set
+ *   bun scripts/generate-i18n-types.mjs --self-test # exercise the parity rule
+ *                                                   # against fixtures, no repo read
  *
- * No dependencies. Node >= 16.
+ * Either mode also fails on cross-language drift (see `diffLocaleKeys`): the d.ts is
+ * generated from ONE locale, so without this a key added to zh-CN only, or dropped
+ * from zh-CN only, is invisible — the type still typechecks and the runtime silently
+ * falls back to English.
+ *
+ * Must run under `bun`, not bare `node` (package.json already does: `check:i18n`,
+ * `gen:i18n`). The plural-aware parity rule is imported from the renderer's
+ * TypeScript source so this gate and the per-namespace locale tests cannot answer
+ * the same question differently, and one shared rule is worth more than a bare-node
+ * entry point nothing in this repo uses. A runtime that cannot load `.ts` is told
+ * exactly that, plus which bun command to run, instead of dying inside the module
+ * loader — see `importParityRule`.
  *
  * Rules (mirrors the historical generator output):
  * - Namespaces and their order come from locales/en-US/index.ts (runtime truth).
@@ -23,15 +37,69 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// The plural-aware parity rule lives in the renderer source, not here: the
+// per-namespace locale tests must reach the same verdict, and their literal
+// key-for-key comparison used to contradict this gate outright — it demanded plural
+// variants i18next can never resolve (see the module's own header).
+const PARITY_RULE = '../ui/src/renderer/services/i18n/localeKeyParity.ts';
+
+/**
+ * Loader failures that all mean one thing: this runtime will not read the `.ts`
+ * module above. node 22 without type stripping raises the first; a node compiled
+ * without TypeScript support raises the second even when `--experimental-strip-types`
+ * is passed; the last two are type stripping refusing a particular file. Anything
+ * else is a real fault in the rule itself and must not be dressed up as this one.
+ */
+const NO_TYPESCRIPT_SUPPORT = new Set([
+  'ERR_UNKNOWN_FILE_EXTENSION',
+  'ERR_NO_TYPESCRIPT',
+  'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX',
+  'ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING',
+]);
+
+/**
+ * Import the shared parity rule, translating "this runtime cannot load TypeScript"
+ * into one actionable line.
+ *
+ * The import is dynamic purely so that translation is reachable at all: a static
+ * import of a `.ts` module is resolved before any statement in this file runs, so
+ * `node scripts/generate-i18n-types.mjs` used to die inside the module loader with an
+ * ERR_UNKNOWN_FILE_EXTENSION stack that named a renderer file and never mentioned
+ * bun — and no guard at the top of this file could have printed ahead of it.
+ *
+ * Deliberately not a `typeof Bun` check: any runtime that can load `.ts` should just
+ * work, so only the ones that demonstrably cannot are turned away.
+ */
+async function importParityRule() {
+  try {
+    return await import(PARITY_RULE);
+  } catch (error) {
+    if (!NO_TYPESCRIPT_SUPPORT.has(error?.code)) throw error;
+    console.error(
+      `scripts/generate-i18n-types.mjs must run under bun (this runtime cannot load\n` +
+        `TypeScript: ${error.code}). It imports the plural-aware parity rule from\n` +
+        `ui/src/renderer/services/i18n/localeKeyParity.ts so this gate and the locale\n` +
+        `tests cannot answer the same question differently.\n\n` +
+        `  bun run gen:i18n      # write ui/src/renderer/services/i18n/i18n-keys.d.ts\n` +
+        `  bun run check:i18n    # verify it, plus cross-language key parity`,
+    );
+    process.exit(1);
+  }
+}
+
+const { diffLocaleKeys } = await importParityRule();
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const i18nDir = path.join(repoRoot, 'ui', 'src', 'renderer', 'services', 'i18n');
-const localeDir = path.join(i18nDir, 'locales', 'en-US');
+const localesDir = path.join(i18nDir, 'locales');
+const i18nConfigFile = path.join(repoRoot, 'ui', 'src', 'common', 'config', 'i18n-config.json');
 const outFile = path.join(i18nDir, 'i18n-keys.d.ts');
 
 const checkMode = process.argv.includes('--check');
+const selfTestMode = process.argv.includes('--self-test');
 
-/** Parse locales/en-US/index.ts: namespace export order + json file per namespace. */
-function readNamespaces() {
+/** Parse a locale's index.ts: namespace export order + json file per namespace. */
+function readNamespaces(localeDir) {
   const src = fs.readFileSync(path.join(localeDir, 'index.ts'), 'utf8');
 
   const importMap = new Map(); // identifier -> json filename
@@ -60,7 +128,9 @@ function readNamespaces() {
     .readdirSync(localeDir)
     .filter((f) => f.endsWith('.json') && !referenced.has(f));
   for (const f of orphans) {
-    process.stderr.write(`warning: ${f} exists in en-US but is not exported by index.ts (keys excluded)\n`);
+    process.stderr.write(
+      `warning: ${f} exists in ${path.basename(localeDir)} but is not exported by index.ts (keys excluded)\n`,
+    );
   }
 
   return namespaces;
@@ -77,7 +147,7 @@ function flatten(value, prefix, out) {
   }
 }
 
-function collectKeys(namespaces) {
+function collectKeys(namespaces, localeDir) {
   const keys = [];
   for (const { name, file } of namespaces) {
     const json = JSON.parse(fs.readFileSync(path.join(localeDir, file), 'utf8'));
@@ -96,6 +166,71 @@ function collectKeys(namespaces) {
     );
   }
   return [...seen].sort(); // UTF-16 code unit order, matches historical output
+}
+
+// ── Cross-language parity ──────────────────────────────────────────────────────
+// The rule itself is `diffLocaleKeys` (imported above); what follows only feeds it
+// the repo's locales and renders its verdict.
+
+/** Read every shipped locale's flattened key set. Returns `{ keysByLocale, namespacesByLocale }`. */
+function readAllLocales() {
+  const { supportedLanguages, referenceLanguage } = JSON.parse(fs.readFileSync(i18nConfigFile, 'utf8'));
+  if (!Array.isArray(supportedLanguages) || !supportedLanguages.includes(referenceLanguage)) {
+    throw new Error(`${i18nConfigFile} must list referenceLanguage in supportedLanguages`);
+  }
+  // referenceLanguage first: its warnings read as the baseline, and the d.ts comes
+  // from it. The rest keep the config's order for stable output.
+  const locales = [referenceLanguage, ...supportedLanguages.filter((l) => l !== referenceLanguage)];
+  const keysByLocale = {};
+  const namespacesByLocale = {};
+  for (const locale of locales) {
+    const dir = path.join(localesDir, locale);
+    if (!fs.existsSync(dir)) throw new Error(`supported language '${locale}' has no locales/${locale} directory`);
+    const namespaces = readNamespaces(dir);
+    namespacesByLocale[locale] = namespaces;
+    keysByLocale[locale] = collectKeys(namespaces, dir);
+  }
+  return { locales, referenceLanguage, keysByLocale, namespacesByLocale };
+}
+
+/**
+ * Report parity to stderr. Returns true when the locales agree.
+ *
+ * A namespace missing from one locale's index.ts would otherwise print as every
+ * one of its keys, so it is reported on its own first.
+ */
+function reportParity({ locales, referenceLanguage, keysByLocale, namespacesByLocale }) {
+  let ok = true;
+  const reference = namespacesByLocale[referenceLanguage].map((n) => n.name);
+  for (const locale of locales) {
+    if (locale === referenceLanguage) continue;
+    const names = namespacesByLocale[locale].map((n) => n.name);
+    const missing = reference.filter((name) => !names.includes(name));
+    const extra = names.filter((name) => !reference.includes(name));
+    if (missing.length || extra.length) {
+      ok = false;
+      if (missing.length) console.error(`${locale}/index.ts does not export: ${missing.join(', ')}`);
+      if (extra.length) console.error(`${locale}/index.ts exports namespaces ${referenceLanguage} does not: ${extra.join(', ')}`);
+    }
+  }
+
+  const { errors, warnings } = diffLocaleKeys(keysByLocale);
+  for (const { locale, key, reason } of warnings) {
+    process.stderr.write(`warning: ${locale} '${key}' is unreachable — ${reason}\n`);
+  }
+  if (errors.length) {
+    ok = false;
+    for (const locale of locales) {
+      const mine = errors.filter((error) => error.locale === locale);
+      if (!mine.length) continue;
+      console.error(`${locale} is missing ${mine.length} key${mine.length === 1 ? '' : 's'}:`);
+      for (const { key, reason } of mine) console.error(`  ${key}  (${reason})`);
+    }
+    console.error(
+      '\nlocale key sets must match: the d.ts is generated from one locale, so a one-sided key typechecks and then silently falls back at runtime.',
+    );
+  }
+  return ok;
 }
 
 const quote = (s) => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
@@ -120,9 +255,88 @@ function render(namespaces, keys) {
 
 const normalize = (s) => s.replace(/\r\n/g, '\n');
 
+/**
+ * Prove the parity rule both bites and tolerates, on fixtures instead of the
+ * repo: the two failure modes are "misses a real one-sided key" and "fails on a
+ * correct translation", and only a self-test can show which one a change caused.
+ */
+function selfTest() {
+  const en = 'en-US';
+  const zh = 'zh-CN';
+  const cases = [
+    {
+      name: 'a one-sided plain key fails, naming the locale that lacks it',
+      keys: { [en]: ['a.kept', 'a.enOnly'], [zh]: ['a.kept'] },
+      expectErrors: [`${zh}:a.enOnly`],
+      expectWarnings: [],
+    },
+    {
+      name: 'a one-sided plain key fails in the other direction too',
+      keys: { [en]: ['a.kept'], [zh]: ['a.kept', 'a.zhOnly'] },
+      expectErrors: [`${en}:a.zhOnly`],
+      expectWarnings: [],
+    },
+    {
+      name: "English's extra plural form is not demanded of Chinese",
+      keys: { [en]: ['a.n_one', 'a.n_other'], [zh]: ['a.n_other'] },
+      expectErrors: [],
+      expectWarnings: [],
+    },
+    {
+      name: 'the one plural form Chinese does have is demanded (the real bug)',
+      keys: { [en]: ['a.n', 'a.n_other'], [zh]: ['a.n'] },
+      expectErrors: [`${zh}:a.n_other`],
+      expectWarnings: [],
+    },
+    {
+      name: 'a plural form outside a locale’s categories warns instead of failing',
+      keys: { [en]: ['a.n_one', 'a.n_other'], [zh]: ['a.n_one', 'a.n_other'] },
+      expectErrors: [],
+      expectWarnings: [`${zh}:a.n_one`],
+    },
+    {
+      name: 'a key that merely ends in an unrelated word is not read as a plural',
+      keys: { [en]: ['a.the_others'], [zh]: ['a.the_others'] },
+      expectErrors: [],
+      expectWarnings: [],
+    },
+  ];
+
+  let failures = 0;
+  for (const { name, keys, expectErrors, expectWarnings } of cases) {
+    const { errors, warnings } = diffLocaleKeys(keys);
+    const seen = (entries) => entries.map((e) => `${e.locale}:${e.key}`).sort();
+    const expected = { errors: [...expectErrors].sort(), warnings: [...expectWarnings].sort() };
+    const actual = { errors: seen(errors), warnings: seen(warnings) };
+    const same =
+      JSON.stringify(expected.errors) === JSON.stringify(actual.errors) &&
+      JSON.stringify(expected.warnings) === JSON.stringify(actual.warnings);
+    if (same) {
+      console.log(`ok   ${name}`);
+    } else {
+      failures += 1;
+      console.error(`FAIL ${name}`);
+      console.error(`     expected errors ${JSON.stringify(expected.errors)}, got ${JSON.stringify(actual.errors)}`);
+      console.error(`     expected warnings ${JSON.stringify(expected.warnings)}, got ${JSON.stringify(actual.warnings)}`);
+    }
+  }
+  if (failures) {
+    console.error(`\n${failures} of ${cases.length} parity self-tests failed`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`all ${cases.length} parity self-tests passed`);
+}
+
 function main() {
-  const namespaces = readNamespaces();
-  const keys = collectKeys(namespaces);
+  if (selfTestMode) {
+    selfTest();
+    return;
+  }
+
+  const locales = readAllLocales();
+  const namespaces = locales.namespacesByLocale[locales.referenceLanguage];
+  const keys = locales.keysByLocale[locales.referenceLanguage];
   const generated = render(namespaces, keys);
 
   const existing = fs.existsSync(outFile) ? normalize(fs.readFileSync(outFile, 'utf8')) : null;
@@ -130,31 +344,35 @@ function main() {
   if (checkMode) {
     if (existing === generated) {
       console.log(`i18n-keys.d.ts is up to date (${keys.length} keys, ${namespaces.length} modules)`);
-      return;
+    } else {
+      // Report drift at key granularity, then fall back to a text-level hint.
+      const extractKeys = (text) => {
+        const section = text.split('export type I18nModule')[0];
+        return new Set([...section.matchAll(/\|\s+'((?:[^'\\]|\\.)*)'/g)].map((m) => m[1]));
+      };
+      const oldKeys = existing ? extractKeys(existing) : new Set();
+      const newKeys = new Set(keys);
+      const missing = keys.filter((k) => !oldKeys.has(k)); // in locales, not in d.ts
+      const stale = [...oldKeys].filter((k) => !newKeys.has(k)); // in d.ts, not in locales
+      if (missing.length) console.error(`missing from d.ts (${missing.length}):\n  ${missing.join('\n  ')}`);
+      if (stale.length) console.error(`stale in d.ts (${stale.length}):\n  ${stale.join('\n  ')}`);
+      if (!missing.length && !stale.length) console.error('key sets match but file text differs (ordering/header/EOL)');
+      console.error('\ni18n-keys.d.ts is out of date — run: bun run gen:i18n');
+      process.exitCode = 1;
     }
-    // Report drift at key granularity, then fall back to a text-level hint.
-    const extractKeys = (text) => {
-      const section = text.split('export type I18nModule')[0];
-      return new Set([...section.matchAll(/\|\s+'((?:[^'\\]|\\.)*)'/g)].map((m) => m[1]));
-    };
-    const oldKeys = existing ? extractKeys(existing) : new Set();
-    const newKeys = new Set(keys);
-    const missing = keys.filter((k) => !oldKeys.has(k)); // in locales, not in d.ts
-    const stale = [...oldKeys].filter((k) => !newKeys.has(k)); // in d.ts, not in locales
-    if (missing.length) console.error(`missing from d.ts (${missing.length}):\n  ${missing.join('\n  ')}`);
-    if (stale.length) console.error(`stale in d.ts (${stale.length}):\n  ${stale.join('\n  ')}`);
-    if (!missing.length && !stale.length) console.error('key sets match but file text differs (ordering/header/EOL)');
-    console.error('\ni18n-keys.d.ts is out of date — run: node scripts/generate-i18n-types.mjs');
-    process.exitCode = 1;
+    if (!reportParity(locales)) process.exitCode = 1;
     return;
   }
 
   if (existing === generated) {
     console.log(`i18n-keys.d.ts already up to date (${keys.length} keys)`);
-    return;
+  } else {
+    fs.writeFileSync(outFile, generated, 'utf8');
+    console.log(`wrote ${path.relative(repoRoot, outFile)} (${keys.length} keys, ${namespaces.length} modules)`);
   }
-  fs.writeFileSync(outFile, generated, 'utf8');
-  console.log(`wrote ${path.relative(repoRoot, outFile)} (${keys.length} keys, ${namespaces.length} modules)`);
+  // Regenerating cannot fix cross-language drift — only editing the other locale
+  // can — so this is reported (and failed on) after the write, not instead of it.
+  if (!reportParity(locales)) process.exitCode = 1;
 }
 
 main();

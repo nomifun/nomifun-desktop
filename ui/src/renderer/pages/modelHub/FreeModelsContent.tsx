@@ -57,9 +57,9 @@ const formatRefreshInterval = (
 const managedSourceAlias = (): string => 'oc';
 
 const healthDotClass = (status: ManagedModelHealthResult['status'] | 'checking'): string => {
-  if (status === 'healthy') return 'bg-[rgb(var(--success-6))] shadow-[0_0_0_3px_rgba(var(--success-6),0.1)]';
-  if (status === 'unhealthy') return 'bg-[rgb(var(--danger-6))] shadow-[0_0_0_3px_rgba(var(--danger-6),0.1)]';
-  if (status === 'checking') return 'bg-[rgb(var(--primary-6))] animate-pulse';
+  if (status === 'healthy') return 'bg-success-6 shadow-[0_0_0_3px_rgba(var(--success-6),0.1)]';
+  if (status === 'unhealthy') return 'bg-danger-6 shadow-[0_0_0_3px_rgba(var(--danger-6),0.1)]';
+  if (status === 'checking') return 'bg-primary-6 animate-pulse';
   return 'bg-[var(--color-fill-4)]';
 };
 
@@ -176,7 +176,7 @@ const FreeModelsContent: React.FC = () => {
     <div className='flex flex-col bg-2 rd-16px px-24px py-16px'>
       {messageContext}
 
-      <div className='flex-shrink-0 border-b border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
+      <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
         <div className='flex items-center justify-between gap-12px flex-wrap'>
           <div className='flex items-center gap-8px min-w-0'>
             <span className='size-28px flex items-center justify-center rd-8px bg-primary-1 text-primary-6 shrink-0'>
@@ -228,7 +228,7 @@ const FreeModelsContent: React.FC = () => {
                 loading={pendingAction === 'refresh'}
                 disabled={!status || serviceBusy || healthBusy}
                 onClick={() => void run(refresh, 'settings.modelHub.free.refreshSuccess', true)}
-                className='rd-100px border-1 border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
+                className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
               >
                 {t('settings.modelHub.free.refresh')}
               </Button>
@@ -243,7 +243,7 @@ const FreeModelsContent: React.FC = () => {
             backgroundColor: 'rgba(var(--primary-6),0.06)',
           }}
         >
-          <Info theme='outline' size='16' className='mt-1px shrink-0 text-[rgb(var(--primary-6))]' />
+          <Info theme='outline' size='16' className='mt-1px shrink-0 text-primary-6' />
           <div className='min-w-0'>
             <div className='text-13px font-600 leading-18px text-t-primary'>{t('settings.modelHub.free.privacyTitle')}</div>
             <div className='mt-2px text-12px leading-18px text-t-secondary'>{t('settings.modelHub.free.privacyNotice')}</div>
@@ -362,7 +362,7 @@ const FreeModelsContent: React.FC = () => {
                       <Tag
                         size='small'
                         bordered={false}
-                        className='!rd-6px !px-7px !text-10px !bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]'
+                        className='!rd-6px !px-7px !text-10px !bg-[rgba(var(--success-6),0.1)] !text-success-6'
                       >
                         {t('settings.modelHub.free.freeBadge')}
                       </Tag>
@@ -445,7 +445,7 @@ const FreeModelsContent: React.FC = () => {
                           aria-hidden='true'
                           className={classNames(
                             'absolute left-0 top-9px h-24px w-2px rd-r-3px transition-colors',
-                            modelAvailable ? 'bg-[rgb(var(--primary-6))]' : 'bg-[var(--color-fill-4)]'
+                            modelAvailable ? 'bg-primary-6' : 'bg-[var(--color-fill-4)]'
                           )}
                         />
 
@@ -516,7 +516,13 @@ const FreeModelsContent: React.FC = () => {
                               className={classNames(
                                 'shrink-0 flex items-center gap-5px rd-6px px-3px -mx-3px outline-none',
                                 modelAvailable && !healthBusy
-                                  ? 'cursor-pointer hover:text-t-primary focus-visible:ring-2 focus-visible:ring-[rgba(var(--primary-6),0.28)]'
+                                  ? // `outline-none` above removes the native focus ring, so this ring IS the
+                                    // keyboard focus affordance. `ring-2` set only `--un-ring-color` — a numeric
+                                    // suffix resolves against the theme's numeric colour keys — so the width
+                                    // stayed 0 (no box-shadow at all) and, because `.ring-2` is emitted after
+                                    // `.ring-[…]`, it also overrode the intended colour with `var(--bg-2)`.
+                                    // `ring-2px` is the width spelling and emits the full box-shadow chain.
+                                    'cursor-pointer hover:text-t-primary focus-visible:ring-2px focus-visible:ring-[rgba(var(--primary-6),0.28)]'
                                   : 'cursor-default'
                               )}
                               onClick={() => {

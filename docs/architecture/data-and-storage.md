@@ -27,7 +27,7 @@ Inside the data directory:
 │                        the open OS handle; a leftover file is harmless)
 ├── logs/                tracing-appender file output (rotated daily)
 ├── conversations/       per-conversation workspaces (see below)
-└── companion/                 companion file domain (shared memory hub + per-companion profiles, see below)
+└── companion/                 companion file domain (install-wide memory database + per-companion profiles, see below)
 ```
 
 All three hosts resolve the unset default through one shared helper,
@@ -215,10 +215,12 @@ without a database cascade.
 
 ## Encryption at rest — AES-GCM
 
-Sensitive strings (provider API keys, OAuth tokens, channel-bot tokens, ...)
-are encrypted before insertion using AES-256-GCM via
-`nomifun_common::crypto::{encrypt_string, decrypt_string}` and the
-data-encryption key loaded by `nomifun_app::load_or_create_data_encryption_key`.
+Sensitive strings (provider API keys, OAuth tokens, channel-bot tokens,
+SSH host credentials — password / private key / passphrase / certificate /
+sudo password in the `ssh_hosts` table, ...) are encrypted before insertion
+using AES-256-GCM via `nomifun_common::crypto::{encrypt_string, decrypt_string}`
+and the data-encryption key loaded by
+`nomifun_app::load_or_create_data_encryption_key`.
 
 The master key is a per-v3-dataset file at `<data_dir>/encryption_key`, created
 when the new dataset is initialized. Password changes and JWT rotation do not
@@ -293,16 +295,53 @@ historical row migrations. The multi-companion layout:
 
 ```
 <data_dir>/companion/
-├── shared/                      shared memory hub (one copy for all companions)
-│   ├── config.json              SharedCompanionConfig: collect switches, event retention/capacity, learn interval & model, default_companion_id
+├── shared/                      install-wide files (one per install, NOT shared memory)
+│   ├── config.json              SharedCompanionConfig: collect switches, event retention/capacity, session archiving, default_companion_id
+│                                (learn/evolve moved onto each companion profile in 2026-08)
 │   ├── events/YYYYMMDD.jsonl    raw events (automatic age/hard-cap cleanup; privacy-sensitive; export is opt-in)
 │   └── memory.db                standalone SQLite (PRAGMA user_version ladder):
-│                                shared memories/suggestions + per-companion runtime
-│                                state (companion_runtime_state: XP, …)
+│                                one memory database for the whole install, but
+│                                every row is OWNED by exactly one companion
+│                                (companion_memories.companion_id) and readable
+│                                only by that companion; + per-companion runtime
+│                                state (companion_runtime_state: XP, mood, and
+│                                each companion's learn_cursor_ts /
+│                                evolve_cursor_ts position in events/)
 └── companions/
     └── {companion_id}/                bare UUIDv7 companion ID; the directory is the source of truth
-        └── config.json          CompanionProfileConfig: name/character/persona/per-companion model/desktop-companion toggle & position
+        └── config.json          CompanionProfileConfig: name/character/persona/per-companion chat model/
+                                 that companion's own learn + evolve settings/desktop-companion toggle,
+                                 position & quiet hours
 ```
+
+`shared/` is "one per install", not "shared between companions". `memory.db` holds
+every companion's memory rows in one table, and each row carries its owner in ONE
+nullable column, `companion_id` (`companion_skills` is the same); every
+companion-facing read filters on that owner, so a companion never sees another's
+memories and a memory cannot be moved between owners. `companion_id IS NULL` is
+the only ownerless state: it is what pre-upgrade rows and imports into an empty
+roster look like. The column stays nullable because a zero-companion install is
+supported, and rows in that state are re-homed onto one owner (the explicit
+`default_companion_id` if it is still in the roster, else the oldest companion) by
+an idempotent boot migration — one `UPDATE`, never a per-companion copy, so
+`memory_id` values stay stable and a fact cannot diverge into per-companion
+duplicates.
+
+Both tables carried a two-column encoding of that owner until 2026-08 —
+`scope_kind TEXT NOT NULL` (`'user'` / `'companion'`) plus a nullable
+`scope_companion_id`, paired by a table CHECK into exactly `('user', NULL)` and
+`('companion', id)`. The discriminator was fully determined by whether an owner
+was present, so it could only ever disagree, never inform; a boot migration
+rebuilds both tables into the single nullable column (SQLite cannot drop a column
+named in a table CHECK). The rebuild preserves every `id` verbatim because
+`companion_memories_fts` is external-content FTS5 keyed on `content_rowid='id'`.
+A memory's owner reaches the wire under the column's own name, `companion_id`,
+and so does a skill's — the skill wire kept the retired spelling on a
+`serde(rename)` for one release longer, which is exactly how a wire and its
+column get to disagree unnoticed. An older bundle's `scope_kind` is accepted and
+discarded on import, and a `scope_companion_id` on either row type is translated
+to `companion_id` — a bundle is a long-lived file on the owner's disk, not a
+request we can ask them to re-issue.
 
 The historical single-companion layout `companion/nomi/` is not migrated into
 v3. If detected, it is retired together with the complete old managed dataset.
@@ -397,8 +436,8 @@ non-loopback bind address.
   `<work_dir>/conversations/` tree. User-selected/custom workspaces elsewhere
   on disk are external user projects and are never copied implicitly.
 - **Companion data** — the bundle recursively includes
-  `<data_dir>/companion/` (shared memory hub + per-companion profiles; see the
-  [Companions guide](../guides/companions.md)).
+  `<data_dir>/companion/` (the install-wide memory database + per-companion
+  profiles; see the [Companions guide](../guides/companions.md)).
 - **Bun runtime cache** — disposable; will be re-extracted on next boot.
 
 Offline CLI commands are provided by `nomicore`:

@@ -154,7 +154,7 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
         <div
           id={`terminal-${session.terminal_id}`}
         className={classNames(
-          'chat-history__item h-34px rd-8px flex items-center group cursor-pointer relative overflow-hidden shrink-0 min-w-0 transition-colors justify-start gap-8px pr-16px',
+          'chat-history__item h-32px rd-8px flex items-center group cursor-pointer relative overflow-hidden shrink-0 min-w-0 transition-colors justify-start gap-8px pr-16px',
           indent ? 'pl-34px' : 'pl-10px',
           {
             'hover:bg-fill-3': !selectionMode && !active,
@@ -288,7 +288,7 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
                     </div>
                   </Menu.Item>
                   <Menu.Item key='delete'>
-                    <div className='flex items-center gap-8px text-[rgb(var(--warning-6))]'>
+                    <div className='flex items-center gap-8px text-warning-6'>
                       <DeleteOne theme='outline' size='14' />
                       <span>{t('terminal.action.delete')}</span>
                     </div>

@@ -41,7 +41,7 @@ type AgentSkillImportDrawerProps = {
 const sourceToneClass = (source: string) => {
   if (source === 'claude') return 'bg-[rgba(245,132,38,0.08)] text-[rgb(210,105,30)]';
   if (source === 'gemini') return 'bg-[rgba(var(--primary-6),0.08)] text-primary-6';
-  if (source === 'agents') return 'bg-[rgba(var(--success-6),0.1)] text-[rgb(var(--success-6))]';
+  if (source === 'agents') return 'bg-[rgba(var(--success-6),0.1)] text-success-6';
   return 'bg-fill-2 text-t-secondary';
 };
 
@@ -275,7 +275,11 @@ const AgentSkillImportDrawer: React.FC<AgentSkillImportDrawerProps> = ({
 
         <div className='rd-12px overflow-hidden bg-fill-1 shadow-[inset_0_0_0_1px_rgba(var(--primary-6),0.10)]'>
           {rows.length > 0 ? (
-            <div className='max-h-[420px] overflow-auto divide-y divide-[rgba(var(--primary-6),0.10)]'>
+            // The colour here was always valid, but `divide-y` emits only a width and this project
+            // ships no border reset, so the style stayed `none` and no separator ever painted.
+            // `divide-solid` styles all four sides, so `divide-x-0` keeps the unset left/right
+            // widths from falling back to the CSS initial `medium` (~3px).
+            <div className='max-h-[420px] overflow-auto divide-y divide-x-0 divide-solid divide-[rgba(var(--primary-6),0.10)]'>
               {rows.map((row) => (
                 <div
                   key={row.key}
@@ -292,7 +296,7 @@ const AgentSkillImportDrawer: React.FC<AgentSkillImportDrawerProps> = ({
                         {row.sourceName}
                       </Tag>
                       {row.alreadyImported && (
-                        <Tag size='small' bordered={false} className='!bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]'>
+                        <Tag size='small' bordered={false} className='!bg-[rgba(var(--success-6),0.1)] !text-success-6'>
                           <span className='inline-flex items-center gap-3px'>
                             <CheckSmall size={12} fill='currentColor' />
                             {t('settings.agentSkillImport.alreadyImported', { defaultValue: 'In library' })}

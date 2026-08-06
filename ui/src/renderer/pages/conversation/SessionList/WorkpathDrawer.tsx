@@ -65,7 +65,7 @@ export interface WorkpathDrawerProps {
  * display name + session-count badge + hover ops) and, when expanded, up to two
  * SessionKindGroup sub-drawers (interactive first; empty groups not rendered).
  * Collapse interaction follows the WorkspaceCollapse paradigm (conditional
- * render, h-34px header, hover bg, trailing ops revealed on hover).
+ * render, compact header, hover bg, trailing ops revealed on hover).
  */
 const WorkpathDrawer: React.FC<WorkpathDrawerProps> = ({
   node,
@@ -256,7 +256,7 @@ const WorkpathDrawer: React.FC<WorkpathDrawerProps> = ({
       <div
         className={classNames(
           'flex items-center gap-8px pl-10px pr-8px cursor-pointer hover:bg-fill-3 rd-8px transition-colors min-w-0 group',
-          twoLineWorkpath ? 'h-42px py-4px' : 'h-34px'
+          twoLineWorkpath ? 'h-40px py-3px' : 'h-32px'
         )}
         onClick={() => {
           if (batchMode && !workpathSelectionState.disabled) {
@@ -407,7 +407,7 @@ const WorkpathDrawer: React.FC<WorkpathDrawerProps> = ({
                   role='button'
                   tabIndex={0}
                   aria-label={t('sessionList.removeWorkpath')}
-                  className='flex-center cursor-pointer transition-colors text-t-secondary hover:text-[rgb(var(--danger-6))] size-20px rd-4px sider-action-btn'
+                  className='flex-center cursor-pointer transition-colors text-t-secondary hover:text-danger-6 size-20px rd-4px sider-action-btn'
                   onClick={(e) => {
                     e.stopPropagation();
                     onRemoveProjectWorkpath(node);

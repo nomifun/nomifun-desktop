@@ -1,0 +1,37 @@
+[package]
+name = "nomifun-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nomi-ssh.workspace = true
+nomifun-ai-agent.workspace = true
+nomifun-common.workspace = true
+nomifun-db.workspace = true
+nomifun-realtime.workspace = true
+nomifun-api-types.workspace = true
+nomifun-auth.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+zeroize.workspace = true
+axum.workspace = true
+# Home-directory resolution for the read-only `~/.ssh/config` importer. Already a
+# workspace dependency (and already in this binary's graph via eleven other
+# crates), so this adds nothing to the lockfile.
+dirs.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile.workspace = true
+sqlx.workspace = true
+serde_json.workspace = true
+# Drives the host-book router in-process (`oneshot`), so a route test exercises
+# the real handlers and extractors instead of calling private functions.
+tower.workspace = true

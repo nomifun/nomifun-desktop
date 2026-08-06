@@ -8,7 +8,7 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
 import { Message, Modal } from '@arco-design/web-react';
-import { IconDelete, IconPlus } from '@arco-design/web-react/icon';
+import { Delete, Plus } from '@icon-park/react';
 import { getBaseUrl, isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IFigureMeta } from '@/common/adapter/ipcBridge';
 import type { FigureId } from '@/common/types/ids';
@@ -87,7 +87,11 @@ const CharacterPicker: React.FC<{
                 'flex flex-col items-center cursor-pointer transition-all border-solid',
                 compact
                   ? 'gap-4px rd-10px px-8px pt-8px pb-7px border'
-                  : 'gap-6px rd-12px px-10px pt-12px pb-10px border-2',
+                  // 宽度必须写 border-2px：`border-2` 是 --bg-2 颜色，而且生成顺序在
+                  // border-[var(--color-primary)] 之后，会把下面那条选中色整条盖掉——
+                  // 非紧凑卡片因此既是 3px 的 medium 边框，又永远显示不出选中态。
+                  // `border-2` is a colour that outranks the active ring below it.
+                  : 'gap-6px rd-12px px-10px pt-12px pb-10px border-2px',
                 active ? 'border-[var(--color-primary)] !bg-primary-1 shadow-[0_4px_14px_rgba(var(--primary-rgb),0.25)]' : 'border-transparent bg-fill-2 hover:bg-fill-3'
               )}
             >
@@ -120,7 +124,7 @@ const CharacterPicker: React.FC<{
                 'group relative flex flex-col items-center cursor-pointer overflow-hidden transition-all border-solid',
                 compact
                   ? 'gap-4px rd-10px px-8px pt-8px pb-7px border'
-                  : 'gap-6px rd-12px px-10px pt-12px pb-10px border-2',
+                  : 'gap-6px rd-12px px-10px pt-12px pb-10px border-2px',
                 active ? 'border-[var(--color-primary)] !bg-primary-1 shadow-[0_4px_14px_rgba(var(--primary-rgb),0.25)]' : 'border-transparent bg-fill-2 hover:bg-fill-3'
               )}
             >
@@ -136,7 +140,7 @@ const CharacterPicker: React.FC<{
                     if (!used) confirmDelete(fig);
                   }}
                 >
-                  <IconDelete className='text-13px' />
+                  <Delete theme='outline' size='13' fill='currentColor' />
                 </FigureActionButton>
               </FigureActionSurface>
               <span
@@ -168,7 +172,7 @@ const CharacterPicker: React.FC<{
             'flex flex-col items-center justify-center cursor-pointer transition-all border-dashed border-[var(--color-border-2)] bg-fill-2 hover:bg-fill-3 hover:border-[var(--color-primary)]',
             compact
               ? 'gap-4px rd-10px px-8px pt-8px pb-7px border'
-              : 'gap-6px rd-12px px-10px pt-12px pb-10px border-2'
+              : 'gap-6px rd-12px px-10px pt-12px pb-10px border-2px'
           )}
         >
           <span
@@ -177,7 +181,7 @@ const CharacterPicker: React.FC<{
               compact ? 'h-64px text-26px' : 'h-84px text-32px'
             )}
           >
-            <IconPlus />
+            <Plus theme='outline' size='14' fill='currentColor' />
           </span>
           <span className='text-13px font-600 text-t-primary'>{t('nomi.customFigure.createNew')}</span>
           <span className='text-11px text-t-tertiary text-center leading-snug'>{t('nomi.customFigure.cardHint')}</span>

@@ -41,6 +41,14 @@ impl SystemPromptCache {
         self.sections.insert("agents_md", instructions);
         self.joined = None;
     }
+
+    /// Override the environment section. Used by session bootstrap when the
+    /// default "Working directory: <local cwd>" rendering would be a lie — an
+    /// SSH-bound session runs on the remote host and has no local cwd.
+    pub fn set_environment(&mut self, environment: String) {
+        self.sections.insert("environment", environment);
+        self.joined = None;
+    }
 }
 
 impl Default for SystemPromptCache {

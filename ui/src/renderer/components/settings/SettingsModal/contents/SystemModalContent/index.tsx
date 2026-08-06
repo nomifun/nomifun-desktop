@@ -280,7 +280,14 @@ const SystemModalContent: React.FC = () => {
       <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
         <div className='space-y-16px'>
           <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
-            <div className='w-full flex flex-col divide-y divide-border-2'>
+            {/*
+              `divide-y` emits only a width; with no border reset in this project the style stays
+              `none`, so `divide-solid` is mandatory or the separators never paint. `divide-solid`
+              styles all four sides, hence `divide-x-0` to keep the unset left/right widths from
+              falling back to the CSS initial `medium` (~3px). `divide-border-2` was dead — there is
+              no theme colour named `border`.
+            */}
+            <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
               {preferenceItems.map((item) => (
                 <PreferenceRow key={item.key} label={item.label} description={item.description}>
                   {item.component}
@@ -364,7 +371,7 @@ const SystemModalContent: React.FC = () => {
 
           {/* Danger zone: factory reset (clears the database + derived data) */}
           <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
-            <div className='text-13px font-600 text-[rgb(var(--danger-6))]'>{t('settings.factoryReset.dangerZone')}</div>
+            <div className='text-13px font-600 text-danger-6'>{t('settings.factoryReset.dangerZone')}</div>
             <div className='flex items-center justify-between gap-12px flex-wrap'>
               <div className='flex-1 min-w-200px'>
                 <div className='text-14px text-t-primary'>{t('settings.factoryReset.title')}</div>

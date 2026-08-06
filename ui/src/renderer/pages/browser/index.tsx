@@ -484,7 +484,7 @@ const BrowserPage: React.FC = () => {
   const capabilityUnavailable = overview?.supported === false || overview?.enabled === false;
 
   return (
-    <div className='size-full min-h-0 flex flex-col p-16px box-border bg-bg-2'>
+    <div className='size-full min-h-0 flex flex-col p-16px box-border bg-2'>
       <BrowserPageHeader
         runningCount={runningCount}
         queuedCount={queuedCount}
@@ -527,7 +527,7 @@ const BrowserPage: React.FC = () => {
       {overview && !capabilityUnavailable && <BrowserHostDiagnostics overview={overview} />}
 
       {capabilityUnavailable ? (
-        <div className='flex-1 min-h-0 flex items-center justify-center bg-bg-1 rd-12px border border-solid border-[var(--color-border-2)]'>
+        <div className='flex-1 min-h-0 flex items-center justify-center bg-1 rd-12px border border-solid border-[var(--color-border-2)]'>
           <Empty
             icon={<WebPage theme='outline' size='42' />}
             description={t('browser.page.capabilityUnavailable')}
@@ -538,7 +538,7 @@ const BrowserPage: React.FC = () => {
           <Spin tip={t('browser.page.loading')} />
         </div>
       ) : hasResidualResources ? (
-        <div className='flex-1 min-h-0 flex items-center justify-center bg-bg-1 rd-12px border border-solid border-[var(--color-border-2)] p-20px'>
+        <div className='flex-1 min-h-0 flex items-center justify-center bg-1 rd-12px border border-solid border-[var(--color-border-2)] p-20px'>
           <Alert
             type='warning'
             showIcon
@@ -554,7 +554,7 @@ const BrowserPage: React.FC = () => {
           />
         </div>
       ) : lanes.length === 0 ? (
-        <div className='flex-1 min-h-0 flex items-center justify-center bg-bg-1 rd-12px border border-solid border-[var(--color-border-2)]'>
+        <div className='flex-1 min-h-0 flex items-center justify-center bg-1 rd-12px border border-solid border-[var(--color-border-2)]'>
           <Empty
             icon={<WebPage theme='outline' size='42' />}
             description={t('browser.page.empty')}

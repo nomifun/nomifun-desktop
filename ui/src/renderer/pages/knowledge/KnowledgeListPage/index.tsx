@@ -324,11 +324,11 @@ const KnowledgeListPage: React.FC = () => {
                 'bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)]',
                 'shadow-[0_6px_18px_rgba(var(--primary-6),0.14)]',
                 'hover:bg-[rgba(var(--primary-6),0.18)]',
-                'focus-visible:border-[rgb(var(--primary-6))] focus-visible:outline-none',
+                'focus-visible:border-primary-6 focus-visible:outline-none',
                 'transition-all',
               ].join(' ')}
             >
-              <span className='text-16px leading-none text-[rgb(var(--primary-6))]'>＋</span>
+              <span className='text-16px leading-none text-primary-6'>＋</span>
               {t('knowledge.newBase', { defaultValue: '新建知识库' })}
             </div>
           </div>
@@ -389,7 +389,7 @@ const KnowledgeListPage: React.FC = () => {
                   'min-h-188px rounded-16px',
                   'border border-dashed border-[var(--color-border-3)] bg-transparent',
                   'text-[var(--color-text-3)]',
-                  'hover:border-[var(--color-primary-light-3)] hover:text-[rgb(var(--primary-6))] hover:bg-[var(--color-primary-light-1)]',
+                  'hover:border-[var(--color-primary-light-3)] hover:text-primary-6 hover:bg-[var(--color-primary-light-1)]',
                   'transition-all duration-150',
                 ].join(' ')}
               >

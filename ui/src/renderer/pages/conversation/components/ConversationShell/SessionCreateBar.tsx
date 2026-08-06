@@ -55,15 +55,15 @@ const SessionCreateBar: React.FC<SessionCreateBarProps> = ({
 }) => {
   const { t } = useTranslation();
   const actionButtonClassName =
-    'flex-1 basis-0 min-w-0 h-34px px-9px rd-8px border border-solid outline-none flex items-center justify-center gap-6px text-13px font-[500] leading-none transition-colors focus:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
+    'flex-1 basis-0 min-w-0 h-32px px-9px rd-8px border border-solid outline-none flex items-center justify-center gap-6px text-13px font-[500] leading-none transition-colors focus:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
   const restingButtonClassName =
     'cursor-pointer bg-transparent border-[var(--color-border-2)] text-t-primary hover:bg-fill-3 active:bg-fill-4';
   const batchToggleLabel = t(batchMode ? 'sessionList.exitBatchSelect' : 'sessionList.batchSelect');
 
   return (
-    <div className='shrink-0 px-10px pt-12px pb-8px flex flex-col gap-8px'>
+    <div className='shrink-0 px-10px pt-8px pb-6px flex flex-col gap-6px'>
       {/* Title strip + secondary actions */}
-      <div className='flex items-center h-22px px-2px select-none'>
+      <div className='flex items-center h-20px px-2px select-none'>
         <span className='text-13px text-t-tertiary font-[500] leading-none tracking-wide'>
           {t('sessionList.title')}
         </span>
@@ -92,7 +92,7 @@ const SessionCreateBar: React.FC<SessionCreateBarProps> = ({
         </div>
       </div>
 
-      <div data-testid='session-action-grid' className='grid grid-cols-2 gap-6px'>
+      <div data-testid='session-action-grid' className='grid grid-cols-2 gap-4px'>
         <button
           type='button'
           data-testid='session-new-conversation-entry'

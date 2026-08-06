@@ -226,15 +226,18 @@ const MessageKnowledgeWriteback: React.FC<{
     }
   };
 
+  // 只有 running/未知这两支用的 `border-line` 是死类名（theme 无 line 键），改成
+  // border-arco-2；四支共用的 border-style 由容器统一补，见下面的 border-solid。
+  // `border-line` names no colour; the shared style lives on the container.
   const toneClass = RUNNING_WRITEBACK_STATUSES.has(displayState.status)
-    ? 'border-line bg-fill-1 text-t-secondary'
+    ? 'border-arco-2 bg-fill-1 text-t-secondary'
     : SUCCESS_WRITEBACK_STATUSES.has(displayState.status)
       ? 'border-success-4 bg-success-light-1 text-success-6'
       : WARNING_WRITEBACK_STATUSES.has(displayState.status)
         ? 'border-warning-3 bg-warning-1 text-warning-7'
         : FAILURE_WRITEBACK_STATUSES.has(displayState.status)
           ? 'border-danger-4 bg-danger-light-1 text-danger-6'
-          : 'border-line bg-fill-1 text-t-secondary';
+          : 'border-arco-2 bg-fill-1 text-t-secondary';
 
   const icon = RUNNING_WRITEBACK_STATUSES.has(displayState.status) ? (
     <Loading theme='outline' size='13' className='block shrink-0 animate-spin' />
@@ -249,7 +252,10 @@ const MessageKnowledgeWriteback: React.FC<{
   return (
     <div
       className={classNames(
-        'mt-6px inline-flex max-w-full items-center gap-6px rd-6px border px-8px py-4px text-12px leading-18px',
+        // border-solid 不能省：本仓库唯一的 preflight 是 `color: inherit`，没有全局
+        // border reset，border-style 停在初始值 none —— 四种状态的边框此前全都没画出来。
+        // Without an explicit style the badge border never painted in any tone.
+        'mt-6px inline-flex max-w-full items-center gap-6px rd-6px border border-solid px-8px py-4px text-12px leading-18px',
         toneClass
       )}
       title={detail}

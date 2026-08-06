@@ -1097,7 +1097,14 @@ const BrowserUseSettingsContent: React.FC = () => {
         <div className='space-y-16px'>
           <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
             <div className='text-13px font-600 text-t-secondary'>{t('settings.browserUseSection')}</div>
-            <div className='w-full flex flex-col divide-y divide-border-2'>
+            {/*
+              Separator recipe used by every panel in this file. `divide-y` emits only a width and
+              this project ships no border reset, so the style stays `none` unless `divide-solid` is
+              present. `divide-solid` styles all four sides, so `divide-x-0` is needed to stop the
+              unset left/right widths falling back to the CSS initial `medium` (~3px). The old
+              `divide-border-2` emitted nothing at all: there is no theme colour named `border`.
+            */}
+            <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
               <PreferenceRow label={t('settings.browserUse')} description={t('settings.browserUseDesc')}>
                 <Switch checked={browserUse} onChange={handleBrowserUseChange} />
               </PreferenceRow>
@@ -1207,7 +1214,7 @@ const BrowserUseSettingsContent: React.FC = () => {
               <div className='text-13px font-600 text-t-secondary'>
                 {t('settings.browserResourcePolicySection')}
               </div>
-              <div className='w-full flex flex-col divide-y divide-border-2'>
+              <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
                 <PreferenceRow
                   label={t('settings.browserResourcePolicy')}
                   description={t('settings.browserResourcePolicyDesc')}
@@ -1266,7 +1273,7 @@ const BrowserUseSettingsContent: React.FC = () => {
                     </div>
                   }
                 >
-                  <div className='w-full flex flex-col divide-y divide-border-2'>
+                  <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
                   <PreferenceRow
                     label={t('settings.browserResourceMaxMemoryRatio')}
                     description={t('settings.browserResourceMaxMemoryRatioDesc')}

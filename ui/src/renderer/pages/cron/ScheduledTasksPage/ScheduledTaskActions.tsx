@@ -86,7 +86,7 @@ const ScheduledTaskActions: React.FC<ScheduledTaskActionsProps> = ({
                   <div
                     className={classNames(
                       'flex items-center gap-8px',
-                      isRemove && 'text-[rgb(var(--danger-6))]'
+                      isRemove && 'text-danger-6'
                     )}
                   >
                     {icon}

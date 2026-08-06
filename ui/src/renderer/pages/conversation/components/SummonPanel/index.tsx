@@ -167,8 +167,8 @@ export const SummonDrawer: React.FC<SummonDrawerProps> = ({ visible, onCancel, i
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, roster]);
 
-  // Memory search scoped to the summoned companion's visibility (shared + its
-  // own private memories) — the same scope the read-only recall tool gets.
+  // Memory search scoped to the summoned companion's own memories — the same
+  // scope the read-only recall tool gets.
   useEffect(() => {
     if (!visible || !companionId) return;
     let cancelled = false;
@@ -178,7 +178,7 @@ export const SummonDrawer: React.FC<SummonDrawerProps> = ({ visible, onCancel, i
         q: memoryQuery.trim() || undefined,
         kind: memoryKind || undefined,
         status: 'all',
-        scope_companion_id: companionId,
+        companion_id: companionId,
         sort: memoryQuery.trim() ? 'relevance' : 'importance',
         limit: 50,
         offset: 0,
@@ -265,7 +265,7 @@ export const SummonDrawer: React.FC<SummonDrawerProps> = ({ visible, onCancel, i
               }}
               className={`cursor-pointer rounded-8px border border-solid px-12px py-8px text-13px transition-colors ${
                 profile.companion_id === companionId
-                  ? 'border-[rgb(var(--primary-6))] bg-[rgba(var(--primary-6),0.08)] text-[rgb(var(--primary-6))]'
+                  ? 'border-primary-6 bg-[rgba(var(--primary-6),0.08)] text-primary-6'
                   : 'border-[var(--color-border-2)] hover:border-[var(--color-border-3)]'
               }`}
               data-testid='summon-companion-card'
@@ -324,7 +324,7 @@ export const SummonDrawer: React.FC<SummonDrawerProps> = ({ visible, onCancel, i
       <div className='text-12px op-70 mb-8px' data-testid='summon-budget-meter'>
         {t('conversation.summon.budget', { used: budgetUsed, budget: SUMMON_CONTEXT_BUDGET })}
         {budgetUsed > SUMMON_CONTEXT_BUDGET && (
-          <span className='text-[rgb(var(--warning-6))] ml-4px'>{t('conversation.summon.budgetOverflow')}</span>
+          <span className='text-warning-6 ml-4px'>{t('conversation.summon.budgetOverflow')}</span>
         )}
       </div>
       <Spin loading={memoriesLoading} className='w-full'>

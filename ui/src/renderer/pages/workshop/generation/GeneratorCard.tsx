@@ -196,7 +196,7 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
       <div className='shrink-0 border-b border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-t-0 px-11px py-9px'>
         <div className='mb-8px flex items-center gap-8px'>
           <span
-            className='flex h-22px w-22px items-center justify-center rounded-6px text-[rgb(var(--primary-6))]'
+            className='flex h-22px w-22px items-center justify-center rounded-6px text-primary-6'
             style={{ background: 'rgba(var(--primary-6),0.12)' }}
           >
             <MagicWand theme='outline' size={13} strokeWidth={3} />
@@ -275,8 +275,8 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
             onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && setErrExpanded((v) => !v)}
             className='nodrag mb-8px flex items-start gap-6px rounded-8px border border-solid border-[rgba(var(--danger-6),0.35)] bg-[rgba(var(--danger-6),0.08)] px-9px py-6px cursor-pointer'
           >
-            <Info theme='outline' size={13} strokeWidth={3} className='mt-1px shrink-0 text-[rgb(var(--danger-6))]' />
-            <span className={['flex-1 text-11px leading-[1.5] text-[rgb(var(--danger-6))]', errExpanded ? '' : 'line-clamp-2'].join(' ')}>
+            <Info theme='outline' size={13} strokeWidth={3} className='mt-1px shrink-0 text-danger-6' />
+            <span className={['flex-1 text-11px leading-[1.5] text-danger-6', errExpanded ? '' : 'line-clamp-2'].join(' ')}>
               {data.errorMessage}
             </span>
           </div>
@@ -290,7 +290,7 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
               cancel();
             }}
             onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && cancel()}
-            className='nodrag flex w-full box-border items-center justify-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-10px py-8px text-12px font-600 text-[var(--color-text-2)] cursor-pointer transition-colors hover:border-[rgb(var(--danger-6))] hover:text-[rgb(var(--danger-6))]'
+            className='nodrag flex w-full box-border items-center justify-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-10px py-8px text-12px font-600 text-[var(--color-text-2)] cursor-pointer transition-colors hover:border-danger-6 hover:text-danger-6'
           >
             <Pause theme='outline' size={13} strokeWidth={3} />
             {t('workshopGeneration.run.cancel', { defaultValue: '取消' })}
@@ -314,7 +314,7 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
             className={[
               'nodrag flex w-full box-border items-center justify-center gap-6px rounded-9px px-10px py-8px text-12px font-700 transition-all select-none',
               effectiveModel
-                ? 'bg-[rgb(var(--primary-6))] text-white cursor-pointer hover:opacity-92 shadow-[0_4px_14px_rgba(var(--primary-6),0.32)]'
+                ? 'bg-primary-6 text-white cursor-pointer hover:opacity-92 shadow-[0_4px_14px_rgba(var(--primary-6),0.32)]'
                 : 'bg-[var(--color-fill-3)] text-[var(--color-text-3)] cursor-not-allowed',
             ].join(' ')}
           >

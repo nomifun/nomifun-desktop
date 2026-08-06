@@ -6,11 +6,36 @@
 
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { createGenerator } from 'unocss';
 import cronEn from '@renderer/services/i18n/locales/en-US/cron.json';
 import cronZh from '@renderer/services/i18n/locales/zh-CN/cron.json';
+import unoConfig from '../../../../../uno.config';
 import * as scheduledTaskLayout from './scheduledTaskLayout';
 
 const pageSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
+
+const uno = await createGenerator(unoConfig);
+
+/**
+ * Asserts INTENT, not a literal class name: the focused search pill must end up
+ * with a `border-color` the browser can actually parse.
+ *
+ * This replaces a string assertion on `!border-[rgb(var(--primary-6))]`, which
+ * UnoCSS compiles to `rgb(var(--primary-6) / var(--un-border-opacity))`. Because
+ * the ramp variables are comma-separated triplets that expands to
+ * `rgb(232, 23, 74 / 1)` — invalid, so the browser threw the declaration away and
+ * the focused pill kept its unfocused border. Compiling the utility catches that;
+ * matching its name could not.
+ */
+async function expectRealBorderColor(utility: string): Promise<void> {
+  const { css } = await uno.generate(utility, { preflights: false });
+  const declaration = css.match(/border(?:-[a-z]+)?-color\s*:\s*([^;}!]+)/)?.[1]?.trim() ?? '';
+
+  expect(css.trim()).not.toBe('');
+  expect(declaration).not.toBe('');
+  expect(/\/\s*var\(--un-/.test(declaration)).toBe(false);
+  expect(['transparent', 'currentColor', 'inherit', 'unset', 'initial'].includes(declaration)).toBe(false);
+}
 
 test('keeps responsive utility classes in JSX instead of runtime exports', () => {
   const layout = scheduledTaskLayout as Record<string, unknown>;
@@ -73,7 +98,7 @@ test('keeps desktop table surfaces transparent', () => {
   expect(desktopListClass.includes('md:divide-y')).toBe(true);
 });
 
-test('styles the scheduled task search as a bordered pill', () => {
+test('styles the scheduled task search as a bordered pill', async () => {
   const searchClass =
     pageSource.match(/<Input\.Search[\s\S]*?className='([^']+)'[\s\S]*?\/>/)?.[1] ?? '';
   const searchClasses = searchClass.split(/\s+/);
@@ -83,7 +108,13 @@ test('styles the scheduled task search as a bordered pill', () => {
   expect(searchClasses.includes('[&_.arco-input-inner-wrapper]:!border-solid')).toBe(true);
   expect(searchClasses.includes('[&_.arco-input-inner-wrapper]:!border-[var(--color-border-2)]')).toBe(true);
   expect(searchClasses.includes('[&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)]')).toBe(true);
-  expect(searchClasses.includes('[&_.arco-input-inner-wrapper-focus]:!border-[rgb(var(--primary-6))]')).toBe(true);
+
+  // The focused pill must actually change colour, whatever utility spells it.
+  const focusBorderUtility = searchClasses.find(
+    (token) => token.startsWith('[&_.arco-input-inner-wrapper-focus]:') && token.includes('border-')
+  );
+  expect(focusBorderUtility).toBeDefined();
+  await expectRealBorderColor(focusBorderUtility as string);
 });
 
 test('places localized status filters below the search input', () => {

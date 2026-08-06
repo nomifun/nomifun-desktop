@@ -1486,6 +1486,11 @@ pub struct AppServices {
     /// so the AutoWork runner drives the SAME PTYs the terminal routes
     /// created (a fresh instance would have an empty live map).
     pub terminal_service: Arc<TerminalService>,
+    /// The one SSH connection pool: every live remote session in the process.
+    /// Shared (not rebuilt) by the host-book routes, the agent factory and the
+    /// conversation-delete cascade — a per-consumer pool would report status about
+    /// sockets the agent is not using. `clone()` is a handle to the same pool.
+    pub ssh_pool: nomifun_ssh::SshConnectionPool,
     pub acp_session_sync: Arc<AcpSessionSyncService>,
     /// Raw JWT secret string, used only for authentication/session signing.
     pub jwt_secret_raw: String,
@@ -2878,6 +2883,27 @@ impl AppServices {
         let browser_lane_provider_slot =
             nomifun_ai_agent::BrowserLaneClientProviderSlot::new();
 
+        // SSH remote sessions: ONE process-level connection pool, built here
+        // because the agent factory below is its first consumer and the host-book
+        // routes plus the conversation-delete cascade must receive this very
+        // handle. A second pool would supervise sockets nobody is talking to while
+        // reporting status for the ones the operator can see. Host keys are learned
+        // into the operator's own ~/.ssh/known_hosts.
+        let ssh_pool = {
+            let repo = Arc::new(nomifun_db::SqliteSshHostRepository::new(
+                database.pool().clone(),
+            )) as Arc<dyn nomifun_db::ISshHostRepository>;
+            let known_hosts = dirs::home_dir()
+                .unwrap_or_else(|| data_dir.clone())
+                .join(".ssh")
+                .join("known_hosts");
+            nomifun_ssh::SshConnectionPool::new(
+                nomifun_ssh::SshHostService::new(repo, encryption_key),
+                known_hosts,
+                nomifun_ssh::SshEventEmitter::new(event_bus.clone()),
+            )
+        };
+
         let factory = build_agent_factory(AgentFactoryDeps {
             authoritative_user_id: authoritative_user_id.clone(),
             skill_manager: AcpSkillManager::new(skill_paths.clone()),
@@ -2951,6 +2977,11 @@ impl AppServices {
             companion_summon: Some(
                 companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionSummonProvider>
             ),
+            // SSH remote sessions: the factory dials through the one process pool,
+            // so a runtime rebuilt by a model switch rejoins the conversation's
+            // existing link instead of opening (and abandoning) a second one.
+            ssh_provider: Some(Arc::new(ssh_pool.clone())
+                as Arc<dyn nomifun_ai_agent::SshBackendProvider>),
         });
 
         // Agent factory is now wired. Future extension/custom agents
@@ -2990,6 +3021,7 @@ impl AppServices {
             execution_conversation_boundary,
             requirement_service,
             terminal_service,
+            ssh_pool,
             acp_session_sync: acp_agent_service,
             jwt_secret_raw: secret,
             encryption_key,

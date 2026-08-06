@@ -255,7 +255,7 @@ const RequirementDrawer: React.FC<RequirementDrawerProps> = ({
               />
               <div className='flex flex-col gap-4px'>
                 <span className='text-t-tertiary text-12px'>{t('requirements.form.contentLabel')}</span>
-                <div className='whitespace-pre-wrap break-words rounded-8px border border-solid border-border-2 bg-fill-1 p-12px text-t-primary text-13px leading-20px min-h-60px'>
+                <div className='whitespace-pre-wrap break-words rounded-8px border border-solid border-arco-2 bg-fill-1 p-12px text-t-primary text-13px leading-20px min-h-60px'>
                   {data.content || '-'}
                 </div>
               </div>
@@ -272,7 +272,7 @@ const RequirementDrawer: React.FC<RequirementDrawerProps> = ({
               {data.completion_note ? (
                 <div className='flex flex-col gap-4px'>
                   <span className='text-t-tertiary text-12px'>{t('requirements.detail.completionNote')}</span>
-                  <div className='whitespace-pre-wrap break-words rounded-8px border border-solid border-border-2 bg-fill-1 p-12px text-t-primary text-13px leading-20px'>
+                  <div className='whitespace-pre-wrap break-words rounded-8px border border-solid border-arco-2 bg-fill-1 p-12px text-t-primary text-13px leading-20px'>
                     {data.completion_note}
                   </div>
                 </div>
