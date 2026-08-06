@@ -16,19 +16,28 @@ export const DEFAULT_SPEECH_TO_TEXT_CONFIG: SpeechToTextConfig = {
   language: '',
 };
 
+/**
+ * True when this stored config still carries a retired embedded-credential
+ * block. The backend stopped executing those at the catalog migration
+ * (`nomifun-shell` answers a 400 telling the user to re-pick a provider), so
+ * they are dead weight that keeps an API key on disk.
+ */
+export const hasLegacyEmbeddedSpeechBlocks = (config?: SpeechToTextConfig): boolean =>
+  Boolean(config?.openai) || Boolean(config?.deepgram);
+
 export const normalizeSpeechToTextConfig = (config?: SpeechToTextConfig): SpeechToTextConfig => {
   if (!config) return DEFAULT_SPEECH_TO_TEXT_CONFIG;
 
+  // Keep the user's actual model/language choice, drop the credential shape.
+  // `provider` stays pinned as a legacy wire constant: the Rust
+  // `SpeechToTextConfig` still requires it and the backend ignores its value
+  // (transcription executes by provider_id + model).
+  const { openai, deepgram, ...rest } = config;
   return {
-    ...config,
+    ...rest,
     provider: config.provider ?? 'openai',
-    language:
-      config.language ??
-      (config.provider === 'openai' ? config.openai?.language : config.provider === 'deepgram' ? config.deepgram?.language : '') ??
-      '',
-    model:
-      config.model ??
-      (config.provider === 'openai' ? config.openai?.model : config.provider === 'deepgram' ? config.deepgram?.model : undefined),
+    language: config.language ?? openai?.language ?? deepgram?.language ?? '',
+    model: config.model ?? openai?.model ?? deepgram?.model,
   };
 };
 
