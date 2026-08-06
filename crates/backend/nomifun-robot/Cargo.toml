@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+nomifun-api-types = { workspace = true }
+nomifun-realtime = { workspace = true }
+
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
