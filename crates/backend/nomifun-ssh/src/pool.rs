@@ -568,6 +568,13 @@ impl SshConnectionPool {
         self.0.recycle_shell(link, detail).await;
     }
 
+    /// Dial a link the reconnect ladder gave up on, because a tool call asked for
+    /// it. Treated as a deliberate dial, and still subject to the host's dial gate
+    /// — so a model retrying in a loop cannot outpace the cooldown.
+    pub(crate) async fn revive(&self, link: &Arc<SshLink>) -> Result<(), SshDialError> {
+        self.0.ensure_connected(link).await
+    }
+
     /// Report that a tool call found the transport gone.
     pub(crate) async fn note_transport_loss(&self, link: &Arc<SshLink>, detail: &str) {
         self.0.note_transport_loss(link, detail).await;
