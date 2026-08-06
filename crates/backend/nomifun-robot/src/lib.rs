@@ -16,6 +16,7 @@ pub mod registry;
 pub mod routes;
 pub mod session;
 pub mod status;
+pub mod vad;
 
 use std::sync::Arc;
 

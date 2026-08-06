@@ -19,6 +19,9 @@ pub struct AudioBuffer {
     pub sample_rate: u32,
 }
 
+/// Uplink sample rate, re-exported so the VAD engines need not import `protocol`.
+pub const UPLINK_SAMPLE_RATE_HINT: u32 = crate::protocol::UPLINK_SAMPLE_RATE;
+
 #[cfg(test)]
 mod tests {
     use super::*;
