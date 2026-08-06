@@ -22,6 +22,20 @@ const mergeProfile = (prev: ICompanionProfile, patch: ICompanionProfilePatch): I
   ...(patch.character !== undefined ? { character: patch.character } : {}),
   ...(patch.persona ? { persona: { ...prev.persona, ...patch.persona } } : {}),
   ...(patch.model !== undefined ? { model: patch.model } : {}),
+  ...(patch.fallback_model !== undefined ? { fallback_model: patch.fallback_model } : {}),
+  ...(patch.vision_model !== undefined ? { vision_model: patch.vision_model } : {}),
+  // `voice.vad` sits one level below `voice`: a single spread would replace the
+  // whole vad block, so patching 灵敏度 alone would snap 停顿判停 back to its
+  // default until the server response landed.
+  ...(patch.voice
+    ? {
+        voice: {
+          ...prev.voice,
+          ...patch.voice,
+          vad: { ...prev.voice.vad, ...patch.voice.vad },
+        },
+      }
+    : {}),
   ...(patch.skills ? { skills: { ...prev.skills, ...patch.skills } } : {}),
   ...(patch.appearance ? { appearance: { ...prev.appearance, ...patch.appearance } } : {}),
 });
