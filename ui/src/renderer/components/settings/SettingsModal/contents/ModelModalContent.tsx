@@ -943,6 +943,10 @@ const ModelModalContent: React.FC = () => {
             </div>
           </div>
         </div>
+        {/* 职责收窄：本页只管接入与凭证；「按用途找模型」已迁到模态分区。 */}
+        <div className='mt-8px text-12px leading-18px text-t-tertiary'>
+          {t('settings.modelHub.provider.scopeNote')}
+        </div>
       </div>
 
       {/* Content Area */}
