@@ -10,9 +10,13 @@ use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, SshHostId};
 
-use crate::dto::{CreateSshHostRequest, SshHostResponse, SshStatusEvent, UpdateSshHostRequest};
+use crate::dto::{
+    CreateSshHostRequest, ImportSshHostsRequest, SshHostResponse, SshImportResult, SshStatusEvent,
+    UpdateSshHostRequest,
+};
 use crate::pool::SshConnectionPool;
 use crate::service::{SshHostService, SshServiceError};
+use crate::ssh_config::SshConfigScan;
 
 /// Router state: the host book plus the process connection pool (both cheap
 /// handles). The pool is the same one the agent factory dials through, so a probe
@@ -32,6 +36,8 @@ pub fn ssh_host_routes(state: SshHostRouterState) -> Router {
         // prefers a literal segment over a capture regardless of order, and no
         // real host id can spell `statuses` because every one of them is a uuid.
         .route("/api/ssh-hosts/statuses", get(statuses))
+        .route("/api/ssh-hosts/import-candidates", get(import_candidates))
+        .route("/api/ssh-hosts/import", post(import_from_ssh_config))
         .route(
             "/api/ssh-hosts/{ssh_host_id}",
             get(get_one).put(update).delete(delete_one),
@@ -162,4 +168,43 @@ async fn test_connection(
         ok: outcome.ok,
         message: outcome.detail,
     })))
+}
+
+/// Hosts in this account's `~/.ssh/config` that could be added to the book.
+///
+/// Non-secret by construction: a candidate names the identity *file*, never its
+/// contents (`the_candidate_list_never_carries_private_key_material` pins that).
+/// Read-only, and the config is the only file read.
+///
+/// The `CurrentUser` extractor is kept even though the scan is per-machine rather
+/// than per-owner: this router is mounted under the instance-owner guard, and a
+/// handler that asks for no identity is one refactor away from being mounted
+/// somewhere that grants none.
+async fn import_candidates(
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<SshConfigScan>>, AppError> {
+    let scan = crate::ssh_config::scan_default_ssh_config()
+        .map_err(|e| AppError::Internal(format!("read ssh config: {e}")))?;
+    Ok(Json(ApiResponse::ok(scan)))
+}
+
+/// Add the confirmed candidates to the book.
+async fn import_from_ssh_config(
+    State(state): State<SshHostRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    body: Result<Json<ImportSshHostsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<SshImportResult>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    // Re-scan instead of trusting the client's copy of the candidates. The only
+    // files this route may read are the ones this account's own ssh config names;
+    // accepting host/port/key paths from the request body would turn an import
+    // into an arbitrary-file-read primitive.
+    let scan = crate::ssh_config::scan_default_ssh_config()
+        .map_err(|e| AppError::Internal(format!("read ssh config: {e}")))?;
+    let result = state
+        .service
+        .import_hosts(user.id.as_str(), &req.aliases, &scan.hosts)
+        .await
+        .map_err(map_err)?;
+    Ok(Json(ApiResponse::ok(result)))
 }

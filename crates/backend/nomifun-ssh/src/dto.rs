@@ -105,6 +105,63 @@ fn default_port() -> i64 {
     22
 }
 
+// ── `~/.ssh/config` import ──────────────────────────────────────────────
+
+/// The aliases the user confirmed for import.
+///
+/// Aliases *only*, on purpose. The server re-reads its own `~/.ssh/config` to
+/// learn what each one points at, so the request can never name a file for the
+/// server to read: an import that accepted `identityFile` paths would be an
+/// arbitrary-file-read primitive wearing a feature's clothes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportSshHostsRequest {
+    pub aliases: Vec<String>,
+}
+
+/// One host the import created.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedSshHost {
+    /// The `Host` alias it came from, which is also its display name.
+    pub alias: String,
+    pub ssh_host_id: String,
+    /// The host was created but has no credential stored — the config named no
+    /// identity file, or the one it named held no readable private key. The row
+    /// is still useful (all the coordinates are right); it just cannot connect
+    /// until someone opens it and supplies a secret, and saying so is the
+    /// difference between an honest import and a book full of dead hosts.
+    pub needs_credential: bool,
+}
+
+/// Why a requested alias produced no host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SshImportSkipReason {
+    /// A saved host already uses this display name.
+    DuplicateName,
+    /// A saved host already has this `user@host:port`.
+    DuplicateEndpoint,
+    /// The config no longer offers this alias (it changed since the scan).
+    NotInConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedSshHost {
+    pub alias: String,
+    pub reason: SshImportSkipReason,
+}
+
+/// What an import did, per alias. A report: no credential material here, only
+/// names and ids.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshImportResult {
+    pub imported: Vec<ImportedSshHost>,
+    pub skipped: Vec<SkippedSshHost>,
+}
+
 /// One link's status as the client sees it. This is the *only* wire shape for
 /// link state: the realtime `ssh.status` event and the REST snapshot both carry
 /// it, so a reconnecting link cannot look different depending on how the client

@@ -1890,6 +1890,76 @@ const fromApiSshHost = (value: IApiSshHost): IApiSshHost => ({
   sshHostId: parseSshHostId(value.sshHostId),
 });
 
+/**
+ * A host the server found in this machine's `~/.ssh/config` and could add to the
+ * host book.
+ *
+ * Non-secret by construction: `identityFile` is a *path*. The server reads that
+ * file's contents only during an import the user confirmed, and never puts key
+ * material in this payload.
+ */
+export interface IApiSshConfigHost {
+  /** The `Host` alias, which becomes the host's display name. */
+  alias: string;
+  /** `HostName`, or the alias itself when the config gives none (ssh semantics). */
+  host: string;
+  port: number;
+  /** `null` when the config names no user — the form asks rather than guesses. */
+  username: string | null;
+  /** `IdentityFile` with `~/` expanded, or `null`. A path, never contents. */
+  identityFile: string | null;
+}
+
+/** One read of `~/.ssh/config`, including what it could not offer and why. */
+export interface IApiSshConfigScan {
+  /** The file that was read, `null` only when this account has no home dir. */
+  configPath: string | null;
+  hosts: IApiSshConfigHost[];
+  /**
+   * Aliases left out because they go through a jump host (unsupported in v1).
+   * Named rather than dropped: a user whose config is entirely bastion-fronted
+   * would otherwise see an empty list with no explanation.
+   */
+  skippedProxy: string[];
+  /**
+   * How many `Include` directives the parser did not follow. Reported so a short
+   * candidate list is never a silent one.
+   */
+  skippedIncludes: number;
+}
+
+export interface IApiSshImportedHost {
+  alias: string;
+  sshHostId: SshHostId;
+  /**
+   * The row was created but holds no credential — the config named no identity
+   * file, or the one it named had no readable private key. Everything else about
+   * the host is right; it just cannot connect until someone supplies a secret.
+   */
+  needsCredential: boolean;
+}
+
+export type IApiSshImportSkipReason = 'duplicateName' | 'duplicateEndpoint' | 'notInConfig';
+
+export interface IApiSshImportSkipped {
+  alias: string;
+  reason: IApiSshImportSkipReason;
+}
+
+/** What an import did, per alias. A report — never credential material. */
+export interface IApiSshImportResult {
+  imported: IApiSshImportedHost[];
+  skipped: IApiSshImportSkipped[];
+}
+
+const fromApiSshImportResult = (value: IApiSshImportResult): IApiSshImportResult => ({
+  ...value,
+  imported: value.imported.map((item) => ({
+    ...item,
+    sshHostId: parseSshHostId(item.sshHostId),
+  })),
+});
+
 const fromApiSshStatus = (value: IApiSshStatus): IApiSshStatus => ({
   ...value,
   sshHostId: parseSshHostId(value.sshHostId),
@@ -1935,6 +2005,17 @@ export const ssh = {
   /** Every link transition, owner-scoped. Same payload as `statuses`. */
   onStatus: wsMappedEmitter<IApiSshStatus>('ssh.status', (raw) =>
     fromApiSshStatus(raw as IApiSshStatus)
+  ),
+  /** Hosts in this machine's `~/.ssh/config` that are not in the book yet. */
+  importCandidates: httpGet<IApiSshConfigScan, void>('/api/ssh-hosts/import-candidates'),
+  /**
+   * Add the confirmed candidates to the book. Aliases only: the server re-reads
+   * its own config to learn what they point at, so the client can never name a
+   * file for the server to read.
+   */
+  importHosts: withResponseMap(
+    httpPost<IApiSshImportResult, { aliases: string[] }>('/api/ssh-hosts/import'),
+    fromApiSshImportResult
   ),
 };
 

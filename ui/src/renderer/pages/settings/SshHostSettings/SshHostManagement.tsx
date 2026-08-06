@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IApiSshHost } from '@/common/adapter/ipcBridge';
+import type { IApiSshConfigScan, IApiSshHost } from '@/common/adapter/ipcBridge';
 import { ipcBridge } from '@/common';
 import { useCallback, useState } from 'react';
 import { Button, Form, Input, InputNumber, Message, Modal, Select } from '@arco-design/web-react';
 import NomiModal from '@renderer/components/base/NomiModal';
-import { Certificate, Edit, Fingerprint, Key, Lock, Plus, Server, Speed } from '@icon-park/react';
+import { Certificate, Download, Edit, Fingerprint, Key, Lock, Plus, Server, Speed } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import useSWR from 'swr';
@@ -24,6 +24,12 @@ import {
   type SshAuthType,
   type SshHostFormValues,
 } from './sshHostForm.validation';
+import {
+  candidateEndpoint,
+  hostBookPrimaryCta,
+  scanNotes,
+  summarizeImport,
+} from './sshConfigImport';
 
 const FormItem = Form.Item;
 
@@ -254,6 +260,114 @@ const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, onClose
   );
 };
 
+// ── ~/.ssh/config import ────────────────────────────────────────────────
+
+interface ImportModalProps {
+  visible: boolean;
+  /** The server's scan. `undefined` while loading or when the scan failed. */
+  scan?: IApiSshConfigScan;
+  onClose: () => void;
+  onImported: () => void;
+}
+
+/**
+ * Confirm-then-import: the whole candidate list, shown as it will be saved, with
+ * one button. No per-row checkboxes — picking a subset is what the edit and
+ * delete actions on the resulting rows are for, and a host book is cheap.
+ *
+ * The list is exactly what the server offered; nothing here re-derives a host,
+ * and the request carries only aliases, so the server reads no path this screen
+ * could invent.
+ */
+const SshConfigImportModal: React.FC<ImportModalProps> = ({ visible, scan, onClose, onImported }) => {
+  const { t } = useTranslation();
+  const [importing, setImporting] = useState(false);
+  const candidates = scan?.hosts ?? [];
+  const notes = scan ? scanNotes(scan) : [];
+
+  const handleImport = useCallback(async () => {
+    if (candidates.length === 0) return;
+    setImporting(true);
+    try {
+      const result = await ipcBridge.ssh.importHosts.invoke({
+        aliases: candidates.map((candidate) => candidate.alias),
+      });
+      const { level, clauses } = summarizeImport(result);
+      // Every clause the summary produced, so the toast reports what actually
+      // happened rather than a flat "imported".
+      const text = clauses.map((clause) => t(clause.key, clause.values)).join(' ');
+      if (level === 'success') Message.success(text);
+      else Message.warning(text);
+      onImported();
+      onClose();
+    } catch (e) {
+      Message.error(t('ssh.import.failed', { message: String(e) }));
+    } finally {
+      setImporting(false);
+    }
+  }, [candidates, onClose, onImported, t]);
+
+  return (
+    <NomiModal
+      visible={visible}
+      onCancel={onClose}
+      header={{ title: t('ssh.import.title'), showClose: true }}
+      style={{ maxWidth: '92vw', borderRadius: 16 }}
+      contentStyle={{
+        background: 'var(--dialog-fill-0)',
+        borderRadius: 16,
+        padding: '20px 24px 16px',
+        overflow: 'auto',
+      }}
+      okText={t('ssh.import.confirm', { count: candidates.length })}
+      cancelText={t('ssh.form.cancel')}
+      onOk={handleImport}
+      confirmLoading={importing}
+    >
+      <div className='flex w-460px max-w-full flex-col gap-10px'>
+        <div className='text-12px leading-18px text-t-tertiary'>
+          {t('ssh.import.description', { path: scan?.configPath ?? '~/.ssh/config' })}
+        </div>
+        <div className='flex max-h-320px flex-col gap-6px overflow-auto'>
+          {candidates.map((candidate) => (
+            <div
+              key={candidate.alias}
+              className='flex items-center gap-10px rd-8px border border-arco-2 bg-fill-0 px-10px py-8px'
+            >
+              <span className='flex size-26px shrink-0 items-center justify-center rd-6px bg-brand-light text-brand'>
+                <Server theme='outline' size='14' fill='currentColor' />
+              </span>
+              <div className='min-w-0 flex-1'>
+                <div className='truncate text-13px font-600 leading-19px text-t-primary'>{candidate.alias}</div>
+                <div className='mt-1px truncate font-mono text-11px leading-17px text-t-secondary'>
+                  {candidateEndpoint(candidate)}
+                </div>
+              </div>
+              {/* A key path is not a secret, and it is the one thing that decides
+                  whether the imported host can connect straight away. */}
+              <div className='max-w-160px shrink-0 truncate text-11px leading-17px text-t-tertiary'>
+                {candidate.identityFile ? (
+                  <span className='inline-flex items-center gap-4px'>
+                    <Key theme='outline' size='12' />
+                    <span className='truncate font-mono'>{candidate.identityFile}</span>
+                  </span>
+                ) : (
+                  t('ssh.import.noKey')
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        {notes.map((note) => (
+          <div key={note.key} className='text-11px leading-17px text-t-tertiary'>
+            {t(note.key, note.values)}
+          </div>
+        ))}
+      </div>
+    </NomiModal>
+  );
+};
+
 // ── Host book panel ─────────────────────────────────────────────────────
 
 const SshHostManagement: React.FC = () => {
@@ -261,8 +375,22 @@ const SshHostManagement: React.FC = () => {
   const navigate = useNavigate();
   const { current_model } = useGuidModelSelection('nomi');
   const { data: hosts, mutate } = useSWR('ssh-hosts.list', () => ipcBridge.ssh.list.invoke());
+  // Scanned once per mount, silently: the empty state is import-first only when
+  // there is genuinely something to import. `shouldRetryOnError: false` keeps a
+  // backend without this route (an older build) from being polled about it.
+  const { data: scan } = useSWR(
+    'ssh-hosts.import-candidates',
+    () => ipcBridge.ssh.importCandidates.invoke(),
+    { shouldRetryOnError: false }
+  );
   const [modalVisible, setModalVisible] = useState(false);
+  const [importVisible, setImportVisible] = useState(false);
   const [editHost, setEditHost] = useState<IApiSshHost | undefined>();
+
+  const cta = hostBookPrimaryCta(scan);
+  const isEmpty = !hosts || hosts.length === 0;
+  /** Empty book *and* a config worth reading: the import takes the lead. */
+  const importFirst = isEmpty && cta.kind === 'import';
 
   const openAdd = () => {
     setEditHost(undefined);
@@ -328,18 +456,56 @@ const SshHostManagement: React.FC = () => {
     <div>
       <div className='mb-14px flex items-center justify-between gap-8px'>
         <div className='text-13px text-t-tertiary'>{t('ssh.description')}</div>
-        <Button type='primary' icon={<Plus theme='outline' size='14' />} onClick={openAdd}>
-          {t('ssh.empty.add')}
-        </Button>
+        <div className='flex shrink-0 items-center gap-6px'>
+          {/* Unobtrusive entry for a book that already has hosts — the import is
+              still one click away, without competing with the main action. */}
+          {!isEmpty && cta.kind === 'import' ? (
+            <Button
+              size='small'
+              type='text'
+              icon={<Download theme='outline' size='14' />}
+              onClick={() => setImportVisible(true)}
+            >
+              {t('ssh.import.entry')}
+            </Button>
+          ) : null}
+          <Button
+            type={importFirst ? 'outline' : 'primary'}
+            icon={<Plus theme='outline' size='14' />}
+            onClick={openAdd}
+          >
+            {t('ssh.empty.add')}
+          </Button>
+        </div>
       </div>
 
-      {!hosts || hosts.length === 0 ? (
+      {isEmpty ? (
         <div className='flex min-h-200px flex-col items-center justify-center gap-10px rd-12px border border-arco-2 bg-fill-0 px-24px py-28px text-center'>
           <span className='flex size-44px items-center justify-center rd-12px bg-brand-light text-brand'>
             <Server theme='outline' size='24' fill='currentColor' />
           </span>
           <div className='text-15px font-600 leading-22px text-t-primary'>{t('ssh.empty.title')}</div>
           <div className='mt-2px text-12px leading-18px text-t-tertiary'>{t('ssh.empty.description')}</div>
+          {/* Import-first, but never a button that opens an empty dialog: with no
+              candidates (or no readable config) this falls back to the add flow. */}
+          {cta.kind === 'import' ? (
+            <>
+              <Button
+                type='primary'
+                icon={<Download theme='outline' size='14' />}
+                onClick={() => setImportVisible(true)}
+              >
+                {t('ssh.import.cta')}
+              </Button>
+              <div className='text-12px leading-18px text-t-tertiary'>
+                {t('ssh.import.detected', { count: cta.count })}
+              </div>
+            </>
+          ) : (
+            <Button type='primary' icon={<Plus theme='outline' size='14' />} onClick={openAdd}>
+              {t('ssh.empty.add')}
+            </Button>
+          )}
         </div>
       ) : (
         <div className='flex flex-col gap-8px'>
@@ -385,6 +551,13 @@ const SshHostManagement: React.FC = () => {
         editHost={editHost}
         onClose={() => setModalVisible(false)}
         onSaved={() => void mutate()}
+      />
+
+      <SshConfigImportModal
+        visible={importVisible}
+        scan={scan}
+        onClose={() => setImportVisible(false)}
+        onImported={() => void mutate()}
       />
     </div>
   );

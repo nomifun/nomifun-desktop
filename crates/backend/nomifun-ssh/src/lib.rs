@@ -16,7 +16,10 @@ pub mod sink;
 pub mod ssh_config;
 pub mod state;
 
-pub use dto::{CreateSshHostRequest, SshHostResponse, SshStatusEvent, UpdateSshHostRequest};
+pub use dto::{
+    CreateSshHostRequest, ImportSshHostsRequest, ImportedSshHost, SshHostResponse, SshImportResult,
+    SshImportSkipReason, SshStatusEvent, UpdateSshHostRequest,
+};
 pub use events::SshEventEmitter;
 pub use pool::{
     PoolTuning, SshConnectionPool, SshLink, SshLinkKey, SshProbeOutcome, SshShutdownReport,

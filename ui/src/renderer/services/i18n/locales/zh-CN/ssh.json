@@ -8,6 +8,23 @@
   },
   "sessionGroup": "SSH 会话",
   "newSession": "新建 SSH 会话",
+  "import": {
+    "cta": "从 ~/.ssh/config 导入",
+    "entry": "从 ~/.ssh/config 导入",
+    "detected": "已在 ~/.ssh/config 中检测到 {{count}} 个 Host",
+    "title": "从 ~/.ssh/config 导入",
+    "description": "读取自 {{path}}。导入会把它们存入主机簿；条目中写了 IdentityFile 的，会读取该私钥并加密存于本机，导入后即可直接连接。",
+    "confirm": "导入 {{count}} 台主机",
+    "noKey": "配置里没写私钥",
+    "noteProxy": "{{count}} 个条目经跳板机连接，暂不支持导入：{{aliases}}",
+    "noteIncludes": "有 {{count}} 条 Include 指令未被跟随，被 include 的文件里定义的主机不在此列。",
+    "summaryImported": "已导入 {{count}} 台主机。",
+    "summaryNothing": "没有导入任何主机。",
+    "summaryNeedsCredential": "其中 {{count}} 台仍缺凭据 —— 打开它补上即可。",
+    "summaryDuplicate": "{{count}} 台已存在于主机簿。",
+    "summaryVanished": "{{count}} 个别名已不在配置里。",
+    "failed": "从 ~/.ssh/config 导入失败：{{message}}"
+  },
   "group": {
     "hostTooltip": "SSH 主机 {{host}}",
     "hostUnknown": "未知主机",
