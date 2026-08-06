@@ -250,6 +250,19 @@ opusic-sys = "0.7.5"
 # exactly the formats providers actually return; `all-codecs` would pull video
 # and subtitle decoders we never touch.
 symphonia = { version = "0.6.0", features = ["mp3", "wav", "isomp4", "aac", "vorbis"] }
+# Silero VAD inference. `download-binaries` fetches a prebuilt ONNX Runtime at
+# build time, so no system onnxruntime is required; if the runtime cannot be
+# loaded at all, `nomifun-robot` degrades to its energy VAD. Defaults are
+# narrowed: `tls-rustls` keeps the build off system OpenSSL, and `ndarray` is
+# dropped because the VAD reads tensors as plain slices.
+ort = { version = "2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "tracing",
+    "download-binaries",
+    "tls-rustls",
+    "copy-dylibs",
+    "api-27",
+] }
 
 # --- Testing ---
 tempfile = "3"
