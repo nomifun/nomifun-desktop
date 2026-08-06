@@ -236,6 +236,21 @@ enigo = "0.6"
 # transitively via `chromiumoxide_cdp`, so no separate workspace entry.
 chromiumoxide = { version = "0.9" }
 
+# --- Robot audio (LAN robot gateway) ---
+# Opus codec for the robot uplink/downlink. `opusic-sys` is used instead of the
+# higher-level `audiopus`/`opus` crates because both of those pull
+# `audiopus_sys`, whose vendored libopus still declares
+# `cmake_minimum_required(VERSION 3.1)` — removed in CMake 4 — and whose 0.1.x
+# line needs autotools. `opusic-sys` bundles a modern libopus, builds it with
+# CMake >= 3.16 and links it **statically**, so no platform needs a preinstalled
+# libopus and nothing extra has to be shipped beside the binary. The safe
+# wrappers live in `nomifun-robot/src/audio/opus.rs` and are the only FFI here.
+opusic-sys = "0.7.5"
+# Container decode for TTS audio that does not come back as raw PCM. Features are
+# exactly the formats providers actually return; `all-codecs` would pull video
+# and subtitle decoders we never touch.
+symphonia = { version = "0.6.0", features = ["mp3", "wav", "isomp4", "aac", "vorbis"] }
+
 # --- Testing ---
 tempfile = "3"
 wiremock = "0.6"
