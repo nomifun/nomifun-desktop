@@ -28,6 +28,12 @@ use tokio::sync::{Mutex, OnceCell};
 /// so it can foreground the (otherwise headless) window (F29).
 const QUEUED_FOREGROUND_POLL: Duration = Duration::from_millis(250);
 
+/// A failed exact-owner cleanup is already retained by the Hub's single
+/// autonomous cleanup supervisor.  Throttle request-driven confirmation so a
+/// burst of repeated login clicks cannot turn one stuck driver into thousands
+/// of concurrent/repeated cleanup calls.
+const LOGIN_CLEANUP_RETRY_BACKOFF: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 pub(crate) struct BrowserLoginState {
     inner: Arc<BrowserLoginInner>,
@@ -49,10 +55,14 @@ struct BrowserLoginInner {
 }
 
 struct LoginLane {
-    lane_id: BrowserLaneId,
+    /// `None` while an issued owner is being bound/opened, or when opening was
+    /// cancelled before a Lane id was published.  The owner lease itself is
+    /// still cleanup authority and must remain fenced until exact revocation
+    /// succeeds.
+    lane_id: Option<BrowserLaneId>,
     owner_lease_id: OwnerLeaseId,
     hub: Arc<BrowserSessionHub>,
-    renewal_task: tokio::task::JoinHandle<()>,
+    renewal_task: Option<tokio::task::JoinHandle<()>>,
     /// Present while the Lane was admitted Queued: foregrounds the window
     /// once the scheduler promotes it to Running (F29).
     foreground_task: Option<tokio::task::JoinHandle<()>>,
@@ -60,13 +70,70 @@ struct LoginLane {
     /// reports whether a FRESH capture was committed during this session, not
     /// whether lease revocation succeeded (F60).
     identity_generation_at_open: u64,
+    /// Explicit cleanup disarms this flag only after the Hub proves the exact
+    /// owner is gone.  Until then Drop remains the final best-effort fallback.
+    cleanup_armed: bool,
+    /// Fail-closed replacement fence.  A pending authority is never replaced
+    /// by a fresh runtime/lease, even when its Lane has already disappeared
+    /// from the public inventory.
+    cleanup_pending: bool,
+    cleanup_retry_not_before: Option<std::time::Instant>,
+}
+
+impl LoginLane {
+    fn pending_authority(
+        owner_lease_id: OwnerLeaseId,
+        hub: Arc<BrowserSessionHub>,
+        identity_generation_at_open: u64,
+    ) -> Self {
+        Self {
+            lane_id: None,
+            owner_lease_id,
+            hub,
+            renewal_task: None,
+            foreground_task: None,
+            identity_generation_at_open,
+            cleanup_armed: true,
+            // The authority is installed before bind/open awaits.  If that
+            // request is cancelled, the next request must clean this owner,
+            // not assume the slot is free and mint another runtime.
+            cleanup_pending: true,
+            cleanup_retry_not_before: None,
+        }
+    }
+
+    fn stop_background_tasks(&mut self) {
+        if let Some(task) = self.renewal_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.foreground_task.take() {
+            task.abort();
+        }
+    }
+
+    fn cleanup_retry_due(&self) -> bool {
+        self.cleanup_retry_not_before
+            .is_none_or(|deadline| std::time::Instant::now() >= deadline)
+    }
+
+    fn mark_active(&mut self) {
+        self.cleanup_pending = false;
+        self.cleanup_retry_not_before = None;
+    }
+
+    fn disarm_cleanup(&mut self) {
+        self.stop_background_tasks();
+        self.cleanup_armed = false;
+        self.cleanup_pending = false;
+        self.cleanup_retry_not_before = None;
+    }
 }
 
 impl Drop for LoginLane {
     fn drop(&mut self) {
-        self.renewal_task.abort();
-        if let Some(task) = self.foreground_task.take() {
-            task.abort();
+        self.stop_background_tasks();
+        if !self.cleanup_armed {
+            return;
         }
         // `BrowserLoginState` is router state and is normally dropped only
         // during application teardown.  Do not rely on the next status call
@@ -79,6 +146,45 @@ impl Drop for LoginLane {
             handle.spawn(async move {
                 let _ = hub.revoke_owner_lease(&lease_id).await;
             });
+        }
+    }
+}
+
+/// Revoke the exact tracked login owner without ever exposing an empty router
+/// slot before cleanup succeeds.  The Hub owns durable retry authority; this
+/// helper only confirms completion and maintains the route-level replacement
+/// fence.
+async fn clear_tracked_login(session: &mut Option<LoginLane>) -> bool {
+    let Some(authority) = session.as_mut() else {
+        return true;
+    };
+    authority.stop_background_tasks();
+    authority.cleanup_pending = true;
+    if !authority.cleanup_retry_due() {
+        return false;
+    }
+
+    let result = authority
+        .hub
+        .revoke_owner_lease(&authority.owner_lease_id)
+        .await;
+    match result {
+        Ok(_) => {
+            authority.disarm_cleanup();
+            // Drop only after disarming; otherwise LoginLane::drop would spawn
+            // a redundant second revoke and could multiply cleanup workers.
+            session.take();
+            true
+        }
+        Err(error) => {
+            authority.cleanup_retry_not_before =
+                Some(std::time::Instant::now() + LOGIN_CLEANUP_RETRY_BACKOFF);
+            tracing::warn!(
+                code = ?error.code,
+                lease_id = %authority.owner_lease_id,
+                "login browser owner cleanup remains pending; replacement is fenced"
+            );
+            false
         }
     }
 }
@@ -209,14 +315,23 @@ pub(crate) async fn open_browser_login(
     let source = Some(state.effective_source().await.to_string());
 
     let mut session = state.inner.session.lock().await;
-    if let Some(existing) = session.as_ref() {
+    let reusable = session
+        .as_ref()
+        .filter(|existing| !existing.cleanup_pending)
+        .and_then(|existing| {
+            existing
+                .lane_id
+                .clone()
+                .map(|lane_id| (lane_id, existing.owner_lease_id.clone()))
+        });
+    if let Some((existing_lane_id, existing_lease_id)) = reusable {
         let existing_snapshot = hub
             .list_lanes()
             .await
             .into_iter()
-            .find(|lane| lane.lane_id == existing.lane_id);
+            .find(|lane| lane.lane_id == existing_lane_id);
         if let Some(snapshot) = existing_snapshot
-            && hub.renew_owner_lease(&existing.owner_lease_id).is_ok()
+            && hub.renew_owner_lease(&existing_lease_id).is_ok()
         {
             match reopen_disposition(snapshot.lifecycle_state) {
                 // A Lane that is still queued (or starting) cannot be
@@ -229,23 +344,27 @@ pub(crate) async fn open_browser_login(
                         true,
                         "queued",
                         false,
-                        Some(existing.lane_id.clone()),
+                        Some(existing_lane_id),
                         source,
                     );
                 }
                 ReopenDisposition::Foreground => {
                     if hub
-                        .foreground_lane_for_user(state.inner.user_id.as_ref(), &existing.lane_id)
+                        .foreground_lane_for_user(
+                            state.inner.user_id.as_ref(),
+                            &existing_lane_id,
+                        )
                         .await
                         .is_err()
                     {
-                        if let Some(stale) = session.take() {
-                            stale.renewal_task.abort();
-                            let _ = hub.revoke_owner_lease(&stale.owner_lease_id).await;
-                        }
+                        let cleaned = clear_tracked_login(&mut session).await;
                         return login_response(
                             false,
-                            "launch_failed:browser_unavailable",
+                            if cleaned {
+                                "launch_failed:browser_unavailable"
+                            } else {
+                                "cleanup_pending"
+                            },
                             false,
                             None,
                             source,
@@ -255,7 +374,7 @@ pub(crate) async fn open_browser_login(
                         true,
                         "already_open",
                         false,
-                        Some(existing.lane_id.clone()),
+                        Some(existing_lane_id),
                         source,
                     );
                 }
@@ -266,11 +385,12 @@ pub(crate) async fn open_browser_login(
             }
         }
     }
-    if let Some(stale) = session.take() {
-        stale.renewal_task.abort();
+    if session.is_some() {
         // `renew` may already have removed an expired lease. Hub revocation is
         // still authoritative for any Lane that survived that expiry.
-        let _ = hub.revoke_owner_lease(&stale.owner_lease_id).await;
+        if !clear_tracked_login(&mut session).await {
+            return login_response(false, "cleanup_pending", false, None, source);
+        }
     }
 
     let runtime_instance_id = format!("browser-login-{}", uuid::Uuid::now_v7());
@@ -284,6 +404,15 @@ pub(crate) async fn open_browser_login(
             return login_response(false, "launch_failed:owner_lease", false, None, source);
         }
     };
+    let identity_generation_at_open = current_identity_generation(&hub);
+    // Publish cleanup authority before any bind/open await.  Cancellation of
+    // this request can therefore never make the router look idle while this
+    // exact owner may still be allocating or cleaning browser resources.
+    *session = Some(LoginLane::pending_authority(
+        lease.lease_id.clone(),
+        Arc::clone(&hub),
+        identity_generation_at_open,
+    ));
     let caller = CallerIdentity {
         user_id: state.inner.user_id.to_string(),
         conversation_id: None,
@@ -312,11 +441,20 @@ pub(crate) async fn open_browser_login(
     let client = match hub.bind(caller) {
         Ok(client) => client,
         Err(_) => {
-            let _ = hub.revoke_owner_lease(&lease.lease_id).await;
-            return login_response(false, "launch_failed:invalid_capability", false, None, source);
+            let cleaned = clear_tracked_login(&mut session).await;
+            return login_response(
+                false,
+                if cleaned {
+                    "launch_failed:invalid_capability"
+                } else {
+                    "cleanup_pending"
+                },
+                false,
+                None,
+                source,
+            );
         }
     };
-    let identity_generation_at_open = current_identity_generation(&hub);
     let outcome = match client
         .open(
             Some("login"),
@@ -327,10 +465,14 @@ pub(crate) async fn open_browser_login(
     {
         Ok(outcome) => outcome,
         Err(_) => {
-            let _ = hub.revoke_owner_lease(&lease.lease_id).await;
+            let cleaned = clear_tracked_login(&mut session).await;
             return login_response(
                 false,
-                "launch_failed:browser_unavailable",
+                if cleaned {
+                    "launch_failed:browser_unavailable"
+                } else {
+                    "cleanup_pending"
+                },
                 false,
                 None,
                 source,
@@ -338,6 +480,10 @@ pub(crate) async fn open_browser_login(
         }
     };
     let lane_id = outcome.lane().lane_id.clone();
+    session
+        .as_mut()
+        .expect("login cleanup authority must remain installed")
+        .lane_id = Some(lane_id.clone());
     let renewal_period = Duration::from_millis(
         (lease
             .expires_at_ms
@@ -376,7 +522,11 @@ pub(crate) async fn open_browser_login(
             }
         }
     });
-    let (message, foreground_task) = match outcome {
+    session
+        .as_mut()
+        .expect("login cleanup authority must remain installed")
+        .renewal_task = Some(renewal_task);
+    let message = match outcome {
         OpenLaneOutcome::Running { .. } => {
             if hub
                 .foreground_lane_for_user(state.inner.user_id.as_ref(), &lane_id)
@@ -387,39 +537,41 @@ pub(crate) async fn open_browser_login(
                 // Chromium window visible leaves the explicit login request
                 // unusable. Tear down the owner capability so failure cannot
                 // strand a live background Lane.
-                renewal_task.abort();
-                let _ = hub.revoke_owner_lease(&lease.lease_id).await;
+                let cleaned = clear_tracked_login(&mut session).await;
                 return login_response(
                     false,
-                    "launch_failed:browser_unavailable",
+                    if cleaned {
+                        "launch_failed:browser_unavailable"
+                    } else {
+                        "cleanup_pending"
+                    },
                     false,
                     None,
                     source,
                 );
             }
-            ("opened", None)
+            "opened"
         }
         // F29: the login Lane was admitted into the scheduler queue. Once it
         // dequeues it would run on the (default headless) Primary Host with
         // no visible window; watch for the Running transition and foreground
         // it so the explicit login request eventually becomes visible.
-        OpenLaneOutcome::Queued { .. } => (
-            "queued",
-            Some(spawn_foreground_once_running(
+        OpenLaneOutcome::Queued { .. } => {
+            session
+                .as_mut()
+                .expect("login cleanup authority must remain installed")
+                .foreground_task = Some(spawn_foreground_once_running(
                 Arc::clone(&hub),
                 Arc::clone(&state.inner.user_id),
                 lane_id.clone(),
-            )),
-        ),
+            ));
+            "queued"
+        }
     };
-    *session = Some(LoginLane {
-        lane_id: lane_id.clone(),
-        owner_lease_id: lease.lease_id,
-        hub: Arc::clone(&hub),
-        renewal_task,
-        foreground_task,
-        identity_generation_at_open,
-    });
+    session
+        .as_mut()
+        .expect("login cleanup authority must remain installed")
+        .mark_active();
     login_response(true, message, false, Some(lane_id), source)
 }
 
@@ -480,13 +632,10 @@ pub(crate) async fn close_browser_login(
         return login_response(false, "not_open", false, None, None);
     };
     let source = Some(state.effective_source().await.to_string());
-    let Some(mut session) = state.inner.session.lock().await.take() else {
+    let mut session = state.inner.session.lock().await;
+    let Some(existing) = session.as_ref() else {
         return login_response(false, "not_open", false, None, source);
     };
-    session.renewal_task.abort();
-    if let Some(task) = session.foreground_task.take() {
-        task.abort();
-    }
     // F60/F44 contract: `saved` reports actual vault capture — whether the
     // canonical Primary identity generation advanced (the Hub publishes a
     // generation only after a successful capture + vault persist) during this
@@ -495,12 +644,9 @@ pub(crate) async fn close_browser_login(
         .current_identity_snapshot()
         .ok()
         .flatten()
-        .is_some_and(|snapshot| snapshot.generation > session.identity_generation_at_open);
-    if let Err(error) = hub.revoke_owner_lease(&session.owner_lease_id).await {
-        tracing::warn!(
-            code = ?error.code,
-            "login browser owner lease revocation failed; Hub sweep remains authoritative"
-        );
+        .is_some_and(|snapshot| snapshot.generation > existing.identity_generation_at_open);
+    if !clear_tracked_login(&mut session).await {
+        return login_response(false, "cleanup_pending", saved, None, source);
     }
     login_response(false, "closed", saved, None, source)
 }
@@ -521,7 +667,10 @@ pub(crate) async fn browser_login_status(
     };
     let source = Some(state.effective_source().await.to_string());
     let session = state.inner.session.lock().await;
-    let lane_id = session.as_ref().map(|value| value.lane_id.clone());
+    let cleanup_pending = session
+        .as_ref()
+        .is_some_and(|value| value.cleanup_pending);
+    let lane_id = session.as_ref().and_then(|value| value.lane_id.clone());
     drop(session);
     let lanes = hub.list_lanes().await;
     let active = lane_id
@@ -529,7 +678,11 @@ pub(crate) async fn browser_login_status(
         .is_some_and(|lane_id| lanes.iter().any(|lane| &lane.lane_id == lane_id));
     login_response(
         active,
-        "managed_primary_lane",
+        if cleanup_pending {
+            "cleanup_pending"
+        } else {
+            "managed_primary_lane"
+        },
         false,
         lane_id.filter(|_| active),
         source,
@@ -560,6 +713,7 @@ mod tests {
     use async_trait::async_trait;
     use nomifun_browser_platform::{
         BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserLaneDriver,
+        BrowserProfileFootprint,
         BrowserOperation, BrowserOperationResult, BrowserPlatformError,
         DriverOperationContext, HostLaunchRequest, HostLifecycleState, HubConfig,
         LaneLaunchRequest,
@@ -575,6 +729,17 @@ mod tests {
         /// promoted by the scheduler then transitions to `Failed` (the Hub
         /// marks a failed start instead of discarding the Lane).
         fail_open_lane: AtomicBool,
+        block_open_lane: AtomicBool,
+        open_lane_entered: tokio::sync::Notify,
+        allow_open_lane: tokio::sync::Notify,
+        lane_opens: AtomicUsize,
+        lane_close_attempts: AtomicUsize,
+        fail_close: AtomicBool,
+        block_close: AtomicBool,
+        close_entered: tokio::sync::Notify,
+        allow_close: tokio::sync::Notify,
+        fail_shutdown: AtomicBool,
+        shutdown_attempts: AtomicUsize,
     }
 
     struct FakeFactory {
@@ -615,6 +780,17 @@ mod tests {
             self.epoch
         }
 
+        // This fake manages no on-disk profile, so report a completed
+        // zero measurement. Inheriting the trait default would instead
+        // mean "could not measure", which fences Primary fail-closed.
+        async fn profile_footprint(
+            &self,
+            _stop_after_bytes: u64,
+            _stop_after_entries: u64,
+        ) -> Result<Option<BrowserProfileFootprint>, BrowserPlatformError> {
+            Ok(Some(BrowserProfileFootprint::EMPTY))
+        }
+
         fn state(&self) -> HostLifecycleState {
             HostLifecycleState::Running
         }
@@ -627,6 +803,11 @@ mod tests {
             &self,
             _request: LaneLaunchRequest,
         ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
+            self.probe.lane_opens.fetch_add(1, Ordering::AcqRel);
+            if self.probe.block_open_lane.load(Ordering::Acquire) {
+                self.probe.open_lane_entered.notify_one();
+                self.probe.allow_open_lane.notified().await;
+            }
             if self.probe.fail_open_lane.load(Ordering::Acquire) {
                 return Err(BrowserPlatformError::new(
                     nomifun_browser_platform::BrowserErrorCode::BrowserUnavailable,
@@ -640,7 +821,28 @@ mod tests {
             }))
         }
 
+        async fn reconcile_task_tab_limit(
+            &self,
+            _task_resource_key: &str,
+            _max_task_tabs: usize,
+        ) -> Result<(), BrowserPlatformError> {
+            // The fake has no tab inventory. Production Hosts implement the
+            // same seam with real target reconciliation.
+            Ok(())
+        }
+
         async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
+            self.probe
+                .shutdown_attempts
+                .fetch_add(1, Ordering::AcqRel);
+            if self.probe.fail_shutdown.load(Ordering::Acquire) {
+                return Err(BrowserPlatformError::new(
+                    nomifun_browser_platform::BrowserErrorCode::BrowserUnavailable,
+                    "Synthetic login host shutdown failure.",
+                    true,
+                    "Retry the exact login Host shutdown.",
+                ));
+            }
             Ok(())
         }
     }
@@ -656,6 +858,21 @@ mod tests {
         }
 
         async fn close(&self) -> Result<(), BrowserPlatformError> {
+            self.probe
+                .lane_close_attempts
+                .fetch_add(1, Ordering::AcqRel);
+            if self.probe.block_close.load(Ordering::Acquire) {
+                self.probe.close_entered.notify_one();
+                self.probe.allow_close.notified().await;
+            }
+            if self.probe.fail_close.load(Ordering::Acquire) {
+                return Err(BrowserPlatformError::new(
+                    nomifun_browser_platform::BrowserErrorCode::BrowserUnavailable,
+                    "Synthetic login lane close failure.",
+                    true,
+                    "Retry the exact login owner cleanup.",
+                ));
+            }
             Ok(())
         }
 
@@ -726,6 +943,201 @@ mod tests {
                 .active
         );
         assert!(hub.list_lanes().await.is_empty());
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
+
+    #[tokio::test]
+    async fn failed_close_retains_exact_authority_and_fences_a_thousand_reopens() {
+        let (hub, probe) = login_hub(HubConfig::default());
+        let state = login_state(&hub);
+
+        let Json(opened) = open_browser_login(State(state.clone()), Json(open_body())).await;
+        assert!(opened.data.expect("open data").active);
+        let original_lease = state
+            .inner
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .expect("tracked login")
+            .owner_lease_id
+            .clone();
+        let opens_before_cleanup = probe.lane_opens.load(Ordering::Acquire);
+        let shutdowns_before_cleanup = probe.shutdown_attempts.load(Ordering::Acquire);
+        probe.fail_close.store(true, Ordering::Release);
+        probe.fail_shutdown.store(true, Ordering::Release);
+
+        let Json(closed) = close_browser_login(State(state.clone())).await;
+        let closed = closed.data.expect("close data");
+        assert!(!closed.active);
+        assert_eq!(closed.message.as_deref(), Some("cleanup_pending"));
+        {
+            let session = state.inner.session.lock().await;
+            let retained = session.as_ref().expect("failed cleanup authority retained");
+            assert_eq!(retained.owner_lease_id, original_lease);
+            assert!(retained.cleanup_armed);
+        assert!(retained.cleanup_pending);
+        }
+        assert!(
+            probe.shutdown_attempts.load(Ordering::Acquire) > shutdowns_before_cleanup,
+            "the test must inject a real retained Host-cleanup failure"
+        );
+
+        // The first failed revoke installs a retry backoff. A request storm
+        // must observe the same fence instead of invoking cleanup (or minting
+        // a new runtime/Lane) once per click.
+        for _ in 0..1_000 {
+            let Json(reopened) =
+                open_browser_login(State(state.clone()), Json(open_body())).await;
+            let reopened = reopened.data.expect("fenced reopen data");
+            assert!(!reopened.active);
+            assert_eq!(reopened.message.as_deref(), Some("cleanup_pending"));
+        }
+        assert_eq!(
+            probe.lane_opens.load(Ordering::Acquire),
+            opens_before_cleanup,
+            "the storm must not open any replacement Lane"
+        );
+        assert_eq!(
+            state
+                .inner
+                .session
+                .lock()
+                .await
+                .as_ref()
+                .expect("authority remains fenced")
+                .owner_lease_id,
+            original_lease
+        );
+
+        // Let the retained Hub cleanup finish, then confirm the exact old
+        // owner before opening a replacement. A stale old-owner revoke must
+        // not affect the replacement (ABA/exact-owner regression).
+        probe.fail_close.store(false, Ordering::Release);
+        probe.fail_shutdown.store(false, Ordering::Release);
+        tokio::time::sleep(LOGIN_CLEANUP_RETRY_BACKOFF + Duration::from_millis(50)).await;
+        let Json(reopened) =
+            open_browser_login(State(state.clone()), Json(open_body())).await;
+        let reopened = reopened.data.expect("reopen after cleanup");
+        assert!(reopened.active);
+        let replacement_lane = reopened.lane_id.expect("replacement login Lane");
+        let replacement_lease = state
+            .inner
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .expect("replacement tracked")
+            .owner_lease_id
+            .clone();
+        assert_ne!(replacement_lease, original_lease);
+        assert!(probe.lane_opens.load(Ordering::Acquire) > opens_before_cleanup);
+
+        hub.revoke_owner_lease(&original_lease)
+            .await
+            .expect("stale exact-owner revoke is idempotent");
+        assert!(
+            hub.list_lanes()
+                .await
+                .iter()
+                .any(|lane| lane.lane_id == replacement_lane),
+            "a stale cleanup completion must not clear the replacement"
+        );
+
+        let _ = close_browser_login(State(state)).await;
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
+
+    #[tokio::test]
+    async fn blocked_close_never_exposes_an_idle_slot_to_concurrent_open() {
+        let (hub, probe) = login_hub(HubConfig::default());
+        let state = login_state(&hub);
+        let Json(opened) = open_browser_login(State(state.clone()), Json(open_body())).await;
+        assert!(opened.data.expect("open data").active);
+        let opens_before_cleanup = probe.lane_opens.load(Ordering::Acquire);
+
+        probe.block_close.store(true, Ordering::Release);
+        let closing_state = state.clone();
+        let closing = tokio::spawn(async move { close_browser_login(State(closing_state)).await });
+        tokio::time::timeout(Duration::from_secs(1), probe.close_entered.notified())
+            .await
+            .expect("login close never reached the driver");
+
+        let reopening_state = state.clone();
+        let reopening = tokio::spawn(async move {
+            open_browser_login(State(reopening_state), Json(open_body())).await
+        });
+        tokio::task::yield_now().await;
+        assert!(!reopening.is_finished(), "open must wait behind exact-owner cleanup");
+        assert_eq!(
+            probe.lane_opens.load(Ordering::Acquire),
+            opens_before_cleanup,
+            "no replacement Lane may open while old cleanup is in flight"
+        );
+
+        probe.block_close.store(false, Ordering::Release);
+        probe.allow_close.notify_waiters();
+        let Json(closed) = closing.await.expect("close task");
+        assert_eq!(
+            closed.data.expect("close data").message.as_deref(),
+            Some("closed")
+        );
+        let Json(reopened) = reopening.await.expect("reopen task");
+        assert!(reopened.data.expect("reopen data").active);
+        assert!(probe.lane_opens.load(Ordering::Acquire) > opens_before_cleanup);
+
+        let _ = close_browser_login(State(state)).await;
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
+
+    #[tokio::test]
+    async fn cancelled_initial_open_keeps_cleanup_authority_before_lane_publication() {
+        let (hub, probe) = login_hub(HubConfig::default());
+        let state = login_state(&hub);
+        probe.block_open_lane.store(true, Ordering::Release);
+
+        let opening_state = state.clone();
+        let opening = tokio::spawn(async move {
+            open_browser_login(State(opening_state), Json(open_body())).await
+        });
+        tokio::time::timeout(Duration::from_secs(1), probe.open_lane_entered.notified())
+            .await
+            .expect("login open never reached the driver");
+        opening.abort();
+        let _ = opening.await;
+
+        let original_lease = {
+            let session = state.inner.session.lock().await;
+            let retained = session
+                .as_ref()
+                .expect("cancelled open must retain cleanup authority");
+            assert!(retained.cleanup_armed);
+            assert!(retained.cleanup_pending);
+            assert!(retained.lane_id.is_none());
+            retained.owner_lease_id.clone()
+        };
+        assert_eq!(probe.lane_opens.load(Ordering::Acquire), 1);
+
+        // Settle the Hub-owned late start. The next open first confirms exact
+        // cleanup of the retained lease and only then issues a replacement.
+        probe.block_open_lane.store(false, Ordering::Release);
+        probe.allow_open_lane.notify_waiters();
+        let Json(reopened) =
+            open_browser_login(State(state.clone()), Json(open_body())).await;
+        assert!(reopened.data.expect("reopen data").active);
+        let replacement_lease = state
+            .inner
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .expect("replacement tracked")
+            .owner_lease_id
+            .clone();
+        assert_ne!(replacement_lease, original_lease);
+        assert!(probe.lane_opens.load(Ordering::Acquire) > 1);
+
+        let _ = close_browser_login(State(state)).await;
         hub.shutdown().await.expect("shutdown fake browser Hub");
     }
 

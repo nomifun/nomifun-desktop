@@ -57,7 +57,7 @@ const SlashCommandMenu: React.FC<SlashCommandMenuProps> = ({
       }}
     >
       <div
-        className='px-12px py-8px border-b border-solid flex items-center justify-between gap-8px'
+        className='px-12px py-8px border-b border-b-solid flex items-center justify-between gap-8px'
         style={{
           borderColor: 'color-mix(in srgb, var(--color-border-2) 56%, transparent)',
           background: 'color-mix(in srgb, var(--color-bg-1) 84%, transparent)',

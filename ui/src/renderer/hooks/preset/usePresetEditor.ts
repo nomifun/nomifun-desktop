@@ -72,7 +72,6 @@ export const usePresetEditor = ({
   const [autoSelectable, setAutoSelectable] = useState(false);
   const [knowledgePolicy, setKnowledgePolicy] = useState<PresetKnowledgePolicy>({
     enabled: false,
-    mode: 'inherit',
     writeback: false,
     grounded: false,
   });
@@ -156,7 +155,7 @@ export const usePresetEditor = ({
     setEditTargets(['conversation']);
     setFallbackAllowed(false);
     setAutoSelectable(false);
-    setKnowledgePolicy({ enabled: false, mode: 'inherit', writeback: false, grounded: false });
+    setKnowledgePolicy({ enabled: false, writeback: false, grounded: false });
     setKnowledgeBaseIds([]);
     setSelectedSkills([]);
     setCustomSkills([]);

@@ -91,7 +91,7 @@ const SourceCard: React.FC<SourceCardProps> = ({ icon, name, description, status
         <div
           className={[
             'size-36px flex-shrink-0 rounded-10px flex items-center justify-center line-height-0',
-            isActive ? 'text-[rgb(var(--primary-6))]' : 'bg-fill-2 text-t-secondary',
+            isActive ? 'text-primary-6' : 'bg-fill-2 text-t-secondary',
           ].join(' ')}
           style={isActive ? { background: 'color-mix(in srgb, rgb(var(--primary-6)) 16%, var(--color-bg-2))' } : undefined}
         >
@@ -120,7 +120,7 @@ const SourceCard: React.FC<SourceCardProps> = ({ icon, name, description, status
 
       {/* Footer — status-specific */}
       {isActive && typeof count === 'number' && (
-        <div className='mt-12px text-12px leading-18px font-medium text-[rgb(var(--primary-6))]'>
+        <div className='mt-12px text-12px leading-18px font-medium text-primary-6'>
           {t('requirements.source.count', { count })}
         </div>
       )}
@@ -141,8 +141,12 @@ const SourceCard: React.FC<SourceCardProps> = ({ icon, name, description, status
               'inline-flex h-28px items-center gap-6px rounded-8px px-10px',
               'bg-[var(--color-fill-2)] text-12px font-500 leading-none text-[var(--color-text-3)]',
               'cursor-pointer transition-colors duration-180',
-              'hover:bg-[var(--color-primary-light-1)] hover:text-[rgb(var(--primary-6))]',
-              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(var(--primary-6),0.22)]',
+              'hover:bg-[var(--color-primary-light-1)] hover:text-primary-6',
+              // `outline-none` removes the native focus ring, so the `ring-*` classes are the only
+              // focus affordance here. `ring-2` set just `--un-ring-color` (numeric suffixes resolve
+              // against the theme's numeric colour keys), leaving the ring width at 0 and the focus
+              // state completely invisible. `ring-2px` is the width spelling.
+              'focus-visible:outline-none focus-visible:ring-2px focus-visible:ring-[rgba(var(--primary-6),0.22)]',
             ].join(' ')}
           >
             <span className='inline-flex size-14px flex-shrink-0 items-center justify-center line-height-0'>

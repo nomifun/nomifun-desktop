@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for the NomiFun desktop window.",
-  "windows": ["main", "companion-*", "nomi-memory-panel"],
+  "windows": ["main", "companion-*"],
   "permissions": [
     "core:default",
     "core:window:default",
@@ -32,7 +32,6 @@
     "notification:allow-request-permission",
     "deep-link:default",
     "updater:allow-check",
-    "updater:allow-download",
     "process:default",
     "autostart:default"
   ]

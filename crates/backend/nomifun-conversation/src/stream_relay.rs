@@ -441,16 +441,16 @@ fn turn_writeback_final_state(
     finished_at: i64,
     prior_written: &[Value],
     prior_failures: &[Value],
-    _scope: &str,
 ) -> Value {
+    // A write-back target is now just the document it addresses: there is no
+    // staged storage path to map back to a logical one. Message rows written
+    // before that change may still carry an `_inbox/{scope}/` prefix, and they
+    // simply key differently — a retry against such a row re-proposes the
+    // material rather than mis-deduplicating it against the base document.
     let target_key = |kb_id: &str, rel_path: &str| {
-        let logical =
-            nomifun_knowledge::service::logical_writeback_target_from_storage_path(
-                rel_path,
-            );
         format!(
             "{kb_id}\0{}",
-            nomifun_knowledge::service::portable_writeback_path_identity(&logical)
+            nomifun_knowledge::service::portable_writeback_path_identity(rel_path)
         )
     };
     let value_target_key = |item: &Value| {
@@ -473,7 +473,6 @@ fn turn_writeback_final_state(
         let item = json!({
             "kb_id": outcome.kb_id.clone(),
             "rel_path": outcome.final_rel_path.clone(),
-            "staged": outcome.staged,
         });
         let key = target_key(
             outcome.kb_id.as_str(),
@@ -563,8 +562,10 @@ fn turn_writeback_event_payload(conversation_id: &str, msg_id: &str, state: &Val
     let mut payload = state.clone();
     if let Some(obj) = payload.as_object_mut() {
         // These fields are persisted solely so an explicit retry can recreate
-        // the exact source turn and idempotency scope. They are not part of the
-        // realtime presentation contract.
+        // the exact source turn. They are not part of the realtime presentation
+        // contract. `scope` is no longer written — it was the staged inbox
+        // namespace — but rows persisted before that change still carry it, so
+        // the strip stays to keep it out of the wire payload.
         obj.remove("source_message_id");
         obj.remove("scope");
         obj.remove("assistant_text");
@@ -821,7 +822,6 @@ pub(crate) struct TurnWritebackAttempt {
     conversation_id: String,
     msg_id: String,
     source_message_id: String,
-    scope: String,
     assistant_text: String,
     prior_written: Vec<Value>,
     prior_failures: Vec<Value>,
@@ -997,7 +997,6 @@ impl TurnWritebackAttempt {
         conversation_id: String,
         msg_id: String,
         source_message_id: String,
-        scope: String,
         assistant_text: String,
         prior_written: Vec<Value>,
         prior_failures: Vec<Value>,
@@ -1010,7 +1009,6 @@ impl TurnWritebackAttempt {
             user_id,
             conversation_id,
             source_message_id,
-            scope,
             assistant_text: nomifun_knowledge::turn_writeback::bounded_assistant_text(
                 &assistant_text,
             ),
@@ -1032,7 +1030,6 @@ impl TurnWritebackAttempt {
                 "source_message_id".to_owned(),
                 json!(self.source_message_id),
             );
-            obj.insert("scope".to_owned(), json!(self.scope));
             obj.insert("assistant_text".to_owned(), json!(self.assistant_text));
         }
         state
@@ -1289,7 +1286,7 @@ pub(crate) async fn reconcile_orphaned_writebacks(
             if let (Some(existing), Some(next)) =
                 (state.as_object(), interrupted.as_object_mut())
             {
-                for key in ["source_message_id", "scope", "assistant_text"] {
+                for key in ["source_message_id", "assistant_text"] {
                     if let Some(value) = existing.get(key) {
                         next.insert(key.to_owned(), value.clone());
                     }
@@ -1561,7 +1558,6 @@ async fn persist_turn_writeback_report_terminal(
             now_ms(),
             &attempt.prior_written,
             &attempt.prior_failures,
-            &attempt.scope,
         ),
     )
     .await;
@@ -5278,7 +5274,6 @@ mod tests {
             conversation_id,
             msg_id,
             TEST_TURN_A.to_owned(),
-            "conversation".to_owned(),
             "answer".to_owned(),
             Vec::new(),
             Vec::new(),
@@ -5296,7 +5291,6 @@ mod tests {
                 kb_id: kb_id.clone(),
                 final_rel_path: "Foo.md".into(),
                 op: nomifun_knowledge::WriteOp::Create,
-                staged: false,
             }],
             failures: Vec::new(),
         };
@@ -5314,7 +5308,6 @@ mod tests {
             2,
             &[],
             &prior_failures,
-            "scope",
         );
 
         assert_eq!(state["status"], "written");
@@ -5351,7 +5344,6 @@ mod tests {
             2,
             &prior_written,
             &prior_failures,
-            "scope",
         );
 
         assert_eq!(state["status"], "partial");
@@ -5370,7 +5362,6 @@ mod tests {
                 kb_id: written_kb,
                 final_rel_path: "Unrelated.md".into(),
                 op: nomifun_knowledge::WriteOp::Create,
-                staged: false,
             }],
             failures: Vec::new(),
         };
@@ -5388,7 +5379,6 @@ mod tests {
             2,
             &[],
             &prior_failures,
-            "scope",
         );
 
         assert_eq!(state["status"], "partial");

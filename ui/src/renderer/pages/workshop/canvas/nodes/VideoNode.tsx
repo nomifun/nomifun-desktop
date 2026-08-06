@@ -76,11 +76,11 @@ function VideoNodeImpl({ id, data, selected }: NodeProps<VideoFlowNode>) {
               />
               {status === 'loading' && (
                 <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
-                  <span className='h-18px w-18px animate-spin rounded-full border-2 border-solid border-white/30 border-t-white' />
+                  <span className='h-18px w-18px animate-spin rounded-full border-2px border-solid border-white/30 border-t-white' />
                 </div>
               )}
               {status === 'error' && (
-                <div className='absolute inset-0 flex flex-col items-center justify-center gap-6px px-12px text-center text-[rgb(var(--danger-6))]' style={{ background: 'var(--color-bg-2)' }}>
+                <div className='absolute inset-0 flex flex-col items-center justify-center gap-6px px-12px text-center text-danger-6' style={{ background: 'var(--color-bg-2)' }}>
                   <Info theme='outline' size={20} strokeWidth={3} />
                   <span className='text-11px'>{t('workshopCanvas.node.video.loadFailed', { defaultValue: '视频加载失败' })}</span>
                 </div>

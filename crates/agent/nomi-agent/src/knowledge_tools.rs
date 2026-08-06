@@ -248,23 +248,15 @@ pub enum WriteTarget {
     Path { kb_id: KnowledgeBaseId, rel_path: String },
 }
 
-/// Placement mode for a write-back, decided by the backend per session/surface
-/// and baked into [`KnowledgeWriteTool`] at construction. `Staged{scope}` → the
-/// backend places the write under a review inbox keyed by `scope`; `Direct` →
-/// the base body. The tool never builds the final path itself.
-#[derive(Debug, Clone)]
-pub enum WriteMode {
-    Staged { scope: String },
-    Direct,
-}
-
 /// A model-issued write, resolved by the backend [`KnowledgeWritebackSink`]
 /// (handle/path → existing doc or new file) before placement is applied.
 #[derive(Debug, Clone)]
 pub struct WriteRequest {
     pub target: WriteTarget,
+    /// The NEW material to record. The backend appends it to an existing
+    /// document rather than replacing the body, so this is never a full
+    /// document restatement.
     pub content: String,
-    pub mode: WriteMode,
     /// Bases this session may write to; the backend rejects a handle/path
     /// outside this set.
     pub bound_kb_ids: Vec<KnowledgeBaseId>,
@@ -274,7 +266,6 @@ pub struct WriteRequest {
 #[derive(Debug, Clone)]
 pub struct WriteReceipt {
     pub final_rel_path: String,
-    pub staged: bool,
     pub updated: bool,
 }
 
@@ -304,8 +295,6 @@ pub struct KnowledgeWriteTool {
     /// Bound bases as `(kb_id, name)`. The model selects by `name`; `kb_id` is
     /// opaque to it. Used to resolve `base` → `kb_id` for the create path.
     bases: Vec<(KnowledgeBaseId, String)>,
-    /// Placement mode baked at construction (Staged inbox scope, or Direct).
-    mode: WriteMode,
     /// Bases this session may write to (forwarded to the backend for scope
     /// enforcement). Mirrors the search/read tools' `kb_ids`.
     bound_kb_ids: Vec<KnowledgeBaseId>,
@@ -315,10 +304,9 @@ impl KnowledgeWriteTool {
     pub fn new(
         sink: Arc<dyn KnowledgeWritebackSink>,
         bases: Vec<(KnowledgeBaseId, String)>,
-        mode: WriteMode,
         bound_kb_ids: Vec<KnowledgeBaseId>,
     ) -> Self {
-        Self { sink, bases, mode, bound_kb_ids }
+        Self { sink, bases, bound_kb_ids }
     }
 
     /// One-line description of the bound bases for the schema/description.
@@ -417,7 +405,7 @@ impl Tool for KnowledgeWriteTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "The FULL markdown content to store (overwrite semantics for updates). Keep it self-contained and free of session-specific noise."
+                    "description": "The NEW material to record, as markdown. For an update this is APPENDED to the existing document (already-present material is skipped), so never resend the document's existing text and never try to rewrite or shorten it. Keep it self-contained and free of session-specific noise."
                 }
             },
             "required": ["content"]
@@ -467,18 +455,14 @@ impl Tool for KnowledgeWriteTool {
         let req = WriteRequest {
             target,
             content: content.to_owned(),
-            mode: self.mode.clone(),
             bound_kb_ids: self.bound_kb_ids.clone(),
         };
         match self.sink.write(req).await {
             Ok(r) => {
-                let verb = if r.updated { "Updated" } else { "Saved" };
-                let note = if r.staged {
-                    " (STAGED to the review inbox; the user merges it into the base later)"
-                } else {
-                    ""
-                };
-                ToolResult::text(format!("{verb} knowledge document at {}{note}.", r.final_rel_path))
+                // "Appended" is the honest verb: the backend merges the new
+                // material into the existing document instead of replacing it.
+                let verb = if r.updated { "Appended to" } else { "Saved" };
+                ToolResult::text(format!("{verb} knowledge document at {}.", r.final_rel_path))
             }
             Err(e) => ToolResult::error(format!("knowledge_write failed: {e}")),
         }
@@ -648,6 +632,9 @@ mod tests {
     struct FakeWriteSink {
         last: std::sync::Mutex<Option<WriteRequest>>,
         fail: bool,
+        /// What the backend resolved the target to. The receipt's wording turns
+        /// on this: a create is "Saved", an update is an append.
+        updated: bool,
     }
 
     #[async_trait]
@@ -656,31 +643,30 @@ mod tests {
             if self.fail {
                 return Err("disk full".to_owned());
             }
-            let staged = matches!(req.mode, WriteMode::Staged { .. });
             let final_rel_path = match &req.target {
                 WriteTarget::Handle(h) => h.clone(),
                 WriteTarget::Path { rel_path, .. } => rel_path.clone(),
             };
             *self.last.lock().unwrap() = Some(req);
-            Ok(WriteReceipt { final_rel_path, staged, updated: true })
+            Ok(WriteReceipt { final_rel_path, updated: self.updated })
         }
     }
 
-    fn write_tool(bases: Vec<(&str, &str)>, mode: WriteMode) -> (KnowledgeWriteTool, Arc<FakeWriteSink>) {
-        let sink = Arc::new(FakeWriteSink::default());
+    fn write_tool(bases: Vec<(&str, &str)>) -> (KnowledgeWriteTool, Arc<FakeWriteSink>) {
+        write_tool_resolving_to(bases, false)
+    }
+
+    fn write_tool_resolving_to(
+        bases: Vec<(&str, &str)>,
+        updated: bool,
+    ) -> (KnowledgeWriteTool, Arc<FakeWriteSink>) {
+        let sink = Arc::new(FakeWriteSink { updated, ..Default::default() });
         let bases: Vec<(KnowledgeBaseId, String)> = bases
             .into_iter()
             .map(|(id, name)| (kb_id(id), name.to_owned()))
             .collect();
         let bound: Vec<KnowledgeBaseId> = bases.iter().map(|(id, _)| id.clone()).collect();
-        (KnowledgeWriteTool::new(sink.clone(), bases, mode, bound), sink)
-    }
-
-    fn direct() -> WriteMode {
-        WriteMode::Direct
-    }
-    fn staged(scope: &str) -> WriteMode {
-        WriteMode::Staged { scope: scope.to_owned() }
+        (KnowledgeWriteTool::new(sink.clone(), bases, bound), sink)
     }
 
     // resolve_write_base ------------------------------------------------
@@ -724,7 +710,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_by_base_and_path_builds_path_target() {
-        let (tool, sink) = write_tool(vec![("kb1", "金融知识库")], direct());
+        let (tool, sink) = write_tool(vec![("kb1", "金融知识库")]);
         let res = tool.execute(json!({"rel_path": "terms.md", "content": "# 术语\nPER = 市盈率"})).await;
         assert!(!res.is_error, "{res:?}");
         let req = sink.last.lock().unwrap().clone().unwrap();
@@ -736,24 +722,25 @@ mod tests {
             other => panic!("expected Path target, got {other:?}"),
         }
         assert!(req.content.contains("市盈率"));
-        assert!(matches!(req.mode, WriteMode::Direct));
-        assert!(!res.content.contains("STAGED"));
+        // A create reads as "Saved"; only an update is an append.
+        assert!(res.content.contains("Saved"), "{res:?}");
     }
 
     #[tokio::test]
     async fn write_by_handle_builds_handle_target() {
-        let (tool, sink) = write_tool(vec![("kb1", "Finance")], staged("conv-7"));
-        let res = tool.execute(json!({"handle": "kdoc_xyz", "content": "merged"})).await;
+        let (tool, sink) = write_tool_resolving_to(vec![("kb1", "Finance")], true);
+        let res = tool.execute(json!({"handle": "kdoc_xyz", "content": "new fact"})).await;
         assert!(!res.is_error, "{res:?}");
         let req = sink.last.lock().unwrap().clone().unwrap();
         assert!(matches!(req.target, WriteTarget::Handle(ref h) if h == "kdoc_xyz"));
-        assert!(matches!(req.mode, WriteMode::Staged { ref scope } if scope == "conv-7"));
-        assert!(res.content.contains("STAGED"));
+        // The receipt must not promise a review step — there is no longer one.
+        assert!(!res.content.contains("STAGED"), "{res:?}");
+        assert!(res.content.contains("Appended to"), "an update appends: {res:?}");
     }
 
     #[tokio::test]
     async fn execute_rejects_missing_and_blank_inputs() {
-        let (tool, _sink) = write_tool(vec![("kb1", "Finance")], direct());
+        let (tool, _sink) = write_tool(vec![("kb1", "Finance")]);
         assert!(tool.execute(json!({"content": "x"})).await.is_error, "no handle or rel_path");
         assert!(tool.execute(json!({"rel_path": "a.md"})).await.is_error, "missing content");
         assert!(tool.execute(json!({"handle": "kdoc_x", "content": "   "})).await.is_error, "blank content");
@@ -766,7 +753,6 @@ mod tests {
         let tool = KnowledgeWriteTool::new(
             sink,
             vec![(kb_id("kb1"), "Finance".into())],
-            WriteMode::Direct,
             vec![kb_id("kb1")],
         );
         let res = tool.execute(json!({"handle": "kdoc_x", "content": "x"})).await;
@@ -776,7 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_multi_base_requires_base_arg_for_create() {
-        let (tool, _sink) = write_tool(vec![("kb1", "Finance"), ("kb2", "Ops")], direct());
+        let (tool, _sink) = write_tool(vec![("kb1", "Finance"), ("kb2", "Ops")]);
         let res = tool.execute(json!({"rel_path": "a.md", "content": "x"})).await;
         assert!(res.is_error);
         assert!(res.content.contains("Specify"));

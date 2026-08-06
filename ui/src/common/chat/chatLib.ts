@@ -124,7 +124,6 @@ export type KnowledgeWritebackStatus =
 export type KnowledgeWritebackFile = {
   kb_id?: KnowledgeBaseId | null;
   rel_path?: string | null;
-  staged?: boolean;
 };
 
 export type KnowledgeWritebackFailure = {
@@ -473,7 +472,6 @@ const normalizeKnowledgeWritebackFiles = (value: unknown): KnowledgeWritebackFil
           ? { kb_id: parseKnowledgeBaseId(file.kb_id) }
           : {}),
       ...(typeof file.rel_path === 'string' || file.rel_path === null ? { rel_path: file.rel_path } : {}),
-      ...(typeof file.staged === 'boolean' ? { staged: file.staged } : {}),
     }));
 };
 

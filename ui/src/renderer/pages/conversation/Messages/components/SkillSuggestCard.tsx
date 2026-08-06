@@ -69,7 +69,7 @@ const SkillSuggestCard: React.FC<SkillSuggestCardProps> = ({
   return (
     <div
       data-testid='skill-suggest-card'
-      className='mt-8px p-12px rd-8px bg-fill-0 b-1 b-solid'
+      className='mt-8px p-12px rd-8px bg-fill-0 b-1px b-solid'
       style={{ borderColor: 'color-mix(in srgb, var(--color-border-2) 70%, transparent)' }}
     >
       <div className='flex items-center gap-6px mb-8px'>
@@ -88,7 +88,7 @@ const SkillSuggestCard: React.FC<SkillSuggestCardProps> = ({
         <span>{t('cron.skill.preview')}</span>
       </div>
       {expanded && (
-        <div className='mb-12px p-8px rd-4px bg-bg-3 max-h-240px overflow-y-auto text-12px'>
+        <div className='mb-12px p-8px rd-4px bg-3 max-h-240px overflow-y-auto text-12px'>
           <MarkdownView codeStyle={CODE_STYLE} fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT}>
             {`\`\`\`markdown\n${suggestion.content}\n\`\`\``}
           </MarkdownView>

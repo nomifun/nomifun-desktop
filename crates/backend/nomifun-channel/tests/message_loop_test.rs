@@ -509,6 +509,7 @@ async fn user_messages(
         order: Some("ASC".into()),
         content_mode: None,
         cursor: None,
+        day: None,
     };
     let result = svc
         .list_messages(installation_owner, conversation_id, query)

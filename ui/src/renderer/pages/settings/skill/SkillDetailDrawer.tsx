@@ -89,9 +89,9 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
         ? t('settings.skillsHub.sourceExtension', { defaultValue: 'Extension' })
         : t('settings.skillsHub.builtin', { defaultValue: 'Built-in' });
   const sourceBadgeClass = isAutoInjected
-    ? 'bg-[rgba(var(--success-6),0.1)] text-[rgb(var(--success-6))]'
+    ? 'bg-[rgba(var(--success-6),0.1)] text-success-6'
     : skill?.source === 'custom'
-      ? 'bg-[rgba(var(--orange-6),0.1)] text-[rgb(var(--orange-6))]'
+      ? 'bg-[rgba(var(--orange-6),0.1)] text-[rgba(var(--orange-6),1)]'
       : skill?.source === 'extension'
         ? 'bg-fill-2 text-t-secondary'
         : 'bg-primary-1 text-primary-6';
@@ -155,13 +155,13 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
     >
       {skill && display && (
         <div className='flex h-full min-h-0 flex-col' data-testid='skill-detail-content'>
-          <div className='flex-shrink-0 border-b border-solid border-[var(--color-border-1)] px-24px py-20px'>
+          <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-1)] px-24px py-20px'>
             <div className='flex items-start gap-14px'>
               <div
                 className={[
                   'flex h-44px w-44px flex-shrink-0 items-center justify-center rounded-12px text-17px font-700 uppercase shadow-sm',
                   isAutoInjected
-                    ? 'bg-[rgba(var(--success-6),0.1)] text-[rgb(var(--success-6))]'
+                    ? 'bg-[rgba(var(--success-6),0.1)] text-success-6'
                     : 'bg-primary-1 text-primary-6',
                 ].join(' ')}
               >

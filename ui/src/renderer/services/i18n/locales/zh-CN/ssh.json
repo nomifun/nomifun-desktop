@@ -1,0 +1,112 @@
+{
+  "title": "远程主机",
+  "description": "保存的 SSH 主机可被任意会话复用；凭据加密存储于本机。",
+  "empty": {
+    "title": "还没有保存的主机",
+    "description": "添加一台远程 Linux 主机，agent 就能在会话里代你操控它。",
+    "add": "添加主机"
+  },
+  "sessionGroup": "SSH 会话",
+  "newSession": "新建 SSH 会话",
+  "import": {
+    "cta": "从 ~/.ssh/config 导入",
+    "entry": "从 ~/.ssh/config 导入",
+    "detected": "已在 ~/.ssh/config 中检测到 {{count}} 个 Host",
+    "detected_other": "已在 ~/.ssh/config 中检测到 {{count}} 个 Host",
+    "title": "从 ~/.ssh/config 导入",
+    "description": "读取自 {{path}}。导入会把它们存入主机簿；条目中写了 IdentityFile 的，会读取该私钥并加密存于本机，导入后即可直接连接。",
+    "confirm": "导入 {{count}} 台主机",
+    "confirm_other": "导入 {{count}} 台主机",
+    "noKey": "配置里没写私钥",
+    "noteProxy": "{{count}} 个条目经跳板机连接，暂不支持导入：{{aliases}}",
+    "noteProxy_other": "{{count}} 个条目经跳板机连接，暂不支持导入：{{aliases}}",
+    "noteIncludes": "有 {{count}} 条 Include 指令未被跟随，被 include 的文件里定义的主机不在此列。",
+    "noteIncludes_other": "有 {{count}} 条 Include 指令未被跟随，被 include 的文件里定义的主机不在此列。",
+    "summaryImported": "已导入 {{count}} 台主机。",
+    "summaryImported_other": "已导入 {{count}} 台主机。",
+    "summaryNothing": "没有导入任何主机。",
+    "summaryNeedsCredential": "其中 {{count}} 台仍缺凭据 —— 打开它补上即可。",
+    "summaryNeedsCredential_other": "其中 {{count}} 台仍缺凭据 —— 打开它补上即可。",
+    "summaryNeedsUsername": "其中 {{count}} 台在配置里没写用户名 —— 打开它补上即可。",
+    "summaryNeedsUsername_other": "其中 {{count}} 台在配置里没写用户名 —— 打开它补上即可。",
+    "summaryDuplicate": "{{count}} 台已存在于主机簿。",
+    "summaryDuplicate_other": "{{count}} 台已存在于主机簿。",
+    "summaryVanished": "{{count}} 个别名已不在配置里。",
+    "summaryVanished_other": "{{count}} 个别名已不在配置里。",
+    "failed": "从 ~/.ssh/config 导入失败：{{message}}"
+  },
+  "group": {
+    "hostTooltip": "SSH 主机 {{host}}",
+    "hostUnknown": "未知主机",
+    "hostMissing": "已删除的主机"
+  },
+  "form": {
+    "addTitle": "添加 SSH 主机",
+    "editTitle": "编辑 SSH 主机",
+    "name": "显示名称",
+    "host": "主机",
+    "port": "端口",
+    "username": "用户名",
+    "authType": "认证方式",
+    "authPassword": "密码",
+    "authKey": "私钥",
+    "authCertificate": "证书",
+    "authAgent": "SSH agent",
+    "password": "密码",
+    "privateKey": "私钥",
+    "privateKeyPlaceholder": "粘贴私钥（PEM / OpenSSH），留空则沿用已存的。",
+    "passphrase": "私钥口令",
+    "certificate": "证书",
+    "sudoPassword": "sudo 密码",
+    "sudoHint": "在远程 sudo 提示符处自动注入，agent 永远看不到。免密 sudo 可留空。",
+    "secretKept": "已存有一个值。保持不动即沿用，或输入新值替换。",
+    "test": "测试连接",
+    "save": "保存",
+    "cancel": "取消"
+  },
+  "status": {
+    "connected": "已连接",
+    "connecting": "连接中…",
+    "reconnecting": "重连中…",
+    "idle": "未建立链路",
+    "degraded": "正在重建远程 shell…",
+    "dropped": "链路已断",
+    "closed": "已关闭",
+    "unknown": "未连接",
+    "error": "连接错误"
+  },
+  "pill": {
+    "endpoint": "登录地址",
+    "hostKey": "主机密钥",
+    "hostKeyUnpinned": "尚未固定",
+    "sudoStored": "已为该主机保存 sudo 密码。",
+    "sudoMissing": "未保存 sudo 密码 —— 该主机需免密 sudo。",
+    "attempt": "第 {{attempt}} 次拨号",
+    "retryIn": "{{seconds}} 秒后重试",
+    "detail": "详情",
+    "noLink": "该会话尚未与主机建立链路。",
+    "droppedHint": "链路恢复前命令无法送达该主机。若迟迟不恢复，请检查凭据与主机密钥。",
+    "droppedActionRequired": "该链路不会自行恢复。请到「设置 → 远程主机」编辑此主机的凭据；若是主机密钥发生变更，请先核对并信任新密钥再重连。",
+    "unconfirmedExit": "无法确认远程 shell 已退出 —— 主机上可能仍有进程在跑。"
+  },
+  "test": {
+    "running": "正在测试连接…",
+    "ok": "连接成功",
+    "failed": "连接失败：{{message}}"
+  },
+  "delete": {
+    "confirm": "删除此主机？请先移除绑定它的会话。",
+    "ok": "删除",
+    "cancel": "取消"
+  },
+  "sessionsOnline": "{{count}} 个会话在线",
+  "sessionsOnline_other": "{{count}} 个会话在线",
+  "validation": {
+    "nameRequired": "请填写显示名称。",
+    "hostRequired": "请填写主机。",
+    "portRange": "端口须在 1–65535 之间。",
+    "usernameRequired": "请填写用户名。",
+    "passwordRequired": "密码认证需要填写密码。",
+    "privateKeyRequired": "该认证方式需要提供私钥。"
+  }
+}

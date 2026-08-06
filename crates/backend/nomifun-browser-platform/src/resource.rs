@@ -13,8 +13,33 @@ pub const MAX_GLOBAL_QUEUE: usize = 256;
 pub const MAX_OWNER_QUEUE: usize = 32;
 pub const MIN_BROWSER_MEMORY_RATIO: f64 = 0.1;
 pub const MAX_BROWSER_MEMORY_RATIO: f64 = 0.8;
+pub const MIN_TASK_MEMORY_BYTES: u64 = 256 * MIB;
+pub const MAX_TASK_MEMORY_BYTES: u64 = 16 * GIB;
+pub const AUTOMATIC_TASK_MEMORY_BYTES: u64 = GIB;
+pub const RESOURCE_SAVING_TASK_MEMORY_BYTES: u64 = 768 * MIB;
+pub const HIGH_CONCURRENCY_TASK_MEMORY_BYTES: u64 = GIB;
+pub const MAX_TASK_ACTIVE_OPERATIONS: usize = 16;
+pub const MAX_TASK_OPEN_LANES: usize = 32;
+pub const MAX_TASK_TABS: usize = 64;
+pub const MAX_DERIVED_RESERVED_MEMORY_BYTES: u64 = 8 * GIB;
 pub const MIN_RESERVED_MEMORY_BYTES: u64 = 256 * MIB;
 pub const MAX_RESERVED_MEMORY_BYTES: u64 = 512 * GIB;
+
+const fn default_task_memory_bytes() -> u64 {
+    AUTOMATIC_TASK_MEMORY_BYTES
+}
+
+const fn default_task_active_operations() -> usize {
+    2
+}
+
+const fn default_task_open_lanes() -> usize {
+    4
+}
+
+const fn default_task_tabs() -> usize {
+    16
+}
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 #[error("invalid browser resource policy field `{field}`: {reason}")]
@@ -43,11 +68,33 @@ pub struct ResourcePolicy {
     pub preset: ResourcePolicyPreset,
     pub reserved_memory_bytes: u64,
     pub max_browser_memory_ratio: f64,
+    /// Estimated memory share allowed to one trusted user-visible task family.
+    ///
+    /// Chromium Hosts may be shared by many tasks, so this is deliberately
+    /// separate from the machine-wide ratio. The Hub attributes Host RSS to
+    /// live Lanes and reclaims only the task that persistently exceeds this
+    /// budget; aggregate browser memory remains elastic for many tasks.
+    #[serde(default = "default_task_memory_bytes")]
+    pub max_task_memory_bytes: u64,
     pub lane_cold_start_bytes: u64,
     pub lane_ewma_min_bytes: u64,
     pub lane_ewma_max_bytes: u64,
     pub max_active_operations: usize,
     pub max_open_lanes: usize,
+    /// Weighted in-flight driver-operation limit for one task family. Sibling
+    /// runtimes in the same conversation share it.
+    #[serde(default = "default_task_active_operations")]
+    pub max_task_active_operations: usize,
+    /// Live Lane limit for one task family. Runtime rotation cannot create
+    /// another allowance. This is not a physical renderer-process limit:
+    /// cross-origin iframes/OOPIFs may fan one page out across renderers.
+    #[serde(default = "default_task_open_lanes")]
+    pub max_task_open_lanes: usize,
+    /// Top-level page/target limit across all Lanes in one task family. It is a
+    /// structural quota, not a renderer-process ceiling; physical process
+    /// isolation requires a dedicated Host or OS-level containment.
+    #[serde(default = "default_task_tabs")]
+    pub max_task_tabs: usize,
     pub max_global_queue: usize,
     pub max_owner_queue: usize,
     pub sample_period_ms: u64,
@@ -59,8 +106,8 @@ pub struct ResourcePolicy {
 
 impl ResourcePolicy {
     pub fn automatic(total_memory_bytes: u64, logical_cpus: usize) -> Self {
-        let reserved_memory_bytes =
-            (total_memory_bytes / 5).clamp(2 * GIB, MAX_RESERVED_MEMORY_BYTES);
+        let reserved_memory_bytes = (total_memory_bytes / 5)
+            .clamp(2 * GIB, MAX_DERIVED_RESERVED_MEMORY_BYTES);
         let browser_budget = ((total_memory_bytes as f64) * 0.4) as u64;
         let memory_permits = browser_budget
             .saturating_sub(reserved_memory_bytes.min(browser_budget))
@@ -73,18 +120,24 @@ impl ResourcePolicy {
             preset: ResourcePolicyPreset::Automatic,
             reserved_memory_bytes,
             max_browser_memory_ratio: 0.4,
+            max_task_memory_bytes: AUTOMATIC_TASK_MEMORY_BYTES,
             lane_cold_start_bytes: 256 * MIB,
             lane_ewma_min_bytes: 128 * MIB,
-            lane_ewma_max_bytes: GIB,
+            // This predictor must be able to cross the per-task watchdog
+            // threshold; clamping it at the threshold hides a leaking Lane.
+            lane_ewma_max_bytes: 4 * GIB,
             max_active_operations: active,
             max_open_lanes: active.saturating_mul(4).min(MAX_OPEN_LANES),
+            max_task_active_operations: default_task_active_operations(),
+            max_task_open_lanes: default_task_open_lanes(),
+            max_task_tabs: default_task_tabs(),
             max_global_queue: MAX_GLOBAL_QUEUE,
             max_owner_queue: MAX_OWNER_QUEUE,
             sample_period_ms: 5_000,
             lifecycle_sweep_period_ms: 30_000,
-            idle_expiry_ms: 10 * 60_000,
-            pressured_idle_expiry_ms: 2 * 60_000,
-            host_warm_ms: 60_000,
+            idle_expiry_ms: 2 * 60_000,
+            pressured_idle_expiry_ms: 30_000,
+            host_warm_ms: 0,
         }
     }
 
@@ -101,6 +154,13 @@ impl ResourcePolicy {
                 policy.max_active_operations = (policy.max_active_operations / 2).max(1);
                 policy.max_open_lanes = policy.max_active_operations.saturating_mul(3).min(96);
                 policy.max_browser_memory_ratio = 0.3;
+                policy.max_task_memory_bytes = RESOURCE_SAVING_TASK_MEMORY_BYTES;
+                policy.max_task_active_operations = 1;
+                policy.max_task_open_lanes = 2;
+                policy.max_task_tabs = 8;
+                policy.idle_expiry_ms = 60_000;
+                policy.pressured_idle_expiry_ms = 15_000;
+                policy.host_warm_ms = 0;
             }
             ResourcePolicyPreset::HighConcurrency => {
                 policy.max_active_operations =
@@ -110,6 +170,15 @@ impl ResourcePolicy {
                     .saturating_mul(4)
                     .min(MAX_OPEN_LANES);
                 policy.max_browser_memory_ratio = 0.5;
+                // High concurrency raises aggregate capacity, not the share
+                // one task may monopolize.
+                policy.max_task_memory_bytes = HIGH_CONCURRENCY_TASK_MEMORY_BYTES;
+                policy.max_task_active_operations = 2;
+                policy.max_task_open_lanes = 4;
+                policy.max_task_tabs = 16;
+                policy.idle_expiry_ms = 10 * 60_000;
+                policy.pressured_idle_expiry_ms = 2 * 60_000;
+                policy.host_warm_ms = 60_000;
             }
         }
         policy
@@ -130,6 +199,14 @@ impl ResourcePolicy {
             return Err(ResourcePolicyValidationError::new(
                 "max_browser_memory_ratio",
                 "must be finite and between 0.1 and 0.8",
+            ));
+        }
+        if !(MIN_TASK_MEMORY_BYTES..=MAX_TASK_MEMORY_BYTES)
+            .contains(&self.max_task_memory_bytes)
+        {
+            return Err(ResourcePolicyValidationError::new(
+                "max_task_memory_bytes",
+                "is outside the supported range",
             ));
         }
         if !(MIN_RESERVED_MEMORY_BYTES..=MAX_RESERVED_MEMORY_BYTES)
@@ -176,6 +253,24 @@ impl ResourcePolicy {
                 "must be between 1 and 128",
             ));
         }
+        if !(1..=MAX_TASK_ACTIVE_OPERATIONS).contains(&self.max_task_active_operations) {
+            return Err(ResourcePolicyValidationError::new(
+                "max_task_active_operations",
+                "must be between 1 and 16",
+            ));
+        }
+        if !(1..=MAX_TASK_OPEN_LANES).contains(&self.max_task_open_lanes) {
+            return Err(ResourcePolicyValidationError::new(
+                "max_task_open_lanes",
+                "must be between 1 and 32",
+            ));
+        }
+        if !(1..=MAX_TASK_TABS).contains(&self.max_task_tabs) {
+            return Err(ResourcePolicyValidationError::new(
+                "max_task_tabs",
+                "must be between 1 and 64",
+            ));
+        }
         if !(1..=MAX_GLOBAL_QUEUE).contains(&self.max_global_queue) {
             return Err(ResourcePolicyValidationError::new(
                 "max_global_queue",
@@ -205,7 +300,6 @@ impl ResourcePolicy {
                 "pressured_idle_expiry_ms",
                 self.pressured_idle_expiry_ms,
             ),
-            ("host_warm_ms", self.host_warm_ms),
         ] {
             if value == 0 {
                 return Err(ResourcePolicyValidationError::new(
@@ -265,6 +359,15 @@ pub struct ResourceTelemetry {
     /// projections expose only the matched byte count on safe host records.
     #[serde(skip)]
     pub host_rss_by_process_id: HashMap<u32, u64>,
+    /// Per-managed-host CPU load keyed by its OS root process ID.
+    ///
+    /// Values are normalized against total logical machine capacity: `1.0`
+    /// means the process tree consumed all logical CPUs during the sampling
+    /// interval. This is another in-process join index only. A shared Host can
+    /// serve several tasks, so the value must never be presented as precise
+    /// task CPU attribution or serialized across a management boundary.
+    #[serde(skip)]
+    pub host_cpu_pressure_by_process_id: HashMap<u32, f64>,
 }
 
 /// Point-in-time browser workload used alongside OS telemetry for admission
@@ -306,6 +409,11 @@ pub struct ResourceDecision {
     /// responses show the value in force instead of silently diverging from
     /// configuration.
     pub effective_reserved_memory_bytes: u64,
+    /// Machine-wide Chromium RSS pressure threshold derived from total memory.
+    ///
+    /// This is an elastic admission/shedding signal, not the per-task budget
+    /// and not an absolute installation-wide allocation cap.
+    pub effective_browser_memory_limit_bytes: u64,
     pub reason_code: Option<&'static str>,
     pub first_lane_reason_code: Option<&'static str>,
     pub expansion_lane_reason_code: Option<&'static str>,
@@ -342,6 +450,7 @@ impl ResourcePolicy {
                 operation_weight_limit: self.max_active_operations.max(1),
                 recommended_concurrency: static_recommendation,
                 effective_reserved_memory_bytes: self.reserved_memory_bytes,
+                effective_browser_memory_limit_bytes: 0,
                 reason_code: None,
                 first_lane_reason_code: None,
                 expansion_lane_reason_code: None,
@@ -359,15 +468,15 @@ impl ResourcePolicy {
             .max(1);
         let static_recommendation = available_operation_concurrency(operation_limit, workload);
         // The 20%-of-total floor protects presets whose reserve was derived
-        // for a different machine size. An explicit `Custom` reserve passed
-        // validation and is authoritative: silently raising it would make the
-        // accepted 256MiB..512GiB range meaningless and force Pressured on
-        // machines whose available memory sits below the floor.
+        // for a different machine size, but it is capped on large workstations
+        // so a large installation can still scale across many independent
+        // tasks. An explicit `Custom` reserve remains authoritative.
         let reserved = if self.preset == ResourcePolicyPreset::Custom {
             self.reserved_memory_bytes
         } else {
             self.reserved_memory_bytes
                 .max(((total as f64) * 0.2) as u64)
+                .min(MAX_DERIVED_RESERVED_MEMORY_BYTES)
         };
         let browser_limit = ((total as f64) * self.max_browser_memory_ratio) as u64;
         let predicted_lane_bytes = predicted_lane_cost(self, workload);
@@ -492,6 +601,7 @@ impl ResourcePolicy {
             operation_weight_limit,
             recommended_concurrency,
             effective_reserved_memory_bytes: reserved,
+            effective_browser_memory_limit_bytes: browser_limit,
             reason_code: first_lane_reason_code.or(expansion_lane_reason_code),
             first_lane_reason_code,
             expansion_lane_reason_code,
@@ -542,19 +652,66 @@ mod tests {
         let policy = ResourcePolicy::automatic(16 * GIB, 8);
         assert_eq!(policy.validate(), Ok(()));
         assert_eq!(policy.reserved_memory_bytes, 16 * GIB / 5);
+        assert_eq!(policy.max_task_memory_bytes, AUTOMATIC_TASK_MEMORY_BYTES);
         assert!(policy.max_active_operations <= MAX_ACTIVE_OPERATIONS);
         assert!(policy.max_open_lanes <= MAX_OPEN_LANES);
+        assert_eq!(policy.max_task_active_operations, 2);
+        assert_eq!(policy.max_task_open_lanes, 4);
+        assert_eq!(policy.max_task_tabs, 16);
+        assert_eq!(policy.idle_expiry_ms, 2 * 60_000);
+        assert_eq!(policy.pressured_idle_expiry_ms, 30_000);
+        assert_eq!(policy.host_warm_ms, 0);
         assert_eq!(policy.max_global_queue, MAX_GLOBAL_QUEUE);
         assert_eq!(policy.max_owner_queue, MAX_OWNER_QUEUE);
+
+        let workstation = ResourcePolicy::automatic(64 * GIB, 32);
+        assert_eq!(
+            workstation.reserved_memory_bytes,
+            MAX_DERIVED_RESERVED_MEMORY_BYTES
+        );
+        assert_eq!(
+            workstation
+                .decide(&ResourceTelemetry {
+                    total_memory_bytes: 64 * GIB,
+                    available_memory_bytes: 12 * GIB,
+                    logical_cpus: 32,
+                    ..Default::default()
+                })
+                .effective_reserved_memory_bytes,
+            MAX_DERIVED_RESERVED_MEMORY_BYTES
+        );
     }
 
     #[test]
-    fn validation_rejects_non_finite_ratio_and_absolute_cap_bypasses() {
+    fn legacy_serialized_policy_gets_default_task_budget() {
+        let policy = ResourcePolicy::automatic(16 * GIB, 8);
+        let mut value = serde_json::to_value(&policy).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("max_task_memory_bytes");
+
+        let restored: ResourcePolicy = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            restored.max_task_memory_bytes,
+            AUTOMATIC_TASK_MEMORY_BYTES
+        );
+    }
+
+    #[test]
+    fn validation_rejects_non_finite_ratio_and_task_limit_bypasses() {
         let mut policy = ResourcePolicy::default();
         policy.max_browser_memory_ratio = f64::NAN;
         assert_eq!(
             policy.validate().unwrap_err().field,
             "max_browser_memory_ratio"
+        );
+
+        let mut policy = ResourcePolicy::default();
+        policy.max_task_memory_bytes = MIN_TASK_MEMORY_BYTES - 1;
+        assert_eq!(
+            policy.validate().unwrap_err().field,
+            "max_task_memory_bytes"
         );
 
         let mut policy = ResourcePolicy::default();
@@ -617,11 +774,11 @@ mod tests {
         policy.preset = ResourcePolicyPreset::Custom;
         policy.reserved_memory_bytes = 2 * GIB;
         assert_eq!(policy.validate(), Ok(()));
-        // 10 GiB available is below the 12.8 GiB automatic floor but far above
+        // 7 GiB available is below the capped 8 GiB automatic floor but far above
         // the explicit 2 GiB reserve; the machine must not be Pressured.
         let telemetry = ResourceTelemetry {
             total_memory_bytes: 64 * GIB,
-            available_memory_bytes: 10 * GIB,
+            available_memory_bytes: 7 * GIB,
             logical_cpus: 16,
             ..Default::default()
         };
@@ -642,6 +799,7 @@ mod tests {
             automatic
                 .reserved_memory_bytes
                 .max((64 * GIB) / 5)
+                .min(MAX_DERIVED_RESERVED_MEMORY_BYTES)
         );
     }
 
@@ -651,7 +809,8 @@ mod tests {
         let decision = policy.decide(&ResourceTelemetry {
             total_memory_bytes: 8 * GIB,
             available_memory_bytes: 6 * GIB,
-            chromium_rss_bytes: ((8 * GIB) as f64 * policy.max_browser_memory_ratio) as u64
+            chromium_rss_bytes: ((8 * GIB) as f64 * policy.max_browser_memory_ratio)
+                as u64
                 * 86
                 / 100,
             logical_cpus: 8,
@@ -694,7 +853,7 @@ mod tests {
         let policy = ResourcePolicy::automatic(64 * GIB, 16);
         let telemetry = ResourceTelemetry {
             total_memory_bytes: 64 * GIB,
-            available_memory_bytes: 87 * GIB / 10,
+            available_memory_bytes: 7 * GIB,
             logical_cpus: 16,
             ..Default::default()
         };
@@ -725,7 +884,11 @@ mod tests {
 
     #[test]
     fn measured_cpu_pressure_reduces_concurrency_with_healthy_memory() {
-        let policy = ResourcePolicy::automatic(16 * GIB, 8);
+        let policy = ResourcePolicy::preset(
+            ResourcePolicyPreset::HighConcurrency,
+            16 * GIB,
+            8,
+        );
         let decision = policy.decide(&ResourceTelemetry {
             total_memory_bytes: 16 * GIB,
             available_memory_bytes: 12 * GIB,
@@ -739,7 +902,7 @@ mod tests {
         assert!(!decision.admit_expansion_lane);
         assert_eq!(
             decision.recommended_concurrency,
-            (policy.max_active_operations / 2).max(1)
+            (policy.max_active_operations.min(8 * 2) / 2).max(1)
         );
     }
 
@@ -771,7 +934,12 @@ mod tests {
 
     #[test]
     fn workload_cost_and_live_counts_reduce_recommended_concurrency() {
-        let policy = ResourcePolicy::automatic(16 * GIB, 8);
+        let mut policy = ResourcePolicy::preset(
+            ResourcePolicyPreset::HighConcurrency,
+            16 * GIB,
+            8,
+        );
+        policy.lane_ewma_max_bytes = 4 * GIB;
         let telemetry = ResourceTelemetry {
             total_memory_bytes: 16 * GIB,
             available_memory_bytes: 12 * GIB,
@@ -789,8 +957,8 @@ mod tests {
                 &ResourceWorkload {
                     active_lanes: 4,
                     queued_lanes: 2,
-                    active_lane_ewma_bytes: 4 * GIB,
-                    queued_lane_estimate_bytes: 2 * GIB,
+                    active_lane_ewma_bytes: 8 * GIB,
+                    queued_lane_estimate_bytes: 4 * GIB,
                     ..Default::default()
                 },
             )
@@ -802,8 +970,8 @@ mod tests {
                     active_lanes: 4,
                     queued_lanes: 2,
                     frozen_lanes: 2,
-                    active_lane_ewma_bytes: 4 * GIB,
-                    queued_lane_estimate_bytes: 2 * GIB,
+                    active_lane_ewma_bytes: 8 * GIB,
+                    queued_lane_estimate_bytes: 4 * GIB,
                     ..Default::default()
                 },
             )
@@ -845,7 +1013,11 @@ mod tests {
 
     #[test]
     fn measured_logical_cpu_count_caps_configured_operation_concurrency() {
-        let mut policy = ResourcePolicy::automatic(64 * GIB, 64);
+        let mut policy = ResourcePolicy::preset(
+            ResourcePolicyPreset::HighConcurrency,
+            64 * GIB,
+            64,
+        );
         policy.max_active_operations = 64;
         let decision = policy.decide(&ResourceTelemetry {
             total_memory_bytes: 64 * GIB,
@@ -894,16 +1066,18 @@ mod tests {
     }
 
     #[test]
-    fn process_id_rss_join_index_is_never_serialized() {
+    fn process_id_join_indexes_are_never_serialized() {
         let telemetry = ResourceTelemetry {
             chromium_rss_bytes: 123,
             host_rss_by_process_id: HashMap::from([(4_242, 123)]),
+            host_cpu_pressure_by_process_id: HashMap::from([(4_242, 0.75)]),
             ..Default::default()
         };
 
         let json = serde_json::to_value(telemetry).unwrap();
         assert_eq!(json["chromium_rss_bytes"], 123);
         assert!(json.get("host_rss_by_process_id").is_none());
+        assert!(json.get("host_cpu_pressure_by_process_id").is_none());
         assert!(!json.to_string().contains("4242"));
     }
 

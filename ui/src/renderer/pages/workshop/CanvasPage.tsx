@@ -40,12 +40,12 @@ const SaveStatePill: React.FC<{ state: SaveState }> = ({ state }) => {
     saved: {
       icon: <CheckOne theme='outline' size={13} strokeWidth={3} />,
       label: t('workshop.editor.saved', { defaultValue: '已保存' }),
-      className: 'text-[rgb(var(--success-6))] border-[rgba(var(--success-6),0.35)] bg-[rgba(var(--success-6),0.08)]',
+      className: 'text-success-6 border-[rgba(var(--success-6),0.35)] bg-[rgba(var(--success-6),0.08)]',
     },
     error: {
       icon: <CloseOne theme='outline' size={13} strokeWidth={3} />,
       label: t('workshop.editor.saveFailed', { defaultValue: '保存失败' }),
-      className: 'text-[rgb(var(--danger-6))] border-[rgba(var(--danger-6),0.35)] bg-[rgba(var(--danger-6),0.08)]',
+      className: 'text-danger-6 border-[rgba(var(--danger-6),0.35)] bg-[rgba(var(--danger-6),0.08)]',
     },
   };
   const { icon, label, className } = config[state];
@@ -198,7 +198,7 @@ const CanvasPage: React.FC = () => {
         </div>
 
         <span
-          className='flex items-center justify-center w-28px h-28px rd-8px shrink-0 text-[rgb(var(--primary-6))]'
+          className='flex items-center justify-center w-28px h-28px rd-8px shrink-0 text-primary-6'
           style={{ background: 'rgba(var(--primary-6),0.12)' }}
         >
           <Platte theme='outline' size={16} fill='currentColor' className='block' style={{ lineHeight: 0 }} />
@@ -224,7 +224,7 @@ const CanvasPage: React.FC = () => {
             className={[
               'min-w-0 max-w-360px flex-none text-15px font-700 text-[var(--color-text-1)]',
               'bg-transparent border-none outline-none',
-              'border-b border-solid !border-b-[rgb(var(--primary-6))] px-1px py-2px',
+              'border-b border-b-solid !border-b-[rgba(var(--primary-6),1)] px-1px py-2px',
             ].join(' ')}
           />
         ) : (

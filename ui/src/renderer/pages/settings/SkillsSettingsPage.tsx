@@ -7,7 +7,7 @@ import { Tabs } from '@arco-design/web-react';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
-import SettingsPageWrapper from './components/SettingsPageWrapper';
+import HubPageShell from '@/renderer/components/layout/HubPageShell';
 import SkillMarketSettings from './SkillMarketSettings';
 import SkillsHubSettings from './SkillsHubSettings';
 
@@ -39,7 +39,13 @@ const SkillsSettingsPage: React.FC = () => {
   };
 
   return (
-    <SettingsPageWrapper contentClassName='max-w-1200px'>
+    <HubPageShell
+      title={t('settings.skillsHub.title', { defaultValue: 'Skills Hub' })}
+      subtitle={t('settings.skillsHub.description', {
+        defaultValue: 'Manage independent Agent Skill packages that any preset can reference.',
+      })}
+      maxWidthClass='md:max-w-1200px'
+    >
       <Tabs
         activeTab={activeTab}
         onChange={handleTabChange}
@@ -57,7 +63,7 @@ const SkillsSettingsPage: React.FC = () => {
           <SkillMarketSettings />
         </Tabs.TabPane>
       </Tabs>
-    </SettingsPageWrapper>
+    </HubPageShell>
   );
 };
 

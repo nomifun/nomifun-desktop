@@ -9,9 +9,17 @@
  * This file provides TypeScript types and helper functions for the color system
  *
  * Usage:
- * - CSS: use CSS variables directly: var(--color-bg-0)
- * - UnoCSS: use atomic classes: bg-bg-0, text-text, border-border
+ * - CSS: use CSS variables directly: var(--bg-base), var(--bg-1), var(--text-primary)
+ * - UnoCSS: use atomic classes: bg-base / bg-1..bg-6, text-t-primary, border-arco-2
  * - TypeScript: use this file for type safety and constants
+ *
+ * ⚠️ This block used to recommend `var(--color-bg-0)` and the atomic classes
+ * `bg-bg-0` / `text-text` / `border-border`. All four are dead: `--color-bg-0` is
+ * defined by no theme, and the three classes emit ZERO CSS (measured with the real
+ * generator against ui/uno.config.ts — there is no colour named `bg`, `text` or
+ * `border` in the theme, so the doubled prefix indexes into nothing). Elements
+ * written that way silently keep their inherited background/colour. See
+ * ui/src/renderer/styles/MIGRATION.md and scripts/check-dead-css-utilities.mjs.
  */
 
 /**

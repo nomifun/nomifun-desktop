@@ -103,7 +103,10 @@ const ExecutionAdjustBox: React.FC<{
   );
 
   return (
-    <div className='shrink-0 border-t border-t-base bg-1 px-10px pb-10px pt-8px'>
+    // 顶部分隔线原来写成「`border-t-` + `base`」：UnoCSS 先吃掉 `-t-` 当方向，剩下的
+    // `base` 键落在 --bg-base（主背景）上，于是分隔线和背景同色；基础边框变量得写中括号。
+    // (The old form resolved to var(--bg-base), so the divider matched the background.)
+    <div className='shrink-0 border-t border-t-solid border-t-[var(--border-base)] bg-1 px-10px pb-10px pt-8px'>
       {messageContext}
       {summary && <div className='mb-6px truncate px-8px text-11px text-t-tertiary'>{summary}</div>}
       <ExecutionPlanEditor

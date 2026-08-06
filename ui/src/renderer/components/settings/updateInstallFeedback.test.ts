@@ -24,10 +24,21 @@ describe('update install interaction feedback', () => {
 
   test('install progress has a dedicated live region and cannot be dismissed mid-handoff', () => {
     expect(modalSource.includes("case 'installing':")).toBe(true);
-    expect(modalSource.includes("installPhase === 'downloading'")).toBe(true);
+    expect(modalSource.includes("installPhase === 'downloading'")).toBe(false);
     expect(modalSource.includes("aria-live='polite'")).toBe(true);
     expect(modalSource.includes("showClose: status !== 'installing'")).toBe(true);
     expect(modalSource.includes('if (installRequestedRef.current) return;\n    setVisible(false)')).toBe(true);
+  });
+
+  test('download and install actions use distinct labels and states', () => {
+    const availableStart = modalSource.lastIndexOf("case 'available':");
+    const downloadingStart = modalSource.indexOf("case 'downloading':", availableStart);
+    const available = modalSource.slice(availableStart, downloadingStart);
+
+    expect(available.includes("t('update.downloadButton')")).toBe(true);
+    expect(available.includes("t('update.downloadAndInstall')")).toBe(false);
+    expect(modalSource.includes("case 'downloaded':")).toBe(true);
+    expect(modalSource.includes("t('update.installNow')")).toBe(true);
   });
 
   test('reopening the modal cannot reset an in-flight install', () => {

@@ -14,6 +14,10 @@ const ASSISTANT_TEXT_MAX_CHARS: usize = 24_000;
 const TOC_LINES_PER_BASE_MAX: usize = 24;
 
 /// Strict-JSON contract for extracting durable knowledge from one completed turn.
+///
+/// The new-material-only rule is load-bearing: the service merges a candidate
+/// append-only, so a candidate that restates an existing document would be
+/// appended to that document instead of replacing it.
 pub const TURN_WRITEBACK_SYSTEM: &str = "You are a knowledge-base curator for NomiFun. \
 Read one completed conversation turn and decide whether anything should be proposed \
 for knowledge-base write-back. Output ONLY a JSON object of this exact shape:\n\
@@ -25,8 +29,9 @@ Rules:\n\
 - Ground every candidate in the provided turn. Never invent facts.\n\
 - Pick exactly one mounted kb_id for each candidate.\n\
 - Return at most 8 candidates.\n\
-- rel_path must be a relative markdown path inside that base, never absolute, never under _inbox/.\n\
+- rel_path must be a relative markdown path inside that base, never absolute.\n\
 - content must be concise markdown, organized as a durable note.\n\
+- content must be ONLY the new material to record, never a rewrite of an existing document.\n\
 - If nothing qualifies, return {\"candidates\":[]}.";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,15 +56,18 @@ pub fn build_turn_writeback_prompt(
     assistant_text: &str,
 ) -> String {
     let eagerness_label = match eagerness {
-        WritebackEagerness::Conservative => "conservative",
-        WritebackEagerness::Aggressive => "aggressive",
+        WritebackEagerness::Manual => "manual",
+        WritebackEagerness::Auto => "auto",
     };
+    // Production never reaches the Manual arm — the conversation crate skips
+    // scheduling the extractor entirely under that disposition — but a future
+    // caller that forgets the gate must still get the restrained instruction.
     let eagerness_rule = match eagerness {
-        WritebackEagerness::Conservative => {
-            "Conservative: require clear durable value and high confidence. Prefer no candidate over a noisy one."
+        WritebackEagerness::Manual => {
+            "Manual: the owner drives write-back. Return an EMPTY candidates array unless the user in THIS turn explicitly asked to record or save something; then extract only that."
         }
-        WritebackEagerness::Aggressive => {
-            "Aggressive: include anything plausibly reusable for a mounted base, while still obeying all no-noise and no-secret gates."
+        WritebackEagerness::Auto => {
+            "Auto: you decide, and the bar is high. Extract only durable, reusable, clearly-correct knowledge. Prefer an empty array over a marginal candidate, and never extract trivia, transient state, or anything the known_paths listing shows is already recorded."
         }
     };
 
@@ -183,25 +191,34 @@ mod tests {
         assert!(parse_turn_writeback_output(raw).is_err());
     }
 
+    /// The disposition has to reach the model, and the two dispositions must
+    /// never render the same rule text — a silent collapse would hand Manual
+    /// sessions the self-directed instruction.
     #[test]
-    fn prompt_labels_eagerness_without_changing_placement() {
-        let prompt = build_turn_writeback_prompt(
-            &[KnowledgeMountInfo {
-                knowledge_base_id: nomifun_common::KnowledgeBaseId::new(),
-                name: "Ops".into(),
-                description: String::new(),
-                rel_path: ".nomi/knowledge/Ops".into(),
-                toc: vec!["runbook.md — Runbook".into()],
-                summary: None,
-                live_sources: Vec::new(),
-            }],
-            WritebackEagerness::Aggressive,
+    fn prompt_labels_disposition_and_keeps_manual_distinct_from_auto() {
+        let mount = KnowledgeMountInfo {
+            knowledge_base_id: nomifun_common::KnowledgeBaseId::new(),
+            name: "Ops".into(),
+            description: String::new(),
+            rel_path: ".nomi/knowledge/Ops".into(),
+            toc: vec!["runbook.md — Runbook".into()],
+            summary: None,
+            live_sources: Vec::new(),
+        };
+
+        let auto = build_turn_writeback_prompt(
+            std::slice::from_ref(&mount),
+            WritebackEagerness::Auto,
             "u",
             "a",
         );
-        assert!(prompt.contains("eagerness: aggressive"));
-        assert!(prompt.contains("runbook.md"));
-        assert!(!prompt.contains("_inbox/{"));
+        assert!(auto.contains("eagerness: auto"));
+        assert!(auto.contains("runbook.md — Runbook"));
+        assert!(!auto.contains("EMPTY candidates array"));
+
+        let manual = build_turn_writeback_prompt(&[mount], WritebackEagerness::Manual, "u", "a");
+        assert!(manual.contains("eagerness: manual"));
+        assert!(manual.contains("EMPTY candidates array"));
     }
 
 }

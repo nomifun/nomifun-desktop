@@ -24,6 +24,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 
 import ConversationRow from './ConversationRow';
 import CompanionSessionGroup from './CompanionSessionGroup';
+import SshSessionGroup from './SshSessionGroup';
 import { useBatchSelection } from './hooks/useBatchSelection';
 import { useConversationActions } from './hooks/useConversationActions';
 import { useExport } from './hooks/useExport';
@@ -465,6 +466,25 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     [navigate, onSessionClick]
   );
 
+  // Row renderer handed to SshSessionGroup. SSH-bound sessions are excluded from
+  // `conversations` by conversationListFilter, so they are outside
+  // useBatchSelection's universe: it prunes every selected id missing from that
+  // array, and select-all / the selected counts never see them. Batch selection
+  // would therefore be broken by construction for these rows, so it is switched
+  // off after the spread — the session keeps rename / export / delete / pin.
+  const renderSshRow = useCallback(
+    (conversation: TChatConversation): React.ReactNode => (
+      <ConversationRow
+        key={conversation.id}
+        {...getConversationRowProps(conversation)}
+        batchMode={false}
+        checked={false}
+        dimIcon
+      />
+    ),
+    [getConversationRowProps]
+  );
+
   const renderEntry = useCallback(
     (entry: SessionEntry): React.ReactNode => {
       if (entry.kind === 'interactive' && entry.conversation) {
@@ -643,6 +663,7 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
             activeConversationId={activeConversationId}
             onSessionClick={onSessionClick}
           />
+          <SshSessionGroup collapsed activeConversationId={activeConversationId} renderRow={renderSshRow} />
           {tree.flatMap((node) =>
             node.interactive.map((entry) =>
               entry.conversation ? (
@@ -671,8 +692,17 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
           onToggleExpanded={ui.toggleCompanionGroup}
         />
 
-        <div data-testid='workpath-section-toolbar' className='px-2px pb-6px'>
-          <div className='h-22px px-2px flex items-center justify-between gap-8px select-none'>
+        {/* SSH 远程会话分组（设计 §10）：绑定主机的会话不进普通工作会话列表，
+            这里按主机二级聚合给它们一个可回访的家。行由 renderSshRow 注入。 */}
+        <SshSessionGroup
+          activeConversationId={activeConversationId}
+          expanded={ui.sshGroupExpanded}
+          onToggleExpanded={ui.toggleSshGroup}
+          renderRow={renderSshRow}
+        />
+
+        <div data-testid='workpath-section-toolbar' className='px-2px pb-3px'>
+          <div className='h-20px px-2px flex items-center justify-between gap-8px select-none'>
             <span className='text-13px text-t-tertiary font-[500] leading-none tracking-wide truncate'>
               {t('sessionList.workpathSection')}
             </span>

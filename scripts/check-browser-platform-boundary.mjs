@@ -399,7 +399,7 @@ function isEngineProductionPath(path) {
 }
 
 function browserToolConstructorPattern() {
-  return /\b(?:[A-Za-z_]\w*\s*::\s*)*BrowserTool\s*::\s*(?:new|new_standalone|with_data_dir|with_secret_store)\s*(?:::<[^;{}()]*>\s*)?\(/g;
+  return /\b(?:[A-Za-z_]\w*\s*::\s*)*BrowserTool\s*::\s*(?:new|new_standalone|with_data_dir)\s*(?:::<[^;{}()]*>\s*)?\(/g;
 }
 
 function browserPolicyConstructorPattern() {
@@ -415,7 +415,10 @@ function privateEngineConstructorPattern() {
 }
 
 function managedHostLaunchPattern() {
-  return /\b(?:[A-Za-z_]\w*\s*::\s*)*ManagedBrowserHost\s*::\s*launch\s*(?:::<[^;{}()]*>\s*)?\(/g;
+  // Production Platform callers must use the authority-carrying launch path;
+  // retain `launch` in the matcher as well so legacy/direct launches outside
+  // the adapter remain boundary violations.
+  return /\b(?:[A-Za-z_]\w*\s*::\s*)*ManagedBrowserHost\s*::\s*launch(?:_platform_managed(?:_with_cleanup_lease)?)?\s*(?:::<[^;{}()]*>\s*)?\(/g;
 }
 
 function managedBrowserToolConstructorPattern() {
@@ -442,7 +445,7 @@ function functionBody(source, name) {
 }
 
 function standaloneBrowserConstructorPattern() {
-  return /\b(?:Self|BrowserTool)\s*::\s*(?:new|new_standalone|with_data_dir|with_secret_store)\s*(?:::<[^;{}()]*>\s*)?\(/g;
+  return /\b(?:Self|BrowserTool)\s*::\s*(?:new|new_standalone|with_data_dir)\s*(?:::<[^;{}()]*>\s*)?\(/g;
 }
 
 function browserProfileAllocationPattern() {
@@ -885,7 +888,7 @@ function scanEntries(entries) {
         masked,
         launches[0]?.index ?? 0,
         'adapter-launch-contract',
-        `the adapter must contain exactly one ManagedBrowserHost::launch call (found ${launches.length})`,
+        `the adapter must contain exactly one ManagedBrowserHost managed launch call (found ${launches.length})`,
       );
     }
 
@@ -1082,7 +1085,7 @@ function selfTest() {
     {
       path: PLATFORM_ADAPTER,
       source: `
-        ManagedBrowserHost::launch(config).await?;
+        ManagedBrowserHost::launch_platform_managed_with_cleanup_lease(config, cleanup_lease).await?;
         BrowserTool::with_managed_engine(engine);
       `,
     },
@@ -1197,7 +1200,7 @@ function selfTest() {
         ? {
             ...entry,
             source: `
-              ManagedBrowserHost::launch(config).await?;
+              ManagedBrowserHost::launch_platform_managed(config).await?;
               BrowserTool::with_data_dir(data_dir, false);
             `,
           }
@@ -1212,7 +1215,7 @@ function selfTest() {
         ? {
             ...entry,
             source: `
-              ManagedBrowserHost::launch(config).await?;
+              ManagedBrowserHost::launch_platform_managed(config).await?;
               BrowserTool::with_managed_engine(engine);
               let profile_dir = allocate_profile_dir(&data_dir);
             `,

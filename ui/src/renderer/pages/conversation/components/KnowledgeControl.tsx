@@ -37,7 +37,6 @@ import type {
   IKnowledgeTag,
   KnowledgeBindingKind,
   KnowledgeWritebackEagerness,
-  KnowledgeWritebackMode,
 } from '@/common/adapter/ipcBridge';
 import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
 import { useTerminalSessions } from '@/renderer/pages/terminal/useTerminalSessions';
@@ -77,8 +76,7 @@ type KnowledgeControlProps = {
 export const defaultKnowledgeBinding = (): IKnowledgeBinding => ({
   enabled: false,
   writeback: false,
-  writeback_mode: 'staged',
-  writeback_eagerness: 'conservative',
+  writeback_eagerness: 'manual',
   channel_write_enabled: false,
   kb_ids: [],
 });
@@ -111,13 +109,13 @@ function getKindBadge(kind: IKnowledgeBase['kind']): KindBadgeStyle {
     case 'local':
       return {
         bgClass: 'bg-[rgba(var(--primary-6),0.1)]',
-        textClass: 'text-[rgb(var(--primary-5))]',
+        textClass: 'text-primary-5',
         borderClass: 'border-[rgba(var(--primary-6),0.3)]',
       };
     case 'web':
       return {
         bgClass: 'bg-[rgba(var(--success-6),0.1)]',
-        textClass: 'text-[rgb(var(--success-5))]',
+        textClass: 'text-success-5',
         borderClass: 'border-[rgba(var(--success-6),0.3)]',
       };
     case 'blank':
@@ -331,10 +329,6 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     void persist({ ...binding, writeback: v });
   };
 
-  const handleWritebackMode = (mode: KnowledgeWritebackMode) => {
-    void persist({ ...binding, writeback_mode: mode });
-  };
-
   const handleWritebackEagerness = (eagerness: KnowledgeWritebackEagerness) => {
     void persist({ ...binding, writeback_eagerness: eagerness });
   };
@@ -358,7 +352,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
       ? t('knowledge.control.mounted', { count: mountedCount })
       : t('knowledge.control.off');
 
-  // Compact segmented control (writeback mode / eagerness) — tinted track with a
+  // Compact segmented control (writeback disposition) — tinted track with a
   // primary active pill, sitting on the section's bg-fill-1 surface.
   const renderSegment = (
     current: string,
@@ -374,7 +368,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
             className={[
               'cursor-pointer rounded-6px px-10px py-4px text-11px leading-none',
               activeSeg
-                ? 'border border-solid border-[rgba(var(--primary-6),0.28)] bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))] font-600'
+                ? 'border border-solid border-[rgba(var(--primary-6),0.28)] bg-[rgba(var(--primary-6),0.12)] text-primary-6 font-600'
                 : 'border border-solid border-transparent text-[var(--color-text-1)] hover:bg-[var(--color-fill-3)]',
               targetUnresolved && 'cursor-not-allowed opacity-60',
             ]
@@ -389,14 +383,10 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     </div>
   );
 
-  const writebackModeHint =
-    binding.writeback_mode === 'staged'
-      ? t('knowledge.control.modeStagedHint')
-      : t('knowledge.control.modeDirectHint');
   const writebackEagernessHint =
-    binding.writeback_eagerness === 'conservative'
-      ? t('knowledge.control.eagernessConservativeHint')
-      : t('knowledge.control.eagernessAggressiveHint');
+    binding.writeback_eagerness === 'manual'
+      ? t('knowledge.control.eagernessManualHint')
+      : t('knowledge.control.eagernessAutoHint');
 
   // One mounted base row.
   const renderBaseRow = (base: IKnowledgeBase) => {
@@ -425,7 +415,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
           className={[
             'grid h-17px w-17px flex-none place-items-center rounded-5px border-1.5px border-solid text-10px leading-none',
             isSelected
-              ? 'border-[rgba(var(--primary-6),0.48)] bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))]'
+              ? 'border-[rgba(var(--primary-6),0.48)] bg-[rgba(var(--primary-6),0.12)] text-primary-6'
               : 'border-[var(--color-text-3)] bg-[var(--color-bg-1)] text-transparent',
           ].join(' ')}
         >
@@ -455,7 +445,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
             </span>
           </span>
           {rootMissing && (
-            <span className='knowledge-control-root-missing mt-2px block text-11px leading-15px text-[rgb(var(--danger-6))]'>
+            <span className='knowledge-control-root-missing mt-2px block text-11px leading-15px text-danger-6'>
               {t('knowledge.mount.rootMissingHint', {
                 defaultValue: '源目录不存在或暂时不可访问，恢复目录后再挂载。',
               })}
@@ -504,7 +494,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
           {t('knowledge.control.hint')}
         </div>
         <div
-          className='self-start text-11px font-600 text-[rgb(var(--primary-6))] cursor-pointer hover:underline'
+          className='self-start text-11px font-600 text-primary-6 cursor-pointer hover:underline'
           onClick={() => navigate('/knowledge')}
         >
           {t('knowledge.mount.manage', { defaultValue: '管理知识库 ›' })}
@@ -588,44 +578,25 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
               </div>
 
               {binding.writeback && (
-                <div className='flex flex-col gap-9px'>
-                  {/* Mode */}
-                  <div className={fieldStackClass}>
-                    <span className={fieldLabelClass}>
-                      {t('knowledge.control.writebackMode', { defaultValue: '回血模式' })}
-                    </span>
-                    {renderSegment(
-                      binding.writeback_mode,
-                      [
-                        { value: 'staged', label: t('knowledge.control.modeStaged', { defaultValue: '暂存回血' }) },
-                        { value: 'direct', label: t('knowledge.control.modeDirect', { defaultValue: '直接回血' }) },
-                      ],
-                      (v) => handleWritebackMode(v as KnowledgeWritebackMode)
-                    )}
-                    <span className='text-[var(--color-text-2)] text-11px leading-15px'>{writebackModeHint}</span>
-                  </div>
-
-                  {/* Eagerness */}
-                  <div className={fieldStackClass}>
-                    <span className={fieldLabelClass}>
-                      {t('knowledge.control.writebackEagerness', { defaultValue: '回写意识' })}
-                    </span>
-                    {renderSegment(
-                      binding.writeback_eagerness,
-                      [
-                        {
-                          value: 'conservative',
-                          label: t('knowledge.control.eagernessConservative', { defaultValue: '保守型' }),
-                        },
-                        {
-                          value: 'aggressive',
-                          label: t('knowledge.control.eagernessAggressive', { defaultValue: '激进型' }),
-                        },
-                      ],
-                      (v) => handleWritebackEagerness(v as KnowledgeWritebackEagerness)
-                    )}
-                    <span className='text-[var(--color-text-2)] text-11px leading-15px'>{writebackEagernessHint}</span>
-                  </div>
+                <div className={fieldStackClass}>
+                  <span className={fieldLabelClass}>
+                    {t('knowledge.control.writebackEagerness', { defaultValue: '回写意识' })}
+                  </span>
+                  {renderSegment(
+                    binding.writeback_eagerness,
+                    [
+                      {
+                        value: 'manual',
+                        label: t('knowledge.control.eagernessManual', { defaultValue: '手动型（推荐）' }),
+                      },
+                      {
+                        value: 'auto',
+                        label: t('knowledge.control.eagernessAuto', { defaultValue: '自动型' }),
+                      },
+                    ],
+                    (v) => handleWritebackEagerness(v as KnowledgeWritebackEagerness)
+                  )}
+                  <span className='text-[var(--color-text-2)] text-11px leading-15px'>{writebackEagernessHint}</span>
                 </div>
               )}
             </div>
@@ -635,7 +606,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
         </>
       )}
 
-      {footer ? <div className='shrink-0 border-t border-[var(--color-border-1)] pt-8px'>{footer}</div> : null}
+      {footer ? <div className='shrink-0 border-t border-t-solid border-[var(--color-border-1)] pt-8px'>{footer}</div> : null}
     </div>
   );
 

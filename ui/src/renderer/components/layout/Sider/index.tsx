@@ -12,7 +12,6 @@ import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
-import { useKnowledgeInboxPending } from '@renderer/pages/knowledge/useKnowledge';
 import {
   isBrowserCapabilityUnavailable,
   useBrowserOverview,
@@ -64,7 +63,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const isMobile = layout?.isMobile ?? false;
   const location = useLocation();
   const { pathname, search, hash } = location;
-  const { count: pendingInboxCount } = useKnowledgeInboxPending();
   const {
     overview: browserOverview,
     unavailable: browserUnavailable,
@@ -196,7 +194,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             <SettingsSider collapsed={collapsed} tooltipEnabled={tooltipEnabled} />
           </Suspense>
         ) : (
-          <div className='size-full flex flex-col gap-2px'>
+          <div className='size-full flex flex-col gap-1px'>
             {/* 常用 — high-frequency primary destinations */}
             <SiderSectionHeader label={t('common.siderSection.common')} collapsed={collapsed} />
             {/* Conversations — opens the session secondary sidebar (ContentSider) */}
@@ -232,7 +230,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleKnowledgeClick}
-              dot={pendingInboxCount > 0}
             />
             {/* Asset library — unified management of creative-workshop assets */}
             <SiderAssetLibraryEntry
@@ -299,7 +296,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
         )}
       </div>
       {/* Bottom pinned group (设置) — Model & Agent and Open Capabilities sit directly above Settings */}
-      <div className='shrink-0 mt-auto pt-8px flex flex-col gap-2px border-t border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-b-0'>
+      <div className='shrink-0 mt-auto pt-5px flex flex-col gap-1px border-t border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-b-0'>
         {/* 设置 — section label; the enclosing border-t already separates this region when collapsed */}
         <SiderSectionHeader label={t('common.siderSection.settings')} collapsed={collapsed} collapsedRule={false} />
         {/* Browser management — lifecycle/visibility control for managed Chromium,

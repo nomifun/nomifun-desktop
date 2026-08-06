@@ -50,7 +50,7 @@ export function getKindConfig(
       return {
         label: t('knowledge.card.kindLocal', { defaultValue: '本地文件夹' }),
         bgClass: 'bg-[rgba(var(--primary-6),0.1)]',
-        textClass: textVariant === 'accent' ? 'text-[rgb(var(--primary-5))]' : 'text-[var(--color-text-1)]',
+        textClass: textVariant === 'accent' ? 'text-primary-5' : 'text-[var(--color-text-1)]',
         borderClass: 'border-[rgba(var(--primary-6),0.3)]',
         iconBg: 'rgba(var(--primary-6),0.1)',
         iconBorder: 'rgba(var(--primary-6),0.3)',
@@ -60,7 +60,7 @@ export function getKindConfig(
       return {
         label: t('knowledge.card.kindWeb', { defaultValue: '网页' }),
         bgClass: 'bg-[rgba(var(--success-6),0.1)]',
-        textClass: textVariant === 'accent' ? 'text-[rgb(var(--success-5))]' : 'text-[var(--color-text-1)]',
+        textClass: textVariant === 'accent' ? 'text-success-5' : 'text-[var(--color-text-1)]',
         borderClass: 'border-[rgba(var(--success-6),0.3)]',
         iconBg: 'rgba(var(--success-6),0.1)',
         iconBorder: 'rgba(var(--success-6),0.3)',

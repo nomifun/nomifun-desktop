@@ -11,8 +11,26 @@ const realFetch = globalThis.fetch;
 const realWindow = (globalThis as { window?: Window }).window;
 const realDocument = (globalThis as { document?: Document }).document;
 
+/**
+ * Install a global via `Object.defineProperty` rather than plain assignment.
+ * A sibling test file may have left `globalThis.window` as a read-only data
+ * property, which makes `globalThis.window = …` throw in strict mode and
+ * couples this file's result to suite ordering.
+ */
+function defineGlobal(key: 'window' | 'document', value: unknown): void {
+  Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+}
+
+function restoreGlobal(key: 'window' | 'document', original: unknown): void {
+  if (original === undefined) {
+    Reflect.deleteProperty(globalThis, key);
+    return;
+  }
+  defineGlobal(key, original);
+}
+
 function installWebUiGlobals(csrfToken = ''): void {
-  (globalThis as { window?: unknown }).window = {
+  defineGlobal('window', {
     location: {
       origin: 'http://192.168.3.68:25808',
       protocol: 'http:',
@@ -21,23 +39,18 @@ function installWebUiGlobals(csrfToken = ''): void {
       hash: '#/guid',
     },
     dispatchEvent: () => true,
-  };
-  (globalThis as { document?: unknown }).document = {
+  });
+  defineGlobal('document', {
     cookie: csrfToken ? `nomifun-csrf-token=${csrfToken}` : '',
-  };
+  });
 }
 
 afterEach(() => {
-  globalThis.fetch = realFetch;
-  if (realWindow === undefined) {
-    delete (globalThis as { window?: Window }).window;
-  } else {
-    (globalThis as { window?: Window }).window = realWindow;
-  }
-  if (realDocument === undefined) {
-    delete (globalThis as { document?: Document }).document;
-  } else {
-    (globalThis as { document?: Document }).document = realDocument;
+  try {
+    globalThis.fetch = realFetch;
+  } finally {
+    restoreGlobal('window', realWindow);
+    restoreGlobal('document', realDocument);
   }
 });
 

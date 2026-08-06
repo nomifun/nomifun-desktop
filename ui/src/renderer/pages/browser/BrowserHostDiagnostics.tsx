@@ -124,7 +124,7 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
   const renderHost = (host: IBrowserHost) => (
     <article
       key={host.host_id}
-      className='min-w-0 rd-12px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-bg-1 p-12px shadow-[0_6px_18px_rgba(15,23,42,0.03)]'
+      className='min-w-0 rd-12px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-1 p-12px shadow-[0_6px_18px_rgba(15,23,42,0.03)]'
       data-browser-host-id={host.host_id}
     >
       <div className='flex items-center gap-6px mb-9px'>
@@ -196,9 +196,9 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
 
       <div className='border-t border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_52%,transparent)] border-b-0 border-l-0 border-r-0 p-12px'>
         <section className='mb-12px grid grid-cols-2 md:grid-cols-4 gap-10px'>
-          <DiagnosticField label={t('browser.diagnostics.fields.activeOperations')}>
-            {valueOrDash(capacity?.active)}
-            {capacity?.max_active != null ? ` / ${capacity.max_active}` : null}
+          <DiagnosticField label={t('browser.diagnostics.fields.activeLanes')}>
+            {valueOrDash(capacity?.active_lanes ?? capacity?.active)}
+            {capacity?.max_open_lanes != null ? ` / ${capacity.max_open_lanes}` : null}
           </DiagnosticField>
           <DiagnosticField label={t('browser.diagnostics.fields.queuedRequests')}>
             {valueOrDash(capacity?.queued ?? overview.queued_lanes)}
@@ -209,6 +209,21 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
           </DiagnosticField>
           <DiagnosticField label={t('browser.diagnostics.fields.managedHosts')}>
             {valueOrDash(overview.managed_host_count ?? hosts.length)}
+          </DiagnosticField>
+          <DiagnosticField label={t('browser.diagnostics.fields.globalMemoryPressureThreshold')}>
+            {formatBytes(capacity?.global_memory_pressure_threshold_bytes)}
+          </DiagnosticField>
+          <DiagnosticField label={t('browser.diagnostics.fields.taskMemoryBudget')}>
+            {formatBytes(capacity?.max_task_memory_bytes)}
+          </DiagnosticField>
+          <DiagnosticField label={t('browser.diagnostics.fields.taskOperationLimit')}>
+            {valueOrDash(capacity?.max_task_active_operations)}
+          </DiagnosticField>
+          <DiagnosticField label={t('browser.diagnostics.fields.taskLaneLimit')}>
+            {valueOrDash(capacity?.max_task_open_lanes)}
+          </DiagnosticField>
+          <DiagnosticField label={t('browser.diagnostics.fields.taskTabLimit')}>
+            {valueOrDash(capacity?.max_task_tabs)}
           </DiagnosticField>
           <DiagnosticField label={t('browser.diagnostics.fields.pendingCleanup')}>
             {valueOrDash(overview.pending_cleanup_count)}

@@ -316,6 +316,7 @@ impl ChannelMessageService {
             order: Some("DESC".into()),
             content_mode: None,
             cursor: None,
+            day: None,
         };
         let result = self
             .conversation_svc

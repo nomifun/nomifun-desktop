@@ -39,7 +39,7 @@ const BrowserDisplayModeControl: React.FC<BrowserDisplayModeControlProps> = ({
 
   return (
     <section
-      className='mb-12px shrink-0 rd-12px border border-solid border-[var(--color-border-2)] bg-bg-1 px-14px py-12px'
+      className='mb-12px shrink-0 rd-12px border border-solid border-[var(--color-border-2)] bg-1 px-14px py-12px'
       data-browser-display-mode-control
     >
       <div className='flex flex-wrap items-center gap-10px'>

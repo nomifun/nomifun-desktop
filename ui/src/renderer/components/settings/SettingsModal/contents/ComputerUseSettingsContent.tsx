@@ -75,7 +75,14 @@ const ComputerUseSettingsContent: React.FC = () => {
       <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
         <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
           <div className='text-13px font-600 text-t-secondary'>{t('settings.computerUseSection')}</div>
-          <div className='w-full flex flex-col divide-y divide-border-2'>
+          {/*
+            Row separators need all three parts. `divide-y` only emits a top/bottom WIDTH, and this
+            project ships no border reset, so without `divide-solid` the style stays `none` and
+            nothing paints. `divide-solid` then styles all four sides, so `divide-x-0` is required
+            to stop the unset left/right widths falling back to the CSS initial `medium` (~3px).
+            `divide-border-2` was also dead: there is no theme colour named `border`.
+          */}
+          <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
             <PreferenceRow label={t('settings.computerUse')} description={t('settings.computerUseDesc')}>
               <Switch checked={computerUse} onChange={handleComputerUseChange} />
             </PreferenceRow>
@@ -90,7 +97,7 @@ const ComputerUseSettingsContent: React.FC = () => {
                 {t('settings.computerUsePermRefresh')}
               </Button>
             </div>
-            <div className='w-full flex flex-col divide-y divide-border-2'>
+            <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
               {permRow('accessibility', perm?.accessibility ?? null, t('settings.computerUseAccessibility'), t('settings.computerUseAccessibilityDesc'))}
               {permRow('screen_recording', perm?.screen_recording ?? null, t('settings.computerUseScreenRecording'), t('settings.computerUseScreenRecordingDesc'))}
             </div>

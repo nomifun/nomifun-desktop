@@ -105,6 +105,7 @@ fn make_factory_with_summon(
         settings_repo: None,
         companion_prompt: None,
         companion_summon,
+        ssh_provider: None,
         companion_skill_sink: None,
         skill_manager: AcpSkillManager::new(skill_paths),
         remote_agent_repo,
@@ -278,15 +279,6 @@ impl nomifun_ai_agent::CompanionMemorySink for FakeSummonMemorySink {
     }
 }
 
-struct FakeSummonProposalSink;
-
-#[async_trait::async_trait]
-impl nomifun_ai_agent::SummonProposalSink for FakeSummonProposalSink {
-    async fn propose(&self, _c: &str, _k: &str, _co: &str, _r: &str) -> Result<String, String> {
-        Ok(String::new())
-    }
-}
-
 struct FakeSummonContextSink;
 
 #[async_trait::async_trait]
@@ -306,12 +298,6 @@ impl nomifun_ai_agent::CompanionSummonProvider for FakeSummonProvider {
         _companion_id: &str,
     ) -> Result<Arc<dyn nomifun_ai_agent::CompanionMemorySink>, nomifun_common::AppError> {
         Ok(Arc::new(FakeSummonMemorySink))
-    }
-    fn summon_proposal_sink(
-        &self,
-        _companion_id: &str,
-    ) -> Result<Arc<dyn nomifun_ai_agent::SummonProposalSink>, nomifun_common::AppError> {
-        Ok(Arc::new(FakeSummonProposalSink))
     }
     fn summon_context_sink(
         &self,

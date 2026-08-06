@@ -35,7 +35,6 @@ fn record_then_query_returns_hint() {
         role: "button".into(),
         accessible_name: "Compose".into(),
         selector: Some("div[gh=cm]".into()),
-        from_secret: false,
     };
     store.record(entry.clone());
 
@@ -51,24 +50,11 @@ fn record_then_query_returns_hint() {
 }
 
 #[test]
-fn record_skips_secret_sourced_descriptor() {
+fn record_skips_redacted_descriptor() {
     let sink = InMemorySink::new();
     let store = SiteMemoryStore::new(Box::new(sink));
 
-    // Case 1: from_secret = true → dropped.
-    let secret_entry = SiteMemoryEntry {
-        etld1: "bank.com".into(),
-        url_pattern: "https://bank.com/login".into(),
-        intent: "type".into(),
-        role: "textbox".into(),
-        accessible_name: "Password".into(),
-        selector: Some("#pw".into()),
-        from_secret: true,
-    };
-    store.record(secret_entry);
-    assert!(store.query("bank.com").is_empty(), "from_secret=true must be dropped");
-
-    // Case 2: accessible_name is a redaction placeholder → dropped.
+    // Case 1: accessible_name is a redaction placeholder → dropped.
     let redacted_entry = SiteMemoryEntry {
         etld1: "bank.com".into(),
         url_pattern: "https://bank.com/login".into(),
@@ -76,12 +62,11 @@ fn record_skips_secret_sourced_descriptor() {
         role: "textbox".into(),
         accessible_name: "[KNOWN_SECRET_REDACTED]".into(),
         selector: Some("#secret-field".into()),
-        from_secret: false,
     };
     store.record(redacted_entry);
     assert!(store.query("bank.com").is_empty(), "redaction placeholder must be dropped");
 
-    // Case 3: Another redaction marker variant.
+    // Case 2: Another redaction marker variant.
     let redacted_entry2 = SiteMemoryEntry {
         etld1: "bank.com".into(),
         url_pattern: "https://bank.com/login".into(),
@@ -89,12 +74,11 @@ fn record_skips_secret_sourced_descriptor() {
         role: "textbox".into(),
         accessible_name: "OTP [REDACTED]".into(),
         selector: None,
-        from_secret: false,
     };
     store.record(redacted_entry2);
     assert!(store.query("bank.com").is_empty(), "[REDACTED] in name must be dropped");
 
-    // Case 4: Normal (non-secret) entry IS persisted.
+    // Case 3: Normal entry IS persisted.
     let normal_entry = SiteMemoryEntry {
         etld1: "bank.com".into(),
         url_pattern: "https://bank.com/dashboard".into(),
@@ -102,11 +86,10 @@ fn record_skips_secret_sourced_descriptor() {
         role: "button".into(),
         accessible_name: "Transfer".into(),
         selector: Some("#transfer-btn".into()),
-        from_secret: false,
     };
     store.record(normal_entry);
     let results = store.query("bank.com");
-    assert_eq!(results.len(), 1, "non-secret entry should persist");
+    assert_eq!(results.len(), 1, "normal entry should persist");
     assert_eq!(results[0].accessible_name, "Transfer");
 }
 
@@ -123,7 +106,6 @@ fn stale_descriptor_invalidated_on_role_mismatch() {
         role: "button".into(),
         accessible_name: "Submit".into(),
         selector: Some("#submit-btn".into()),
-        from_secret: false,
     };
     let entry_b = SiteMemoryEntry {
         etld1: "example.com".into(),
@@ -132,7 +114,6 @@ fn stale_descriptor_invalidated_on_role_mismatch() {
         role: "link".into(),
         accessible_name: "Help".into(),
         selector: Some("a.help".into()),
-        from_secret: false,
     };
     store.record(entry_a);
     store.record(entry_b);

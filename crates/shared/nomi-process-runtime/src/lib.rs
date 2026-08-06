@@ -16,9 +16,11 @@ mod supervisor;
 
 pub use capability::{CapabilityPolicy, SandboxPolicy};
 pub use command_builder::{
-    ChildProcessBuilder, ChildProcessCleanup, ManagedChildProcess, kill_process_tree,
-    merge_process_path, resolve_command_in, resolve_command_path,
+    ChildProcessBuilder, ChildProcessCleanup, ManagedChildCleanupMetrics, ManagedChildProcess,
+    kill_process_tree, managed_child_cleanup_metrics, merge_process_path, resolve_command_in,
+    resolve_command_path,
 };
+pub use platform::poller::{PlatformLifecycleMetrics, platform_lifecycle_metrics};
 pub use io::{OutputBuffer, OutputObserver};
 pub use outcome::{
     CleanupReport, EncodingMetadata, ProcessOutcome, OutputChunk, OutputCursor,

@@ -13,6 +13,15 @@
   "createProject": "创建项目",
   "createProjectSuccess": "项目已创建",
   "createProjectFailed": "创建项目失败",
+  "actionChat": "会话",
+  "actionTerminal": "终端",
+  "actionProject": "项目",
+  "actionRemote": "远程",
+  "newRemoteSession": "新建远程会话",
+  "remoteHint": "点击主机即可开始远程会话",
+  "remoteLoading": "正在读取主机…",
+  "remoteEmptyHint": "添加一台 SSH 主机，agent 就能在会话里代你操控它。",
+  "remoteAddHost": "新建远程主机…",
   "batchSelect": "批量选择",
   "exitBatchSelect": "退出选择",
   "displaySettings": "显示设置",
@@ -46,5 +55,5 @@
   "removeWorkpathSuccess": "工作路径已移除",
   "collapseList": "收起会话列表",
   "expandList": "展开会话列表",
-  "empty": "暂无会话，点击上方「新建会话」或「创建项目」开始"
+  "empty": "暂无会话，点击上方「+ 会话」或「+ 项目」开始"
 }

@@ -370,7 +370,7 @@ const StarOfficeMonitorCard: React.FC<StarOfficeMonitorCardProps> = ({ conversat
         }}
       >
         <div className='flex flex-col gap-12px'>
-          <div className='rounded-12px border border-3 bg-2 p-12px'>
+          <div className='rounded-12px border border-solid border-3 bg-2 p-12px'>
             <button
               type='button'
               className='border-none bg-transparent p-0 text-left text-14px font-500 text-t-primary underline-offset-3 hover:underline cursor-pointer'
@@ -384,7 +384,7 @@ const StarOfficeMonitorCard: React.FC<StarOfficeMonitorCardProps> = ({ conversat
                   'Star Office is a visual companion for OpenClaw. It turns chat-side status into a live, interactive monitor view.',
               })}
             </div>
-            <div className='mt-10px overflow-hidden rounded-10px border border-3 bg-1'>
+            <div className='mt-10px overflow-hidden rounded-10px border border-solid border-3 bg-1'>
               {previewImageFailed ? (
                 <div className='h-132px w-full flex items-center justify-center bg-fill-2 px-12px'>
                   <div className='text-center'>
@@ -420,21 +420,21 @@ const StarOfficeMonitorCard: React.FC<StarOfficeMonitorCardProps> = ({ conversat
               </div>
             </div>
             <div className='mt-10px flex items-center gap-6px text-12px text-t-primary flex-wrap'>
-              <span className='rounded-full border border-3 bg-1 px-8px py-4px'>
+              <span className='rounded-full border border-solid border-3 bg-1 px-8px py-4px'>
                 {t('starOffice.monitor.visualStepChat', { defaultValue: 'OpenClaw Chat' })}
               </span>
               <span className='text-t-secondary'>→</span>
-              <span className='rounded-full border border-3 bg-1 px-8px py-4px'>
+              <span className='rounded-full border border-solid border-3 bg-1 px-8px py-4px'>
                 {t('starOffice.monitor.visualStepUi', { defaultValue: 'Star Office UI' })}
               </span>
               <span className='text-t-secondary'>→</span>
-              <span className='rounded-full border border-3 bg-1 px-8px py-4px'>
+              <span className='rounded-full border border-solid border-3 bg-1 px-8px py-4px'>
                 {t('starOffice.monitor.visualStepLive', { defaultValue: 'Live Monitor' })}
               </span>
             </div>
           </div>
 
-          <div className='rounded-14px border border-2 bg-[linear-gradient(180deg,rgba(var(--gray-1),0.82),rgba(var(--gray-2),0.7))] p-14px'>
+          <div className='rounded-14px border border-solid border-2 bg-[linear-gradient(180deg,rgba(var(--gray-1),0.82),rgba(var(--gray-2),0.7))] p-14px'>
             <div className='flex items-center gap-8px'>
               <span
                 className='h-8px w-8px rounded-full'
@@ -490,7 +490,7 @@ const StarOfficeMonitorCard: React.FC<StarOfficeMonitorCardProps> = ({ conversat
           </div>
 
           {detectError ? (
-            <div className='text-11px text-[rgb(var(--danger-6))]'>
+            <div className='text-11px text-danger-6'>
               {statusText} · {detectError}
             </div>
           ) : null}

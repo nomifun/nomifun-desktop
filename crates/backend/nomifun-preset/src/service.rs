@@ -563,11 +563,10 @@ fn validate_request(
             AppError::BadRequest(format!("invalid model preference provider_id: {error}"))
         })?;
     }
-    if !matches!(policy.mode.as_str(), "inherit" | "staged" | "direct") {
-        return Err(AppError::BadRequest("knowledge policy mode must be inherit, staged, or direct".into()));
-    }
-    if policy.eagerness.as_deref().is_some_and(|value| !matches!(value, "conservative" | "aggressive")) {
-        return Err(AppError::BadRequest("knowledge eagerness must be conservative or aggressive".into()));
+    // An un-migrated caller sending the retired vocabulary must fail loudly
+    // here rather than be silently coerced to a disposition it did not choose.
+    if policy.eagerness.as_deref().is_some_and(|value| !matches!(value, "manual" | "auto")) {
+        return Err(AppError::BadRequest("knowledge eagerness must be manual or auto".into()));
     }
     for preset_tag_id in audience_tags.iter().chain(scenario_tags) {
         validate_preset_tag_id(preset_tag_id)?;
@@ -635,7 +634,7 @@ fn record_to_response(record: &PresetRecord) -> Result<PresetResponse, AppError>
         if let Some(v) = &l.description { description_i18n.insert(l.locale.clone(), v.clone()); }
         if let Some(v) = &l.instructions { instructions_i18n.insert(l.locale.clone(), v.clone()); }
     }
-    let policy = record.knowledge_policy.as_ref().map(|k| PresetKnowledgePolicy { enabled: k.enabled, mode: k.mode.clone(), writeback: k.writeback, eagerness: k.eagerness.clone(), grounded: k.grounded }).unwrap_or_default();
+    let policy = record.knowledge_policy.as_ref().map(|k| PresetKnowledgePolicy { enabled: k.enabled, writeback: k.writeback, eagerness: k.eagerness.clone(), grounded: k.grounded }).unwrap_or_default();
     let mut response = PresetResponse {
         preset_id: p.preset_id.clone(), revision: p.revision, source: match p.source_kind.as_str() { "builtin" => PresetSource::Builtin, "extension" => PresetSource::Extension, _ => PresetSource::User },
         source_key: p.source_key.clone(), name: p.name.clone(), name_i18n, description: p.description.clone(), description_i18n,
@@ -716,7 +715,7 @@ fn builtin_write_params(
                     .map(|skill| (skill, "exclude_auto".into(), false)),
             )
             .collect(),
-        knowledge_policy: (false, "inherit".into(), false, None, false),
+        knowledge_policy: (false, false, None, false),
         knowledge_bases: vec![],
         examples: flatten_examples(item.prompts.clone(), item.prompts_i18n.clone()),
         tag_bindings: item
@@ -790,7 +789,7 @@ fn extension_write_params(item: &ResolvedPreset) -> Result<PresetWriteParams, Ap
             .cloned()
             .map(|skill| (skill, "include".into(), false))
             .collect(),
-        knowledge_policy: (false, "inherit".into(), false, None, false),
+        knowledge_policy: (false, false, None, false),
         knowledge_bases: vec![],
         examples: item
             .prompts
@@ -808,7 +807,7 @@ fn write_from_create(preset_id: String, r: CreatePresetRequest) -> PresetWritePa
     PresetWriteParams { preset_id: preset_id.clone(), source_kind: "user".into(), source_key: None, name: r.name.trim().into(), description: r.description, routing_description: r.routing_description, instructions: r.instructions, avatar: r.avatar, fallback_allowed: r.fallback_allowed,
         localizations, targets: target_strings(&r.targets), agent_preferences: r.agent_preferences.into_iter().map(|v| (v.agent_id, v.required)).collect(), model_preferences: r.model_preferences.into_iter().map(|v| (v.provider_id, v.model, v.required)).collect(),
         skill_bindings: r.included_skills.into_iter().map(|v| (v.skill_name,"include".into(),v.required)).chain(r.excluded_auto_skills.into_iter().map(|v| (v,"exclude_auto".into(),false))).collect(),
-        knowledge_policy: (r.knowledge_policy.enabled,r.knowledge_policy.mode,r.knowledge_policy.writeback,r.knowledge_policy.eagerness,r.knowledge_policy.grounded),
+        knowledge_policy: (r.knowledge_policy.enabled,r.knowledge_policy.writeback,r.knowledge_policy.eagerness,r.knowledge_policy.grounded),
         knowledge_bases: r.knowledge_bases.into_iter().map(|v| (v.knowledge_base_id.to_string(),v.required)).collect(), examples,
         tag_bindings: r.audience_tag_ids.into_iter().map(|v| (v,"audience".into())).chain(r.scenario_tag_ids.into_iter().map(|v| (v,"scenario".into()))).collect() }
 }
@@ -819,7 +818,7 @@ fn write_from_response(r: PresetResponse) -> PresetWriteParams {
     PresetWriteParams { preset_id:r.preset_id.clone(),source_kind:"user".into(),source_key:None,name:r.name,description:r.description,routing_description:r.routing_description,instructions:r.instructions,avatar:r.avatar,fallback_allowed:r.fallback_allowed,
         localizations,targets:target_strings(&r.targets),agent_preferences:r.agent_preferences.into_iter().map(|v|(v.agent_id,v.required)).collect(),model_preferences:r.model_preferences.into_iter().map(|v|(v.provider_id,v.model,v.required)).collect(),
         skill_bindings:r.included_skills.into_iter().map(|v|(v.skill_name,"include".into(),v.required)).chain(r.excluded_auto_skills.into_iter().map(|v|(v,"exclude_auto".into(),false))).collect(),
-        knowledge_policy:(r.knowledge_policy.enabled,r.knowledge_policy.mode,r.knowledge_policy.writeback,r.knowledge_policy.eagerness,r.knowledge_policy.grounded),knowledge_bases:r.knowledge_bases.into_iter().map(|v|(v.knowledge_base_id.to_string(),v.required)).collect(),examples,
+        knowledge_policy:(r.knowledge_policy.enabled,r.knowledge_policy.writeback,r.knowledge_policy.eagerness,r.knowledge_policy.grounded),knowledge_bases:r.knowledge_bases.into_iter().map(|v|(v.knowledge_base_id.to_string(),v.required)).collect(),examples,
         tag_bindings:r.audience_tag_ids.into_iter().map(|v|(v,"audience".into())).chain(r.scenario_tag_ids.into_iter().map(|v|(v,"scenario".into()))).collect() }
 }
 

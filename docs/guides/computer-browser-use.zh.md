@@ -31,8 +31,8 @@ NomiFun agent 内置/接入两项可选的系统级能力：
   Agent 任务以 Chromium `--headless=new` 静默运行；"前台可见"是用户显式选择的
   默认前台策略，Primary Host 以真实窗口启动。安装 owner 可在此处或 `/browser`
   修改；后端会立即应用并持久化已确认的更改。普通 Agent/模型无权覆盖该偏好；
-- **资源策略**：Automatic、Resource saving、High concurrency；
-- 高级资源上限（仅在需要诊断或精细调优时修改）。
+- **资源策略**：Automatic、Resource saving 或 High concurrency。总容量随并发任务数量与机器压力弹性伸缩，不使用安装级固定 RSS 总上限；
+- 高级资源限制（仅在需要诊断或精细调优时修改）：机器级弹性内存压力比例，以及单任务的归因内存、操作、Lane、标签页和队列预算。共享 Host 的单任务内存属于估算值，结构配额则是硬边界。
 
 右侧边栏的 **Browser** 页面（`/browser`）只展示 running/queued Lane 的状态、
 容量、队列、身份、owner 与生命周期，并在权限允许时关闭单个 Lane、某个
@@ -70,7 +70,6 @@ max_screenshot_edge = 1568   # 截图长边像素上限
 
 [tools.browser]
 enabled = true
-allowed_origins = []         # 可选 origin 白名单；空=全放行，仅纵深防御
 # 可信全局默认值为 headless；安装 owner 可实时改为 external。
 # 对 Lane 的前台/后台切换不会改写该默认值。
 # 未知的旧配置键（如早期的 browser_path / idle_timeout_secs）会被忽略，
@@ -115,8 +114,11 @@ profile 数据。若无法重新验证精确 ownership 或进程树已经退出�
   Primary；可能修改登录或持久账户状态的动作必须回到 Primary。
 - 切换账户、退出测试、不可信浏览或用户显式隔离使用 **Isolated identity**。
   crawl、replica 与 isolated Host 均可 headless 运行。
+- Anonymous profile 状态按共享 Host 设有持续增长边界：512 MiB、50,000 个目录项、
+  30 分钟或 256 次已准入导航中的任一条件会触发精确加栅栏轮换。它阻止长期公开
+  网页任务无限积累缓存和站点数据，但不会给所有无关任务设置固定内存总上限。
 
-容量有明确上限。超过安全预算的 Lane 会进入可取消队列，返回
+容量按任务设置边界，同时在安装级保持弹性。超过单任务资源包络或当前机器级安全预算的 Lane 会进入可取消队列，返回
 `browser_capacity_queued` 或 `system_memory_pressure`，并携带队列位置、原因、
 建议并发和重试延迟。`browser_open` 会成功报告 Lane 已进入队列，但导航、观察、
 页面 `wait` 等普通 action 在 Lane 变为 `running` 前不会派发，而会返回显式可重试
@@ -135,6 +137,10 @@ Lane、降低并发，或让批量公开读取使用 `browser_crawl_many`。
 - `browser_list` / `browser_status`：查看 Lane、身份、容量、队列和恢复状态；
 - `browser_close` / `browser_close_all`：关闭当前 owner 的一个或全部 Lane；
 - `browser_crawl_many`：有界并发处理一组 URL，并负责 Lane 复用、排序、取消和清理。
+
+知识渲染对每个 URL 打开并关闭一个事务级 Anonymous Lane。页面文本与 HTML 在
+跨 CDP 之前以及批次聚合之前都执行字节上限，因此取消或恶意超大页面不会留下持续
+增长的完整 HTML/文本结果队列。
 
 关闭 Lane 只会让相关浏览器调用收到类型化错误，不会关闭 conversation 或
 AgentExecution。attempt 完成/取消、runtime 终止、conversation 删除、远程连接断开、

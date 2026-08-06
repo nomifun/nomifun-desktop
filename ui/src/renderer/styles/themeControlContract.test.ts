@@ -14,7 +14,6 @@ const presetTagPickerSource = readFileSync(
   new URL('../pages/settings/PresetSettings/PresetTagPicker.tsx', import.meta.url),
   'utf8'
 );
-const knowledgeTagFilterSource = readFileSync(new URL('../pages/knowledge/KnowledgeTagFilterBar.tsx', import.meta.url), 'utf8');
 const requirementSourceCardSource = readFileSync(
   new URL('../pages/requirements/SourcesPage/SourceCard.tsx', import.meta.url),
   'utf8'
@@ -83,12 +82,16 @@ describe('theme control contract', () => {
   });
 
   test('uses the control palette for custom selected chips and selected source tags', () => {
-    for (const source of [
-      presetTagPickerSource,
-      knowledgeTagFilterSource,
-      requirementSourceCardSource,
-      knowledgeEmptyStateSource,
-    ]) {
+    // `KnowledgeTagFilterBar` used to be in this list and is deliberately not any
+    // more. `style(ui): unify hub page headers and knowledge toolbar` (6e951000)
+    // replaced its custom selected chip with an Arco `Menu` whose selection is a
+    // `Check` icon, plus a second row of REMOVABLE chips that are intentionally
+    // neutral (`--color-fill-2` / `--color-text-2`) — they do not signal selection
+    // by colour, they exist because the tag is selected. With no custom selected
+    // chip left there is nothing for the control palette to own there, so keeping
+    // the file here only asserted the presence of a token the component no longer
+    // has any reason to use.
+    for (const source of [presetTagPickerSource, requirementSourceCardSource, knowledgeEmptyStateSource]) {
       expect(source.includes('--control-selected-bg')).toBe(true);
       expect(source.includes('--control-selected-fg')).toBe(true);
     }

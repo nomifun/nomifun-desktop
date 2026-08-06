@@ -8,7 +8,7 @@
  * KnowledgeCard — A grid item for the knowledge base list.
  * Mirrors PresetCard visual language (rounded-16px bordered surface, soft hover)
  * with knowledge-specific additions: kind icon + badge, status tags, user tag chips,
- * meta row, pending-inbox badge, and hover-revealed actions.
+ * meta row, and hover-revealed actions.
  *
  * Theme variables only; `<div onClick>` for clickables (no <button>).
  */
@@ -47,7 +47,7 @@ function StatusBadges({
     badges.push(
       <span
         key='root-missing'
-        className='knowledge-card-root-missing inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[rgba(var(--danger-6),0.35)] text-[rgb(var(--danger-6))] bg-[rgba(var(--danger-6),0.08)]'
+        className='knowledge-card-root-missing inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[rgba(var(--danger-6),0.35)] text-danger-6 bg-[rgba(var(--danger-6),0.08)]'
       >
         {t('knowledge.card.rootMissing', { defaultValue: '目录不可用' })}
       </span>
@@ -59,7 +59,7 @@ function StatusBadges({
       badges.push(
         <span
           key='live'
-          className='inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[rgba(var(--success-6),0.4)] text-[rgb(var(--success-5))] bg-transparent'
+          className='inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[rgba(var(--success-6),0.4)] text-success-5 bg-transparent'
         >
           {t('knowledge.card.modeLive', { defaultValue: '实时' })}
         </span>
@@ -160,21 +160,6 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
       ].join(' ')}
       onClick={() => onOpen?.(base)}
     >
-      {/* Pending inbox badge (top-right) */}
-      {base.pending_inbox > 0 && (
-        <span
-          className={[
-            'absolute top-14px right-14px inline-flex items-center gap-5px',
-            'rounded-full px-9px py-3px',
-            'text-11px font-600',
-            'bg-[rgba(var(--warning-6),0.14)] text-[rgb(var(--warning-5))] border border-solid border-[rgba(var(--warning-6),0.4)]',
-          ].join(' ')}
-        >
-          <i className='w-6px h-6px rounded-full bg-[rgb(var(--warning-6))] shadow-[0_0_8px_rgb(var(--warning-6))]' />
-          {t('knowledge.card.pending', { count: base.pending_inbox, defaultValue: '{{count}} 待审' })}
-        </span>
-      )}
-
       {/* Header: icon + name + badges */}
       <div className='flex items-center gap-12px'>
         <KindIcon kind={base.kind} config={kindConfig} />
@@ -262,7 +247,7 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
               'grid h-30px w-30px place-items-center rounded-8px',
               'border border-solid border-transparent',
               'bg-transparent text-[var(--color-text-3)] cursor-pointer',
-              'hover:border-[rgba(var(--danger-6),0.28)] hover:bg-[rgba(var(--danger-6),0.08)] hover:text-[rgb(var(--danger-6))]',
+              'hover:border-[rgba(var(--danger-6),0.28)] hover:bg-[rgba(var(--danger-6),0.08)] hover:text-danger-6',
               'transition-colors',
             ].join(' ')}
             title={t('knowledge.actions.delete', { defaultValue: '删除' })}

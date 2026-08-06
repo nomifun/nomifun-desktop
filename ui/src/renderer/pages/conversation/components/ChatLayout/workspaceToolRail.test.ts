@@ -11,12 +11,17 @@ const stylesheet = readFileSync(new URL('./chat-layout.css', import.meta.url), '
 const componentSource = readFileSync(new URL('./WorkspaceToolRail.tsx', import.meta.url), 'utf8');
 const workspaceRailBodySource = readFileSync(new URL('../../Workspace/WorkspaceRailBody.tsx', import.meta.url), 'utf8');
 const workspaceEventsSource = readFileSync(new URL('../../Workspace/hooks/useWorkspaceEvents.ts', import.meta.url), 'utf8');
+// The rail's tooltip metrics live in the app-wide Arco override rather than in
+// this layout's stylesheet, so the compact look is guarded there.
+const arcoOverrides = readFileSync(new URL('../../../../styles/arco-override.css', import.meta.url), 'utf8');
 
-const rule = (selector: string) => {
-  const match = stylesheet.match(new RegExp(`${selector}\\s*\\{([\\s\\S]*?)\\n\\}`, 'm'));
+const ruleIn = (sheet: string, selector: string) => {
+  const match = sheet.match(new RegExp(`${selector}\\s*\\{([\\s\\S]*?)\\n\\}`, 'm'));
   expect(match).not.toBeNull();
   return match?.[1] ?? '';
 };
+
+const rule = (selector: string) => ruleIn(stylesheet, selector);
 
 describe('workspace tool rail dimensions', () => {
   test('uses a text-free red dot when workspace changes are pending', () => {
@@ -80,12 +85,29 @@ describe('workspace tool rail dimensions', () => {
   });
 
   test('uses a compact scoped tooltip and removes the active vertical bar', () => {
-    const tooltip = rule('\\.workspace-tool-rail__tooltip \\.arco-tooltip-content');
-
+    // The rail still opts into Arco's `mini` tooltip and keeps its own scoping
+    // class, so per-rail tweaks stay possible.
     expect(componentSource.includes("mini className='workspace-tool-rail__tooltip'")).toBe(true);
+    // The active item is marked by colour alone; no vertical indicator bar.
     expect(stylesheet.includes('.workspace-tool-rail__item--active::before')).toBe(false);
-    expect(tooltip.includes('font-size: 11px;')).toBe(true);
-    expect(tooltip.includes('line-height: 16px;')).toBe(true);
-    expect(tooltip.includes('padding: 3px 6px;')).toBe(true);
+
+    // The compact metrics are no longer duplicated per-rail: this layout must
+    // not re-declare them, and the global contract must supply them.
+    expect(stylesheet.includes('.workspace-tool-rail__tooltip .arco-tooltip-content')).toBe(false);
+
+    const tooltipVars = ruleIn(arcoOverrides, ':root');
+    expect(tooltipVars.includes('--nomi-tooltip-font-size: 12px;')).toBe(true);
+    expect(tooltipVars.includes('--nomi-tooltip-line-height: 16px;')).toBe(true);
+    expect(tooltipVars.includes('--nomi-tooltip-padding-block: 3px;')).toBe(true);
+    expect(tooltipVars.includes('--nomi-tooltip-padding-inline: 7px;')).toBe(true);
+
+    const tooltip = ruleIn(arcoOverrides, '\\.arco-tooltip-content');
+    expect(tooltip.includes('font-size: var(--nomi-tooltip-font-size) !important;')).toBe(true);
+    expect(tooltip.includes('line-height: var(--nomi-tooltip-line-height) !important;')).toBe(true);
+    expect(
+      tooltip.includes(
+        'padding: var(--nomi-tooltip-padding-block) var(--nomi-tooltip-padding-inline) !important;'
+      )
+    ).toBe(true);
   });
 });

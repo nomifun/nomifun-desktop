@@ -206,15 +206,8 @@ pub struct NomiResolvedConfig {
     /// Opt-in goal-driven continuation (objective + auto-continuation cap).
     /// `None` (default) = normal one-shot turn behavior.
     pub goal: Option<nomi_agent::goal::runtime::GoalSpec>,
-    /// Shared browser secret-vault descriptor (vault path + machine-bound key).
-    /// Bootstrap passes it to the Hub-backed Browser tool policy so
-    /// user-registered `secret:NAME` values resolve under origin checks and
-    /// contribute their `allowed_origins` to the egress firewall. This is a
-    /// shared policy store, not a browser profile or per-runtime Chromium owner.
-    /// `None` (browser-use off / probe sessions) keeps the compatibility empty
-    /// store behavior. The raw key is carried without a `nomi_browser` type so
-    /// this crate needs no `nomi-browser` dependency.
-    pub browser_secret_vault: Option<BrowserSecretVault>,
+    /// Machine-bound key used for encrypted persistent-browser-login snapshots.
+    pub persistent_login_key: Option<[u8; 32]>,
     /// Stable identity of the owning conversation instance (the conversation
     /// row's `created_at`, stringified). Persisted Nomi runtimes always provide
     /// it; probe-only runtimes may leave it absent because they do not resume a
@@ -234,30 +227,6 @@ pub struct NomiResolvedConfig {
     /// manager 灌进 `config.tools.write_root`。与 gateway file-service 的
     /// `PathAuthority` 同一信任模型（见 file-access-authority spec）。
     pub write_root: Option<String>,
-}
-
-/// Shared browser secret-vault location plus its machine-bound key.
-///
-/// One application vault serves all callers. It contains policy-managed
-/// credentials, not the Primary identity profile; Chromium/profile ownership
-/// remains exclusively in the main-process `BrowserSessionHub`. Debug redacts
-/// the key so it never lands in a `NomiResolvedConfig` log line.
-#[derive(Clone)]
-pub struct BrowserSecretVault {
-    /// The shared secret vault file path
-    /// (`{data_dir}/browser-secrets/shared/secrets.json`).
-    pub vault_path: std::path::PathBuf,
-    /// The machine-bound AES-256-GCM `encryption_key` (32 bytes).
-    pub key: [u8; 32],
-}
-
-impl std::fmt::Debug for BrowserSecretVault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BrowserSecretVault")
-            .field("vault_path", &self.vault_path)
-            .field("key", &"<redacted>")
-            .finish()
-    }
 }
 
 #[cfg(test)]

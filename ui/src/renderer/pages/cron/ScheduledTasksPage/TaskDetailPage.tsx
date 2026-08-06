@@ -261,8 +261,8 @@ const TaskDetailPage: React.FC = () => {
                     className={classNames(
                       'flex items-center gap-6px !border-solid !font-medium',
                       job.enabled
-                        ? '!text-success !border-[rgb(var(--success-4))] !bg-success-light-1 hover:!bg-success-light-2'
-                        : '!text-danger !border-[rgb(var(--danger-4))] !bg-danger-light-1 hover:!bg-danger-light-2'
+                        ? '!text-success !border-success-4 !bg-success-light-1 hover:!bg-success-light-2'
+                        : '!text-danger !border-danger-4 !bg-danger-light-1 hover:!bg-danger-light-2'
                     )}
                   >
                     {job.enabled ? (

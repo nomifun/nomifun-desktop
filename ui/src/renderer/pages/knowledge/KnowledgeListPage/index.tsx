@@ -25,10 +25,11 @@ import {
   Result,
   Typography,
 } from '@arco-design/web-react';
-import { Search } from '@icon-park/react';
+import { AddOne, Search, SettingTwo } from '@icon-park/react';
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { ipcBridge } from '@/common';
+import { HUB_PAGE_TITLE_CLASS } from '@/renderer/components/layout/HubPageShell';
 import type { KnowledgeKindShortcut } from '../KnowledgeEmptyState';
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import {
@@ -286,53 +287,101 @@ const KnowledgeListPage: React.FC = () => {
     >
       <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-16px'>
         {/* Header */}
-        <div className='flex w-full flex-wrap items-start justify-between gap-x-20px gap-y-10px'>
-          <div>
-            <h1 className='m-0 text-26px font-bold text-[var(--color-text-1)] tracking-tight'>
-              {t('knowledge.title', { defaultValue: '知识库' })}
-            </h1>
-            <Typography.Paragraph className='!m-0 !mt-6px text-[var(--color-text-3)] text-13px max-w-560px'>
-              {t('knowledge.subtitle', { defaultValue: '集中管理你的专属领域知识。任意会话、终端、数字伙伴都能挂载它作为模型的扩展知识来源。' })}
-            </Typography.Paragraph>
-          </div>
-          <div className='flex items-center gap-10px'>
-            {/* Search */}
-            <div className='flex items-center gap-8px bg-[var(--color-fill-2)] border border-solid border-[var(--color-border-3)] rounded-10px px-12px py-8px w-220px'>
-              <Search theme='outline' size={14} className='text-[var(--color-text-3)] flex-none' />
-              <input
-                className='border-none bg-transparent outline-none text-[var(--color-text-1)] text-13px w-full font-[inherit] placeholder:text-[var(--color-text-3)]'
-                placeholder={t('knowledge.searchPlaceholder', { defaultValue: '搜索知识库...' })}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-            </div>
-            {/* Create button */}
+        <div className='w-full'>
+          <h1 className={HUB_PAGE_TITLE_CLASS}>
+            {t('knowledge.title', { defaultValue: '知识库' })}
+          </h1>
+          <Typography.Paragraph className='!m-0 !mt-6px max-w-1000px text-13px leading-20px text-[var(--color-text-3)]'>
+            {t('knowledge.subtitle', { defaultValue: '集中管理你的专属领域知识。任意会话、终端、数字伙伴都能挂载它作为模型的扩展知识来源。' })}
+          </Typography.Paragraph>
+        </div>
+
+        {/* Compact filter and action toolbar */}
+        <KnowledgeTagFilterBar
+          kindFilter={kindFilter}
+          tagFilter={tagFilter}
+          onKindChange={setKindFilter}
+          onTagChange={setTagFilter}
+          kindCounts={kindCounts}
+          tagCounts={tagCounts}
+          tags={tags}
+          sort={sort}
+          onSortChange={setSort}
+          actions={(
             <div
-              role='button'
-              tabIndex={0}
-              onClick={() => openStudio()}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  openStudio();
-                }
-              }}
               className={[
-                'inline-flex items-center gap-7px cursor-pointer select-none',
-                'rounded-full px-18px py-9px text-14px font-700',
-                'border border-solid border-transparent',
-                'bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)]',
-                'shadow-[0_6px_18px_rgba(var(--primary-6),0.14)]',
-                'hover:bg-[rgba(var(--primary-6),0.18)]',
-                'focus-visible:border-[rgb(var(--primary-6))] focus-visible:outline-none',
-                'transition-all',
+                'flex min-w-0 items-center gap-8px',
+                isMobile ? 'w-full' : 'flex-1 justify-end',
               ].join(' ')}
             >
-              <span className='text-16px leading-none text-[rgb(var(--primary-6))]'>＋</span>
-              {t('knowledge.newBase', { defaultValue: '新建知识库' })}
+              {/* Search */}
+              <div
+                className={[
+                  'flex h-38px box-border min-w-0 items-center gap-8px rounded-full px-13px',
+                  'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
+                  'focus-within:border-primary-6 transition-colors',
+                  isMobile ? 'flex-1' : 'w-220px',
+                ].join(' ')}
+              >
+                <Search theme='outline' size={14} className='flex-none text-[var(--color-text-3)]' />
+                <input
+                  className='w-full border-none bg-transparent text-13px text-[var(--color-text-1)] outline-none font-[inherit] placeholder:text-[var(--color-text-3)]'
+                  placeholder={t('knowledge.searchPlaceholder', { defaultValue: '搜索知识库...' })}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
+
+              {/* Tag management */}
+              <div
+                role='button'
+                tabIndex={0}
+                onClick={handleManageTags}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleManageTags();
+                  }
+                }}
+                className={[
+                  'inline-flex h-38px box-border flex-none items-center gap-6px rounded-full px-14px',
+                  'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
+                  'text-13px font-medium text-[var(--color-text-1)] cursor-pointer select-none',
+                  'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)]',
+                  'focus-visible:outline-none focus-visible:border-primary-6 transition-colors',
+                ].join(' ')}
+              >
+                <SettingTwo theme='outline' size={14} strokeWidth={3} />
+                {!isMobile && t('knowledge.filter.manageTags', { defaultValue: '管理标签' })}
+              </div>
+
+              {/* Create button */}
+              <div
+                role='button'
+                tabIndex={0}
+                onClick={() => openStudio()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    openStudio();
+                  }
+                }}
+                className={[
+                  'inline-flex h-38px box-border flex-none items-center gap-7px cursor-pointer select-none',
+                  'rounded-full px-17px text-13px font-700',
+                  'border border-solid border-transparent',
+                  'bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)]',
+                  'hover:bg-[rgba(var(--primary-6),0.18)]',
+                  'focus-visible:border-primary-6 focus-visible:outline-none',
+                  'transition-colors',
+                ].join(' ')}
+              >
+                <AddOne theme='outline' size={15} strokeWidth={4} className='text-primary-6' />
+                {!isMobile && t('knowledge.newBase', { defaultValue: '新建知识库' })}
+              </div>
             </div>
-          </div>
-        </div>
+          )}
+        />
 
         {/* Error state */}
         {error ? (
@@ -346,20 +395,6 @@ const KnowledgeListPage: React.FC = () => {
           <KnowledgeEmptyState onCreate={openStudio} onImport={() => void handleImport()} />
         ) : (
           <>
-            {/* Two-dimension filter bar */}
-            <KnowledgeTagFilterBar
-              kindFilter={kindFilter}
-              tagFilter={tagFilter}
-              onKindChange={setKindFilter}
-              onTagChange={setTagFilter}
-              kindCounts={kindCounts}
-              tagCounts={tagCounts}
-              tags={tags}
-              onManageTags={handleManageTags}
-              sort={sort}
-              onSortChange={setSort}
-            />
-
             {/* Card grid */}
             <div className='grid gap-16px' style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(330px, 1fr))' }}>
               {displayBases.map((base) => (
@@ -389,7 +424,7 @@ const KnowledgeListPage: React.FC = () => {
                   'min-h-188px rounded-16px',
                   'border border-dashed border-[var(--color-border-3)] bg-transparent',
                   'text-[var(--color-text-3)]',
-                  'hover:border-[var(--color-primary-light-3)] hover:text-[rgb(var(--primary-6))] hover:bg-[var(--color-primary-light-1)]',
+                  'hover:border-[var(--color-primary-light-3)] hover:text-primary-6 hover:bg-[var(--color-primary-light-1)]',
                   'transition-all duration-150',
                 ].join(' ')}
               >

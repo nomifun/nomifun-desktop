@@ -17,7 +17,7 @@ const ORIGIN: &str = "https://example.com";
 /// capture 返回 IndexedDbDump 含这 2 条记录 + 正确的 db name/version/store name/keyPath。
 #[tokio::test]
 #[ignore = "需 NOMIFUN_CHROME_BINARY（真 Chrome）：IndexedDB capture 集成"]
-async fn capture_index_db_collects_records() {
+async fn capture_index_db_is_disabled_even_when_records_exist() {
     let backend = common::build_backend_for_fixture("idb-cap").await;
     backend
         .navigate(ORIGIN, false)
@@ -59,54 +59,10 @@ async fn capture_index_db_collects_records() {
         .capture_index_db()
         .await
         .expect("capture_index_db must succeed");
-    let dump = dump.expect("IndexedDB dump must be Some on https://example.com");
-
-    eprintln!("=== capture_index_db result: {dump:?}");
-
-    assert!(!dump.databases.is_empty(), "must capture at least 1 database");
-    let db = dump
-        .databases
-        .iter()
-        .find(|d| d.name == "testdb")
-        .expect("testdb found");
-    assert_eq!(db.version, 2);
-    assert!(!db.stores.is_empty(), "must have stores");
-    let store = db
-        .stores
-        .iter()
-        .find(|s| s.name == "items")
-        .expect("items store");
-    assert_eq!(store.key_path.as_deref(), Some("id"));
-    assert_eq!(store.records.len(), 2, "must have 2 records");
-
-    // Verify first record content.
-    let rec1 = store
-        .records
-        .iter()
-        .find(|r| r.get("id") == Some(&serde_json::json!(1)));
-    assert!(rec1.is_some(), "record with id=1 must exist");
-    let rec1 = rec1.unwrap();
-    assert_eq!(rec1.get("name"), Some(&serde_json::json!("hello")));
-
-    // Verify binary record contains __b64__ sentinel.
-    let rec2 = store
-        .records
-        .iter()
-        .find(|r| r.get("id") == Some(&serde_json::json!(2)));
-    assert!(rec2.is_some(), "record with id=2 must exist");
-    let rec2 = rec2.unwrap();
-    let data_field = rec2.get("data").expect("data field in record 2");
-    // Should be a base64 sentinel: {"__b64__": "..."}
     assert!(
-        data_field.get("__b64__").is_some(),
-        "binary field must be encoded as __b64__ sentinel, got: {data_field}"
+        dump.is_none(),
+        "IndexedDB capture must remain disabled instead of materializing records"
     );
-    // Decode and verify bytes.
-    let decoded =
-        nomi_browser_engine::decode_binary_sentinel(data_field).expect("decode base64 sentinel");
-    assert_eq!(decoded, vec![0xCA, 0xFE, 0xBA, 0xBE], "binary must round-trip");
-
-    eprintln!("=== PASS: capture_index_db_collects_records");
 }
 
 /// **restore_index_db_writes_back**: build a dump, restore to a new engine, verify records present.

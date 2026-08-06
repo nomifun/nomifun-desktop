@@ -302,15 +302,9 @@ pub struct AgentBootstrap {
     /// no protocol approval manager (e.g. the interactive REPL) leave it `None` and the
     /// facade falls back to the construction-time snapshot (unchanged behavior).
     approval_manager: Option<Arc<nomi_protocol::ToolApprovalManager>>,
-    /// **P3-X2: the session's per-pet browser secret vault source** (vault file path +
-    /// machine-bound 32-byte key). Threaded into the native `BrowserTool` so it can lazily
-    /// load the registered credentials (`secret:NAME` resolves, origin-gated) and derive the
-    /// firewall domain allowlist from the same per-pet `allowed_origins` (裁决⑤). Stored as
-    /// the raw pieces (NOT the `nomi_browser` type) so the field exists regardless of the
-    /// `browser-use` feature; the `BrowserSecretSource` is constructed only at the
-    /// feature-gated `with_policy` call site. `None` → empty store + unrestricted egress.
+    /// Machine-bound key for encrypted persistent-browser-login snapshots.
     #[cfg_attr(not(feature = "browser-use"), allow(dead_code))]
-    browser_secret_source: Option<(PathBuf, [u8; 32])>,
+    persistent_login_key: Option<[u8; 32]>,
     /// **Phase D: the session's browser approval gate** (human takeover + SD-5 cross-origin
     /// egress). Threaded into the native `BrowserTool` so an irreversible action in a bypass
     /// session — and a gated cross-origin POST — is surfaced to the user and awaited. `None`
@@ -325,6 +319,11 @@ pub struct AgentBootstrap {
     /// path and cannot lazily launch a private Chromium process.
     #[cfg(feature = "browser-use")]
     browser_lane_client: Option<nomi_browser::BrowserLaneClient>,
+    /// When present, the session is bound to a remote SSH host: the remote tool
+    /// family takes over the `Read`/`Write`/`Edit`/`Bash`/`Grep`/`Glob` names
+    /// instead of the local implementations. The connection lives behind this
+    /// backend; the model never sees credentials or host identity.
+    ssh_session: Option<Arc<dyn crate::ssh_backend::SshBackend>>,
 }
 
 impl AgentBootstrap {
@@ -339,11 +338,12 @@ impl AgentBootstrap {
             goal: None,
             install_embedded_agent_execution: true,
             approval_manager: None,
-            browser_secret_source: None,
+            persistent_login_key: None,
             #[cfg(feature = "browser-use")]
             approval_gate: None,
             #[cfg(feature = "browser-use")]
             browser_lane_client: None,
+            ssh_session: None,
         }
     }
 
@@ -379,14 +379,9 @@ impl AgentBootstrap {
         self
     }
 
-    /// **P3-X2: provide the session's per-pet browser secret vault source** so the native
-    /// `BrowserTool` can load the user-registered credentials (`secret:NAME`, origin-gated)
-    /// and derive the firewall domain allowlist from the same per-pet `allowed_origins`
-    /// (裁决⑤). Takes the raw pieces (vault file path + machine-bound 32-byte key) so backend
-    /// callers (`nomifun-ai-agent`) need not depend on `nomi-browser` to wire it. Omit it
-    /// (the default) to keep an empty store + unrestricted egress (current behavior).
-    pub fn browser_secret_source(mut self, vault_path: PathBuf, key: [u8; 32]) -> Self {
-        self.browser_secret_source = Some((vault_path, key));
+    /// Provide the application data key used to encrypt persistent-browser-login snapshots.
+    pub fn persistent_login_key(mut self, key: [u8; 32]) -> Self {
+        self.persistent_login_key = Some(key);
         self
     }
 
@@ -413,6 +408,15 @@ impl AgentBootstrap {
     /// Resume from a previously saved session.
     pub fn resume(mut self, session: Session) -> Self {
         self.resume_session = Some(session);
+        self
+    }
+
+    /// Bind this session to a remote SSH host. The remote tool family takes over
+    /// the native `Read`/`Write`/`Edit`/`Bash`/`Grep`/`Glob` names, so the model
+    /// operates the remote host through its ordinary vocabulary. Credentials and
+    /// host identity live behind the backend and never reach model input.
+    pub fn ssh_session(mut self, backend: Arc<dyn crate::ssh_backend::SshBackend>) -> Self {
+        self.ssh_session = Some(backend);
         self
     }
 
@@ -459,43 +463,54 @@ impl AgentBootstrap {
                 Some(std::path::PathBuf::from(wr))
             }
         };
-        registry.register(Box::new(nomi_tools::read::ReadTool::new(
-            file_cache.clone(),
-            Some(cwd_path.to_path_buf()),
-        )));
-        registry.register(Box::new(
-            nomi_tools::write::WriteTool::new(file_cache.clone())
-                .with_write_root(write_root.clone())
-                .with_cwd(Some(cwd_path.to_path_buf())),
-        ));
-        registry.register(Box::new(
-            nomi_tools::edit::EditTool::new(file_cache.clone())
-                .with_write_root(write_root.clone())
-                .with_cwd(Some(cwd_path.to_path_buf())),
-        ));
-        registry.register(Box::new(
-            nomi_tools::apply_patch::ApplyPatchTool::new(file_cache)
-                .with_write_root(write_root.clone())
-                .with_cwd(Some(cwd_path.to_path_buf())),
-        ));
-        // Experimental `Lsp` code-navigation tool: registered only when at least
-        // one language server is configured (default off → no behaviour change).
-        {
-            let mut lsp_map: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
-            for entry in &self.config.tools.lsp_servers {
-                if entry.command.is_empty() {
-                    continue;
-                }
-                for ext in &entry.extensions {
-                    lsp_map.insert(ext.trim_start_matches('.').to_ascii_lowercase(), entry.command.clone());
-                }
+        // SSH-bound session: the remote tool family takes over Read/Write/Edit/
+        // Bash/Grep/Glob; the local filesystem/exec tools (incl. ApplyPatch, Lsp,
+        // exec_command, write_stdin) are skipped so nothing operates the local
+        // machine by mistake. Otherwise register the local family as usual.
+        let ssh_backend = self.ssh_session.clone();
+        if let Some(ssh) = ssh_backend.clone() {
+            for tool in crate::ssh_tools::remote_tool_family(ssh) {
+                registry.register(tool);
             }
-            if !lsp_map.is_empty() {
-                registry.register(Box::new(nomi_tools::lsp::LspTool::new(
-                    lsp_map,
-                    cwd_path.to_path_buf(),
-                )));
+        } else {
+            registry.register(Box::new(nomi_tools::read::ReadTool::new(
+                file_cache.clone(),
+                Some(cwd_path.to_path_buf()),
+            )));
+            registry.register(Box::new(
+                nomi_tools::write::WriteTool::new(file_cache.clone())
+                    .with_write_root(write_root.clone())
+                    .with_cwd(Some(cwd_path.to_path_buf())),
+            ));
+            registry.register(Box::new(
+                nomi_tools::edit::EditTool::new(file_cache.clone())
+                    .with_write_root(write_root.clone())
+                    .with_cwd(Some(cwd_path.to_path_buf())),
+            ));
+            registry.register(Box::new(
+                nomi_tools::apply_patch::ApplyPatchTool::new(file_cache)
+                    .with_write_root(write_root.clone())
+                    .with_cwd(Some(cwd_path.to_path_buf())),
+            ));
+            // Experimental `Lsp` code-navigation tool: registered only when at least
+            // one language server is configured (default off → no behaviour change).
+            {
+                let mut lsp_map: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for entry in &self.config.tools.lsp_servers {
+                    if entry.command.is_empty() {
+                        continue;
+                    }
+                    for ext in &entry.extensions {
+                        lsp_map.insert(ext.trim_start_matches('.').to_ascii_lowercase(), entry.command.clone());
+                    }
+                }
+                if !lsp_map.is_empty() {
+                    registry.register(Box::new(nomi_tools::lsp::LspTool::new(
+                        lsp_map,
+                        cwd_path.to_path_buf(),
+                    )));
+                }
             }
         }
         // Native `remember` tool: persist durable project/user memories mid-session
@@ -515,31 +530,38 @@ impl AgentBootstrap {
                 nomi_process_runtime::SandboxPolicy::UnrestrictedLocalOwner
             },
         };
-        registry.register(Box::new(nomi_tools::bash::BashTool::new(
-            Arc::clone(&process_supervisor),
-            cwd_path.to_path_buf(),
-            process_capability.clone(),
-        )));
-        registry.register(Box::new(nomi_tools::grep::GrepTool::new(
-            cwd_path.to_path_buf(),
-        )));
-        registry.register(Box::new(nomi_tools::glob::GlobTool::new(
-            cwd_path.to_path_buf(),
-        )));
+        // Local shell/exec tools operate the local machine, so they are skipped
+        // in an SSH-bound session (the remote Bash/Grep/Glob family already took
+        // over those names above). The supervisor itself is still constructed —
+        // later wiring (`with_process_supervisor`, `set_process_supervisor`)
+        // depends on it regardless of session kind.
+        if ssh_backend.is_none() {
+            registry.register(Box::new(nomi_tools::bash::BashTool::new(
+                Arc::clone(&process_supervisor),
+                cwd_path.to_path_buf(),
+                process_capability.clone(),
+            )));
+            registry.register(Box::new(nomi_tools::grep::GrepTool::new(
+                cwd_path.to_path_buf(),
+            )));
+            registry.register(Box::new(nomi_tools::glob::GlobTool::new(
+                cwd_path.to_path_buf(),
+            )));
 
-        // Numeric-session schemas share the same supervisor as Bash. The
-        // ProcessStore is only a numeric-id adapter; it owns no OS process.
-        let process_store = Arc::new(nomi_tools::process_store::ProcessStore::new());
-        registry.register(Box::new(nomi_tools::exec_command::ExecCommandTool::new(
-            Arc::clone(&process_supervisor),
-            Arc::clone(&process_store),
-            cwd_path.to_path_buf(),
-            process_capability.clone(),
-        )));
-        registry.register(Box::new(nomi_tools::write_stdin::WriteStdinTool::new(
-            Arc::clone(&process_supervisor),
-            Arc::clone(&process_store),
-        )));
+            // Numeric-session schemas share the same supervisor as Bash. The
+            // ProcessStore is only a numeric-id adapter; it owns no OS process.
+            let process_store = Arc::new(nomi_tools::process_store::ProcessStore::new());
+            registry.register(Box::new(nomi_tools::exec_command::ExecCommandTool::new(
+                Arc::clone(&process_supervisor),
+                Arc::clone(&process_store),
+                cwd_path.to_path_buf(),
+                process_capability.clone(),
+            )));
+            registry.register(Box::new(nomi_tools::write_stdin::WriteStdinTool::new(
+                Arc::clone(&process_supervisor),
+                Arc::clone(&process_store),
+            )));
+        }
 
         let mut mcp_managers: Vec<Arc<McpManager>> = Vec::new();
         let mcp_manager = if !self.config.mcp.servers.is_empty() {
@@ -590,6 +612,24 @@ impl AgentBootstrap {
 
         let mut prompt_cache = crate::context::SystemPromptCache::new();
         prompt_cache.set_agents_md(agents_snapshot.formatted);
+        // SSH-bound session: `cwd` here is a LOCAL scratch directory (design F2
+        // keeps `extra.workspace` local for transcripts and attachments), while
+        // every file/exec tool registered above is the remote family and no local
+        // exec tool exists at all. Rendering that path as "Working directory"
+        // would name somewhere none of the model's tools can reach, on a machine
+        // it is not operating. Seed the section so `build_system_prompt`'s
+        // `or_insert_with` default never runs; the date still comes along, since
+        // that is the other half of what this section owes the model.
+        if ssh_backend.is_some() {
+            prompt_cache.set_environment(format!(
+                "This session runs entirely on a remote host over SSH. Read, Write, Edit, Bash, \
+                 Grep and Glob all act on that host, and no tool here can reach the local machine. \
+                 There is no local working directory: the remote shell starts in the login user's \
+                 default directory on the host (run `pwd` to see it), and paths from the local \
+                 machine do not exist there.\nCurrent date: {}",
+                chrono::Local::now().format("%Y-%m-%d")
+            ));
+        }
         let system_prompt = crate::context::build_system_prompt(
             &mut prompt_cache,
             self.config.system_prompt.as_deref(),
@@ -745,12 +785,7 @@ impl AgentBootstrap {
                 self.config.tools.browser.persistent_login,
                 Some(PathBuf::from(cwd)),
                 self.approval_manager.clone(),
-                // P3-X2: per-pet secret vault source (vault path + machine-bound key) so the
-                // facade lazily loads registered credentials + derives the firewall domain
-                // allowlist from their allowed_origins (裁决⑤). None → empty store + unrestricted.
-                self.browser_secret_source
-                    .clone()
-                    .map(|(vault_path, key)| nomi_browser::BrowserSecretSource { vault_path, key }),
+                self.persistent_login_key,
             );
             if let Some(client) = self.browser_lane_client.clone() {
                 // Authoritative mode switch: once injected, BrowserTool::engine()

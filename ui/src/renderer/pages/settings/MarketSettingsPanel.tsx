@@ -328,7 +328,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
       </div>
 
       {errors.length > 0 && (
-        <div className='mb-14px rounded-12px border border-solid border-[rgba(var(--orange-6),0.24)] bg-[rgba(var(--orange-6),0.08)] px-14px py-10px text-12px leading-18px text-[rgb(var(--orange-7))]'>
+        <div className='mb-14px rounded-12px border border-solid border-[rgba(var(--orange-6),0.24)] bg-[rgba(var(--orange-6),0.08)] px-14px py-10px text-12px leading-18px text-[rgba(var(--orange-7),1)]'>
           {errors.join(' / ')}
         </div>
       )}
