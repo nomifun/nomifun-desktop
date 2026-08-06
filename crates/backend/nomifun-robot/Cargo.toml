@@ -30,6 +30,9 @@ uuid = { workspace = true, features = ["v4"] }
 # not `audiopus`/`opus`); the FFI is wrapped in `src/audio/opus.rs`.
 opusic-sys = { workspace = true }
 symphonia = { workspace = true }
+# Silero VAD (ONNX Runtime). Loading is fallible at runtime and every failure
+# path degrades to the energy VAD, so this is never a hard requirement.
+ort = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
