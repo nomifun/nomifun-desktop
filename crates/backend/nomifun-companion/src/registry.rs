@@ -558,9 +558,9 @@ impl CompanionRegistry {
         merged.seq = current.seq;
         merged.created_at = current.created_at;
         merged.name = validate_name(&merged.name)?;
-        validate_provider_model(self.provider_repo.as_ref(), merged.model.as_ref()).await?;
-        validate_provider_model(self.provider_repo.as_ref(), merged.learn.model.as_ref()).await?;
-        validate_provider_model(self.provider_repo.as_ref(), merged.evolve.model.as_ref()).await?;
+        for (_, model) in merged.provider_model_slots() {
+            validate_provider_model(self.provider_repo.as_ref(), Some(&model)).await?;
+        }
         merged
             .save(&self.companions_dir.join(&merged.companion_id))
             .map_err(|e| AppError::Internal(format!("save companion profile: {e}")))?;
@@ -597,15 +597,13 @@ impl CompanionRegistry {
     ) -> Result<(), AppError> {
         let profiles: Vec<_> = self.inner.read().await.values().cloned().collect();
         for profile in profiles {
-            // All three per-companion Provider references are hard bindings: the
-            // chat model plus this companion's own 学习 / 进化 models, which used
-            // to be one install-wide pair audited by the service.
-            for (model, what) in [
-                (profile.model.as_ref(), "chat"),
-                (profile.learn.model.as_ref(), "learn"),
-                (profile.evolve.model.as_ref(), "evolve"),
-            ] {
-                validate_provider_model(self.provider_repo.as_ref(), model)
+            // Every slot in `provider_model_slots()` is a hard binding: a missing
+            // Provider is an orphaned reference and fails startup. Provider
+            // deletion is refused while any of them points at it
+            // (`CompanionService::providers_in_use`), so an orphan means the
+            // durable state was edited behind the app's back.
+            for (what, model) in profile.provider_model_slots() {
+                validate_provider_model(self.provider_repo.as_ref(), Some(&model))
                     .await
                     .map_err(|error| {
                         AppError::Internal(format!(

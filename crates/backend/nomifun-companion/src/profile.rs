@@ -294,6 +294,126 @@ impl CompanionEvolveConfig {
     }
 }
 
+/// The built-in local VAD engine name. Plan A's robot gateway recognises ONLY
+/// this value; anything else falls back to its energy VAD. Kept as a string
+/// rather than an enum so a future engine needs no profile migration.
+pub const DEFAULT_VAD_ENGINE: &str = "silero";
+/// Default speech-probability threshold for the VAD (0 = trigger on anything,
+/// 1 = never trigger).
+pub const DEFAULT_VAD_SENSITIVITY: f32 = 0.5;
+/// Default trailing silence that ends one utterance.
+pub const DEFAULT_VAD_MIN_SILENCE_MS: u32 = 700;
+pub const MIN_VAD_MIN_SILENCE_MS: u32 = 200;
+pub const MAX_VAD_MIN_SILENCE_MS: u32 = 3000;
+
+/// Per-companion voice-activity detection settings (语音活动检测).
+///
+/// The engine runs locally (no Provider, no credential), so this block holds
+/// tuning only. Values are clamped at the READ site
+/// ([`Self::effective_sensitivity`] / [`Self::effective_min_silence_ms`]) and
+/// range-checked on the way out ([`CompanionProfileConfig::save`]) — the same
+/// split [`CompanionLearnConfig`] uses, so a profile written by another build
+/// can never wedge the voice pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompanionVadConfig {
+    /// Detection engine id; `"silero"` is the only one implemented.
+    pub engine: String,
+    /// Speech probability threshold, 0.0..=1.0.
+    pub sensitivity: f32,
+    /// Trailing silence (ms) that closes one utterance, 200..=3000.
+    pub min_silence_ms: u32,
+}
+
+impl Default for CompanionVadConfig {
+    fn default() -> Self {
+        Self {
+            engine: DEFAULT_VAD_ENGINE.to_owned(),
+            sensitivity: DEFAULT_VAD_SENSITIVITY,
+            min_silence_ms: DEFAULT_VAD_MIN_SILENCE_MS,
+        }
+    }
+}
+
+impl CompanionVadConfig {
+    /// The threshold the pipeline actually uses. A non-finite or out-of-range
+    /// durable value resolves to the default rather than disabling detection.
+    pub fn effective_sensitivity(&self) -> f32 {
+        if self.sensitivity.is_finite() {
+            self.sensitivity.clamp(0.0, 1.0)
+        } else {
+            DEFAULT_VAD_SENSITIVITY
+        }
+    }
+
+    /// The pause the pipeline actually uses, clamped to the documented range.
+    pub fn effective_min_silence_ms(&self) -> u32 {
+        self.min_silence_ms
+            .clamp(MIN_VAD_MIN_SILENCE_MS, MAX_VAD_MIN_SILENCE_MS)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.engine.trim().is_empty() {
+            return Err("voice.vad.engine must not be empty".into());
+        }
+        if !self.sensitivity.is_finite() || !(0.0..=1.0).contains(&self.sensitivity) {
+            return Err("voice.vad.sensitivity must be between 0.0 and 1.0".into());
+        }
+        if !(MIN_VAD_MIN_SILENCE_MS..=MAX_VAD_MIN_SILENCE_MS).contains(&self.min_silence_ms) {
+            return Err(format!(
+                "voice.vad.min_silence_ms must be between {MIN_VAD_MIN_SILENCE_MS} and {MAX_VAD_MIN_SILENCE_MS}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One companion's speech-synthesis 选择: which catalog model speaks, and in
+/// which provider voice.
+///
+/// Deliberately NOT a [`ProviderWithModel`]: the voice id is part of the
+/// selection, and the side store's model shape is fixed at
+/// `{provider_id, model}`. [`Self::as_provider_model`] projects it back for the
+/// Provider-reference validators.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CompanionTtsSelection {
+    #[serde(deserialize_with = "crate::config::deserialize_provider_id")]
+    pub provider_id: String,
+    pub model: String,
+    /// Provider voice id (free text). `None` = the provider's own default voice.
+    #[serde(default)]
+    pub voice: Option<String>,
+}
+
+impl CompanionTtsSelection {
+    /// The `(provider, model)` pair this selection points at — the shape the
+    /// profile's Provider-reference validators and the deletion-usage scan read.
+    pub fn as_provider_model(&self) -> ProviderWithModel {
+        ProviderWithModel {
+            provider_id: self.provider_id.clone(),
+            model: self.model.clone(),
+            use_model: None,
+        }
+    }
+}
+
+/// One companion's voice stack: 语音识别 (ASR), 语音合成 (TTS) and 语音活动检测
+/// (VAD). ASR/TTS absent = fall back to the install-wide preferences
+/// (`tools.speechToText` / `tools.textToSpeech`); VAD always has values because
+/// the engine is local and needs no configuration to run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompanionVoiceConfig {
+    #[serde(
+        deserialize_with = "deserialize_optional_model",
+        serialize_with = "serialize_optional_model"
+    )]
+    pub asr: Option<ProviderWithModel>,
+    pub tts: Option<CompanionTtsSelection>,
+    pub vad: CompanionVadConfig,
+}
+
 /// Per-companion profile persisted as `companion/companions/{companion_id}/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -319,6 +439,27 @@ pub struct CompanionProfileConfig {
         serialize_with = "serialize_optional_model"
     )]
     pub model: Option<ProviderWithModel>,
+    /// 备用对话模型: replayed once when the main model's turn fails, and used by
+    /// the model-resolution chain when the main reference goes stale. Absent =
+    /// no fallback, a failure is a failure.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_model",
+        serialize_with = "serialize_optional_model"
+    )]
+    pub fallback_model: Option<ProviderWithModel>,
+    /// 视觉大模型 for one-shot image understanding. Absent = use the main chat
+    /// model when it carries the `vision_input` trait.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_model",
+        serialize_with = "serialize_optional_model"
+    )]
+    pub vision_model: Option<ProviderWithModel>,
+    /// This companion's voice stack (ASR / TTS / VAD). `#[serde(default)]` so a
+    /// profile written before the slots existed still loads.
+    #[serde(default)]
+    pub voice: CompanionVoiceConfig,
     /// This companion's own 定时学习 loop. `#[serde(default)]` so a profile
     /// written before the settings moved off the shared config still loads; the
     /// boot migration then seeds it from the retired install-wide values.
@@ -358,6 +499,9 @@ impl CompanionProfileConfig {
             character: character.to_owned(),
             persona: PersonaConfig::default(),
             model: None,
+            fallback_model: None,
+            vision_model: None,
+            voice: CompanionVoiceConfig::default(),
             learn: CompanionLearnConfig::default(),
             evolve: CompanionEvolveConfig::default(),
             skills: CompanionSkillConfig::default(),
@@ -366,6 +510,33 @@ impl CompanionProfileConfig {
             order_index: None,
             created_at: now_ms(),
         }
+    }
+
+    /// Every Provider reference this profile holds, labelled for diagnostics.
+    ///
+    /// ONE list so [`Self::load`], [`Self::save`], the startup audit
+    /// (`CompanionRegistry::validate_provider_references_under_guard`) and the
+    /// Provider-deletion usage scan (`CompanionService::providers_in_use`) can
+    /// never disagree about which slots are hard references. Adding a slot means
+    /// editing exactly this function.
+    pub fn provider_model_slots(&self) -> Vec<(&'static str, ProviderWithModel)> {
+        let mut slots = Vec::new();
+        for (label, model) in [
+            ("chat", self.model.as_ref()),
+            ("learn", self.learn.model.as_ref()),
+            ("evolve", self.evolve.model.as_ref()),
+            ("fallback", self.fallback_model.as_ref()),
+            ("vision", self.vision_model.as_ref()),
+            ("asr", self.voice.asr.as_ref()),
+        ] {
+            if let Some(model) = model {
+                slots.push((label, model.clone()));
+            }
+        }
+        if let Some(tts) = self.voice.tts.as_ref() {
+            slots.push(("tts", tts.as_provider_model()));
+        }
+        slots
     }
 
     pub fn config_path(dir: &Path) -> PathBuf {
@@ -398,17 +569,8 @@ impl CompanionProfileConfig {
                 path.display()
             )));
         }
-        validate_persisted_model(profile.model.as_ref()).map_err(|error| {
-            nomifun_common::AppError::Internal(format!(
-                "companion profile {} has invalid model: {error}",
-                path.display()
-            ))
-        })?;
-        for (model, label) in [
-            (profile.learn.model.as_ref(), "learn"),
-            (profile.evolve.model.as_ref(), "evolve"),
-        ] {
-            validate_persisted_model(model).map_err(|error| {
+        for (label, model) in profile.provider_model_slots() {
+            validate_persisted_model(Some(&model)).map_err(|error| {
                 nomifun_common::AppError::Internal(format!(
                     "companion profile {} has invalid {label} model: {error}",
                     path.display()
@@ -456,9 +618,11 @@ impl CompanionProfileConfig {
     /// so two concurrent saves can never rename each other's half-written
     /// temp into place).
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
-        validate_persisted_model(self.model.as_ref()).map_err(std::io::Error::other)?;
-        validate_persisted_model(self.learn.model.as_ref()).map_err(std::io::Error::other)?;
-        validate_persisted_model(self.evolve.model.as_ref()).map_err(std::io::Error::other)?;
+        for (label, model) in self.provider_model_slots() {
+            validate_persisted_model(Some(&model))
+                .map_err(|error| std::io::Error::other(format!("{label} model: {error}")))?;
+        }
+        self.voice.vad.validate().map_err(std::io::Error::other)?;
         // Range-checked on the way OUT only. `load` deliberately accepts whatever
         // is on disk (and the loops clamp), because hard-failing a boot on a
         // legacy interval would take the whole install down over a schedule.
@@ -1220,6 +1384,156 @@ mod tests {
                 "non-v3 companion side-store model must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn legacy_profile_without_voice_slots_gets_documented_defaults() {
+        let companion_id = CompanionId::new().into_string();
+        let raw = serde_json::json!({
+            "companion_id": companion_id,
+            "seq": 1,
+            "name": "Old",
+            "character": "ink",
+            "persona": PersonaConfig::default(),
+            "model": null,
+            "appearance": CompanionWindowConfig::default(),
+            "created_at": 1
+        });
+        let profile: CompanionProfileConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(profile.fallback_model, None);
+        assert_eq!(profile.vision_model, None);
+        assert_eq!(profile.voice.asr, None);
+        assert_eq!(profile.voice.tts, None);
+        assert_eq!(profile.voice.vad.engine, DEFAULT_VAD_ENGINE);
+        assert!((profile.voice.vad.sensitivity - DEFAULT_VAD_SENSITIVITY).abs() < f32::EPSILON);
+        assert_eq!(profile.voice.vad.min_silence_ms, DEFAULT_VAD_MIN_SILENCE_MS);
+    }
+
+    #[test]
+    fn every_model_slot_round_trips_in_the_v3_reference_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider_id = nomifun_common::ProviderId::new().into_string();
+        let model = ProviderWithModel {
+            provider_id: provider_id.clone(),
+            model: "chat".into(),
+            use_model: None,
+        };
+
+        let mut profile = CompanionProfileConfig::new("全槽位", "ink", 1);
+        profile.model = Some(model.clone());
+        profile.fallback_model = Some(model.clone());
+        profile.vision_model = Some(model.clone());
+        profile.voice.asr = Some(model.clone());
+        profile.voice.tts = Some(CompanionTtsSelection {
+            provider_id: provider_id.clone(),
+            model: "tts-1".into(),
+            voice: Some("alloy".into()),
+        });
+        profile.voice.vad.sensitivity = 0.7;
+        profile.voice.vad.min_silence_ms = 900;
+        profile.save(dir.path()).unwrap();
+
+        let again = CompanionProfileConfig::load(dir.path()).unwrap().unwrap();
+        assert_eq!(again, profile);
+
+        // 侧存储只接受 {provider_id, model}；use_model 是运行时 DTO 概念。
+        let json = serde_json::to_value(&profile).unwrap();
+        for persisted in [&json["fallback_model"], &json["vision_model"], &json["voice"]["asr"]] {
+            assert_eq!(
+                persisted
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>(),
+                ["model", "provider_id"].into_iter().collect()
+            );
+        }
+        assert_eq!(json["voice"]["tts"]["voice"], serde_json::json!("alloy"));
+        assert_eq!(json["voice"]["vad"]["engine"], serde_json::json!("silero"));
+    }
+
+    #[test]
+    fn provider_model_slots_lists_every_hard_reference_exactly_once() {
+        let provider_id = nomifun_common::ProviderId::new().into_string();
+        let model = ProviderWithModel {
+            provider_id: provider_id.clone(),
+            model: "m".into(),
+            use_model: None,
+        };
+
+        let empty = CompanionProfileConfig::new("空", "ink", 1);
+        assert!(empty.provider_model_slots().is_empty());
+
+        let mut full = CompanionProfileConfig::new("满", "ink", 1);
+        full.model = Some(model.clone());
+        full.learn.model = Some(model.clone());
+        full.evolve.model = Some(model.clone());
+        full.fallback_model = Some(model.clone());
+        full.vision_model = Some(model.clone());
+        full.voice.asr = Some(model.clone());
+        full.voice.tts = Some(CompanionTtsSelection {
+            provider_id: provider_id.clone(),
+            model: "tts-1".into(),
+            voice: None,
+        });
+        let slots = full.provider_model_slots();
+        assert_eq!(
+            slots.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            ["chat", "learn", "evolve", "fallback", "vision", "asr", "tts"]
+        );
+        assert!(slots.iter().all(|(_, model)| model.provider_id == provider_id));
+        assert_eq!(slots.last().unwrap().1.model, "tts-1");
+    }
+
+    #[test]
+    fn vad_settings_are_clamped_on_read_and_range_checked_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut profile = CompanionProfileConfig::new("VAD", "ink", 1);
+
+        profile.voice.vad.sensitivity = 9.0;
+        profile.voice.vad.min_silence_ms = 99_999;
+        assert!(profile.save(dir.path()).is_err());
+        // load 故意宽容（旧档案不能拖垮启动），读取点负责收敛。
+        assert!((profile.voice.vad.effective_sensitivity() - 1.0).abs() < f32::EPSILON);
+        assert_eq!(
+            profile.voice.vad.effective_min_silence_ms(),
+            MAX_VAD_MIN_SILENCE_MS
+        );
+
+        profile.voice.vad.sensitivity = -1.0;
+        profile.voice.vad.min_silence_ms = 1;
+        assert!((profile.voice.vad.effective_sensitivity() - 0.0).abs() < f32::EPSILON);
+        assert_eq!(
+            profile.voice.vad.effective_min_silence_ms(),
+            MIN_VAD_MIN_SILENCE_MS
+        );
+
+        profile.voice.vad.sensitivity = 0.5;
+        profile.voice.vad.min_silence_ms = 700;
+        profile.voice.vad.engine = " ".into();
+        assert!(profile.save(dir.path()).is_err());
+    }
+
+    #[test]
+    fn voice_and_new_slots_reject_unknown_fields() {
+        assert!(
+            serde_json::from_value::<CompanionVoiceConfig>(serde_json::json!({"engine": "x"}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CompanionVadConfig>(
+                serde_json::json!({"engine": "silero", "threshold": 1})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CompanionTtsSelection>(serde_json::json!({
+                "provider_id": "not-a-provider-id",
+                "model": "tts-1"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
