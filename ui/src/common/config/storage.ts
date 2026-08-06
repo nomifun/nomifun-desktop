@@ -96,17 +96,6 @@ interface IChatConversation<T, Extra> {
 // Token 使用统计数据类型
 export interface TokenUsageData {
   total_tokens: number;
-  /** Cumulative input tokens reported by the Nomi session usage payload. */
-  input_tokens?: number;
-  /** Cumulative output tokens reported by the Nomi session usage payload. */
-  output_tokens?: number;
-  /** Tokens written into the provider prompt cache. */
-  cache_creation_tokens?: number;
-  /** Tokens read back from the provider prompt cache. */
-  cache_read_tokens?: number;
-  /** Wall-clock duration of the last turn in milliseconds (optional; nomi
-   * turn_completed carries it). Absent on legacy persisted payloads. */
-  elapsed_ms?: number;
   /** Current context occupancy (gauge numerator). */
   context_tokens?: number;
   /** Effective context budget (gauge denominator). */
