@@ -6703,6 +6703,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
+ "futures-util",
  "nomifun-api-types",
  "nomifun-realtime",
  "rand 0.9.4",
@@ -6714,6 +6715,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
