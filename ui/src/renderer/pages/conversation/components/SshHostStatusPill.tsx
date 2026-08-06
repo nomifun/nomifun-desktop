@@ -98,10 +98,40 @@ const SshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) => {
     [hosts, sshHostId]
   );
 
-  // The book has not answered yet, or the host was deleted while the session
-  // survived. Either way there is no honest identity to show, and a badge that
-  // says nothing is worse than no badge: stay silent.
-  if (host == null) return null;
+  // The book has no row for this id: it has not answered yet, or the host was
+  // deleted while the session survived. Deleting a host does cut its links, but
+  // until that `closed` arrives the operator is still driving a real machine —
+  // and going silent here is precisely the failure this pill exists to prevent
+  // ("which box am I on?"). Show a grey chip carrying the id prefix instead: no
+  // name, no endpoint, no phase to claim, but an identity all the same.
+  if (host == null) {
+    return (
+      <span className='inline-flex'>
+        <Button
+          size='mini'
+          shape='round'
+          type='secondary'
+          disabled
+          data-testid='ssh-host-status-pill'
+          className={capabilityHeaderButtonClass(false, 'shrink-0')}
+          style={capabilityHeaderButtonStyle(SSH_STATUS_COLOR.idle)}
+        >
+          <span className='inline-flex items-center gap-6px leading-none'>
+            <Server
+              theme='outline'
+              size='14'
+              fill={SSH_STATUS_COLOR.idle}
+              className='block'
+              style={{ lineHeight: 0 }}
+            />
+            <span className='text-12px max-w-140px truncate'>
+              {t('ssh.group.hostMissing')} · {sshHostId.slice(0, 8)}
+            </span>
+          </span>
+        </Button>
+      </span>
+    );
+  }
 
   // No live link yet is its own truthful phase, not a missing value.
   const phase: ISshLinkPhase = status?.state ?? 'idle';
