@@ -23,6 +23,7 @@ import {
   Message,
   Modal,
   Result,
+  Tooltip,
   Typography,
 } from '@arco-design/web-react';
 import { AddOne, Search, SettingTwo } from '@icon-park/react';
@@ -39,7 +40,13 @@ import {
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeEmptyState from '../KnowledgeEmptyState';
 import KnowledgeCard from '../KnowledgeCard';
-import KnowledgeTagFilterBar, { type KnowledgeKind, type KnowledgeSort } from '../KnowledgeTagFilterBar';
+import KnowledgeTagFilterBar, {
+  type KnowledgeKind,
+  type KnowledgeSort,
+  type KnowledgeSortDirection,
+} from '../KnowledgeTagFilterBar';
+import toolbarStyles from '../KnowledgeTagFilterBar.module.css';
+import { sortKnowledgeBases } from '../knowledgeSort';
 import KnowledgeTagManagementModal from '../KnowledgeTagManagementModal';
 import CreateStudio from '../CreateStudio';
 import type { StudioInitialKind } from '../CreateStudio/sourceTypes';
@@ -64,22 +71,6 @@ export function filterBases(
       (tagKeys.length === 0 || tagKeys.some((k) => b.tags.includes(k))) &&
       (!lq || b.name.toLowerCase().includes(lq) || (b.description ?? '').toLowerCase().includes(lq))
   );
-}
-
-// ─── Sort comparator ─────────────────────────────────────────────────────────
-
-function sortBases(bases: IKnowledgeBase[], sort: KnowledgeSort): IKnowledgeBase[] {
-  const arr = [...bases];
-  switch (sort) {
-    case 'updated':
-      return arr.sort((a, b) => b.updated_at - a.updated_at);
-    case 'created':
-      return arr.sort((a, b) => b.created_at - a.created_at);
-    case 'name':
-      return arr.sort((a, b) => a.name.localeCompare(b.name));
-    case 'size':
-      return arr.sort((a, b) => b.total_size - a.total_size);
-  }
 }
 
 /** Self-managing checkbox for the imperative delete Modal.confirm. The modal
@@ -118,6 +109,7 @@ const KnowledgeListPage: React.FC = () => {
   const [tagFilter, setTagFilter] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [sort, setSort] = useState<KnowledgeSort>('updated');
+  const [sortDirection, setSortDirection] = useState<KnowledgeSortDirection>('desc');
 
   // Compute counts from the full (unfiltered) set
   const kindCounts = useMemo(() => {
@@ -147,8 +139,8 @@ const KnowledgeListPage: React.FC = () => {
 
   // Filtered + sorted result
   const displayBases = useMemo(
-    () => sortBases(filterBases(bases, kindFilter ?? 'all', tagFilter, searchQuery), sort),
-    [bases, kindFilter, tagFilter, searchQuery, sort]
+    () => sortKnowledgeBases(filterBases(bases, kindFilter ?? 'all', tagFilter, searchQuery), sort, sortDirection),
+    [bases, kindFilter, tagFilter, searchQuery, sort, sortDirection]
   );
 
   // ─── CreateStudio state ─────────────────────────────────────────────────────
@@ -278,6 +270,10 @@ const KnowledgeListPage: React.FC = () => {
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
+  const searchLabel = t('knowledge.searchPlaceholder', { defaultValue: '搜索知识库...' });
+  const manageTagsLabel = t('knowledge.filter.manageTags', { defaultValue: '管理标签' });
+  const newBaseLabel = t('knowledge.newBase', { defaultValue: '新建知识库' });
+
   return (
     <div
       className={[
@@ -285,7 +281,7 @@ const KnowledgeListPage: React.FC = () => {
         isMobile ? 'px-16px py-14px' : 'px-12px py-24px md:px-40px md:py-32px',
       ].join(' ')}
     >
-      <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-16px'>
+      <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-12px'>
         {/* Header */}
         <div className='w-full'>
           <h1 className={HUB_PAGE_TITLE_CLASS}>
@@ -307,78 +303,116 @@ const KnowledgeListPage: React.FC = () => {
           tags={tags}
           sort={sort}
           onSortChange={setSort}
+          sortDirection={sortDirection}
+          onSortDirectionChange={setSortDirection}
           actions={(
             <div
               className={[
-                'flex min-w-0 items-center gap-8px',
+                'flex min-w-0 items-center gap-6px',
                 isMobile ? 'w-full' : 'flex-1 justify-end',
+                !isMobile ? toolbarStyles.desktopActions : '',
               ].join(' ')}
             >
               {/* Search */}
-              <div
-                className={[
-                  'flex h-38px box-border min-w-0 items-center gap-8px rounded-full px-13px',
-                  'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
-                  'focus-within:border-primary-6 transition-colors',
-                  isMobile ? 'flex-1' : 'w-220px',
-                ].join(' ')}
-              >
-                <Search theme='outline' size={14} className='flex-none text-[var(--color-text-3)]' />
-                <input
-                  className='w-full border-none bg-transparent text-13px text-[var(--color-text-1)] outline-none font-[inherit] placeholder:text-[var(--color-text-3)]'
-                  placeholder={t('knowledge.searchPlaceholder', { defaultValue: '搜索知识库...' })}
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </div>
+              <Tooltip content={searchLabel} position='top' mini>
+                <div
+                  className={[
+                    'flex h-34px box-border min-w-0 items-center gap-7px rounded-full px-11px',
+                    'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
+                    'focus-within:border-primary-6 transition-colors',
+                    isMobile ? 'flex-1' : 'w-220px',
+                    !isMobile ? toolbarStyles.desktopSearch : '',
+                  ].join(' ')}
+                >
+                  <span
+                    className={[
+                      'inline-flex h-18px w-18px flex-none items-center justify-center',
+                      toolbarStyles.actionIcon,
+                      !isMobile ? toolbarStyles.desktopSearchIcon : '',
+                    ].join(' ')}
+                  >
+                    <Search theme='outline' size={14} className='block text-[var(--color-text-3)]' />
+                  </span>
+                  <input
+                    aria-label={searchLabel}
+                    className={[
+                      'w-full border-none bg-transparent text-13px leading-18px text-[var(--color-text-1)] outline-none font-[inherit] placeholder:text-[var(--color-text-3)]',
+                      !isMobile ? toolbarStyles.desktopSearchInput : '',
+                    ].join(' ')}
+                    placeholder={searchLabel}
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
+                </div>
+              </Tooltip>
 
               {/* Tag management */}
-              <div
-                role='button'
-                tabIndex={0}
-                onClick={handleManageTags}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    handleManageTags();
-                  }
-                }}
-                className={[
-                  'inline-flex h-38px box-border flex-none items-center gap-6px rounded-full px-14px',
-                  'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
-                  'text-13px font-medium text-[var(--color-text-1)] cursor-pointer select-none',
-                  'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)]',
-                  'focus-visible:outline-none focus-visible:border-primary-6 transition-colors',
-                ].join(' ')}
-              >
-                <SettingTwo theme='outline' size={14} strokeWidth={3} />
-                {!isMobile && t('knowledge.filter.manageTags', { defaultValue: '管理标签' })}
-              </div>
+              <Tooltip content={manageTagsLabel} position='top' mini>
+                <div
+                  role='button'
+                  tabIndex={0}
+                  aria-label={manageTagsLabel}
+                  onClick={handleManageTags}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      handleManageTags();
+                    }
+                  }}
+                  className={[
+                    'inline-flex h-34px box-border flex-none items-center gap-6px rounded-full px-12px leading-none',
+                    'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
+                    'text-13px font-medium text-[var(--color-text-1)] cursor-pointer select-none',
+                    'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)]',
+                    'focus-visible:outline-none focus-visible:border-primary-6 transition-colors',
+                    !isMobile ? toolbarStyles.desktopIconAction : '',
+                  ].join(' ')}
+                >
+                  <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
+                    <SettingTwo theme='outline' size={14} strokeWidth={3} className='block' />
+                  </span>
+                  {!isMobile && (
+                    <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
+                      {manageTagsLabel}
+                    </span>
+                  )}
+                </div>
+              </Tooltip>
 
               {/* Create button */}
-              <div
-                role='button'
-                tabIndex={0}
-                onClick={() => openStudio()}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    openStudio();
-                  }
-                }}
-                className={[
-                  'inline-flex h-38px box-border flex-none items-center gap-7px cursor-pointer select-none',
-                  'rounded-full px-17px text-13px font-700',
-                  'border border-solid border-transparent',
-                  'bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)]',
-                  'hover:bg-[rgba(var(--primary-6),0.18)]',
-                  'focus-visible:border-primary-6 focus-visible:outline-none',
-                  'transition-colors',
-                ].join(' ')}
-              >
-                <AddOne theme='outline' size={15} strokeWidth={4} className='text-primary-6' />
-                {!isMobile && t('knowledge.newBase', { defaultValue: '新建知识库' })}
-              </div>
+              <Tooltip content={newBaseLabel} position='top' mini>
+                <div
+                  role='button'
+                  tabIndex={0}
+                  aria-label={newBaseLabel}
+                  onClick={() => openStudio()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openStudio();
+                    }
+                  }}
+                  className={[
+                    'inline-flex h-34px box-border flex-none items-center gap-6px cursor-pointer select-none leading-none',
+                    'rounded-full px-14px text-13px font-700',
+                    'border border-solid border-transparent',
+                    'bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)]',
+                    'hover:bg-[rgba(var(--primary-6),0.18)]',
+                    'focus-visible:border-primary-6 focus-visible:outline-none',
+                    'transition-colors',
+                    !isMobile ? toolbarStyles.desktopIconAction : '',
+                  ].join(' ')}
+                >
+                  <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
+                    <AddOne theme='outline' size={15} strokeWidth={4} className='block text-primary-6' />
+                  </span>
+                  {!isMobile && (
+                    <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
+                      {newBaseLabel}
+                    </span>
+                  )}
+                </div>
+              </Tooltip>
             </div>
           )}
         />
