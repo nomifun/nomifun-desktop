@@ -122,3 +122,61 @@ async fn shutting_down_refuses_a_dial_before_touching_the_network() {
     assert!(matches!(err, SshDialError::ShuttingDown), "{err:?}");
     assert!(!err.is_retryable(), "{err:?}");
 }
+
+/// A port that completes the TCP handshake and then says nothing — the shape of a
+/// mistyped port landing on a non-SSH service, and the case no layer below this
+/// crate bounds: the transport sets no handshake timeout, so without a budget here
+/// the dial never returns.
+///
+/// Not a firewall DROP, because that would need privileges; an accepted socket
+/// that never sends an SSH banner reaches the same unbounded wait through the
+/// same code path. The listener is owned by the test (a real `TcpListener` bound
+/// to an ephemeral loopback port) and dropped with it — no child process, so
+/// nothing to signal or clean up.
+#[tokio::test]
+async fn a_peer_that_never_speaks_ssh_times_out_instead_of_hanging() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a silent listener");
+    let port = listener.local_addr().expect("addr").port();
+    // Accept and hold, forever. Never writes the version string russh waits for.
+    let _silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let harness = support::harness(tmp.path().join("known_hosts"), support::brisk_tuning()).await;
+    let mut req = host_req("password", Some("pw"));
+    req.port = port as i64;
+    let id = harness.add_host(req).await;
+
+    let started = std::time::Instant::now();
+    let err = harness
+        .pool
+        .acquire(&harness.user_id, "conv-1", &id, "/")
+        .await
+        .expect_err("a peer that never speaks ssh cannot produce a link");
+    let waited = started.elapsed();
+
+    assert!(
+        matches!(err, SshDialError::Unreachable(_)),
+        "a silent peer is unreachable, not a credential problem: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("timed out"),
+        "the operator must be told the dial ran out of time: {err}"
+    );
+    assert!(
+        err.is_retryable(),
+        "a host that may simply be slow to answer stays retryable: {err:?}"
+    );
+    // The budget is 15s; anything near the kernel's SYN-retry horizon (~130s) or
+    // beyond means nothing bounded the dial.
+    assert!(
+        waited < std::time::Duration::from_secs(30),
+        "the dial must be bounded by its own budget, waited {waited:?}"
+    );
+}
