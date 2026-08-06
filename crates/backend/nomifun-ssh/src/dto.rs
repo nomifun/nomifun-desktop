@@ -132,6 +132,15 @@ pub struct ImportedSshHost {
     /// until someone opens it and supplies a secret, and saying so is the
     /// difference between an honest import and a book full of dead hosts.
     pub needs_credential: bool,
+    /// The config named no `User`, so the row has an empty username.
+    ///
+    /// Separate from `needs_credential` because it is a separate missing piece: a
+    /// host whose key we read fine is still undialable without a username, and
+    /// folding the two together (or reporting only the credential) would show
+    /// such a host as ready. `ssh` would have fallen back to the local account
+    /// name here; we do not guess, because a wrong username fails authentication
+    /// far from its cause.
+    pub needs_username: bool,
 }
 
 /// Why a requested alias produced no host.
