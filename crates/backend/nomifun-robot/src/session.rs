@@ -489,8 +489,18 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                     .publish(&robot_id, Some(&bound), RobotPhase::Idle, now_ms())
                                     .await;
                                 let tuning = deps.dispatcher.vad_tuning(&bound).await;
-                                let engine = build_engine("silero", tuning);
-                                tracing::info!(%robot_id, vad = engine.name(), "robot: endpointer ready");
+                                // The profile picks the engine; `build_engine`
+                                // owns the fallback when the named one cannot
+                                // load, so an unavailable engine costs accuracy,
+                                // never the voice link.
+                                let named = deps.dispatcher.vad_engine(&bound).await;
+                                let engine = build_engine(&named, tuning);
+                                tracing::info!(
+                                    %robot_id,
+                                    requested = %named,
+                                    vad = engine.name(),
+                                    "robot: endpointer ready"
+                                );
                                 uplink = UplinkPipeline::new(engine).ok();
                                 conversation_id = deps
                                     .dispatcher
@@ -868,6 +878,79 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    /// A plain 300 Hz tone: loud enough for the energy engine, and scored at
+    /// about one percent by Silero. That difference is what makes the engine the
+    /// profile asked for observable from outside.
+    async fn send_tone(tx: &mpsc::Sender<Frame>, ms: u32) {
+        let n = (16_000u64 * ms as u64 / 1000) as usize;
+        let pcm: Vec<i16> = (0..n)
+            .map(|i| {
+                let t = i as f32 / 16_000.0;
+                ((t * 300.0 * std::f32::consts::TAU).sin() * 9000.0) as i16
+            })
+            .collect();
+        let packets = crate::audio::OpusStreamEncoder::new_uplink_for_test()
+            .unwrap()
+            .encode_frames(&pcm)
+            .unwrap();
+        for packet in packets {
+            tx.send(Frame::Binary(bytes::Bytes::from(packet)))
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Run one tone-then-silence round with `engine` named by the profile and
+    /// report whether the session decided a turn had happened.
+    async fn tone_round_transcribes(engine: &str) -> bool {
+        let (deps, link, tx, _written, _dir) = harness(true).await;
+        let speech = deps.speech_mock();
+        deps.dispatcher_mock().set_vad_engine(engine);
+        speech.push_transcript("嗯");
+
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(
+            r#"{"type":"hello","version":1,"transport":"websocket"}"#.into(),
+        ))
+        .await
+        .unwrap();
+        tx.send(Frame::Text(
+            r#"{"session_id":"s","type":"listen","state":"start","mode":"auto"}"#.into(),
+        ))
+        .await
+        .unwrap();
+        send_tone(&tx, 300).await;
+        send_audio(&tx, 900, false).await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        drop(tx);
+        task.await.unwrap();
+        speech.transcribe_calls() > 0
+    }
+
+    #[tokio::test]
+    async fn the_profile_chooses_the_endpointing_engine() {
+        assert!(
+            tone_round_transcribes("energy").await,
+            "the energy engine hears a plain tone, so the profile's choice reached the session"
+        );
+        assert!(
+            tone_round_transcribes("no-such-engine").await,
+            "an engine this build does not know falls back to energy rather than going deaf"
+        );
+    }
+
+    #[tokio::test]
+    async fn silero_from_the_profile_ignores_a_plain_tone() {
+        if crate::vad::silero::SileroVad::new(crate::vad::VadTuning::default()).is_err() {
+            eprintln!("skipping: ONNX runtime unavailable, silero degrades to energy here");
+            return;
+        }
+        assert!(
+            !tone_round_transcribes("silero").await,
+            "silero must not mistake a plain tone for speech"
+        );
     }
 
     #[tokio::test]
