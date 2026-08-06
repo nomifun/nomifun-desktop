@@ -22,6 +22,7 @@ pub mod session;
 pub mod status;
 pub mod tool_registry;
 pub mod vad;
+pub mod wiring;
 
 use std::sync::Arc;
 
