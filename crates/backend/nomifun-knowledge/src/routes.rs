@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::export::{self, ExportSummary, ImportSummary};
 use crate::service::{
-    AutogenOutcome, ConsumerInfo, InboxDiff, InboxEntry, InboxMergeResult, KbFileContent, KbFileEntry,
-    KbTreeEntry, KnowledgeBaseInfo, KnowledgeBinding, KnowledgeSearchHit, RefreshSourceSummary,
+    AutogenOutcome, ConsumerInfo, KbFileContent, KbFileEntry, KbTreeEntry, KnowledgeBaseInfo,
+    KnowledgeBinding, KnowledgeSearchHit, RefreshSourceSummary,
 };
 use crate::state::KnowledgeRouterState;
 
@@ -67,25 +67,6 @@ pub fn knowledge_routes(state: KnowledgeRouterState) -> Router {
             "/api/knowledge/bases/{knowledge_base_id}/tree/rename",
             post(rename_tree_entry),
         )
-        .route(
-            "/api/knowledge/bases/{knowledge_base_id}/inbox",
-            get(list_inbox),
-        )
-        .route("/api/knowledge/inbox/pending-count", get(pending_inbox_count))
-        .route(
-            "/api/knowledge/bases/{knowledge_base_id}/inbox/diff",
-            get(inbox_diff),
-        )
-        .route(
-            "/api/knowledge/bases/{knowledge_base_id}/inbox/merge",
-            post(merge_inbox),
-        )
-        .route(
-            "/api/knowledge/bases/{knowledge_base_id}/inbox/discard",
-            post(discard_inbox),
-        )
-        .route("/api/knowledge/inbox/merge-all", post(merge_all_inbox))
-        .route("/api/knowledge/inbox/discard-all", post(discard_all_inbox))
         .route(
             "/api/knowledge/bases/{knowledge_base_id}/consumers",
             get(list_consumers),
@@ -576,112 +557,7 @@ async fn delete_tag(
     Ok(Json(ApiResponse::ok(())))
 }
 
-// ── P4 inbox review + consumers ───────────────────────────────────────
-
-async fn list_inbox(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(knowledge_base_id): Path<KnowledgeBaseId>,
-) -> Result<Json<ApiResponse<Vec<InboxEntry>>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state.service.list_inbox(knowledge_base_id.as_str()).await?,
-    )))
-}
-
-/// Total unreviewed staged proposals across all bases (sidebar red-dot signal).
-async fn pending_inbox_count(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<usize>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.count_pending_inbox().await?)))
-}
-
-#[derive(Deserialize)]
-struct InboxItemQuery {
-    scope: String,
-    path: String,
-}
-
-async fn inbox_diff(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(knowledge_base_id): Path<KnowledgeBaseId>,
-    Query(q): Query<InboxItemQuery>,
-) -> Result<Json<ApiResponse<InboxDiff>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .inbox_diff(knowledge_base_id.as_str(), &q.scope, &q.path)
-            .await?,
-    )))
-}
-
-#[derive(Deserialize)]
-struct InboxActionRequest {
-    scope: String,
-    path: String,
-}
-
-async fn merge_inbox(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(knowledge_base_id): Path<KnowledgeBaseId>,
-    body: Result<Json<InboxActionRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<InboxMergeResult>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .merge_inbox(knowledge_base_id.as_str(), &req.scope, &req.path)
-            .await?,
-    )))
-}
-
-async fn discard_inbox(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(knowledge_base_id): Path<KnowledgeBaseId>,
-    body: Result<Json<InboxActionRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state
-        .service
-        .discard_inbox(knowledge_base_id.as_str(), &req.scope, &req.path)
-        .await?;
-    Ok(Json(ApiResponse::ok(())))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct InboxBatchRequest {
-    kb_id: KnowledgeBaseId,
-    scope: Option<String>,
-}
-
-#[derive(Serialize)]
-struct InboxBatchResult {
-    count: usize,
-}
-
-async fn merge_all_inbox(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<InboxBatchRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<InboxBatchResult>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let count = state.service.merge_all_inbox(req.kb_id.as_str(), req.scope.as_deref()).await?;
-    Ok(Json(ApiResponse::ok(InboxBatchResult { count })))
-}
-
-async fn discard_all_inbox(
-    State(state): State<KnowledgeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<InboxBatchRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<InboxBatchResult>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let count = state.service.discard_all_inbox(req.kb_id.as_str(), req.scope.as_deref()).await?;
-    Ok(Json(ApiResponse::ok(InboxBatchResult { count })))
-}
+// ── P4 consumers ──────────────────────────────────────────────────────
 
 async fn list_consumers(
     State(state): State<KnowledgeRouterState>,

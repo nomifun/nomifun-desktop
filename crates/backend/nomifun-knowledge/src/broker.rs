@@ -156,22 +156,19 @@ async fn serve_authenticated_connection<S>(
     };
 
     let canonical_cwd_string = canonical_cwd.to_string_lossy().into_owned();
-    let (kb_ids, binding, workpath_key) = service
+    let (kb_ids, binding, _workpath_key) = service
         .resolve_write_context_for_cwd(&canonical_cwd_string)
         .await;
     // This is an ephemeral session identity, not a display label. Keep it in
     // the same canonical UUIDv7 shape as every other v3 business/session ID.
     let process_session_id = generate_id();
-    let policy = resolve_write_policy(
-        WriteSurface::TerminalAcp,
-        &binding,
-        &workpath_key,
-    );
+    let policy = resolve_write_policy(WriteSurface::TerminalAcp, &binding);
     // Falling back to all registered bases is a read-only convenience for an
     // unbound/empty workspace. Write authority requires a real, non-empty
-    // persisted binding in addition to its writeback policy.
+    // persisted binding in addition to its writeback policy. Matching the
+    // granting mode positively keeps any future write mode fail-closed here.
     let has_bound_scope = binding.enabled && !binding.kb_ids.is_empty();
-    let allow_write = has_bound_scope && !matches!(policy.mode, WriteMode::Disabled);
+    let allow_write = has_bound_scope && matches!(policy.mode, WriteMode::Direct);
     let child = match config.issue_for_external_process(
         &installation_owner_id,
         &process_session_id,
@@ -747,7 +744,6 @@ mod platform {
                     KnowledgeBinding {
                         enabled: true,
                         writeback: true,
-                        writeback_mode: "staged".into(),
                         kb_ids: vec![kb_a_id.clone()],
                         ..KnowledgeBinding::default()
                     },

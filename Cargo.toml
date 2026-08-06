@@ -129,7 +129,6 @@ notify = "8"
 walkdir = "2"
 ignore = "0.4"
 # Unified-diff computation for the knowledge-base inbox review panel (P4).
-similar = "2"
 zip = "2"
 # Node portable-runtime archive extraction (provisioner): tar.gz on unix/macos.
 flate2 = "1"
