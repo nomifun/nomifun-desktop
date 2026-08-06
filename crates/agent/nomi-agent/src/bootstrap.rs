@@ -612,6 +612,24 @@ impl AgentBootstrap {
 
         let mut prompt_cache = crate::context::SystemPromptCache::new();
         prompt_cache.set_agents_md(agents_snapshot.formatted);
+        // SSH-bound session: `cwd` here is a LOCAL scratch directory (design F2
+        // keeps `extra.workspace` local for transcripts and attachments), while
+        // every file/exec tool registered above is the remote family and no local
+        // exec tool exists at all. Rendering that path as "Working directory"
+        // would name somewhere none of the model's tools can reach, on a machine
+        // it is not operating. Seed the section so `build_system_prompt`'s
+        // `or_insert_with` default never runs; the date still comes along, since
+        // that is the other half of what this section owes the model.
+        if ssh_backend.is_some() {
+            prompt_cache.set_environment(format!(
+                "This session runs entirely on a remote host over SSH. Read, Write, Edit, Bash, \
+                 Grep and Glob all act on that host, and no tool here can reach the local machine. \
+                 There is no local working directory: the remote shell starts in the login user's \
+                 default directory on the host (run `pwd` to see it), and paths from the local \
+                 machine do not exist there.\nCurrent date: {}",
+                chrono::Local::now().format("%Y-%m-%d")
+            ));
+        }
         let system_prompt = crate::context::build_system_prompt(
             &mut prompt_cache,
             self.config.system_prompt.as_deref(),
