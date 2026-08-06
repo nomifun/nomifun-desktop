@@ -117,6 +117,13 @@ async fn delete_one(
         .delete(user.id.as_str(), &ssh_host_id)
         .await
         .map_err(map_err)?;
+    // The row is gone, so the links must go too: a live transport outlives its
+    // host row happily, the supervisor's probe keeps succeeding, and the agent
+    // goes on running commands on a machine the operator just deleted — with no
+    // pill on screen, because the pill needs the row to render.
+    if let Some(pool) = &state.pool {
+        pool.close_for_host(&ssh_host_id).await;
+    }
     Ok(Json(ApiResponse::ok(())))
 }
 
