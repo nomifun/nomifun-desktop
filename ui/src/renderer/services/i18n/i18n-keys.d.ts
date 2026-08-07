@@ -4840,6 +4840,7 @@ export type I18nKey =
   | 'update.noCompatibleAssetManual'
   | 'update.noReleaseNotes'
   | 'update.openFile'
+  | 'update.packageNoLongerReady'
   | 'update.preparingInstallDesc'
   | 'update.preparingInstallTitle'
   | 'update.productWebsiteHint'

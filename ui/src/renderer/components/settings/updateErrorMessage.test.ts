@@ -25,4 +25,13 @@ describe('getUpdateErrorMessageKey', () => {
   ])('maps unsafe macOS install error %s to recovery guidance', (message) => {
     expect(getUpdateErrorMessageKey(message)).toBe('update.crossDeviceInstallUnsupported');
   });
+
+  test.each([
+    'NOMIFUN_UPDATE_NOT_RETAINED: update 0.4.2 has not been downloaded',
+    'NOMIFUN_UPDATE_NOT_RETAINED: update 0.4.2 is still downloading',
+  ])('tells the user to download again when the package is gone: %s', (message) => {
+    // These used to fall through to 'update.checkFailed', so a failed INSTALL
+    // told the user the CHECK had failed — pointing them at the wrong recovery.
+    expect(getUpdateErrorMessageKey(message)).toBe('update.packageNoLongerReady');
+  });
 });
