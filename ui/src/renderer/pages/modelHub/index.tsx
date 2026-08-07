@@ -13,58 +13,181 @@ import {
   HeadsetOne,
   LinkCloud,
   SettingTwo,
-  Platte,
   Lightning,
+  Pic,
   PreviewOpen,
   SafeRetrieval,
+  VideoTwo,
+  Voice,
 } from '@icon-park/react';
 import ContentSider from '@/renderer/components/layout/ContentSider';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
+import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 import ModelModalContent from '@/renderer/components/settings/SettingsModal/contents/ModelModalContent';
 import GlobalModelConfig from './GlobalModelConfig';
-import CreationModelsContent from './CreationModelsContent';
 import FreeModelsContent from './FreeModelsContent';
-import SpeechModelsContent from './SpeechModelsContent';
+import SpeechToTextContent from './SpeechToTextContent';
+import TextToSpeechContent from './TextToSpeechContent';
 import ChatModelsContent from './ChatModelsContent';
 import VisionModelsContent from './VisionModelsContent';
+import ImageModelsContent from './ImageModelsContent';
+import VideoModelsContent from './VideoModelsContent';
 import EmbeddingModelsContent from './EmbeddingModelsContent';
 
-type Section = 'chat' | 'speech' | 'vision' | 'creation' | 'embedding' | 'free' | 'models' | 'global';
+type Section =
+  | 'models'
+  | 'chat'
+  | 'asr'
+  | 'tts'
+  | 'vision'
+  | 'image'
+  | 'video'
+  | 'embedding'
+  | 'free'
+  | 'global';
+
+/**
+ * Retired section keys kept resolvable so old bookmarks and links land somewhere
+ * sensible. `speech` and `creation` were hosts that each held several model
+ * categories; they now have one section per category, so an old link resolves to
+ * the first of them.
+ */
+const LEGACY_SECTIONS: Record<string, Section> = {
+  speech: 'asr',
+  creation: 'image',
+};
+
+const SECTION_KEYS: readonly Section[] = [
+  'models',
+  'chat',
+  'asr',
+  'tts',
+  'vision',
+  'image',
+  'video',
+  'embedding',
+  'free',
+  'global',
+];
 
 const isSection = (value: string | null): value is Section =>
-  value === 'chat' ||
-  value === 'speech' ||
-  value === 'vision' ||
-  value === 'creation' ||
-  value === 'embedding' ||
-  value === 'free' ||
-  value === 'models' ||
-  value === 'global';
+  value !== null && (SECTION_KEYS as readonly string[]).includes(value);
+
+/** Resolve a `?section=` value, following the retired-key aliases. */
+const resolveSection = (value: string | null): Section | null =>
+  isSection(value) ? value : value !== null && value in LEGACY_SECTIONS ? LEGACY_SECTIONS[value] : null;
 
 const MODELHUB_SIDER_STORAGE_KEY = 'nomifun:modelhub-sider-width';
 
 interface SectionDef {
   key: Section;
-  label: string;
+  labelKey: I18nKey;
   icon: React.ReactNode;
 }
 
+interface SectionGroup {
+  key: string;
+  titleKey: I18nKey;
+  sections: SectionDef[];
+}
+
 /**
- * ModelHubPage (/models) — "Model Management", a MODALITY-first view. The primary
- * level is a content-area secondary sidebar (mirroring the conversation
- * `ContentSider`): a left section list (chat / voice / vision / creation /
- * embedding & retrieval / free models / providers & keys / global settings)
- * drives the right content pane. Execution engines live independently under
- * Settings and are intentionally not mixed into model management.
+ * The sidebar's three groups, in the order a model actually travels: a provider
+ * is the source of every model, so 供应商与密钥 leads; then one section per model
+ * capability; then the things you reach for rarely. 免费模型 sits in the last
+ * group on purpose — it is NomiFun-managed, not something the user configured,
+ * and the same rule orders the provider groups inside every capability section.
+ */
+const SECTION_GROUPS: SectionGroup[] = [
+  {
+    key: 'access',
+    titleKey: 'settings.modelHub.groupAccess',
+    sections: [
+      {
+        key: 'models',
+        labelKey: 'settings.modelHub.sectionModels',
+        icon: <LinkCloud theme='outline' size='16' strokeWidth={3} />,
+      },
+    ],
+  },
+  {
+    key: 'capability',
+    titleKey: 'settings.modelHub.groupCapability',
+    sections: [
+      {
+        key: 'chat',
+        labelKey: 'settings.modelHub.sectionChat',
+        icon: <Comment theme='outline' size='16' strokeWidth={3} />,
+      },
+      {
+        key: 'asr',
+        labelKey: 'settings.modelHub.sectionAsr',
+        icon: <HeadsetOne theme='outline' size='16' strokeWidth={3} />,
+      },
+      {
+        key: 'tts',
+        labelKey: 'settings.modelHub.sectionTts',
+        icon: <Voice theme='outline' size='16' strokeWidth={3} />,
+      },
+      {
+        key: 'vision',
+        labelKey: 'settings.modelHub.sectionVision',
+        icon: <PreviewOpen theme='outline' size='16' strokeWidth={3} />,
+      },
+      {
+        key: 'image',
+        labelKey: 'settings.modelHub.sectionImage',
+        icon: <Pic theme='outline' size='16' strokeWidth={3} />,
+      },
+      {
+        key: 'video',
+        labelKey: 'settings.modelHub.sectionVideo',
+        icon: <VideoTwo theme='outline' size='16' strokeWidth={3} />,
+      },
+      {
+        key: 'embedding',
+        labelKey: 'settings.modelHub.sectionEmbedding',
+        icon: <SafeRetrieval theme='outline' size='16' strokeWidth={3} />,
+      },
+    ],
+  },
+  {
+    key: 'advanced',
+    titleKey: 'settings.modelHub.groupAdvanced',
+    sections: [
+      {
+        key: 'free',
+        labelKey: 'settings.modelHub.sectionFree',
+        icon: <Lightning theme='outline' size='16' strokeWidth={3} />,
+      },
+      {
+        key: 'global',
+        labelKey: 'settings.modelHub.sectionGlobal',
+        icon: <SettingTwo theme='outline' size='16' strokeWidth={3} />,
+      },
+    ],
+  },
+];
+
+const FLAT_SECTIONS: SectionDef[] = SECTION_GROUPS.flatMap((group) => group.sections);
+
+/**
+ * ModelHubPage (/models) — "Model Management", a CAPABILITY-first view. The
+ * primary level is a content-area secondary sidebar (mirroring the conversation
+ * `ContentSider`): a grouped left section list drives the right content pane.
+ * Execution engines live independently under Settings and are intentionally not
+ * mixed into model management.
  *
- * The sidebar width is drag-resizable and persisted. On mobile the left sidebar
- * collapses to a horizontal segmented bar above the content.
+ * One sidebar entry = one model capability, so nothing hides behind a page-level
+ * filter or a second row of tabs. The sidebar width is drag-resizable and
+ * persisted. On mobile the sidebar collapses to a horizontal segmented bar above
+ * the content (flat — the groups are a desktop affordance).
  *
- * The level syncs to `?section=`; the previous provider-first keys (`models`,
- * `free`, `speech`, `creation`, `global`) still resolve so old bookmarks work.
+ * The level syncs to `?section=`; the retired host keys (`speech`, `creation`)
+ * and the provider-first key (`models`) still resolve so old bookmarks work.
  */
 const ModelHubPage: React.FC = () => {
   const { t } = useTranslation();
@@ -72,15 +195,14 @@ const ModelHubPage: React.FC = () => {
   const isMobile = layout?.isMobile ?? false;
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const [section, setSection] = useState<Section>(() => {
-    const param = searchParams.get('section');
-    return isSection(param) ? param : 'chat';
-  });
+  const [section, setSection] = useState<Section>(
+    () => resolveSection(searchParams.get('section')) ?? 'chat'
+  );
 
   useEffect(() => {
-    const param = searchParams.get('section');
-    if (isSection(param) && param !== section) {
-      setSection(param);
+    const resolved = resolveSection(searchParams.get('section'));
+    if (resolved && resolved !== section) {
+      setSection(resolved);
     }
   }, [searchParams, section]);
 
@@ -114,29 +236,17 @@ const ModelHubPage: React.FC = () => {
   const { ref: paneRef, width: paneWidth } = useContainerWidth<HTMLDivElement>();
   const panePadX = paneWidth === 0 ? 'px-24px' : paneWidth >= 600 ? 'px-40px' : paneWidth >= 420 ? 'px-24px' : 'px-16px';
 
-  const sections: SectionDef[] = useMemo(
-    () => [
-      { key: 'chat', label: t('settings.modelHub.sectionChat'), icon: <Comment theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'speech', label: t('settings.modelHub.sectionSpeech'), icon: <HeadsetOne theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'vision', label: t('settings.modelHub.sectionVision'), icon: <PreviewOpen theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'creation', label: t('settings.modelHub.sectionCreation'), icon: <Platte theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'embedding', label: t('settings.modelHub.sectionEmbedding'), icon: <SafeRetrieval theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'free', label: t('settings.modelHub.sectionFree'), icon: <Lightning theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'models', label: t('settings.modelHub.sectionModels'), icon: <LinkCloud theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'global', label: t('settings.modelHub.sectionGlobal'), icon: <SettingTwo theme='outline' size='16' strokeWidth={3} /> },
-    ],
-    [t]
-  );
-
   const content = (
     <>
+      {section === 'models' && <ModelModalContent />}
       {section === 'chat' && <ChatModelsContent />}
-      {section === 'speech' && <SpeechModelsContent />}
+      {section === 'asr' && <SpeechToTextContent />}
+      {section === 'tts' && <TextToSpeechContent />}
       {section === 'vision' && <VisionModelsContent />}
-      {section === 'creation' && <CreationModelsContent />}
+      {section === 'image' && <ImageModelsContent />}
+      {section === 'video' && <VideoModelsContent />}
       {section === 'embedding' && <EmbeddingModelsContent />}
       {section === 'free' && <FreeModelsContent />}
-      {section === 'models' && <ModelModalContent />}
       {section === 'global' && <GlobalModelConfig />}
     </>
   );
@@ -151,7 +261,11 @@ const ModelHubPage: React.FC = () => {
 
   // Mobile: horizontal segmented nav above the content (no left sidebar).
   if (isMobile) {
-    const segmentedItems: SegmentedTabItem[] = sections.map((s) => ({ key: s.key, label: s.label, icon: s.icon }));
+    const segmentedItems: SegmentedTabItem[] = FLAT_SECTIONS.map((s) => ({
+      key: s.key,
+      label: t(s.labelKey),
+      icon: s.icon,
+    }));
     return (
       <div className='w-full min-h-full box-border overflow-y-auto px-16px py-16px'>
         <div className='text-20px font-600 text-t-primary leading-tight'>{t('settings.modelHub.title')}</div>
@@ -171,6 +285,55 @@ const ModelHubPage: React.FC = () => {
     </div>
   );
 
+  const renderTab = (s: SectionDef) => {
+    const selected = section === s.key;
+    const index = FLAT_SECTIONS.findIndex((item) => item.key === s.key);
+    return (
+      <div
+        key={s.key}
+        id={`model-hub-tab-${s.key}`}
+        role='tab'
+        aria-selected={selected}
+        aria-controls='model-hub-panel'
+        tabIndex={selected ? 0 : -1}
+        onClick={() => handleSectionChange(s.key)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleSectionChange(s.key);
+            return;
+          }
+          if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Home' || e.key === 'End') {
+            e.preventDefault();
+            const nextIndex =
+              e.key === 'Home'
+                ? 0
+                : e.key === 'End'
+                  ? FLAT_SECTIONS.length - 1
+                  : (index + (e.key === 'ArrowDown' ? 1 : -1) + FLAT_SECTIONS.length) % FLAT_SECTIONS.length;
+            const next = FLAT_SECTIONS[nextIndex].key;
+            handleSectionChange(next);
+            focusSectionTab(next);
+          }
+        }}
+        className={classNames(
+          'h-34px rd-8px flex items-center gap-8px px-10px cursor-pointer shrink-0 transition-colors outline-none text-t-primary',
+          selected ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
+        )}
+      >
+        <span
+          className={classNames(
+            'size-22px flex items-center justify-center shrink-0 line-height-0',
+            selected ? 'text-primary-6' : 'text-t-secondary'
+          )}
+        >
+          {s.icon}
+        </span>
+        <span className='text-14px font-[500] leading-24px truncate'>{t(s.labelKey)}</span>
+      </div>
+    );
+  };
+
   return (
     <div className='relative flex size-full min-h-0'>
       <ContentSider
@@ -179,54 +342,24 @@ const ModelHubPage: React.FC = () => {
         ariaLabel={t('settings.modelHub.title')}
         resizeHandle={resize.createDragHandle({ className: 'right-0' })}
       >
-        <div className='flex flex-col gap-2px px-8px pb-8px' role='tablist' aria-orientation='vertical'>
-          {sections.map((s, index) => {
-            const selected = section === s.key;
-            return (
+        {/* The group captions are `aria-hidden` decoration: a `tablist` may own
+            only `tab` children, so exposing them would break that contract while
+            the tabs themselves already carry their labels and position. */}
+        <div className='flex flex-col px-8px pb-8px' role='tablist' aria-orientation='vertical'>
+          {SECTION_GROUPS.map((group, groupIndex) => (
+            <React.Fragment key={group.key}>
               <div
-                key={s.key}
-                id={`model-hub-tab-${s.key}`}
-                role='tab'
-                aria-selected={selected}
-                aria-controls='model-hub-panel'
-                tabIndex={selected ? 0 : -1}
-                onClick={() => handleSectionChange(s.key)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    handleSectionChange(s.key);
-                    return;
-                  }
-                  if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Home' || e.key === 'End') {
-                    e.preventDefault();
-                    const nextIndex =
-                      e.key === 'Home'
-                        ? 0
-                        : e.key === 'End'
-                          ? sections.length - 1
-                          : (index + (e.key === 'ArrowDown' ? 1 : -1) + sections.length) % sections.length;
-                    const next = sections[nextIndex].key;
-                    handleSectionChange(next);
-                    focusSectionTab(next);
-                  }
-                }}
+                aria-hidden='true'
                 className={classNames(
-                  'h-34px rd-8px flex items-center gap-8px px-10px cursor-pointer shrink-0 transition-colors outline-none text-t-primary',
-                  selected ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
+                  'px-10px pb-4px text-11px font-600 leading-16px text-t-tertiary select-none',
+                  groupIndex === 0 ? 'pt-2px' : 'pt-12px'
                 )}
               >
-                <span
-                  className={classNames(
-                    'size-22px flex items-center justify-center shrink-0 line-height-0',
-                    selected ? 'text-primary-6' : 'text-t-secondary'
-                  )}
-                >
-                  {s.icon}
-                </span>
-                <span className='text-14px font-[500] leading-24px truncate'>{s.label}</span>
+                {t(group.titleKey)}
               </div>
-            );
-          })}
+              <div className='flex flex-col gap-2px'>{group.sections.map(renderTab)}</div>
+            </React.Fragment>
+          ))}
         </div>
       </ContentSider>
       <div
