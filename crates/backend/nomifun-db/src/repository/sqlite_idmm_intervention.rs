@@ -316,14 +316,6 @@ impl IIdmmInterventionRepository for SqliteIdmmInterventionRepository {
         Ok(rows)
     }
 
-    async fn clear_all(&self, user_id: &str) -> Result<u64, DbError> {
-        let result = sqlx::query("DELETE FROM idmm_interventions WHERE user_id = ?")
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(result.rows_affected())
-    }
-
     async fn sweep_all_owners(&self, cutoff_ms: i64, per_user_cap: i64) -> Result<u64, DbError> {
         // 先按 TTL 删旧。
         let by_ttl = sqlx::query("DELETE FROM idmm_interventions WHERE at < ?")
@@ -854,7 +846,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_recent_is_owner_scoped_cross_target_recent_first_capped() {
-        let (repo, _db, owner) = setup().await;
+        let (repo, db, owner) = setup().await;
+        insert_user(&db, OWNER_B).await;
         // 跨多个 target 写入,at 交错。
         repo.insert(&sample_row(&owner, "conversation", CONVERSATION_A, 10))
             .await
@@ -868,8 +861,19 @@ mod tests {
         repo.insert(&sample_row(&owner, "terminal", TERMINAL_A, 30))
             .await
             .unwrap();
+        // 另一个 owner 的记录:at 最大,若查询漏了 user_id 过滤就会排在第一位。
+        // 这条读路径是 agent 能力 `nomi_idmm_get_activity` 的唯一来源,所以隔离
+        // 必须在这一层被证明。
+        repo.insert(&sample_row_for_user(
+            OWNER_B,
+            "conversation",
+            OWNER_B_CONVERSATION,
+            50,
+        ))
+        .await
+        .unwrap();
 
-        // 跨全部 target 按 at DESC:40 -> 30 -> 20 -> 10。
+        // 跨全部 target 按 at DESC:40 -> 30 -> 20 -> 10,不含别人的 50。
         let rows = repo.list_recent(&owner, 100).await.unwrap();
         let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![2, 4, 3, 1]);
@@ -878,37 +882,11 @@ mod tests {
         let capped = repo.list_recent(&owner, 2).await.unwrap();
         let ids: Vec<i64> = capped.iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![2, 4]);
-    }
 
-    #[tokio::test]
-    async fn clear_all_empties_only_the_owners_activity_and_returns_count() {
-        let (repo, db, owner) = setup().await;
-        insert_user(&db, OWNER_B).await;
-        repo.insert(&sample_row(&owner, "conversation", CONVERSATION_A, 10))
-            .await
-            .unwrap();
-        repo.insert(&sample_row(&owner, "terminal", TERMINAL_A, 20))
-            .await
-            .unwrap();
-        repo.insert(&sample_row(&owner, "conversation", CONVERSATION_B, 30))
-            .await
-            .unwrap();
-        repo.insert(&sample_row_for_user(
-            OWNER_B,
-            "conversation",
-            OWNER_B_CONVERSATION,
-            40,
-        ))
-        .await
-        .unwrap();
-
-        let removed = repo.clear_all(&owner).await.unwrap();
-        assert_eq!(removed, 3);
-
-        assert!(repo.list_recent(&owner, 100).await.unwrap().is_empty());
+        // 对方只看得见自己的那一条。
         let other = repo.list_recent(OWNER_B, 100).await.unwrap();
-        assert_eq!(other.len(), 1);
-        assert_eq!(other[0].id, 4);
+        let ids: Vec<i64> = other.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![5]);
     }
 
     #[tokio::test]

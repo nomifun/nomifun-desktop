@@ -575,15 +575,12 @@ mod tests {
             scope("nomi_channel_list_plugins"),
             AccessScope::InstanceOwner
         );
-        assert_eq!(
-            scope("nomi_idmm_get_settings"),
-            AccessScope::InstanceOwner
-        );
         assert_eq!(scope("nomi_delegate"), AccessScope::InstanceOwner);
         assert_eq!(scope("nomi_execution_get"), AccessScope::InstanceOwner);
         assert_eq!(scope("nomi_execution_update"), AccessScope::InstanceOwner);
-        // Target-scoped IDMM data is user-owned and every handler verifies the
-        // target owner; only its global settings remain installation-owned.
+        // Every IDMM capability is target-scoped and user-owned, and every
+        // handler verifies the target owner (there are no global IDMM settings
+        // for an installation owner to hold).
         assert_eq!(scope("nomi_idmm_get_log"), AccessScope::User);
         assert_eq!(scope("nomi_create_terminal"), AccessScope::InstanceOwner);
         assert_eq!(scope("nomi_terminal_get"), AccessScope::InstanceOwner);

@@ -985,7 +985,6 @@
     "goto": "前往处理",
     "desktopCompanion": "桌面伙伴",
     "customerService": "客服",
-    "smartDecision": "智能决策",
     "conversation": "会话主模型",
     "agentExecution": "协作任务"
   },
@@ -1267,11 +1266,7 @@
     "sectionVideo": "视频生成",
     "sectionEmbedding": "嵌入与检索",
     "sectionFree": "免费模型",
-    "sectionGlobal": "全局模型设置",
-    "globalConfigTip": "IDMM、旁路模型、记忆总结、伙伴对话等全局默认模型对话配置入口。",
-    "idmmTab": "IDMM 默认配置",
-    "failoverTab": "故障转移队列",
-    "activityTab": "决策活动",
+    "sectionFailover": "故障转移",
     "modality": {
       "chatTitle": "对话模型",
       "chatSubtitle": "能用来对话的模型；新会话的默认模型也在这里设。",

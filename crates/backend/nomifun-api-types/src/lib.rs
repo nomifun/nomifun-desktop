@@ -141,7 +141,7 @@ pub use file::{
 };
 pub use idmm::{
     BlockedBehavior, BudgetConfig, BypassModelRef, CategoryMode, CategoryRules, DecisionStrategy,
-    DecisionWatchConfig, FaultWatchConfig, IdmmConfig, IdmmRunState, IdmmSettings, IdmmState,
+    DecisionWatchConfig, FaultWatchConfig, IdmmConfig, IdmmRunState, IdmmState,
     IdmmTargetKind, InterventionRecord, ModelFailoverConfig, OpenQuestionRule, OptionRule,
     PermissionRule, ScanScope, SetIdmmRequest, Tendency, WakeStrategy, WatchBase, WatchTier,
 };

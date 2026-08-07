@@ -18,7 +18,6 @@ import {
 export type ProviderUsageFeature =
   | 'desktopCompanion'
   | 'customerService'
-  | 'smartDecision'
   | 'conversation'
   | 'agentExecution';
 
@@ -39,10 +38,6 @@ export function featureRoute(feature: ProviderUsageFeature, targetId?: ProviderU
       return '/nomi';
     case 'customerService':
       return targetId ? `/customer-service/` : '/customer-service';
-    case 'smartDecision':
-      // IDMM global backup model lives in Global Model Config → IDMM tab,
-      // where backup_provider_id / backup_model can be cleared to unbind.
-      return '/models?section=global';
     case 'conversation':
       return targetId ? `/conversation/${targetId}` : '/guid';
     case 'agentExecution':
@@ -74,7 +69,7 @@ export function parseProviderInUseDetails(details: unknown): ProviderUsage[] {
       const raw = item as { feature?: unknown; label?: unknown; targetId?: unknown };
       if (typeof raw.feature !== 'string' || typeof raw.label !== 'string') return [];
       const feature = raw.feature as ProviderUsageFeature;
-      if (!['desktopCompanion', 'customerService', 'smartDecision', 'conversation', 'agentExecution'].includes(feature)) {
+      if (!['desktopCompanion', 'customerService', 'conversation', 'agentExecution'].includes(feature)) {
         return [];
       }
       if (raw.targetId == null) return [{ feature, label: raw.label }];
@@ -84,7 +79,6 @@ export function parseProviderInUseDetails(details: unknown): ProviderUsage[] {
           case 'customerService': return parseCsAgentId(raw.targetId);
           case 'conversation': return parseConversationId(raw.targetId);
           case 'agentExecution': return parseExecutionId(raw.targetId);
-          case 'smartDecision': return undefined;
         }
       })();
       return [{ feature, label: raw.label, ...(targetId ? { targetId } : {}) }];
