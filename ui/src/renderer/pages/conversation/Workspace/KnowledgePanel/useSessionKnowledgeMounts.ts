@@ -6,6 +6,8 @@
 
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase, IKnowledgeBinding } from '@/common/adapter/ipcBridge';
+import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import type { KnowledgeBaseId } from '@/common/types/ids';
 import { useEffect, useMemo, useState } from 'react';
 import {
   knowledgeBindingTargetKey,
@@ -18,12 +20,23 @@ import {
  *
  * Neither the conversation nor the terminal payload carries any knowledge field
  * (see `TChatConversation.extra`, `ITerminalSession`), and there is no batch
- * "resolve these kb_ids" endpoint — so this needs `getBinding` for the ids and
- * `listBases` for their names. Both are cached module-wide with in-flight
- * de-duplication and refreshed from the knowledge WS events, mirroring
- * `SessionList/hooks/useWorkpathKnowledge.ts`: a rail entry must not cost a
- * request per re-mount, and several consumers on one screen must not multiply
- * them.
+ * "resolve these kb_ids" endpoint, so this needs `getBinding` for the ids and
+ * `listBases` for their names.
+ *
+ * Three properties matter and each cost a bug during review:
+ *
+ * 1. **The first render must already know.** The rail tab list is what
+ *    `WorkspaceRailBody` validates the persisted active tab against; if the
+ *    knowledge tab is missing on the first render it normalizes the stored key
+ *    to `files` and PERSISTS that, desyncing the rail (which keeps its own copy)
+ *    from the body. So the last known mount state is mirrored into
+ *    localStorage and read synchronously on mount.
+ * 2. **Never blank while refreshing.** Dropping the cached list on a base event
+ *    would flip `mounted` to false for a beat, which unmounts the panel and
+ *    loses its tree. Refreshes replace, they do not clear.
+ * 3. **A failed read must retry.** The fetch guards live inside the effects and
+ *    are re-armed by an attempt counter, so a transient 500 does not wedge the
+ *    entry off for the lifetime of the view.
  */
 
 const bindingCache = new Map<string, IKnowledgeBinding>();
@@ -31,117 +44,172 @@ const bindingInflight = new Set<string>();
 let basesCache: IKnowledgeBase[] | null = null;
 let basesInflight = false;
 
-const listeners = new Set<() => void>();
+/** Listeners are keyed by binding target so an unrelated binding change does not re-render every open session. */
+const listeners = new Map<string, Set<() => void>>();
+
+const notifyTarget = (targetKey: string) => listeners.get(targetKey)?.forEach((listener) => listener());
+const notifyAll = () => listeners.forEach((set) => set.forEach((listener) => listener()));
+
 let subscribed = false;
-
-const notify = () => listeners.forEach((listener) => listener());
-
 const ensureSubscribed = () => {
   if (subscribed) return;
   subscribed = true;
-  // App-lifetime module subscriptions (deliberately never unsubscribed), same
-  // shape as useWorkpathKnowledge's.
+  // App-lifetime module subscriptions, same shape as useWorkpathKnowledge's.
   ipcBridge.knowledge.onBindingChanged.on((payload) => {
     const { target_kind, target_id, ...binding } = payload;
+    const key = knowledgeBindingTargetKey({ kind: target_kind, target_id: String(target_id) });
     // The event carries the whole binding, so this is an update, not an
     // invalidation — no refetch needed.
-    bindingCache.set(knowledgeBindingTargetKey({ kind: target_kind, target_id: String(target_id) }), binding);
-    notify();
+    bindingCache.set(key, binding);
+    notifyTarget(key);
   });
-  const invalidateBases = () => {
-    basesCache = null;
-    notify();
+  const refreshBases = () => {
+    // Replace-on-success rather than clear-then-fetch: clearing would make
+    // `mounted` momentarily false and unmount the open panel.
+    void ipcBridge.knowledge.listBases
+      .invoke()
+      .then((next) => {
+        basesCache = next;
+        notifyAll();
+      })
+      .catch(() => {
+        /* keep the previous list; a later event or mount retries */
+      });
   };
-  ipcBridge.knowledge.onBaseCreated.on(invalidateBases);
-  ipcBridge.knowledge.onBaseUpdated.on(invalidateBases);
-  ipcBridge.knowledge.onBaseDeleted.on(invalidateBases);
+  ipcBridge.knowledge.onBaseCreated.on(refreshBases);
+  ipcBridge.knowledge.onBaseUpdated.on(refreshBases);
+  ipcBridge.knowledge.onBaseDeleted.on(refreshBases);
 };
 
-/** Drop every cached binding and base. Exported for tests only. */
-export function resetSessionKnowledgeCacheForTests(): void {
-  bindingCache.clear();
-  bindingInflight.clear();
-  basesCache = null;
-  basesInflight = false;
+/**
+ * Last known mounted ids per target, so the very first render of a returning
+ * session already reports the right `mounted` value. Only ids are stored — names
+ * and file counts always come from the live `listBases`.
+ */
+const seedStorageKey = (targetKey: string) => browserStorageGenerationKey(`knowledge-mounted:${targetKey}`);
+
+function readSeed(targetKey: string): KnowledgeBaseId[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(seedStorageKey(targetKey));
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed.filter((id) => typeof id === 'string') as KnowledgeBaseId[]) : [];
+  } catch {
+    return [];
+  }
 }
 
+function writeSeed(targetKey: string, ids: KnowledgeBaseId[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (ids.length === 0) localStorage.removeItem(seedStorageKey(targetKey));
+    else localStorage.setItem(seedStorageKey(targetKey), JSON.stringify(ids));
+  } catch {
+    /* private mode */
+  }
+}
+
+const mountedIdsOf = (binding: IKnowledgeBinding | undefined): KnowledgeBaseId[] =>
+  binding?.enabled ? binding.kb_ids : [];
+
 export interface SessionKnowledgeMounts {
-  /** True when the session has an enabled binding with at least one base. */
+  /**
+   * True when the session's binding is enabled with at least one base — the same
+   * rule as the session-list capability dot (`useWorkpathKnowledgeLit`).
+   *
+   * Optimistic on the first render of a known session (seeded from
+   * localStorage), then authoritative.
+   */
   mounted: boolean;
-  /** The mounted bases, in the binding's own `kb_ids` order. */
+  /** The mounted bases in the binding's own `kb_ids` order; empty until `listBases` lands. */
   bases: IKnowledgeBase[];
-  loading: boolean;
 }
 
 export function useSessionKnowledgeMounts(source: SessionKnowledgeSource | undefined): SessionKnowledgeMounts {
   const [, setTick] = useState(0);
-
-  useEffect(() => {
-    ensureSubscribed();
-    const listener = () => setTick((tick) => tick + 1);
-    listeners.add(listener);
-    return () => {
-      listeners.delete(listener);
-    };
-  }, []);
+  const [attempt, setAttempt] = useState(0);
 
   const target = useMemo(() => (source ? resolveKnowledgeBindingTarget(source) : null), [source]);
   const targetKey = target ? knowledgeBindingTargetKey(target) : null;
 
-  const binding = targetKey ? bindingCache.get(targetKey) : undefined;
-  const needsBinding = Boolean(targetKey) && binding === undefined && !(targetKey && bindingInflight.has(targetKey));
-
   useEffect(() => {
-    if (!needsBinding || !target || !targetKey) return;
+    if (!targetKey) return undefined;
+    ensureSubscribed();
+    const listener = () => setTick((tick) => tick + 1);
+    const set = listeners.get(targetKey) ?? new Set();
+    set.add(listener);
+    listeners.set(targetKey, set);
+    return () => {
+      set.delete(listener);
+      if (set.size === 0) listeners.delete(targetKey);
+    };
+  }, [targetKey]);
+
+  const binding = targetKey ? bindingCache.get(targetKey) : undefined;
+
+  // Fetch the binding. The in-flight check lives INSIDE the effect: computing it
+  // during render lets two consumers mounted in the same commit both pass it.
+  useEffect(() => {
+    if (!target || !targetKey) return;
+    if (bindingCache.has(targetKey) || bindingInflight.has(targetKey)) return;
     bindingInflight.add(targetKey);
+    let cancelled = false;
     void (async () => {
       try {
         const next = await ipcBridge.knowledge.getBinding.invoke({
           kind: target.kind,
           target_id: target.target_id,
         });
-        bindingCache.set(targetKey, next);
+        // A `binding-changed` event that landed mid-flight is newer than this
+        // response — do not clobber it.
+        if (!bindingCache.has(targetKey)) bindingCache.set(targetKey, next);
+        if (!cancelled) writeSeed(targetKey, mountedIdsOf(bindingCache.get(targetKey)));
       } catch {
-        // Transient failure: leave uncached so a later mount retries. The rail
-        // entry stays hidden meanwhile, which is the safe default.
+        // Re-arm so the next attempt tick retries instead of wedging.
+        if (!cancelled) setAttempt((n) => n + 1);
       } finally {
         bindingInflight.delete(targetKey);
-        notify();
+        notifyTarget(targetKey);
       }
     })();
-  }, [needsBinding, target, targetKey]);
+    return () => {
+      cancelled = true;
+    };
+  }, [target, targetKey, attempt]);
 
-  const mountedIds = binding?.enabled ? binding.kb_ids : [];
+  const liveIds = mountedIdsOf(binding);
+  const seedIds = useMemo(() => (targetKey ? readSeed(targetKey) : []), [targetKey, attempt]);
+  // Before the binding resolves, trust the seed; afterwards the binding wins
+  // (including when it says "nothing mounted any more").
+  const mountedIds = binding ? liveIds : seedIds;
   const hasMountedIds = mountedIds.length > 0;
-  const needsBases = hasMountedIds && basesCache === null && !basesInflight;
 
   useEffect(() => {
-    if (!needsBases) return;
+    if (!hasMountedIds) return;
+    if (basesCache !== null || basesInflight) return;
     basesInflight = true;
     void (async () => {
       try {
         basesCache = await ipcBridge.knowledge.listBases.invoke();
       } catch {
-        // Leave null so the next consumer retries.
+        setAttempt((n) => n + 1);
       } finally {
         basesInflight = false;
-        notify();
+        notifyAll();
       }
     })();
-  }, [needsBases]);
+  }, [hasMountedIds, attempt]);
 
+  const mountedKey = mountedIds.join(',');
   const bases = useMemo(() => {
     if (!hasMountedIds || basesCache === null) return [];
     const byId = new Map(basesCache.map((base) => [base.knowledge_base_id, base]));
     // Preserve the binding's order — it is the order the user picked them in.
     return mountedIds.map((id) => byId.get(id)).filter((base): base is IKnowledgeBase => Boolean(base));
-  }, [hasMountedIds, mountedIds.join(','), basesCache]);
+    // basesCache is module state; every mutation is followed by a notify() that
+    // re-renders subscribers, so its identity is a valid dep here.
+  }, [hasMountedIds, mountedKey, basesCache]);
 
-  return {
-    // Gate on the resolved bases, not just the ids: a binding that still lists a
-    // deleted base must not light up an entry that would open an empty tree.
-    mounted: bases.length > 0,
-    bases,
-    loading: (needsBinding || (hasMountedIds && basesCache === null)) && bases.length === 0,
-  };
+  return { mounted: hasMountedIds, bases };
 }

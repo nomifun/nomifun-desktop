@@ -1,8 +1,8 @@
 # 会话右栏知识库预览入口
 
 - 日期：2026-08-06
-- 状态：设计已定稿，待实施。分支 `feat/session-knowledge-rail-preview`，未推远端。
-- 影响面：`ui/src/renderer/pages/conversation/Workspace/KnowledgePanel/**`（新增）、`ui/src/renderer/pages/conversation/components/ChatConversation.tsx`、`ui/src/renderer/pages/terminal/{TerminalSessionPage,TerminalWorkspaceRail}.tsx`、`ui/src/renderer/pages/knowledge/KnowledgeDetailPage/{index.tsx,treeModel.ts}`、i18n 两语。后端零改动。
+- 状态：已实施并通过 `bun run check` + `bun test --cwd ui`，并在真实应用里驱动验证（§11）。分支 `feat/session-knowledge-rail-preview`，未推远端。
+- 影响面：`ui/src/renderer/pages/conversation/Workspace/KnowledgePanel/**`（新增）、`ui/src/renderer/pages/conversation/components/ChatConversation.tsx`、`ui/src/renderer/pages/terminal/{TerminalSessionPage,TerminalWorkspaceRail}.tsx`、i18n 两语。`KnowledgeDetailPage` 未改动（§6.2）。后端零改动。
 
 ## 1. 问题陈述
 
@@ -27,7 +27,7 @@
 - **不做编辑。** 这是预览入口。不引入 `writeFile` / `deleteFile` / `createFolder` / `renameTreeEntry`，不做右键菜单。要改知识库内容，仍去 `/knowledge` 详情页。
 - **不新增后端接口。** `getBinding` + `listBases` + `listTree` + `readFile` 已经够用（§5）。不改 `ui-api-contract-version.txt`（当前 `16`，只为 HTTP/WS 线型变更而动）。
 - **不放宽 rail 的显示门槛。** 见 §3.2。
-- **不重构 `KnowledgeDetailPage`。** 那棵树是 1573 行文件里的内联 JSX（`index.tsx:1151-1263`），无 props 接口，读 ~11 个页面 `useState` 与 8 个 handler，且有按源码文本断言的测试（`knowledgeDetailActionBar.test.ts`）。本次只上提一个纯函数（§6.1），不抽组件。
+- **不重构 `KnowledgeDetailPage`。** 那棵树是 1573 行文件里的内联 JSX（`index.tsx:1151-1263`），无 props 接口，读 ~11 个页面 `useState` 与 8 个 handler，且有按源码文本断言的测试（`knowledgeDetailActionBar.test.ts`）。本次一行都不改它，只复用 `treeModel.ts` 已导出的 `mergeKnowledgeTreeChildren`。
 - **不修 `KnowledgeControl` 的写入路径。** 它存在一处既有的绑定行解析分歧（§4.3），本次只让新面板读对，弹窗照旧，记为独立后续。
 - 不做搜索框。详情页有搜索是因为它是全库管理界面；rail 是 260px 的速查入口，先不加。
 
@@ -95,7 +95,7 @@ export function resolveKnowledgeBindingTarget(
 
 ### 4.4 联结与刷新
 
-`useSessionKnowledgeMounts(source)` 返回 `{ mounted, bases, loading, error }`：
+`useSessionKnowledgeMounts(source)` 返回 `{ mounted, bases }`：
 
 1. `resolveKnowledgeBindingTarget(source)` → `{ kind, target_id }`
 2. `ipcBridge.knowledge.getBinding.invoke({ kind, target_id })` → `kb_ids`（未命中时返回 `{enabled:false, kb_ids:[]}`，不是 404）
@@ -137,10 +137,14 @@ ui/src/renderer/pages/conversation/Workspace/KnowledgePanel/
 ├── knowledgeBindingTarget.ts       §4.1 纯函数
 ├── knowledgeBindingTarget.test.ts  三分支真值表（镜像 service.rs:13862-13932 的 Rust 单测）
 ├── useSessionKnowledgeMounts.ts    §4.4
-└── sessionKnowledgePanel.test.ts   面板契约（§8）
+├── useSessionKnowledgeTab.tsx      唯一的 tab 描述符工厂，会话与终端共用
+├── sessionKnowledgePanel.test.ts   源码契约（§8）
+└── sessionKnowledgePanelRender.test.tsx  真实 React 渲染冒烟（§8）
 ```
 
 落点理由：面板只由 `WorkspaceRailBody` 渲染，与它同目录；无文档规定跨三类会话共享的面板该放哪，此处显式定为约定。
+
+`KnowledgeDetailPage` 未改动：原计划把 `collectKnowledgeDirKeys` 上提到 `treeModel.ts` 共用，但本面板的「全部展开」只展开一层（§7.3），压根不需要收集全部目录键 —— 上提会留下一个没有第二个消费者的死导出。只复用 `treeModel.ts` 已导出的 `mergeKnowledgeTreeChildren`。
 
 **不新增 CSS 文件。** 只用 Uno 工具类与主题 token（`var(--color-text-*)` / `var(--color-border-*)` / `var(--color-fill-*)` / `rgba(var(--primary-6),…)`），规避 `check:dead-css` 的 7 类禁用写法与主题双属性陷阱（浅深色同时跨 `html[data-theme]` 与 `body[arco-theme]`，`hooks/system/useTheme.ts:11-14`）。
 
@@ -148,8 +152,7 @@ ui/src/renderer/pages/conversation/Workspace/KnowledgePanel/
 
 | 文件 | 改动 |
 |---|---|
-| `KnowledgeDetailPage/treeModel.ts` | 上提并导出 `collectKnowledgeDirKeys`（现为 `index.tsx:100-111` 的模块私有函数） |
-| `KnowledgeDetailPage/index.tsx` | 删除本地定义，改为 import；注意 `knowledgeDetailActionBar.test.ts` 按源码文本断言，需同步核对 |
+| `KnowledgeDetailPage/**` | **不改。** 见下方说明 |
 | `ChatConversation.tsx` | 目前有**两份**独立的 `workspaceExtraTabs`（`:209-218` 与 `:633-646`），抽成 `hooks/useWorkspaceExtraTabs.ts` 供两处共用 |
 | `TerminalWorkspaceRail.tsx` | props 与 `WorkspaceSource` 增加 `extraTabs` 透传（今天完全没有这个通道） |
 | `TerminalSessionPage.tsx` | 构造 extraTabs 并传给 `WorkspaceToolRail`（`:208-226`，今天不传）与 `TerminalWorkspaceRail`；把 `:196-200` 硬编码的两路标题三元改成与 `ChatLayout/index.tsx:136-141` 相同的通用查找 |
@@ -203,11 +206,13 @@ ui/src/renderer/pages/conversation/Workspace/KnowledgePanel/
 
 单击文件 → `readFile({ knowledge_base_id, path })` → `openPreview(content, 'markdown', meta)`。`meta` 沿用 `useWorkspaceFileOps.ts:300-350` 的形状，其中：
 
-- `file_path` 用 `${base.root_path}/${relPath}` —— **必须是绝对路径**，正文里的本地图片才能解析
+- `file_path` 用 `${base.root_path}/${relPath}`（绝对路径），`workspace` 用 `base.root_path`，与工作区文件预览的元数据形状一致。注：`components/Markdown` 并不消费这两个字段，所以正文内本地图片能否解析不由它们决定 —— 传绝对路径是为了「下载 / 用系统应用打开」这些既有动作有正确的落点
 - `editable: false`
 - `title` 用 `${base.name} / ${叶子名}`
 
-树常驻可见，可连续点多个文件对比（预览列自带标签页与同文件去重）。
+预览列自带标签页与同文件去重，所以可以连续点多个文档、在标签间来回对比。
+
+**注意一个继承来的布局行为**：预览列打开时，工作区侧栏会被压到 0 宽，所以点开文档的那一刻知识库树会消失（要看树就再点一次 rail 上的知识库 icon）。这不是本面板特有的 —— 实测「工作区文件」tab 点开一个 `.md` 时侧栏同样从 220px 收到 0（`.layout-sider` 185 → 1）。本次不改这个共享行为，只在此记录，以免把它当成新增缺陷。
 
 **树里天然只有 markdown。** 后端 `list_tree_level` 仅在 `is_md()` 为真时产出文件节点（`crates/backend/nomifun-knowledge/src/service.rs:5935`，`is_md` = 扩展名 `md`，`:5081-5085`），图片 / PDF / 代码不可能成为节点。所以预览类型恒为 `'markdown'`，不需要 MIME 分支。
 
@@ -217,7 +222,7 @@ ui/src/renderer/pages/conversation/Workspace/KnowledgePanel/
 |---|---|---|
 | 源目录不存在 | `base.root_exists === false` | 复用 `knowledge.mount.rootMissing`「目录不可用」+ `rootMissingHint` |
 | 某库无可预览文档 | `listTree` 返回空数组 | **中性**："没有可预览的文档"。不可写成"这个知识库是空的" |
-| 读文件失败 | `readFile` 抛错 | 一次 `Message.error`，不影响树 |
+| 读文件失败 | `readFile` 抛错 | 一次 `Message.error(knowledgeErrorText(e))`（复用 `useKnowledge.ts:141` 的格式化，直接 `String(e)` 会把方法/路径/JSON body 甩给用户），不影响树 |
 
 第二条的中性措辞是必需的：`list_files` / `list_tree` 在 6 秒遍历预算耗尽时**静默返回空数组**（`nomifun-knowledge/src/service.rs:1272-1302`），"真的空"与"慢盘/网络盘超时"在响应上不可区分。断言"是空的"会说谎。
 
@@ -254,11 +259,9 @@ ui/src/renderer/pages/conversation/Workspace/KnowledgePanel/
 | 测试 | 断言 |
 |---|---|
 | `knowledgeBindingTarget.test.ts` | 三分支真值表：`companion_id` 优先于 `preset_knowledge_binding` 优先于 workpath；终端走 `workpathKeyForTerminal`；镜像 `service.rs:13862-13932` 的 Rust 用例 |
-| `knowledgeTreeModel.test.ts`（补充） | 上提后的 `collectKnowledgeDirKeys`：只收目录、递归、跳过文件 |
 | `sessionKnowledgePanel.test.ts`（新增，源码契约） | ① 可见判定含 `enabled` 与 `kb_ids.length` 双条件；② 树键带 `${kb_id}::` 前缀；③「全部展开」只置根键、不递归（源码内不得出现递归 `listTree`）；④ 只读 —— 源码不得 import `writeFile` / `deleteFile` / `createFolder` / `renameTreeEntry`；⑤ 空态文案不含"空的"式断言 |
 | `ChatConversation` 契约（新增或并入既有） | 两处 extraTabs 来自同一个 `useWorkspaceExtraTabs`，防止再次分叉 |
 | `TerminalSessionPage.structure.test.ts`（更新） | `:22-27` 断言 `className='!bg-1 relative layout-sider'` 紧邻 `<WorkspaceToolRail`，加 `extraTabs` 后需同步 |
-| `knowledgeDetailActionBar.test.ts`（核对） | 按源码文本断言，`collectKnowledgeDirKeys` 上提后需确认未破坏 |
 
 ## 9. 门禁与陷阱
 

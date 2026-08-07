@@ -31,7 +31,12 @@ export type SessionKnowledgeSource =
       session: Pick<ITerminalSession, 'cwd' | 'is_default_workpath'>;
     };
 
-export interface KnowledgeBindingTarget {
+/**
+ * A resolved binding row address. Named distinctly from `ipcBridge`'s
+ * `KnowledgeBindingTarget` (which carries branded ids per kind) because this is
+ * the widened, already-resolved form the read path passes around.
+ */
+export interface ResolvedKnowledgeBindingTarget {
   kind: KnowledgeBindingKind;
   target_id: string;
 }
@@ -52,7 +57,7 @@ export interface KnowledgeBindingTarget {
  * Branch 2 is the one `KnowledgeControl`'s inline memo is missing, which is why
  * this lives in its own tested function instead of being copied again.
  */
-export function resolveKnowledgeBindingTarget(source: SessionKnowledgeSource): KnowledgeBindingTarget {
+export function resolveKnowledgeBindingTarget(source: SessionKnowledgeSource): ResolvedKnowledgeBindingTarget {
   if (source.kind === 'terminal') {
     return { kind: 'workpath', target_id: workpathKeyForTerminal(source.session) };
   }
@@ -72,6 +77,6 @@ export function resolveKnowledgeBindingTarget(source: SessionKnowledgeSource): K
 }
 
 /** Stable cache/subscription key for a resolved target. */
-export function knowledgeBindingTargetKey(target: KnowledgeBindingTarget): string {
+export function knowledgeBindingTargetKey(target: ResolvedKnowledgeBindingTarget): string {
   return `${target.kind}:${target.target_id}`;
 }

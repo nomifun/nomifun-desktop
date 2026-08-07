@@ -29,10 +29,58 @@ const read = (relative: string): string =>
 
 const panel = read('./index.tsx');
 const mounts = read('./useSessionKnowledgeMounts.ts');
+const tabFactory = read('./useSessionKnowledgeTab.tsx');
 const extraTabs = read('../../hooks/useWorkspaceExtraTabs.tsx');
 const chatConversation = read('../../components/ChatConversation.tsx');
 const terminalPage = read('../../../terminal/TerminalSessionPage.tsx');
 const terminalRail = read('../../../terminal/TerminalWorkspaceRail.tsx');
+
+describe('the async resolve window cannot desync the rail from the body', () => {
+  test('the last known mount state is seeded synchronously from storage', () => {
+    // WorkspaceRailBody validates the persisted active tab against the tab list
+    // and PERSISTS its fallback. If the knowledge tab is missing on the first
+    // render, the user's stored `session-knowledge` selection is rewritten to
+    // `files` while the rail keeps its own copy — icon active, file tree shown.
+    expect(mounts.includes('function readSeed(')).toBe(true);
+    expect(mounts.includes('function writeSeed(')).toBe(true);
+    expect(mounts.includes('const mountedIds = binding ? liveIds : seedIds;')).toBe(true);
+  });
+
+  test('a refresh never blanks the cached list', () => {
+    // Clearing basesCache would flip `mounted` false for a beat, unmounting the
+    // open panel and losing its tree.
+    expect(mounts.includes('basesCache = null')).toBe(false);
+    expect(mounts.includes('const refreshBases = ')).toBe(true);
+  });
+
+  test('a failed read is re-armed instead of wedging the entry off', () => {
+    expect(mounts.includes('setAttempt((n) => n + 1)')).toBe(true);
+    expect(mounts.includes('attempt]')).toBe(true);
+  });
+
+  test('the in-flight guard is inside the effect, not computed during render', () => {
+    // Computed during render, two consumers mounted in the same commit both
+    // pass it and both fire the request.
+    expect(mounts.includes('if (bindingCache.has(targetKey) || bindingInflight.has(targetKey)) return;')).toBe(
+      true
+    );
+    expect(mounts.includes('if (basesCache !== null || basesInflight) return;')).toBe(true);
+  });
+
+  test('binding events only re-render the sessions that share that target', () => {
+    expect(mounts.includes('const notifyTarget =')).toBe(true);
+    expect(mounts.includes('notifyTarget(key)')).toBe(true);
+  });
+});
+
+describe('stale per-base state is pruned', () => {
+  test('unmounting a base drops its cached level, expansion and selection', () => {
+    expect(panel.includes('const live = new Set<string>(bases.map((base) => base.knowledge_base_id));')).toBe(
+      true
+    );
+    expect(panel.includes('belongsToLiveBase')).toBe(true);
+  });
+});
 
 describe('session knowledge panel is a preview, not an editor', () => {
   test('imports none of the knowledge mutation calls', () => {
@@ -70,11 +118,20 @@ describe('tree keys are scoped per knowledge base', () => {
 });
 
 describe('expand-all is one level per root, not a recursive crawl', () => {
-  test('fans out exactly once per mounted base', () => {
-    expect(panel.includes('readableBases.map(')).toBe(true);
-    expect(panel.includes('setExpandedKeys(readableBases.map((base) => rootKeyOf(base.knowledge_base_id)))')).toBe(
+  test('fans out at most once per mounted base and tolerates a partial failure', () => {
+    expect(panel.includes('Promise.allSettled(')).toBe(true);
+    expect(panel.includes('Promise.all(')).toBe(false);
+    // Already-loaded levels are not re-listed.
+    expect(panel.includes('readableBases.filter((base) => !loadedRef.current[base.knowledge_base_id])')).toBe(
       true
     );
+    expect(panel.includes('setExpandedKeys(expandable.map((base) => rootKeyOf(base.knowledge_base_id)))')).toBe(
+      true
+    );
+  });
+
+  test('the first-open latch is only set once the expansion actually succeeded', () => {
+    expect(panel.includes('if (ok) autoExpandedRef.current = true;')).toBe(true);
   });
 
   test('does not reuse the detail page recursive expander', () => {
@@ -121,10 +178,19 @@ describe('registration covers every session kind', () => {
     expect(chatConversation.includes("key: 'conversation-terminals'")).toBe(false);
   });
 
-  test('the helper contributes knowledge only when something is mounted', () => {
-    expect(extraTabs.includes('if (knowledgeMounted) {')).toBe(true);
-    expect(extraTabs.includes('SESSION_KNOWLEDGE_TAB_KEY')).toBe(true);
-    expect(extraTabs.includes('<BookOne size={18} />')).toBe(true);
+  test('the knowledge entry is built in exactly one place for both surfaces', () => {
+    // The descriptor used to be hand-copied into TerminalSessionPage, which is
+    // the same two-copies divergence useWorkspaceExtraTabs was extracted to kill.
+    expect(tabFactory.includes('if (!mounted) return [];')).toBe(true);
+    expect(tabFactory.includes('SESSION_KNOWLEDGE_TAB_KEY')).toBe(true);
+    expect(tabFactory.includes('<BookOne size={18} />')).toBe(true);
+    expect(extraTabs.includes('useSessionKnowledgeTab(')).toBe(true);
+    expect(terminalPage.includes('useSessionKnowledgeTab(')).toBe(true);
+    // Neither host rebuilds the descriptor itself.
+    for (const host of [extraTabs, terminalPage]) {
+      expect(host.includes('SESSION_KNOWLEDGE_TAB_KEY,')).toBe(false);
+      expect(host.includes('<BookOne')).toBe(false);
+    }
   });
 
   test('the terminal surface now has an extraTabs channel on both consumers', () => {
@@ -161,7 +227,10 @@ describe('empty and unavailable states stay honest', () => {
     expect(panel.includes('knowledge.mount.rootMissing')).toBe(true);
   });
 
-  test('a failed read reports without tearing down the tree', () => {
-    expect(panel.includes('Message.error(String(error))')).toBe(true);
+  test('a failed read reports through the repo formatter without tearing down the tree', () => {
+    // knowledgeErrorText surfaces the backend message; String(error) would dump
+    // the method, path and JSON body at the user.
+    expect(panel.includes('Message.error(knowledgeErrorText(')).toBe(true);
+    expect(panel.includes('Message.error(String(')).toBe(false);
   });
 });
