@@ -85,6 +85,7 @@ import type { AcpModelInfo } from '../types/platform/acpTypes';
 import {
   fromProviderResponse,
   toCreateProviderRequest,
+  toUpdateProviderRequest,
   type CreateProviderInput,
   type FetchModelsAnonymousRequest,
   type FetchModelsResponse,
@@ -1323,16 +1324,11 @@ export const mode = {
   ),
   updateProvider: withResponseMap(httpPut<ProviderResponse, { provider_id: ProviderId } & UpdateProviderRequest>(
     (p) => `/api/providers/${p.provider_id}`,
-    (p) => {
-      // Call sites read-modify-write whole `IProvider` records into this body
-      // (`const { id, ...body } = provider`). `models_detail` is a
-      // response-only projection (`ProviderResponse.models_detail` →
-      // `IProvider.models_detail`); the deny_unknown_fields backend update
-      // contract must never see it.
-      const { provider_id: _provider_id, models_detail: _modelsDetail, ...body } =
-        p as typeof p & { models_detail?: unknown };
-      return body;
-    }
+    // Call sites may derive this object from a whole renderer record or form.
+    // Serialize only the strict UpdateProviderRequest contract: response-only
+    // (`models_detail`) and form-only (`model`, Bedrock helper) fields must not
+    // reach the backend's deny_unknown_fields DTO.
+    toUpdateProviderRequest
   ), fromProviderResponse),
   deleteProvider: httpDelete<void, { provider_id: ProviderId }>(
     (p) => `/api/providers/${p.provider_id}`
