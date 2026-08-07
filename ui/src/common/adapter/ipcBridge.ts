@@ -4074,12 +4074,6 @@ export interface IIdmmIntervention {
   bypass_model?: string;
 }
 
-export interface IIdmmSettings {
-  backup_provider_id?: ProviderId;
-  backup_model?: string;
-  default_steering_prompt: string;
-}
-
 const parseIdmmTargetId = (kind: IdmmTargetKind, value: unknown): SessionCapabilityTargetId =>
   kind === 'conversation' ? parseConversationId(value) : parseTerminalId(value);
 
@@ -4117,13 +4111,6 @@ const fromApiIdmmIntervention = (record: IIdmmIntervention): IIdmmIntervention =
   target_id: parseIdmmTargetId(record.target_kind, record.target_id),
 });
 
-const fromApiIdmmSettings = (settings: IIdmmSettings): IIdmmSettings => ({
-  ...settings,
-  ...(settings.backup_provider_id == null
-    ? {}
-    : { backup_provider_id: parseProviderId(settings.backup_provider_id) }),
-});
-
 export const idmm = {
   set: withResponseMap(httpPost<IIdmmState, IIdmmSetParams>('/api/idmm'), fromApiIdmmState),
   getStatus: withResponseMap(httpGet<IIdmmState, { kind: IdmmTargetKind; target_id: SessionCapabilityTargetId }>(
@@ -4139,15 +4126,6 @@ export const idmm = {
   clearLog: httpDelete<void, { kind: IdmmTargetKind; target_id: SessionCapabilityTargetId }>(
     (p) => `/api/idmm/${p.kind}/${p.target_id}/log`
   ),
-  /** Cross-session recent interventions for the global activity overview
-   * (most-recent-first, across all targets; honours the same aggressive
-   * eviction the per-target records do). */
-  getActivity: withResponseMap(httpGet<IIdmmIntervention[], { limit?: number }>(
-    (p) => `/api/idmm/activity${p.limit ? `?limit=${p.limit}` : ''}`
-  ), (records) => records.map(fromApiIdmmIntervention)),
-  clearActivity: httpDelete<void, void>('/api/idmm/activity'),
-  getSettings: withResponseMap(httpGet<IIdmmSettings, void>('/api/idmm/settings'), fromApiIdmmSettings),
-  updateSettings: withResponseMap(httpPut<IIdmmSettings, IIdmmSettings>('/api/idmm/settings'), fromApiIdmmSettings),
   onStatus: wsMappedEmitter<IIdmmState>('idmm.statusChanged', fromApiIdmmState),
   onIntervention: wsMappedEmitter<IIdmmIntervention>('idmm.intervention', fromApiIdmmIntervention),
 };
@@ -4155,8 +4133,7 @@ export const idmm = {
 // ── Phase-3 model failover queue (mirrors `ModelFailoverConfig`, plan D1/D8). ──
 // A global, ordered list of provider+model candidates the conversation send-loop
 // falls back through when a NOMI session hits a pre-response provider fault. Read
-// & written through the `agent.model_failover` client preference (one JSON blob),
-// the same idmm-settings-style channel as `idmm.getSettings`/`updateSettings`.
+// & written through the `agent.model_failover` client preference (one JSON blob).
 
 /** One ordered candidate in the failover queue. */
 export interface IModelFailoverCandidate {

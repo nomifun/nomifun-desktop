@@ -65,9 +65,18 @@ const ModelPicker: React.FC<ModelPickerProps> = ({ mode, providerId, model, onCh
     setOpen(false);
   };
 
+  // 每种生成模式都有自己的模型管理分区，直接送到对的那一栏；text 没有专属分区，
+  // 落到供应商与密钥（那里才是加模型的地方）。
+  const MODEL_HUB_SECTION: Record<GenMode, string> = {
+    text: 'models',
+    image: 'image',
+    video: 'video',
+    tts: 'tts',
+  };
+
   const goToModelHub = (): void => {
     setOpen(false);
-    navigate(mode === 'text' ? '/models?section=models' : '/models?section=creation');
+    navigate(`/models?section=${MODEL_HUB_SECTION[mode]}`);
   };
 
   return (

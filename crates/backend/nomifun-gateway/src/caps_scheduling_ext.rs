@@ -20,7 +20,7 @@ use crate::caps_idmm::{
     parse_target_id as parse_idmm_target_id, verify_target as verify_idmm_target,
 };
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::id_schema::{CanonicalEntityId, ModelRefParam, SessionTargetKind};
+use crate::id_schema::{CanonicalEntityId, SessionTargetKind};
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::ok;
 
@@ -204,26 +204,6 @@ struct IdmmInterveneParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct IdmmGetSettingsParams {
-    // No parameters — global settings.
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct IdmmSetSettingsParams {
-    /// Backup provider/model pair. Omit to leave unchanged.
-    #[serde(default)]
-    backup_model: Option<ModelRefParam>,
-    /// Explicitly clear the backup pair.
-    #[serde(default)]
-    clear_backup_model: bool,
-    /// Default steering prompt injected into new IDMM supervision configs.
-    #[serde(default)]
-    default_steering_prompt: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct IdmmClearLogParams {
     /// Target kind: "conversation" or "terminal".
     kind: SessionTargetKind,
@@ -287,40 +267,6 @@ async fn idmm_intervene(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmIntervene
                 Err(e) => json!({"error": e.to_string()}),
             }
         }
-        Err(e) => json!({"error": e.to_string()}),
-    }
-}
-
-async fn idmm_get_settings(deps: Arc<GatewayDeps>, _p: IdmmGetSettingsParams) -> Value {
-    match deps.idmm_service.get_settings().await {
-        Ok(settings) => ok(settings),
-        Err(e) => json!({"error": e.to_string()}),
-    }
-}
-
-async fn idmm_set_settings(deps: Arc<GatewayDeps>, p: IdmmSetSettingsParams) -> Value {
-    // Read current settings and overlay provided fields (same partial-update
-    // semantics as the REST route).
-    let mut settings = match deps.idmm_service.get_settings().await {
-        Ok(s) => s,
-        Err(e) => return json!({"error": e.to_string()}),
-    };
-    if p.clear_backup_model && p.backup_model.is_some() {
-        return json!({"error":"backup_model and clear_backup_model cannot both be set"});
-    }
-    if p.clear_backup_model {
-        settings.backup_provider_id = None;
-        settings.backup_model = None;
-    } else if let Some(backup) = p.backup_model {
-        settings.backup_provider_id = Some(backup.provider_id.into_string());
-        settings.backup_model = Some(backup.model);
-    }
-    if let Some(prompt) = p.default_steering_prompt {
-        settings.default_steering_prompt = prompt;
-    }
-
-    match deps.idmm_service.set_settings(&settings).await {
-        Ok(()) => ok(settings),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
@@ -432,26 +378,6 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             DangerTier::Write,
         ),
         idmm_intervene,
-    ));
-    out.push(Capability::new::<IdmmGetSettingsParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_idmm_get_settings",
-            "idmm",
-            "Read global IDMM settings (backup provider/model, default steering prompt).",
-            DangerTier::Read,
-        )
-        .instance_owner(),
-        |deps, _ctx, p| idmm_get_settings(deps, p),
-    ));
-    out.push(Capability::new::<IdmmSetSettingsParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_idmm_set_settings",
-            "idmm",
-            "Update global IDMM settings (backup provider/model, default steering prompt). Partial update: omitted fields keep their current value.",
-            DangerTier::Sensitive,
-        )
-        .instance_owner(),
-        |deps, _ctx, p| idmm_set_settings(deps, p),
     ));
     out.push(Capability::new::<IdmmClearLogParams, _, _>(
         CapabilityMeta::new(

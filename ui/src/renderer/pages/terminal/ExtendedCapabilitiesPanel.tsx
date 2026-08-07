@@ -144,7 +144,7 @@ const ExtendedCapabilitiesPanel: React.FC<ExtendedCapabilitiesPanelProps> = ({
             </div>
             <div className='shrink-0'>
               <IdmmControl
-                draft={{ value: idmm, onChange: onIdmmChange }}
+                draft={{ value: idmm, onChange: onIdmmChange, kind: 'terminal' }}
                 applyNote={t('terminal.extended.idmmApplyNote', {
                   defaultValue: '创建终端后立即生效，可在终端内继续调整。',
                 })}

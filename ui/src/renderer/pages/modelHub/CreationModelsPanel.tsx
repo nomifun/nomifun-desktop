@@ -4,15 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import classNames from 'classnames';
 import { Button, Tag } from '@arco-design/web-react';
-import { LinkCloud, MagicWand, Pic, Platte, VideoTwo } from '@icon-park/react';
+import { LinkCloud, MagicWand, Pic, VideoTwo } from '@icon-park/react';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
-import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
+import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 import {
   type CreationCapability,
   filterCreationModels,
@@ -20,7 +20,12 @@ import {
   useCreationModels,
 } from './creationModels';
 
-type Filter = 'all' | CreationCapability;
+export interface CreationModelsPanelProps {
+  /** The one generation capability this section lists. */
+  capability: CreationCapability;
+  titleKey: I18nKey;
+  subtitleKey: I18nKey;
+}
 
 /** Per-capability visual language (chip icon + accent), consistent light/dark. */
 const CAP_META: Record<CreationCapability, { icon: React.ReactNode; color: string }> = {
@@ -28,56 +33,41 @@ const CAP_META: Record<CreationCapability, { icon: React.ReactNode; color: strin
   video_generation: { icon: <VideoTwo theme='outline' size='12' strokeWidth={3} />, color: 'purple' },
 };
 
+const CAP_HEADER_ICON: Record<CreationCapability, React.ReactNode> = {
+  image_generation: <Pic theme='outline' size='18' strokeWidth={3} />,
+  video_generation: <VideoTwo theme='outline' size='18' strokeWidth={3} />,
+};
+
+const CAP_LABEL_KEY: Record<CreationCapability, I18nKey> = {
+  image_generation: 'settings.modelHub.creation.capImage',
+  video_generation: 'settings.modelHub.creation.capVideo',
+};
+
 /**
- * CreationModelsContent — the 创作模型 (Creative Workshop) section of Model
- * Management. Surfaces the generation-capable models across configured
- * providers, grouped by provider and filterable by capability
- * (image / video generation). Capability comes from the authoritative catalog
+ * One generation capability's section of Model Management (图像生成 / 视频生成).
+ * Lists the models that can produce that medium across configured providers,
+ * grouped by provider. Capability comes from the authoritative catalog
  * resolution (per-model task tags; `image_edit` folds into image generation) —
- * the page is a read-only view; tagging lives on the model management page.
+ * this is a read-only view, tagging lives on the 供应商与密钥 page.
  *
- * Visual language mirrors `ModelModalContent`: header + info banner + grouped
- * cards; no layout departure.
+ * A row is tagged only with the OTHER capabilities it also carries: the section
+ * already states the capability every row shares, so repeating it on each row is
+ * noise, while "this image model also does video" is not.
  */
-const CreationModelsContent: React.FC = () => {
+const CreationModelsPanel: React.FC<CreationModelsPanelProps> = ({
+  capability,
+  titleKey,
+  subtitleKey,
+}) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { data } = useProvidersQuery();
   const { entries } = useCreationModels();
-  const [filter, setFilter] = useState<Filter>('all');
-
-  const capabilityLabel = (cap: CreationCapability): string =>
-    cap === 'image_generation'
-      ? t('settings.modelHub.creation.capImage')
-      : t('settings.modelHub.creation.capVideo');
-
-  const counts = useMemo(
-    () => ({
-      all: entries.length,
-      image_generation: filterCreationModels(entries, 'image_generation').length,
-      video_generation: filterCreationModels(entries, 'video_generation').length,
-    }),
-    [entries]
-  );
 
   const groups = useMemo(
-    () => groupCreationModelsByProvider(filterCreationModels(entries, filter === 'all' ? undefined : filter)),
-    [entries, filter]
+    () => groupCreationModelsByProvider(filterCreationModels(entries, capability)),
+    [entries, capability]
   );
-
-  const filterItems: SegmentedTabItem[] = [
-    { key: 'all', label: `${t('settings.modelHub.creation.filterAll')} (${counts.all})` },
-    {
-      key: 'image_generation',
-      label: `${t('settings.modelHub.creation.filterImage')} (${counts.image_generation})`,
-      icon: <Pic theme='outline' size='14' strokeWidth={3} />,
-    },
-    {
-      key: 'video_generation',
-      label: `${t('settings.modelHub.creation.filterVideo')} (${counts.video_generation})`,
-      icon: <VideoTwo theme='outline' size='14' strokeWidth={3} />,
-    },
-  ];
 
   const providersWithModels = (data ?? []).filter((p) => p.enabled !== false && (p.models ?? []).length > 0).length;
 
@@ -85,14 +75,13 @@ const CreationModelsContent: React.FC = () => {
     <div className='flex flex-col bg-2 rd-16px px-24px py-16px'>
       {/* Header */}
       <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
-        <div className='flex items-center gap-8px'>
-          <span className='size-28px flex items-center justify-center rd-8px bg-primary-1 text-primary-6 shrink-0'>
-            <Platte theme='outline' size='18' strokeWidth={3} />
+        <div className='flex items-center gap-9px'>
+          <span className='size-30px flex items-center justify-center rd-9px bg-primary-1 text-primary-6 shrink-0'>
+            {CAP_HEADER_ICON[capability]}
           </span>
           <div className='min-w-0'>
-            <div className='text-20px font-600 text-t-primary leading-28px'>
-              {t('settings.modelHub.creation.title')}
-            </div>
+            <h2 className='m-0 text-20px font-650 leading-28px text-t-primary'>{t(titleKey)}</h2>
+            <p className='m-0 mt-2px text-12px leading-18px text-t-secondary'>{t(subtitleKey)}</p>
           </div>
         </div>
         {/* Capability comes from per-model task tags; link to where they are edited. */}
@@ -114,7 +103,6 @@ const CreationModelsContent: React.FC = () => {
             {t('settings.modelHub.creation.manageModels')}
           </Button>
         </div>
-        <SegmentedTabs items={filterItems} activeKey={filter} onChange={(k) => setFilter(k as Filter)} size='sm' />
       </div>
 
       {/* Content */}
@@ -161,11 +149,13 @@ const CreationModelsContent: React.FC = () => {
                         {entry.model}
                       </span>
                       <div className='flex items-center gap-6px shrink-0'>
-                        {entry.capabilities.map((cap) => (
-                          <Tag key={cap} size='small' color={CAP_META[cap].color} icon={CAP_META[cap].icon}>
-                            {capabilityLabel(cap)}
-                          </Tag>
-                        ))}
+                        {entry.capabilities
+                          .filter((cap) => cap !== capability)
+                          .map((cap) => (
+                            <Tag key={cap} size='small' color={CAP_META[cap].color} icon={CAP_META[cap].icon}>
+                              {t(CAP_LABEL_KEY[cap])}
+                            </Tag>
+                          ))}
                       </div>
                     </div>
                   ))}
@@ -179,4 +169,4 @@ const CreationModelsContent: React.FC = () => {
   );
 };
 
-export default CreationModelsContent;
+export default CreationModelsPanel;
