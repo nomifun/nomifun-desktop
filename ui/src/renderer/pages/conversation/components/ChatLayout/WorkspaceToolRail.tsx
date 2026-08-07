@@ -11,6 +11,13 @@ import { Branch, Change, ChartHistogram, FolderOpen } from '@icon-park/react';
 import classNames from 'classnames';
 import type { TFunction } from 'i18next';
 import React from 'react';
+// Every `.workspace-tool-rail*` rule lives in this stylesheet. It used to be
+// imported only by ChatLayout, so the terminal page — which renders this rail
+// without ever loading ChatLayout, in its own React.lazy chunk — showed an
+// unstyled rail: horizontal buttons with the labels that should be
+// visually-hidden. Importing it here means every consumer of the rail gets the
+// rules that describe it.
+import './chat-layout.css';
 
 export const WORKSPACE_PANEL_TAB_EVENT = 'nomifun-workspace-panel-tab';
 export const WORKSPACE_PANEL_META_EVENT = 'nomifun-workspace-panel-meta';

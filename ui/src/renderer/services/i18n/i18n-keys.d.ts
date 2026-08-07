@@ -1772,6 +1772,7 @@ export type I18nKey =
   | 'knowledge.searchChip.searching'
   | 'knowledge.searchPlaceholder'
   | 'knowledge.selectFile'
+  | 'knowledge.session.noDocs'
   | 'knowledge.source.fetchFailedTitle'
   | 'knowledge.source.fetchSummary'
   | 'knowledge.source.lastFetched'
