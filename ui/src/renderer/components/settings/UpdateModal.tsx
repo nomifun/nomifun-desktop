@@ -6,7 +6,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Progress, Message } from '@arco-design/web-react';
-import { CheckOne, Download, FolderOpen, Refresh, CloseOne, Install } from '@icon-park/react';
+import { CheckOne, Download, FolderOpen, Install } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import MarkdownView from '@/renderer/components/Markdown';
@@ -20,6 +20,7 @@ import { useTranslation } from 'react-i18next';
 import { getUpdateErrorMessageKey } from './updateErrorMessage';
 import { deriveUpdateStatus, shouldApplyDownloadEvent } from './deriveUpdateStatus';
 import { reportNoUpdateAvailable, reportUpdateAvailable } from '@renderer/hooks/system/useUpdateAvailability';
+import './UpdateModal.css';
 
 type UpdateStatus =
   | 'checking'
@@ -35,6 +36,8 @@ type UpdateInfo = UpdateReleaseInfo;
 
 const BAIDU_RELEASE_MIRROR_URL = 'https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA';
 const PRODUCT_WEBSITE_URL = 'https://www.nomifun.com';
+const PRODUCT_CONTACT_URL = 'https://www.nomifun.com/contact';
+const GITHUB_ISSUES_PAGE = 'https://github.com/nomifun/nomifun-tauri/issues';
 const GITHUB_RELEASES_PAGE = 'https://github.com/nomifun/nomifun-tauri/releases/latest';
 
 const UpdateModal: React.FC = () => {
@@ -97,6 +100,18 @@ const UpdateModal: React.FC = () => {
   const openProductWebsite = () => {
     void ipcBridge.shell.openExternal.invoke(PRODUCT_WEBSITE_URL).catch((error) => {
       console.error('Failed to open product website:', error);
+    });
+  };
+
+  const openProductContact = () => {
+    void ipcBridge.shell.openExternal.invoke(PRODUCT_CONTACT_URL).catch((error) => {
+      console.error('Failed to open product contact page:', error);
+    });
+  };
+
+  const openGitHubIssues = () => {
+    void ipcBridge.shell.openExternal.invoke(GITHUB_ISSUES_PAGE).catch((error) => {
+      console.error('Failed to open GitHub issues:', error);
     });
   };
 
@@ -445,6 +460,16 @@ const UpdateModal: React.FC = () => {
     </Button>
   );
 
+  /* 同方向的 border-t-solid：无方向的 border-solid 会给四边都上样式，另外三边没有
+     宽度类会回落到 medium≈3px。bg-fill-1/60 也是死写法（bg-fill-N 规则以 $ 锚定，
+     斜杠透明度让它一条都匹配不上），改用 color-mix 拿到同样的 60% 填充。
+     Same-direction style + a fill that actually compiles: `bg-fill-1/60` matched
+     no rule at all, so this strip had no background of any kind.
+     注意 updateDisclaimer.test.ts 用正则要求类名字符串紧跟在括号后面。 */
+  const disclaimer = renderDisclaimer(
+    'shrink-0 border-t border-t-solid border-[rgba(var(--warning-6),0.18)] bg-[color-mix(in_srgb,var(--color-fill-1)_60%,transparent)] px-20px py-8px text-left update-modal__disclaimer'
+  );
+
   const renderContent = () => {
     switch (status) {
       case 'checking':
@@ -479,83 +504,84 @@ const UpdateModal: React.FC = () => {
 
       case 'available':
         return (
-          <div className='flex flex-col h-full'>
-            {/* Version info header */}
-            <div className='flex items-center justify-between px-24px py-16px border-b border-b-solid border-arco-2 bg-fill-1'>
-              <div className='flex items-center gap-12px'>
-                <div className='w-40px h-40px bg-[rgba(var(--primary-6),0.12)] rounded-10px flex items-center justify-center'>
-                  <Download size='20' fill='rgb(var(--primary-6))' />
+          <div className='flex h-full min-h-0 flex-col'>
+            <div className='update-modal__available'>
+              <div className='update-modal__metadata'>
+                <div className='update-modal__meta-row'>
+                  <span className='update-modal__meta-label'>{t('update.versionLabel')}</span>
+                  <strong>{updateInfo?.version || autoUpdateInfo?.version || '-'}</strong>
                 </div>
-                <div>
-                  <div className='text-15px font-600 text-t-primary'>{t('update.availableTitle')}</div>
-                  <div className='text-12px text-t-tertiary mt-2px'>
-                    {currentVersion} →{' '}
-                    <span className='text-primary-6 font-500'>
-                      {updateInfo?.version || autoUpdateInfo?.version}
-                    </span>
+                <div className='update-modal__meta-row'>
+                  <span className='update-modal__meta-label'>{t('update.sizeLabel')}</span>
+                  <span>
+                    {updateInfo?.recommendedAsset?.size ? formatSize(updateInfo.recommendedAsset.size) : '-'}
+                  </span>
+                </div>
+                <div className='update-modal__details-label'>{t('update.detailsLabel')}</div>
+              </div>
+
+              {!hasCompatibleManualAsset && !autoUpdateAvailable && (
+                <div className='update-modal__compatibility-warning'>
+                  {t('update.noCompatibleAssetManual')}
+                </div>
+              )}
+
+              <div
+                className='update-modal__release-scroll custom-scrollbar'
+                tabIndex={0}
+                role='region'
+                aria-label={t('update.detailsLabel')}
+              >
+                {updateInfo?.name && <div className='update-modal__release-title'>{updateInfo.name}</div>}
+                {updateInfo?.body || autoUpdateInfo?.releaseNotes ? (
+                  <MarkdownView allowHtml compact fontSize='13px' lineHeight='20px'>
+                    {updateInfo?.body || autoUpdateInfo?.releaseNotes || ''}
+                  </MarkdownView>
+                ) : (
+                  <div className='text-13px text-t-tertiary italic'>{t('update.noReleaseNotes')}</div>
+                )}
+
+                <div className='update-modal__source-note'>
+                  <div>{t('update.downloadSourceHint')}</div>
+                  <div>
+                    {t('update.baiduMirrorHint')}{' '}
+                    <button
+                      type='button'
+                      onClick={openBaiduReleaseMirror}
+                      title={BAIDU_RELEASE_MIRROR_URL}
+                      className='update-modal__inline-link'
+                    >
+                      {t('update.baiduMirrorLink')}
+                    </button>
+                    <span aria-hidden='true'> · </span>
+                    <button
+                      type='button'
+                      onClick={openProductWebsite}
+                      title={PRODUCT_WEBSITE_URL}
+                      className='update-modal__inline-link'
+                    >
+                      {t('update.productWebsiteLink')}
+                    </button>
                   </div>
                 </div>
               </div>
-              <div className='flex flex-wrap items-center justify-end gap-8px'>
-                {!hasCompatibleManualAsset && !autoUpdateAvailable && releasePageUrl ? (
-                  <Button type='primary' size='small' onClick={openReleasePage} className='!px-16px'>
-                    {t('update.goToRelease')}
-                  </Button>
-                ) : autoUpdateAvailable ? (
-                  <Button type='primary' size='small' onClick={startDownload} className='!px-16px'>
-                    {t('update.downloadButton')}
-                  </Button>
-                ) : (
-                  <Button type='primary' size='small' onClick={startDownload} className='!px-16px'>
-                    {t('update.downloadButton')}
-                  </Button>
-                )}
-                {renderBaiduManualDownloadButton()}
-              </div>
             </div>
-
-            {!hasCompatibleManualAsset && !autoUpdateAvailable && (
-              <div className='mx-24px mt-12px px-12px py-10px text-12px rounded-8px bg-[rgba(var(--warning-6),0.1)] text-warning-6'>
-                {t('update.noCompatibleAssetManual')}
-              </div>
-            )}
-
-            <div className='mx-24px mt-12px px-12px py-10px rounded-8px border border-solid border-[rgba(var(--primary-6),0.16)] bg-[rgba(var(--primary-6),0.06)] text-12px leading-18px text-t-secondary'>
-              <div>{t('update.downloadSourceHint')}</div>
-              <div className='mt-4px'>
-                {t('update.baiduMirrorHint')}{' '}
-                <button
-                  type='button'
-                  onClick={openBaiduReleaseMirror}
-                  title={BAIDU_RELEASE_MIRROR_URL}
-                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-primary-6 underline-offset-2 hover:underline'
-                >
-                  {t('update.baiduMirrorLink')}
-                </button>
-              </div>
-              <div className='mt-4px'>
-                {t('update.productWebsiteHint')}{' '}
-                <button
-                  type='button'
-                  onClick={openProductWebsite}
-                  title={PRODUCT_WEBSITE_URL}
-                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-primary-6 underline-offset-2 hover:underline'
-                >
-                  {PRODUCT_WEBSITE_URL}
-                </button>
-              </div>
-            </div>
-
-            {/* Release notes content */}
-            <div className='flex-1 min-h-0 overflow-y-auto px-24px py-16px custom-scrollbar'>
-              {updateInfo?.name && <div className='text-14px font-500 text-t-primary mb-12px'>{updateInfo.name}</div>}
-              {updateInfo?.body || autoUpdateInfo?.releaseNotes ? (
-                <div className='text-13px text-t-secondary leading-relaxed'>
-                  <MarkdownView allowHtml>{updateInfo?.body || autoUpdateInfo?.releaseNotes || ''}</MarkdownView>
-                </div>
+            {disclaimer}
+            <div className='update-modal__actions'>
+              {!hasCompatibleManualAsset && !autoUpdateAvailable && releasePageUrl ? (
+                <Button type='primary' size='small' onClick={openReleasePage} className='update-modal__action'>
+                  {t('update.goToRelease')}
+                </Button>
+              ) : autoUpdateAvailable ? (
+                <Button type='primary' size='small' onClick={startDownload} className='update-modal__action'>
+                  {t('update.downloadButton')}
+                </Button>
               ) : (
-                <div className='text-13px text-t-tertiary italic'>{t('update.noReleaseNotes')}</div>
+                <Button type='primary' size='small' onClick={startDownload} className='update-modal__action'>
+                  {t('update.downloadButton')}
+                </Button>
               )}
+              {renderBaiduManualDownloadButton('update-modal__action')}
             </div>
           </div>
         );
@@ -662,22 +688,49 @@ const UpdateModal: React.FC = () => {
 
       case 'error':
         return (
-          <div className='flex flex-col items-center justify-center py-48px px-32px'>
-            <div className='w-56px h-56px bg-[rgba(var(--danger-6),0.12)] rounded-full flex items-center justify-center mb-20px'>
-              <CloseOne theme='filled' size='28' fill='rgb(var(--danger-6))' />
+          <div className='update-modal__error'>
+            <div className='update-modal__error-content'>
+              <div className='update-modal__error-message' aria-live='polite'>
+                {errorMsg}
+              </div>
+              <div className='update-modal__error-links'>
+                <div className='update-modal__error-link-row'>
+                  <span>{t('update.feedbackIssueLabel')}</span>
+                  <button type='button' onClick={openGitHubIssues} className='update-modal__error-link'>
+                    {GITHUB_ISSUES_PAGE}
+                  </button>
+                </div>
+                <div className='update-modal__error-link-row'>
+                  <span>{t('update.contactUsLabel')}</span>
+                  <button type='button' onClick={openProductContact} className='update-modal__error-link'>
+                    {PRODUCT_CONTACT_URL}
+                  </button>
+                </div>
+                <div className='update-modal__error-link-row'>
+                  <span>{t('update.releasePageLabel')}</span>
+                  <button type='button' onClick={openReleasePage} className='update-modal__error-link'>
+                    {releasePageUrl || GITHUB_RELEASES_PAGE}
+                  </button>
+                </div>
+                <div className='update-modal__error-link-row'>
+                  <span>{t('update.productWebsiteHint')}</span>
+                  <button type='button' onClick={openProductWebsite} className='update-modal__error-link'>
+                    {PRODUCT_WEBSITE_URL}
+                  </button>
+                </div>
+              </div>
             </div>
-            <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.errorTitle')}</div>
-            <div className='text-13px text-t-tertiary mb-24px text-center max-w-360px'>{errorMsg}</div>
-            <div className='flex flex-wrap justify-center gap-12px'>
-              <Button size='small' onClick={checkForUpdates} icon={<Refresh size='14' />} className='!px-16px'>
+            {disclaimer}
+            <div className='update-modal__actions update-modal__actions--error'>
+              <Button
+                size='small'
+                onClick={checkForUpdates}
+                className='update-modal__action update-modal__error-action--primary'
+              >
                 {t('common.retry')}
               </Button>
-              <Button type='primary' size='small' onClick={openReleasePage} className='!px-16px'>
-                {t('update.goToRelease')}
-              </Button>
-              {renderBaiduManualDownloadButton()}
-              <Button size='small' onClick={openProductWebsite} className='!px-16px'>
-                {t('update.productWebsiteLink')}
+              <Button size='small' onClick={openBaiduReleaseMirror} className='update-modal__action'>
+                {t('settings.baiduManualDownload')}
               </Button>
             </div>
           </div>
@@ -685,33 +738,47 @@ const UpdateModal: React.FC = () => {
     }
   };
 
+  const isAvailableDialog = status === 'available';
+  const isErrorDialog = status === 'error';
+  const isExpandedDialog = isAvailableDialog || isErrorDialog;
+
   return (
     <NomiModal
       visible={visible}
       onCancel={handleClose}
-      size={status === 'available' ? 'medium' : 'small'}
+      size={isExpandedDialog ? undefined : 'small'}
+      alignCenter={isExpandedDialog}
+      className={
+        isAvailableDialog
+          ? 'nomifun-update-modal nomifun-update-modal--available'
+          : isErrorDialog
+            ? 'nomifun-update-modal nomifun-update-modal--error'
+            : ''
+      }
+      style={isAvailableDialog ? { width: '720px' } : isErrorDialog ? { width: '640px' } : undefined}
       header={{
-        title: t('update.modalTitle'),
+        title: isAvailableDialog
+          ? t('update.availableTitle')
+          : isErrorDialog
+            ? t('update.errorDialogTitle')
+            : t('update.modalTitle'),
         showClose: status !== 'installing',
+        className: isExpandedDialog ? 'update-modal__header' : undefined,
       }}
       footer={{ render: () => null }}
       contentStyle={{
-        height: status === 'available' ? '420px' : 'auto',
+        height: isAvailableDialog
+          ? 'min(350px, calc(100vh - 144px))'
+          : isErrorDialog
+            ? 'auto'
+            : 'auto',
         padding: 0,
         overflow: 'hidden',
       }}
     >
       <div className='flex flex-col h-full w-full'>
         <div className='min-h-0 flex-1'>{renderContent()}</div>
-        {/* 同方向的 border-t-solid：无方向的 border-solid 会给四边都上样式，另外三边没有
-            宽度类会回落到 medium≈3px。bg-fill-1/60 也是死写法（bg-fill-N 规则以 $ 锚定，
-            斜杠透明度让它一条都匹配不上），改用 color-mix 拿到同样的 60% 填充。
-            Same-direction style + a fill that actually compiles: `bg-fill-1/60` matched
-            no rule at all, so this strip had no background of any kind.
-            注意 updateDisclaimer.test.ts 用正则要求类名字符串紧跟在括号后面。 */}
-        {renderDisclaimer(
-          'shrink-0 border-t border-t-solid border-[rgba(var(--warning-6),0.18)] bg-[color-mix(in_srgb,var(--color-fill-1)_60%,transparent)] px-20px py-10px text-center'
-        )}
+        {!isAvailableDialog && !isErrorDialog && disclaimer}
       </div>
     </NomiModal>
   );

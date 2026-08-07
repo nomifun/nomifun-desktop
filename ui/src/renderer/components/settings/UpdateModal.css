@@ -1,0 +1,303 @@
+/* Presentation-only styles for the expanded available and error states. */
+
+.nomifun-update-modal .arco-modal-content {
+  overflow: hidden;
+  border: 2px solid rgba(var(--primary-6), 0.22) !important;
+  border-radius: 16px !important;
+  box-shadow:
+    0 22px 54px rgba(15, 23, 42, 0.2),
+    0 4px 14px rgba(15, 23, 42, 0.08) !important;
+}
+
+.nomifun-update-modal--error .arco-modal-content {
+  border-color: var(--color-border-2) !important;
+}
+
+.nomifun-update-modal--error .update-modal__header {
+  padding: 0 4px 6px !important;
+}
+
+.nomifun-update-modal .nomifun-modal-wrapper {
+  overflow: hidden;
+  border-radius: 14px !important;
+}
+
+.update-modal__header {
+  padding: 0 0 8px !important;
+  border-bottom: 0 !important;
+}
+
+.update-modal__header h3 {
+  font-size: 18px !important;
+  font-weight: 650 !important;
+  line-height: 26px;
+}
+
+.update-modal__header button {
+  width: 30px !important;
+  height: 30px !important;
+  border-radius: 8px !important;
+}
+
+.update-modal__available {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  padding: 0 2px;
+}
+
+.update-modal__metadata {
+  flex: 0 0 auto;
+  padding-bottom: 8px;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.update-modal__meta-row {
+  display: flex;
+  align-items: baseline;
+}
+
+.update-modal__meta-row strong {
+  font-weight: 600;
+}
+
+.update-modal__meta-label {
+  flex: 0 0 auto;
+  font-weight: 500;
+}
+
+.update-modal__details-label {
+  margin-top: 1px;
+  font-weight: 500;
+}
+
+.update-modal__compatibility-warning {
+  flex: 0 0 auto;
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  border: 1px solid rgba(var(--warning-6), 0.22);
+  border-radius: 8px;
+  background: rgba(var(--warning-6), 0.08);
+  color: rgb(var(--warning-6));
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.update-modal__release-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0 12px 10px 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+  outline: none;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.update-modal__release-scroll:focus-visible {
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 2px rgba(var(--primary-6), 0.22);
+}
+
+.update-modal__release-title {
+  margin-bottom: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.update-modal__release-scroll .markdown-shadow-body > :first-child {
+  margin-top: 0;
+}
+
+.update-modal__release-scroll .markdown-shadow-body > :last-child {
+  margin-bottom: 0;
+}
+
+.update-modal__release-scroll .markdown-shadow-body ul,
+.update-modal__release-scroll .markdown-shadow-body ol {
+  padding-left: 20px;
+}
+
+.update-modal__source-note {
+  margin-top: 12px;
+  padding-top: 9px;
+  border-top: 1px solid var(--color-border-1);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.update-modal__inline-link {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: rgb(var(--primary-6));
+  cursor: pointer;
+  font: inherit;
+  text-underline-offset: 2px;
+}
+
+.update-modal__inline-link:hover,
+.update-modal__inline-link:focus-visible {
+  text-decoration: underline;
+}
+
+.update-modal__inline-link:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid rgba(var(--primary-6), 0.28);
+  outline-offset: 2px;
+}
+
+.nomifun-update-modal .update-modal__disclaimer {
+  color: var(--text-secondary) !important;
+  font-size: 11px !important;
+  line-height: 17px !important;
+}
+
+.update-modal__actions {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  padding: 10px 48px 0;
+}
+
+.nomifun-update-modal .update-modal__action.arco-btn {
+  width: 100%;
+  height: 36px;
+  justify-content: center;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.update-modal__error {
+  display: flex;
+  min-height: 0;
+  height: auto;
+  flex-direction: column;
+}
+
+.update-modal__error-content {
+  min-height: 0;
+  flex: 0 0 auto;
+  padding: 0 4px 10px;
+}
+
+.update-modal__error-message {
+  margin-bottom: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 19px;
+}
+
+.update-modal__error-links {
+  display: grid;
+  gap: 2px;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.update-modal__error-link-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+}
+
+.update-modal__error-link {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: rgb(var(--link-6, var(--primary-6)));
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-modal__error-link:hover,
+.update-modal__error-link:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.update-modal__error-link:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid rgba(var(--primary-6), 0.28);
+  outline-offset: 2px;
+}
+
+.update-modal__actions--error {
+  padding: 8px 16px 0;
+}
+
+.nomifun-update-modal--error .update-modal__disclaimer {
+  margin-inline: 4px;
+  padding-inline: 0 !important;
+}
+
+.nomifun-update-modal .update-modal__error-action--primary.arco-btn {
+  border-color: var(--text-primary) !important;
+  background: var(--text-primary) !important;
+  color: var(--color-bg-1) !important;
+}
+
+.nomifun-update-modal .update-modal__error-action--primary.arco-btn:hover {
+  opacity: 0.88;
+}
+
+body[arco-theme='dark'] .nomifun-update-modal .arco-modal-content,
+[data-theme='dark'] .nomifun-update-modal .arco-modal-content {
+  box-shadow:
+    0 24px 58px rgba(0, 0, 0, 0.44),
+    0 5px 16px rgba(0, 0, 0, 0.28) !important;
+}
+
+@media (max-width: 560px) {
+  .update-modal__actions {
+    gap: 10px;
+    padding-inline: 0;
+  }
+
+  .update-modal__error-content {
+    padding-inline: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .update-modal__error-link-row {
+    grid-template-columns: 1fr;
+  }
+
+  .update-modal__error-link {
+    padding-left: 12px;
+  }
+}
+
+@media (max-width: 390px) {
+  .update-modal__actions {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nomifun-update-modal *,
+  .nomifun-update-modal *::before,
+  .nomifun-update-modal *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
