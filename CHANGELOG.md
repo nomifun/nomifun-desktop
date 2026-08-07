@@ -5,6 +5,10 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+No unreleased changes yet.
+
+## v0.5.0 - 2026-08-08
+
 - **Behaviour change + migration.** Knowledge write-back has exactly one landing
   spot now: the knowledge base body. The 知识库-待审 review surface is gone — the
   tab, the unified-diff preview, the merge/discard actions, the pending badge and

@@ -1,19 +1,11 @@
 {
-  "version": "0.4.1",
-  "notes": "## NomiFun v0.4.1\n\n- 首发 SSH 远程会话能力：新增 SSH host book、主机 CRUD / 测试连接、从 `~/.ssh/config` 导入主机、密码 / key / ssh-agent / OpenSSH certificate 认证，以及已加密、可脱敏的凭据模型。\n- 新增远程 shell / SFTP 工具链：支持远程命令、cwd 标记、sudo 提示安全响应、远程文件读写 / stat / list、原子写入和可恢复超时，远程工具命名也与本地工具家族对齐。\n- 引入 SSH 连接池与会话状态体系：支持每个会话复用受监管连接、重连阶梯、owner-scoped `ssh.status` 快照、会话列表 SSH 分组、会话创建入口、会话头 host 状态 pill，以及删除 host 时关闭 live links。\n- 重构 Nomi companion 工作台：三栏式 companion 管理、独立 companion sidebar、每个 companion 拥有自己的记忆 / 技能 / 进化设置，新增聊天历史 day index 与 bundle 携带 companion 的数据模型。\n- 调整 Nomi 数据采集：将“数据采集”放回“进化”页签，并停止记录回复内容，降低 companion 学习过程中的敏感内容留存。\n- 强化隐私和数据收集设置：恢复并独立展示数据收集控制、保留策略和停止全部采集入口，同时把 companion memory / skill / evolution 所有权收敛到用户和 companion 维度。\n- 改进更新器体验：下载更新与安装更新拆分，降低下载完成后误触发安装的风险。\n- 大量 UI 可读性和一致性修补：统一 hub 页面标题和知识库工具栏，修复边框、背景、focus ring、alert 对比度、死 CSS utility、侧边栏间距、知识库详情 / 设置、任务 / 预览 / 工作台 / 设置等页面的细节表现。\n- 补充 SSH 远程会话、移动端远控 bridge、relay server、协议 v1、Nomi companion redesign、数据采集回迁等设计文档和交接记录。\n\n## Windows 包\n\n- 本次 GitHub 首发发布 Windows x64 安装包及 Tauri 自动更新签名资产。\n- 安装包未包含 Authenticode 签名，手动下载时可能出现 SmartScreen 或未知发布者提示；自动更新仍使用 Tauri 签名校验。\n- v0.4.1 首发以 Windows x64 包为主，其他平台可后续在对应原生构建机追加。",
-  "pub_date": "2026-08-06T10:35:32.518Z",
+  "version": "0.5.0",
+  "notes": "## Highlights\n\n- Reworked knowledge write-back so accepted material lands directly in knowledge-base documents, with explicit manual/automatic modes and append-only updates.\n- Rebuilt the companion workspace with per-companion memory, learning, evolution, mood, chat history, export/import, and ownership enforcement.\n- Added SSH remote sessions with encrypted host credentials, persistent remote shells, connection status, and host-bound conversation grouping.\n- Introduced the customer-service domain for stateless IM visitor dialogues backed by read-only knowledge/service-note tools.\n- Hardened data migrations, factory-reset recovery, backup compatibility, zip imports, and default data-root handling across desktop and WebUI hosts.\n- Fixed broad appearance and accessibility issues around theme tokens, borders, rings, outlines, alerts, i18n checks, and generated CSS validation.\n\n## macOS\n\n- First `v0.5.0` desktop release for macOS, built for Apple Silicon.\n- Includes signed updater artifacts and a manual DMG installer.",
+  "pub_date": "2026-08-07T18:42:20.043Z",
   "platforms": {
-    "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNkRzR1NG1JRFo3MTZXZ3owWnVOdDBvZDUvQ0NQU1kzbGwyTWgzMzdTZzZYL1BvNDBianJLd1c2MHE5RDV3RzJCMHd4eUJaeWloUW9MTFY0dEE1TEFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MDEwNzIxCWZpbGU6Tm9taUZ1bl8wLjQuMV94NjQtc2V0dXAuZXhlCk1oMkFpa2k4cHZFd0o1TVlla2FaSkY4NHNhRDhtN2NFUnBZbjRpbVB0N0JIVlJ3ZWg4eEsxNDgvVmhXaDMyZkdTbndlN3NyVS91ekNVRWVtVW56SEJRPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.4.1/NomiFun_0.4.1_x64-setup.exe"
-    },
-    "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODRiUjNZVHQrWGU4djM3N2hCV3VpdzgyQXAwTzJ6VHAzMDhaQUhUd3ZHOXZ1VWl2MW82ODk1bFliWGtSSUsyRmFoM3k3RXo4bytYMm96Q0Rjdjg5SGdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MDEyMzg2CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Cm55WElZNjV0ck42K0hsUkR1ZHdvM1NSNDVhWHNGSjlRZFJTQ29xN21SQWhadGhnMjFTMG9UZ3NuVmswTzFITHhNZXUvV3lvMWI4SUVSOTdMeDZOY0NnPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.4.1/NomiFun.app.tar.gz"
-    },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODRiUjNZVHQrWGU4djM3N2hCV3VpdzgyQXAwTzJ6VHAzMDhaQUhUd3ZHOXZ1VWl2MW82ODk1bFliWGtSSUsyRmFoM3k3RXo4bytYMm96Q0Rjdjg5SGdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MDEyMzg2CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Cm55WElZNjV0ck42K0hsUkR1ZHdvM1NSNDVhWHNGSjlRZFJTQ29xN21SQWhadGhnMjFTMG9UZ3NuVmswTzFITHhNZXUvV3lvMWI4SUVSOTdMeDZOY0NnPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.4.1/NomiFun.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODQ1TUwwNkd1WEZhUEtuVDlLZlNhaGJuUGFGR0pZU2xkdG91VjJ6YVJsLy8yZWg3aWRDWkVHdU5LeXE0SDlYU3c1N3M2ZThZbzdUaGVtY2RwUDZKSkF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MTI4MDczCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClhwVzg1WnZSbjluTDdJZjk3Uk1TTDllNHo1VlJ0Y1l0Nk1ZRkVPWjdRaE9neVRwOHhCeXJicHZ6TXV2anB5U1JBL3VBanArV2swQjF3QmJHK0syZENRPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.5.0/NomiFun.app.tar.gz"
     }
   }
 }
