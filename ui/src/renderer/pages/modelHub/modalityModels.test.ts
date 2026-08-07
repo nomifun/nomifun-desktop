@@ -8,6 +8,8 @@ import { describe, expect, test } from 'bun:test';
 import type { ProviderModelResponse } from '@/common/protocolBindings/ProviderModelResponse';
 import type { IProvider } from '@/common/config/storage';
 import type { ProviderId } from '@/common/types/ids';
+import { NOMIFUN_FREE_MODEL_PLATFORM } from '@/common/types/provider/managedModelService';
+import { orderModelSelectorProviders } from '@/renderer/hooks/agent/modelSelectorProviderOrdering';
 import {
   buildModalityGroups,
   buildUntaggedGroups,
@@ -18,9 +20,13 @@ import {
 
 const A = '0190f5fe-7c00-7a00-8000-0000000000a1' as ProviderId;
 const B = '0190f5fe-7c00-7a00-8000-0000000000b2' as ProviderId;
+const FREE = '0190f5fe-7c00-7a00-8000-0000000000f3' as ProviderId;
 
 const provider = (id: ProviderId, name: string): IProvider =>
   ({ id, name, platform: 'custom', enabled: true }) as unknown as IProvider;
+
+const freeProvider = (id: ProviderId): IProvider =>
+  ({ id, name: 'NomiFun Free', platform: NOMIFUN_FREE_MODEL_PLATFORM, enabled: true }) as unknown as IProvider;
 
 const row = (
   providerId: ProviderId,
@@ -121,5 +127,27 @@ describe('modality specs', () => {
       () => '免费模型'
     );
     expect(groups[0].providerName).toBe('免费模型');
+  });
+
+  test('the free-model group sits BELOW the groups the user configured', () => {
+    // The backend lists the managed free provider FIRST — it is auto-created
+    // before the user has added anything. A management view must not lead with
+    // models the user never configured, so the panel feeds these groups the
+    // shared selector ordering (which ranks the free platform last) instead of
+    // the raw provider query.
+    const groups = buildModalityGroups(
+      [row(FREE, 'free-m'), row(A, 'a'), row(B, 'b')],
+      orderModelSelectorProviders([freeProvider(FREE), provider(A, 'A'), provider(B, 'B')]),
+      MODALITY_SPECS.chat
+    );
+    expect(groups.map((g) => g.providerId)).toEqual([A, B, FREE]);
+  });
+
+  test('untagged rows follow the same ordering, free last', () => {
+    const groups = buildUntaggedGroups(
+      [row(FREE, 'free-bare', { tasks: [] }), row(A, 'bare', { tasks: [] })],
+      orderModelSelectorProviders([freeProvider(FREE), provider(A, 'A')])
+    );
+    expect(groups.map((g) => g.providerId)).toEqual([A, FREE]);
   });
 });
