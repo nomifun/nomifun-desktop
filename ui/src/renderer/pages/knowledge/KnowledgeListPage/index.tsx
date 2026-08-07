@@ -459,6 +459,11 @@ const KnowledgeListPage: React.FC = () => {
                   'border border-dashed border-[var(--color-border-3)] bg-transparent',
                   'text-[var(--color-text-3)]',
                   'hover:border-[var(--color-primary-light-3)] hover:text-primary-6 hover:bg-[var(--color-primary-light-1)]',
+                  // This card is in the tab order (focusable div), and nothing
+                  // styles a bare focusable div, so without these the keyboard
+                  // focus was invisible. Mirrors the hover treatment;
+                  // border-dashed is untouched because only the colour changes.
+                  'focus-visible:border-primary-6 focus-visible:text-primary-6 focus-visible:outline-none',
                   'transition-all duration-150',
                 ].join(' ')}
               >
