@@ -25,18 +25,13 @@ import { ipcBridge } from '@/common';
 import type { IKnowledgeBase, IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
 import type { KnowledgeBaseId } from '@/common/types/ids';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
-import {
-  collectKnowledgeDirKeys,
-  mergeKnowledgeTreeChildren,
-} from '@/renderer/pages/knowledge/KnowledgeDetailPage/treeModel';
+import { mergeKnowledgeTreeChildren } from '@/renderer/pages/knowledge/KnowledgeDetailPage/treeModel';
+import { knowledgeErrorText } from '@/renderer/pages/knowledge/useKnowledge';
 import { Button, Empty, Message, Tooltip, Tree } from '@arco-design/web-react';
 import { ExpandDown, ExpandUp, Right } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-
-/** The rail tab key this panel is registered under. */
-export const SESSION_KNOWLEDGE_TAB_KEY = 'session-knowledge';
 
 /**
  * Tree keys must be scoped per knowledge base. Every existing knowledge tree is
@@ -87,6 +82,31 @@ const SessionKnowledgePanel: React.FC<{ bases: IKnowledgeBase[] }> = ({ bases })
   /** Bases whose source directory is gone cannot be listed at all. */
   const readableBases = useMemo(() => bases.filter((base) => base.root_exists), [bases]);
 
+  // Mirror of childrenByBase for the expand-all path, which needs "is this level
+  // already loaded" without taking childrenByBase as a dependency (that would
+  // rebuild the callback on every lazy load and re-fire the auto-expand effect).
+  const loadedRef = useRef<Record<string, IKnowledgeTreeEntry[]>>({});
+  useEffect(() => {
+    loadedRef.current = childrenByBase;
+  }, [childrenByBase]);
+
+  // Drop cached levels, expansion and selection for bases that are no longer
+  // mounted. Without this, unmounting and re-mounting a base re-renders its old
+  // directory listing with no refetch.
+  useEffect(() => {
+    const live = new Set<string>(bases.map((base) => base.knowledge_base_id));
+    setChildrenByBase((previous) => {
+      const kept = Object.fromEntries(Object.entries(previous).filter(([id]) => live.has(id)));
+      return Object.keys(kept).length === Object.keys(previous).length ? previous : kept;
+    });
+    const belongsToLiveBase = (key: string) => live.has(key.split(KEY_SEP)[0] ?? '');
+    setExpandedKeys((previous) => {
+      const kept = previous.filter(belongsToLiveBase);
+      return kept.length === previous.length ? previous : kept;
+    });
+    setSelectedKey((previous) => (previous && !belongsToLiveBase(previous) ? null : previous));
+  }, [bases]);
+
   const loadLevel = useCallback(
     async (id: KnowledgeBaseId, relPath: string) => {
       const children = await ipcBridge.knowledge.listTree.invoke({
@@ -108,40 +128,61 @@ const SessionKnowledgePanel: React.FC<{ bases: IKnowledgeBase[] }> = ({ bases })
    * with no cache or cancellation, which in a rail with N roots multiplies into
    * dozens. One level per root is N requests and matches the design's
    * "展开：全部根目录".
+   *
+   * `allSettled`, not `all`: one unreadable base must not discard the levels the
+   * other bases returned, and must not leave the tree unexpanded.
    */
   const expandAllRoots = useCallback(async () => {
-    if (readableBases.length === 0) return;
+    if (readableBases.length === 0) return false;
     setExpanding(true);
     try {
-      const levels = await Promise.all(
-        readableBases.map(
-          async (base) =>
-            [
-              base.knowledge_base_id,
-              await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: base.knowledge_base_id }),
-            ] as const
+      const pending = readableBases.filter((base) => !loadedRef.current[base.knowledge_base_id]);
+      const settled = await Promise.allSettled(
+        pending.map(async (base) =>
+          [
+            base.knowledge_base_id,
+            await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: base.knowledge_base_id }),
+          ] as const
         )
       );
-      setChildrenByBase((previous) => {
-        const next = { ...previous };
-        for (const [id, children] of levels) next[id] = children;
-        return next;
-      });
-      setExpandedKeys(readableBases.map((base) => rootKeyOf(base.knowledge_base_id)));
-    } catch (error) {
-      Message.error(String(error));
+
+      const loaded: Array<readonly [KnowledgeBaseId, IKnowledgeTreeEntry[]]> = [];
+      const failures: unknown[] = [];
+      for (const outcome of settled) {
+        if (outcome.status === 'fulfilled') loaded.push(outcome.value);
+        else failures.push(outcome.reason);
+      }
+      if (loaded.length > 0) {
+        setChildrenByBase((previous) => {
+          const next = { ...previous };
+          for (const [id, children] of loaded) next[id] = children;
+          return next;
+        });
+      }
+      // Expand every base we can list — including ones already cached from a
+      // previous expand — so a partial failure still opens the rest.
+      const expandable = readableBases.filter(
+        (base) =>
+          loadedRef.current[base.knowledge_base_id] || loaded.some(([id]) => id === base.knowledge_base_id)
+      );
+      setExpandedKeys(expandable.map((base) => rootKeyOf(base.knowledge_base_id)));
+      if (failures.length > 0) Message.error(knowledgeErrorText(failures[0]));
+      return failures.length === 0;
     } finally {
       setExpanding(false);
     }
-  }, [readableBases]);
+  }, [readableBases, t]);
 
   // First open shows one level of every root, so the panel never opens on just a
-  // couple of collapsed rows. Not persisted — reopening expands again.
+  // couple of collapsed rows. Not persisted — reopening expands again. The latch
+  // is only set once the expansion actually succeeded, so a transient failure
+  // retries on the next render rather than leaving a permanently collapsed tree.
   const autoExpandedRef = useRef(false);
   useEffect(() => {
     if (autoExpandedRef.current || readableBases.length === 0) return;
-    autoExpandedRef.current = true;
-    void expandAllRoots();
+    void expandAllRoots().then((ok) => {
+      if (ok) autoExpandedRef.current = true;
+    });
   }, [expandAllRoots, readableBases.length]);
 
   const rootKeys = useMemo(
@@ -196,7 +237,7 @@ const SessionKnowledgePanel: React.FC<{ bases: IKnowledgeBase[] }> = ({ bases })
           editable: false,
         });
       } catch (error) {
-        Message.error(String(error));
+        Message.error(knowledgeErrorText(error));
       }
     },
     [basesById, openPreview]
@@ -232,7 +273,10 @@ const SessionKnowledgePanel: React.FC<{ bases: IKnowledgeBase[] }> = ({ bases })
       </div>
 
       <Tree
-        className='session-knowledge-tree text-13px'
+        // Reuse the knowledge detail page's tree class so this inherits the
+        // existing node/switcher rules in styles/ instead of introducing a
+        // marker class with no CSS behind it.
+        className='knowledge-doc-tree session-knowledge-tree text-13px'
         size='mini'
         blockNode
         showLine
@@ -263,7 +307,7 @@ const SessionKnowledgePanel: React.FC<{ bases: IKnowledgeBase[] }> = ({ bases })
           const base = basesById.get(dataRef.knowledgeBaseId);
           if (!base?.root_exists) return Promise.resolve();
           return loadLevel(dataRef.knowledgeBaseId, dataRef.relPath).catch((error: unknown) => {
-            Message.error(String(error));
+            Message.error(knowledgeErrorText(error));
           });
         }}
         renderTitle={(node) => {

@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button, Input, Message, Spin } from '@arco-design/web-react';
-import { BookOne, Refresh, EditOne, Terminal } from '@icon-park/react';
+import { Refresh, EditOne, Terminal } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
@@ -28,12 +28,8 @@ import WorkspaceToolRail, {
   type WorkspacePanelMetaDetail,
 } from '@/renderer/pages/conversation/components/ChatLayout/WorkspaceToolRail';
 import { useWorkspacePanelTabs } from '@/renderer/pages/conversation/hooks/useWorkspacePanelTabs';
-import SessionKnowledgePanel, {
-  SESSION_KNOWLEDGE_TAB_KEY,
-} from '@/renderer/pages/conversation/Workspace/KnowledgePanel';
 import type { SessionKnowledgeSource } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/knowledgeBindingTarget';
-import { useSessionKnowledgeMounts } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeMounts';
-import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
+import { useSessionKnowledgeTab } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeTab';
 import { dispatchWorkspaceToggleEvent } from '@/renderer/utils/workspace/workspaceEvents';
 import { WORKSPACE_HEADER_HEIGHT } from '@/renderer/pages/conversation/utils/layoutCalc';
 import RegisterKnowledgeButton from './RegisterKnowledgeButton';
@@ -115,21 +111,7 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
     () => ({ kind: 'terminal', session: { cwd: session.cwd, is_default_workpath: session.is_default_workpath } }),
     [session.cwd, session.is_default_workpath]
   );
-  const { mounted: knowledgeMounted, bases: knowledgeBases } = useSessionKnowledgeMounts(knowledgeSource);
-  const workspaceExtraTabs = useMemo<WorkspaceExtraTab[]>(
-    () =>
-      knowledgeMounted
-        ? [
-            {
-              key: SESSION_KNOWLEDGE_TAB_KEY,
-              title: t('knowledge.control.label'),
-              icon: <BookOne size={18} />,
-              content: <SessionKnowledgePanel bases={knowledgeBases} />,
-            },
-          ]
-        : [],
-    [knowledgeBases, knowledgeMounted, t]
-  );
+  const workspaceExtraTabs = useSessionKnowledgeTab(knowledgeSource);
 
   useEffect(() => {
     const handleMeta = (event: Event) => {

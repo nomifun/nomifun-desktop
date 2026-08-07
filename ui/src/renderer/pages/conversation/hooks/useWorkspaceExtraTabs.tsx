@@ -6,13 +6,10 @@
 
 import type { TChatConversation } from '@/common/config/storage';
 import ConversationTerminalPanel from '@/renderer/pages/conversation/components/ConversationTerminalPanel';
-import SessionKnowledgePanel, {
-  SESSION_KNOWLEDGE_TAB_KEY,
-} from '@/renderer/pages/conversation/Workspace/KnowledgePanel';
 import type { SessionKnowledgeSource } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/knowledgeBindingTarget';
-import { useSessionKnowledgeMounts } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeMounts';
+import { useSessionKnowledgeTab } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeTab';
 import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
-import { BookOne, Terminal } from '@icon-park/react';
+import { Terminal } from '@icon-park/react';
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -37,33 +34,22 @@ export function useWorkspaceExtraTabs(conversation?: TChatConversation): Workspa
   const hasWorkspace = Boolean(extra?.workspace);
 
   const knowledgeSource = useMemo<SessionKnowledgeSource | undefined>(
-    () => (conversationId ? { kind: 'conversation', conversationId, extra } : undefined),
-    [conversationId, extra]
+    () => (conversationId && hasWorkspace ? { kind: 'conversation', conversationId, extra } : undefined),
+    [conversationId, hasWorkspace, extra]
   );
-  const { mounted: knowledgeMounted, bases: knowledgeBases } = useSessionKnowledgeMounts(knowledgeSource);
+  const knowledgeTabs = useSessionKnowledgeTab(knowledgeSource);
 
   return useMemo(() => {
     if (!conversationId || !hasWorkspace) return [];
 
-    const tabs: WorkspaceExtraTab[] = [
+    return [
       {
         key: 'conversation-terminals',
         title: t('terminal.conversationPanel.tab'),
         icon: <Terminal size={18} />,
         content: <ConversationTerminalPanel conversationId={conversationId} />,
       },
+      ...knowledgeTabs,
     ];
-
-    // Knowledge is a conditional entry: no mounted bases, no icon.
-    if (knowledgeMounted) {
-      tabs.push({
-        key: SESSION_KNOWLEDGE_TAB_KEY,
-        title: t('knowledge.control.label'),
-        icon: <BookOne size={18} />,
-        content: <SessionKnowledgePanel bases={knowledgeBases} />,
-      });
-    }
-
-    return tabs;
-  }, [conversationId, hasWorkspace, knowledgeBases, knowledgeMounted, t]);
+  }, [conversationId, hasWorkspace, knowledgeTabs, t]);
 }

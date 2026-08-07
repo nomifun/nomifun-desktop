@@ -113,27 +113,8 @@ export function preserveKnowledgeTreeChildren(
   return preserve(nextNodes);
 }
 
-/**
- * Every directory node's key in a knowledge tree, depth-first. Used to drive
- * "expand all" / "is the whole tree expanded" against Arco's `expandedKeys`.
- *
- * Only walks what is already loaded — it does not fetch. Callers that want a
- * deeper set must load those levels first.
- */
-export function collectKnowledgeDirKeys(nodes: IKnowledgeTreeEntry[]): string[] {
-  const keys: string[] = [];
-  const visit = (items: IKnowledgeTreeEntry[]) => {
-    for (const item of items) {
-      if (!item.is_dir) continue;
-      keys.push(item.rel_path);
-      if (item.children?.length) visit(item.children);
-    }
-  };
-  visit(nodes);
-  return keys;
-}
-
-export function firstKnowledgeFilePath(nodes: IKnowledgeTreeEntry[]): string | null {  for (const node of nodes) {
+export function firstKnowledgeFilePath(nodes: IKnowledgeTreeEntry[]): string | null {
+  for (const node of nodes) {
     if (node.is_file) return node.rel_path;
     if (node.children?.length) {
       const found = firstKnowledgeFilePath(node.children);
