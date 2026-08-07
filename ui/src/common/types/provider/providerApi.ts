@@ -146,6 +146,50 @@ export interface UpdateProviderRequest {
 }
 
 /**
+ * Convert a renderer update into the exact backend body.
+ *
+ * Some callers derive updates from renderer/form objects, which may carry
+ * response-only or form-only properties at runtime despite their static type.
+ * Keep the strict backend contract intact by allow-listing its accepted keys
+ * at the wire boundary.
+ */
+export function toUpdateProviderRequest(input: UpdateProviderRequest): UpdateProviderRequest {
+  const {
+    platform,
+    name,
+    base_url,
+    api_key,
+    models,
+    enabled,
+    sort_order,
+    model_context_limits,
+    model_protocols,
+    model_descriptions,
+    model_enabled,
+    model_health,
+    bedrock_config,
+    is_full_url,
+  } = input;
+
+  return {
+    platform,
+    name,
+    base_url,
+    api_key,
+    models,
+    enabled,
+    sort_order,
+    model_context_limits,
+    model_protocols,
+    model_descriptions,
+    model_enabled,
+    model_health,
+    bedrock_config,
+    is_full_url,
+  };
+}
+
+/**
  * Response for `POST /api/providers/:id/models` and
  * `POST /api/providers/fetch-models`.
  */

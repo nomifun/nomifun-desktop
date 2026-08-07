@@ -888,7 +888,7 @@ const ModelModalContent: React.FC = () => {
 
   const [editModalCtrl, editModalContext] = EditModeModal.useModal({
     onChange(platform) {
-      updatePlatform(platform, () => editModalCtrl.close());
+      return updatePlatform(platform, () => undefined, true);
     },
   });
 
