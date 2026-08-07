@@ -1,6 +1,7 @@
 import type { PresetTag } from '@/common/types/agent/presetTypes';
 import type { ISkillMarketItem } from '@/common/adapter/ipcBridge';
-import { getAvatarColorClass, normalizeTestId } from './skillPresentation';
+import CopyIconButton from '@/renderer/components/base/CopyIconButton';
+import { normalizeTestId } from './skillPresentation';
 import { marketSourceLabel, translateMarketDescription } from './skillMarket';
 import { Button, Tag } from '@arco-design/web-react';
 import { Plus } from '@icon-park/react';
@@ -67,22 +68,16 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({ item, tagByKey, local
     >
       <Button
         size='mini'
-        type='primary'
+        type='secondary'
         data-testid={`btn-add-market-skill-${testId}`}
-        className='!absolute !right-12px !top-12px !rounded-[100px] !h-26px !px-10px !text-12px'
+        className='!absolute !right-12px !top-12px !rounded-[100px] !h-26px !px-10px !text-12px !font-medium !border !border-solid !border-[var(--color-border-2)] !bg-[var(--color-fill-2)] !text-[var(--color-text-1)] !shadow-none hover:!border-[var(--color-border-3)] hover:!bg-[var(--color-fill-3)] hover:!text-[var(--color-text-1)]'
         icon={<Plus theme='outline' size={12} strokeWidth={3} />}
         onClick={() => onAdd(item)}
       >
         {t('common.add', { defaultValue: 'Add' })}
       </Button>
 
-      <div className='flex items-start gap-10px pr-68px'>
-        <div
-          className={`flex-shrink-0 w-36px h-36px rounded-10px flex items-center justify-center font-bold text-13px shadow-sm ${getAvatarColorClass(item.name)}`}
-          title={`#${item.rank || '-'}`}
-        >
-          {item.rank ? `#${item.rank}` : item.name.charAt(0).toUpperCase()}
-        </div>
+      <div className='min-w-0 pr-76px'>
         <div className='min-w-0 flex-1 pt-2px'>
           <div className='flex items-center gap-6px min-w-0 flex-wrap'>
             <span
@@ -146,10 +141,19 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({ item, tagByKey, local
         </div>
       )}
 
-      <div className='mt-auto pt-10px flex min-w-0 items-center justify-between gap-10px'>
-        <span className='truncate text-11px text-[var(--color-text-3)] font-mono' title={item.install_command}>
+      <div className='mt-auto pt-10px flex min-w-0 items-center gap-4px'>
+        <span
+          className='min-w-0 flex-1 truncate text-11px text-[var(--color-text-3)] font-mono'
+          title={item.install_command}
+        >
           {item.install_command}
         </span>
+        <CopyIconButton
+          text={item.install_command}
+          tooltip={t('settings.skillsMarket.copyCommand', { defaultValue: '复制完整命令' })}
+          size={13}
+          className='size-22px shrink-0 -mr-4px'
+        />
       </div>
     </div>
   );
