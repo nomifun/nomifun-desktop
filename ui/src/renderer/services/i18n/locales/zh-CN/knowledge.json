@@ -188,7 +188,10 @@
     "kindWeb": "网页",
     "manageTags": "管理标签",
     "selectedCount": "已选 {{count}} 个",
+    "sortAscending": "正序",
     "sortCreated": "创建时间",
+    "sortDescending": "倒序",
+    "sortDirectionTooltip": "当前：{{current}}，点击切换为{{next}}",
     "sortLabel": "排序",
     "sortName": "名称",
     "sortSize": "大小",
@@ -280,6 +283,9 @@
   },
   "searchPlaceholder": "搜索知识库...",
   "selectFile": "选择左侧文档查看内容",
+  "session": {
+    "noDocs": "没有可预览的文档"
+  },
   "source": {
     "fetchFailedTitle": "部分 URL 抓取失败",
     "fetchSummary": "成功 {{fetched}} 条，失败 {{failed}} 条",

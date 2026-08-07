@@ -188,7 +188,10 @@
     "kindWeb": "Web",
     "manageTags": "Manage tags",
     "selectedCount": "{{count}} selected",
+    "sortAscending": "Ascending",
     "sortCreated": "Created",
+    "sortDescending": "Descending",
+    "sortDirectionTooltip": "Current: {{current}}. Click to switch to {{next}}",
     "sortLabel": "Sort",
     "sortName": "Name",
     "sortSize": "Size",
@@ -280,6 +283,9 @@
   },
   "searchPlaceholder": "Search knowledge bases...",
   "selectFile": "Select a document on the left to view it",
+  "session": {
+    "noDocs": "No previewable documents"
+  },
   "source": {
     "fetchFailedTitle": "Some URLs failed to fetch",
     "fetchSummary": "{{fetched}} fetched, {{failed}} failed",
