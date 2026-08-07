@@ -15,7 +15,6 @@ const base = (name: string, createdAt: number, updatedAt: number, totalSize: num
   root_exists: true,
   tags: [],
   kind: 'blank',
-  pending_inbox: 0,
 });
 
 const bases = [
