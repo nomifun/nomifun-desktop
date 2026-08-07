@@ -283,6 +283,9 @@
   },
   "searchPlaceholder": "Search knowledge bases...",
   "selectFile": "Select a document on the left to view it",
+  "session": {
+    "noDocs": "No previewable documents"
+  },
   "source": {
     "fetchFailedTitle": "Some URLs failed to fetch",
     "fetchSummary": "{{fetched}} fetched, {{failed}} failed",
