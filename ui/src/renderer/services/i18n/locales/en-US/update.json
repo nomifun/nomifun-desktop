@@ -7,6 +7,9 @@
   "upToDateTitle": "You're up to date",
   "currentVersion": "Current version: {{version}}",
   "availableTitle": "Update available",
+  "versionLabel": "Version: ",
+  "sizeLabel": "Size: ",
+  "detailsLabel": "Details: ",
   "downloadSourceHint": "This update downloads installers from GitHub Releases.",
   "baiduMirrorHint": "If downloads are slow in mainland China, use the",
   "baiduMirrorLink": "Baidu Netdisk mirror",
@@ -34,5 +37,9 @@
   "autoUpdateMode": "Auto-update mode",
   "showInFolder": "Show in folder",
   "openFile": "Open file",
-  "errorTitle": "Update failed"
+  "errorTitle": "Update failed",
+  "errorDialogTitle": "Version update failed",
+  "feedbackIssueLabel": "Report an issue: ",
+  "contactUsLabel": "Contact us: ",
+  "releasePageLabel": "Releases: "
 }
