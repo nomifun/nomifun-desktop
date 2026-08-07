@@ -516,7 +516,7 @@ const AssetLibraryPage: React.FC = () => {
 
         {/* Controls */}
         <div className='flex flex-wrap items-center gap-10px'>
-          <div className='flex min-w-200px flex-1 items-center gap-8px rounded-10px border border-solid border-[var(--color-border-3)] bg-[var(--color-fill-2)] px-12px py-8px'>
+          <div className='box-border flex h-32px min-w-200px flex-1 items-center gap-8px rounded-10px border border-solid border-[var(--color-border-3)] bg-[var(--color-fill-2)] px-12px'>
             <Search theme='outline' size={14} className='shrink-0 text-[var(--color-text-3)]' />
             <input
               className='w-full border-none bg-transparent font-[inherit] text-13px text-[var(--color-text-1)] outline-none placeholder:text-[var(--color-text-3)]'

@@ -38,7 +38,7 @@ const SiderAssetLibraryEntry: React.FC<SiderAssetLibraryEntryProps> = ({
       <Tooltip {...siderTooltipProps} content={t('assetLibrary.title')} position='right'>
         <div
           className={classNames(
-            'w-full h-32px flex items-center justify-center cursor-pointer transition-colors rd-8px text-t-primary',
+            'w-full h-28px flex items-center justify-center cursor-pointer transition-colors rd-8px text-t-primary',
             isActive ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
           )}
           onClick={onClick}
@@ -55,7 +55,7 @@ const SiderAssetLibraryEntry: React.FC<SiderAssetLibraryEntryProps> = ({
     <Tooltip {...siderTooltipProps} content={t('assetLibrary.title')} position='right'>
       <div
         className={classNames(
-          'box-border group h-32px w-full flex items-center justify-start gap-8px pl-10px pr-8px rd-0.5rem cursor-pointer shrink-0 transition-all text-t-primary',
+          'box-border group h-28px w-full flex items-center justify-start gap-8px pl-10px pr-8px rd-0.5rem cursor-pointer shrink-0 transition-all text-t-primary',
           isMobile && 'sider-action-btn-mobile',
           isActive ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
         )}

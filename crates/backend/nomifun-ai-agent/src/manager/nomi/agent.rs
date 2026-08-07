@@ -1249,11 +1249,8 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     elapsed_ms,
                     input_tokens: agent_result.usage.input_tokens,
                     output_tokens: agent_result.usage.output_tokens,
-                    cache_creation_tokens: agent_result.usage.cache_creation_tokens,
-                    cache_read_tokens: agent_result.usage.cache_read_tokens,
                     context_tokens,
                     context_window,
-                    stop_reason: Some(stop_reason),
                 }));
 
                 // —— Post-session memory distillation (exact turn child) ——
@@ -3382,17 +3379,17 @@ mod tests {
 
         assert_eq!(provider.calls(), 2, "MaxTokens should trigger one continuation pass");
 
-        let mut completed_reasons = Vec::new();
+        let mut completed_turns = 0;
         let mut finish_reason = None;
         while let Ok(event) = rx.try_recv() {
             match event {
-                AgentStreamEvent::TurnCompleted(data) => completed_reasons.push(data.stop_reason),
+                AgentStreamEvent::TurnCompleted(_) => completed_turns += 1,
                 AgentStreamEvent::Finish(data) => finish_reason = data.stop_reason,
                 _ => {}
             }
         }
 
-        assert_eq!(completed_reasons, vec![Some(TurnStopReason::EndTurn)]);
+        assert_eq!(completed_turns, 1, "continuation must collapse into one completed turn");
         assert_eq!(finish_reason, Some(TurnStopReason::EndTurn));
     }
 
@@ -3868,19 +3865,16 @@ mod tests {
             "MaxTurns must terminate the host turn instead of resetting the engine budget"
         );
 
-        let mut completed_reasons = Vec::new();
+        let mut completed_turns = 0;
         let mut finish_reason = None;
         while let Ok(event) = rx.try_recv() {
             match event {
-                AgentStreamEvent::TurnCompleted(data) => completed_reasons.push(data.stop_reason),
+                AgentStreamEvent::TurnCompleted(_) => completed_turns += 1,
                 AgentStreamEvent::Finish(data) => finish_reason = data.stop_reason,
                 _ => {}
             }
         }
-        assert_eq!(
-            completed_reasons,
-            vec![Some(TurnStopReason::MaxTurnRequests)]
-        );
+        assert_eq!(completed_turns, 1);
         assert_eq!(finish_reason, Some(TurnStopReason::MaxTurnRequests));
     }
 
@@ -3965,21 +3959,18 @@ mod tests {
         );
 
         let mut starts = 0;
-        let mut completed_reasons = Vec::new();
+        let mut completed_turns = 0;
         let mut finish_reason = None;
         while let Ok(event) = rx.try_recv() {
             match event {
                 AgentStreamEvent::Start(_) => starts += 1,
-                AgentStreamEvent::TurnCompleted(data) => completed_reasons.push(data.stop_reason),
+                AgentStreamEvent::TurnCompleted(_) => completed_turns += 1,
                 AgentStreamEvent::Finish(data) => finish_reason = data.stop_reason,
                 _ => {}
             }
         }
         assert_eq!(starts, 1, "MaxTurns must not start a race-tail engine pass");
-        assert_eq!(
-            completed_reasons,
-            vec![Some(TurnStopReason::MaxTurnRequests)]
-        );
+        assert_eq!(completed_turns, 1);
         assert_eq!(finish_reason, Some(TurnStopReason::MaxTurnRequests));
 
         let second_send = {
