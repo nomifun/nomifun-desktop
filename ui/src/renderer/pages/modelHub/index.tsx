@@ -27,7 +27,7 @@ import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 import ModelModalContent from '@/renderer/components/settings/SettingsModal/contents/ModelModalContent';
-import GlobalModelConfig from './GlobalModelConfig';
+import ModelFailoverContent from './ModelFailoverContent';
 import FreeModelsContent from './FreeModelsContent';
 import SpeechToTextContent from './SpeechToTextContent';
 import TextToSpeechContent from './TextToSpeechContent';
@@ -47,7 +47,7 @@ type Section =
   | 'video'
   | 'embedding'
   | 'free'
-  | 'global';
+  | 'failover';
 
 /**
  * Retired section keys kept resolvable so old bookmarks and links land somewhere
@@ -58,6 +58,9 @@ type Section =
 const LEGACY_SECTIONS: Record<string, Section> = {
   speech: 'asr',
   creation: 'image',
+  // 「全局模型设置」曾是 IDMM 全局默认 + 故障转移队列 + 决策活动的三 tab 宿主。
+  // 全局 IDMM 那套已整体删除,剩下的只有故障转移队列,所以这一栏就叫它自己。
+  global: 'failover',
 };
 
 const SECTION_KEYS: readonly Section[] = [
@@ -70,7 +73,7 @@ const SECTION_KEYS: readonly Section[] = [
   'video',
   'embedding',
   'free',
-  'global',
+  'failover',
 ];
 
 const isSection = (value: string | null): value is Section =>
@@ -164,8 +167,8 @@ const SECTION_GROUPS: SectionGroup[] = [
         icon: <Lightning theme='outline' size='16' strokeWidth={3} />,
       },
       {
-        key: 'global',
-        labelKey: 'settings.modelHub.sectionGlobal',
+        key: 'failover',
+        labelKey: 'settings.modelHub.sectionFailover',
         icon: <SettingTwo theme='outline' size='16' strokeWidth={3} />,
       },
     ],
@@ -186,8 +189,8 @@ const FLAT_SECTIONS: SectionDef[] = SECTION_GROUPS.flatMap((group) => group.sect
  * persisted. On mobile the sidebar collapses to a horizontal segmented bar above
  * the content (flat — the groups are a desktop affordance).
  *
- * The level syncs to `?section=`; the retired host keys (`speech`, `creation`)
- * and the provider-first key (`models`) still resolve so old bookmarks work.
+ * The level syncs to `?section=`; the retired keys (`speech`, `creation`,
+ * `global`) still resolve so old bookmarks work.
  */
 const ModelHubPage: React.FC = () => {
   const { t } = useTranslation();
@@ -247,7 +250,7 @@ const ModelHubPage: React.FC = () => {
       {section === 'video' && <VideoModelsContent />}
       {section === 'embedding' && <EmbeddingModelsContent />}
       {section === 'free' && <FreeModelsContent />}
-      {section === 'global' && <GlobalModelConfig />}
+      {section === 'failover' && <ModelFailoverContent />}
     </>
   );
 

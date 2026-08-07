@@ -985,7 +985,6 @@
     "goto": "Go fix it",
     "desktopCompanion": "Desktop companion",
     "customerService": "Customer service",
-    "smartDecision": "Smart decision",
     "conversation": "Conversation lead model",
     "agentExecution": "Collaborative task"
   },
@@ -1267,11 +1266,7 @@
     "sectionVideo": "Video generation",
     "sectionEmbedding": "Embedding & retrieval",
     "sectionFree": "Free Models",
-    "sectionGlobal": "Global Model Settings",
-    "globalConfigTip": "Global default model settings for IDMM, the bypass model, memory summarization, and companion chat.",
-    "idmmTab": "IDMM Defaults",
-    "failoverTab": "Failover Queue",
-    "activityTab": "Decision Activity",
+    "sectionFailover": "Failover",
     "modality": {
       "chatTitle": "Chat models",
       "chatSubtitle": "Models usable for conversation — the default model for new sessions is set here too.",
