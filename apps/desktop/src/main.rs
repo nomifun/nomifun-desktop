@@ -317,6 +317,34 @@ struct DownloadUpdateProgress {
     content_length: Option<u64>,
 }
 
+/// Marker prefix on `install_update` errors that mean the package was NEVER
+/// handed to the installer: the slot did not hold the requested version, so
+/// nothing on disk was touched and the running app is intact. The renderer must
+/// recover from these (report and stay put) instead of taking the fail-closed
+/// exit reserved for a failure that may have left a half-replaced app bundle.
+const UPDATE_NOT_RETAINED_ERROR: &str = "NOMIFUN_UPDATE_NOT_RETAINED";
+
+/// Smallest gap between download-progress messages pushed to the webview. The
+/// plugin invokes its progress callback once per HTTP body chunk, and every
+/// `Channel::send` is one `webview.eval` plus one React render downstream —
+/// tens of thousands of them for a large installer, which starved the very
+/// click the user was waiting to make. Bytes are accumulated between sends, so
+/// coalescing changes the message RATE and never the reported total.
+const UPDATE_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+/// What the native side currently holds for the in-app updater. This is the
+/// single source of truth for "is an update installable right now" — the
+/// renderer used to mirror it in module globals that silently drifted apart
+/// from it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdatePackageStatus {
+    /// `empty` | `downloading` | `ready` | `installing`
+    state: &'static str,
+    /// The version the active state refers to. Only `ready` means installable.
+    version: Option<String>,
+}
+
 enum DownloadedUpdateSlot<T> {
     Empty,
     Downloading { version: String },
@@ -336,28 +364,111 @@ impl<T> Default for DownloadedUpdateCache<T> {
     }
 }
 
+#[derive(Debug)]
 enum BeginUpdateDownload {
     Start,
-    AlreadyReady,
+    /// The requested version is already downloaded and verified. Carries the
+    /// retained size, measured under the SAME lock that decided this, so the
+    /// answer and the size it reports can never disagree.
+    AlreadyReady { retained_len: u64 },
+    /// A verified package for `replaced` was discarded to make room for this
+    /// download. Callers must log it: the renderer may still be offering the
+    /// old version as installable.
+    StartReplacingReady { replaced: String },
+}
+
+/// Why a package could not be claimed for installation. The distinction is a
+/// SAFETY boundary, not cosmetics: `NotRetained`/`StillDownloading` prove the
+/// installer was never handed anything, while `AlreadyInstalling` means another
+/// handoff is underway and may already have moved the installed app aside — so
+/// it must NOT be reported to the renderer as a recoverable "download again".
+#[derive(Debug, PartialEq, Eq)]
+enum TakeReadyError {
+    NotRetained { version: String },
+    StillDownloading { version: String },
+    AlreadyInstalling { version: String },
+}
+
+impl TakeReadyError {
+    fn message(&self) -> String {
+        match self {
+            Self::NotRetained { version } => format!("update {version} has not been downloaded"),
+            Self::StillDownloading { version } => format!("update {version} is still downloading"),
+            Self::AlreadyInstalling { version } => {
+                format!("update {version} is already installing")
+            }
+        }
+    }
+
+    /// Whether an installer handoff may already be in progress for this package.
+    fn handoff_may_have_started(&self) -> bool {
+        matches!(self, Self::AlreadyInstalling { .. })
+    }
 }
 
 impl<T> DownloadedUpdateCache<T> {
-    fn begin_download(&self, version: &str) -> Result<BeginUpdateDownload, String> {
+    /// `measure` reports the byte size of an already-retained payload. It is
+    /// applied while the slot lock is still held so the "already downloaded"
+    /// verdict and the size reported with it are one atomic observation — two
+    /// separate lock acquisitions could report 0 bytes for a package that was
+    /// discarded in between.
+    fn begin_download(
+        &self,
+        version: &str,
+        measure: impl FnOnce(&T) -> u64,
+    ) -> Result<BeginUpdateDownload, String> {
         let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
         match &*slot {
             DownloadedUpdateSlot::Downloading { version: active }
             | DownloadedUpdateSlot::Installing { version: active } => {
                 return Err(format!("update {active} is already being processed"));
             }
-            DownloadedUpdateSlot::Ready { version: ready, .. } if ready == version => {
-                return Ok(BeginUpdateDownload::AlreadyReady);
+            DownloadedUpdateSlot::Ready {
+                version: ready,
+                payload,
+            } if ready == version => {
+                return Ok(BeginUpdateDownload::AlreadyReady {
+                    retained_len: measure(payload),
+                });
             }
             DownloadedUpdateSlot::Empty | DownloadedUpdateSlot::Ready { .. } => {}
         }
+        // Note which verified package (if any) this download is about to drop.
+        let replaced = match &*slot {
+            DownloadedUpdateSlot::Ready { version: ready, .. } => Some(ready.clone()),
+            _ => None,
+        };
         *slot = DownloadedUpdateSlot::Downloading {
             version: version.to_owned(),
         };
-        Ok(BeginUpdateDownload::Start)
+        Ok(match replaced {
+            Some(replaced) => BeginUpdateDownload::StartReplacingReady { replaced },
+            None => BeginUpdateDownload::Start,
+        })
+    }
+
+    /// A snapshot of what is held right now. Read-only: never mutates the slot,
+    /// so the renderer can poll it to decide whether to offer "install".
+    fn status(&self) -> UpdatePackageStatus {
+        let slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        match &*slot {
+            DownloadedUpdateSlot::Empty => UpdatePackageStatus {
+                state: "empty",
+                version: None,
+            },
+            DownloadedUpdateSlot::Downloading { version } => UpdatePackageStatus {
+                state: "downloading",
+                version: Some(version.clone()),
+            },
+            DownloadedUpdateSlot::Ready { version, .. } => UpdatePackageStatus {
+                state: "ready",
+                version: Some(version.clone()),
+            },
+            DownloadedUpdateSlot::Installing { version } => UpdatePackageStatus {
+                state: "installing",
+                version: Some(version.clone()),
+            },
+        }
     }
 
     fn cancel_download(&self, version: &str) {
@@ -383,7 +494,7 @@ impl<T> DownloadedUpdateCache<T> {
         Ok(())
     }
 
-    fn take_ready(&self, version: &str) -> Result<T, String> {
+    fn take_ready(&self, version: &str) -> Result<T, TakeReadyError> {
         let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
         match std::mem::replace(&mut *slot, DownloadedUpdateSlot::Empty) {
             DownloadedUpdateSlot::Ready {
@@ -395,19 +506,26 @@ impl<T> DownloadedUpdateCache<T> {
             }
             other @ DownloadedUpdateSlot::Ready { .. } => {
                 *slot = other;
-                Err(format!("update {version} has not been downloaded"))
+                Err(TakeReadyError::NotRetained {
+                    version: version.to_owned(),
+                })
             }
             other @ DownloadedUpdateSlot::Downloading { .. } => {
                 *slot = other;
-                Err(format!("update {version} is still downloading"))
+                Err(TakeReadyError::StillDownloading {
+                    version: version.to_owned(),
+                })
             }
             other @ DownloadedUpdateSlot::Installing { .. } => {
                 *slot = other;
-                Err(format!("update {version} is already installing"))
+                Err(TakeReadyError::AlreadyInstalling {
+                    version: version.to_owned(),
+                })
             }
-            DownloadedUpdateSlot::Empty => {
-                Err(format!("update {version} has not been downloaded"))
-            }
+            DownloadedUpdateSlot::Empty => Err(TakeReadyError::NotRetained {
+                version: version.to_owned(),
+            }),
+
         }
     }
 
@@ -416,6 +534,21 @@ impl<T> DownloadedUpdateCache<T> {
         if matches!(&*slot, DownloadedUpdateSlot::Installing { version: active } if active == &version)
         {
             *slot = DownloadedUpdateSlot::Ready { version, payload };
+        }
+    }
+
+    /// Release the claim taken by [`Self::take_ready`] after the installer has
+    /// accepted the package. Without this, `Installing` was a terminal state:
+    /// on macOS/Linux `Update::install` RETURNS on success, so a completed
+    /// install parked the slot forever and every later `begin_download` failed
+    /// with "already being processed" until the app was restarted. Windows never
+    /// reaches this (its installer handoff ends in `process::exit`), which is
+    /// exactly why the leak went unnoticed.
+    fn finish_install(&self, version: &str) {
+        let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        if matches!(&*slot, DownloadedUpdateSlot::Installing { version: active } if active == version)
+        {
+            *slot = DownloadedUpdateSlot::Empty;
         }
     }
 }
@@ -436,6 +569,33 @@ fn checked_update_version(version: &str) -> Result<&str, String> {
     }
 }
 
+/// Accumulate `chunk` into `buffered` and decide whether to publish now.
+///
+/// Returns `Some(bytes)` — everything buffered since the last publish, INCLUDING
+/// this chunk — once `min_interval` has elapsed, and `None` while bytes should
+/// keep accumulating. The renderer adds each reported value to a running total,
+/// so callers MUST flush whatever is left in `buffered` when the download ends
+/// or the reported total finishes short of the real byte count.
+fn coalesce_progress_chunk(
+    buffered: &std::sync::atomic::AtomicU64,
+    last_sent: &mut Instant,
+    chunk: u64,
+    min_interval: Duration,
+    now: Instant,
+) -> Option<u64> {
+    use std::sync::atomic::Ordering;
+
+    // fetch_add returns the PREVIOUS value, so add the chunk back to get the
+    // post-add buffer.
+    let pending = buffered.fetch_add(chunk, Ordering::Relaxed) + chunk;
+    if now.duration_since(*last_sent) < min_interval {
+        return None;
+    }
+    buffered.store(0, Ordering::Relaxed);
+    *last_sent = now;
+    Some(pending)
+}
+
 /// Download and verify the exact update selected by the renderer, retaining the
 /// native Update handle and verified bytes together until installation. This is
 /// the only command that performs package network I/O.
@@ -450,14 +610,23 @@ async fn download_update(
     use tauri_plugin_updater::UpdaterExt;
 
     let requested_version = checked_update_version(&version)?.to_owned();
-    match downloaded.begin_download(&requested_version)? {
-        BeginUpdateDownload::AlreadyReady => {
+    match downloaded.begin_download(&requested_version, |package| package.bytes.len() as u64)? {
+        BeginUpdateDownload::AlreadyReady { retained_len } => {
+            // Report the retained size so the renderer paints a truthful
+            // "already complete" frame rather than 100% of nothing.
             let _ = on_event.send(DownloadUpdateProgress {
                 phase: "downloaded",
                 chunk_length: None,
-                content_length: None,
+                content_length: Some(retained_len),
             });
             return Ok(());
+        }
+        BeginUpdateDownload::StartReplacingReady { replaced } => {
+            tracing::warn!(
+                replaced = %replaced,
+                requested = %requested_version,
+                "discarding a verified update package to download a different version"
+            );
         }
         BeginUpdateDownload::Start => {}
     }
@@ -511,20 +680,54 @@ async fn download_update(
 
         let download_progress = on_event.clone();
         let download_finished = on_event.clone();
+        // Bytes seen since the last message, shared with the completion callback
+        // so the coalesced remainder is always flushed and the renderer's running
+        // total ends up exact.
+        let buffered = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let buffered_tail = Arc::clone(&buffered);
+        let observed_length = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let observed_length_tail = Arc::clone(&observed_length);
+        let mut last_sent = Instant::now();
         let bytes = update
             .download(
                 move |chunk_length, content_length| {
+                    use std::sync::atomic::Ordering;
+                    if let Some(total) = content_length {
+                        observed_length.store(total, Ordering::Relaxed);
+                    }
+                    let Some(pending) = coalesce_progress_chunk(
+                        &buffered,
+                        &mut last_sent,
+                        chunk_length as u64,
+                        UPDATE_PROGRESS_MIN_INTERVAL,
+                        Instant::now(),
+                    ) else {
+                        return;
+                    };
                     let _ = download_progress.send(DownloadUpdateProgress {
                         phase: "downloading",
-                        chunk_length: Some(chunk_length),
+                        chunk_length: Some(pending as usize),
                         content_length,
                     });
                 },
                 move || {
+                    use std::sync::atomic::Ordering;
+                    let total = observed_length_tail.load(Ordering::Relaxed);
+                    let content_length = (total > 0).then_some(total);
+                    // Flush whatever the interval swallowed before declaring the
+                    // download complete.
+                    let tail = buffered_tail.swap(0, Ordering::Relaxed);
+                    if tail > 0 {
+                        let _ = download_finished.send(DownloadUpdateProgress {
+                            phase: "downloading",
+                            chunk_length: Some(tail as usize),
+                            content_length,
+                        });
+                    }
                     let _ = download_finished.send(DownloadUpdateProgress {
                         phase: "downloaded",
                         chunk_length: None,
-                        content_length: None,
+                        content_length,
                     });
                 },
             )
@@ -552,14 +755,41 @@ async fn install_update(
     downloaded: tauri::State<'_, DownloadedUpdateState>,
     version: String,
 ) -> Result<(), String> {
-    let requested_version = checked_update_version(&version)?.to_owned();
-    let package = downloaded.take_ready(&requested_version)?;
+    // `checked_update_version` and `take_ready` are precondition checks that
+    // touch nothing on disk — EXCEPT `AlreadyInstalling`, which means another
+    // handoff is already underway and may have moved the installed app aside.
+    // Only the provably-untouched cases get the recoverable marker; killing the
+    // process for those destroys the memory-only package and forces a full
+    // re-download just to retry, which is the whole "must download twice to
+    // install" complaint.
+    let requested_version = checked_update_version(&version)
+        .map_err(|error| format!("{UPDATE_NOT_RETAINED_ERROR}: {error}"))?
+        .to_owned();
+    let package = match downloaded.take_ready(&requested_version) {
+        Ok(package) => package,
+        Err(error) if error.handoff_may_have_started() => return Err(error.message()),
+        Err(error) => return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: {}", error.message())),
+    };
 
+    // Past this point the installer has been handed the bytes: on Windows this
+    // never returns (the plugin spawns the installer and exits), and on macOS a
+    // failure can leave the app bundle half replaced. An Err here is NOT
+    // recoverable in the renderer.
     if let Err(error) = package.update.install(&package.bytes) {
         downloaded.restore_ready(requested_version, package);
         return Err(error.to_string());
     }
+    downloaded.finish_install(&requested_version);
     Ok(())
+}
+
+/// The authoritative answer to "does an installable update package exist right
+/// now". The renderer polls this instead of mirroring the state locally.
+#[tauri::command]
+async fn update_package_status(
+    downloaded: tauri::State<'_, DownloadedUpdateState>,
+) -> Result<UpdatePackageStatus, String> {
+    Ok(downloaded.status())
 }
 
 /// Bounded shutdown attempts before the updater installer handoff proceeds
@@ -2643,6 +2873,7 @@ fn main() -> std::process::ExitCode {
         .invoke_handler(tauri::generate_handler![
             download_update,
             install_update,
+            update_package_status,
             companion_pointer::get_companion_local_pointer,
             updater_install_context::get_updater_install_context,
             sync_companion_windows,
@@ -2696,26 +2927,239 @@ mod tests {
         let cache = DownloadedUpdateCache::default();
 
         assert!(matches!(
-            cache.begin_download("0.3.8"),
+            cache.begin_download("0.3.8", |_| 0),
             Ok(BeginUpdateDownload::Start)
         ));
-        assert!(cache.begin_download("0.3.8").is_err());
+        assert!(cache.begin_download("0.3.8", |_| 0).is_err());
         cache.finish_download("0.3.8", "verified bytes").unwrap();
 
         assert!(matches!(
-            cache.begin_download("0.3.8"),
-            Ok(BeginUpdateDownload::AlreadyReady)
+            cache.begin_download("0.3.8", |_| 0),
+            Ok(BeginUpdateDownload::AlreadyReady { .. })
         ));
         assert_eq!(cache.take_ready("0.3.8").unwrap(), "verified bytes");
-        assert!(cache.begin_download("0.3.8").is_err());
+        // While the installer is being handed the bytes the slot is claimed, so a
+        // concurrent download or a second install must still be refused.
+        assert!(cache.begin_download("0.3.8", |_| 0).is_err());
         assert!(cache.take_ready("0.3.8").is_err());
+    }
+
+    #[test]
+    fn completed_install_releases_the_slot_for_the_next_update() {
+        // `Installing` used to be a terminal sink: the only way out was an install
+        // ERROR (restore_ready). On macOS/Linux `install()` returns Ok, so a
+        // successful install parked the slot in Installing for the rest of the
+        // process — after which EVERY later download was rejected with
+        // "already being processed" and the user could not update again without
+        // restarting the app.
+        let cache = DownloadedUpdateCache::default();
+        cache.begin_download("0.4.2", |_| 0).unwrap();
+        cache.finish_download("0.4.2", "verified bytes").unwrap();
+        let payload = cache.take_ready("0.4.2").unwrap();
+        assert_eq!(payload, "verified bytes");
+
+        cache.finish_install("0.4.2");
+
+        assert_eq!(cache.status().state, "empty");
+        assert!(matches!(
+            cache.begin_download("0.4.3", |_| 0),
+            Ok(BeginUpdateDownload::Start)
+        ));
+    }
+
+    #[test]
+    fn finish_install_only_releases_the_version_that_was_claimed() {
+        let cache = DownloadedUpdateCache::default();
+        cache.begin_download("0.4.2", |_| 0).unwrap();
+        cache.finish_download("0.4.2", "verified bytes").unwrap();
+        let _payload = cache.take_ready("0.4.2").unwrap();
+
+        // A stale completion for another version must not release this claim.
+        cache.finish_install("0.4.1");
+        assert_eq!(cache.status().state, "installing");
+        assert_eq!(cache.status().version.as_deref(), Some("0.4.2"));
+    }
+
+    #[test]
+    fn status_reports_the_installable_version_only_while_ready() {
+        let cache = DownloadedUpdateCache::<&str>::default();
+        assert_eq!(cache.status().state, "empty");
+        assert_eq!(cache.status().version, None);
+
+        cache.begin_download("0.4.2", |_| 0).unwrap();
+        let downloading = cache.status();
+        assert_eq!(downloading.state, "downloading");
+        // The version is reported for every active state so the renderer can pin
+        // its metadata handle to the package being produced, but only `ready`
+        // means "installable right now".
+        assert_eq!(downloading.version.as_deref(), Some("0.4.2"));
+
+        cache.finish_download("0.4.2", "bytes").unwrap();
+        let ready = cache.status();
+        assert_eq!(ready.state, "ready");
+        assert_eq!(ready.version.as_deref(), Some("0.4.2"));
+    }
+
+    #[test]
+    fn replacing_a_ready_package_reports_what_it_discarded() {
+        // Starting a download for a different version silently threw away an
+        // already-verified package while the renderer still believed it was
+        // installable; the caller must at least be able to log it.
+        let cache = DownloadedUpdateCache::default();
+        cache.begin_download("0.4.2", |_| 0).unwrap();
+        cache.finish_download("0.4.2", "verified bytes").unwrap();
+
+        match cache.begin_download("0.4.3", |_| 0) {
+            Ok(BeginUpdateDownload::StartReplacingReady { replaced }) => {
+                assert_eq!(replaced, "0.4.2");
+            }
+            other => panic!("expected the discarded package to be reported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coalescing_progress_never_loses_or_duplicates_a_byte() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // Synthetic clock so the test does not depend on wall time.
+        let base = Instant::now();
+        let min = Duration::from_millis(100);
+        let buffered = AtomicU64::new(0);
+        let mut last_sent = base;
+
+        // (chunk bytes, milliseconds since `base`) — several chunks inside one
+        // window, one that crosses it, then a sub-window tail that never crosses.
+        let chunks: [(u64, u64); 7] = [
+            (1_000, 10),
+            (2_000, 40),
+            (3_000, 90),
+            (4_000, 150),
+            (5_000, 160),
+            (6_000, 260),
+            (7_000, 300),
+        ];
+
+        let mut emitted = Vec::new();
+        for (chunk, at_ms) in chunks {
+            if let Some(bytes) = coalesce_progress_chunk(
+                &buffered,
+                &mut last_sent,
+                chunk,
+                min,
+                base + Duration::from_millis(at_ms),
+            ) {
+                emitted.push(bytes);
+            }
+        }
+        // The remainder the interval swallowed, flushed the way the download's
+        // completion callback does.
+        let tail = buffered.swap(0, Ordering::Relaxed);
+
+        let total: u64 = chunks.iter().map(|(chunk, _)| chunk).sum();
+        let reported: u64 = emitted.iter().sum::<u64>() + tail;
+        assert_eq!(
+            reported, total,
+            "the renderer's running total must equal the real byte count"
+        );
+        // The point of coalescing: far fewer messages than chunks.
+        assert!(
+            emitted.len() < chunks.len(),
+            "expected coalescing, got {} messages for {} chunks",
+            emitted.len(),
+            chunks.len()
+        );
+        // 150ms crosses the first window (1000+2000+3000+4000), 260ms the second
+        // (5000+6000); 7000 arrives 40ms later and stays buffered as the tail.
+        assert_eq!(emitted, vec![10_000, 11_000]);
+        assert_eq!(tail, 7_000);
+    }
+
+    #[test]
+    fn a_single_chunk_after_the_interval_publishes_immediately() {
+        use std::sync::atomic::AtomicU64;
+
+        let base = Instant::now();
+        let buffered = AtomicU64::new(0);
+        let mut last_sent = base;
+        assert_eq!(
+            coalesce_progress_chunk(
+                &buffered,
+                &mut last_sent,
+                512,
+                Duration::from_millis(100),
+                base + Duration::from_millis(101),
+            ),
+            Some(512)
+        );
+    }
+
+    #[test]
+    fn already_ready_measures_the_retained_package_under_the_same_lock() {
+        // The size travels with the verdict: measuring it in a second lock
+        // acquisition let a concurrent take/replace turn it into 0, which is how
+        // the UI ended up painting "100% of 0.0 KB".
+        let cache = DownloadedUpdateCache::default();
+        cache.begin_download("0.4.2", |_| 0).unwrap();
+        cache.finish_download("0.4.2", vec![0u8; 1234]).unwrap();
+
+        match cache.begin_download("0.4.2", |payload: &Vec<u8>| payload.len() as u64) {
+            Ok(BeginUpdateDownload::AlreadyReady { retained_len }) => {
+                assert_eq!(retained_len, 1234);
+            }
+            other => panic!("expected the retained size to be reported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_install_already_in_flight_is_never_reported_as_recoverable() {
+        // SAFETY BOUNDARY. `NotRetained`/`StillDownloading` prove the installer
+        // was handed nothing. `AlreadyInstalling` does not: on macOS the running
+        // .app has already been renamed aside by then, so telling the renderer
+        // "just download again" hands the user a live Install button on top of a
+        // half-replaced app instead of terminating.
+        let cache = DownloadedUpdateCache::<&str>::default();
+        assert_eq!(
+            cache.take_ready("0.4.2"),
+            Err(TakeReadyError::NotRetained {
+                version: "0.4.2".to_owned()
+            })
+        );
+        assert!(!TakeReadyError::NotRetained {
+            version: "0.4.2".to_owned()
+        }
+        .handoff_may_have_started());
+        assert!(!TakeReadyError::StillDownloading {
+            version: "0.4.2".to_owned()
+        }
+        .handoff_may_have_started());
+        assert!(TakeReadyError::AlreadyInstalling {
+            version: "0.4.2".to_owned()
+        }
+        .handoff_may_have_started());
+
+        cache.begin_download("0.4.2", |_| 0).unwrap();
+        assert_eq!(
+            cache.take_ready("0.4.2"),
+            Err(TakeReadyError::StillDownloading {
+                version: "0.4.2".to_owned()
+            })
+        );
+        cache.finish_download("0.4.2", "bytes").unwrap();
+        cache.take_ready("0.4.2").unwrap();
+        // Slot is now Installing: a second claim must say so, not "not retained".
+        assert_eq!(
+            cache.take_ready("0.4.2"),
+            Err(TakeReadyError::AlreadyInstalling {
+                version: "0.4.2".to_owned()
+            })
+        );
     }
 
     #[test]
     fn downloaded_update_cache_rejects_wrong_version_without_losing_ready_package() {
         let cache = DownloadedUpdateCache::default();
         assert!(matches!(
-            cache.begin_download("0.3.8"),
+            cache.begin_download("0.3.8", |_| 0),
             Ok(BeginUpdateDownload::Start)
         ));
         cache.finish_download("0.3.8", vec![1, 2, 3]).unwrap();
@@ -2730,12 +3174,12 @@ mod tests {
     fn failed_update_download_can_be_retried() {
         let cache = DownloadedUpdateCache::<Vec<u8>>::default();
         assert!(matches!(
-            cache.begin_download("0.3.8"),
+            cache.begin_download("0.3.8", |_| 0),
             Ok(BeginUpdateDownload::Start)
         ));
         cache.cancel_download("0.3.8");
         assert!(matches!(
-            cache.begin_download("0.3.8"),
+            cache.begin_download("0.3.8", |_| 0),
             Ok(BeginUpdateDownload::Start)
         ));
     }
