@@ -19,9 +19,9 @@ pub use nomifun_conversation::model_failover::is_provider_fault;
 /// Phase 2 (plan D4 / config.rs validate): validation is **per-watch**. A watch
 /// only carries operational requirements when it is enabled. The single hard
 /// prerequisite is the `RulePlusModel` tier's resolvable backup model — and the
-/// caller computes `backup_resolvable` inclusively (per-watch override → global
-/// default → the conversation's own model), so a plain desktop chat satisfies it
-/// with zero extra config ("智能值守、全托管" is one click). The strategy's
+/// caller computes `backup_resolvable` inclusively (per-watch selection → the
+/// conversation's own model), so a plain desktop chat satisfies it with zero
+/// extra config ("智能值守、全托管" is one click). The strategy's
 /// steering / freeform text is OPTIONAL: when empty, the sidecar prompt falls
 /// back to a conservative built-in policy ([`crate::prompt::build_user_prompt`]),
 /// so requiring it only added friction. A disabled watch never runs and so
@@ -50,8 +50,8 @@ pub fn validate(cfg: &IdmmConfig, backup_resolvable: bool) -> Result<(), String>
         cfg.decision_watch.base.enabled && cfg.decision_watch.base.tier == WatchTier::RulePlusModel;
     if (fault_needs_backup || decision_needs_backup) && !backup_resolvable {
         return Err(
-            "no backup model resolvable for the 旁路模型 (RulePlusModel) tier — pick a per-watch bypass model, set a \
-             global default (设置 → 智能决策), or enable it on a conversation that already has a model selected"
+            "no backup model resolvable for the 旁路模型 (RulePlusModel) tier — pick a bypass model for the watch, or \
+             enable it on a conversation that already has a model selected"
                 .into(),
         );
     }

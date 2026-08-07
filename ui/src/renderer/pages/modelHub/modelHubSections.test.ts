@@ -22,13 +22,13 @@ const SECTIONS = [
   'video',
   'embedding',
   'free',
-  'global',
+  'failover',
 ] as const;
 
 const GROUPS = [
   { key: 'access', sections: ['models'] },
   { key: 'capability', sections: ['chat', 'asr', 'tts', 'vision', 'image', 'video', 'embedding'] },
-  { key: 'advanced', sections: ['free', 'global'] },
+  { key: 'advanced', sections: ['free', 'failover'] },
 ] as const;
 
 const hubOf = (locale: unknown): Record<string, string> =>
@@ -70,11 +70,23 @@ describe('model hub is a capability-first view', () => {
     // now have one section per category, so an old link resolves to the first.
     expect(src.includes("speech: 'asr'")).toBe(true);
     expect(src.includes("creation: 'image'")).toBe(true);
-    // `models` / `free` / `global` are still real keys, so they resolve as-is.
-    for (const stillReal of ['models', 'free', 'global'] as const) {
+    // `global` held the IDMM defaults + the failover queue + decision activity.
+    // The global-IDMM concept is gone entirely, so the section is named after
+    // what actually remains.
+    expect(src.includes("global: 'failover'")).toBe(true);
+    // `models` / `free` are still real keys, so they resolve as-is.
+    for (const stillReal of ['models', 'free'] as const) {
       expect(SECTIONS.includes(stillReal)).toBe(true);
     }
     expect(src.includes("searchParams.get('section') === 'agents'")).toBe(true);
+  });
+
+  test('no global-IDMM surface survives in the hub', () => {
+    // 全局 IDMM 配置 / 决策活动 were removed together with the global-backup
+    // concept they configured; the wrapper that hosted them is gone too.
+    expect(src.includes('GlobalModelConfig')).toBe(false);
+    expect(src.includes('IdmmActivityContent')).toBe(false);
+    expect(src.includes('<ModelFailoverContent />')).toBe(true);
   });
 
   test('every section and group has a label in both locales', () => {

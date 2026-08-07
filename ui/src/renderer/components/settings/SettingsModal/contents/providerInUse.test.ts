@@ -19,7 +19,6 @@ describe('providerInUse helpers', () => {
     expect(featureRoute('desktopCompanion')).toBe('/nomi');
     expect(featureRoute('customerService', CS_AGENT)).toBe(`/customer-service/`);
     expect(featureRoute('customerService')).toBe('/customer-service');
-    expect(featureRoute('smartDecision')).toBe('/models?section=global');
     expect(featureRoute('conversation', CONVERSATION)).toBe(`/conversation/${CONVERSATION}`);
     expect(featureRoute('conversation')).toBe('/guid');
     expect(featureRoute('agentExecution')).toBe('/guid');

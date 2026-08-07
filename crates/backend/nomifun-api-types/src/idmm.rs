@@ -531,13 +531,14 @@ pub struct IdmmState {
     pub last_signal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_intervention_at: Option<i64>,
-    /// Whether a backup provider is resolvable (per-session or global default).
+    /// Whether a backup provider is resolvable for the model tier: the watch's
+    /// own bypass model, or (conversations only) the session's own model.
     pub sidecar_provider_resolved: bool,
     /// The persisted per-session `IdmmConfig`, included so the frontend can
     /// rehydrate its form (per-watch tier, bypass model, strategy rules) on
     /// remount instead of reconstructing from scratch and silently dropping the
     /// user's saved config. Absent for targets that have never been configured
-    /// (the frontend then falls back to the global defaults via `IdmmSettings`).
+    /// (the frontend then seeds the form from its own defaults).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<IdmmConfig>,
 }
@@ -685,47 +686,6 @@ impl<'de> Deserialize<'de> for SetIdmmRequest {
                 fault_watch: wire.fault_watch,
                 decision_watch: wire.decision_watch,
             },
-        })
-    }
-}
-
-/// Global IDMM defaults (`GET/PUT /api/idmm/settings`), stored in `client_preferences`.
-#[derive(Debug, Clone, PartialEq, Serialize, Default)]
-pub struct IdmmSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup_provider_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup_model: Option<String>,
-    #[serde(default)]
-    pub default_steering_prompt: String,
-}
-
-impl<'de> Deserialize<'de> for IdmmSettings {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            #[serde(default)]
-            backup_provider_id: Option<String>,
-            #[serde(default)]
-            backup_model: Option<String>,
-            #[serde(default)]
-            default_steering_prompt: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        crate::serde_util::validate_optional_provider_model_pair(
-            wire.backup_provider_id.as_deref(),
-            wire.backup_model.as_deref(),
-        )
-        .map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            backup_provider_id: wire.backup_provider_id,
-            backup_model: wire.backup_model,
-            default_steering_prompt: wire.default_steering_prompt,
         })
     }
 }
@@ -960,32 +920,6 @@ mod tests {
             serde_json::from_value::<BypassModelRef>(serde_json::json!({
                 "provider_id": PROVIDER_ID,
                 "model": "model-a"
-            }))
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn idmm_settings_require_a_complete_trimmed_provider_model_pair() {
-        const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
-        for invalid in [
-            serde_json::json!({"backup_provider_id": PROVIDER_ID}),
-            serde_json::json!({"backup_model": "model-a"}),
-            serde_json::json!({
-                "backup_provider_id": "openrouter",
-                "backup_model": "model-a"
-            }),
-            serde_json::json!({
-                "backup_provider_id": PROVIDER_ID,
-                "backup_model": " model-a"
-            }),
-        ] {
-            assert!(serde_json::from_value::<IdmmSettings>(invalid).is_err());
-        }
-        assert!(
-            serde_json::from_value::<IdmmSettings>(serde_json::json!({
-                "backup_provider_id": PROVIDER_ID,
-                "backup_model": "model-a"
             }))
             .is_ok()
         );

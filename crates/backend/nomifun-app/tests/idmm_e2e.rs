@@ -206,32 +206,22 @@ async fn allow_unmarked_pick_flag_round_trips_on_conversation() {
 #[tokio::test]
 async fn model_tier_without_freeform_policy_is_allowed() {
     // The strategy's freeform policy is OPTIONAL for the RulePlusModel tier (a
-    // conservative built-in policy is used when empty). With a resolvable global
-    // backup provider, enabling the model tier with no freeform must SUCCEED.
+    // conservative built-in policy is used when empty). With a resolvable bypass
+    // model, enabling the model tier with no freeform must SUCCEED.
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let provider_id = ProviderId::new().into_string();
     seed_provider(&services, &provider_id, "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
 
-    // IdmmSettings validates provider/model as a pair: a backup provider
-    // without its model is rejected at the DTO boundary.
-    let settings = json!({
-        "backup_provider_id": provider_id,
-        "backup_model": "m1",
-        "default_steering_prompt": ""
-    });
-    let resp = app
-        .clone()
-        .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
     let body = json!({
         "kind": "conversation",
         "target_id": conv,
-        "decision_watch": { "enabled": true, "tier": "rule_plus_model" }
+        "decision_watch": {
+            "enabled": true,
+            "tier": "rule_plus_model",
+            "bypass_model": { "provider_id": provider_id, "model": "m1" }
+        }
     });
     let resp = app
         .clone()
@@ -241,7 +231,7 @@ async fn model_tier_without_freeform_policy_is_allowed() {
     assert_eq!(
         resp.status(),
         StatusCode::OK,
-        "empty freeform must be allowed once a backup model resolves"
+        "empty freeform must be allowed once a bypass model resolves"
     );
     let j = body_json(resp).await;
     assert_eq!(j["data"]["enabled"], true);
@@ -254,8 +244,8 @@ async fn model_tier_without_backup_provider_is_rejected() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
 
-    // No global backup provider, no per-watch bypass model, and the e2e
-    // conversation carries no model of its own → nothing resolves → must 400.
+    // No per-watch bypass model, and the e2e conversation carries no model of
+    // its own → nothing resolves → must 400.
     let body = json!({
         "kind": "conversation",
         "target_id": conv,
@@ -295,21 +285,12 @@ async fn fault_watch_model_tier_without_backup_is_rejected() {
 }
 
 #[tokio::test]
-async fn model_tier_with_global_backup_succeeds() {
+async fn model_tier_with_a_watch_bypass_model_succeeds() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let provider_id = ProviderId::new().into_string();
     seed_provider(&services, &provider_id, "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
-
-    // Configure a global backup provider.
-    let settings = json!({ "backup_provider_id": provider_id, "backup_model": "m1", "default_steering_prompt": "" });
-    let resp = app
-        .clone()
-        .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
 
     let body = json!({
         "kind": "conversation",
@@ -317,6 +298,7 @@ async fn model_tier_with_global_backup_succeeds() {
         "decision_watch": {
             "enabled": true,
             "tier": "rule_plus_model",
+            "bypass_model": { "provider_id": provider_id, "model": "m1" },
             "strategy": { "freeform_policy": "prefer the recommended option; never delete data" }
         }
     });
@@ -328,87 +310,11 @@ async fn model_tier_with_global_backup_succeeds() {
     assert_eq!(
         resp.status(),
         StatusCode::OK,
-        "model tier enable with a global backup should succeed"
+        "model tier enable with the watch's own bypass model should succeed"
     );
     let j = body_json(resp).await;
     assert_eq!(j["data"]["config"]["decision_watch"]["tier"], "rule_plus_model");
     assert_eq!(j["data"]["sidecar_provider_resolved"], true);
-}
-
-#[tokio::test]
-async fn settings_roundtrip() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let provider_id = ProviderId::new().into_string();
-    seed_provider(&services, &provider_id, "model-xyz").await;
-
-    let settings = json!({
-        "backup_provider_id": provider_id,
-        "backup_model": "model-xyz",
-        "default_steering_prompt": "be conservative"
-    });
-    let resp = app
-        .clone()
-        .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let resp = app
-        .clone()
-        .oneshot(get_with_token("/api/idmm/settings", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let j = body_json(resp).await;
-    assert_eq!(j["data"]["backup_provider_id"], provider_id);
-    assert_eq!(j["data"]["backup_model"], "model-xyz");
-    assert_eq!(j["data"]["default_steering_prompt"], "be conservative");
-}
-
-#[tokio::test]
-async fn settings_update_clears_optional_backup_fields_when_absent() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let provider_id = ProviderId::new().into_string();
-    seed_provider(&services, &provider_id, "model-old").await;
-
-    let initial = json!({
-        "backup_provider_id": provider_id,
-        "backup_model": "model-old",
-        "default_steering_prompt": "old policy"
-    });
-    let resp = app
-        .clone()
-        .oneshot(json_with_token("PUT", "/api/idmm/settings", initial, &token, &csrf))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let cleared = json!({ "default_steering_prompt": "" });
-    let resp = app
-        .clone()
-        .oneshot(json_with_token("PUT", "/api/idmm/settings", cleared, &token, &csrf))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let resp = app
-        .clone()
-        .oneshot(get_with_token("/api/idmm/settings", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let j = body_json(resp).await;
-    assert!(
-        j["data"].get("backup_provider_id").is_none() || j["data"]["backup_provider_id"].is_null(),
-        "clearing the global backup provider must remove the stored preference; got {j:?}"
-    );
-    assert!(
-        j["data"].get("backup_model").is_none() || j["data"]["backup_model"].is_null(),
-        "clearing the global backup model must remove the stored preference; got {j:?}"
-    );
-    assert_eq!(j["data"]["default_steering_prompt"], "");
 }
 
 #[tokio::test]
@@ -492,26 +398,24 @@ async fn disable_model_watch_without_backup_succeeds() {
 
 #[tokio::test]
 async fn enabled_to_disabled_transition_succeeds_without_validation() {
-    // The user enables the model tier with a global backup, later turns it off.
-    // The disable POST must succeed even without the backup still resolving.
+    // The user enables the model tier with a bypass model, later turns it off.
+    // The disable POST must succeed even when the bypass model is dropped from
+    // the payload (a disabled watch carries no operational requirements).
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let provider_id = ProviderId::new().into_string();
     seed_provider(&services, &provider_id, "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
-    let settings = json!({ "backup_provider_id": provider_id, "backup_model": "m1", "default_steering_prompt": "" });
-    let resp = app
-        .clone()
-        .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
 
     // Enable.
     let body = json!({
         "kind": "conversation",
         "target_id": conv,
-        "decision_watch": { "enabled": true, "tier": "rule_plus_model" }
+        "decision_watch": {
+            "enabled": true,
+            "tier": "rule_plus_model",
+            "bypass_model": { "provider_id": provider_id, "model": "m1" }
+        }
     });
     let resp = app
         .clone()
@@ -542,19 +446,9 @@ async fn get_status_round_trips_persisted_config() {
     // tiers, bypass model, strategy) so the frontend can rehydrate its form.
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let provider_id = ProviderId::new().into_string();
     let watch_provider_id = ProviderId::new().into_string();
-    seed_provider(&services, &provider_id, "m1").await;
     seed_provider(&services, &watch_provider_id, "m-watch").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
-
-    let settings = json!({ "backup_provider_id": provider_id, "backup_model": "m1", "default_steering_prompt": "" });
-    let resp = app
-        .clone()
-        .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
 
     let body = json!({
         "kind": "conversation",
@@ -742,217 +636,4 @@ async fn deleting_conversation_cascades_idmm_records() {
         after.is_empty(),
         "IDMM records must be cascade-cleared when the conversation is deleted; got {after:?}"
     );
-}
-
-#[tokio::test]
-async fn cross_session_activity_feed_round_trips() {
-    // IDMM is an installation-owner control plane. Its activity feed reads the
-    // owner's targets most-recent-first, rejects secondary users at the HTTP
-    // boundary, and bulk clear removes only the owner's rows. Insert records
-    // for two users directly so repository deletion isolation remains covered
-    // without granting the secondary user access to IDMM.
-    use nomifun_db::models::NewIdmmInterventionRow;
-    use nomifun_db::{IIdmmInterventionRepository, SqliteIdmmInterventionRepository};
-
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let (other_token, other_csrf) =
-        setup_and_login(&mut app, &services, "idmm-activity-other", "StrongP@ss2").await;
-    let owner_user_id = services
-        .user_repo
-        .find_by_username("admin")
-        .await
-        .unwrap()
-        .unwrap()
-        .user_id
-        .to_string();
-    let other_user_id = services
-        .user_repo
-        .find_by_username("idmm-activity-other")
-        .await
-        .unwrap()
-        .unwrap()
-        .user_id
-        .to_string();
-    let owner_conversation_a = create_conversation(&mut app, &token, &csrf).await;
-    let owner_conversation_b = create_conversation(&mut app, &token, &csrf).await;
-    let owner_terminal = create_terminal(&mut app, &token, &csrf).await;
-    let other_conversation = create_conversation(&mut app, &other_token, &other_csrf).await;
-
-    let records: SqliteIdmmInterventionRepository =
-        SqliteIdmmInterventionRepository::new(services.database.pool().clone());
-
-    let make_row =
-        |intervention_id: &IdmmInterventionId,
-         user_id: &str,
-         target_kind: &str,
-         target_id: &str,
-         at: i64| NewIdmmInterventionRow {
-            intervention_id: intervention_id.as_str().to_owned(),
-            user_id: user_id.into(),
-            target_kind: target_kind.into(),
-            target_id: target_id.into(),
-            watch: "decision".into(),
-            at,
-            signal: "decision".into(),
-            tier_used: "rule".into(),
-            category: Some("option".into()),
-            action: "answer_choice".into(),
-            detail: Some("option 2".into()),
-            reason: Some("rule-tier auto-pick".into()),
-            confidence: None,
-            bypass_model: None,
-            outcome: "applied".into(),
-        };
-
-    // Two distinct targets, at interleaved → most-recent-first must mix them.
-    let activity_a = IdmmInterventionId::new();
-    let activity_b = IdmmInterventionId::new();
-    let activity_c = IdmmInterventionId::new();
-    let other_activity = IdmmInterventionId::new();
-
-    records
-        .insert(&make_row(
-            &activity_a,
-            &owner_user_id,
-            "conversation",
-            &owner_conversation_a,
-            10,
-        ))
-        .await
-        .unwrap();
-    records
-        .insert(&make_row(
-            &activity_b,
-            &owner_user_id,
-            "terminal",
-            &owner_terminal,
-            30,
-        ))
-        .await
-        .unwrap();
-    records
-        .insert(&make_row(
-            &activity_c,
-            &owner_user_id,
-            "conversation",
-            &owner_conversation_b,
-            20,
-        ))
-        .await
-        .unwrap();
-    records
-        .insert(&make_row(
-            &other_activity,
-            &other_user_id,
-            "conversation",
-            &other_conversation,
-            40,
-        ))
-        .await
-        .unwrap();
-
-    // GET the feed → most-recent-first across ALL targets (30 -> 20 -> 10).
-    let resp = app
-        .clone()
-        .oneshot(get_with_token("/api/idmm/activity", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let j = body_json(resp).await;
-    let items = j["data"].as_array().expect("activity feed is an array");
-    let intervention_ids: Vec<IdmmInterventionId> = items
-        .iter()
-        .map(|record| {
-            assert!(
-                record.get("id").is_none(),
-                "legacy generic id must not be emitted: {record:?}"
-            );
-            assert!(
-                record.get("intervention_row_id").is_none(),
-                "technical row id must not cross the HTTP boundary: {record:?}"
-            );
-            let value = record
-                .get("intervention_id")
-                .expect("intervention_id must be emitted");
-            assert!(
-                value.is_string(),
-                "intervention_id must not be an integer: {record:?}"
-            );
-            let value = value.as_str().unwrap();
-            assert!(
-                !value.bytes().all(|byte| byte.is_ascii_digit()),
-                "numeric-string intervention_id must not be emitted: {record:?}"
-            );
-            assert!(
-                !value.starts_with("idmm_"),
-                "prefixed intervention_id must not be emitted: {record:?}"
-            );
-            IdmmInterventionId::parse(value.to_owned())
-                .expect("intervention_id must be a bare lowercase UUIDv7")
-        })
-        .collect();
-    assert_eq!(intervention_ids, vec![activity_b, activity_c, activity_a]);
-    // Spans both targets.
-    assert_eq!(items[0]["target_kind"], "terminal");
-    assert_eq!(items[1]["target_kind"], "conversation");
-
-    // Secondary users cannot access the installation-wide IDMM control plane.
-    let resp = app
-        .clone()
-        .oneshot(get_with_token("/api/idmm/activity", &other_token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-    // DELETE the feed → clears this owner's records across every target.
-    let resp = app
-        .clone()
-        .oneshot(delete_with_token("/api/idmm/activity", &token, &csrf))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let j = body_json(resp).await;
-    assert_eq!(j["data"], 3, "bulk clear must report the removed count");
-
-    // The feed is now empty.
-    let resp = app
-        .clone()
-        .oneshot(get_with_token("/api/idmm/activity", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let j = body_json(resp).await;
-    assert!(
-        j["data"].as_array().unwrap().is_empty(),
-        "activity feed must be empty after bulk clear; got {j:?}"
-    );
-
-    // Clearing the owner's feed must not delete a row belonging to another
-    // user, even though that user cannot access IDMM over HTTP.
-    let other_rows = records.list_recent(&other_user_id, 100).await.unwrap();
-    assert_eq!(other_rows.len(), 1);
-    assert_eq!(
-        other_rows[0].intervention_id,
-        other_activity.as_str(),
-        "repository isolation must be checked with the business UUIDv7, not the technical row id"
-    );
-
-    // The owner-only boundary remains enforced after the owner's mutation.
-    let resp = app
-        .clone()
-        .oneshot(get_with_token("/api/idmm/activity", &other_token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-    let resp = app
-        .oneshot(delete_with_token(
-            "/api/idmm/activity",
-            &other_token,
-            &other_csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }

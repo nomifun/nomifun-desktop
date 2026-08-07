@@ -1,7 +1,6 @@
 //! Sidecar backup-model caller. Resolves the effective bypass provider/model
-//! (per-watch override → global default in `client_preferences` → the session's
-//! own model), then runs a one-shot completion and parses the strict-JSON
-//! decision (with one retry).
+//! (per-watch override → the session's own model), then runs a one-shot
+//! completion and parses the strict-JSON decision (with one retry).
 //!
 //! The provider call is behind the `Completer` trait so the supervisor tests can
 //! inject canned responses without a live provider; the production impl wraps
@@ -13,16 +12,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nomifun_ai_agent::{one_shot_completion, resolve_provider_config, user_message};
 use nomifun_api_types::{BypassModelRef, DecisionStrategy};
-use nomifun_db::{IClientPreferenceRepository, IProviderRepository};
+use nomifun_db::IProviderRepository;
 use nomifun_common::ProviderId;
 
 use crate::prompt::{SIDECAR_SYSTEM, SidecarDecision, build_open_question_prompt, build_user_prompt, parse_decision};
 use crate::signal::StallClass;
-
-/// Global-default preference keys (stored in `client_preferences`).
-pub const PREF_BACKUP_PROVIDER: &str = "idmm_backup_provider_id";
-pub const PREF_BACKUP_MODEL: &str = "idmm_backup_model";
-pub const PREF_DEFAULT_STEERING: &str = "idmm_default_steering_prompt";
 
 const SIDECAR_MAX_TOKENS: u32 = 1024;
 
@@ -92,79 +86,49 @@ pub struct OpenQuestionAsk<'a> {
 /// Resolves the bypass model and runs sidecar decisions.
 pub struct SidecarClient {
     completer: Arc<dyn Completer>,
-    client_prefs: Arc<dyn IClientPreferenceRepository>,
 }
 
 impl SidecarClient {
-    pub fn new(completer: Arc<dyn Completer>, client_prefs: Arc<dyn IClientPreferenceRepository>) -> Self {
-        Self {
-            completer,
-            client_prefs,
-        }
+    pub fn new(completer: Arc<dyn Completer>) -> Self {
+        Self { completer }
     }
 
-    /// Read a single global-default preference value.
-    async fn pref(&self, key: &str) -> Option<String> {
-        self.client_prefs
-            .get_by_keys(&[key])
-            .await
-            .ok()
-            .and_then(|rows| rows.into_iter().next())
-            .map(|p| p.value)
-    }
-
-    async fn strategy_with_default_steering(&self, strategy: &DecisionStrategy) -> DecisionStrategy {
-        if strategy
-            .freeform_policy
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|s| !s.is_empty())
-        {
-            return strategy.clone();
-        }
-        let Some(default_policy) = self
-            .pref(PREF_DEFAULT_STEERING)
-            .await
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        else {
-            return strategy.clone();
-        };
-        let mut merged = strategy.clone();
-        merged.freeform_policy = Some(default_policy);
-        merged
-    }
-
-    /// Resolve effective `(provider_id, model)` from the watch's `bypass_model` +
-    /// global defaults. `model` falls back to the global default, then to empty
-    /// (the provider's default).
-    pub async fn resolve_backup(&self, bypass: &BypassModelRef) -> Option<(String, String)> {
-        let provider_id = match bypass.provider_id.as_deref() {
-            Some(provider_id) => ProviderId::parse(provider_id).ok()?.into_string(),
-            None => ProviderId::parse(self.pref(PREF_BACKUP_PROVIDER).await?).ok()?.into_string(),
-        };
+    /// Resolve effective `(provider_id, model)` from the watch's `bypass_model`.
+    /// An empty `model` means "the provider's default".
+    ///
+    /// This used to fall through to three global `client_preferences` defaults
+    /// (backup provider / backup model / steering prompt). That tier is gone: a
+    /// watch either names its own bypass model or borrows the supervised
+    /// session's, and a watch with no policy text falls back to the built-in
+    /// conservative one in [`build_user_prompt`]. Both remaining sources are
+    /// visible where the watch is configured, so there is no longer a setting
+    /// that silently changes how every session decides.
+    pub fn resolve_backup(&self, bypass: &BypassModelRef) -> Option<(String, String)> {
+        let provider_id = ProviderId::parse(bypass.provider_id.as_deref()?)
+            .ok()?
+            .into_string();
         let model = match &bypass.model {
             Some(m) if !m.is_empty() => m.clone(),
-            _ => self.pref(PREF_BACKUP_MODEL).await.unwrap_or_default(),
+            _ => String::new(),
         };
         Some((provider_id, model))
     }
 
     /// Whether a backup provider is resolvable for this watch's bypass model —
     /// used by validation + the `sidecar_provider_resolved` state flag.
-    pub async fn backup_resolvable(&self, bypass: &BypassModelRef) -> bool {
-        self.resolve_backup(bypass).await.is_some()
+    pub fn backup_resolvable(&self, bypass: &BypassModelRef) -> bool {
+        self.resolve_backup(bypass).is_some()
     }
 
     /// Run one sidecar decision pass.
     ///
-    /// `bypass` is the active watch's bypass-model selection (per-watch override →
-    /// global default). `strategy` drives the prompt's policy block (tendency /
-    /// freeform / never-destructive). `fallback` is the supervised session's own
-    /// `(provider_id, model)` — used when no per-watch/global backup is
-    /// configured, so the model tier works out-of-the-box on a plain desktop chat
-    /// (the session's own model becomes the bypass model). `open_question`, when
-    /// `Some`, switches to the free-text answer prompt (D6).
+    /// `bypass` is the active watch's bypass-model selection. `strategy` drives
+    /// the prompt's policy block (tendency / freeform / never-destructive).
+    /// `fallback` is the supervised session's own `(provider_id, model)` — used
+    /// when the watch names no bypass model, so the model tier works
+    /// out-of-the-box on a plain desktop chat (the session's own model becomes
+    /// the bypass model). `open_question`, when `Some`, switches to the free-text
+    /// answer prompt (D6).
     #[allow(clippy::too_many_arguments)]
     pub async fn decide(
         &self,
@@ -176,7 +140,7 @@ impl SidecarClient {
         fallback: Option<(String, String)>,
         open_question: Option<OpenQuestionAsk<'_>>,
     ) -> SidecarOutcome {
-        let resolved = match self.resolve_backup(bypass).await {
+        let resolved = match self.resolve_backup(bypass) {
             Some(pm) => Some(pm),
             None => fallback.filter(|(provider_id, _)| ProviderId::parse(provider_id).is_ok()),
         };
@@ -188,10 +152,9 @@ impl SidecarClient {
             };
         };
         let used = (provider_id.clone(), model.clone());
-        let effective_strategy = self.strategy_with_default_steering(strategy).await;
         let user = match &open_question {
-            Some(oq) => build_open_question_prompt(&effective_strategy, oq.question, context, oq.max_answer_chars),
-            None => build_user_prompt(&effective_strategy, class, detail, context),
+            Some(oq) => build_open_question_prompt(strategy, oq.question, context, oq.max_answer_chars),
+            None => build_user_prompt(strategy, class, detail, context),
         };
 
         // First attempt.
@@ -242,62 +205,11 @@ impl SidecarClient {
 mod tests {
     use super::*;
     use nomifun_api_types::{BypassModelRef, DecisionStrategy};
-    use nomifun_db::DbError;
-    use nomifun_db::models::ClientPreference;
     use std::sync::Mutex;
 
     const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const WATCH_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
-    const GLOBAL_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
-
-    // ── Mock client-preferences repo ──
-    #[derive(Default)]
-    struct MockPrefs {
-        map: Mutex<std::collections::HashMap<String, String>>,
-    }
-    impl MockPrefs {
-        fn with(pairs: &[(&str, &str)]) -> Self {
-            let m = Self::default();
-            for (k, v) in pairs {
-                m.map.lock().unwrap().insert(k.to_string(), v.to_string());
-            }
-            m
-        }
-    }
-    #[async_trait]
-    impl IClientPreferenceRepository for MockPrefs {
-        async fn get_all(&self) -> Result<Vec<ClientPreference>, DbError> {
-            Ok(vec![])
-        }
-        async fn get_by_keys(&self, keys: &[&str]) -> Result<Vec<ClientPreference>, DbError> {
-            let map = self.map.lock().unwrap();
-            Ok(keys
-                .iter()
-                .filter_map(|k| {
-                    map.get(*k).map(|v| ClientPreference {
-                        id: 0,
-                        key: k.to_string(),
-                        value: v.clone(),
-                        updated_at: 0,
-                    })
-                })
-                .collect())
-        }
-        async fn upsert_batch(&self, entries: &[(&str, &str)]) -> Result<(), DbError> {
-            let mut map = self.map.lock().unwrap();
-            for (k, v) in entries {
-                map.insert(k.to_string(), v.to_string());
-            }
-            Ok(())
-        }
-        async fn delete_keys(&self, keys: &[&str]) -> Result<(), DbError> {
-            let mut map = self.map.lock().unwrap();
-            for k in keys {
-                map.remove(*k);
-            }
-            Ok(())
-        }
-    }
+    const SESSION_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
 
     // ── Mock completer: scripted responses ──
     struct ScriptedCompleter {
@@ -314,13 +226,13 @@ mod tests {
     }
 
     struct CapturingCompleter {
-        last_user: Mutex<Option<String>>,
+        last_target: Mutex<Option<(String, String)>>,
     }
 
     #[async_trait]
     impl Completer for CapturingCompleter {
-        async fn complete(&self, _p: &str, _m: &str, _s: &str, user: &str) -> Result<String, ()> {
-            *self.last_user.lock().unwrap() = Some(user.to_string());
+        async fn complete(&self, p: &str, m: &str, _s: &str, _user: &str) -> Result<String, ()> {
+            *self.last_target.lock().unwrap() = Some((p.to_string(), m.to_string()));
             Ok(r#"{"action":"retry","confidence":0.9}"#.into())
         }
     }
@@ -345,55 +257,74 @@ mod tests {
         DecisionStrategy::default()
     }
 
-    #[tokio::test]
-    async fn resolve_backup_prefers_watch_then_global() {
-        let prefs = Arc::new(MockPrefs::with(&[
-            (PREF_BACKUP_PROVIDER, GLOBAL_PROVIDER_ID),
-            (PREF_BACKUP_MODEL, "global_model"),
-        ]));
-        let comp = Arc::new(ScriptedCompleter::new(vec![]));
-        let client = SidecarClient::new(comp, prefs);
+    #[test]
+    fn resolve_backup_reads_the_watch_and_nothing_else() {
+        let client = SidecarClient::new(Arc::new(ScriptedCompleter::new(vec![])));
 
-        // Per-watch override wins.
         let watch = BypassModelRef {
             provider_id: Some(WATCH_PROVIDER_ID.into()),
             model: Some("watch_model".into()),
         };
         assert_eq!(
-            client.resolve_backup(&watch).await,
+            client.resolve_backup(&watch),
             Some((WATCH_PROVIDER_ID.into(), "watch_model".into()))
         );
 
-        // Empty → global default.
-        let empty = BypassModelRef::default();
+        // A provider with no model means "the provider's default", not "look
+        // somewhere else for a model".
+        let provider_only = BypassModelRef {
+            provider_id: Some(WATCH_PROVIDER_ID.into()),
+            model: None,
+        };
         assert_eq!(
-            client.resolve_backup(&empty).await,
-            Some((GLOBAL_PROVIDER_ID.into(), "global_model".into()))
+            client.resolve_backup(&provider_only),
+            Some((WATCH_PROVIDER_ID.into(), String::new()))
         );
     }
 
-    #[tokio::test]
-    async fn resolve_backup_none_when_no_provider_anywhere() {
-        let prefs = Arc::new(MockPrefs::default());
-        let comp = Arc::new(ScriptedCompleter::new(vec![]));
-        let client = SidecarClient::new(comp, prefs);
-        assert!(client.resolve_backup(&BypassModelRef::default()).await.is_none());
-        assert!(!client.backup_resolvable(&BypassModelRef::default()).await);
+    #[test]
+    fn resolve_backup_none_when_the_watch_names_no_provider() {
+        // There is no global-default tier to fall through to: an unset watch
+        // resolves to nothing, and `decide` then borrows the session's model.
+        let client = SidecarClient::new(Arc::new(ScriptedCompleter::new(vec![])));
+        assert!(client.resolve_backup(&BypassModelRef::default()).is_none());
+        assert!(!client.backup_resolvable(&BypassModelRef::default()));
     }
 
     #[tokio::test]
-    async fn sidecar_uses_global_default_steering_when_watch_policy_empty() {
-        let prefs = Arc::new(MockPrefs::with(&[
-            (PREF_BACKUP_PROVIDER, GLOBAL_PROVIDER_ID),
-            (PREF_DEFAULT_STEERING, "prefer option 2 when safe"),
-        ]));
-        let comp = Arc::new(CapturingCompleter { last_user: Mutex::new(None) });
-        let client = SidecarClient::new(comp.clone(), prefs);
+    async fn an_unset_watch_borrows_the_supervised_session_model() {
+        let comp = Arc::new(CapturingCompleter {
+            last_target: Mutex::new(None),
+        });
+        let client = SidecarClient::new(comp.clone());
 
         let out = client
             .decide(
                 &BypassModelRef::default(),
-                &DecisionStrategy::default(),
+                &strat(),
+                StallClass::Decision,
+                "pick an option",
+                "ctx",
+                Some((SESSION_PROVIDER_ID.into(), "session_model".into())),
+                None,
+            )
+            .await;
+
+        assert!(!out.provider_failed);
+        assert_eq!(
+            *comp.last_target.lock().unwrap(),
+            Some((SESSION_PROVIDER_ID.into(), "session_model".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unset_watch_with_no_session_model_fails_the_provider_call() {
+        let comp = Arc::new(ScriptedCompleter::new(vec![]));
+        let client = SidecarClient::new(comp.clone());
+        let out = client
+            .decide(
+                &BypassModelRef::default(),
+                &strat(),
                 StallClass::Decision,
                 "pick an option",
                 "ctx",
@@ -401,22 +332,17 @@ mod tests {
                 None,
             )
             .await;
-
-        assert!(!out.provider_failed);
-        let prompt = comp.last_user.lock().unwrap().clone().unwrap();
-        assert!(
-            prompt.contains("prefer option 2 when safe"),
-            "global default steering prompt must be applied to an empty per-watch policy; prompt was: {prompt}"
-        );
+        assert!(out.provider_failed);
+        assert!(out.resolved.is_none());
+        assert_eq!(*comp.calls.lock().unwrap(), 0);
     }
 
     #[tokio::test]
     async fn sidecar_returns_parsed_decision() {
-        let prefs = Arc::new(MockPrefs::default());
         let comp = Arc::new(ScriptedCompleter::new(vec![Ok(
             r#"{"action":"retry","confidence":0.9,"reason":"transient"}"#.into(),
         )]));
-        let client = SidecarClient::new(comp, prefs);
+        let client = SidecarClient::new(comp);
         let out = client
             .decide(&bypass(), &strat(), StallClass::ProviderError, "500", "ctx", None, None)
             .await;
@@ -426,12 +352,11 @@ mod tests {
 
     #[tokio::test]
     async fn sidecar_retries_once_on_garbage_then_parses() {
-        let prefs = Arc::new(MockPrefs::default());
         let comp = Arc::new(ScriptedCompleter::new(vec![
             Ok("sorry, I cannot".into()),
             Ok(r#"{"action":"send_text","text":"continue"}"#.into()),
         ]));
-        let client = SidecarClient::new(comp.clone(), prefs);
+        let client = SidecarClient::new(comp.clone());
         let out = client
             .decide(&bypass(), &strat(), StallClass::Idle, "idle", "ctx", None, None)
             .await;
@@ -442,9 +367,8 @@ mod tests {
 
     #[tokio::test]
     async fn sidecar_garbage_twice_yields_no_decision() {
-        let prefs = Arc::new(MockPrefs::default());
         let comp = Arc::new(ScriptedCompleter::new(vec![Ok("nope".into()), Ok("still nope".into())]));
-        let client = SidecarClient::new(comp, prefs);
+        let client = SidecarClient::new(comp);
         let out = client
             .decide(&bypass(), &strat(), StallClass::Idle, "idle", "ctx", None, None)
             .await;
@@ -454,9 +378,8 @@ mod tests {
 
     #[tokio::test]
     async fn sidecar_provider_error_sets_provider_failed() {
-        let prefs = Arc::new(MockPrefs::default());
         let comp = Arc::new(ScriptedCompleter::new(vec![Err(())]));
-        let client = SidecarClient::new(comp, prefs);
+        let client = SidecarClient::new(comp);
         let out = client
             .decide(&bypass(), &strat(), StallClass::ProviderError, "500", "ctx", None, None)
             .await;
@@ -468,11 +391,10 @@ mod tests {
     async fn sidecar_open_question_returns_answer_text() {
         // D6: an open-question ask uses the free-text prompt and the model
         // replies with answer_text.
-        let prefs = Arc::new(MockPrefs::default());
         let comp = Arc::new(ScriptedCompleter::new(vec![Ok(
             r#"{"action":"answer_text","text":"用 LRU + 30 分钟 TTL","confidence":0.8}"#.into(),
         )]));
-        let client = SidecarClient::new(comp, prefs);
+        let client = SidecarClient::new(comp);
         let out = client
             .decide(
                 &bypass(),

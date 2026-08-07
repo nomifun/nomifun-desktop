@@ -1,7 +1,6 @@
 use crate::error::DbError;
 use crate::models::ClientPreference;
 
-const IDMM_BACKUP_PROVIDER_KEY: &str = "idmm_backup_provider_id";
 const MODEL_FAILOVER_KEY: &str = "agent.model_failover";
 const COLLABORATION_MODELS_KEY: &str = "nomi.collaborationModels";
 const NOMI_DEFAULT_MODEL_KEY: &str = "nomi.defaultModel";
@@ -53,14 +52,12 @@ pub(crate) struct NormalizedProviderPreference {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ProviderPreferenceDeleteAction {
     Keep,
-    Restrict,
     Delete,
     Update(String),
 }
 
 #[derive(Debug, Clone, Copy)]
 enum ProviderPreferenceKind {
-    IdmmBackupProvider,
     ModelFailover,
     CollaborationModels,
     RequiredModelObject,
@@ -69,7 +66,6 @@ enum ProviderPreferenceKind {
 
 fn provider_preference_kind(key: &str) -> Option<ProviderPreferenceKind> {
     match key {
-        IDMM_BACKUP_PROVIDER_KEY => Some(ProviderPreferenceKind::IdmmBackupProvider),
         MODEL_FAILOVER_KEY => Some(ProviderPreferenceKind::ModelFailover),
         COLLABORATION_MODELS_KEY => Some(ProviderPreferenceKind::CollaborationModels),
         NOMI_DEFAULT_MODEL_KEY
@@ -210,22 +206,6 @@ fn optional_provider_field(
     }
 }
 
-fn parse_idmm_backup_provider(
-    key: &str,
-    value: &str,
-) -> Result<NormalizedProviderPreference, DbError> {
-    // The specialized IDMM service stores this scalar as bare text. Accept a
-    // JSON string as well so the generic preference endpoint converges on the
-    // same fixed persisted representation instead of creating a second shape.
-    let provider_id = serde_json::from_str::<String>(value)
-        .unwrap_or_else(|_| value.to_owned());
-    let provider_id = canonical_provider_id(key, "$", &provider_id)?;
-    Ok(NormalizedProviderPreference {
-        value: provider_id.clone(),
-        provider_ids: vec![provider_id],
-    })
-}
-
 fn parse_json_provider_preference(
     key: &str,
     value: &str,
@@ -281,7 +261,6 @@ fn parse_json_provider_preference(
                 provider_ids.push(provider_id);
             }
         }
-        ProviderPreferenceKind::IdmmBackupProvider => unreachable!(),
     }
 
     provider_ids.sort();
@@ -303,12 +282,7 @@ pub(crate) fn normalize_provider_preference(
         });
     };
 
-    match kind {
-        ProviderPreferenceKind::IdmmBackupProvider => {
-            parse_idmm_backup_provider(key, value)
-        }
-        _ => parse_json_provider_preference(key, value, kind),
-    }
+    parse_json_provider_preference(key, value, kind)
 }
 
 pub(crate) fn provider_preference_delete_action(
@@ -319,15 +293,6 @@ pub(crate) fn provider_preference_delete_action(
     let Some(kind) = provider_preference_kind(key) else {
         return Ok(ProviderPreferenceDeleteAction::Keep);
     };
-
-    if matches!(kind, ProviderPreferenceKind::IdmmBackupProvider) {
-        let normalized = parse_idmm_backup_provider(key, value)?;
-        return Ok(if normalized.provider_ids.iter().any(|id| id == provider_id) {
-            ProviderPreferenceDeleteAction::Restrict
-        } else {
-            ProviderPreferenceDeleteAction::Keep
-        });
-    }
 
     let normalized = parse_json_provider_preference(key, value, kind)?;
     if !normalized.provider_ids.iter().any(|id| id == provider_id) {
@@ -368,7 +333,6 @@ pub(crate) fn provider_preference_delete_action(
                 .insert("provider_id".to_owned(), serde_json::Value::Null);
             Ok(ProviderPreferenceDeleteAction::Update(parsed.to_string()))
         }
-        ProviderPreferenceKind::IdmmBackupProvider => unreachable!(),
     }
 }
 
@@ -382,7 +346,6 @@ mod provider_reference_tests {
     #[test]
     fn registry_extracts_every_supported_provider_reference_shape() {
         let cases = [
-            (IDMM_BACKUP_PROVIDER_KEY, PROVIDER_A.to_owned(), 1),
             (
                 MODEL_FAILOVER_KEY,
                 serde_json::json!({
@@ -448,7 +411,6 @@ mod provider_reference_tests {
     #[test]
     fn registry_rejects_noncanonical_or_malformed_registered_values() {
         for (key, value) in [
-            (IDMM_BACKUP_PROVIDER_KEY, "prov_legacy"),
             (
                 MODEL_FAILOVER_KEY,
                 r#"{"queue":[{"provider_id":"prov_legacy","model":"a"}]}"#,

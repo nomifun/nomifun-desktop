@@ -102,9 +102,6 @@ pub trait IIdmmInterventionRepository: Send + Sync {
     /// Most-recent-first across one owner's targets, capped at `limit`.
     async fn list_recent(&self, user_id: &str, limit: i64) -> Result<Vec<IdmmInterventionRow>, DbError>;
 
-    /// Delete every record owned by one user. Returns count.
-    async fn clear_all(&self, user_id: &str) -> Result<u64, DbError>;
-
     /// Privileged janitor operation across all owners: TTL sweep plus an
     /// independently-applied per-user hard cap. Never exposed to REST/tools.
     async fn sweep_all_owners(&self, cutoff_ms: i64, per_user_cap: i64) -> Result<u64, DbError>;
