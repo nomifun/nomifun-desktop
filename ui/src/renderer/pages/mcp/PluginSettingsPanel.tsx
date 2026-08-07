@@ -60,13 +60,13 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
   return (
     <div className='space-y-16px pb-24px'>
       {showInstalled && (
-        <div className='bg-fill-2 rounded-24px p-20px'>
-          <div className='flex items-start justify-between gap-12px mb-14px'>
+        <div
+          data-testid='plugin-installed-surface'
+          className='mt-8px box-border rounded-24px border border-solid border-[var(--color-border-2)] bg-transparent px-16px py-10px md:px-20px md:py-12px'
+        >
+          <div className='flex items-center justify-between gap-12px mb-12px'>
             <div>
-              <h2 className='m-0 text-22px font-600 text-t-primary'>
-                {t('settings.plugins.installedTitle', { defaultValue: 'Installed Plugins' })}
-              </h2>
-              <p className='mt-6px mb-0 text-13px text-t-secondary'>
+              <p className='m-0 text-13px text-t-secondary'>
                 {t('settings.plugins.installedDescription', {
                   defaultValue: 'Loaded Nomi extensions and plugin packages currently available to the app.',
                 })}
@@ -75,11 +75,11 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
           </div>
 
           {loading ? (
-            <div className='py-24px text-center text-t-secondary text-14px'>
+            <div className='py-20px text-center text-t-secondary text-14px'>
               {t('common.loading', { defaultValue: 'Loading...' })}
             </div>
           ) : extensions.length === 0 ? (
-            <div className='py-24px text-center text-t-secondary text-14px border border-dashed border-arco-2 rd-12px'>
+            <div className='py-20px text-center text-t-secondary text-14px border border-dashed border-arco-2 rd-12px'>
               {t('settings.plugins.emptyInstalled', { defaultValue: 'No installed plugins found.' })}
             </div>
           ) : (
