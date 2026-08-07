@@ -6755,6 +6755,7 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-model-invoke",
  "nomifun-realtime",
+ "nomifun-robot",
  "opusic-sys",
  "ort",
  "rand 0.9.4",
