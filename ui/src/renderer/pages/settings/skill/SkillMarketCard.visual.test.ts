@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('./SkillMarketCard.tsx', import.meta.url), 'utf8');
+const panelSource = readFileSync(new URL('../MarketSettingsPanel.tsx', import.meta.url), 'utf8');
 
 describe('SkillMarketCard visual hierarchy', () => {
   test('removes ranking avatars from every shared market card', () => {
@@ -31,5 +32,15 @@ describe('SkillMarketCard visual hierarchy', () => {
     expect(source.includes('text={item.install_command}')).toBe(true);
     expect(source.includes("t('settings.skillsMarket.copyCommand'")).toBe(true);
     expect(source.includes("className='size-22px shrink-0 -mr-4px'")).toBe(true);
+  });
+
+  test('locks each add action while its asynchronous request is pending', () => {
+    expect(panelSource.includes('const pendingAddIdsRef = useRef<Set<string>>(new Set())')).toBe(true);
+    expect(panelSource.includes('if (pendingAddIdsRef.current.has(item.id)) return')).toBe(true);
+    expect(panelSource.includes('await onAdd(item)')).toBe(true);
+    expect(panelSource.includes('finished.delete(item.id)')).toBe(true);
+    expect(panelSource.includes("console.error('Market add callback failed:'")).toBe(true);
+    expect(source.includes('loading={adding}')).toBe(true);
+    expect(source.includes('disabled={adding}')).toBe(true);
   });
 });
