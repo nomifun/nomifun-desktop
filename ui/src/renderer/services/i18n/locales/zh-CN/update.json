@@ -7,6 +7,9 @@
   "upToDateTitle": "已是最新版本",
   "currentVersion": "当前版本：{{version}}",
   "availableTitle": "发现新版本",
+  "versionLabel": "版本：",
+  "sizeLabel": "大小：",
+  "detailsLabel": "详情：",
   "downloadSourceHint": "本次更新基于 GitHub Release 进行安装包下载。",
   "baiduMirrorHint": "中国区用户如果下载较慢，可以通过",
   "baiduMirrorLink": "百度网盘地址",
@@ -34,5 +37,9 @@
   "autoUpdateMode": "自动更新模式",
   "showInFolder": "在文件夹中显示",
   "openFile": "打开文件",
-  "errorTitle": "更新失败"
+  "errorTitle": "更新失败",
+  "errorDialogTitle": "版本更新失败",
+  "feedbackIssueLabel": "反馈问题：",
+  "contactUsLabel": "联系我们：",
+  "releasePageLabel": "版本发布："
 }
