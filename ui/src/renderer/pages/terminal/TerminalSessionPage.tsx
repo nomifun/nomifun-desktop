@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button, Input, Message, Spin } from '@arco-design/web-react';
 import { Refresh, EditOne, Terminal } from '@icon-park/react';
@@ -28,6 +28,8 @@ import WorkspaceToolRail, {
   type WorkspacePanelMetaDetail,
 } from '@/renderer/pages/conversation/components/ChatLayout/WorkspaceToolRail';
 import { useWorkspacePanelTabs } from '@/renderer/pages/conversation/hooks/useWorkspacePanelTabs';
+import type { SessionKnowledgeSource } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/knowledgeBindingTarget';
+import { useSessionKnowledgeTab } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeTab';
 import { dispatchWorkspaceToggleEvent } from '@/renderer/utils/workspace/workspaceEvents';
 import { WORKSPACE_HEADER_HEIGHT } from '@/renderer/pages/conversation/utils/layoutCalc';
 import RegisterKnowledgeButton from './RegisterKnowledgeButton';
@@ -100,6 +102,16 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
   });
   const { activeWorkspaceTab, setActiveWorkspaceTab } = useWorkspacePanelTabs(workspaceTarget);
   const [workspaceChangeCount, setWorkspaceChangeCount] = useState(0);
+
+  // Terminal-owned rail resources. A terminal resolves its knowledge binding
+  // from its OWN session object rather than an id lookup: conversation-owned
+  // terminals are filtered out of useTerminalSessions(), so a lookup would
+  // silently fail for them.
+  const knowledgeSource = useMemo<SessionKnowledgeSource>(
+    () => ({ kind: 'terminal', session: { cwd: session.cwd, is_default_workpath: session.is_default_workpath } }),
+    [session.cwd, session.is_default_workpath]
+  );
+  const workspaceExtraTabs = useSessionKnowledgeTab(knowledgeSource);
 
   useEffect(() => {
     const handleMeta = (event: Event) => {
@@ -196,11 +208,12 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
             <span className='text-14px font-medium text-t-primary truncate'>
               {activeWorkspaceTab === 'changes'
                 ? t('conversation.workspace.changes.tab')
-                : t('terminal.workspace.title', { defaultValue: '项目' })}
+                : workspaceExtraTabs.find((tab) => tab.key === activeWorkspaceTab)?.title ??
+                  t('terminal.workspace.title', { defaultValue: '项目' })}
             </span>
           </WorkspacePanelHeader>
           <div style={{ height: `calc(100% - ${WORKSPACE_HEADER_HEIGHT}px)` }}>
-            <TerminalWorkspaceRail session={session} />
+            <TerminalWorkspaceRail session={session} extraTabs={workspaceExtraTabs} />
           </div>
         </div>
       )}
@@ -212,6 +225,7 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
           expanded={!rightSiderCollapsed}
           onSelect={selectWorkspaceTool}
           changeCount={workspaceChangeCount}
+          extraTabs={workspaceExtraTabs}
           footer={
             <button
               type='button'

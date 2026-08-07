@@ -12,7 +12,7 @@ import { CronJobManager } from '@/renderer/pages/cron';
 import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
 import { iconColors } from '@/renderer/styles/colors';
 import { Button, Dropdown, Menu, Message, Tooltip, Typography } from '@arco-design/web-react';
-import { History, Terminal } from '@icon-park/react';
+import { History } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -47,8 +47,8 @@ import { ExecutionProvider } from '../execution/ExecutionContext';
 import ExecutionConversationLayout from '../execution/ExecutionConversationLayout';
 import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
 import StarOfficeMonitorCard from '../platforms/openclaw/StarOfficeMonitorCard.tsx';
-import ConversationTerminalPanel from './ConversationTerminalPanel';
 import SshHostStatusPill from './SshHostStatusPill';
+import { useWorkspaceExtraTabs } from '../hooks/useWorkspaceExtraTabs';
 import { useExecutionModelPool } from '../execution/useExecutionModelPool';
 import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
 
@@ -205,18 +205,7 @@ const NomiConversationLayout: React.FC<{
   collaborationPolicyNode,
   presetPresetName,
 }) => {
-  const { t } = useTranslation();
-  const workspaceExtraTabs = useMemo(
-    () => [
-      {
-        key: 'conversation-terminals',
-        title: t('terminal.conversationPanel.tab'),
-        icon: <Terminal size={18} />,
-        content: <ConversationTerminalPanel conversationId={conversation.id} />,
-      },
-    ],
-    [conversation, t],
-  );
+  const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
 
   return (
     <ExecutionConversationLayout
@@ -630,20 +619,7 @@ const ChatConversation: React.FC<{
     );
   }, [t]);
 
-  const workspaceExtraTabs = useMemo(
-    () =>
-      conversation?.extra?.workspace
-        ? [
-            {
-              key: 'conversation-terminals',
-              title: t('terminal.conversationPanel.tab'),
-              icon: <Terminal size={18} />,
-              content: <ConversationTerminalPanel conversationId={conversation.id} />,
-            },
-          ]
-        : [],
-    [conversation?.id, conversation?.extra?.workspace, t],
-  );
+  const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
 
   const isRetainedAttemptTranscript = Boolean(
     conversation?.execution_step_id || conversation?.execution_attempt_id,
