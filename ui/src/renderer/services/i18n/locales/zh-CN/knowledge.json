@@ -283,6 +283,9 @@
   },
   "searchPlaceholder": "搜索知识库...",
   "selectFile": "选择左侧文档查看内容",
+  "session": {
+    "noDocs": "没有可预览的文档"
+  },
   "source": {
     "fetchFailedTitle": "部分 URL 抓取失败",
     "fetchSummary": "成功 {{fetched}} 条，失败 {{failed}} 条",

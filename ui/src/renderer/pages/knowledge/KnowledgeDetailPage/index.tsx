@@ -77,6 +77,7 @@ import TagPicker from '../CreateStudio/TagPicker';
 import { getKindConfig, KindIcon, type KindConfig } from '../knowledgeKind';
 import {
   buildKnowledgeSearchTree,
+  collectKnowledgeDirKeys,
   isKnowledgePathWithin,
   knowledgeFolderPathChain,
   mergeKnowledgeTreeChildren,
@@ -95,19 +96,6 @@ const ALL_TABS: TabKey[] = ['docs', 'use', 'set'];
 /** Kind icon in a rounded square (52px for detail header, bigger than card). */
 function DetailKindIcon({ kind, config }: { kind: IKnowledgeBase['kind']; config: KindConfig }) {
   return <KindIcon kind={kind} config={config} size={22} containerClass='w-52px h-52px rounded-14px' />;
-}
-
-function collectKnowledgeDirKeys(nodes: IKnowledgeTreeEntry[]): string[] {
-  const keys: string[] = [];
-  const visit = (items: IKnowledgeTreeEntry[]) => {
-    for (const item of items) {
-      if (!item.is_dir) continue;
-      keys.push(item.rel_path);
-      if (item.children?.length) visit(item.children);
-    }
-  };
-  visit(nodes);
-  return keys;
 }
 
 const knowledgeDetailSoftActiveClass =
