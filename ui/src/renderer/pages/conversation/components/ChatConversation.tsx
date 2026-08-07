@@ -205,7 +205,6 @@ const NomiConversationLayout: React.FC<{
   collaborationPolicyNode,
   presetPresetName,
 }) => {
-  const { t } = useTranslation();
   const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
 
   return (

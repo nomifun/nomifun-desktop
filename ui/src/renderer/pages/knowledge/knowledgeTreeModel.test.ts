@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import type { IKnowledgeFileEntry, IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
 import {
   buildKnowledgeSearchTree,
-  collectKnowledgeDirKeys,
   isKnowledgePathWithin,
   knowledgeFolderPathChain,
   mergeKnowledgeTreeChildren,
@@ -96,28 +95,5 @@ describe('knowledge detail tree model', () => {
     expect(replaceKnowledgePathPrefix('raw/tutorials/topic.md', 'raw/tutorials', 'wiki/tutorials')).toBe('wiki/tutorials/topic.md');
     expect(replaceKnowledgePathPrefix('raw/tutorials', 'raw/tutorials', 'wiki/tutorials')).toBe('wiki/tutorials');
     expect(replaceKnowledgePathPrefix(null, 'raw/tutorials', 'wiki/tutorials')).toBeNull();
-  });
-
-  test('collects only directory keys, depth-first, from what is already loaded', () => {
-    const tree: IKnowledgeTreeEntry[] = [
-      {
-        ...node('raw', 'raw', true),
-        children: [
-          node('python3-type-conversion.md', 'raw/python3-type-conversion.md', false),
-          { ...node('deep', 'raw/deep', true), children: [node('topic.md', 'raw/deep/topic.md', false)] },
-        ],
-      },
-      node('README.md', 'README.md', false),
-      // A directory whose children have not been lazily loaded yet still counts
-      // as a key — it is expandable, it just has nothing under it to collect.
-      node('snapshots', 'snapshots', true),
-    ];
-
-    expect(collectKnowledgeDirKeys(tree)).toEqual(['raw', 'raw/deep', 'snapshots']);
-  });
-
-  test('returns no keys for a tree of files only', () => {
-    expect(collectKnowledgeDirKeys([node('README.md', 'README.md', false)])).toEqual([]);
-    expect(collectKnowledgeDirKeys([])).toEqual([]);
   });
 });
