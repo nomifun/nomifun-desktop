@@ -614,12 +614,12 @@ impl IProviderRepository for SqliteProviderRepository {
         // references are enforced by the centralized registry in the
         // client-preference repository rather than by SQL FK/trigger logic.
         // Resolve every registered preference before deleting the parent:
-        // IDMM backup is RESTRICT; arrays are filtered in order; defaults are
-        // deleted and optional references are set to null.
+        // arrays are filtered in order; defaults are deleted and optional
+        // references are set to null. No registered preference RESTRICTs the
+        // delete any more.
         let preference_rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT key, value FROM client_preferences \
-             WHERE key = 'idmm_backup_provider_id' \
-                OR key = 'agent.model_failover' \
+             WHERE key = 'agent.model_failover' \
                 OR key = 'nomi.collaborationModels' \
                 OR key = 'nomi.defaultModel' \
                 OR key = 'knowledge.autogenModel' \
@@ -634,11 +634,6 @@ impl IProviderRepository for SqliteProviderRepository {
         for (key, value) in preference_rows {
             match provider_preference_delete_action(&key, &value, id)? {
                 ProviderPreferenceDeleteAction::Keep => {}
-                ProviderPreferenceDeleteAction::Restrict => {
-                    return Err(DbError::Conflict(
-                        "provider is still referenced by an IDMM backup preference".to_owned(),
-                    ));
-                }
                 action => preference_actions.push((key, action)),
             }
         }
@@ -766,8 +761,7 @@ impl IProviderRepository for SqliteProviderRepository {
                     .execute(&mut *transaction)
                     .await?;
                 }
-                ProviderPreferenceDeleteAction::Keep
-                | ProviderPreferenceDeleteAction::Restrict => unreachable!(),
+                ProviderPreferenceDeleteAction::Keep => unreachable!(),
             }
         }
 

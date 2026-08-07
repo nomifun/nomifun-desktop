@@ -819,11 +819,6 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "workshop_assets", "asset_id", "idx_creation_tasks_result_asset_ids_json", SetNull, RequireParent
     ),
     json_text_ref!(
-        "client_preferences", "value", "$ (idmm_backup_provider_id)",
-        "SELECT value AS value FROM client_preferences WHERE key = 'idmm_backup_provider_id'" =>
-        "providers", "provider_id", "idx_client_preferences_provider_key", Restrict, RequireParent
-    ),
-    json_text_ref!(
         "client_preferences", "value", "$.queue[].provider_id",
         "SELECT json_extract(item.value, '$.provider_id') AS value FROM client_preferences preference, json_each(preference.value, '$.queue') item WHERE preference.key = 'agent.model_failover' AND json_valid(preference.value)" =>
         "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent

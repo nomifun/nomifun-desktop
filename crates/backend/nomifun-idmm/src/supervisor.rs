@@ -1821,7 +1821,6 @@ mod tests {
     use async_trait::async_trait;
     use nomifun_api_types::{IdmmConfig, WatchTier};
     use nomifun_db::DbError;
-    use nomifun_db::models::ClientPreference;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
     use tokio::sync::{Barrier, mpsc};
@@ -2219,43 +2218,6 @@ mod tests {
         }
     }
     #[derive(Default)]
-    struct MockPrefs(Mutex<std::collections::HashMap<String, String>>);
-    #[async_trait]
-    impl nomifun_db::IClientPreferenceRepository for MockPrefs {
-        async fn get_all(&self) -> Result<Vec<ClientPreference>, DbError> {
-            Ok(vec![])
-        }
-        async fn get_by_keys(&self, keys: &[&str]) -> Result<Vec<ClientPreference>, DbError> {
-            let m = self.0.lock().unwrap();
-            Ok(keys
-                .iter()
-                .filter_map(|k| {
-                    m.get(*k).map(|v| ClientPreference {
-                        id: 0,
-                        key: k.to_string(),
-                        value: v.clone(),
-                        updated_at: 0,
-                    })
-                })
-                .collect())
-        }
-        async fn upsert_batch(&self, e: &[(&str, &str)]) -> Result<(), DbError> {
-            let mut m = self.0.lock().unwrap();
-            for (k, v) in e {
-                m.insert(k.to_string(), v.to_string());
-            }
-            Ok(())
-        }
-        async fn delete_keys(&self, k: &[&str]) -> Result<(), DbError> {
-            let mut m = self.0.lock().unwrap();
-            for key in k {
-                m.remove(*key);
-            }
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
     struct NullBroadcaster;
     impl nomifun_realtime::UserEventSink for NullBroadcaster {
         fn send_to_user(
@@ -2348,9 +2310,6 @@ mod tests {
             _limit: i64,
         ) -> Result<Vec<nomifun_db::models::IdmmInterventionRow>, DbError> {
             Ok(self.inserted.lock().unwrap().clone())
-        }
-        async fn clear_all(&self, _user_id: &str) -> Result<u64, DbError> {
-            Ok(0)
         }
         async fn sweep_all_owners(&self, _cutoff_ms: i64, _per_user_cap: i64) -> Result<u64, DbError> {
             Ok(0)
@@ -2497,17 +2456,10 @@ mod tests {
     /// Like `deps_with`, but lets the caller inject (and later inspect) the
     /// record repo — used by the persistence test.
     fn deps_with_records(responses: Vec<Result<String, ()>>, records: Arc<RecordingRepo>) -> Arc<LoopDeps> {
-        let prefs = Arc::new(MockPrefs::default());
-        prefs
-            .0
-            .lock()
-            .unwrap()
-            .insert(
-                crate::sidecar::PREF_BACKUP_PROVIDER.into(),
-                TEST_PROVIDER_ID.into(),
-            );
+        // Model-tier watches name their own bypass model (see `model_cfg`), so
+        // the sidecar needs no preference store to resolve a provider.
         let comp = Arc::new(ScriptedCompleter(Mutex::new(responses)));
-        let sidecar = Arc::new(SidecarClient::new(comp, prefs));
+        let sidecar = Arc::new(SidecarClient::new(comp));
         let emitter = IdmmEventEmitter::new(Arc::new(NullBroadcaster));
         Arc::new(LoopDeps {
             sidecar,

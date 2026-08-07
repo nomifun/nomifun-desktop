@@ -205,47 +205,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idmm_backup_provider_requires_existing_logical_parent() {
-        let (repo, db) = setup().await;
-        let missing = "0190f5fe-7c00-7a00-8000-000000000003";
-
-        assert!(matches!(
-            repo.upsert_batch(&[("idmm_backup_provider_id", missing)])
-                .await,
-            Err(DbError::Conflict(_))
-        ));
-        assert!(
-            repo.get_by_keys(&["idmm_backup_provider_id"])
-                .await
-                .unwrap()
-                .is_empty()
-        );
-
-        sqlx::query(
-            "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-                created_at, updated_at\
-             ) VALUES (?, 'openai', 'logical parent', 'https://example.invalid', \
-                       'encrypted', 1, 1, 1)",
-        )
-        .bind(missing)
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        repo.upsert_batch(&[("idmm_backup_provider_id", missing)])
-            .await
-            .unwrap();
-        assert_eq!(
-            repo.get_by_keys(&["idmm_backup_provider_id"])
-                .await
-                .unwrap()[0]
-                .value,
-            missing
-        );
-    }
-
-    #[tokio::test]
     async fn provider_reference_validation_rolls_back_the_entire_batch() {
         let (repo, _db) = setup().await;
         let missing = "0190f5fe-7c00-7a00-8000-000000000003";

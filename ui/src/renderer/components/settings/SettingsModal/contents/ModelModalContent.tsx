@@ -630,7 +630,6 @@ const ModelModalContent: React.FC = () => {
           const featureName: Record<ProviderUsageFeature, string> = {
             desktopCompanion: t('settings.providerInUse.desktopCompanion'),
             customerService: t('settings.providerInUse.customerService'),
-            smartDecision: t('settings.providerInUse.smartDecision'),
             conversation: t('settings.providerInUse.conversation'),
             agentExecution: t('settings.providerInUse.agentExecution'),
           };

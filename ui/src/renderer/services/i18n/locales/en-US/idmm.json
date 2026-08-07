@@ -78,16 +78,8 @@
   "disabledOk": "IDMM disabled",
   "draftIncomplete": "IDMM configuration is incomplete. Turn the watch off, complete the required fields, then turn it on again.",
   "settings": {
-    "title": "Intelligent Decision-Making (IDMM)",
-    "desc": "Defaults for the backup-model mode, used when a watch does not set its own.",
-    "backupProvider": "Backup provider",
-    "backupModel": "Backup model",
     "selectProvider": "Select a provider",
-    "selectModel": "Select a model",
-    "defaultSteering": "Default policy",
-    "defaultSteeringPlaceholder": "Default decision policy applied when a watch leaves its free-form policy empty.",
-    "saved": "IDMM settings saved",
-    "none": "None"
+    "selectModel": "Select a model"
   },
   "log": {
     "title": "Decision log",
@@ -134,14 +126,5 @@
       "halted": "Halted",
       "skipped": "Skipped"
     }
-  },
-  "activity": {
-    "title": "Decision activity",
-    "desc": "Recent IDMM interventions across all sessions (most recent first). This is a rolling window, not a full history — old records age out automatically.",
-    "empty": "No interventions across any session yet.",
-    "refresh": "Refresh",
-    "clearAll": "Clear all",
-    "clearConfirm": "Clear all decision activity across every session? This cannot be undone.",
-    "clearOk": "Decision activity cleared"
   }
 }

@@ -1,7 +1,7 @@
 //! App-layer aggregation of every subsystem's provider-in-use scan.
 //!
-//! `nomifun-app` is the only layer that sees the companion, customer-service, IDMM
-//! and Agent Execution subsystems at once, so the cross-subsystem
+//! `nomifun-app` is the only layer that sees the companion, customer-service,
+//! workshop and Agent Execution subsystems at once, so the cross-subsystem
 //! [`ProviderDeletionCoordinator`](nomifun_system::provider_deletion::ProviderDeletionCoordinator)
 //! is implemented here and injected into `ProviderService` (see
 //! `router::state::build_system_state`). Deletion then refuses an in-use provider
@@ -15,10 +15,8 @@ use nomifun_common::{
     AppError, ProviderId, ProviderLifecycleBarrier, ProviderUsage, ProviderUsageFeature,
 };
 use nomifun_db::{
-    IAgentExecutionRepository, IAgentExecutionTemplateRepository,
-    IClientPreferenceRepository, IConversationRepository,
+    IAgentExecutionRepository, IAgentExecutionTemplateRepository, IConversationRepository,
 };
-use nomifun_idmm::sidecar::PREF_BACKUP_PROVIDER;
 use nomifun_system::provider_deletion::ProviderDeletionCoordinator;
 
 /// Aggregates every subsystem's provider-in-use scan behind the single
@@ -28,7 +26,6 @@ pub struct AppProviderDeletionCoordinator {
     pub companion: Arc<nomifun_companion::CompanionService>,
     pub customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
     pub workshop: Arc<nomifun_workshop::WorkshopService>,
-    pub client_prefs: Arc<dyn IClientPreferenceRepository>,
     pub execution_repo: Arc<dyn IAgentExecutionRepository>,
     pub execution_template_repo: Arc<dyn IAgentExecutionTemplateRepository>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
@@ -53,27 +50,6 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
         let mut out = Vec::new();
         out.extend(self.companion.providers_in_use(provider_id).await);
         out.extend(self.customer_service.providers_in_use(provider_id).await);
-
-        // 智能决策 (smart decision): the global backup model is a hard binding
-        // surfaced here as a friendly product error. Per-session watch bypass
-        // models are soft references: the provider repository clears matching
-        // `bypass_model` objects from Conversation and terminal JSON in the same
-        // transaction that deletes the Provider.
-        let rows = self
-            .client_prefs
-            .get_by_keys(&[PREF_BACKUP_PROVIDER])
-            .await
-            .map_err(|e| AppError::Internal(format!("read idmm backup pref: {e}")))?;
-        if rows
-            .iter()
-            .any(|r| r.key == PREF_BACKUP_PROVIDER && r.value == provider_id)
-        {
-            out.push(ProviderUsage {
-                feature: ProviderUsageFeature::SmartDecision,
-                label: "智能决策·备份模型".into(),
-                target_id: None,
-            });
-        }
 
         // The top-level Conversation model is its current lead and therefore a
         // hard provider binding. Collaborator-only pool entries remain soft
@@ -201,8 +177,6 @@ mod tests {
         let customer_service = Arc::new(nomifun_customer_service::CustomerServiceService::new(
             Arc::new(nomifun_db::SqliteCustomerServiceRepository::new(db.pool().clone())),
         ));
-        let client_prefs: Arc<dyn IClientPreferenceRepository> =
-            Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()));
         let execution_repo: Arc<dyn IAgentExecutionRepository> =
             Arc::new(SqliteAgentExecutionRepository::new(db.pool().clone()));
         let execution_template_repo: Arc<dyn IAgentExecutionTemplateRepository> =
@@ -220,7 +194,6 @@ mod tests {
                     Arc::new(nomifun_db::SqliteWorkshopRepository::new(db.pool().clone())),
                     provider_lifecycle,
                 ),
-                client_prefs,
                 execution_repo,
                 execution_template_repo,
                 conversation_repo,
@@ -230,33 +203,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregates_idmm_backup_usage() {
-        let dir = tempfile::tempdir().unwrap();
-        let (coord, _db) = coordinator(dir.path()).await;
-        coord
-            .client_prefs
-            .upsert_batch(&[(nomifun_idmm::sidecar::PREF_BACKUP_PROVIDER, "0190f5fe-7c00-7a00-8000-000000000026")])
-            .await
-            .unwrap();
-        let usages = coord.usages("0190f5fe-7c00-7a00-8000-000000000026").await.unwrap();
-        assert!(
-            usages
-                .iter()
-                .any(|u| matches!(u.feature, ProviderUsageFeature::SmartDecision)),
-            "global idmm backup provider should surface as a SmartDecision usage"
-        );
-        assert!(coord.usages("0190f5fe-7c00-7a00-8000-000000000027").await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
     async fn usages_rejects_empty_provider_id() {
         let dir = tempfile::tempdir().unwrap();
         let (coord, _db) = coordinator(dir.path()).await;
-        coord
-            .client_prefs
-            .upsert_batch(&[(nomifun_idmm::sidecar::PREF_BACKUP_PROVIDER, "0190f5fe-7c00-7a00-8000-000000000026")])
-            .await
-            .unwrap();
         assert!(matches!(coord.usages("").await, Err(AppError::BadRequest(_))));
     }
 
@@ -411,8 +360,11 @@ mod tests {
             get_global_failover_config, set_global_failover_config,
         };
         let dir = tempfile::tempdir().unwrap();
-        let (coord, db) = coordinator(dir.path()).await;
-        let mut cfg = get_global_failover_config(&coord.client_prefs).await;
+        // 协调器只为把删除守卫接上来;这条用例断言的是删除本身的事务效果。
+        let (_coord, db) = coordinator(dir.path()).await;
+        let client_prefs: Arc<dyn IClientPreferenceRepository> =
+            Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()));
+        let mut cfg = get_global_failover_config(&client_prefs).await;
         cfg.queue = vec![
             nomifun_common::ProviderWithModel {
                 provider_id: "0190f5fe-7c00-7a00-8000-000000000026".into(),
@@ -425,7 +377,7 @@ mod tests {
                 use_model: None,
             },
         ];
-        set_global_failover_config(&coord.client_prefs, &cfg)
+        set_global_failover_config(&client_prefs, &cfg)
             .await
             .unwrap();
 
@@ -433,7 +385,7 @@ mod tests {
             .delete("0190f5fe-7c00-7a00-8000-000000000026")
             .await
             .unwrap();
-        let after = get_global_failover_config(&coord.client_prefs).await;
+        let after = get_global_failover_config(&client_prefs).await;
         assert_eq!(after.queue.len(), 1);
         assert_eq!(after.queue[0].provider_id, "0190f5fe-7c00-7a00-8000-000000000023");
     }
