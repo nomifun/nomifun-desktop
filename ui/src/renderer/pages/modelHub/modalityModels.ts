@@ -88,9 +88,11 @@ const groupRows = (
   }
 
   const groups: ModalityProviderGroup[] = [];
-  // Provider order is the selector ordering authority (free-model platform
-  // first); rows inside a provider follow the catalog `sort_order`, with the
-  // model name as the tie-break so the list never reshuffles between renders.
+  // Provider order is the caller's: it passes the shared selector ordering, so
+  // the managed free platform lands LAST — a management view must not lead with
+  // models the user never configured. Rows inside a provider follow the catalog
+  // `sort_order`, with the model name as the tie-break so the list never
+  // reshuffles between renders.
   for (const provider of providers) {
     const models = byProvider.get(provider.id);
     if (!models || models.length === 0) continue;

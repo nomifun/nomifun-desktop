@@ -16,7 +16,7 @@ import type { ProviderId } from '@/common/types/ids';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import { NomiSettingList, NomiSettingRow } from '@/renderer/components/base/NomiSettingLayout';
 import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
-import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
+import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
@@ -67,7 +67,11 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [message, messageContext] = useArcoMessage({ maxCount: 2 });
-  const { data: providers } = useProvidersQuery();
+  // The ordered, enabled-only provider list — the ONE selector ordering
+  // authority, which ranks the managed free platform last. The raw provider
+  // query would hand back the backend order, and that order LEADS with the free
+  // provider (it is auto-created before the user configures anything).
+  const { providers } = useModelProviderList();
   const providerLabel = useModelSelectorProviderLabel();
   const { data: rows, mutate } = useSWR(CATALOG_ROWS_SWR_KEY, () =>
     ipcBridge.providerModel.list.invoke({})
@@ -77,20 +81,14 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   );
   const [draftDescription, setDraftDescription] = useState('');
 
-  const enabledProviders = useMemo(
-    () => (providers ?? []).filter((p) => p.enabled !== false),
-    [providers]
-  );
-
   const groups = useMemo(
-    () =>
-      buildModalityGroups(rows ?? [], enabledProviders, MODALITY_SPECS[modality], providerLabel),
-    [rows, enabledProviders, modality, providerLabel]
+    () => buildModalityGroups(rows ?? [], providers, MODALITY_SPECS[modality], providerLabel),
+    [rows, providers, modality, providerLabel]
   );
 
   const untagged = useMemo(
-    () => (showUntagged ? buildUntaggedGroups(rows ?? [], enabledProviders, providerLabel) : []),
-    [showUntagged, rows, enabledProviders, providerLabel]
+    () => (showUntagged ? buildUntaggedGroups(rows ?? [], providers, providerLabel) : []),
+    [showUntagged, rows, providers, providerLabel]
   );
 
   const toggleRow = useCallback(
