@@ -1,5 +1,6 @@
 import { ipcBridge } from '@/common';
 import type { ISkillMarketItem, ISkillMarketPackageResponse } from '@/common/adapter/ipcBridge';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { CreatePresetRequest } from '@/common/types/agent/presetTypes';
 import { parsePresetId, type PresetId } from '@/common/types/ids';
 import { resolveLocaleKey, uuidv7 } from '@/common/utils';
@@ -31,6 +32,15 @@ const MAX_INSTALLED_SKILL_NAME_LENGTH = 160;
 const UNSAFE_INSTALLED_SKILL_NAME = /[\/\\]|\.\.|[\x00-\x1F\x7F]/;
 
 type SkillBindingSource = 'market' | 'installed';
+export type PresetPackageAddErrorKind = 'timeout' | 'upstream' | 'not_found' | 'generic';
+
+export const classifyPresetPackageAddError = (error: unknown): PresetPackageAddErrorKind => {
+  if (!isBackendHttpError(error)) return 'generic';
+  if (error.code === 'TIMEOUT') return 'timeout';
+  if (error.code === 'BAD_GATEWAY') return 'upstream';
+  if (error.code === 'NOT_FOUND') return 'not_found';
+  return 'generic';
+};
 
 const isSkillBindingName = (skillName: string, source: SkillBindingSource) =>
   source === 'market'
@@ -152,7 +162,20 @@ const PresetPackageMarketSettings: React.FC<PresetPackageMarketSettingsProps> = 
         }
       } catch (error) {
         console.error('Failed to add expert package:', error);
-        Message.error(t('settings.presetMarket.addFailed', { defaultValue: 'Failed to add expert package.' }));
+        const errorKind = classifyPresetPackageAddError(error);
+        const errorMessage = {
+          timeout: t('settings.presetMarket.timeout', {
+            defaultValue: 'SkillHub took too long to respond. Please try again.',
+          }),
+          upstream: t('settings.presetMarket.upstreamUnavailable', {
+            defaultValue: 'SkillHub is temporarily unavailable. Please try again later.',
+          }),
+          not_found: t('settings.presetMarket.notFound', {
+            defaultValue: 'This expert package is no longer available. Refresh the market and try again.',
+          }),
+          generic: t('settings.presetMarket.addFailed', { defaultValue: 'Failed to add expert package.' }),
+        }[errorKind];
+        Message.error(errorMessage);
       }
     },
     [i18n.language, onImported, t]

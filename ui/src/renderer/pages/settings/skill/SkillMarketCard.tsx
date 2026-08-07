@@ -12,6 +12,7 @@ type SkillMarketCardProps = {
   item: ISkillMarketItem;
   tagByKey: Map<string, PresetTag>;
   localeKey: string;
+  adding: boolean;
   onAdd: (item: ISkillMarketItem) => void;
 };
 
@@ -42,7 +43,7 @@ const MarketSourceBadge: React.FC<{ source: ISkillMarketItem['source'] }> = ({ s
   );
 };
 
-const SkillMarketCard: React.FC<SkillMarketCardProps> = ({ item, tagByKey, localeKey, onAdd }) => {
+const SkillMarketCard: React.FC<SkillMarketCardProps> = ({ item, tagByKey, localeKey, adding, onAdd }) => {
   const { t } = useTranslation();
   const testId = normalizeTestId(item.id);
   const requiresApiKey = item.tags?.includes('requires_api_key') ?? false;
@@ -72,6 +73,8 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({ item, tagByKey, local
         data-testid={`btn-add-market-skill-${testId}`}
         className='!absolute !right-12px !top-12px !rounded-[100px] !h-26px !px-10px !text-12px !font-medium !border !border-solid !border-[var(--color-border-2)] !bg-[var(--color-fill-2)] !text-[var(--color-text-1)] !shadow-none hover:!border-[var(--color-border-3)] hover:!bg-[var(--color-fill-3)] hover:!text-[var(--color-text-1)]'
         icon={<Plus theme='outline' size={12} strokeWidth={3} />}
+        loading={adding}
+        disabled={adding}
         onClick={() => onAdd(item)}
       >
         {t('common.add', { defaultValue: 'Add' })}

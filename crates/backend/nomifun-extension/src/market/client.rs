@@ -31,6 +31,9 @@ const MARKET_ALLOWED_HOSTS: &[&str] = &[
     "api.cocoloop.cn",
     "hub.cocoloop.cn",
     "dl.cocoloop.cn",
+    // SkillHub's official download endpoint redirects child-skill archives
+    // to this exact Tencent COS acceleration host.
+    "skillhub-1388575217.cos.accelerate.myqcloud.com",
     "wry-manatee-359.convex.cloud",
     "www.mcpworld.com",
 ];
@@ -79,6 +82,39 @@ pub(crate) fn build_market_client() -> Result<reqwest::Client, AppError> {
 /// GET `url` and return its body as text, capped at [`MAX_MARKET_BODY_BYTES`].
 pub(crate) async fn read_market_body(client: &reqwest::Client, url: &str) -> Result<String, AppError> {
     let mut response = client.get(url).send().await.map_err(map_market_fetch_error)?;
+    read_market_response(&mut response).await
+}
+
+/// GET `url` with a caller-specific deadline. This is reserved for known
+/// large market payloads; ordinary detail and archive requests keep the
+/// tighter client-wide timeout.
+pub(crate) async fn read_market_body_with_timeout(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+) -> Result<String, AppError> {
+    let mut response = client
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(map_market_fetch_error)?;
+    read_market_response(&mut response).await
+}
+
+/// GET a detail resource while preserving a real upstream 404 as
+/// [`AppError::NotFound`]. Ranking pages use [`read_market_body`] because a
+/// missing market page is an upstream integration failure, whereas a missing
+/// detail resource means the selected entry was removed or became stale.
+pub(crate) async fn read_market_detail_body(
+    client: &reqwest::Client,
+    url: &str,
+    label: &str,
+) -> Result<String, AppError> {
+    let mut response = client.get(url).send().await.map_err(map_market_fetch_error)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(AppError::NotFound(format!("{label} not found")));
+    }
     read_market_response(&mut response).await
 }
 
@@ -152,6 +188,29 @@ pub(crate) fn map_market_fetch_error(error: reqwest::Error) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn spawn_test_response(
+        status: &'static str,
+        body: &'static str,
+        body_delay: Duration,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let headers = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(headers.as_bytes()).await;
+            tokio::time::sleep(body_delay).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        });
+        (format!("http://{address}/"), server)
+    }
 
     #[test]
     fn market_host_allowlist_accepts_known_hosts() {
@@ -180,7 +239,13 @@ mod tests {
         }
 
         // Off-allowlist public hosts are rejected too.
-        for host in ["evil.example.com", "clawhub.ai.evil.com", "sub.skillhub.cn", "example.com"] {
+        for host in [
+            "evil.example.com",
+            "clawhub.ai.evil.com",
+            "sub.skillhub.cn",
+            "other-bucket.cos.accelerate.myqcloud.com",
+            "example.com",
+        ] {
             assert!(!is_allowed_market_host(host), "{host} must be rejected");
         }
     }
@@ -188,5 +253,49 @@ mod tests {
     #[test]
     fn build_market_client_succeeds() {
         assert!(build_market_client().is_ok());
+    }
+
+    #[tokio::test]
+    async fn request_timeout_override_covers_delayed_response_body() {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+
+        let (default_url, default_server) =
+            spawn_test_response("200 OK", "{}", Duration::from_millis(150)).await;
+        let error = read_market_body(&client, &default_url).await.unwrap_err();
+        assert!(matches!(&error, AppError::Timeout(_)), "{error}");
+        default_server.await.unwrap();
+
+        let (override_url, override_server) =
+            spawn_test_response("200 OK", "{}", Duration::from_millis(150)).await;
+        let body = read_market_body_with_timeout(&client, &override_url, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(body, "{}");
+        override_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detail_reader_preserves_not_found_and_rejects_other_errors() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let (not_found_url, not_found_server) =
+            spawn_test_response("404 Not Found", "missing", Duration::ZERO).await;
+        let error = read_market_detail_body(&client, &not_found_url, "test package")
+            .await
+            .unwrap_err();
+        assert!(matches!(&error, AppError::NotFound(_)), "{error}");
+        not_found_server.await.unwrap();
+
+        let (server_error_url, server_error) =
+            spawn_test_response("500 Internal Server Error", "failed", Duration::ZERO).await;
+        let error = read_market_detail_body(&client, &server_error_url, "test package")
+            .await
+            .unwrap_err();
+        assert!(matches!(&error, AppError::BadGateway(_)), "{error}");
+        server_error.await.unwrap();
     }
 }
