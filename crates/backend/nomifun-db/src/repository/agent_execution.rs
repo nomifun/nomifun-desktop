@@ -185,7 +185,6 @@ pub struct UpdateAgentExecutionParams {
     pub max_parallel: Option<i64>,
     pub work_dir: Option<Option<String>>,
     pub summary: Option<Option<String>>,
-    pub total_tokens: Option<Option<i64>>,
 }
 
 #[derive(Debug, Clone)]

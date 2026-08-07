@@ -1122,7 +1122,7 @@ const KnowledgeDetailPage: React.FC = () => {
                 </div>
 
                 {/* Search box */}
-                <div className='knowledge-doc-search mx-9px mt-9px flex shrink-0 items-center gap-7px rounded-7px bg-[var(--color-fill-2)] border border-solid border-[var(--color-border-3)] px-9px py-6px'>
+                <div className='knowledge-doc-search mx-9px mt-9px flex shrink-0 items-center gap-7px rounded-7px bg-[var(--color-fill-2)] border border-solid border-[var(--color-border-3)] px-9px py-4px'>
                   <Search theme='outline' size='13' className='text-[var(--color-text-3)] shrink-0' />
                   <input
                     className='min-w-0 border-none bg-transparent outline-none text-[var(--color-text-1)] text-11px w-full placeholder:text-[var(--color-text-3)]'

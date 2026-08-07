@@ -19,7 +19,6 @@ import {
   isCompleteMessageProjection,
   isConversationProcessing,
 } from '@/renderer/pages/conversation/utils/conversationRuntime';
-import { emitter } from '@/renderer/utils/emitter';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ThoughtData } from '../thoughtTypes';
 import {
@@ -422,11 +421,8 @@ export const useNomiMessage = (
             // it updates the send-box metrics chip and persists for rehydration.
             const metrics = message.data as
               | {
-                  elapsed_ms?: number;
                   input_tokens?: number;
                   output_tokens?: number;
-                  cache_creation_tokens?: number;
-                  cache_read_tokens?: number;
                   context_tokens?: number;
                   context_window?: number;
                 }
@@ -436,17 +432,11 @@ export const useNomiMessage = (
               const outputTokens = metrics.output_tokens || 0;
               const newTokenUsage: TokenUsageData = {
                 total_tokens: inputTokens + outputTokens,
-                input_tokens: metrics.input_tokens,
-                output_tokens: metrics.output_tokens,
-                cache_creation_tokens: metrics.cache_creation_tokens,
-                cache_read_tokens: metrics.cache_read_tokens,
-                elapsed_ms: metrics.elapsed_ms,
                 context_tokens: metrics.context_tokens,
                 context_window: metrics.context_window,
               };
               setTokenUsage(newTokenUsage);
               if (!readOnly) {
-                emitter.emit('nomi.usage.updated', { conversation_id, tokenUsage: newTokenUsage });
                 void ipcBridge.conversation.update.invoke({
                   conversation_id: conversation_id,
                   updates: {
