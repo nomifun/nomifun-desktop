@@ -48,6 +48,13 @@ symphonia = { workspace = true }
 ort = { workspace = true }
 
 [dev-dependencies]
+# Self dev-dependency with `test-support` on: the integration tests need
+# `services::mock`, which is feature-gated so mocks never reach a release build.
+# Without this line `tests/fake_device.rs` only compiles when the caller
+# remembers `--features test-support` — and a plain `cargo test --workspace`
+# fails to BUILD (unresolved import), taking the whole suite down rather than
+# skipping one test. This makes the feature implicit for tests only.
+nomifun-robot = { path = ".", features = ["test-support"] }
 tempfile = { workspace = true }
 # The MCP proxy is only correct if it is driven over real HTTP, headers and all.
 reqwest = { workspace = true }
