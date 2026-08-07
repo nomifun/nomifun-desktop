@@ -48,6 +48,17 @@ describe('modality panel', () => {
     expect(panel.includes('useModelsForTask')).toBe(false);
   });
 
+  test('provider groups come from the ONE shared selector ordering', () => {
+    // `useProvidersQuery` is the raw backend order, and that order LEADS with the
+    // managed free provider (auto-created before the user configures anything).
+    // Reaching for it here made the hub's own sections contradict every model
+    // selector in the app, and put models the user never configured in the first
+    // slot of a management view. `useModelProviderList` already filters disabled
+    // providers and applies `orderModelSelectorProviders` (free last).
+    expect(panel.includes('useModelProviderList()')).toBe(true);
+    expect(panel.includes('useProvidersQuery(')).toBe(false);
+  });
+
   test('a row can be switched on and off in place', () => {
     expect(panel.includes('providerModel.update')).toBe(true);
     expect(panel.includes('<Switch')).toBe(true);
