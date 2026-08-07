@@ -9,7 +9,12 @@ import type { ITerminalSession } from '@/common/adapter/ipcBridge';
 import { terminalTarget } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
 import WorkspaceRailBody from '@/renderer/pages/conversation/Workspace/WorkspaceRailBody';
-import type { MessageApi, SelectedFile, WorkspaceSource } from '@/renderer/pages/conversation/Workspace/types';
+import type {
+  MessageApi,
+  SelectedFile,
+  WorkspaceExtraTab,
+  WorkspaceSource,
+} from '@/renderer/pages/conversation/Workspace/types';
 import React, { useCallback, useMemo } from 'react';
 
 /**
@@ -39,7 +44,9 @@ import React, { useCallback, useMemo } from 'react';
 const TerminalWorkspaceRail: React.FC<{
   session: ITerminalSession;
   messageApi?: MessageApi;
-}> = ({ session, messageApi }) => {
+  /** Terminal-owned resources shown in the shared rail (e.g. mounted knowledge). */
+  extraTabs?: WorkspaceExtraTab[];
+}> = ({ session, messageApi, extraTabs }) => {
   const terminalId = session.terminal_id;
   const cwd = session.cwd;
 
@@ -78,10 +85,11 @@ const TerminalWorkspaceRail: React.FC<{
       lazyChanges: true,
       isTemporary: false,
       onAppendFiles,
+      extraTabs,
       // Intentionally omit onSelectFiles / subscribeRefresh / upload — see the
       // component doc above.
     }),
-    [terminalId, cwd, onAppendFiles],
+    [terminalId, cwd, onAppendFiles, extraTabs],
   );
 
   return <WorkspaceRailBody source={source} messageApi={messageApi} />;
