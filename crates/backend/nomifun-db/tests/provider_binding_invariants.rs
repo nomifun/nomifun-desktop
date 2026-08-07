@@ -128,8 +128,8 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     assert!(
         preferences
             .upsert_batch(&[(
-                "idmm_backup_provider_id",
-                "0190f5fe-7c00-7a00-8000-000000000003",
+                "nomi.defaultModel",
+                r#"{"provider_id":"0190f5fe-7c00-7a00-8000-000000000003","model":"model"}"#,
             )])
             .await
             .is_err(),
@@ -284,34 +284,6 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     );
 
     insert_provider(&database, "0190f5fe-7c00-7a00-8000-000000000002").await;
-    preferences
-        .upsert_batch(&[(
-            "idmm_backup_provider_id",
-            "0190f5fe-7c00-7a00-8000-000000000002",
-        )])
-        .await
-        .unwrap();
-    assert!(
-        providers
-            .delete("0190f5fe-7c00-7a00-8000-000000000002")
-            .await
-            .is_err(),
-        "IDMM backup is a hard binding protected inside provider DELETE"
-    );
-    assert!(
-        preferences
-            .upsert_batch(&[(
-                "idmm_backup_provider_id",
-                "0190f5fe-7c00-7a00-8000-000000000003",
-            )])
-            .await
-            .is_err(),
-        "authoritative IDMM backup updates cannot introduce a missing provider"
-    );
-    preferences
-        .delete_keys(&["idmm_backup_provider_id"])
-        .await
-        .unwrap();
     let hard_conversation = conversations
         .create(&conversation(
             &owner,

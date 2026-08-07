@@ -21,6 +21,10 @@ describe('TerminalCreatePage extended capabilities', () => {
     expect(createPageSource.includes('target_id: session.terminal_id')).toBe(true);
 
     expect(panelSource.includes('IdmmControl')).toBe(true);
-    expect(panelSource.includes('draft={{ value: idmm, onChange: onIdmmChange }}')).toBe(true);
+    // The draft declares its kind: a terminal has no model of its own to lend the
+    // model tier (its agent CLI owns the model), so a terminal watch must name a
+    // bypass model itself. Without this the control would offer a one-click
+    // enable that the backend then rejects with a 400.
+    expect(panelSource.includes("draft={{ value: idmm, onChange: onIdmmChange, kind: 'terminal' }}")).toBe(true);
   });
 });

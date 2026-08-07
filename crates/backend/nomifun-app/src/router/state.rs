@@ -639,10 +639,8 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
     let provider_repo = Arc::new(SqliteProviderRepository::new(pool.clone()));
 
     // Cross-subsystem provider-deletion guard: aggregate every hard binding
-    // (companion, public Agent, IDMM backup, active Agent Execution) and strip
-    // soft failover/model-pool references only after deletion is allowed.
-    let client_pref_repo: Arc<dyn nomifun_db::IClientPreferenceRepository> =
-        Arc::new(SqliteClientPreferenceRepository::new(pool.clone()));
+    // (companion, public Agent, active Agent Execution) and strip soft
+    // failover/model-pool references only after deletion is allowed.
     let execution_repo: Arc<dyn IAgentExecutionRepository> =
         Arc::new(SqliteAgentExecutionRepository::new(pool.clone()));
     let execution_template_repo: Arc<dyn IAgentExecutionTemplateRepository> =
@@ -652,7 +650,6 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         companion: services.companion_service.clone(),
         customer_service: services.customer_service_service.clone(),
         workshop: services.workshop_service.clone(),
-        client_prefs: client_pref_repo,
         execution_repo,
         execution_template_repo,
         conversation_repo: services.conversation_repo.clone(),
@@ -1428,9 +1425,9 @@ pub fn build_agent_execution_engine(
 
 /// Build the `IdmmRouterState` (the IDMM supervisor manager + service). Shares
 /// the caller's `ConversationService` / conversation repo / terminal driver so
-/// IDMM supervises the same live sessions AutoWork + the UI drive. Constructs
-/// fresh provider/client-preference repos from the pool, while reusing the
-/// process-wide persistent data-encryption key from [`AppServices`].
+/// IDMM supervises the same live sessions AutoWork + the UI drive. Constructs a
+/// fresh provider repo from the pool, while reusing the process-wide persistent
+/// data-encryption key from [`AppServices`].
 pub fn build_idmm_state(
     services: &AppServices,
     conv_service: ConversationService,
@@ -1439,8 +1436,6 @@ pub fn build_idmm_state(
 ) -> IdmmRouterState {
     let pool = services.database.pool().clone();
     let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool.clone()));
-    let client_prefs: Arc<dyn nomifun_db::IClientPreferenceRepository> =
-        Arc::new(SqliteClientPreferenceRepository::new(pool.clone()));
     let records: Arc<dyn IIdmmInterventionRepository> = Arc::new(SqliteIdmmInterventionRepository::new(pool));
     let encryption_key = services.encryption_key;
 
@@ -1452,7 +1447,7 @@ pub fn build_idmm_state(
         encryption_key,
         workspace: services.data_dir.clone(),
     });
-    let sidecar = Arc::new(nomifun_idmm::SidecarClient::new(completer, client_prefs.clone()));
+    let sidecar = Arc::new(nomifun_idmm::SidecarClient::new(completer));
 
     let probe_deps = Arc::new(nomifun_idmm::ProbeDeps {
         conversation_service: conv_service,
@@ -1469,7 +1464,6 @@ pub fn build_idmm_state(
     let manager = IdmmManager::new(loop_deps, probe_deps.clone(), probe_deps.clone());
     let service = Arc::new(nomifun_idmm::IdmmService::new(
         probe_deps,
-        client_prefs,
         sidecar,
         manager,
         records.clone(),

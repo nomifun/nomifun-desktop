@@ -8,7 +8,7 @@ use axum::extract::{Extension, Json, Path, Query, State};
 use axum::routing::{get, post};
 
 use nomifun_api_types::{
-    ApiResponse, IdmmConfig, IdmmSettings, IdmmState, IdmmTargetKind, InterventionRecord, SetIdmmRequest,
+    ApiResponse, IdmmConfig, IdmmState, IdmmTargetKind, InterventionRecord, SetIdmmRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
@@ -20,9 +20,6 @@ use crate::state::IdmmRouterState;
 /// the timeline shows every record the aggressive pruning keeps.
 const DEFAULT_LOG_LIMIT: i64 = 30;
 
-/// Default `?limit` for the cross-session activity feed (`GET /api/idmm/activity`).
-const DEFAULT_ACTIVITY_LIMIT: i64 = 50;
-
 /// Query string for `GET .../log`.
 #[derive(Debug, Deserialize)]
 struct LogQuery {
@@ -30,18 +27,9 @@ struct LogQuery {
     limit: Option<i64>,
 }
 
-/// Query string for `GET /api/idmm/activity`.
-#[derive(Debug, Deserialize)]
-struct ActivityQuery {
-    /// Max rows to return (most-recent-first). Defaults to [`DEFAULT_ACTIVITY_LIMIT`].
-    limit: Option<i64>,
-}
-
 pub fn idmm_routes(state: IdmmRouterState) -> Router {
     Router::new()
         .route("/api/idmm", post(set_idmm))
-        .route("/api/idmm/settings", get(get_settings).put(set_settings))
-        .route("/api/idmm/activity", get(get_activity).delete(clear_activity))
         .route("/api/idmm/{kind}/{target_id}", get(get_idmm))
         .route("/api/idmm/{kind}/{target_id}/intervene", post(intervene))
         .route("/api/idmm/{kind}/{target_id}/log", get(get_log).delete(clear_log))
@@ -117,40 +105,4 @@ async fn clear_log(
     let kind = parse_kind(&kind)?;
     let removed = state.service.clear_log(&user.id, kind, &target_id).await?;
     Ok(Json(ApiResponse::ok(removed)))
-}
-
-async fn get_activity(
-    State(state): State<IdmmRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    Query(q): Query<ActivityQuery>,
-) -> Result<Json<ApiResponse<Vec<InterventionRecord>>>, AppError> {
-    let limit = q.limit.unwrap_or(DEFAULT_ACTIVITY_LIMIT);
-    let activity = state.service.recent_activity(&user.id, limit).await?;
-    Ok(Json(ApiResponse::ok(activity)))
-}
-
-async fn clear_activity(
-    State(state): State<IdmmRouterState>,
-    Extension(user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<u64>>, AppError> {
-    let removed = state.service.clear_activity(&user.id).await?;
-    Ok(Json(ApiResponse::ok(removed)))
-}
-
-async fn get_settings(
-    State(state): State<IdmmRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<IdmmSettings>>, AppError> {
-    let s = state.service.get_settings().await?;
-    Ok(Json(ApiResponse::ok(s)))
-}
-
-async fn set_settings(
-    State(state): State<IdmmRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<IdmmSettings>, JsonRejection>,
-) -> Result<Json<ApiResponse<IdmmSettings>>, AppError> {
-    let Json(settings) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.service.set_settings(&settings).await?;
-    Ok(Json(ApiResponse::ok(state.service.get_settings().await?)))
 }

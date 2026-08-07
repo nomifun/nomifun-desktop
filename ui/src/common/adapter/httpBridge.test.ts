@@ -386,7 +386,7 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     try {
       let caught: unknown;
       try {
-        await httpRequest('PUT', '/api/idmm/settings', { default_steering_prompt: '' });
+        await httpRequest('PUT', '/api/nomi/summon', { enabled: false });
       } catch (e) {
         caught = e;
       }

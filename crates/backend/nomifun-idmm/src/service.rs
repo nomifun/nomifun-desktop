@@ -1,7 +1,7 @@
 //! IDMM business logic: config persistence (conversation `extra.idmm` /
-//! `terminal_sessions.idmm`), state assembly, global settings, and the
-//! `ConfigReader` + `ProbeFactory` impls that let `IdmmManager` (re)build probes
-//! and read config lazily. No axum here.
+//! `terminal_sessions.idmm`), state assembly, and the `ConfigReader` +
+//! `ProbeFactory` impls that let `IdmmManager` (re)build probes and read config
+//! lazily. No axum here.
 //!
 //! Construction is layered to avoid a cycle: `ProbeDeps` (probe build + config
 //! read) needs no manager; it backs the factory/config-reader, those back the
@@ -11,15 +11,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
-use nomifun_api_types::{IdmmConfig, IdmmSettings, IdmmState, IdmmTargetKind, InterventionRecord};
+use nomifun_api_types::{IdmmConfig, IdmmState, IdmmTargetKind, InterventionRecord};
 use nomifun_common::{AppError, ConversationId, TerminalId, UserId};
 use nomifun_conversation::ConversationService;
 use nomifun_db::models::IdmmInterventionRow;
-use nomifun_db::{IClientPreferenceRepository, IConversationRepository, IIdmmInterventionRepository};
+use nomifun_db::{IConversationRepository, IIdmmInterventionRepository};
 use nomifun_terminal::TerminalDriver;
 
 use crate::probe::{ConversationProbe, SessionProbe, TerminalProbe};
-use crate::sidecar::{PREF_BACKUP_MODEL, PREF_BACKUP_PROVIDER, PREF_DEFAULT_STEERING, SidecarClient};
+use crate::sidecar::SidecarClient;
 use crate::supervisor::{ConfigReader, IdmmManager, ProbeFactory, build_state};
 
 /// Public log/activity reads are deliberately bounded even if an internal
@@ -178,11 +178,10 @@ impl ConfigReader for ProbeDeps {
     }
 }
 
-/// IDMM's API-facing service (config persistence, state, settings, log).
+/// IDMM's API-facing service (config persistence, state, log).
 #[derive(Clone)]
 pub struct IdmmService {
     probe_deps: Arc<ProbeDeps>,
-    client_prefs: Arc<dyn IClientPreferenceRepository>,
     sidecar: Arc<SidecarClient>,
     manager: IdmmManager,
     records: Arc<dyn IIdmmInterventionRepository>,
@@ -191,14 +190,12 @@ pub struct IdmmService {
 impl IdmmService {
     pub fn new(
         probe_deps: Arc<ProbeDeps>,
-        client_prefs: Arc<dyn IClientPreferenceRepository>,
         sidecar: Arc<SidecarClient>,
         manager: IdmmManager,
         records: Arc<dyn IIdmmInterventionRepository>,
     ) -> Self {
         Self {
             probe_deps,
-            client_prefs,
             sidecar,
             manager,
             records,
@@ -210,19 +207,19 @@ impl IdmmService {
     }
 
     /// Whether the RulePlusModel tier has a resolvable bypass model: a per-watch
-    /// override / global default, or, for a conversation target, the
-    /// conversation's own selected model (which becomes the bypass model, so the
-    /// model tier works with zero extra config on a plain chat). Terminals have
-    /// no own callable model (their agent CLI owns the model), so they still need
-    /// an explicit backup. Feeds both `validate` and the
-    /// `sidecar_provider_resolved` state flag the frontend gates its toggle on.
+    /// selection, or, for a conversation target, the conversation's own selected
+    /// model (which becomes the bypass model, so the model tier works with zero
+    /// extra config on a plain chat). Terminals have no own callable model (their
+    /// agent CLI owns the model), so a terminal watch must name its own. Feeds
+    /// both `validate` and the `sidecar_provider_resolved` state flag the
+    /// frontend gates its toggle on.
     ///
-    /// Checks both watches' bypass models (either resolving satisfies the
-    /// requirement. `validate` only demands a backup when an enabled watch is on
-    /// the model tier, and both watches resolve through the same global default).
+    /// Checks both watches' bypass models — either resolving satisfies the
+    /// requirement, because `validate` only demands a backup when an enabled
+    /// watch is on the model tier.
     async fn sidecar_backup_resolvable(&self, kind: IdmmTargetKind, target_id: &str, cfg: &IdmmConfig) -> bool {
-        if self.sidecar.backup_resolvable(&cfg.decision_watch.base.bypass_model).await
-            || self.sidecar.backup_resolvable(&cfg.fault_watch.base.bypass_model).await
+        if self.sidecar.backup_resolvable(&cfg.decision_watch.base.bypass_model)
+            || self.sidecar.backup_resolvable(&cfg.fault_watch.base.bypass_model)
         {
             return true;
         }
@@ -278,9 +275,8 @@ impl IdmmService {
     }
 
     /// Read the persisted per-session config. Returns `Ok(None)` when no
-    /// config has been saved for this target (the frontend should then seed
-    /// the form from `IdmmSettings.default_steering_prompt` instead of from a
-    /// blank `IdmmConfig::default()`).
+    /// config has been saved for this target (the frontend then seeds the form
+    /// from `IdmmConfig::default()`).
     pub async fn read_config_persisted(
         &self,
         user_id: &str,
@@ -373,12 +369,6 @@ impl IdmmService {
         rows.into_iter().map(row_to_record).collect()
     }
 
-    /// Clear one owner's activity across all of their targets.
-    pub async fn clear_activity(&self, user_id: &str) -> Result<u64, AppError> {
-        require_user_id(user_id)?;
-        Ok(self.records.clear_all(user_id).await?)
-    }
-
     /// Force one ladder pass now (manual "act now"): ensures supervision is
     /// running; the actual pass happens on the next observed signal.
     pub async fn intervene_now(
@@ -389,67 +379,6 @@ impl IdmmService {
     ) -> Result<(), AppError> {
         self.verify_target_owner(kind, target_id, user_id).await?;
         self.manager.ensure(kind, target_id).await;
-        Ok(())
-    }
-
-    // -- Global settings (client_preferences) -------------------------------
-
-    pub async fn get_settings(&self) -> Result<IdmmSettings, AppError> {
-        let rows = self
-            .client_prefs
-            .get_by_keys(&[PREF_BACKUP_PROVIDER, PREF_BACKUP_MODEL, PREF_DEFAULT_STEERING])
-            .await?;
-        let mut s = IdmmSettings::default();
-        for r in rows {
-            match r.key.as_str() {
-                PREF_BACKUP_PROVIDER => {
-                    nomifun_common::ProviderId::parse(&r.value).map_err(|error| {
-                        AppError::Internal(format!(
-                            "stored IDMM backup provider id is invalid: {error}"
-                        ))
-                    })?;
-                    s.backup_provider_id = Some(r.value);
-                }
-                PREF_BACKUP_MODEL if !r.value.trim().is_empty() => s.backup_model = Some(r.value),
-                PREF_DEFAULT_STEERING => s.default_steering_prompt = r.value,
-                _ => {}
-            }
-        }
-        Ok(s)
-    }
-
-    pub async fn set_settings(&self, settings: &IdmmSettings) -> Result<(), AppError> {
-        let mut entries: Vec<(&str, &str)> = Vec::new();
-        let provider = settings.backup_provider_id.as_deref().map(|provider_id| {
-            nomifun_common::ProviderId::parse(provider_id).map_err(|error| {
-                AppError::BadRequest(format!("invalid backup provider id: {error}"))
-            })
-        }).transpose()?.map(|id| id.into_string());
-        let model = settings
-            .backup_model
-            .as_deref()
-            .map(str::trim)
-            .filter(|m| !m.is_empty());
-        let mut delete_keys: Vec<&str> = Vec::new();
-        if let Some(p) = provider.as_deref() {
-            entries.push((PREF_BACKUP_PROVIDER, p));
-        } else {
-            delete_keys.push(PREF_BACKUP_PROVIDER);
-        }
-        if provider.is_some() {
-            if let Some(m) = model {
-                entries.push((PREF_BACKUP_MODEL, m));
-            } else {
-                delete_keys.push(PREF_BACKUP_MODEL);
-            }
-        } else {
-            delete_keys.push(PREF_BACKUP_MODEL);
-        }
-        entries.push((PREF_DEFAULT_STEERING, settings.default_steering_prompt.as_str()));
-        if !delete_keys.is_empty() {
-            self.client_prefs.delete_keys(&delete_keys).await?;
-        }
-        self.client_prefs.upsert_batch(&entries).await?;
         Ok(())
     }
 
