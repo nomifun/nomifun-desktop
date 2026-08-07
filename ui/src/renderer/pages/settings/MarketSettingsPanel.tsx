@@ -100,6 +100,8 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [searchExpanded, setSearchExpanded] = useState(false);
   const [tagFilter, setTagFilter] = useState<TagFilterState>({ audience: [], scenario: [] });
+  const pendingAddIdsRef = useRef<Set<string>>(new Set());
+  const [pendingAddIds, setPendingAddIds] = useState<Set<string>>(new Set());
 
   const testId = useCallback(
     (id: string): string | undefined => (testIdPrefix ? id.replace('{market}', testIdPrefix) : undefined),
@@ -234,6 +236,29 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
       message.error(text?.openFailed ?? t('settings.market.openFailed', { defaultValue: '无法打开市场' }));
     }
   }, [activeSource, message, t, text]);
+
+  const handleMarketAdd = useCallback(
+    async (item: ISkillMarketItem) => {
+      if (pendingAddIdsRef.current.has(item.id)) return;
+      const started = new Set(pendingAddIdsRef.current);
+      started.add(item.id);
+      pendingAddIdsRef.current = started;
+      setPendingAddIds(started);
+      try {
+        await onAdd(item);
+      } catch (error) {
+        // Consumers normally own their user-facing error message. Keep the
+        // shared callback boundary rejection-safe for future consumers.
+        console.error('Market add callback failed:', error);
+      } finally {
+        const finished = new Set(pendingAddIdsRef.current);
+        finished.delete(item.id);
+        pendingAddIdsRef.current = finished;
+        setPendingAddIds(finished);
+      }
+    },
+    [onAdd]
+  );
 
   const isSearchVisible = searchExpanded || searchQuery.length > 0;
   const activeSearch = searchQuery.trim().length > 0;
@@ -377,7 +402,8 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
               item={item}
               tagByKey={tags.tagByKey}
               localeKey={localeKey}
-              onAdd={(marketItem) => void onAdd(marketItem)}
+              adding={pendingAddIds.has(item.id)}
+              onAdd={(marketItem) => void handleMarketAdd(marketItem)}
             />
           ))}
         </div>

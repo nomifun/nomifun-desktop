@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { BackendHttpError } from '@/common/adapter/httpBridge';
 import { parsePresetId } from '@/common/types/ids';
-import { buildPresetFromMarketPackage } from './PresetPackageMarketSettings';
+import { buildPresetFromMarketPackage, classifyPresetPackageAddError } from './PresetPackageMarketSettings';
 
 describe('preset package market import payload', () => {
   test('keeps real package skills and applies expert package defaults', () => {
@@ -53,5 +54,26 @@ describe('preset package market import payload', () => {
       { skill_name: '中文技能', required: false },
       { skill_name: 'skill with space', required: false },
     ]);
+  });
+});
+
+describe('preset package market errors', () => {
+  const backendError = (code: string) =>
+    new BackendHttpError({
+      method: 'POST',
+      path: '/api/skills/market/package/install',
+      status: code === 'NOT_FOUND' ? 404 : 502,
+      body: { success: false, code, error: 'redacted backend error' },
+    });
+
+  test('maps structured upstream failures to actionable messages', () => {
+    expect(classifyPresetPackageAddError(backendError('TIMEOUT'))).toBe('timeout');
+    expect(classifyPresetPackageAddError(backendError('BAD_GATEWAY'))).toBe('upstream');
+    expect(classifyPresetPackageAddError(backendError('NOT_FOUND'))).toBe('not_found');
+  });
+
+  test('keeps unknown failures on the generic safe fallback', () => {
+    expect(classifyPresetPackageAddError(backendError('INTERNAL_ERROR'))).toBe('generic');
+    expect(classifyPresetPackageAddError(new TypeError('malformed response'))).toBe('generic');
   });
 });

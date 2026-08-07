@@ -17,16 +17,18 @@ use reqwest::header::ACCEPT;
 use crate::skill_service::{self, SkillPaths};
 
 use super::client::{
-    MAX_SKILLHUB_SKILL_ZIP_BYTES, build_market_client, map_market_fetch_error, read_market_body, read_market_bytes,
+    MAX_SKILLHUB_SKILL_ZIP_BYTES, build_market_client, map_market_fetch_error, read_market_body,
+    read_market_bytes, read_market_detail_body,
 };
 use super::parse::{
-    clean_market_text, dedup_strings, is_market_slug, json_string_array, json_text, json_text_preserve,
-    last_url_segment, market_ref_suffix, title_from_slug,
+    dedup_strings, is_market_slug, json_text, json_text_preserve, last_url_segment, market_ref_suffix,
+    title_from_slug,
 };
-use super::{SKILLHUB_PACKAGES_SOURCE, SKILLHUB_PACKAGES_URL};
+use super::SKILLHUB_PACKAGES_SOURCE;
 
 const SKILLHUB_SKILL_DOWNLOAD_URL: &str = "https://api.skillhub.cn/api/v1/download";
 const SKILLHUB_SKILL_SEARCH_URL: &str = "https://api.skillhub.cn/api/v1/search";
+const SKILLHUB_PACKAGE_DETAIL_BASE_URL: &str = "https://api.skillhub.cn/api/v1/skillsets/";
 
 /// Resolve a SkillHub expert package and install its child skills. This is
 /// the `POST /api/skills/market/package/install` implementation; resolving
@@ -45,7 +47,7 @@ pub async fn install_market_package(
     })
 }
 
-/// Look up a package by slug in the SkillHub skillsets listing and build its
+/// Fetch one package by slug from the SkillHub detail endpoint and build its
 /// response (name, instructions, child skill slugs).
 async fn resolve_market_package(req: SkillMarketPackageRequest) -> Result<SkillMarketPackageResponse, AppError> {
     if req.source != SKILLHUB_PACKAGES_SOURCE {
@@ -54,27 +56,59 @@ async fn resolve_market_package(req: SkillMarketPackageRequest) -> Result<SkillM
             req.source
         )));
     }
-    let slug = market_ref_suffix(&req.id, SKILLHUB_PACKAGES_SOURCE)
-        .or_else(|| last_url_segment(&req.url))
-        .ok_or_else(|| AppError::BadRequest("invalid SkillHub package id".into()))?;
-    if !is_market_slug(&slug) {
-        return Err(AppError::BadRequest("invalid SkillHub package slug".into()));
-    }
+    let slug = resolve_skillhub_package_slug(&req)?;
 
     let client = build_market_client()?;
-    let body = read_market_body(&client, SKILLHUB_PACKAGES_URL).await?;
-    let root = serde_json::from_str::<serde_json::Value>(&body)
-        .map_err(|e| AppError::BadGateway(format!("SkillHub package JSON parse failed: {e}")))?;
-    let packages = root
-        .get("skillSets")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| AppError::BadGateway("SkillHub package list missing skillSets".into()))?;
-    let package = packages
-        .iter()
-        .find(|item| json_text(item, "slug", 96).as_deref() == Some(slug.as_str()))
-        .ok_or_else(|| AppError::NotFound(format!("SkillHub package '{slug}' not found")))?;
+    let url = skillhub_package_detail_url(&slug)?;
+    let body = read_market_detail_body(&client, url.as_str(), &format!("SkillHub package '{slug}'")).await?;
+    parse_skillhub_package_detail(&body, &slug)
+}
 
-    build_skillhub_package_response(package, &slug)
+/// Resolve a package slug from the backend-issued id and URL. A stale cache
+/// may contain one malformed field, so a valid peer can recover it; two valid
+/// but conflicting fields are rejected rather than silently selecting one.
+fn resolve_skillhub_package_slug(req: &SkillMarketPackageRequest) -> Result<String, AppError> {
+    let id_slug = market_ref_suffix(&req.id, SKILLHUB_PACKAGES_SOURCE).filter(|slug| is_market_slug(slug));
+    let url_slug = last_url_segment(&req.url).filter(|slug| is_market_slug(slug));
+
+    match (id_slug, url_slug) {
+        (Some(id_slug), Some(url_slug)) if !id_slug.eq_ignore_ascii_case(&url_slug) => Err(AppError::BadRequest(
+            "SkillHub package id and URL refer to different packages".into(),
+        )),
+        (Some(slug), _) | (_, Some(slug)) => Ok(slug),
+        (None, None) => Err(AppError::BadRequest("invalid SkillHub package slug".into())),
+    }
+}
+
+fn skillhub_package_detail_url(slug: &str) -> Result<reqwest::Url, AppError> {
+    if !is_market_slug(slug) {
+        return Err(AppError::BadRequest("invalid SkillHub package slug".into()));
+    }
+    let mut url = reqwest::Url::parse(SKILLHUB_PACKAGE_DETAIL_BASE_URL)
+        .map_err(|e| AppError::Internal(format!("invalid SkillHub package detail URL: {e}")))?;
+    url.path_segments_mut()
+        .map_err(|_| AppError::Internal("invalid SkillHub package detail URL base".into()))?
+        .pop_if_empty()
+        .push(slug);
+    Ok(url)
+}
+
+fn parse_skillhub_package_detail(body: &str, slug: &str) -> Result<SkillMarketPackageResponse, AppError> {
+    let package = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|e| AppError::BadGateway(format!("SkillHub package JSON parse failed: {e}")))?;
+    let returned_slug = package
+        .get("slug")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| is_market_slug(value))
+        .ok_or_else(|| AppError::BadGateway("SkillHub package response missing slug".into()))?;
+    if !returned_slug.eq_ignore_ascii_case(slug) {
+        return Err(AppError::BadGateway(format!(
+            "SkillHub package response slug mismatch: expected '{slug}', got '{returned_slug}'"
+        )));
+    }
+
+    build_skillhub_package_response(&package, slug)
 }
 
 fn build_skillhub_package_response(
@@ -272,7 +306,16 @@ async fn import_skillhub_skill_archive(
 // ---------------------------------------------------------------------------
 
 fn package_skill_slugs(package: &serde_json::Value, instructions: &str) -> Vec<String> {
-    let mut slugs = json_string_array(package.get("skillSlugs"), 80);
+    let mut slugs = package
+        .get("skillSlugs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     slugs.extend(frontmatter_child_slugs(instructions));
     normalize_package_skill_slugs(slugs)
 }
@@ -281,7 +324,7 @@ fn normalize_package_skill_slugs(slugs: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     slugs
         .into_iter()
-        .map(|value| clean_market_text(&value, 80))
+        .map(|value| value.trim().to_string())
         .filter(|value| is_market_slug(value) && !is_package_metadata_field(value))
         .filter(|value| seen.insert(value.to_ascii_lowercase()))
         .collect()
@@ -293,7 +336,7 @@ fn normalize_package_skill_install_slugs(slugs: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     slugs
         .into_iter()
-        .map(|value| clean_market_text(&value, 80))
+        .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty() && !is_package_metadata_field(value))
         .filter(|value| seen.insert(value.to_ascii_lowercase()))
         .collect()
@@ -334,7 +377,9 @@ fn frontmatter_child_slugs(markdown: &str) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(serde_yaml::Value::as_str)
-        .map(|value| clean_market_text(value, 80))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
         .collect()
 }
 
@@ -399,6 +444,112 @@ mod tests {
         assert!(response.instructions.starts_with("---\nname: tech-test-automation"));
         assert!(response.instructions.contains("metadata:"));
         assert!(response.instructions.contains("# Test Automation"));
+    }
+
+    #[test]
+    fn package_detail_url_targets_one_validated_slug() {
+        assert_eq!(
+            skillhub_package_detail_url("tech-test-automation")
+                .unwrap()
+                .as_str(),
+            "https://api.skillhub.cn/api/v1/skillsets/tech-test-automation"
+        );
+        assert!(skillhub_package_detail_url("../tech-test-automation").is_err());
+    }
+
+    #[test]
+    fn package_slug_recovers_one_stale_field_but_rejects_conflicts() {
+        let valid = SkillMarketPackageRequest {
+            source: SKILLHUB_PACKAGES_SOURCE.into(),
+            id: "skillhub_packages:tech-test-automation".into(),
+            url: "https://skillhub.cn/skillspackage/tech-test-automation".into(),
+        };
+        assert_eq!(
+            resolve_skillhub_package_slug(&valid).unwrap(),
+            "tech-test-automation"
+        );
+
+        let stale_id = SkillMarketPackageRequest {
+            id: "skillhub_packages:invalid slug".into(),
+            ..valid.clone()
+        };
+        assert_eq!(
+            resolve_skillhub_package_slug(&stale_id).unwrap(),
+            "tech-test-automation"
+        );
+
+        let conflicting = SkillMarketPackageRequest {
+            url: "https://skillhub.cn/skillspackage/another-package".into(),
+            ..valid
+        };
+        assert!(resolve_skillhub_package_slug(&conflicting).is_err());
+    }
+
+    #[test]
+    fn package_detail_parser_requires_matching_slug_and_content() {
+        let body = serde_json::json!({
+            "slug": "tech-test-automation",
+            "displayName": "Test Automation",
+            "summary": "End-to-end automated testing workflow.",
+            "skillSlugs": ["superpowers-tdd"],
+            "content": "# Test Automation\nUse this package."
+        })
+        .to_string();
+
+        let package = parse_skillhub_package_detail(&body, "tech-test-automation").unwrap();
+        assert_eq!(package.name, "Test Automation");
+        assert_eq!(package.skill_slugs, vec!["superpowers-tdd"]);
+        assert!(parse_skillhub_package_detail(&body, "another-package").is_err());
+
+        let missing_content = serde_json::json!({ "slug": "tech-test-automation" }).to_string();
+        assert!(parse_skillhub_package_detail(&missing_content, "tech-test-automation").is_err());
+    }
+
+    #[test]
+    fn package_child_slug_preserves_the_full_backend_limit() {
+        let max_slug = format!("a{}z", "b".repeat(94));
+        let over_limit = format!("a{}z", "b".repeat(95));
+        let package = serde_json::json!({ "skillSlugs": [max_slug, over_limit.clone()] });
+
+        let slugs = package_skill_slugs(&package, "# Package");
+
+        assert_eq!(slugs, vec![format!("a{}z", "b".repeat(94))]);
+
+        let invalid_for_reporting = normalize_package_skill_install_slugs(vec![over_limit.clone()]);
+        assert_eq!(invalid_for_reporting, vec![over_limit]);
+        assert!(!is_market_slug(&invalid_for_reporting[0]));
+    }
+
+    /// Manual smoke test for the exact lightweight endpoint used by Add.
+    /// Ignored in normal test runs because SkillHub is outside NomiFun's
+    /// availability control.
+    #[tokio::test]
+    #[ignore = "requires public SkillHub access"]
+    async fn live_skillhub_package_detail_contract() {
+        let package = resolve_market_package(SkillMarketPackageRequest {
+            source: SKILLHUB_PACKAGES_SOURCE.into(),
+            id: "skillhub_packages:tech-test-automation".into(),
+            url: "https://skillhub.cn/skillspackage/tech-test-automation".into(),
+        })
+        .await
+        .unwrap();
+
+        assert!(!package.name.is_empty());
+        assert!(!package.instructions.is_empty());
+        assert!(!package.skill_slugs.is_empty());
+    }
+
+    /// Manual smoke test for the official API -> Tencent COS redirect used by
+    /// child-skill archives. The redirect target remains exact-allowlisted.
+    #[tokio::test]
+    #[ignore = "requires public SkillHub and Tencent COS access"]
+    async fn live_skillhub_child_archive_redirect_contract() {
+        let client = build_market_client().unwrap();
+        let archive = request_skillhub_skill_zip(&client, "superpowers-tdd")
+            .await
+            .unwrap();
+
+        assert!(archive.starts_with(b"PK"));
     }
 
     #[test]

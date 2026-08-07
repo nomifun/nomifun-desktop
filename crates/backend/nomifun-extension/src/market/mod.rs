@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use nomifun_api_types::{SkillMarketItemResponse, SkillMarketSyncResponse};
 use nomifun_common::AppError;
 
-use client::{build_market_client, read_market_body, read_market_json_post};
+use client::{build_market_client, read_market_body, read_market_body_with_timeout, read_market_json_post};
 use parse::{
     parse_clawhub_plugins, parse_clawhub_rankings, parse_loophub_rankings, parse_mcpworld_rankings,
     parse_skillhub_mcp_rankings, parse_skillhub_packages, parse_skillhub_rankings,
@@ -55,6 +55,11 @@ const MCPWORLD_RANKING_URL: &str =
 const CLAWHUB_PLUGINS_API_URL: &str = "https://clawhub.ai/api/v1/plugins?limit=100&sort=recommended";
 const CLAWHUB_PLUGINS_URL: &str = "https://clawhub.ai/plugins";
 const SKILLHUB_PACKAGES_URL: &str = "https://api.skillhub.cn/api/v1/skillsets?page=1&pageSize=200";
+
+/// The expert-package ranking is a much larger JSON document than the other
+/// market feeds (currently hundreds of KiB). Give only this request enough
+/// time to finish reading the body while staying inside the 30s source budget.
+const SKILLHUB_PACKAGES_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Ranking cap applied per source after parsing.
 const MAX_MARKET_ITEMS_PER_SOURCE: usize = 200;
@@ -162,7 +167,12 @@ async fn fetch_market_source(
         )),
         MCPWORLD_SOURCE => Ok(parse_mcpworld_rankings(&read_market_body(client, MCPWORLD_RANKING_URL).await?)),
         SKILLHUB_PACKAGES_SOURCE => Ok(parse_skillhub_packages(
-            &read_market_body(client, SKILLHUB_PACKAGES_URL).await?,
+            &read_market_body_with_timeout(
+                client,
+                SKILLHUB_PACKAGES_URL,
+                SKILLHUB_PACKAGES_REQUEST_TIMEOUT,
+            )
+            .await?,
         )),
         other => Err(AppError::BadRequest(format!("unsupported skill market source: {other}"))),
     }
@@ -422,6 +432,25 @@ mod tests {
                 .items
                 .iter()
                 .all(|item| item.rank >= 1 && item.url.starts_with("https://"))
+        );
+    }
+
+    /// Manual smoke test for the larger SkillHub package feed and its
+    /// source-specific response-body timeout.
+    #[tokio::test]
+    #[ignore = "requires public SkillHub access"]
+    async fn live_skillhub_package_ranking_contract() {
+        let response = fetch_skill_market_rankings(vec![SKILLHUB_PACKAGES_SOURCE.into()])
+            .await
+            .unwrap();
+
+        assert!(response.errors.is_empty(), "live fetch errors: {:?}", response.errors);
+        assert!(!response.items.is_empty());
+        assert!(
+            response
+                .items
+                .iter()
+                .all(|item| item.source == SKILLHUB_PACKAGES_SOURCE && item.rank >= 1)
         );
     }
 }

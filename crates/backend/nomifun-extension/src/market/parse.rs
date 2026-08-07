@@ -523,7 +523,7 @@ pub(super) fn parse_skillhub_packages(body: &str) -> Vec<SkillMarketItemResponse
 }
 
 fn parse_skillhub_package_item(item: &serde_json::Value) -> Option<SkillMarketItemResponse> {
-    let slug = json_text(item, "slug", 96)?;
+    let slug = item.get("slug")?.as_str()?.trim().to_string();
     if !is_market_slug(&slug) {
         return None;
     }
@@ -1196,6 +1196,19 @@ mod tests {
         assert_eq!(items[0].source, SKILLHUB_PACKAGES_SOURCE);
         assert_eq!(items[0].install_command, "skillhub package add tech-test-automation");
         assert!(items[0].stats.as_deref().unwrap_or_default().contains("6 skills"));
+    }
+
+    #[test]
+    fn parse_skillhub_packages_rejects_overlong_slug_without_truncating_it() {
+        let body = serde_json::json!({
+            "skillSets": [{
+                "slug": "a".repeat(97),
+                "displayName": "Overlong package"
+            }]
+        })
+        .to_string();
+
+        assert!(parse_skillhub_packages(&body).is_empty());
     }
 
     #[test]
