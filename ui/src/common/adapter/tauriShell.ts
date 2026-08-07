@@ -174,6 +174,25 @@ export async function tauriInstallUpdate(version: string): Promise<void> {
   await invoke('install_update', { version });
 }
 
+export type TauriUpdatePackageState = 'empty' | 'downloading' | 'ready' | 'installing';
+
+export interface TauriUpdatePackageStatus {
+  state: TauriUpdatePackageState;
+  /** The version the active state refers to; only `ready` means installable. */
+  version: string | null;
+}
+
+/**
+ * The authoritative native answer to "is an update package installable right
+ * now". The renderer must not keep its own copy of this fact: a module-global
+ * mirror drifted out of sync with the Rust slot and silently disabled the
+ * install action while a perfectly good verified package was still retained.
+ */
+export async function tauriUpdatePackageStatus(): Promise<TauriUpdatePackageStatus> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<TauriUpdatePackageStatus>('update_package_status');
+}
+
 /** Electron-style OpenDialog options accepted by call sites. */
 export interface ShellOpenDialogOptions {
   properties?: Array<'openFile' | 'openDirectory' | 'multiSelections' | 'createDirectory' | 'showHiddenFiles'>;

@@ -49,6 +49,7 @@ import {
   tauriUpdateCheck,
   tauriUpdateCurrentVersion,
   tauriUpdateDownload,
+  tauriUpdatePackageSnapshot,
   tauriUpdateInstallAndRelaunch,
 } from './tauriUpdater';
 import type {
@@ -1028,16 +1029,34 @@ export const autoUpdate = {
         releaseDate?: string;
         releaseNotes?: string;
       };
+      /**
+       * Version whose verified package the native side already holds, if any.
+       * The modal derives its install affordance from this instead of trusting
+       * React state to have survived a re-check.
+       */
+      retainedVersion?: string | null;
+      /** Native slot state, so a re-check can also land on "already downloading". */
+      packageState?: import('./tauriShell').TauriUpdatePackageState | null;
+      packageVersion?: string | null;
     }>,
     { includePrerelease?: boolean }
   >(async () => {
     // `force` so each modal open / retry performs a fresh check; update.check
     // (called right after) then reuses this same in-flight result.
     const info = await tauriUpdateCheck(true);
-    if (!info) return { success: true, data: {} };
+    const snapshot = await tauriUpdatePackageSnapshot();
+    const slot = {
+      retainedVersion: snapshot?.state === 'ready' ? (snapshot.version ?? null) : null,
+      packageState: snapshot?.state ?? null,
+      packageVersion: snapshot?.version ?? null,
+    };
+    if (!info) return { success: true, data: slot };
     return {
       success: true,
-      data: { updateInfo: { version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes } },
+      data: {
+        updateInfo: { version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes },
+        ...slot,
+      },
     };
   }, { success: false }),
   download: shellProvider<IBridgeResponse, void>(async () => {
