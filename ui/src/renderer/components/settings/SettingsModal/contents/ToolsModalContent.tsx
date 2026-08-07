@@ -204,7 +204,7 @@ const ModalMcpManagementSection: React.FC<{
   };
 
   return (
-    <div className='flex flex-col gap-16px min-h-0'>
+    <div className='flex flex-col gap-12px min-h-0'>
       <div className='flex gap-8px items-center justify-between'>
         <div className='text-14px text-t-primary'>{t('settings.mcpSettings')}</div>
         <div>{renderAddButton()}</div>
@@ -212,7 +212,7 @@ const ModalMcpManagementSection: React.FC<{
 
       <div className='flex-1 min-h-0'>
         {visibleMcpServers.length === 0 && extensionMcpServers.length === 0 ? (
-          <div className='py-24px text-center text-t-secondary text-14px border border-dashed border-arco-2 rd-12px'>
+          <div className='py-20px text-center text-t-secondary text-14px border border-dashed border-arco-2 rd-12px'>
             {t('settings.mcpNoServersFound')}
           </div>
         ) : (
@@ -314,7 +314,10 @@ export const ToolsModalContentWithState: React.FC<{
       {mcpMessageContext}
 
       <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
-        <div className='px-[12px] md:px-[32px] py-[24px] bg-2 rd-12px md:rd-16px flex flex-col min-h-0 border border-solid border-arco-2'>
+        <div
+          data-testid='mcp-installed-surface'
+          className='mt-8px box-border px-[12px] md:px-[32px] py-[10px] md:py-[12px] bg-transparent rd-12px md:rd-16px flex flex-col min-h-0 border border-solid border-[var(--color-border-2)]'
+        >
           <NomiScrollArea className='h-full overflow-visible' disableOverflow>
             <ModalMcpManagementSection
               message={mcpMessage}

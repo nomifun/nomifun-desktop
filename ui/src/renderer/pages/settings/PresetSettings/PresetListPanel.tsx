@@ -1,6 +1,6 @@
 /**
  * PresetListPanel — Renders presets as a responsive card grid with a
- * two-dimension tag filter bar (Audience / Skill Scenario) and a search toggle.
+ * two-dimension tag filter bar (Audience / Skill Scenario) and compact actions.
  * Replaces the old source-Tabs + enabled/disabled-section layout.
  */
 import { filterPresetsByTags, type TagFilterState } from './presetUtils';
@@ -9,8 +9,9 @@ import type { PresetReference, PresetTag } from '@/common/types/agent/presetType
 import type { PresetListItem } from './types';
 import PresetCard from './PresetCard';
 import PresetTagFilterBar from './PresetTagFilterBar';
-import { Button, Input } from '@arco-design/web-react';
-import { Plus, Search, CloseSmall } from '@icon-park/react';
+import toolbarStyles from './PresetTagFilterBar.module.css';
+import { Tooltip } from '@arco-design/web-react';
+import { AddOne, Search, SettingTwo } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -66,7 +67,6 @@ const PresetListPanel: React.FC<PresetListPanelProps> = ({
   const layout = useLayoutContext();
   const isMobile = layout?.isMobile ?? false;
   const [search_query, setSearchQuery] = useState('');
-  const [searchExpanded, setSearchExpanded] = useState(false);
   const [tagFilter, setTagFilter] = useState<TagFilterState>({ audience: [], scenario: [] });
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -118,73 +118,25 @@ const PresetListPanel: React.FC<PresetListPanelProps> = ({
     [presets, search_query, tagFilter, localeKey]
   );
 
-  const isSearchVisible = searchExpanded || search_query.length > 0;
+  const searchLabel = t('settings.searchPresets', { defaultValue: 'Search presets...' });
+  const manageTagsLabel = t('settings.presetManageTags', { defaultValue: 'Manage Tags' });
+  const createPresetLabel = t('settings.createPreset', { defaultValue: 'Create Preset' });
 
   return (
-    <div className='py-2'>
-      <div className={`bg-fill-2 rounded-24px ${isMobile ? 'p-16px' : 'p-20px'}`}>
-        <div className='flex flex-col gap-16px mb-20px'>
-          <div className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-start justify-between'}`}>
-            <div className='min-w-0'>
-              <h2 className='m-0 text-28px font-700 leading-[1.1] text-t-primary'>
-                {t('settings.presets', { defaultValue: 'Presets' })}
-              </h2>
-              <p className='mt-8px mb-0 max-w-[680px] text-14px text-t-secondary leading-relaxed'>
-                {t('settings.presetsListDescription', {
-                  defaultValue:
-                    'Save Agent instructions, preferences, Skills and knowledge scope as reusable one-click configurations.',
-                })}
-              </p>
-            </div>
-            <div className={`flex items-center gap-10px ${isMobile ? 'w-full' : 'flex-shrink-0'}`}>
-              <Button
-                type={isSearchVisible ? 'secondary' : 'text'}
-                size='small'
-                data-testid='btn-search-toggle'
-                className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
-                icon={
-                  isSearchVisible ? (
-                    <CloseSmall size={16} fill='currentColor' />
-                  ) : (
-                    <Search size={16} fill='currentColor' />
-                  )
-                }
-                onClick={() => {
-                  if (isSearchVisible) {
-                    setSearchExpanded(false);
-                    setSearchQuery('');
-                    return;
-                  }
-                  setSearchExpanded(true);
-                }}
-              />
-              <Button
-                type='primary'
-                size='small'
-                className={`!rounded-[100px] ${isMobile ? '!flex-1 !h-36px' : '!px-16px !h-34px'}`}
-                icon={<Plus size={14} fill='currentColor' />}
-                onClick={onCreate}
-                data-testid='btn-create-preset'
-              >
-                {t('settings.createPreset', { defaultValue: 'Create Preset' })}
-              </Button>
-            </div>
-          </div>
-
-          {isSearchVisible && (
-            <Input
-              allowClear
-              autoFocus
-              value={search_query}
-              onChange={setSearchQuery}
-              data-testid='input-search-preset'
-              className='!bg-[var(--color-bg-2)]'
-              placeholder={t('settings.searchPresets', {
-                defaultValue: 'Search presets by name or description',
+    <div>
+      <div
+        data-testid='preset-library-surface'
+        className={`mt-8px box-border rounded-24px border border-solid border-[var(--color-border-2)] bg-transparent ${isMobile ? 'px-16px py-10px' : 'px-20px py-12px'}`}
+      >
+        <div className='flex flex-col gap-10px mb-12px'>
+          <div className='min-w-0'>
+            <p className='m-0 max-w-[760px] text-14px text-t-secondary leading-relaxed'>
+              {t('settings.presetsListDescription', {
+                defaultValue:
+                  'Save Agent instructions, preferences, Skills and knowledge scope as reusable one-click configurations.',
               })}
-              prefix={<Search size={14} fill='currentColor' />}
-            />
-          )}
+            </p>
+          </div>
 
           <PresetTagFilterBar
             audienceTags={audienceTags}
@@ -193,6 +145,115 @@ const PresetListPanel: React.FC<PresetListPanelProps> = ({
             onChange={setTagFilter}
             localeKey={localeKey}
             onManageTags={onManageTags}
+            actions={(
+              <div
+                className={[
+                  'flex min-w-0 items-center gap-6px',
+                  isMobile ? 'w-full' : 'flex-1 justify-end',
+                  !isMobile ? toolbarStyles.desktopActions : '',
+                ].join(' ')}
+              >
+                <Tooltip content={searchLabel} position='top' mini>
+                  <div
+                    className={[
+                      'flex h-34px box-border min-w-0 items-center gap-7px rounded-full px-11px',
+                      'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
+                      'focus-within:border-primary-6 transition-colors',
+                      isMobile ? 'flex-1' : 'w-220px',
+                      !isMobile ? toolbarStyles.desktopSearch : '',
+                    ].join(' ')}
+                  >
+                    <span
+                      className={[
+                        'inline-flex h-18px w-18px flex-none items-center justify-center',
+                        toolbarStyles.actionIcon,
+                        !isMobile ? toolbarStyles.desktopSearchIcon : '',
+                      ].join(' ')}
+                    >
+                      <Search theme='outline' size={14} className='block text-[var(--color-text-3)]' />
+                    </span>
+                    <input
+                      aria-label={searchLabel}
+                      data-testid='input-search-preset'
+                      className={[
+                        'w-full border-none bg-transparent text-13px leading-18px text-[var(--color-text-1)] outline-none font-[inherit] placeholder:text-[var(--color-text-3)]',
+                        !isMobile ? toolbarStyles.desktopSearchInput : '',
+                      ].join(' ')}
+                      placeholder={searchLabel}
+                      value={search_query}
+                      onChange={(event) => setSearchQuery(event.target.value)}
+                    />
+                  </div>
+                </Tooltip>
+
+                <Tooltip content={manageTagsLabel} position='top' mini>
+                  <div
+                    role='button'
+                    tabIndex={0}
+                    aria-label={manageTagsLabel}
+                    data-testid='btn-manage-tags'
+                    onClick={onManageTags}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        onManageTags();
+                      }
+                    }}
+                    className={[
+                      'inline-flex h-34px box-border flex-none items-center gap-6px rounded-full px-12px leading-none',
+                      'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
+                      'text-13px font-medium text-[var(--color-text-1)] cursor-pointer select-none',
+                      'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)]',
+                      'focus-visible:outline-none focus-visible:border-primary-6 transition-colors',
+                      !isMobile ? toolbarStyles.desktopIconAction : '',
+                    ].join(' ')}
+                  >
+                    <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
+                      <SettingTwo theme='outline' size={14} strokeWidth={3} className='block' />
+                    </span>
+                    {!isMobile && (
+                      <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
+                        {manageTagsLabel}
+                      </span>
+                    )}
+                  </div>
+                </Tooltip>
+
+                <Tooltip content={createPresetLabel} position='top' mini>
+                  <div
+                    role='button'
+                    tabIndex={0}
+                    aria-label={createPresetLabel}
+                    data-testid='btn-create-preset'
+                    onClick={onCreate}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        onCreate();
+                      }
+                    }}
+                    className={[
+                      'inline-flex h-34px box-border flex-none items-center gap-6px cursor-pointer select-none leading-none',
+                      'rounded-full px-14px text-13px font-700',
+                      'border border-solid border-transparent',
+                      'bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)]',
+                      'hover:bg-[rgba(var(--primary-6),0.18)]',
+                      'focus-visible:border-primary-6 focus-visible:outline-none transition-colors',
+                      !isMobile ? toolbarStyles.desktopIconAction : '',
+                    ].join(' ')}
+                  >
+                    <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
+                      <AddOne theme='outline' size={15} strokeWidth={4} className='block text-primary-6' />
+                    </span>
+                    {!isMobile && (
+                      <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
+                        {createPresetLabel}
+                      </span>
+                    )}
+                  </div>
+                </Tooltip>
+              </div>
+            )}
           />
         </div>
 

@@ -171,6 +171,7 @@ const PresetPackageMarketSettings: React.FC<PresetPackageMarketSettingsProps> = 
       searchPlaceholder={t('settings.presetMarket.searchPlaceholder', { defaultValue: 'Search expert packages...' })}
       emptyText={t('settings.presetMarket.empty', { defaultValue: 'Refresh to load expert packages.' })}
       onAdd={handleAdd}
+      testIdPrefix='preset-market'
     />
   );
 };

@@ -62,11 +62,11 @@ const PresetCard: React.FC<PresetCardProps> = ({
       data-testid={`preset-card-${preset.preset_id}`}
       onClick={() => onEdit(preset)}
       className={[
-        'group relative flex flex-col rounded-16px p-14px cursor-pointer',
+        'group relative flex flex-col rounded-16px border border-solid p-14px cursor-pointer',
         'transition-all duration-180',
         highlighted
-          ? 'bg-[var(--color-fill-3)] shadow-[0_8px_22px_rgba(0,0,0,0.14)]'
-          : 'bg-[var(--color-bg-1)] hover:bg-[var(--color-fill-2)] hover:shadow-[0_8px_22px_rgba(0,0,0,0.12)]',
+          ? 'border-primary-5 bg-[var(--color-primary-light-1)] shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
+          : 'border-[var(--color-border-2)] bg-[var(--color-bg-2)] hover:border-[var(--color-primary-light-4)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.06)]',
       ].join(' ')}
     >
       {/* Header: avatar + name/badge, enable Switch pinned top-right */}

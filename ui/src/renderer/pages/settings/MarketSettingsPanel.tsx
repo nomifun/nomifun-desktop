@@ -1,8 +1,9 @@
 /**
  * MarketSettingsPanel — shared ranking-market surface for the skill, MCP,
- * plugin, and preset-package markets. Renders the source switcher, sync /
- * search controls, the card grid, and (optionally) the shared audience /
- * scenario tag filter bar. Consumers own what "Add" means via `onAdd`.
+ * plugin, and preset-package markets. Renders an outlined, transparent library
+ * surface with the source switcher, sync / search controls, card grid, and
+ * (optionally) the shared audience / scenario tag filter bar. Consumers own
+ * what "Add" means via `onAdd`.
  */
 import { ipcBridge } from '@/common';
 import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBridge';
@@ -249,56 +250,90 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
         ? emptyText
         : (text?.noFilterMatch ?? emptyText);
 
+  const marketSourceSwitcher = (
+    <div
+      data-testid={testId('{market}-source-actions')}
+      className='inline-flex flex-none items-center gap-4px rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-3px'
+    >
+      {sources.map((source) => (
+        <Button
+          key={source}
+          size='small'
+          type={activeSource === source ? 'primary' : 'text'}
+          data-testid={testId(`btn-{market}-source-${source}`)}
+          className='!rounded-9px !h-28px !px-12px !text-12px'
+          onClick={() => setActiveSource(source)}
+        >
+          {marketSourceLabel(source)}
+          {(sourceCounts[source] ?? 0) > 0 ? ` ${sourceCounts[source]}` : ''}
+        </Button>
+      ))}
+    </div>
+  );
+
+  const marketIconActions = (
+    <div
+      data-testid={testId('{market}-icon-actions')}
+      className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap justify-end' : 'ml-auto flex-none justify-end'}`}
+    >
+      <Button
+        type={isSearchVisible ? 'secondary' : 'text'}
+        size='small'
+        data-testid={testId('btn-search-{market}')}
+        className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
+        icon={isSearchVisible ? <CloseSmall size={16} fill='currentColor' /> : <Search size={16} fill='currentColor' />}
+        onClick={() => {
+          if (isSearchVisible) {
+            setSearchExpanded(false);
+            setSearchQuery('');
+            return;
+          }
+          setSearchExpanded(true);
+        }}
+      />
+      <Button
+        type='text'
+        size='small'
+        data-testid={testId('btn-sync-{market}')}
+        className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
+        icon={<Refresh size={16} fill='currentColor' className={loading ? 'animate-spin' : ''} />}
+        onClick={() => void syncMarket()}
+        title={t('common.refresh', { defaultValue: '刷新' })}
+      />
+    </div>
+  );
+
+  const marketActions = (
+    <div
+      data-testid={testId('{market}-actions')}
+      className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap' : 'ml-auto flex-none justify-end'}`}
+    >
+      {marketSourceSwitcher}
+      {marketIconActions}
+    </div>
+  );
+
   return (
-    <div className={`bg-fill-2 rounded-24px ${isMobile ? 'p-16px' : 'p-20px'}`}>
+    <div
+      aria-label={title}
+      data-testid={testId('{market}-surface')}
+      className={`mt-8px box-border rounded-24px border border-solid border-[var(--color-border-2)] bg-transparent ${isMobile ? 'px-16px py-10px' : 'px-20px py-12px'}`}
+    >
       {messageContext}
-      <div className='flex flex-col gap-16px mb-20px'>
-        <div className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-start justify-between'}`}>
+      <div className='flex flex-col gap-10px mb-12px'>
+        <div
+          data-testid={testId('{market}-header-row')}
+          className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-center justify-between'}`}
+        >
           <div className='min-w-0'>
-            <h2 className='m-0 text-28px font-700 leading-[1.1] text-t-primary'>{title}</h2>
-            <p className='mt-8px mb-0 max-w-[680px] text-14px text-t-secondary leading-relaxed'>{description}</p>
+            <p
+              data-testid={testId('{market}-description')}
+              className='m-0 max-w-[680px] text-14px text-t-secondary leading-relaxed'
+            >
+              {description}
+            </p>
           </div>
-          <div className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap' : 'flex-shrink-0'}`}>
-            <div className='inline-flex items-center gap-4px rounded-12px bg-[var(--color-bg-2)] p-3px border border-solid border-[var(--color-border-2)]'>
-              {sources.map((source) => (
-                <Button
-                  key={source}
-                  size='small'
-                  type={activeSource === source ? 'primary' : 'text'}
-                  data-testid={testId(`btn-{market}-source-${source}`)}
-                  className='!rounded-9px !h-28px !px-12px !text-12px'
-                  onClick={() => setActiveSource(source)}
-                >
-                  {marketSourceLabel(source)}
-                  {(sourceCounts[source] ?? 0) > 0 ? ` ${sourceCounts[source]}` : ''}
-                </Button>
-              ))}
-            </div>
-            <Button
-              type='text'
-              size='small'
-              data-testid={testId('btn-sync-{market}')}
-              className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
-              icon={<Refresh size={16} fill='currentColor' className={loading ? 'animate-spin' : ''} />}
-              onClick={() => void syncMarket()}
-              title={t('common.refresh', { defaultValue: '刷新' })}
-            />
-            <Button
-              type={isSearchVisible ? 'secondary' : 'text'}
-              size='small'
-              data-testid={testId('btn-search-{market}')}
-              className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
-              icon={isSearchVisible ? <CloseSmall size={16} fill='currentColor' /> : <Search size={16} fill='currentColor' />}
-              onClick={() => {
-                if (isSearchVisible) {
-                  setSearchExpanded(false);
-                  setSearchQuery('');
-                  return;
-                }
-                setSearchExpanded(true);
-              }}
-            />
-          </div>
+          {enableTagFilter ? marketIconActions : marketActions}
         </div>
 
         {isSearchVisible && (
@@ -323,6 +358,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
             localeKey={localeKey}
             onManageTags={() => undefined}
             hideManageTags
+            actions={marketSourceSwitcher}
           />
         )}
       </div>
