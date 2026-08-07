@@ -23,7 +23,7 @@ const ProviderLogo: React.FC<{ logo: string | null; name: string; size?: number 
   return <LinkCloud theme='outline' size={size} className='text-t-secondary flex shrink-0' />;
 };
 
-const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: IProvider): void }>(
+const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: IProvider): Promise<void> }>(
   ({ modalProps, modalCtrl, ...props }) => {
     const { t } = useTranslation();
     const { data } = props;
@@ -105,7 +105,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: IProvider): vo
         onOk={async () => {
           try {
             const values = await form.validate();
-            const { model_context_limits: _modelContextLimits, ...formValues } = values;
+            if (!data) return;
             const nextModels = Array.isArray(values.model) ? values.model : [values.model];
             const providerBaseUrl = values.base_url ?? data?.base_url ?? '';
             let normalizedApiKey = isBedrock ? '' : normalizeApiKeyList(values.api_key);
@@ -129,11 +129,12 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: IProvider): vo
 
             const updatedProvider: IProvider = {
               ...data,
-              ...formValues,
+              name: values.name,
+              base_url: values.base_url ?? data.base_url,
               api_key: normalizedApiKey,
               // Ensure models is always an array
               models: nextModels,
-              model_context_limits: data?.model_context_limits,
+              model_context_limits: data.model_context_limits,
             };
 
             // Add Bedrock configuration if platform is Bedrock
@@ -152,10 +153,12 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: IProvider): vo
               };
             }
 
-            props.onChange(updatedProvider);
+            setIsSaving(true);
+            await props.onChange(updatedProvider);
             modalCtrl.close();
           } catch {
-            // Validation failed — Arco Form highlights invalid fields automatically
+            // Validation failures are highlighted by Arco. Persistence errors
+            // are toasted by the parent and leave this modal open for retry.
           } finally {
             setIsSaving(false);
           }
