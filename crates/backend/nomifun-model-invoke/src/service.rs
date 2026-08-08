@@ -152,15 +152,25 @@ impl ModelInvokeService {
             Ok(Ok(TaskOutcome::Done(_) | TaskOutcome::Pending(_))) => {
                 ProbeReport { healthy: true, latency_ms, message: None }
             }
-            // Reachable-only tolerance for the file-based tasks: the probe's
-            // stub file is not usable content, so an UPSTREAM InvalidParams
-            // (4xx — http_status set) still proves endpoint + auth + model
-            // are reachable. A LOCAL InvalidParams (http_status None, e.g. an
+            // Reachable-only tolerance for probes whose request MUST carry a
+            // placeholder the probe cannot make valid generically: the stub
+            // file for ImageEdit/SpeechRecognition, and the VOICE ID for
+            // SpeechSynthesis — a provider-specific enum the generic probe
+            // cannot know, so the OpenAI-family default "alloy" is rejected by
+            // providers with their own voice catalog (e.g. StepFun returns 400
+            // `voice_id_invalid`). An UPSTREAM InvalidParams (4xx — http_status
+            // set) still proves endpoint + auth + model are reachable; the real
+            // voice is chosen where it is used (the companion TTS slot / global
+            // TTS preference). A LOCAL InvalidParams (http_status None, an
             // adapter pre-flight rejection) never touched the wire and proves
             // nothing — that stays unhealthy.
             Ok(Err(e))
-                if matches!(task, ModelTask::ImageEdit | ModelTask::SpeechRecognition)
-                    && e.kind == InvokeErrorKind::InvalidParams
+                if matches!(
+                    task,
+                    ModelTask::ImageEdit
+                        | ModelTask::SpeechRecognition
+                        | ModelTask::SpeechSynthesis
+                ) && e.kind == InvokeErrorKind::InvalidParams
                     && e.http_status.is_some() =>
             {
                 ProbeReport { healthy: true, latency_ms, message: None }
@@ -224,7 +234,10 @@ fn probe_request(task: ModelTask, params: &serde_json::Value) -> TaskRequest {
         }),
         ModelTask::SpeechSynthesis => TaskRequest::SpeechSynthesis(TtsRequest {
             text: "hi".into(),
-            // None → the adapter's default voice (openai family: "alloy").
+            // From the catalog params when set; otherwise None → the adapter's
+            // default voice ("alloy" for the openai family). That default is
+            // not valid for every provider, so the probe treats an upstream
+            // voice-rejection 400 as reachable (see the tolerance arm above).
             voice: params.get("voice").and_then(|v| v.as_str()).map(str::to_string),
             format: None,
             extra: json!({}),
@@ -477,6 +490,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn probe_tts_voice_400_is_healthy_and_reaches_the_wire() {
+        // A TTS provider that rejects the probe's placeholder voice (StepFun
+        // returns 400 `voice_id_invalid` for the OpenAI-family default "alloy")
+        // is reachable — endpoint + auth + model are proven. The real voice is
+        // chosen on use (companion TTS slot / global TTS), so the health check
+        // must not mark the model unhealthy. Regression for the reported
+        // "step-tts-mini: 失败 - InvalidParams ... voice_id (alloy)".
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": {
+                    "message": "The voice_id (alloy) does not exist or you do not have access to it.",
+                    "type": "voice_id_invalid"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "step-tts-mini", r#"["speech_synthesis"]"#, "{}", true).await;
+
+        let report =
+            svc.probe(&mref(&pid, "step-tts-mini"), ModelTask::SpeechSynthesis).await.unwrap();
+        assert!(report.healthy, "a voice-rejection 400 is reachable-only healthy: {:?}", report.message);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "the tts probe must actually reach the wire");
+    }
+
+    #[tokio::test]
     async fn probe_image_edit_unreachable_endpoint_is_unhealthy() {
         // A dead endpoint must NOT be classified healthy: the local/transport
         // failure has no http_status, so the tolerance arm does not fire.
@@ -510,9 +556,9 @@ mod tests {
 
     #[tokio::test]
     async fn probe_400_on_json_task_stays_unhealthy() {
-        // The reachable-only tolerance is scoped to the multipart tasks
-        // (ImageEdit / SpeechRecognition) whose probe cannot carry a file; a
-        // 400 on a JSON task is a real failure.
+        // The reachable-only tolerance covers only the placeholder-bearing tasks
+        // (ImageEdit / SpeechRecognition stub file, SpeechSynthesis voice id); a
+        // 400 on a plain JSON task like image generation is a real failure.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/images/generations"))

@@ -50,10 +50,13 @@ const VISION_EXCLUDE: &[&str] =
     &["embed", "rerank", "dall-e", "flux", "stable-diffusion", "whisper", "tts"];
 /// Model families that IMPLY vision. Note `"-vl"` catches the current-gen
 /// vision-language IDs (`qwen2-vl`, `qwen2.5-vl`, future `qwenN-vl`, …) that the
-/// bare `"qwen-vl"` substring misses once a version digit is inserted.
+/// bare `"qwen-vl"` substring misses once a version digit is inserted. `"step-1v"`
+/// catches StepFun's `step-1v-32k` / `step-1v-8k` (whose ids carry neither `vision`
+/// nor `-vl`), and `"step-3.7"` catches the flagship multimodal `step-3.7-flash`;
+/// `step-3.5-flash` is text-only and does not match either.
 const VISION_INCLUDE: &[&str] = &[
     "4o", "claude-3", "gpt-4", "gemini", "-vl", "qwen-vl", "llava", "vision", "pixtral",
-    "grok-vision", "internvl", "minicpm-v", "mimo-v2.5",
+    "grok-vision", "internvl", "minicpm-v", "mimo-v2.5", "step-1v", "step-3.7",
 ];
 
 /// Infer per-model modalities from the model name. Currently only `"vision"`.

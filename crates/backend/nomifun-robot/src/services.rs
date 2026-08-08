@@ -86,6 +86,7 @@ pub mod mock {
         transcribe_failure: Mutex<Option<String>>,
         transcribe_calls: AtomicUsize,
         synthesized: Mutex<Vec<String>>,
+        synthesize_failure: Mutex<Option<String>>,
         tts_rate: Mutex<u32>,
         vision_answer: Mutex<String>,
         vision_failure: Mutex<Option<String>>,
@@ -107,6 +108,11 @@ pub mod mock {
         /// Make the next `transcribe` fail.
         pub fn fail_next_transcribe(&self, message: &str) {
             *self.transcribe_failure.lock().unwrap() = Some(message.to_owned());
+        }
+
+        /// Make the next `synthesize` fail.
+        pub fn fail_next_synthesize(&self, message: &str) {
+            *self.synthesize_failure.lock().unwrap() = Some(message.to_owned());
         }
 
         pub fn set_tts_rate(&self, rate: u32) {
@@ -152,6 +158,9 @@ pub mod mock {
             text: &str,
         ) -> anyhow::Result<AudioBuffer> {
             self.synthesized.lock().unwrap().push(text.to_owned());
+            if let Some(message) = self.synthesize_failure.lock().unwrap().take() {
+                anyhow::bail!(message);
+            }
             let rate = *self.tts_rate.lock().unwrap();
             // ~80 ms of silence per character keeps frame counts realistic.
             let samples = (rate as usize / 1000) * 80 * text.chars().count().max(1);
