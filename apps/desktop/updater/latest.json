@@ -1,11 +1,15 @@
 {
   "version": "0.5.0",
   "notes": "## Highlights\n\n- Reworked knowledge write-back so accepted material lands directly in knowledge-base documents, with explicit manual/automatic modes and append-only updates.\n- Rebuilt the companion workspace with per-companion memory, learning, evolution, mood, chat history, export/import, and ownership enforcement.\n- Added SSH remote sessions with encrypted host credentials, persistent remote shells, connection status, and host-bound conversation grouping.\n- Introduced the customer-service domain for stateless IM visitor dialogues backed by read-only knowledge/service-note tools.\n- Hardened data migrations, factory-reset recovery, backup compatibility, zip imports, and default data-root handling across desktop and WebUI hosts.\n- Fixed broad appearance and accessibility issues around theme tokens, borders, rings, outlines, alerts, i18n checks, and generated CSS validation.\n\n## macOS\n\n- First `v0.5.0` desktop release for macOS, built for Apple Silicon.\n- Includes signed updater artifacts and a manual DMG installer.",
-  "pub_date": "2026-08-07T18:42:20.043Z",
+  "pub_date": "2026-08-08T03:47:46.251Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODQ1TUwwNkd1WEZhUEtuVDlLZlNhaGJuUGFGR0pZU2xkdG91VjJ6YVJsLy8yZWg3aWRDWkVHdU5LeXE0SDlYU3c1N3M2ZThZbzdUaGVtY2RwUDZKSkF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MTI4MDczCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClhwVzg1WnZSbjluTDdJZjk3Uk1TTDllNHo1VlJ0Y1l0Nk1ZRkVPWjdRaE9neVRwOHhCeXJicHZ6TXV2anB5U1JBL3VBanArV2swQjF3QmJHK0syZENRPT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.5.0/NomiFun.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODVmV0sybTNONGRKRytibng4aXNGdXlwc1lqaktJYUV1MkthVU5QVFY0aWRBWmh4aUExckZpRUpPWkRxZHUyV2tFMitnYmZlSW5QMzcwNWgwR3NqSHdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MTYwODY1CWZpbGU6Tm9taUZ1bl8wLjUuMF94NjQtc2V0dXAuZXhlCnVwRlVPckQ1c05XRVBRaGJrTmZHV0lFWnRwNnVqanIxZUkyZDJHNE8zRTBFZm9tMEU3VEZwZ0RUY2pFZEtlaUVCWElHRlpPWVNyK1VBMEF5cEZyTkJBPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.5.0/NomiFun_0.5.0_x64-setup.exe"
     }
   }
 }
