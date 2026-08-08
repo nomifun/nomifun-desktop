@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { ICompanionWithStatus } from '@/common/adapter/ipcBridge';
+import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId } from '@/common/types/ids';
 import CompanionAvatar from '@renderer/pages/companion/CompanionAvatar';
 import type { CompanionMood } from '@renderer/pages/companion/characters';
@@ -13,16 +14,18 @@ import { customFigureMetaOf } from '@renderer/pages/companion/characters/customM
 import { useCompanions } from '@renderer/pages/nomi/useNomi';
 import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
 import { Message, Tooltip } from '@arco-design/web-react';
-import { Info } from '@icon-park/react';
+import { Info, Robot } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import useSWR from 'swr';
 
 import {
   COMPANION_COLLAPSED_LIST_LIMIT,
   getVisibleCompanionEntries,
 } from './utils/companionVisibleEntries';
+import { useConversationListSync } from './hooks/useConversationListSync';
 
 interface Props {
   /** Active conversation id parsed from the `/conversation/:id` route, for row highlight. */
@@ -127,6 +130,38 @@ const CompanionSessionGroup: React.FC<Props> = ({
     [navigate, onSessionClick, sessionMap]
   );
 
+  // Robot threads bound to each companion. A device's chat belongs to its 伙伴,
+  // shown nested under that companion row rather than in a separate top-level
+  // bucket — the robot thread stays distinct (its own voice-tuned prompt), it is
+  // just attributed to its companion here.
+  const { robotConversations } = useConversationListSync();
+  const { data: robots } = useSWR('robots.list', () => ipcBridge.robot.list.invoke());
+  const robotNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const r of robots ?? []) names.set(r.robot_id, r.name);
+    return names;
+  }, [robots]);
+  const robotsByCompanion = useMemo(() => {
+    const byCompanion = new Map<string, TChatConversation[]>();
+    for (const conv of robotConversations) {
+      const companionId = (conv.extra as { companion_id?: string } | undefined)?.companion_id;
+      if (companionId == null) continue;
+      const bucket = byCompanion.get(companionId);
+      if (bucket) bucket.push(conv);
+      else byCompanion.set(companionId, [conv]);
+    }
+    return byCompanion;
+  }, [robotConversations]);
+
+  const openRobotConversation = useCallback(
+    (id: ConversationId) => {
+      cleanupSiderTooltips();
+      onSessionClick?.();
+      void navigate(`/conversation/${id}`);
+    },
+    [navigate, onSessionClick]
+  );
+
   // 无伙伴时不渲染分组（避免对不使用伙伴的用户造成噪音；创建后经 WS 刷新即出现）。
   if (companions.length === 0) return null;
 
@@ -206,9 +241,10 @@ const CompanionSessionGroup: React.FC<Props> = ({
               activeConversationId != null &&
               sessionMap.get(c.companion_id) === activeConversationId;
             const modelReady = modelReadyOf(c);
+            const companionRobots = robotsByCompanion.get(c.companion_id) ?? [];
             return (
+              <React.Fragment key={c.companion_id}>
               <div
-                key={c.companion_id}
                 onClick={() => void handleOpen(c)}
                 className={classNames(
                   'group flex items-center gap-8px shrink-0 rd-10px px-8px py-4px cursor-pointer transition-colors box-border',
@@ -248,6 +284,40 @@ const CompanionSessionGroup: React.FC<Props> = ({
                   </span>
                 </div>
               </div>
+              {/* 机器人对话：归属到该伙伴之下，缩进为二级条目。点击直达其会话
+                  （ChatConversation 识别 type='nomi'+companion_session 渲染）。 */}
+              {companionRobots.map((conv) => {
+                const robotId = (conv.extra as { robot_id?: string } | undefined)?.robot_id ?? '';
+                const label = robotNames.get(robotId) ?? t('nomi.robot.group.deviceUnknown');
+                const activeRobot = activeConversationId != null && conv.id === activeConversationId;
+                return (
+                  <Tooltip key={conv.id} content={t('nomi.robot.group.deviceTooltip', { robot: label })} position='right' mini>
+                    <div
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openRobotConversation(conv.id);
+                      }}
+                      className={classNames(
+                        'flex items-center gap-6px shrink-0 rd-8px pl-40px pr-8px py-3px cursor-pointer transition-colors box-border min-w-0',
+                        activeRobot ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
+                      )}
+                    >
+                      <span className='size-16px flex items-center justify-center shrink-0 text-t-tertiary'>
+                        <Robot theme='outline' size={12} fill='currentColor' className='block leading-none' />
+                      </span>
+                      <span
+                        className={classNames(
+                          'text-12px truncate min-w-0',
+                          activeRobot ? '!text-primary-6' : 'text-t-secondary'
+                        )}
+                      >
+                        {label}
+                      </span>
+                    </div>
+                  </Tooltip>
+                );
+              })}
+              </React.Fragment>
             );
           })}
           {visibleCompanions.hasOverflow && !forceShowActiveCompanion && (

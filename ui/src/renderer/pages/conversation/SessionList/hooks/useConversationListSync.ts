@@ -128,6 +128,12 @@ export const shouldAcceptSidebarTurnCompletion = ({
 const sshHostIdOf = (conversation: TChatConversation): SshHostId | undefined =>
   (conversation.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
 
+/** Device id of a robot thread, or undefined for every other conversation. A
+ *  robot thread also carries a companion marker (its companion GROUP key), so it
+ *  is matched on `robot_id` explicitly rather than being lumped with companions. */
+const robotIdOf = (conversation: TChatConversation): string | undefined =>
+  (conversation.extra as { robot_id?: string } | undefined)?.robot_id;
+
 /**
  * Snapshot arrays must keep their identity while the underlying rows are
  * unchanged, otherwise every `useSyncExternalStore` consumer re-renders on each
@@ -142,6 +148,9 @@ type ConversationListSyncSnapshot = {
   /** SSH-bound sessions, excluded from `conversations` and grouped by host in
    *  their own sidebar section (SshSessionGroup). */
   sshConversations: TChatConversation[];
+  /** Robot threads, excluded from `conversations` and grouped by device in their
+   *  own sidebar section (RobotSessionGroup). */
+  robotConversations: TChatConversation[];
   generatingConversationIds: Set<ConversationId>;
   completionUnreadConversationIds: Set<ConversationId>;
 };
@@ -151,6 +160,7 @@ const listeners = new Set<() => void>();
 let isStoreInitialized = false;
 let conversationsState: TChatConversation[] = [];
 let sshConversationsState: TChatConversation[] = [];
+let robotConversationsState: TChatConversation[] = [];
 let generatingConversationIdsState = new Set<ConversationId>();
 let completionUnreadConversationIdsState = new Set<ConversationId>();
 let conversation_idsState = new Set<ConversationId>();
@@ -159,6 +169,7 @@ let activeConversationIdState: ConversationId | null = null;
 let snapshotState: ConversationListSyncSnapshot = {
   conversations: conversationsState,
   sshConversations: sshConversationsState,
+  robotConversations: robotConversationsState,
   generatingConversationIds: generatingConversationIdsState,
   completionUnreadConversationIds: completionUnreadConversationIdsState,
 };
@@ -167,6 +178,7 @@ const emitStoreChange = () => {
   snapshotState = {
     conversations: conversationsState,
     sshConversations: sshConversationsState,
+    robotConversations: robotConversationsState,
     generatingConversationIds: generatingConversationIdsState,
     completionUnreadConversationIds: completionUnreadConversationIdsState,
   };
@@ -204,17 +216,23 @@ const refreshConversations = () => {
         // so the group never costs a second full fetch.
         const filteredData: TChatConversation[] = [];
         const sshConversations: TChatConversation[] = [];
+        const robotConversations: TChatConversation[] = [];
         for (const conversation of items) {
           if (isOrdinaryWorkConversation(conversation)) {
             filteredData.push(conversation);
           } else if (sshHostIdOf(conversation) != null) {
             sshConversations.push(conversation);
+          } else if (robotIdOf(conversation) != null) {
+            robotConversations.push(conversation);
           }
         }
         conversationsState = filteredData;
         sshConversationsState = isSameConversationList(sshConversationsState, sshConversations)
           ? sshConversationsState
           : sshConversations;
+        robotConversationsState = isSameConversationList(robotConversationsState, robotConversations)
+          ? robotConversationsState
+          : robotConversations;
         for (const conversation of items) {
           const activeTurnId = getExactSidebarActiveTurnId(conversation);
           if (activeTurnId) {
@@ -234,6 +252,7 @@ const refreshConversations = () => {
 
       conversationsState = [];
       sshConversationsState = sshConversationsState.length === 0 ? sshConversationsState : [];
+      robotConversationsState = robotConversationsState.length === 0 ? robotConversationsState : [];
       conversation_idsState = new Set();
       activeTurnIdsState = new Map();
       generatingConversationIdsState = new Set();
@@ -243,6 +262,7 @@ const refreshConversations = () => {
       console.error('[SessionList] Failed to load conversations:', error);
       conversationsState = [];
       sshConversationsState = sshConversationsState.length === 0 ? sshConversationsState : [];
+      robotConversationsState = robotConversationsState.length === 0 ? robotConversationsState : [];
       conversation_idsState = new Set();
       activeTurnIdsState = new Map();
       generatingConversationIdsState = new Set();
@@ -417,7 +437,7 @@ export const useConversationListSync = () => {
     initializeConversationListSyncStore();
   }, []);
 
-  const { conversations, sshConversations, generatingConversationIds, completionUnreadConversationIds } =
+  const { conversations, sshConversations, robotConversations, generatingConversationIds, completionUnreadConversationIds } =
     useSyncExternalStore(subscribeConversationListSync, getConversationListSyncSnapshot, getConversationListSyncSnapshot);
 
   const clearCompletionUnread = useCallback((conversation_id: ConversationId) => {
@@ -445,6 +465,7 @@ export const useConversationListSync = () => {
   return {
     conversations,
     sshConversations,
+    robotConversations,
     isConversationGenerating,
     hasCompletionUnread,
     clearCompletionUnread,

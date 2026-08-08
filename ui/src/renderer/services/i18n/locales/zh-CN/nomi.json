@@ -433,6 +433,12 @@
     "removeConfirm": "删除后设备令牌立刻失效，机器人需要重新报到并重新绑定。",
     "removeFailed": "删除失败",
     "loadFailed": "读取机器人列表失败，请确认后台的机器人服务已启动。",
+    "sessionGroup": "机器人会话",
+    "group": {
+      "deviceUnknown": "未知机器人",
+      "deviceMissing": "已移除的机器人",
+      "deviceTooltip": "机器人：{{robot}}"
+    },
     "status": {
       "offline": "离线",
       "idle": "在线",

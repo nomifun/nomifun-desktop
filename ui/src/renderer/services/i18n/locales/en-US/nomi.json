@@ -433,6 +433,12 @@
     "removeConfirm": "Deleting revokes the device token immediately; the robot has to report in and be bound again.",
     "removeFailed": "Failed to delete",
     "loadFailed": "Could not read the robot list — check that the robot service is running.",
+    "sessionGroup": "Robot sessions",
+    "group": {
+      "deviceUnknown": "Unknown robot",
+      "deviceMissing": "Removed robot",
+      "deviceTooltip": "Robot: {{robot}}"
+    },
     "status": {
       "offline": "Offline",
       "idle": "Online",
