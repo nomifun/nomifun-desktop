@@ -403,17 +403,32 @@ fn stepfun_plan_models() -> Vec<ModelInfo> {
 /// Keep plan-only `step-router-v1` out of this list: it is not callable through
 /// the regular `https://api.stepfun.com/v1` billing endpoint.
 const STEPFUN_FALLBACK_MODELS: &[&str] = &[
+    // Chat / reasoning. `step-3.7-flash` is the flagship multimodal model and is
+    // callable through the regular `/v1` billing endpoint (see the OpenAI
+    // migration guide), so it belongs here, not only in the Step Plan list.
+    "step-3.7-flash",
     "step-3.5-flash-2603",
     "step-3.5-flash",
     "step-3",
     "step-2-mini",
     "step-2-16k",
+    // Vision-language chat.
     "step-1o-turbo-vision",
     "step-1o-vision-32k",
     "step-1v-32k",
     "step-1v-8k",
+    // Text chat (legacy).
     "step-1-32k",
     "step-1-8k",
+    // Speech recognition (ASR) — one-shot `/v1/audio/transcriptions`. Names
+    // carry `asr`, so `derive_tasks_and_traits` classifies them as
+    // SpeechRecognition. `step-asr` is the legacy id kept for older configs.
+    "stepaudio-2.5-asr",
+    "step-asr",
+    // Speech synthesis (TTS) — `/v1/audio/speech`, `response_format=pcm` at
+    // 24 kHz matches the robot downlink contract. Names carry `tts`.
+    "stepaudio-2.5-tts",
+    "step-tts-mini",
 ];
 
 async fn fetch_stepfun(
@@ -718,6 +733,20 @@ mod tests {
             name: None
         }));
         assert!(!models.iter().any(|model| model.id == "step-router-v1"));
+    }
+
+    #[test]
+    fn stepfun_fallback_offers_speech_models_so_the_robot_voice_slots_are_fillable() {
+        // Without ASR/TTS ids here, a first-run/offline install has no speech
+        // model to select, so the robot's `voice.asr` / `voice.tts` slots stay
+        // empty and the device is silent. See the 2026-08-08 stepfun-robot spec.
+        let models = fallback_models(STEPFUN_FALLBACK_MODELS);
+        for id in ["stepaudio-2.5-asr", "step-asr", "stepaudio-2.5-tts", "step-tts-mini"] {
+            assert!(
+                models.iter().any(|model| model.id == id),
+                "StepFun fallback list must offer {id} so the voice slots are fillable"
+            );
+        }
     }
 
     #[test]
