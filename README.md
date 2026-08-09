@@ -137,6 +137,17 @@ The companion you talk to every day quietly becomes the partner who *gets* you.
 - **Skills it writes itself.** Companions distill their own skills out of real work and discuss them with you before anything is kept.
 - **A super gateway, not just a buddy.** Each companion is a complete, independent individual that can connect to multiple IM channels. From anywhere with a network and a chat app, message your companion to drive your computer for you. Each companion can fully operate the desktop's capabilities.
 
+### 🤖 XiaoZhi robot — give your companion a physical presence
+
+> Guide: [`docs/guides/xiaozhi-robot.md`](docs/guides/xiaozhi-robot.md) · Firmware: [nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai)
+
+Connect a compatible XiaoZhi ESP32 robot directly to NomiFun over your LAN. The
+robot supplies the microphone, speaker, display, servos, and device-side MCP
+tools, while NomiFun supplies the companion's persona, models, memory, ASR, TTS,
+sessions, and tool orchestration. Setup is built into each companion's **Remote
+control → Robot connection** page: copy its OTA address, enter the six-digit
+activation code shown by the robot, and bind the device to that companion.
+
 ### 🧠 Agent collaboration
 
 Start from a normal Agent conversation. When the task deserves parallel work, the same Agent capability can delegate parts of it and expose a live execution graph.
@@ -526,6 +537,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 - [`docs/README.md`](docs/README.md) — documentation index
 - [`docs/getting-started/`](docs/getting-started) — installation and first run
 - [`docs/guides/`](docs/guides) — user & operator guides (companions, channels, AutoWork, knowledge, computer/browser use, terminal, remote API, …)
+- [`docs/guides/xiaozhi-robot.md`](docs/guides/xiaozhi-robot.md) — connect a XiaoZhi ESP32 robot to a NomiFun companion
 - [`docs/architecture/`](docs/architecture) — technical architecture
 - [`docs/reference/`](docs/reference) — configuration, API overview, FAQ, troubleshooting
 

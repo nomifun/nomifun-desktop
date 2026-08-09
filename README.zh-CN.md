@@ -136,6 +136,15 @@
 - **自己写 skill。** 伙伴从真实工作里自动总结、生成 skill 并与你商议，确认后才留下。
 - **不只是伙伴，更是超级网关。** 每个伙伴都是完整、独立的个体，可连接多个 IM 渠道。只要有网络和社交平台，随时随地一条消息，就能指挥伙伴帮你操作电脑。每个伙伴都能完整驱动桌面的系统能力。
 
+### 🤖 小智机器人 —— 让桌面伙伴走进实体设备
+
+> 指南：[`docs/guides/xiaozhi-robot.zh.md`](docs/guides/xiaozhi-robot.zh.md) · 固件：[nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai)
+
+通过局域网把兼容的小智 ESP32 机器人直接连接到 NomiFun。机器人提供麦克风、
+扬声器、显示屏、舵机和设备端 MCP 工具；NomiFun 提供伙伴人格、模型、记忆、
+ASR、TTS、会话和工具编排。接入入口就在每个伙伴的**远程控制 → 机器人连接**：
+复制 OTA 地址，输入机器人显示的 6 位激活码，即可把实体设备绑定到该伙伴。
+
 ### 🧠 Agent 协作
 
 从一条普通 Agent 会话开始。当任务确实值得并行时，同一套 Agent 能力会委派部分工作，并展示实时执行图。
@@ -461,6 +470,7 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 - [`docs/README.zh.md`](docs/README.zh.md) —— 文档索引
 - [`docs/getting-started/`](docs/getting-started) —— 安装与首次运行
 - [`docs/guides/`](docs/guides) —— 用户与运维指南（伙伴、渠道、AutoWork、知识库、computer/browser use、终端、远程 API……）
+- [`docs/guides/xiaozhi-robot.zh.md`](docs/guides/xiaozhi-robot.zh.md) —— 把小智 ESP32 机器人连接到 NomiFun 桌面伙伴
 - [`docs/architecture/`](docs/architecture) —— 技术架构
 - [`docs/reference/`](docs/reference) —— 配置、API 概览、FAQ、排障
 
