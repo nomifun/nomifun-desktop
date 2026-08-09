@@ -14,7 +14,19 @@ describe('SkillMarketCard visual hierarchy', () => {
   test('removes ranking avatars from every shared market card', () => {
     expect(source.includes('item.rank')).toBe(false);
     expect(source.includes('getAvatarColorClass')).toBe(false);
-    expect(source.includes("className='min-w-0 pr-76px'")).toBe(true);
+  });
+
+  test('keeps the title with its action and the source with its skill count', () => {
+    expect(source.includes("className='flex min-w-0 items-center justify-between gap-8px'")).toBe(true);
+    expect(source.includes("className='mt-6px flex min-w-0 items-center gap-6px overflow-hidden'")).toBe(true);
+    expect(source.includes("className='min-w-0 truncate text-11px text-[var(--color-text-3)]'")).toBe(true);
+    expect(source.includes('!absolute')).toBe(false);
+  });
+
+  test('shows at most three tags and summarizes the remainder', () => {
+    expect(source.includes('const MAX_VISIBLE_TAGS = 3')).toBe(true);
+    expect(source.includes('totalTagCount - MAX_VISIBLE_TAGS')).toBe(true);
+    expect(source.includes('+{overflowCount}')).toBe(true);
   });
 
   test('uses a quiet, high-contrast secondary add action', () => {
