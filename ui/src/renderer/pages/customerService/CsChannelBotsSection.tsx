@@ -174,14 +174,14 @@ const CsChannelBotsSection: React.FC<{ csAgentId: CsAgentId }> = ({ csAgentId })
   };
 
   return (
-    <div className='flex flex-col gap-8px'>
-      <div className='flex items-center justify-between gap-12px'>
-        <span className='text-12px text-t-tertiary'>
+    <div className='flex min-w-0 flex-col gap-8px'>
+      <div className='flex min-w-0 flex-wrap items-start justify-between gap-10px 12px'>
+        <span className='min-w-[220px] flex-1 text-12px leading-18px text-t-tertiary'>
           {t('customerService.bindings.domainHint', {
             defaultValue: '客服使用自己的渠道机器人，与桌面伙伴的渠道相互独立。',
           })}
         </span>
-        <Button size='small' type='primary' onClick={() => setPickerOpen(true)}>
+        <Button size='small' type='primary' className='shrink-0' onClick={() => setPickerOpen(true)}>
           <span className='inline-flex items-center gap-4px'>
             <Plus theme='outline' size='13' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
             {t('customerService.bindings.createBot', { defaultValue: '新建渠道机器人' })}
@@ -190,18 +190,18 @@ const CsChannelBotsSection: React.FC<{ csAgentId: CsAgentId }> = ({ csAgentId })
       </div>
 
       {csBots.length === 0 ? (
-        <div className='text-13px text-t-tertiary'>
+        <div className='break-words text-13px text-t-tertiary'>
           {t('customerService.bindings.noBots', {
             defaultValue: '还没有客服渠道机器人 —— 在这里创建一个，创建成功后会自动绑定到本客服。',
           })}
         </div>
       ) : (
-        <div className='flex flex-col gap-8px'>
+        <div className='flex min-w-0 flex-col gap-8px'>
           {csBots.map((bot) => {
             const binding = csBotBindingState(bot.plugin_id, csAgentId, ownerByBot);
             const platform = CHANNEL_PLATFORMS.find((p) => p.id === bot.type);
             return (
-              <div key={bot.plugin_id} className='flex items-center gap-10px text-13px text-t-primary flex-wrap'>
+              <div key={bot.plugin_id} className='flex min-w-0 flex-wrap items-center gap-10px text-13px text-t-primary'>
                 <Checkbox
                   checked={binding.kind === 'boundToThis'}
                   disabled={savingBindings}
@@ -212,7 +212,7 @@ const CsChannelBotsSection: React.FC<{ csAgentId: CsAgentId }> = ({ csAgentId })
                     void saveBindings(next);
                   }}
                 />
-                <span className='truncate'>{bot.name}</span>
+                <span className='min-w-[120px] flex-1 basis-[160px] truncate'>{bot.name}</span>
                 <Tag size='small' className='shrink-0'>
                   {bot.type}
                 </Tag>
@@ -230,7 +230,7 @@ const CsChannelBotsSection: React.FC<{ csAgentId: CsAgentId }> = ({ csAgentId })
                     {t('customerService.bindings.unbound', { defaultValue: '未绑定' })}
                   </Tag>
                 )}
-                <div className='ml-auto flex items-center gap-8px shrink-0'>
+                <div className='ml-auto flex shrink-0 flex-wrap items-center justify-end gap-8px'>
                   {platform && (
                     <Button
                       size='mini'
@@ -269,7 +269,7 @@ const CsChannelBotsSection: React.FC<{ csAgentId: CsAgentId }> = ({ csAgentId })
           showClose: true,
         }}
         footer={null}
-        style={{ width: 520 }}
+        style={{ width: 'min(520px, calc(100vw - 32px))' }}
       >
         <div className='flex flex-col gap-8px py-8px'>
           <div className='text-12px text-t-tertiary'>
@@ -302,7 +302,7 @@ const CsChannelBotsSection: React.FC<{ csAgentId: CsAgentId }> = ({ csAgentId })
           showClose: true,
         }}
         footer={null}
-        style={{ width: 720 }}
+        style={{ width: 'min(720px, calc(100vw - 32px))' }}
         contentStyle={{ maxHeight: 'calc(80vh - 80px)', padding: '0 2px' }}
       >
         {configTarget && (

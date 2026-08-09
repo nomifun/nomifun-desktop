@@ -62,7 +62,7 @@ const PresetCard: React.FC<PresetCardProps> = ({
       data-testid={`preset-card-${preset.preset_id}`}
       onClick={() => onEdit(preset)}
       className={[
-        'group relative flex flex-col rounded-16px border border-solid p-14px cursor-pointer',
+        'group relative flex flex-col rounded-16px border border-solid px-14px pt-14px pb-8px cursor-pointer',
         'transition-all duration-180',
         highlighted
           ? 'border-primary-5 bg-[var(--color-primary-light-1)] shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
@@ -160,7 +160,7 @@ const PresetCard: React.FC<PresetCardProps> = ({
 
       {/* Hover footer — quiet action links, revealed on card hover */}
       <div
-        className='mt-auto pt-12px flex min-h-36px items-center justify-end gap-12px opacity-0 group-hover:opacity-100 transition-opacity duration-180'
+        className='mt-auto pt-4px flex min-h-24px items-center justify-end gap-12px opacity-0 group-hover:opacity-100 transition-opacity duration-180'
         onClick={(e) => e.stopPropagation()}
       >
         <span
