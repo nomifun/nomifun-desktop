@@ -158,8 +158,14 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
 
     return (
       <div className={classNames('relative w-full', className)}>
-        <ShadowView fontSize={fontSize} lineHeight={lineHeight} compact={compact}>
-          <div ref={onRef} className='markdown-shadow-body'>
+        <ShadowView fontSize={fontSize} lineHeight={lineHeight}>
+          <div
+            ref={onRef}
+            className={classNames('markdown-shadow-body markdown-article', {
+              'markdown-article--explicit': Boolean(fontSize || lineHeight),
+              'markdown-article--compact': compact,
+            })}
+          >
             <ReactMarkdown
               remarkPlugins={REMARK_PLUGINS}
               rehypePlugins={rehypePlugins}
