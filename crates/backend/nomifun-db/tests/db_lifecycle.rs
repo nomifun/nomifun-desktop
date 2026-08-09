@@ -30,6 +30,8 @@ const CONVERSATION_RECEIPT_LIFECYCLE: &str =
     include_str!("../migrations/012_conversation_receipt_lifecycle.sql");
 const AUTOWORK_PROVENANCE_AUTHORITY_RECOVERY: &str =
     include_str!("../migrations/013_autowork_provenance_authority_recovery.sql");
+const ROBOT_STAGE_DIRECTION_BACKFILL: &str =
+    include_str!("../migrations/027_robot_stage_direction_backfill.sql");
 const AUTOWORK_PROVENANCE_CONFLICT_NOTE: &str = "AutoWork did not start another turn because \
     durable Conversation state is ambiguous: AutoWork Requirement authority was revoked, \
     superseded, or targets another Conversation. Explicit reset or human review is required.";
@@ -1232,6 +1234,157 @@ async fn migrations_preserve_the_published_v3_baseline_and_apply_additive_upgrad
     assert!(CONVERSATION_RECEIPT_LIFECYCLE.contains("NEW.status IS NOT OLD.status"));
     assert!(AUTOWORK_PROVENANCE_AUTHORITY_RECOVERY.contains("created_by IN ('user', 'agent')"));
     assert_eq!(BASELINE.matches("CREATE TABLE ").count(), 64);
+}
+
+/// The stage-direction backfill must clean robot history and touch nothing else.
+///
+/// The robot prompt asked for `[emotion:name]` and the model emitted `[winking]`,
+/// so a robot transcript that already recorded either is showing the user protocol
+/// noise. The relay stops producing new ones; this settles the past. The gate is
+/// `conversations.extra.robot_session`, and two cases must NOT move: an ordinary
+/// conversation whose text happens to contain the same literal, and real
+/// bracketed content like `[1]` / `[附录2]` in a robot row.
+#[tokio::test]
+async fn robot_stage_direction_backfill_cleans_only_robot_assistant_rows() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql(&executable_baseline_sql())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let user_id = nomifun_common::UserId::new();
+    let robot_conv = nomifun_common::ConversationId::new();
+    let chat_conv = nomifun_common::ConversationId::new();
+    for (conversation_id, extra) in [
+        (&robot_conv, r#"{"robot_session":true}"#),
+        (&chat_conv, "{}"),
+    ] {
+        sqlx::query(
+            "INSERT INTO conversations \
+             (conversation_id, user_id, name, type, extra, created_at, updated_at) \
+             VALUES (?, ?, 'fixture', 'nomi', ?, 1, 1)",
+        )
+        .bind(conversation_id.as_str())
+        .bind(user_id.as_str())
+        .bind(extra)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // (conversation, position, raw text) -> the row's message id, so each
+    // assertion below names exactly one seeded row.
+    let cases = [
+        // The reported form and the dead syntax, in one reply. Neither is keyed
+        // on by the backfill; both are the same shape.
+        (&robot_conv, "left", "[winking]你好。[emotion:EXCITED]再见。"),
+        // Annotation-only: nothing renderable is left. The trailing newline is
+        // why the hidden predicate cannot use bare `trim()`.
+        (&robot_conv, "left", "【laughing】\n"),
+        // An unclosed bracket is not an annotation; it must survive verbatim,
+        // and it must not swallow the line behind it.
+        (&robot_conv, "left", "[winking 还在写"),
+        // A quote/backslash hazard: json_set must keep the row valid JSON.
+        (&robot_conv, "left", r#"[laughs]他说"你好"\反斜杠"#),
+        // The user's own message is never rewritten.
+        (&robot_conv, "right", "[winking]我打的字"),
+        // The blast-radius row: an ordinary conversation keeps the literal.
+        (&chat_conv, "left", "the annotation is [winking] here"),
+        // Real bracketed content in a ROBOT row: a footnote ref, a CJK label,
+        // and a year all stay. Deleting these would be the same bug inverted.
+        (&robot_conv, "left", "见附录[1]、[附录2]，写于[2026]"),
+        // Content first, annotation second: a kept bracket must not hide a real
+        // one behind it.
+        (&robot_conv, "left", "见附录[1]，[winking]然后呢"),
+    ];
+    let mut ids = Vec::new();
+    for (conversation_id, position, text) in cases {
+        let message_id = nomifun_common::MessageId::new();
+        sqlx::query(
+            "INSERT INTO messages \
+             (message_id, conversation_id, type, content, position, status, created_at) \
+             VALUES (?, ?, 'text', json_object('content', ?), ?, 'finish', 1)",
+        )
+        .bind(message_id.as_str())
+        .bind(conversation_id.as_str())
+        .bind(text)
+        .bind(position)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(message_id);
+    }
+
+    sqlx::raw_sql(ROBOT_STAGE_DIRECTION_BACKFILL)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let read = |index: usize| {
+        let message_id = ids[index].as_str().to_owned();
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, i64)>(
+                "SELECT json_extract(content, '$.content'), hidden \
+                 FROM messages WHERE message_id = ?",
+            )
+            .bind(message_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    assert_eq!(
+        read(0).await,
+        ("你好。再见。".to_owned(), 0),
+        "both annotations go, the reported bare form and the dead syntax alike"
+    );
+    assert_eq!(
+        read(1).await,
+        ("\n".to_owned(), 1),
+        "an annotation-only reply is emptied and hidden, matching what finalize does live"
+    );
+    assert_eq!(
+        read(2).await,
+        ("[winking 还在写".to_owned(), 0),
+        "an unclosed bracket is text; the walk stops there and keeps the line"
+    );
+    assert_eq!(
+        read(3).await,
+        (r#"他说"你好"\反斜杠"#.to_owned(), 0),
+        "json_set owns the encoding, so quotes and backslashes cannot break the row"
+    );
+    assert_eq!(
+        read(4).await,
+        ("[winking]我打的字".to_owned(), 0),
+        "position = 'right' is the user's own text"
+    );
+    assert_eq!(
+        read(5).await,
+        ("the annotation is [winking] here".to_owned(), 0),
+        "a non-robot conversation is byte-identical; this is the blast-radius case"
+    );
+    assert_eq!(
+        read(6).await,
+        ("见附录[1]、[附录2]，写于[2026]".to_owned(), 0),
+        "real bracketed content is not ours to delete, not even in a robot row"
+    );
+    assert_eq!(
+        read(7).await,
+        ("见附录[1]，然后呢".to_owned(), 0),
+        "scanning resumes behind a kept bracket, so it cannot hide a real annotation"
+    );
+
+    let invalid: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE NOT json_valid(content)")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(invalid, 0, "every rewritten row is still valid JSON");
 }
 
 #[tokio::test]
