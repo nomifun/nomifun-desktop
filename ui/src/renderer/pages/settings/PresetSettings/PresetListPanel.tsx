@@ -10,6 +10,12 @@ import type { PresetListItem } from './types';
 import PresetCard from './PresetCard';
 import PresetTagFilterBar from './PresetTagFilterBar';
 import toolbarStyles from './PresetTagFilterBar.module.css';
+import {
+  ENHANCED_TOOLS_EMPTY_STATE_CLASS,
+  ENHANCED_TOOLS_GRID_CLASS,
+  ENHANCED_TOOLS_HEADER_CLASS,
+  ENHANCED_TOOLS_SURFACE_CLASS,
+} from '../enhancedToolsLayout';
 import { Tooltip } from '@arco-design/web-react';
 import { AddOne, Search, SettingTwo } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -126,9 +132,9 @@ const PresetListPanel: React.FC<PresetListPanelProps> = ({
     <div>
       <div
         data-testid='preset-library-surface'
-        className={`mt-8px box-border rounded-24px border border-solid border-[var(--color-border-2)] bg-transparent ${isMobile ? 'px-16px py-10px' : 'px-20px py-12px'}`}
+        className={ENHANCED_TOOLS_SURFACE_CLASS}
       >
-        <div className='flex flex-col gap-10px mb-12px'>
+        <div className={ENHANCED_TOOLS_HEADER_CLASS}>
           <div className='min-w-0'>
             <p className='m-0 max-w-[760px] text-14px text-t-secondary leading-relaxed'>
               {t('settings.presetsListDescription', {
@@ -258,7 +264,7 @@ const PresetListPanel: React.FC<PresetListPanelProps> = ({
         </div>
 
         {filteredPresets.length > 0 ? (
-          <div className='grid gap-12px' style={{ gridTemplateColumns: CARD_GRID_COLS }}>
+          <div className={ENHANCED_TOOLS_GRID_CLASS} style={{ gridTemplateColumns: CARD_GRID_COLS }}>
             {filteredPresets.map((preset) => (
               <PresetCard
                 key={preset.preset_id}
@@ -279,7 +285,7 @@ const PresetListPanel: React.FC<PresetListPanelProps> = ({
             ))}
           </div>
         ) : (
-          <div className='text-center text-t-secondary py-32px'>
+          <div className={ENHANCED_TOOLS_EMPTY_STATE_CLASS}>
             {presets.length === 0
               ? t('settings.presetsEmpty', {
                   defaultValue: 'No presets yet. Create one to save a reusable launch configuration.',

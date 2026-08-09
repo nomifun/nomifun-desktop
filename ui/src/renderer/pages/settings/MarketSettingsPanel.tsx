@@ -17,6 +17,12 @@ import type { TagFilterState } from './PresetSettings/presetUtils';
 import type { SkillTagFilterState } from './skill/skillFilter';
 import SkillMarketCard from './skill/SkillMarketCard';
 import {
+  ENHANCED_TOOLS_EMPTY_STATE_CLASS,
+  ENHANCED_TOOLS_GRID_CLASS,
+  ENHANCED_TOOLS_HEADER_CLASS,
+  ENHANCED_TOOLS_SURFACE_CLASS,
+} from './enhancedToolsLayout';
+import {
   cleanMarketText,
   filterSkillMarketItems,
   marketSourceLabel,
@@ -342,10 +348,10 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
     <div
       aria-label={title}
       data-testid={testId('{market}-surface')}
-      className={`mt-8px box-border rounded-24px border border-solid border-[var(--color-border-2)] bg-transparent ${isMobile ? 'px-16px py-10px' : 'px-20px py-12px'}`}
+      className={ENHANCED_TOOLS_SURFACE_CLASS}
     >
       {messageContext}
-      <div className='flex flex-col gap-10px mb-12px'>
+      <div className={ENHANCED_TOOLS_HEADER_CLASS}>
         <div
           data-testid={testId('{market}-header-row')}
           className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-center justify-between'}`}
@@ -395,7 +401,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
       )}
 
       {filteredItems.length > 0 ? (
-        <div className='grid gap-12px' style={{ gridTemplateColumns: CARD_GRID_COLS }}>
+        <div className={ENHANCED_TOOLS_GRID_CLASS} style={{ gridTemplateColumns: CARD_GRID_COLS }}>
           {filteredItems.map((item) => (
             <SkillMarketCard
               key={item.id}
@@ -408,11 +414,11 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
           ))}
         </div>
       ) : (
-        <div className='text-center text-t-secondary py-40px'>{resolvedEmptyText}</div>
+        <div className={ENHANCED_TOOLS_EMPTY_STATE_CLASS}>{resolvedEmptyText}</div>
       )}
 
       {(fetchedAt || items.length > 0) && (
-        <div className='mt-16px flex items-center justify-between gap-12px text-12px text-t-tertiary'>
+        <div className='mt-12px flex items-center justify-between gap-10px text-12px text-t-tertiary'>
           <span>
             {fetchedAt
               ? (text?.lastUpdated?.(new Date(fetchedAt).toLocaleString()) ??

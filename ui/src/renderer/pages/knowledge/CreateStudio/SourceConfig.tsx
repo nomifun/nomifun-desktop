@@ -57,11 +57,11 @@ export interface SourceConfigProps {
 const MAX_URLS = 16;
 
 const sourcePanelClass =
-  'knowledge-source-panel space-y-16px rounded-16px bg-[var(--color-bg-2)] p-16px shadow-[0_10px_30px_rgba(15,23,42,0.035)]';
+  'knowledge-source-panel space-y-12px rounded-16px bg-[var(--color-bg-2)] p-14px shadow-[0_10px_30px_rgba(15,23,42,0.035)]';
 
 const sourceTitleClass = 'text-13px font-700 text-[var(--color-text-1)]';
 
-const sourceLabelClass = 'mb-7px block text-13px font-500 text-[var(--color-text-2)]';
+const sourceLabelClass = 'mb-5px block text-13px font-500 text-[var(--color-text-2)]';
 
 const sourceInputClass =
   'knowledge-source-input rounded-12px border-transparent bg-[var(--color-fill-1)] transition-[background-color,border-color,box-shadow] hover:bg-[var(--color-fill-2)] focus-within:shadow-[0_0_0_3px_rgba(var(--primary-6),0.1)]';
@@ -70,7 +70,7 @@ const sourceButtonClass =
   'knowledge-source-button rounded-10px border-transparent bg-[var(--color-fill-1)] text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]';
 
 const sourceNoteClass =
-  'knowledge-source-note flex gap-10px rounded-12px bg-[var(--color-fill-1)] px-12px py-10px text-12px leading-relaxed text-[var(--color-text-2)] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)]';
+  'knowledge-source-note flex gap-8px rounded-12px bg-[var(--color-fill-1)] px-10px py-8px text-12px leading-relaxed text-[var(--color-text-2)] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)]';
 
 const segmentGroupClass = 'inline-flex gap-4px rounded-11px bg-[var(--color-fill-1)] p-4px';
 
