@@ -50,7 +50,9 @@
     "deleted": "Agent deleted",
     "save": "Save",
     "saved": "Saved",
-    "notFound": "Agent not found or deleted"
+    "notFound": "Agent not found or deleted",
+    "knowledgeBasesPlaceholder": "Select knowledge bases to attach",
+    "knowledgeBasesMountedCount": "{{count}} attached"
   },
   "sections": {
     "identity": "Identity & voice",
@@ -84,6 +86,17 @@
     "shared": "Shared",
     "sharedHint": "Share with every agent (unchecked = this agent only)",
     "enabled": "Enabled",
+    "view": "View",
+    "edit": "Edit",
+    "delete": "Delete",
+    "more": "More actions",
+    "viewTitle": "View note",
+    "editTitle": "Edit note",
+    "close": "Close",
+    "created": "Note created",
+    "updated": "Note updated",
+    "deleted": "Note deleted",
+    "scopeLocked": "The note scope cannot be changed after creation",
     "deleteConfirm": "Delete this note?"
   }
 }

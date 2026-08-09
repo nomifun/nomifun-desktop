@@ -379,7 +379,7 @@
     "deleteConfirm": "删除「{{label}}」？将从所有知识库移除。",
     "deleteFailed": "删除标签失败",
     "empty": "还没有标签，在下方创建一个。",
-    "modalDesc": "用标签整理知识库，可重命名、换色、排序或删除。",
+    "modalDesc": "用标签整理知识库，可重命名、换色或删除。",
     "modalTitle": "管理标签",
     "renameFailed": "重命名标签失败",
     "renameHint": "点击重命名"
