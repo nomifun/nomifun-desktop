@@ -16,6 +16,11 @@ import {
   PLUGIN_MARKET_SOURCES,
 } from '@/renderer/pages/settings/skill/skillMarket';
 import { useNomiQuickStart } from '@/renderer/hooks/agent/useNomiQuickStart';
+import {
+  ENHANCED_TOOLS_GRID_CLASS,
+  ENHANCED_TOOLS_PAGE_STACK_CLASS,
+  ENHANCED_TOOLS_SURFACE_CLASS,
+} from '@/renderer/pages/settings/enhancedToolsLayout';
 
 type PluginSettingsPanelProps = {
   section?: 'installed' | 'market' | 'both';
@@ -58,13 +63,13 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
   );
 
   return (
-    <div className='space-y-16px pb-24px'>
+    <div className={ENHANCED_TOOLS_PAGE_STACK_CLASS}>
       {showInstalled && (
         <div
           data-testid='plugin-installed-surface'
-          className='mt-8px box-border rounded-24px border border-solid border-[var(--color-border-2)] bg-transparent px-16px py-10px md:px-20px md:py-12px'
+          className={ENHANCED_TOOLS_SURFACE_CLASS}
         >
-          <div className='flex items-center justify-between gap-12px mb-12px'>
+          <div className='mb-10px flex items-center justify-between gap-10px'>
             <div>
               <p className='m-0 text-13px text-t-secondary'>
                 {t('settings.plugins.installedDescription', {
@@ -84,13 +89,13 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
             </div>
           ) : (
             <div
-              className='grid gap-12px'
+              className={ENHANCED_TOOLS_GRID_CLASS}
               style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(260px, 100%), 1fr))' }}
             >
               {extensions.map((extension) => (
                 <div
                   key={extension.name}
-                  className='rounded-16px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-14px'
+                  className='rounded-16px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-12px'
                 >
                   <div className='flex items-start justify-between gap-10px'>
                     <div className='min-w-0'>
@@ -114,11 +119,11 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
                     </Tag>
                   </div>
                   {extension.description && (
-                    <div className='mt-10px text-12px leading-18px text-t-secondary line-clamp-2'>
+                    <div className='mt-8px text-12px leading-18px text-t-secondary line-clamp-2'>
                       {extension.description}
                     </div>
                   )}
-                  <div className='mt-12px text-11px text-t-tertiary'>v{extension.version}</div>
+                  <div className='mt-10px text-11px text-t-tertiary'>v{extension.version}</div>
                 </div>
               ))}
             </div>

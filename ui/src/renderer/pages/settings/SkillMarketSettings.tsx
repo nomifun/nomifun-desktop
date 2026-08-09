@@ -7,6 +7,7 @@ import type { ISkillMarketItem } from '@/common/adapter/ipcBridge';
 import { resolveLocaleKey } from '@/common/utils';
 import { useNomiQuickStart } from '@/renderer/hooks/agent/useNomiQuickStart';
 import MarketSettingsPanel from './MarketSettingsPanel';
+import { ENHANCED_TOOLS_PAGE_STACK_CLASS } from './enhancedToolsLayout';
 import {
   buildSkillMarketConversationName,
   buildSkillMarketInstallPrompt,
@@ -36,7 +37,7 @@ const SkillMarketSettings: React.FC = () => {
 
   return (
     <div className='flex flex-col h-full w-full'>
-      <div className='space-y-16px pb-24px'>
+      <div className={ENHANCED_TOOLS_PAGE_STACK_CLASS}>
         <MarketSettingsPanel
           title={t('settings.skillsMarket.title', { defaultValue: '技能市场' })}
           description={t('settings.skillsMarket.description', {

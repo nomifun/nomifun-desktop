@@ -28,6 +28,13 @@ import SkillDetailDrawer from './skill/SkillDetailDrawer';
 import SkillTagModal from './skill/SkillTagModal';
 import { resolveSkillDisplay } from './skill/skillDisplay';
 import { filterSkillsByTags, type SkillTagFilterState } from './skill/skillFilter';
+import {
+  ENHANCED_TOOLS_EMPTY_STATE_CLASS,
+  ENHANCED_TOOLS_GRID_CLASS,
+  ENHANCED_TOOLS_HEADER_CLASS,
+  ENHANCED_TOOLS_PAGE_STACK_CLASS,
+  ENHANCED_TOOLS_SURFACE_CLASS,
+} from './enhancedToolsLayout';
 import { Button, Input, Modal } from '@arco-design/web-react';
 import { CloseSmall, FileZip, FolderOpen, Info, Refresh, Search } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -251,13 +258,13 @@ const SkillsHubSettings: React.FC = () => {
   const mainContent = (
     <div className='flex flex-col h-full w-full'>
       {messageContext}
-      <div className='space-y-16px pb-24px'>
+      <div className={ENHANCED_TOOLS_PAGE_STACK_CLASS}>
         <div
           data-testid='skills-library-surface'
-          className={`mt-8px box-border rounded-24px border border-solid border-[var(--color-border-2)] bg-transparent ${isMobile ? 'px-16px py-10px' : 'px-20px py-12px'}`}
+          className={ENHANCED_TOOLS_SURFACE_CLASS}
         >
           {/* Header: description + actions */}
-          <div className='flex flex-col gap-10px mb-12px'>
+          <div className={ENHANCED_TOOLS_HEADER_CLASS}>
             <div
               data-testid='skills-library-header-row'
               className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-center justify-between'}`}
@@ -370,7 +377,7 @@ const SkillsHubSettings: React.FC = () => {
 
           {/* Single card grid for all skills */}
           {filteredSkills.length > 0 ? (
-            <div className='grid gap-12px' style={{ gridTemplateColumns: CARD_GRID_COLS }}>
+            <div className={ENHANCED_TOOLS_GRID_CLASS} style={{ gridTemplateColumns: CARD_GRID_COLS }}>
               {filteredSkills.map((skill) => (
                 <SkillCard
                   key={skill.name}
@@ -389,7 +396,7 @@ const SkillsHubSettings: React.FC = () => {
               ))}
             </div>
           ) : (
-            <div className='text-center text-t-secondary py-40px'>
+            <div className={ENHANCED_TOOLS_EMPTY_STATE_CLASS}>
               {loading
                 ? t('common.loading', { defaultValue: 'Please wait...' })
                 : availableSkills.length === 0
@@ -400,7 +407,7 @@ const SkillsHubSettings: React.FC = () => {
 
           {/* Skill directory path */}
           {skillPaths && (
-            <div className='mt-16px flex items-center gap-8px text-12px text-t-tertiary font-mono'>
+            <div className='mt-12px flex items-center gap-8px text-12px text-t-tertiary font-mono'>
               <FolderOpen size={14} className='shrink-0' />
               <span className='truncate' title={skillPaths.user_skills_dir} data-testid='skill-paths-display'>
                 {skillPaths.user_skills_dir}
@@ -410,7 +417,7 @@ const SkillsHubSettings: React.FC = () => {
         </div>
 
         {/* Usage tip */}
-        <div className='px-16px md:px-[24px] py-20px bg-base border border-solid border-[var(--border-base)] shadow-sm rd-16px flex items-start gap-12px text-t-secondary'>
+        <div className='flex items-start gap-10px rounded-16px border border-solid border-[var(--border-base)] bg-base px-14px py-12px text-t-secondary shadow-sm md:px-16px'>
           <Info size={18} className='text-primary-6 mt-2px shrink-0' />
           <div className='flex flex-col gap-4px'>
             <span className='font-bold text-t-primary text-14px'>
