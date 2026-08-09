@@ -36,7 +36,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
-Repo="nomifun/nomifun-tauri"
+Repo="nomifun/nomifun-desktop"
 Triple="universal-apple-darwin"
 KeyFile="${NOMIFUN_RELEASE_KEY_FILE:-apps/desktop/signing/nomifun-updater.key}"
 EnvRelease="${NOMIFUN_RELEASE_ENV_FILE:-apps/desktop/signing/.env.release}"

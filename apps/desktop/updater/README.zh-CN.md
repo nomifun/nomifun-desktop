@@ -21,7 +21,7 @@
 当前 endpoint：
 
 ```text
-https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json
+https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json
 ```
 
 ## 密钥区别
@@ -134,7 +134,7 @@ gh release upload "v<version>" apps/desktop/updater/latest.json --clobber
 
 ```bash
 gh release view "v<version>" --json tagName,assets,url
-curl -fsSL https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json
+curl -fsSL https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json
 ```
 
 确认 `latest.json` 的版本、平台 key、URL 和 Release 资产一致。

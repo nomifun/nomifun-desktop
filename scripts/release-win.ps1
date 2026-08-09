@@ -49,7 +49,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root      = Split-Path -Parent $ScriptDir
 Set-Location $Root
 
-$Repo        = 'nomifun/nomifun-tauri'
+$Repo        = 'nomifun/nomifun-desktop'
 $Triple      = 'x86_64-pc-windows-msvc'
 $KeyFile     = 'apps/desktop/signing/nomifun-updater.key'
 $EnvRelease  = 'apps/desktop/signing/.env.release'
