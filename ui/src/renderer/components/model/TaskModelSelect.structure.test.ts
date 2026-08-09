@@ -54,6 +54,9 @@ describe('tts voice candidates', () => {
   test('only platforms whose voice ids are documented get a list', () => {
     expect(ttsVoiceOptionsFor('openai')).toEqual(TTS_VOICE_OPTIONS_BY_PLATFORM.openai);
     expect(ttsVoiceOptionsFor('openai').includes('alloy')).toBe(true);
+    // StepFun voices are verified against its live system-voices API, so they
+    // are offered as suggestions (still free text for cloned/newer ids).
+    expect(ttsVoiceOptionsFor('stepfun').includes('cixingnansheng')).toBe(true);
     // Everything else is free text — inventing ids for a provider we have not
     // verified would offer the user values that just fail at synthesis time.
     expect(ttsVoiceOptionsFor('some-gateway')).toEqual([]);
