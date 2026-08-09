@@ -16,6 +16,7 @@ import type { PresetTagId } from '@/common/types/ids';
 import type { ImportedAgentSkill } from '@/renderer/pages/settings/skill/AgentSkillImportDrawer';
 import type { AgentSkillImportRow } from '@/renderer/pages/settings/skill/agentSkillImportUtils';
 import AgentSkillImportDrawer from '@/renderer/pages/settings/skill/AgentSkillImportDrawer';
+import { stripSkillFrontmatter } from '@/renderer/pages/settings/skill/skillDetail';
 import {
   resolveSkillDisplay,
   type LocalizableSkill,
@@ -209,6 +210,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
   const [drawerWidth, setDrawerWidth] = useState(500);
   const [rulesExpanded, setRulesExpanded] = useState(false);
   const [agentImportVisible, setAgentImportVisible] = useState(false);
+  const promptPreviewContent = useMemo(() => stripSkillFrontmatter(editContext).trim(), [editContext]);
 
   const { resetPendingTagDrafts, closeDrawer, handleDrawerSave } = useMemo(
     () => createPresetTagDraftLifecycle(audiencePickerRef, scenarioPickerRef, setEditVisible, handleSave),
@@ -775,9 +777,11 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                     />
                   </div>
                 ) : (
-                  <div className='p-16px text-14px leading-7'>
-                    {editContext ? (
-                      <MarkdownView hiddenCodeCopyButton>{editContext}</MarkdownView>
+                  <div className='p-16px'>
+                    {promptPreviewContent ? (
+                      <MarkdownView hiddenCodeCopyButton compact>
+                        {promptPreviewContent}
+                      </MarkdownView>
                     ) : (
                       <div className='text-t-secondary text-center py-32px'>
                         {t('settings.promptPreviewEmpty', { defaultValue: 'No content to preview' })}
