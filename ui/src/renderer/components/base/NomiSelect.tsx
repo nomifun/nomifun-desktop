@@ -48,6 +48,24 @@ const BASE_CLASS = classNames(
 );
 
 /**
+ * Arco gives the selector and its value a `width: 100%`, which prevents the
+ * outer select's `max-content` width from following the visible label. Restore
+ * intrinsic sizing only for content-fit selects; max-width still provides the
+ * responsive overflow guard.
+ */
+const CONTENT_FIT_CLASS = classNames(
+  'w-max shrink-0',
+  '[&_.arco-select-view]:w-max',
+  '[&_.arco-select-view]:max-w-full',
+  '[&_.arco-select-view-selector]:w-max',
+  '[&_.arco-select-view-selector]:max-w-full',
+  '[&_.arco-select-view-value]:w-max',
+  '[&_.arco-select-view-value]:max-w-full',
+  '[&_.arco-select-view-value-mirror]:w-max',
+  '[&_.arco-select-view-value-mirror]:max-w-full'
+);
+
+/**
  * 默认的弹出层容器获取函数
  * 始终返回 document.body 以避免嵌套容器导致的 ResizeObserver 循环错误
  * Default popup container getter function
@@ -134,7 +152,7 @@ const InternalSelect = React.forwardRef<SelectHandle, NomiSelectProps>(
       <Select
         ref={ref}
         size={normalizedSize}
-        className={classNames(BASE_CLASS, contentFit && 'w-max shrink-0', className)}
+        className={classNames(BASE_CLASS, contentFit && CONTENT_FIT_CLASS, className)}
         style={{
           ...(contentFit
             ? { width: 'max-content', minWidth: contentMinWidth, maxWidth: contentMaxWidth }
