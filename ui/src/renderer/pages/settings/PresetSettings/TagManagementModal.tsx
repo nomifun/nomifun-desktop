@@ -1,10 +1,6 @@
 /**
- * TagManagementModal — Double-column tag vocabulary CRUD (Audience / Skill
- * Scenario). Built-in seed tags render locked (greyed, no actions); user tags
- * support inline rename + delete (delete confirms and warns it is stripped
- * from all presets). Each column has a「+ New tag」input that calls onCreate.
- *
- * Theme variables only; `<div onClick>` for clickables (no <button>).
+ * Compact two-dimension tag vocabulary management for presets. Built-in tags
+ * remain locked while user tags support inline rename and confirmed deletion.
  */
 import type {
   PresetTag,
@@ -14,7 +10,7 @@ import type {
 import type { PresetTagId } from '@/common/types/ids';
 import type { ArcoMessageInstance } from '@/renderer/utils/ui/useArcoMessage';
 import { Input, Modal } from '@arco-design/web-react';
-import { Check, Close, Delete, Lock, Plus } from '@icon-park/react';
+import { Check, Close, CloseSmall, Lock, Plus } from '@icon-park/react';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -36,8 +32,7 @@ const errorText = (error: unknown): string => {
   return '';
 };
 
-/** A single tag row — locked (built-in) or editable (user). */
-const TagRow: React.FC<{
+const TagChip: React.FC<{
   tag: PresetTag;
   localeKey: string;
   busy: boolean;
@@ -48,18 +43,17 @@ const TagRow: React.FC<{
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const label = tag.label_i18n?.[localeKey] || tag.label;
+  const builtinLabel = t('settings.presetTagBuiltinLocked', { defaultValue: 'Built-in tag' });
 
   if (tag.builtin) {
     return (
       <div
-        className='flex items-center gap-8px rounded-10px px-10px py-7px bg-[var(--color-fill-1)] opacity-65'
+        className='box-border inline-flex h-28px max-w-full items-center gap-4px rounded-full border border-solid border-transparent bg-[var(--color-fill-1)] px-7px text-[var(--color-text-2)] opacity-65'
         data-testid={`tag-row-${tag.key}`}
+        title={`${label} · ${builtinLabel}`}
       >
-        <Lock theme='outline' size={13} className='flex-shrink-0 text-[var(--color-text-3)]' />
-        <span className='flex-1 min-w-0 truncate text-13px text-[var(--color-text-2)]'>{label}</span>
-        <span className='flex-shrink-0 text-10px text-[var(--color-text-3)]'>
-          {t('settings.presetTagBuiltinLocked', { defaultValue: 'Built-in tag' })}
-        </span>
+        <Lock theme='outline' size={10} className='flex-shrink-0 text-[var(--color-text-3)]' />
+        <span className='max-w-150px min-w-0 truncate text-12px leading-16px'>{label}</span>
       </div>
     );
   }
@@ -72,43 +66,49 @@ const TagRow: React.FC<{
     setEditing(false);
   };
 
+  const beginRename = () => {
+    if (busy) return;
+    setDraft(label);
+    setEditing(true);
+  };
+
   return (
     <div
-      className='group flex items-center gap-8px rounded-10px px-10px py-6px bg-[var(--color-bg-2)] border border-solid border-[var(--color-border-2)] hover:border-[var(--color-border-3)] transition-colors'
+      className='group box-border inline-flex h-28px max-w-full items-center gap-4px rounded-full border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-7px transition-colors hover:border-[var(--color-border-3)] hover:bg-[var(--color-fill-1)]'
       data-testid={`tag-row-${tag.key}`}
     >
       {editing ? (
         <>
           <Input
-            size='small'
+            size='mini'
             autoFocus
             value={draft}
             onChange={setDraft}
             onPressEnter={commit}
             disabled={busy}
-            className='flex-1 !rounded-6px'
+            className='w-110px !rounded-6px'
           />
           <div
             role='button'
             tabIndex={0}
             onClick={commit}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commit();
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commit();
             }}
-            className='flex-shrink-0 flex items-center justify-center w-22px h-22px rounded-6px cursor-pointer text-primary-6 hover:bg-[var(--color-primary-light-1)] transition-colors'
+            className='flex h-16px w-16px flex-shrink-0 cursor-pointer items-center justify-center rounded-full text-primary-6 transition-colors hover:bg-[var(--color-primary-light-1)]'
           >
-            <Check theme='outline' size={14} strokeWidth={3} />
+            <Check theme='outline' size={10} strokeWidth={3} />
           </div>
           <div
             role='button'
             tabIndex={0}
             onClick={() => setEditing(false)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') setEditing(false);
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') setEditing(false);
             }}
-            className='flex-shrink-0 flex items-center justify-center w-22px h-22px rounded-6px cursor-pointer text-[var(--color-text-3)] hover:bg-[var(--color-fill-2)] transition-colors'
+            className='flex h-16px w-16px flex-shrink-0 cursor-pointer items-center justify-center rounded-full text-[var(--color-text-3)] transition-colors hover:bg-[var(--color-fill-2)]'
           >
-            <Close theme='outline' size={14} strokeWidth={3} />
+            <Close theme='outline' size={10} strokeWidth={3} />
           </div>
         </>
       ) : (
@@ -116,17 +116,14 @@ const TagRow: React.FC<{
           <span
             role='button'
             tabIndex={0}
-            onClick={() => {
-              setDraft(label);
-              setEditing(true);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                setDraft(label);
-                setEditing(true);
+            onClick={beginRename}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                beginRename();
               }
             }}
-            className='flex-1 min-w-0 truncate text-13px text-[var(--color-text-1)] cursor-text'
+            className='max-w-150px min-w-0 cursor-text truncate text-12px font-500 leading-16px text-[var(--color-text-1)]'
             title={t('settings.presetTagRenameHint', { defaultValue: 'Click to rename' })}
           >
             {label}
@@ -134,14 +131,18 @@ const TagRow: React.FC<{
           <div
             role='button'
             tabIndex={0}
+            aria-label={`${t('common.delete', { defaultValue: 'Delete' })}: ${label}`}
             data-testid={`tag-delete-${tag.key}`}
-            onClick={() => onDelete(tag)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') onDelete(tag);
+            onClick={() => !busy && onDelete(tag)}
+            onKeyDown={(event) => {
+              if ((event.key === 'Enter' || event.key === ' ') && !busy) {
+                event.preventDefault();
+                onDelete(tag);
+              }
             }}
-            className='flex-shrink-0 flex items-center justify-center w-22px h-22px rounded-6px cursor-pointer text-[var(--color-text-3)] opacity-0 group-hover:opacity-100 hover:text-danger-6 hover:bg-[rgba(var(--danger-6),0.08)] transition-all'
+            className='flex h-16px w-16px flex-shrink-0 cursor-pointer items-center justify-center rounded-full text-[var(--color-text-3)] transition-colors hover:bg-[rgba(var(--danger-6),0.08)] hover:text-danger-6'
           >
-            <Delete theme='outline' size={14} strokeWidth={3} />
+            <CloseSmall theme='outline' size={10} strokeWidth={3} />
           </div>
         </>
       )}
@@ -149,7 +150,6 @@ const TagRow: React.FC<{
   );
 };
 
-/** A dimension column: header + tag rows + create input. */
 const TagColumn: React.FC<{
   title: string;
   dimension: PresetTagDimension;
@@ -165,27 +165,31 @@ const TagColumn: React.FC<{
 
   const submit = () => {
     const label = newLabel.trim();
-    if (!label) return;
+    if (!label || busy) return;
     onCreate(label);
     setNewLabel('');
   };
 
   return (
-    <div className='flex flex-col gap-10px min-w-0'>
+    <section className='flex min-w-0 flex-col gap-8px'>
       <div className='flex items-center gap-7px'>
-        <span className='inline-block w-3px h-13px rounded-[2px] bg-[var(--color-primary-light-3)]' aria-hidden='true' />
+        <span className='inline-block h-13px w-3px rounded-[2px] bg-[var(--color-primary-light-3)]' aria-hidden='true' />
         <span className='text-13px font-medium text-[var(--color-text-1)]'>{title}</span>
         <span className='text-11px text-[var(--color-text-3)]'>({tags.length})</span>
       </div>
 
-      <div className='flex flex-col gap-6px' data-testid={`tag-column-${dimension}`}>
+      <div
+        className='flex flex-wrap content-start items-start gap-6px overflow-y-auto pr-4px'
+        style={{ maxHeight: 'min(30vh, 200px)' }}
+        data-testid={`tag-column-${dimension}`}
+      >
         {tags.length === 0 ? (
-          <div className='rounded-10px border border-dashed border-[var(--color-border-2)] px-10px py-12px text-center text-12px text-[var(--color-text-3)]'>
+          <div className='w-full rounded-10px border border-dashed border-[var(--color-border-2)] px-10px py-12px text-center text-12px text-[var(--color-text-3)]'>
             {t('settings.presetTagColumnEmpty', { defaultValue: 'No tags in this group yet.' })}
           </div>
         ) : (
           tags.map((tag) => (
-            <TagRow
+            <TagChip
               key={tag.preset_tag_id}
               tag={tag}
               localeKey={localeKey}
@@ -197,7 +201,7 @@ const TagColumn: React.FC<{
         )}
       </div>
 
-      <div className='flex items-center gap-8px mt-2px'>
+      <div className='mt-2px flex items-center gap-8px border-0 border-t border-solid border-[var(--color-border-2)] pt-10px'>
         <Input
           size='small'
           value={newLabel}
@@ -213,22 +217,29 @@ const TagColumn: React.FC<{
           tabIndex={0}
           data-testid={`tag-add-btn-${dimension}`}
           onClick={submit}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') submit();
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              submit();
+            }
           }}
           className={[
-            'flex-shrink-0 inline-flex items-center gap-4px rounded-8px px-10px h-30px text-12px font-medium cursor-pointer',
+            'inline-flex h-30px flex-shrink-0 cursor-pointer items-center gap-4px rounded-8px px-10px text-12px font-medium leading-none',
             'border border-solid transition-all duration-150',
             newLabel.trim() && !busy
-              ? 'bg-[var(--color-primary-light-1)] text-primary-6 border-[var(--color-primary-light-3)] hover:bg-[var(--color-primary-light-2)]'
-              : 'bg-[var(--color-fill-2)] text-[var(--color-text-3)] border-[var(--color-border-2)] cursor-not-allowed',
+              ? 'border-primary-6 bg-primary-6 text-white hover:opacity-90'
+              : 'cursor-not-allowed border-[var(--color-border-2)] bg-[var(--color-fill-2)] text-[var(--color-text-3)]',
           ].join(' ')}
         >
-          <Plus theme='outline' size={13} strokeWidth={3} />
-          {t('common.add', { defaultValue: 'Add' })}
+          <span className='inline-flex h-14px w-14px flex-none items-center justify-center leading-none [&_svg]:block'>
+            <Plus theme='outline' size={13} strokeWidth={3} fill='currentColor' className='block' />
+          </span>
+          <span className='inline-flex h-16px items-center leading-16px'>
+            {t('common.add', { defaultValue: 'Add' })}
+          </span>
         </div>
       </div>
-    </div>
+    </section>
   );
 };
 
@@ -247,6 +258,7 @@ const TagManagementModal: React.FC<TagManagementModalProps> = ({
   const [busy, setBusy] = useState(false);
 
   const handleCreate = async (dimension: PresetTagDimension, label: string) => {
+    if (busy) return;
     setBusy(true);
     try {
       await onCreate({ dimension, label });
@@ -261,6 +273,7 @@ const TagManagementModal: React.FC<TagManagementModalProps> = ({
   };
 
   const handleRename = async (presetTagId: PresetTagId, label: string) => {
+    if (busy) return;
     setBusy(true);
     try {
       await onRename(presetTagId, label);
@@ -307,17 +320,20 @@ const TagManagementModal: React.FC<TagManagementModalProps> = ({
       onCancel={onClose}
       footer={null}
       title={t('settings.presetTagModalTitle', { defaultValue: 'Manage Tags' })}
-      style={{ width: 680, maxWidth: '92vw', borderRadius: 16 }}
+      style={{ width: 680, maxWidth: '92vw', maxHeight: '82vh', borderRadius: 16 }}
       maskClosable={!busy}
       data-testid='tag-management-modal'
     >
-      <p className='mt-0 mb-16px text-12px leading-18px text-[var(--color-text-3)]'>
+      <p className='mt-0 mb-12px text-12px leading-18px text-[var(--color-text-3)]'>
         {t('settings.presetTagModalDesc', {
           defaultValue:
             'Organize presets by audience and skill scenario. Built-in tags are locked; your own tags can be renamed or deleted.',
         })}
       </p>
-      <div className='grid gap-20px' style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(240px, 100%), 1fr))' }}>
+      <div
+        className='grid gap-18px'
+        style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(240px, 100%), 1fr))' }}
+      >
         <TagColumn
           title={t('settings.presetTagAudience', { defaultValue: 'Audience' })}
           dimension='audience'

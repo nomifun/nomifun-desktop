@@ -379,7 +379,7 @@
     "deleteConfirm": "Delete \"{{label}}\"? It will be removed from all knowledge bases.",
     "deleteFailed": "Failed to delete tag",
     "empty": "No tags yet. Create one below.",
-    "modalDesc": "Organize knowledge bases with tags. Tags can be renamed, recolored, reordered, or deleted.",
+    "modalDesc": "Organize knowledge bases with tags. Tags can be renamed, recolored, or deleted.",
     "modalTitle": "Manage Tags",
     "renameFailed": "Failed to rename tag",
     "renameHint": "Click to rename"
