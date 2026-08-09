@@ -17,6 +17,7 @@ the current architecture or contributor standards.
 | Understand what NomiFun is | [getting-started/introduction.md](getting-started/introduction.md) |
 | Install or run locally | [getting-started/installation.md](getting-started/installation.md) |
 | Try the app quickly | [getting-started/quick-start.md](getting-started/quick-start.md) |
+| Connect a XiaoZhi ESP32 robot | [guides/xiaozhi-robot.md](guides/xiaozhi-robot.md) |
 | Understand the current architecture | [architecture/overview.md](architecture/overview.md) |
 | Build or package the project | [contributing/building-and-packaging.md](contributing/building-and-packaging.md) |
 | Look up flags, env vars, or API groups | [reference/](reference/) |
