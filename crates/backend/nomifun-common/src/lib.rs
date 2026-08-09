@@ -20,6 +20,7 @@ mod pagination;
 pub mod paths;
 pub mod provider_lifecycle;
 pub mod provider_usage;
+pub mod stage_direction;
 mod timestamp;
 mod types;
 pub mod vision_registry;

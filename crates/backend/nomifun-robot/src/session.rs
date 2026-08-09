@@ -17,7 +17,7 @@ use crate::audio::OpusStreamEncoder;
 use crate::link::{AcceptedLink, Frame, RobotLinkSink};
 use crate::pipeline::{
     DownlinkPacer, SentenceSplitter, UplinkOutcome, UplinkPipeline, encode_for_downlink,
-    sanitize_for_speech, strip_emotion, strip_emotion_markers,
+    sanitize_for_display, sanitize_for_speech,
 };
 use crate::protocol::{
     DeviceMessage, ListenState, ListeningMode, ServerMessage, parse_device_message,
@@ -99,6 +99,10 @@ pub struct TurnOutcome {
 /// mute robot. It uses only the frames the firmware already renders — it shows
 /// `sentence_start` text on the OLED — and plays no audio, so it still works
 /// when TTS itself is the thing that is unconfigured.
+///
+/// The `sad` face here is STATE-driven: the gateway knows the voice link is
+/// broken, so it is a fact, not a syntax parsed out of model text. That is the
+/// difference between this send and the deleted per-sentence one.
 async fn show_voice_notice(writer: &Writer, session_id: &str, text: &str) {
     writer
         .send_json(&ServerMessage::TtsStart {
@@ -144,9 +148,16 @@ fn tts_notice_for(error: &anyhow::Error) -> String {
     }
 }
 
-/// Speak one sentence: face, screen, then audio. Returns a failure only when the
-/// turn should be abandoned (a run of TTS errors), never for a single bad
-/// sentence — that one is still on the device's screen.
+/// Speak one sentence: screen, then audio. Returns a failure only when the turn
+/// should be abandoned (a run of TTS errors), never for a single bad sentence —
+/// that one is still on the device's screen.
+///
+/// The model's text drives no facial expression. It once carried an
+/// `[emotion:name]` marker for exactly that, the model emitted `[winking]`
+/// instead, and the result was a marker read aloud and no face at all; the whole
+/// channel is gone rather than re-syntaxed. `ServerMessage::Llm` is still sent —
+/// but only from device/turn STATE (`show_voice_notice`, `report_turn_failure`),
+/// which is a fact the gateway owns rather than a syntax it hopes for.
 #[allow(clippy::too_many_arguments)]
 async fn speak_sentence(
     writer: &Writer,
@@ -160,23 +171,18 @@ async fn speak_sentence(
     generation: u64,
     sentence: &str,
 ) -> Option<TurnFailure> {
-    let (emotion, text) = strip_emotion(sentence);
-    // Screen copy: any stray inline `[emotion:..]` markers removed. Voice copy:
-    // additionally strip emoji / non-speech symbols. Sending emoji or a bare
-    // marker to the TTS engine is what 400s and cuts the voice, so the engine
-    // only ever sees speakable text.
-    let display = strip_emotion_markers(&text);
-    let voice_text = sanitize_for_speech(&text);
+    // Screen copy and voice copy get the same cleaning: bracketed stage
+    // directions removed, plus emoji / non-speech symbols dropped. Sending emoji
+    // or a bracketed annotation to the TTS engine is what 400s and cuts the
+    // voice, and the device's 14px CJK font has no glyph for them either — an
+    // emoji left in the screen copy draws a hollow box. The gateway owns the wire
+    // format, so it cleans both rather than letting the firmware carry a second
+    // sanitiser.
+    let display = sanitize_for_display(sentence);
+    let voice_text = sanitize_for_speech(sentence);
     if display.trim().is_empty() && voice_text.is_empty() {
-        // A marker/emoji-only chunk still sets the face; there is nothing to say.
-        if let Some(emotion) = emotion {
-            writer
-                .send_json(&ServerMessage::Llm {
-                    session_id: session_id.to_owned(),
-                    emotion: emotion.to_owned(),
-                })
-                .await;
-        }
+        // Nothing survived the guard (an emoji- or annotation-only chunk). There
+        // is nothing to show and nothing to say, so there is nothing to do.
         return None;
     }
     if !*speaking {
@@ -186,14 +192,6 @@ async fn speak_sentence(
             })
             .await;
         *speaking = true;
-    }
-    if let Some(emotion) = emotion {
-        writer
-            .send_json(&ServerMessage::Llm {
-                session_id: session_id.to_owned(),
-                emotion: emotion.to_owned(),
-            })
-            .await;
     }
     if !display.trim().is_empty() {
         writer
@@ -248,7 +246,7 @@ async fn speak_sentence(
     }
 }
 
-/// Stream a reply to the device: split into sentences, drive the face, speak.
+/// Stream a reply to the device: split into sentences, then speak.
 #[allow(clippy::too_many_arguments)]
 async fn drive_turn(
     mut events: mpsc::Receiver<TurnEvent>,
@@ -359,6 +357,9 @@ async fn drive_turn(
 }
 
 /// Tell the user something went wrong without stranding the device in `speaking`.
+///
+/// The `sad` face is STATE-driven, like `show_voice_notice`'s: the turn failed,
+/// which the gateway knows for a fact. Model text drives no expression.
 async fn report_turn_failure(writer: &Writer, session_id: &str) {
     writer
         .send_json(&ServerMessage::Llm {
@@ -1144,14 +1145,17 @@ mod tests {
         assert_eq!(snap[0].phase, "offline");
     }
 
+    /// A full turn, with the bracketed annotation the model actually emits. It
+    /// must reach neither the screen nor the face: the text channel drives no
+    /// expression at all any more, and the guard deletes the annotation.
     #[tokio::test]
-    async fn a_full_turn_produces_stt_emotion_sentence_audio_and_stop() {
+    async fn a_full_turn_produces_stt_sentence_audio_and_stop() {
         let (deps, link, tx, written, _dir) = harness(true).await;
         let speech = deps.speech_mock();
         let dispatcher = deps.dispatcher_mock();
         speech.push_transcript("今天天气怎么样");
         dispatcher.script_turn(vec![
-            TurnEvent::Text("[emotion:happy] 晴朗得很。".into()),
+            TurnEvent::Text("[winking] 晴朗得很。".into()),
             TurnEvent::Done,
         ]);
 
@@ -1191,8 +1195,8 @@ mod tests {
             "the transcript is shown on screen: {types:?}"
         );
         assert!(
-            types.contains(&"llm".to_owned()),
-            "the emotion marker drives the face: {types:?}"
+            !types.contains(&"llm".to_owned()),
+            "a healthy turn sets no face: model text is not an expression channel: {types:?}"
         );
         assert!(types.contains(&"tts:start".to_owned()), "{types:?}");
         assert!(types.contains(&"tts:sentence_start".to_owned()), "{types:?}");
@@ -1200,15 +1204,13 @@ mod tests {
 
         let stt = sent.iter().find(|m| m["type"] == "stt").unwrap();
         assert_eq!(stt["text"], "今天天气怎么样");
-        let llm = sent.iter().find(|m| m["type"] == "llm").unwrap();
-        assert_eq!(llm["emotion"], "happy");
         let sentence = sent
             .iter()
             .find(|m| m["type"] == "tts" && m["state"] == "sentence_start")
             .unwrap();
         assert_eq!(
             sentence["text"], "晴朗得很。",
-            "the emotion marker is stripped before display"
+            "the bracketed annotation is stripped before display"
         );
 
         let audio_frames = written
@@ -1352,6 +1354,10 @@ mod tests {
         assert!(
             notices.iter().any(|t| t.contains("语音识别")),
             "the ASR failure must be visible on the device screen, got {notices:?}"
+        );
+        assert!(
+            sent.iter().any(|m| m["type"] == "llm" && m["emotion"] == "sad"),
+            "the notice still sets a face — STATE-driven expression is the part that survived"
         );
     }
 
@@ -1589,7 +1595,7 @@ mod tests {
         let sent = texts(&written);
         assert!(
             sent.iter().any(|m| m["type"] == "llm" && m["emotion"] == "sad"),
-            "the robot looks sad about it"
+            "the robot looks sad about it — the surviving, STATE-driven face"
         );
         assert!(
             sent.iter()

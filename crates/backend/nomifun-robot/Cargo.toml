@@ -11,6 +11,11 @@ default = []
 test-support = []
 
 [dependencies]
+# The `[emotion:name]` vocabulary and its strippers live here, not in this
+# crate: the desktop relay removes the same marker from the same stream and
+# cannot depend on the device pipeline. Free anyway — nomifun-api-types
+# already pulls nomifun-common in.
+nomifun-common = { workspace = true }
 nomifun-api-types = { workspace = true }
 nomifun-realtime = { workspace = true }
 # ASR/TTS go through the one non-chat resolve algorithm.

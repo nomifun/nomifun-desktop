@@ -6753,6 +6753,7 @@ dependencies = [
  "nomi-providers",
  "nomi-types",
  "nomifun-api-types",
+ "nomifun-common",
  "nomifun-model-invoke",
  "nomifun-realtime",
  "nomifun-robot",

@@ -819,6 +819,21 @@ pub trait IConversationRepository: Send + Sync {
         conversation_id: &str,
     ) -> Result<Vec<ConversationRow>, DbError>;
 
+    /// Lists the durable robot conversations owned by one companion.
+    ///
+    /// `extra.companion_id` is indexed in the v3 schema. The additional
+    /// `robot_session` gate keeps the companion's ordinary desktop thread and
+    /// remote channel sessions out of this device-specific projection.
+    async fn list_robot_threads_by_companion(
+        &self,
+        _user_id: &str,
+        _companion_id: &str,
+    ) -> Result<Vec<ConversationRow>, DbError> {
+        Err(DbError::Init(
+            "robot conversation lookup is not supported".to_owned(),
+        ))
+    }
+
     /// Lists every retained Conversation whose top-level current model is
     /// logically bound to `provider_id`. Deletion policy is enforced by the
     /// service layer.

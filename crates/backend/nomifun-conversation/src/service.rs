@@ -4778,6 +4778,52 @@ impl ConversationService {
         Ok(response)
     }
 
+    /// Apply a companion's configured chat model to its durable robot threads.
+    ///
+    /// Companion settings are the source of truth. `only_missing` is used for
+    /// boot repair so a fallback selected after a provider failure remains
+    /// sticky; an explicit settings change passes `false` and intentionally
+    /// retargets every robot body owned by that companion.
+    pub async fn sync_robot_thread_models_for_companion(
+        &self,
+        user_id: &str,
+        companion_id: &str,
+        model: &ProviderWithModel,
+        only_missing: bool,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Result<usize, AppError> {
+        let companion_id = nomifun_common::CompanionId::parse(companion_id.to_owned())
+            .map_err(|error| AppError::BadRequest(format!("Invalid companion id: {error}")))?;
+        let rows = self
+            .conversation_repo
+            .list_robot_threads_by_companion(user_id, companion_id.as_str())
+            .await?;
+        let mut updated = 0;
+        for row in rows {
+            if only_missing && row.model.is_some() {
+                continue;
+            }
+            self.update(
+                user_id,
+                &row.conversation_id,
+                UpdateConversationRequest {
+                    name: None,
+                    pinned: None,
+                    model: Some(model.clone()),
+                    delegation_policy: None,
+                    execution_model_pool: None,
+                    decision_policy: None,
+                    execution_template_id: None,
+                    extra: None,
+                },
+                runtime_registry,
+            )
+            .await?;
+            updated += 1;
+        }
+        Ok(updated)
+    }
+
     /// List conversations with cursor-based pagination and optional filters.
     ///
     /// `exclude_companion_companion`: when `true`, work-partner (companion companion)
@@ -8004,6 +8050,7 @@ impl ConversationService {
         // below rejects that stale send instead of stranding a turn handle.
         let (companion, companion_id, extra_channel_platform) =
             companion_context_from_extra(&row.extra)?;
+        let robot_session = robot_session_from_extra(&row.extra);
         let channel_platform = req
             .channel_platform
             .as_deref()
@@ -8804,6 +8851,7 @@ impl ConversationService {
                 .with_companion_context(companion, companion_id.clone())
                 .with_origin(origin.clone())
                 .with_channel_platform(channel_platform.clone())
+                .with_robot_session(robot_session)
                 .with_artifact_workspace(agent.workspace());
 
                 // Execution-attempt turns: let the relay accumulate this turn's
@@ -9062,7 +9110,8 @@ impl ConversationService {
                     .with_root_turn_id(stable_turn_id.clone())
                     .with_companion_context(companion, companion_id.clone())
                     .with_origin(origin.clone())
-                    .with_channel_platform(channel_platform.clone());
+                    .with_channel_platform(channel_platform.clone())
+                    .with_robot_session(robot_session);
                     let _ = surface_relay
                         .surface_terminal_error(suppressed, &turn_cancellation)
                         .await;
@@ -13237,6 +13286,28 @@ fn companion_context_from_extra(
         }
     };
     Ok((companion, companion_id, channel_platform))
+}
+
+/// True when this conversation is a robot gateway thread.
+///
+/// `extra.robot_session` is written only by nomifun-app's robot wiring, through
+/// the service (`create_idempotent` / `update_extra`) rather than the HTTP
+/// route. It is conversation-level and stable across turns — unlike
+/// `channel_platform`, which is per-TURN and is `None` for a turn the owner
+/// types into the robot thread from the desktop chat.
+///
+/// Deliberately infallible and defaulting to `false`: this only decides whether
+/// the relay deletes bracketed stage directions, so a malformed `extra` must
+/// degrade to "leave the text alone" rather than fail a turn.
+fn robot_session_from_extra(extra: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(extra)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("robot_session")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(false)
 }
 
 /// Decide which knowledge-binding target a conversation mounts from
