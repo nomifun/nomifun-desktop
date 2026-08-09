@@ -24,7 +24,7 @@
   <img alt="Built with Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white">
   <img alt="Rust 2024" src="https://img.shields.io/badge/Rust-edition_2024-CE412B?style=flat-square&logo=rust&logoColor=white">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white">
-  <a href="https://github.com/nomifun/nomifun-tauri/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/nomifun/nomifun-tauri?style=flat-square&color=FF6F91"></a>
+  <a href="https://github.com/nomifun/nomifun-desktop/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/nomifun/nomifun-desktop?style=flat-square&color=FF6F91"></a>
 </p>
 
 <p>
@@ -35,7 +35,7 @@
   <a href="https://www.nomifun.com">🌐 官网</a>&nbsp;·&nbsp;
   <a href="docs/README.zh.md">📖 文档</a>&nbsp;·&nbsp;
   <a href="#-快速开始">🚀 快速开始</a>&nbsp;·&nbsp;
-  <a href="https://github.com/nomifun/nomifun-tauri/releases">📦 下载</a>&nbsp;·&nbsp;
+  <a href="https://github.com/nomifun/nomifun-desktop/releases">📦 下载</a>&nbsp;·&nbsp;
   <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">百度网盘</a>&nbsp;·&nbsp;
   <a href="#-联系我们--社区">💬 社区</a>
 </p>
@@ -298,7 +298,7 @@ packaging/      web 宿主的 Linux 部署支持
 
 ## 🚀 快速开始
 
-> 📦 **下载安装包**：优先使用 [GitHub Releases](https://github.com/nomifun/nomifun-tauri/releases)；中国大陆下载可使用 [百度网盘镜像](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA)（分享名：`nomifun`）。也可以从源码安装，或用 Docker 跑服务器。
+> 📦 **下载安装包**：优先使用 [GitHub Releases](https://github.com/nomifun/nomifun-desktop/releases)；中国大陆下载可使用 [百度网盘镜像](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA)（分享名：`nomifun`）。也可以从源码安装，或用 Docker 跑服务器。
 
 **前置依赖**
 
@@ -309,7 +309,7 @@ packaging/      web 宿主的 Linux 部署支持
 **桌面应用（源码）**
 
 ```bash
-git clone https://github.com/nomifun/nomifun-tauri.git
+git clone https://github.com/nomifun/nomifun-desktop.git
 cd nomifun-tauri
 bun install
 
@@ -491,7 +491,7 @@ NomiFun 非常需要你的加入来壮大 —— 代码贡献、社区运营、�
 - 阅读 [`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md) 完成环境搭建、了解检查阶梯；英文版见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 - 友善相待 —— 见 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)。
 - 发现漏洞？请按 [`SECURITY.md`](SECURITY.md) 操作。
-- 从 [open issues](https://github.com/nomifun/nomifun-tauri/issues) 找一个起点。
+- 从 [open issues](https://github.com/nomifun/nomifun-desktop/issues) 找一个起点。
 
 ---
 
@@ -528,7 +528,7 @@ NomiFun **完全开源、毫无保留**。个人与企业都可以在它之上�
 | 渠道 | 入口 |
 |---|---|
 | 🌐 **官网** | [www.nomifun.com](https://www.nomifun.com) |
-| 🐙 **GitHub** | [nomifun/nomifun-tauri](https://github.com/nomifun/nomifun-tauri) · [Issues](https://github.com/nomifun/nomifun-tauri/issues) · [Releases](https://github.com/nomifun/nomifun-tauri/releases) |
+| 🐙 **GitHub** | [nomifun/nomifun-desktop](https://github.com/nomifun/nomifun-desktop) · [Issues](https://github.com/nomifun/nomifun-desktop/issues) · [Releases](https://github.com/nomifun/nomifun-desktop/releases) |
 | ✉️ **邮箱** | `hello@nomifun.com` <sub>（占位 · 待确认）</sub> |
 | 📕 **小红书** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
 | 📺 **哔哩哔哩** | [NomiFun](https://b23.tv/0UhgKDh) · [演示视频](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |

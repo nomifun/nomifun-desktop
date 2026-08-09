@@ -5,7 +5,7 @@
  *   bun run make:latest                        # 扫本机 target/ 里的更新产物，合并进清单
  *   bun run make:latest --version 0.1.11        # 显式指定版本（默认读单一真源）
  *   bun run make:latest --notes "修复若干问题"    # 指定发布说明（默认读 CHANGELOG / 兜底）
- *   bun run make:latest --repo owner/name       # 指定 GitHub 仓库（默认 nomifun/nomifun-tauri）
+ *   bun run make:latest --repo owner/name       # 指定 GitHub 仓库（默认 nomifun/nomifun-desktop）
  *   bun run make:latest --collect               # 额外把产物 + .sig 拷到 dist/desktop/ 便于上传
  *
  * 背景：Tauri 自动更新靠一个 latest.json 清单，按 `<系统>-<芯片>` 列出每个平台的下载
@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_OUT = join(ROOT, 'apps/desktop/updater/latest.json');
-const DEFAULT_REPO = 'nomifun/nomifun-tauri';
+const DEFAULT_REPO = 'nomifun/nomifun-desktop';
 const ALL_KEYS = ['windows-x86_64', 'windows-aarch64', 'darwin-x86_64', 'darwin-aarch64', 'linux-x86_64', 'linux-aarch64'];
 
 const rel = (p) => (p.startsWith(ROOT) ? p.slice(ROOT.length + 1) : p);

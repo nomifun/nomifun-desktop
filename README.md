@@ -24,7 +24,7 @@
   <img alt="Built with Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white">
   <img alt="Rust 2024" src="https://img.shields.io/badge/Rust-edition_2024-CE412B?style=flat-square&logo=rust&logoColor=white">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white">
-  <a href="https://github.com/nomifun/nomifun-tauri/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/nomifun/nomifun-tauri?style=flat-square&color=FF6F91"></a>
+  <a href="https://github.com/nomifun/nomifun-desktop/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/nomifun/nomifun-desktop?style=flat-square&color=FF6F91"></a>
 </p>
 
 <p>
@@ -35,7 +35,7 @@
   <a href="https://www.nomifun.com">🌐 Website</a>&nbsp;·&nbsp;
   <a href="docs/README.md">📖 Docs</a>&nbsp;·&nbsp;
   <a href="#-getting-started">🚀 Get started</a>&nbsp;·&nbsp;
-  <a href="https://github.com/nomifun/nomifun-tauri/releases">📦 Releases</a>&nbsp;·&nbsp;
+  <a href="https://github.com/nomifun/nomifun-desktop/releases">📦 Releases</a>&nbsp;·&nbsp;
   <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">China mirror</a>&nbsp;·&nbsp;
   <a href="./RELEASING.zh-CN.md">发版手册</a>&nbsp;·&nbsp;
   <a href="#-contact--community">💬 Community</a>
@@ -301,7 +301,7 @@ Start with [`docs/architecture/overview.md`](docs/architecture/overview.md) for 
 
 ## 🚀 Getting started
 
-> 📦 **Installers**: use [GitHub Releases](https://github.com/nomifun/nomifun-tauri/releases) first. Mainland China users can use the [Baidu Netdisk mirror](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA) (shared as `nomifun`). You can also install from source or run the server with Docker.
+> 📦 **Installers**: use [GitHub Releases](https://github.com/nomifun/nomifun-desktop/releases) first. Mainland China users can use the [Baidu Netdisk mirror](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA) (shared as `nomifun`). You can also install from source or run the server with Docker.
 
 **Prerequisites**
 
@@ -312,7 +312,7 @@ Start with [`docs/architecture/overview.md`](docs/architecture/overview.md) for 
 **Desktop app (from source)**
 
 ```bash
-git clone https://github.com/nomifun/nomifun-tauri.git
+git clone https://github.com/nomifun/nomifun-desktop.git
 cd nomifun-tauri
 bun install
 
@@ -558,7 +558,7 @@ NomiFun very much needs your help to grow — code contributions, community buil
 - Read [`CONTRIBUTING.md`](CONTRIBUTING.md) to get set up and learn the check ladder. Simplified Chinese: [`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md).
 - Be excellent to each other — see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 - Found a vulnerability? Follow [`SECURITY.md`](SECURITY.md).
-- Browse [open issues](https://github.com/nomifun/nomifun-tauri/issues) for a place to start.
+- Browse [open issues](https://github.com/nomifun/nomifun-desktop/issues) for a place to start.
 
 ---
 
@@ -595,7 +595,7 @@ We'd love to hear from you. The fastest way to reach us is GitHub; the social ch
 | Channel | Where |
 |---|---|
 | 🌐 **Website** | [www.nomifun.com](https://www.nomifun.com) |
-| 🐙 **GitHub** | [nomifun/nomifun-tauri](https://github.com/nomifun/nomifun-tauri) · [Issues](https://github.com/nomifun/nomifun-tauri/issues) · [Releases](https://github.com/nomifun/nomifun-tauri/releases) |
+| 🐙 **GitHub** | [nomifun/nomifun-desktop](https://github.com/nomifun/nomifun-desktop) · [Issues](https://github.com/nomifun/nomifun-desktop/issues) · [Releases](https://github.com/nomifun/nomifun-desktop/releases) |
 | ✉️ **Email** | `hello@nomifun.com` <sub>(provisional — being finalized)</sub> |
 | 📕 **小红书 / RED** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
 | 📺 **Bilibili** | [NomiFun](https://b23.tv/0UhgKDh) · [demo video](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |
