@@ -26,7 +26,7 @@ App (running version, from workspace Cargo.toml)
   - **Startup silent check** (`Layout.tsx`): on launch, if a newer version is
     available the modal opens automatically; otherwise it stays silent.
 - **Config:** `apps/desktop/tauri.conf.json` →
-  - `plugins.updater.endpoints` = `https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json`
+  - `plugins.updater.endpoints` = `https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json`
   - `plugins.updater.pubkey` = the project updater public key (committed; safe).
 - **Permissions:** `apps/desktop/capabilities/default.json` grants the renderer
   `updater:allow-check` and `process:default` (relaunch/exit). Raw updater
