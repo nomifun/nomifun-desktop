@@ -1,92 +1,28 @@
-//! Incremental sentence splitting and emotion markers.
+//! Incremental sentence splitting and the text cleaning the device needs.
 //!
 //! The model streams text; the device needs whole sentences (one `sentence_start`
 //! plus its audio at a time). Splitting eagerly is what keeps first-audio latency
 //! low, so this runs on every stream chunk.
 //!
-//! Emotion travels as a leading `[emotion:name]` marker the system prompt asks
-//! for. It is stripped before display and TTS, and mapped onto the 21 names the
-//! firmware understands (anything else would silently become `neutral` on-device
-//! anyway, so we normalise here and log nothing).
+//! There is no emotion channel in this text. The robot prompt once asked for a
+//! leading `[emotion:name]` marker and the model emitted `[winking]` instead, so
+//! the marker was spoken aloud and drove nothing; the prompt now forbids brackets
+//! outright and no marker is parsed anywhere. What remains is a content guard:
+//! [`nomifun_common::stage_direction::strip_stage_directions`], re-exported
+//! below, deletes a stage direction of ANY syntax, because a prohibition in a
+//! prompt is not a guarantee and the device must show normal text or nothing.
+//! It lives in `nomifun-common` because the desktop relay has to clean the same
+//! stream and must not depend on this device pipeline.
+//!
+//! What stays here is device-only — `TERMINATORS`, [`sanitize_for_speech`],
+//! [`sanitize_for_display`] and [`SentenceSplitter`] — because dropping emoji and
+//! collapsing whitespace is right for a speaker and a 128x64 OLED, and data loss
+//! anywhere else.
 
-/// The exact emotion vocabulary the firmware maps to eye animations and gimbal
-/// moves. Any other value degrades to `neutral` on-device.
-pub const EMOTIONS: [&str; 21] = [
-    "neutral",
-    "happy",
-    "laughing",
-    "funny",
-    "sad",
-    "angry",
-    "crying",
-    "loving",
-    "embarrassed",
-    "surprised",
-    "shocked",
-    "thinking",
-    "winking",
-    "cool",
-    "relaxed",
-    "delicious",
-    "kissy",
-    "confident",
-    "sleepy",
-    "silly",
-    "confused",
-];
-
-/// Map any name onto the firmware vocabulary, defaulting to `neutral`.
-pub fn normalize_emotion(name: &str) -> &'static str {
-    let needle = name.trim().to_ascii_lowercase();
-    EMOTIONS
-        .iter()
-        .copied()
-        .find(|known| *known == needle)
-        .unwrap_or("neutral")
-}
-
-/// Split a leading `[emotion:name]` marker off a sentence.
-///
-/// Returns the normalised emotion (only when a marker was present) and the
-/// remaining text. A marker anywhere but the start is left alone — the model was
-/// asked to lead with it, and rewriting mid-sentence text would mangle content.
-pub fn strip_emotion(sentence: &str) -> (Option<&'static str>, String) {
-    let trimmed = sentence.trim_start();
-    let Some(rest) = trimmed.strip_prefix("[emotion:") else {
-        return (None, sentence.to_owned());
-    };
-    let Some(end) = rest.find(']') else {
-        return (None, sentence.to_owned());
-    };
-    let name = normalize_emotion(&rest[..end]);
-    (Some(name), rest[end + 1..].trim_start().to_owned())
-}
+pub use nomifun_common::stage_direction::strip_stage_directions;
 
 /// Terminators that end a sentence. `\n` counts: the model uses it as a beat.
 const TERMINATORS: [char; 9] = ['。', '！', '？', '；', '!', '?', ';', '\n', '.'];
-
-/// Remove every `[emotion:name]` marker anywhere in the text, not just a leading
-/// one. `strip_emotion` consumes the leading marker to drive the face; a model
-/// that emits one mid-line (against instructions) would otherwise have it shown
-/// on the OLED and read aloud verbatim.
-pub fn strip_emotion_markers(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("[emotion:") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start..];
-        match after.find(']') {
-            Some(end) => rest = &after[end + 1..],
-            // No closing bracket: not a real marker, keep the remainder as text.
-            None => {
-                out.push_str(after);
-                return out;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
 
 /// A character a speech engine cannot voice: emoji, pictographs, dingbats,
 /// arrows, technical symbols, variation selectors and (non-whitespace) control
@@ -114,16 +50,16 @@ fn is_non_speech_char(ch: char) -> bool {
     )
 }
 
-/// The text that is safe to hand a TTS engine: emotion markers removed, emoji
+/// The text that is safe to hand a TTS engine: stage directions removed, emoji
 /// and other non-speech symbols dropped, runs of whitespace collapsed to one
 /// space, trimmed. Returns an empty string when nothing speakable remains (a
-/// sentence that was only an emoji or a stray marker) — the caller then skips
-/// synthesis instead of letting the engine 400 and cut the voice off.
+/// sentence that was only an emoji or only a stage direction) — the caller then
+/// skips synthesis instead of letting the engine 400 and cut the voice off.
 pub fn sanitize_for_speech(text: &str) -> String {
-    let without_markers = strip_emotion_markers(text);
-    let mut out = String::with_capacity(without_markers.len());
+    let guarded = strip_stage_directions(text);
+    let mut out = String::with_capacity(guarded.len());
     let mut last_was_space = false;
-    for ch in without_markers.chars() {
+    for ch in guarded.chars() {
         if ch.is_whitespace() {
             if !last_was_space && !out.is_empty() {
                 out.push(' ');
@@ -140,6 +76,22 @@ pub fn sanitize_for_speech(text: &str) -> String {
     out.trim().to_owned()
 }
 
+
+/// The text the device's OLED can actually render.
+///
+/// Deliberately the same cleaning as [`sanitize_for_speech`]: every class of
+/// character a speech engine cannot voice — emoji, pictographs, dingbats,
+/// arrows, technical symbols — is also missing from the 14px CJK font the
+/// firmware draws with, where it comes out as a hollow box. Removing bracketed
+/// runs alone (which is what this used to do) left `🌱` on the screen and pushed
+/// the firmware into carrying its own duplicate sanitiser; the gateway owns the
+/// wire format, so it cleans both copies.
+///
+/// Kept as a separate name from the speech copy so the two call sites read as
+/// what they mean, and so they can diverge if a device ever ships an emoji font.
+pub fn sanitize_for_display(text: &str) -> String {
+    sanitize_for_speech(text)
+}
 
 /// Buffers streamed text and hands back whole sentences.
 #[derive(Debug, Default)]
@@ -250,50 +202,6 @@ mod tests {
     }
 
     #[test]
-    fn strips_a_leading_emotion_marker() {
-        let (emotion, text) = strip_emotion("[emotion:happy] 你好呀");
-        assert_eq!(emotion, Some("happy"));
-        assert_eq!(text, "你好呀");
-    }
-
-    #[test]
-    fn unknown_emotion_name_falls_back_to_neutral() {
-        let (emotion, text) = strip_emotion("[emotion:ecstatic]太好了");
-        assert_eq!(emotion, Some("neutral"), "the firmware only knows 21 names");
-        assert_eq!(text, "太好了");
-    }
-
-    #[test]
-    fn sentence_without_marker_is_untouched() {
-        let (emotion, text) = strip_emotion("就这样");
-        assert_eq!(emotion, None);
-        assert_eq!(text, "就这样");
-    }
-
-    #[test]
-    fn marker_must_be_at_the_start_to_count() {
-        let (emotion, text) = strip_emotion("我觉得 [emotion:sad] 不太好");
-        assert_eq!(emotion, None);
-        assert_eq!(text, "我觉得 [emotion:sad] 不太好");
-    }
-
-    #[test]
-    fn normalize_accepts_all_21_firmware_names() {
-        assert_eq!(EMOTIONS.len(), 21);
-        for name in EMOTIONS {
-            assert_eq!(
-                normalize_emotion(name),
-                name,
-                "{name} must survive normalisation"
-            );
-        }
-        assert_eq!(normalize_emotion("HAPPY"), "happy", "case-insensitive");
-        assert_eq!(normalize_emotion(" happy "), "happy", "trimmed");
-        assert_eq!(normalize_emotion("nonsense"), "neutral");
-        assert_eq!(normalize_emotion(""), "neutral");
-    }
-
-    #[test]
     fn sanitize_drops_emoji_but_keeps_the_words() {
         // The reported case: an emoji in the middle of a reply must not reach the
         // TTS engine, but the sentence around it must still be spoken.
@@ -303,14 +211,23 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_strips_emotion_markers_anywhere() {
-        assert_eq!(sanitize_for_speech("[emotion:happy]你好"), "你好");
+    fn sanitize_strips_stage_directions_anywhere() {
+        assert_eq!(sanitize_for_speech("[winking]你好"), "你好");
         assert_eq!(
-            sanitize_for_speech("我觉得 [emotion:sad] 不太好"),
+            sanitize_for_speech("我觉得 [sighs] 不太好"),
             "我觉得 不太好",
-            "a mid-line marker is removed too, not spoken verbatim"
+            "a mid-line stage direction is removed too, not spoken verbatim"
         );
-        assert_eq!(sanitize_for_speech("[emotion:relaxed] 北京现在是 🌤️"), "北京现在是");
+        assert_eq!(
+            sanitize_for_speech("[emotion:relaxed] 北京现在是 🌤️"),
+            "北京现在是",
+            "the dead marker syntax is only one shape of the same guard"
+        );
+        assert_eq!(
+            sanitize_for_speech("见附录[2]和[附录3]"),
+            "见附录[2]和[附录3]",
+            "real bracketed content is spoken, not silently deleted"
+        );
     }
 
     #[test]
@@ -325,13 +242,28 @@ mod tests {
         assert!(out.contains("真的？"));
     }
 
+    /// The screen copy used to remove bracketed runs and nothing else, which left
+    /// emoji on a 14px CJK font that has no glyph for them — the device drew a
+    /// hollow box, and the firmware grew its own duplicate sanitiser to
+    /// compensate. The gateway owns the wire format, so the screen copy is
+    /// cleaned too.
     #[test]
-    fn strip_emotion_markers_leaves_ordinary_brackets_alone() {
-        assert_eq!(strip_emotion_markers("见附录[1]和[emotion:cool]备注"), "见附录[1]和备注");
+    fn the_screen_copy_drops_emoji_not_just_stage_directions() {
         assert_eq!(
-            strip_emotion_markers("未闭合 [emotion:happy 保留"),
-            "未闭合 [emotion:happy 保留",
-            "an unclosed marker is not a marker"
+            sanitize_for_display("[loving] 往往藏着最明亮的开始～ 🌱"),
+            "往往藏着最明亮的开始～",
+            "no emoji reaches the OLED, and the decorative ～ it CAN render survives"
         );
+        assert_eq!(
+            sanitize_for_display("我觉得 【sad】 不太好"),
+            "我觉得 不太好",
+            "a full-width bracketed annotation never reaches the screen either"
+        );
+        assert_eq!(
+            sanitize_for_display("突然「哗啦」一声——真的？"),
+            "突然「哗啦」一声——真的？",
+            "CJK quotes and em-dashes are in the font and must not be stripped"
+        );
+        assert_eq!(sanitize_for_display("👍"), "", "an emoji-only line leaves nothing to show");
     }
 }

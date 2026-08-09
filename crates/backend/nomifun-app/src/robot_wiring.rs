@@ -13,7 +13,7 @@ use nomifun_api_types::{
     AgentErrorOwnership, CreateConversationRequest, SendMessageRequest, SessionMcpServer,
     SessionMcpTransport, UpdateConversationRequest,
 };
-use nomifun_common::AgentType;
+use nomifun_common::{AgentType, ProviderWithModel};
 use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_ai_agent::protocol::events::AgentStreamEvent;
 use nomifun_conversation::ConversationService;
@@ -261,11 +261,50 @@ impl ProviderRowReader for AppProviderRows {
 // Conversation backend
 // ---------------------------------------------------------------------------
 
-/// The physical-body section appended to the companion persona.
+/// The robot-body section appended to the companion persona.
+///
+/// This is the only place the model is told what a *spoken* reply must look
+/// like, so it is where output discipline belongs.
+///
+/// **The model is required to emit plain spoken text, and nothing else.** There
+/// is no marker channel in this text and no vocabulary to learn: no
+/// square/full-width brackets, no stage directions or action annotations, no
+/// emoji, no markdown, no parenthetical asides.
+///
+/// That is a deliberate replacement for a deleted design. The prompt used to ask
+/// for a leading `[emotion:名]` marker out of a 21-name vocabulary so the gateway
+/// could drive the OLED face; the model emitted `[winking]` — the bare name —
+/// and every stripper keyed on the literal `"[emotion:"` matched nothing. The
+/// marker was therefore printed in the desktop transcript AND read aloud by TTS
+/// AND drove no face: broken and noisy at once. A syntax contract with an LLM is
+/// not enforceable, so it is gone rather than re-syntaxed. A PROHIBITION is far
+/// more enforceable than a syntax contract, which is exactly why this reads as
+/// one.
+///
+/// A prohibition is still not a guarantee, so both readers of the model's text
+/// strip stage directions as a backstop, syntax-agnostically
+/// (`nomifun_common::stage_direction`): the desktop relay
+/// (`stream_relay.rs`'s `robot_session` gate, which owns the live stream, the
+/// persisted `messages` row, search and the knowledge writeback) and the device
+/// path (`nomifun-robot`'s `sanitize_for_speech` / `sanitize_for_display`, which
+/// own TTS and the OLED). Those two are NOT duplicates and neither may be
+/// deleted as one: they serve different consumers off independent `broadcast`
+/// clones, and the crates may not depend on each other.
+///
+/// Facial expression still exists, but it is STATE-driven: `session.rs` sends
+/// `ServerMessage::Llm { emotion: "sad" }` when the voice link is broken or a
+/// turn failed. That is a fact the gateway owns, not a syntax it hopes for.
+///
+/// One prompt rule earns its wording carefully: **the text is read aloud**.
+/// Without saying so, models write for a display — emoji, markdown, parenthetical
+/// asides — none of which a TTS engine can voice, and some of which make it fail
+/// outright.
 fn robot_body_prompt() -> &'static str {
     "你现在通过一台物理机器人和用户说话。它有一块 OLED 表情屏、一个可以转动的头（云台）、扬声器和麦克风。\n\
+     - 你写的每一个字都会被语音合成念出声，同时显示在一块 128x64 的小屏上。所以只写能读出来的自然口语。\n\
      - 回复必须简短口语化：每句不超过 40 字，整体不超过 3 句，除非用户明确要求详细内容。\n\
-     - 每句话可以用 [emotion:名] 开头来驱动表情和头部动作，可用的名字只有：neutral, happy, laughing, funny, sad, angry, crying, loving, embarrassed, surprised, shocked, thinking, winking, cool, relaxed, delicious, kissy, confident, sleepy, silly, confused。\n\
+     - 只输出要说出来的那句话本身。不要写任何方括号或【】里的标注（例如 [winking]、[开心]、【笑】），不要写动作描写或舞台提示，不要写旁白和括号里的补充说明。\n\
+     - 不要输出 emoji、颜文字、markdown 记号（星号、井号、反引号），以及任何念不出声的符号。需要停顿就用逗号和句号。\n\
      - 需要转头、看某个方向或调音量时，用 robot_ 开头的工具。"
 }
 
@@ -282,6 +321,17 @@ fn robot_mcp_server_id(robot_id: &str) -> String {
     uuid::Builder::from_unix_timestamp_millis(0, &random_bytes)
         .into_uuid()
         .to_string()
+}
+
+/// Backfill a robot thread created before its companion had a chat model.
+///
+/// An existing selection may be the fallback chosen after a provider failure,
+/// so only a genuinely empty conversation inherits the companion model.
+fn missing_robot_thread_model(
+    current: Option<&ProviderWithModel>,
+    configured: Option<&ProviderWithModel>,
+) -> Option<ProviderWithModel> {
+    current.is_none().then(|| configured.cloned()).flatten()
 }
 
 /// Real conversation access for one installation.
@@ -454,6 +504,59 @@ impl AppRobotBackend {
             .as_str()
             .map(str::to_owned)
     }
+
+    /// A robot can connect before the user finishes configuring its companion.
+    /// The thread is durable, so creation-time model copying alone leaves that
+    /// thread permanently unconfigured. Heal it from the live companion profile
+    /// while preserving any existing selection (including a fallback model).
+    async fn backfill_companion_model_if_missing(
+        &self,
+        conversation_id: &str,
+    ) -> anyhow::Result<()> {
+        let conversation = self
+            .conversations
+            .get(&self.owner_user_id, conversation_id)
+            .await?;
+        if conversation.model.is_some() {
+            return Ok(());
+        }
+
+        let companion_id = conversation
+            .extra
+            .get("companion_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("conversation is not a robot thread"))?;
+        let profile = self.companions.get_companion(companion_id).await?;
+        let Some(model) = missing_robot_thread_model(None, profile.model.as_ref()) else {
+            return Ok(());
+        };
+
+        tracing::info!(
+            conversation_id,
+            companion_id,
+            provider_id = %model.provider_id,
+            model = %model.model,
+            "robot: backfilling the companion chat model onto an unconfigured thread"
+        );
+        self.conversations
+            .update(
+                &self.owner_user_id,
+                conversation_id,
+                UpdateConversationRequest {
+                    name: None,
+                    pinned: None,
+                    model: Some(model),
+                    delegation_policy: None,
+                    execution_model_pool: None,
+                    decision_policy: None,
+                    execution_template_id: None,
+                    extra: None,
+                },
+                &self.runtime_registry,
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -473,6 +576,7 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
                 patch["session_mcp_servers"] = serde_json::to_value(servers)?;
             }
             self.conversations.update_extra(&existing, patch).await?;
+            self.backfill_companion_model_if_missing(&existing).await?;
             return Ok(existing);
         }
 
@@ -538,6 +642,12 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
     ) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
         if use_fallback_model {
             self.apply_fallback_model(conversation_id).await?;
+        } else {
+            // The companion may have been configured after this durable robot
+            // thread was first created. Resolve that race on the next utterance,
+            // even when the device stayed connected and never re-ran handshake.
+            self.backfill_companion_model_if_missing(conversation_id)
+                .await?;
         }
         let request = SendMessageRequest {
             content: text.to_owned(),
@@ -571,21 +681,17 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
                 let _ = tx.send(TurnEvent::Done).await;
                 return;
             };
-            loop {
+            let mut reducer = SpokenReplyReducer::default();
+            'stream: loop {
                 match stream.recv().await {
-                    Ok(event) => match reduce_event(event) {
-                        Some(TurnEvent::Done) => {
-                            let _ = tx.send(TurnEvent::Done).await;
-                            break;
-                        }
-                        Some(reduced) => {
-                            let terminal = matches!(reduced, TurnEvent::Failed { .. });
+                    Ok(event) => {
+                        for reduced in reducer.push(event) {
+                            let terminal = matches!(reduced, TurnEvent::Done | TurnEvent::Failed { .. });
                             if tx.send(reduced).await.is_err() || terminal {
-                                break;
+                                break 'stream;
                             }
                         }
-                        None => {}
-                    },
+                    }
                     // A lagged or closed broadcast ends the turn rather than
                     // leaving the device listening to nothing forever.
                     Err(_) => {
@@ -663,29 +769,73 @@ async fn wait_for_runtime_subscription(
     }
 }
 
-/// Reduce the agent's rich event stream to the three things the downlink needs.
+/// Reduce the agent's rich event stream to the final spoken reply.
 ///
-/// `provider_fault` decides whether a fallback-model retry makes sense, and the
-/// platform already classifies that for us: `UserLlmProvider` and
-/// `UnknownUpstream` are upstream problems, everything else is ours or the
-/// user's and would fail identically on the fallback model.
-fn reduce_event(event: AgentStreamEvent) -> Option<TurnEvent> {
-    match event {
-        AgentStreamEvent::Text(data) => Some(TurnEvent::Text(data.content)),
-        AgentStreamEvent::Finish(_) => Some(TurnEvent::Done),
-        AgentStreamEvent::Error(data) => {
-            let provider_fault = matches!(
-                data.ownership,
-                Some(AgentErrorOwnership::UserLlmProvider) | Some(AgentErrorOwnership::UnknownUpstream)
-            );
-            Some(TurnEvent::Failed {
-                message: data.message,
-                provider_fault,
-            })
+/// Nomi can emit visible narration before each tool call ("let me check"), as
+/// well as typed `Thinking` events. Both are execution progress, not the answer
+/// the robot should speak. A tool/thinking boundary invalidates text collected
+/// before it; only text produced after the last such boundary is released when
+/// the whole turn finishes.
+#[derive(Default)]
+struct SpokenReplyReducer {
+    candidate: String,
+}
+
+impl SpokenReplyReducer {
+    fn push(&mut self, event: AgentStreamEvent) -> Vec<TurnEvent> {
+        match event {
+            AgentStreamEvent::Start(_) => {
+                self.candidate.clear();
+                Vec::new()
+            }
+            AgentStreamEvent::Text(data) => {
+                self.candidate.push_str(&data.content);
+                Vec::new()
+            }
+            AgentStreamEvent::Thinking(data) => {
+                // A completion marker only closes the existing thinking card;
+                // it is not the start of a new model pass.
+                if data.status.as_deref() != Some("done") {
+                    self.candidate.clear();
+                }
+                Vec::new()
+            }
+            AgentStreamEvent::Plan(_)
+            | AgentStreamEvent::ToolCall(_)
+            | AgentStreamEvent::AcpToolCall(_)
+            | AgentStreamEvent::ToolGroup(_)
+            | AgentStreamEvent::Permission(_)
+            | AgentStreamEvent::AcpPermission(_) => {
+                self.candidate.clear();
+                Vec::new()
+            }
+            AgentStreamEvent::Finish(_) => {
+                let answer = std::mem::take(&mut self.candidate);
+                let mut reduced = Vec::with_capacity(2);
+                if !answer.trim().is_empty() {
+                    reduced.push(TurnEvent::Text(answer));
+                }
+                reduced.push(TurnEvent::Done);
+                reduced
+            }
+            AgentStreamEvent::Error(data) => {
+                self.candidate.clear();
+                // `provider_fault` decides whether a fallback-model retry makes
+                // sense. The platform already classifies upstream ownership.
+                let provider_fault = matches!(
+                    data.ownership,
+                    Some(AgentErrorOwnership::UserLlmProvider)
+                        | Some(AgentErrorOwnership::UnknownUpstream)
+                );
+                vec![TurnEvent::Failed {
+                    message: data.message,
+                    provider_fault,
+                }]
+            }
+            // Metrics, status and UI-only metadata do not invalidate an answer
+            // that has already been produced immediately before Finish.
+            _ => Vec::new(),
         }
-        // Tool cards, thinking, plans, tips: visible in the desktop UI, not
-        // something a speaker can convey.
-        _ => None,
     }
 }
 
@@ -757,6 +907,106 @@ pub fn mount(
 mod tests {
     use super::*;
 
+    fn model(provider_id: &str, name: &str) -> ProviderWithModel {
+        ProviderWithModel {
+            provider_id: provider_id.to_owned(),
+            model: name.to_owned(),
+            use_model: None,
+        }
+    }
+
+    fn running_tool_call() -> AgentStreamEvent {
+        use nomifun_ai_agent::protocol::events::tool_call::{
+            ToolCallEventData, ToolCallStatus,
+        };
+
+        AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "tool-1".to_owned(),
+            name: "Browser".to_owned(),
+            args: serde_json::json!({"action": "observe"}),
+            status: ToolCallStatus::Running,
+            input: None,
+            output: None,
+            description: None,
+            retry: None,
+            artifacts: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_missing_robot_thread_model_inherits_the_companion_model() {
+        let configured = model("provider-a", "chat-primary");
+        assert_eq!(
+            missing_robot_thread_model(None, Some(&configured)),
+            Some(configured)
+        );
+    }
+
+    #[test]
+    fn an_existing_robot_thread_model_is_never_overwritten() {
+        let fallback = model("provider-b", "chat-fallback");
+        let configured = model("provider-a", "chat-primary");
+        assert_eq!(
+            missing_robot_thread_model(Some(&fallback), Some(&configured)),
+            None,
+            "the current selection may be a deliberately persistent fallback"
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_companion_cannot_backfill_a_robot_thread() {
+        assert_eq!(missing_robot_thread_model(None, None), None);
+    }
+
+    /// The prompt must PROHIBIT, not specify. It once specified a marker syntax
+    /// (`[emotion:名]` plus a 21-name vocabulary) and the model emitted
+    /// `[winking]` instead — a syntax contract with an LLM is not enforceable, so
+    /// the contract is deleted and only the prohibition remains. This test is the
+    /// guard against re-introducing one: no marker syntax, no vocabulary, and the
+    /// spoken-aloud rule and the bracket ban both intact.
+    #[test]
+    fn the_prompt_bans_brackets_and_offers_no_marker_syntax() {
+        let prompt = robot_body_prompt();
+
+        assert!(
+            !prompt.contains("[emotion:") && !prompt.contains("emotion:名"),
+            "the deleted marker syntax must not come back: {prompt}"
+        );
+        for name in ["neutral", "laughing", "embarrassed", "kissy", "confused"] {
+            assert!(
+                !prompt.contains(name),
+                "{name} is part of a vocabulary the model was told to emit; there is no vocabulary now"
+            );
+        }
+
+        assert!(
+            prompt.contains("方括号") && prompt.contains("【】"),
+            "both bracket shapes must be forbidden by name"
+        );
+        assert!(
+            prompt.contains("[winking]"),
+            "the ban names the exact form the model actually emitted, which is what makes it land"
+        );
+        assert!(
+            prompt.contains("动作描写") || prompt.contains("舞台提示"),
+            "stage directions and action annotations must be forbidden"
+        );
+        assert!(
+            prompt.contains("旁白") || prompt.contains("括号里的补充说明"),
+            "parenthetical asides must be forbidden"
+        );
+        assert!(prompt.contains("emoji"), "nothing tells the model to skip emoji");
+        assert!(prompt.contains("markdown"), "markdown must be forbidden");
+        assert!(
+            prompt.contains("念出声") || prompt.contains("念出来"),
+            "the model is no longer told the text is spoken aloud"
+        );
+        // The short-reply rules and the tool guidance are the parts that were
+        // working and are deliberately kept.
+        assert!(prompt.contains("不超过 40 字") && prompt.contains("不超过 3 句"));
+        assert!(prompt.contains("robot_"), "the tool guidance is still needed");
+    }
+
     #[test]
     fn a_robots_mcp_server_id_is_a_stable_uuidv7() {
         let first = robot_mcp_server_id("aa:bb:cc:dd:ee:ff");
@@ -787,18 +1037,20 @@ mod tests {
             })
         };
         assert_eq!(
-            reduce_event(error(Some(AgentErrorOwnership::UserLlmProvider))),
-            Some(TurnEvent::Failed {
+            SpokenReplyReducer::default()
+                .push(error(Some(AgentErrorOwnership::UserLlmProvider))),
+            vec![TurnEvent::Failed {
                 message: "boom".to_owned(),
                 provider_fault: true
-            })
+            }]
         );
         assert_eq!(
-            reduce_event(error(Some(AgentErrorOwnership::UnknownUpstream))),
-            Some(TurnEvent::Failed {
+            SpokenReplyReducer::default()
+                .push(error(Some(AgentErrorOwnership::UnknownUpstream))),
+            vec![TurnEvent::Failed {
                 message: "boom".to_owned(),
                 provider_fault: true
-            })
+            }]
         );
         for ours in [
             Some(AgentErrorOwnership::Nomifun),
@@ -806,41 +1058,96 @@ mod tests {
             None,
         ] {
             assert_eq!(
-                reduce_event(error(ours)),
-                Some(TurnEvent::Failed {
+                SpokenReplyReducer::default().push(error(ours)),
+                vec![TurnEvent::Failed {
                     message: "boom".to_owned(),
                     provider_fault: false
-                }),
+                }],
                 "{ours:?} would fail the same way on the fallback model"
             );
         }
     }
 
     #[test]
-    fn only_text_and_terminal_events_reach_the_speaker() {
+    fn thinking_is_never_spoken_and_text_waits_for_finish() {
+        use nomifun_ai_agent::protocol::events::{TextEventData, ThinkingEventData};
+
+        let mut reducer = SpokenReplyReducer::default();
         assert_eq!(
-            reduce_event(AgentStreamEvent::Text(
-                nomifun_ai_agent::protocol::events::TextEventData {
-                    content: "在呢".to_owned(),
-                }
-            )),
-            Some(TurnEvent::Text("在呢".to_owned()))
+            reducer.push(AgentStreamEvent::Thinking(ThinkingEventData {
+                content: "internal reasoning".to_owned(),
+                subject: None,
+                duration: None,
+                status: None,
+            })),
+            vec![]
         );
         assert_eq!(
-            reduce_event(AgentStreamEvent::Finish(Default::default())),
-            Some(TurnEvent::Done)
+            reducer.push(AgentStreamEvent::Text(TextEventData {
+                content: "在".to_owned(),
+            })),
+            vec![],
+            "an unconfirmed text delta must not reach TTS"
         );
         assert_eq!(
-            reduce_event(AgentStreamEvent::Thinking(
-                nomifun_ai_agent::protocol::events::ThinkingEventData {
-                    content: "hmm".to_owned(),
-                    subject: None,
-                    duration: None,
-                    status: None,
-                }
-            )),
-            None,
-            "a speaker cannot convey a thinking card"
+            reducer.push(AgentStreamEvent::Text(TextEventData {
+                content: "呢".to_owned(),
+            })),
+            vec![]
+        );
+        assert_eq!(
+            reducer.push(AgentStreamEvent::Finish(Default::default())),
+            vec![TurnEvent::Text("在呢".to_owned()), TurnEvent::Done]
+        );
+    }
+
+    #[test]
+    fn tool_progress_text_is_discarded_and_only_the_final_answer_is_spoken() {
+        use nomifun_ai_agent::protocol::events::TextEventData;
+
+        let mut reducer = SpokenReplyReducer::default();
+        assert!(
+            reducer
+                .push(AgentStreamEvent::Text(TextEventData {
+                    content: "我先搜索一下。".to_owned(),
+                }))
+                .is_empty()
+        );
+        assert!(reducer.push(running_tool_call()).is_empty());
+        assert!(
+            reducer
+                .push(AgentStreamEvent::Text(TextEventData {
+                    content: "已经为你打开视频。".to_owned(),
+                }))
+                .is_empty()
+        );
+        assert_eq!(
+            reducer.push(AgentStreamEvent::Finish(Default::default())),
+            vec![
+                TurnEvent::Text("已经为你打开视频。".to_owned()),
+                TurnEvent::Done
+            ],
+            "the narration before the tool call must never become TTS input"
+        );
+    }
+
+    #[test]
+    fn tool_progress_without_a_final_answer_stays_silent() {
+        use nomifun_ai_agent::protocol::events::TextEventData;
+
+        let mut reducer = SpokenReplyReducer::default();
+        assert!(
+            reducer
+                .push(AgentStreamEvent::Text(TextEventData {
+                    content: "我正在处理。".to_owned(),
+                }))
+                .is_empty()
+        );
+        assert!(reducer.push(running_tool_call()).is_empty());
+        assert_eq!(
+            reducer.push(AgentStreamEvent::Finish(Default::default())),
+            vec![TurnEvent::Done],
+            "stale progress narration must not be spoken when no final text follows the tool"
         );
     }
 }

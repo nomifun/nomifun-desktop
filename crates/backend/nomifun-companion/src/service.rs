@@ -170,7 +170,12 @@ pub trait CompanionCleanupHook: Send + Sync {
     /// channel sessions bound to this companion so they recreate with the new model
     /// on the next inbound message. Default no-op so existing hooks (knowledge
     /// cleanup) need not implement it.
-    async fn on_companion_model_changed(&self, _companion_id: &str) {}
+    async fn on_companion_model_changed(
+        &self,
+        _companion_id: &str,
+        _model: Option<&nomifun_common::ProviderWithModel>,
+    ) {
+    }
 }
 
 pub struct CompanionService {
@@ -676,7 +681,11 @@ impl CompanionService {
             // best-effort，不阻断 patch。
             if let Some(hooks) = self.cleanup_hooks.get() {
                 for hook in hooks {
-                    hook.on_companion_model_changed(&profile.companion_id).await;
+                    hook.on_companion_model_changed(
+                        &profile.companion_id,
+                        profile.model.as_ref(),
+                    )
+                    .await;
                 }
             }
         }

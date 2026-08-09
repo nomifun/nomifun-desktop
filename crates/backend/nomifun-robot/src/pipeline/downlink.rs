@@ -5,10 +5,13 @@
 //! 1. The decode queue holds ~40 packets (≈2.4 s) and **silently drops** what
 //!    does not fit. Bursting a whole sentence tears the audio, so frames leave
 //!    here on a 60 ms cadence with a small priming burst to cover jitter.
-//! 2. `abort` does **not** flush the device's own queue. Cancelling a reply
-//!    therefore means dropping our queued frames *immediately* — anything we
-//!    still hand over will be played. That is what generations are for: `flush`
-//!    bumps the counter and every frame tagged with an older one is discarded.
+//! 2. `abort` used not to flush the device's own queue, so cancelling a reply
+//!    meant dropping our queued frames *immediately* — anything we still handed
+//!    over would be played. That is what generations are for: `flush` bumps the
+//!    counter and every frame tagged with an older one is discarded. Current
+//!    firmware does now flush on abort (`AbortSpeaking` calls `ResetDecoder`),
+//!    but generations stay: they are what makes cancellation correct against any
+//!    firmware version, and they cost nothing.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,13 +61,37 @@ impl DownlinkPacer {
                     current = None;
                     continue;
                 }
+                let now = Instant::now();
                 let (start, index) = match current {
                     Some((generation, start, index)) if generation == item.generation => {
-                        (start, index)
+                        // The deadline this frame would inherit. If it is already
+                        // in the past, the pacer has been idle — a reply is many
+                        // sentences and each one is synthesised by a network round
+                        // trip *before* it is enqueued, so between sentences there
+                        // is nothing to send. Keeping the old anchor turns that
+                        // idle time into credit: every deadline is overdue, so the
+                        // whole next sentence leaves at once. The credit also
+                        // accumulates across sentences, so a long reply eventually
+                        // dumps more than the device's ~40-packet decode queue
+                        // holds, it silently drops the overflow, and the listener
+                        // hears a fragment skipped mid-reply. Re-base instead, so
+                        // the sentence re-primes into a jitter buffer that has
+                        // drained anyway while we waited for the synthesiser.
+                        let due = start
+                            + frame_gap
+                                * u32::try_from(
+                                    index.saturating_sub(PRIME_FRAMES.saturating_sub(1)),
+                                )
+                                .unwrap_or(u32::MAX);
+                        if now > due + frame_gap {
+                            (now, 0)
+                        } else {
+                            (start, index)
+                        }
                     }
                     // New (or resumed) generation: restart the cadence so the
                     // next reply primes instead of inheriting an old deadline.
-                    _ => (Instant::now(), 0),
+                    _ => (now, 0),
                 };
                 // The first `PRIME_FRAMES` leave together; from then on one frame
                 // per frame duration, which is exactly playback speed. Text
@@ -204,6 +231,66 @@ mod tests {
             elapsed >= expected && elapsed < expected + Duration::from_millis(180),
             "expected ~{expected:?} of pacing, got {elapsed:?}"
         );
+    }
+
+    /// A reply is many sentences, and each one is synthesised by a network round
+    /// trip *before* it is enqueued. The pacer must not treat that idle gap as
+    /// credit: if it does, the whole next sentence leaves at once, the device's
+    /// ~40-packet decode queue silently drops the overflow, and the listener
+    /// hears a fragment skipped mid-reply.
+    #[tokio::test(start_paused = true)]
+    async fn a_sentence_arriving_after_tts_latency_must_not_burst() {
+        let (out_tx, mut out_rx) = mpsc::channel(512);
+        let (pacer, _task) = DownlinkPacer::spawn(out_tx);
+        let generation = pacer.generation();
+
+        // Sentence 1 goes out on cadence.
+        pacer.enqueue(generation, packets(10)).await;
+        assert_eq!(drain(&mut out_rx, 10).await, 10, "sentence 1 delivered");
+
+        // The gateway now calls the TTS provider for sentence 2. The pacer is
+        // idle for that whole round trip.
+        tokio::time::advance(Duration::from_millis(1500)).await;
+
+        let started = tokio::time::Instant::now();
+        pacer.enqueue(generation, packets(50)).await;
+        assert_eq!(drain(&mut out_rx, 50).await, 50, "sentence 2 delivered");
+        let elapsed = started.elapsed();
+
+        // 3 frames prime, the other 47 are one per 60 ms of playback.
+        let expected = Duration::from_millis((50 - PRIME_FRAMES) * FRAME_DURATION_MS as u64);
+        assert!(
+            elapsed >= expected,
+            "sentence 2 was burst after the TTS gap: delivered 50 frames in {elapsed:?}, \
+             but 50 frames are {expected:?} of playback. The device drops the overflow."
+        );
+    }
+
+    /// The real shape of the bug: credit accumulated across several sentences.
+    /// Each TTS round trip adds idle time, and with a stale anchor every gap is
+    /// banked, so by the third or fourth sentence the pacer dumps several
+    /// seconds at once — far past the device's ~40-packet ceiling.
+    #[tokio::test(start_paused = true)]
+    async fn idle_gaps_do_not_accumulate_into_credit_across_sentences() {
+        let (out_tx, mut out_rx) = mpsc::channel(1024);
+        let (pacer, _task) = DownlinkPacer::spawn(out_tx);
+        let generation = pacer.generation();
+
+        // Four sentences, each preceded by a synthesiser round trip.
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_millis(900)).await;
+            let started = tokio::time::Instant::now();
+            pacer.enqueue(generation, packets(20)).await;
+            assert_eq!(drain(&mut out_rx, 20).await, 20, "sentence delivered");
+            let elapsed = started.elapsed();
+            let expected =
+                Duration::from_millis((20 - PRIME_FRAMES) * FRAME_DURATION_MS as u64);
+            assert!(
+                elapsed >= expected,
+                "a sentence was burst: 20 frames in {elapsed:?}, but that is {expected:?} \
+                 of playback. Banked idle time must not become credit."
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

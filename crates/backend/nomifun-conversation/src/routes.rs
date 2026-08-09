@@ -109,6 +109,13 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "companion",
             "companion_id",
             "channel_platform",
+            // Robot gateway identity. `robot_session` is a relay behaviour gate
+            // (it deletes bracketed stage directions from assistant text) and
+            // already hides the thread from the work list, so open JSON must not
+            // be able to set it. The real writer is nomifun-app's robot wiring,
+            // which goes through the service, not this route.
+            "robot_session",
+            "robot_id",
             "cron_job_id",
             "mcp_server_ids",
             "mcp_servers",
@@ -803,6 +810,8 @@ mod tests {
             "desktopGateway": true,
             "desktop_gateway": true,
             "companion_session": true,
+            "robot_session": true,
+            "robot_id": "aa:bb:cc:dd:ee:ff",
             "summon": { "companion_id": "0190f5fe-7c00-7a00-8abc-000000000001", "summoned_at": 1 },
             "backend": "claude",
         });
@@ -810,6 +819,11 @@ mod tests {
         assert!(extra.get("desktopGateway").is_none());
         assert!(extra.get("desktop_gateway").is_none());
         assert!(extra.get("companion_session").is_none());
+        assert!(
+            extra.get("robot_session").is_none(),
+            "robot_session gates relay text rewriting; open JSON cannot forge it"
+        );
+        assert!(extra.get("robot_id").is_none());
         assert!(
             extra.get("summon").is_none(),
             "summon is only written through its idle-validated endpoint"

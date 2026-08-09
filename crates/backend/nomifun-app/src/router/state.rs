@@ -1561,10 +1561,18 @@ pub fn build_companion_state(
         ));
     }
 
+    let conv_service = Arc::new(conv_service);
+    let robot_model_sync = Arc::new(CompanionRobotModelSync {
+        conversations: conv_service.clone(),
+        runtime_registry: services.agent_runtime_registry.clone(),
+        owner_user_id: services.authoritative_user_id.clone(),
+    });
+
     // Deleting a companion must also drop its ('companion', id) knowledge-binding row so
     // bindings don't orphan (T3.3). Switching a companion's chat model (single source
-    // of truth) must clear its bound IM channel sessions so they recreate with
-    // the new model; deleting a companion likewise clears them. Both via cleanup hooks.
+    // of truth) clears bound IM sessions and retargets durable robot threads.
+    // Deleting a companion likewise clears its channel bindings. All are
+    // best-effort cleanup hooks.
     services.companion_service.set_cleanup_hooks(vec![
         Arc::new(CompanionKnowledgeCleanup {
             knowledge: services.knowledge_service.clone(),
@@ -1572,11 +1580,28 @@ pub fn build_companion_state(
         Arc::new(CompanionChannelModelSync {
             manager: channel_manager,
         }),
+        robot_model_sync.clone(),
     ]);
+
+    // Repair robot threads created while their companion had no chat model.
+    // This boot pass is deliberately missing-only: a fallback selected after a
+    // provider fault remains sticky across restart. Explicit settings changes
+    // use the hook above and intentionally retarget every robot thread.
+    let companion_service = services.companion_service.clone();
+    tokio::spawn(async move {
+        for profile in companion_service.list_companions().await {
+            let Some(model) = profile.model.as_ref() else {
+                continue;
+            };
+            robot_model_sync
+                .sync(&profile.companion_id, model, true)
+                .await;
+        }
+    });
 
     services
         .companion_service
-        .attach_companion(Arc::new(conv_service), services.agent_runtime_registry.clone());
+        .attach_companion(conv_service, services.agent_runtime_registry.clone());
     CompanionRouterState::new(services.companion_service.clone())
 }
 
@@ -1890,8 +1915,73 @@ impl nomifun_companion::service::CompanionCleanupHook for CompanionChannelModelS
     async fn on_companion_deleted(&self, companion_id: &str) {
         self.manager.unbind_channels_for_deleted_companion(companion_id).await;
     }
-    async fn on_companion_model_changed(&self, companion_id: &str) {
+    async fn on_companion_model_changed(
+        &self,
+        companion_id: &str,
+        _model: Option<&nomifun_common::ProviderWithModel>,
+    ) {
         self.manager.clear_sessions_for_companion(companion_id).await;
+    }
+}
+
+/// Companion model-switch / boot repair -> durable robot conversation sync.
+///
+/// Robot threads are intentionally not part of the companion chat registry,
+/// but they carry the same backend-owned `extra.companion_id` identity and use
+/// the companion chat model as their source of truth.
+struct CompanionRobotModelSync {
+    conversations: Arc<ConversationService>,
+    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    owner_user_id: Arc<str>,
+}
+
+impl CompanionRobotModelSync {
+    async fn sync(
+        &self,
+        companion_id: &str,
+        model: &nomifun_common::ProviderWithModel,
+        only_missing: bool,
+    ) {
+        match self
+            .conversations
+            .sync_robot_thread_models_for_companion(
+                self.owner_user_id.as_ref(),
+                companion_id,
+                model,
+                only_missing,
+                &self.runtime_registry,
+            )
+            .await
+        {
+            Ok(0) => {}
+            Ok(updated) => tracing::info!(
+                companion_id,
+                updated,
+                only_missing,
+                "synchronized companion chat model to robot conversations"
+            ),
+            Err(error) => tracing::warn!(
+                companion_id,
+                %error,
+                only_missing,
+                "failed to synchronize companion chat model to robot conversations"
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_companion::service::CompanionCleanupHook for CompanionRobotModelSync {
+    async fn on_companion_deleted(&self, _companion_id: &str) {}
+
+    async fn on_companion_model_changed(
+        &self,
+        companion_id: &str,
+        model: Option<&nomifun_common::ProviderWithModel>,
+    ) {
+        if let Some(model) = model {
+            self.sync(companion_id, model, false).await;
+        }
     }
 }
 

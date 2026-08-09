@@ -267,7 +267,7 @@ async fn a_device_reports_gets_claimed_talks_and_is_interrupted() {
     // 4. Connect the audio channel and handshake.
     h.speech.push_transcript("讲个故事");
     h.dispatcher.script_turn(vec![
-        TurnEvent::Text("[emotion:happy] 从前有座山。".into()),
+        TurnEvent::Text("[winking] 从前有座山。".into()),
         TurnEvent::Text("山上有座庙。".into()),
         TurnEvent::Done,
     ]);
@@ -308,7 +308,6 @@ async fn a_device_reports_gets_claimed_talks_and_is_interrupted() {
 
     // 6. Expect the documented downlink sequence, and audio as bare binary.
     let mut seen_stt = false;
-    let mut seen_emotion = false;
     let mut seen_sentences = 0;
     let mut audio_frames = 0;
     // Both sentence headers land before the pacer has released a single 60 ms
@@ -323,14 +322,14 @@ async fn a_device_reports_gets_claimed_talks_and_is_interrupted() {
                         assert_eq!(value["text"], "讲个故事");
                         seen_stt = true;
                     }
-                    Some("llm") => {
-                        assert_eq!(value["emotion"], "happy");
-                        seen_emotion = true;
-                    }
+                    Some("llm") => panic!(
+                        "a healthy turn sets no face; model text is not an expression channel: {value}"
+                    ),
                     Some("tts") if value["state"] == "sentence_start" => {
+                        let text = value["text"].as_str().unwrap();
                         assert!(
-                            !value["text"].as_str().unwrap().contains("[emotion:"),
-                            "the marker must be stripped before it reaches the screen"
+                            !text.contains('[') && !text.contains('】'),
+                            "a bracketed annotation must never reach the screen: {text}"
                         );
                         seen_sentences += 1;
                     }
@@ -342,7 +341,7 @@ async fn a_device_reports_gets_claimed_talks_and_is_interrupted() {
             _ => {}
         }
     }
-    assert!(seen_stt && seen_emotion, "stt={seen_stt} emotion={seen_emotion}");
+    assert!(seen_stt, "the transcript must reach the device");
     assert_eq!(seen_sentences, 2);
     assert!(
         audio_frames > 0,

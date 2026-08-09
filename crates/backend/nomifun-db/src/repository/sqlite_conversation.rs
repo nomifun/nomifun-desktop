@@ -4339,6 +4339,25 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(rows)
     }
 
+    async fn list_robot_threads_by_companion(
+        &self,
+        user_id: &str,
+        companion_id: &str,
+    ) -> Result<Vec<ConversationRow>, DbError> {
+        Ok(sqlx::query_as::<_, ConversationRow>(
+            "SELECT * FROM conversations \
+             WHERE user_id = ? \
+               AND type = 'nomi' \
+               AND json_extract(extra, '$.companion_id') = ? \
+               AND json_extract(extra, '$.robot_session') = 1 \
+             ORDER BY updated_at DESC, conversation_id",
+        )
+        .bind(user_id)
+        .bind(companion_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     async fn list_conversations_using_model_provider(
         &self,
         provider_id: &str,
@@ -6838,6 +6857,52 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn list_robot_threads_by_companion_excludes_other_companion_sessions() {
+        let (repo, _db) = setup().await;
+        let companion_id = nomifun_common::CompanionId::new().into_string();
+        let other_companion_id = nomifun_common::CompanionId::new().into_string();
+
+        let mut robot = sample_conversation(TEST_INSTALLATION_OWNER);
+        robot.r#type = "nomi".to_owned();
+        robot.model = None;
+        robot.extra = serde_json::json!({
+            "robot_session": true,
+            "robot_id": "aa:bb:cc:dd:ee:ff",
+            "companion_session": true,
+            "companion_id": companion_id,
+        })
+        .to_string();
+        let robot_id = repo.create(&robot).await.unwrap();
+
+        let mut desktop = sample_conversation(TEST_INSTALLATION_OWNER);
+        desktop.r#type = "nomi".to_owned();
+        desktop.extra = serde_json::json!({
+            "companion_session": true,
+            "companion_id": companion_id,
+        })
+        .to_string();
+        repo.create(&desktop).await.unwrap();
+
+        let mut other_robot = sample_conversation(TEST_INSTALLATION_OWNER);
+        other_robot.r#type = "nomi".to_owned();
+        other_robot.extra = serde_json::json!({
+            "robot_session": true,
+            "robot_id": "11:22:33:44:55:66",
+            "companion_session": true,
+            "companion_id": other_companion_id,
+        })
+        .to_string();
+        repo.create(&other_robot).await.unwrap();
+
+        let rows = repo
+            .list_robot_threads_by_companion(TEST_INSTALLATION_OWNER, &companion_id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].conversation_id, robot_id);
     }
 
     #[tokio::test]

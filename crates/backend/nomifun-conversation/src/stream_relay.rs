@@ -10,7 +10,7 @@ use nomifun_ai_agent::{
     AgentSendError, AgentStreamEvent,
     artifact_store::ArtifactStore,
     protocol::events::{
-        FinishEventData, PlanEventData, ThinkingEventData, TurnStopReason,
+        FinishEventData, PlanEventData, TextEventData, ThinkingEventData, TurnStopReason,
         tool_call::{
             AcpToolCallSessionUpdateKind, AcpToolCallStatus, ToolCallEventData,
             ToolCallStatus, validate_artifact_receipt_integrity,
@@ -24,6 +24,7 @@ use crate::runtime_state::{AgentTurnCancellation, ConversationRuntimeStateServic
 use nomifun_api_types::{AgentErrorCode, ConversationRuntimeSummary, WebSocketMessage};
 use nomifun_common::{
     CompanionId, ErrorChain, MessageId, generate_id, normalize_keys_to_snake_case, now_ms,
+    stage_direction::StageDirectionFilter,
 };
 
 use crate::service::ConversationService;
@@ -1739,6 +1740,30 @@ pub struct StreamRelay {
     /// `turn.completed` payload so the companion window can tell remote IM turns
     /// from local companion turns off the wire.
     channel_platform: Option<String>,
+    /// True when this relay serves a robot gateway thread
+    /// (`conversation.extra.robot_session`). It makes the relay delete bracketed
+    /// stage directions from assistant `Text` before the WebSocket forward, so
+    /// `segment.buffer` and `full_text_buffer` read the cleaned copy.
+    ///
+    /// (i) This is a content guard, not a protocol. The robot prompt REQUIRES
+    ///     plain spoken sentences — no brackets, no stage directions, no emoji,
+    ///     no markdown — but a prompt is not a guarantee: the previous design
+    ///     asked the model for an `[emotion:name]` marker and got `[winking]`,
+    ///     which every `emotion:`-keyed stripper missed, so it was printed here
+    ///     AND read aloud by TTS. The requirement is absolute (要么展示正常内容，
+    ///     要么别展示), so the guard is syntax-agnostic and lives in
+    ///     `nomifun_common::stage_direction`.
+    /// (ii) The device path guards independently
+    ///     (`nomifun-robot`'s `sanitize_for_speech` / `sanitize_for_display`) off
+    ///     its own `broadcast` clone of the same stream. The two are not
+    ///     duplicates: this one owns the desktop transcript and the persisted
+    ///     row, that one owns TTS and the OLED, and neither crate may depend on
+    ///     the other.
+    /// (iii) `false` — the default, and the value for every ordinary chat,
+    ///     customer-service, channel and ACP conversation — means assistant text
+    ///     is never touched. Deliberately narrower than the ungated precedent of
+    ///     `strip_think_tags` / `strip_cron_commands`.
+    robot_session: bool,
     /// Phase 3 (review #1/#5): predicate telling the relay whether a PRE-RESPONSE
     /// terminal provider-fault with this error code WILL be failed over by the
     /// send loop. When it returns `true` the relay suppresses the user-visible
@@ -1821,6 +1846,7 @@ impl StreamRelay {
             companion_id: None,
             origin: None,
             channel_platform: None,
+            robot_session: false,
             failover_suppressor: None,
             runtime_state: None,
             cancellation: None,
@@ -1906,6 +1932,14 @@ impl StreamRelay {
         self
     }
 
+    /// Mark this relay as serving a robot gateway thread, which makes it delete
+    /// bracketed stage directions from assistant text (see field docs). Off by
+    /// default; the robot's own stream clone guards itself either way.
+    pub fn with_robot_session(mut self, robot_session: bool) -> Self {
+        self.robot_session = robot_session;
+        self
+    }
+
     /// Run the relay loop. Consumes `self` and runs until the agent stream ends.
     #[tracing::instrument(
         skip_all,
@@ -1977,6 +2011,9 @@ impl StreamRelay {
         info!("StreamRelay started");
 
         let mut full_text_buffer = String::new();
+        // Robot threads only (see `robot_session`): withholds at most one
+        // partial bracketed run across delta boundaries. Inert when the gate is off.
+        let mut stage_filter = StageDirectionFilter::default();
         let mut text_segments: Vec<PersistedTextSegment> = Vec::new();
         let mut active_text: Option<TextSegmentState> = None;
         let mut active_thinking: Option<ThinkingSegmentState> = None;
@@ -2125,6 +2162,34 @@ impl StreamRelay {
                     // boundary. Never drop an issued mutation to consume a
                     // later terminal: SQLite may commit the abandoned command
                     // after terminal cleanup and regress a row to `work`.
+
+                    // Robot threads: the prompt requires plain spoken sentences,
+                    // so a bracketed stage direction (`[winking]`, `[laughs]`,
+                    // the dead `[emotion:x]` syntax) is a prompt violation, not
+                    // content. Rewrite the event HERE, at the single point where
+                    // the WS forward, `segment.buffer` and `full_text_buffer` all
+                    // read `data.content` — one mutation cleans the live stream,
+                    // the persisted row, /api/messages/search and the knowledge
+                    // writeback together. Precedent: the cancellation rewrite
+                    // above. The device path guards its own copy off its own
+                    // broadcast clone.
+                    if self.robot_session {
+                        if let AgentStreamEvent::Text(data) = &mut event {
+                            data.content = stage_filter.push(&data.content);
+                        } else {
+                            // Any non-Text event ends the text run, so a
+                            // withheld partial bracket was literal text after
+                            // all — release it verbatim, matching
+                            // `strip_stage_directions`. Every
+                            // `close_active_text_segment` call in this branch is
+                            // downstream of here.
+                            self.release_withheld_text(
+                                &mut stage_filter,
+                                &mut active_text,
+                                &mut full_text_buffer,
+                            );
+                        }
+                    }
 
                     match &event {
                         AgentStreamEvent::Thinking(data) => {
@@ -3125,6 +3190,18 @@ impl StreamRelay {
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => {
+                    // The only loop exit that never passes through the
+                    // `Ok(mut event)` branch, so it owns the second (and last)
+                    // release of withheld robot text — before the terminal
+                    // cleanup block borrows `active_text` / `full_text_buffer`
+                    // and closes the segment below.
+                    if self.robot_session {
+                        self.release_withheld_text(
+                            &mut stage_filter,
+                            &mut active_text,
+                            &mut full_text_buffer,
+                        );
+                    }
                     let elapsed_ms = now_ms() - started_at;
                     warn!(
                         elapsed_ms,
@@ -4031,6 +4108,46 @@ impl StreamRelay {
             self.complete_active_thinking(active_thinking).await
         } else {
             true
+        }
+    }
+
+    /// Release whatever the robot stage-direction filter is still withholding, as
+    /// literal text, into the live stream, the active segment's buffer and the
+    /// turn's full text — exactly the three sinks the `Text` arm feeds.
+    ///
+    /// Call this at every loop exit that can reach `close_active_text_segment`
+    /// without going through the `Text` arm first, otherwise a truncated `[` at
+    /// the end of a text run is silently deleted. Today that is two sites: the
+    /// non-`Text` branch of the `Ok(mut event)` rewrite (which covers all six
+    /// in-loop `close_active_text_segment` calls reachable from a received event,
+    /// plus both `break outcome` exits) and the first statement of the
+    /// `RecvError::Closed` arm.
+    ///
+    /// WARNING: a third loop exit — or a `close_active_text_segment` call added
+    /// upstream of the rewrite — breaks this silently, with no test failure and
+    /// no log line. `robot_session_releases_truncated_bracket_before_tool_call`
+    /// pins the known paths only.
+    fn release_withheld_text(
+        &self,
+        filter: &mut StageDirectionFilter,
+        active_text: &mut Option<TextSegmentState>,
+        full_text_buffer: &mut String,
+    ) {
+        let released = filter.flush();
+        if released.is_empty() {
+            return;
+        }
+        // No active segment means no text run was open, so there is nowhere the
+        // bytes belong and no bubble they could have been part of.
+        if let Some(segment) = active_text.as_mut() {
+            self.forward_to_websocket_with_msg_id(
+                &segment.id,
+                &AgentStreamEvent::Text(TextEventData {
+                    content: released.clone(),
+                }),
+            );
+            segment.buffer.push_str(&released);
+            full_text_buffer.push_str(&released);
         }
     }
 
@@ -9319,6 +9436,267 @@ mod tests {
         assert_eq!(turn_evt.data["companion"], false);
         assert!(turn_evt.data["companion_id"].is_null());
         assert!(turn_evt.data["channel_platform"].is_null());
+    }
+
+    // ── Robot-session stage-direction guard tests ─────────────────
+
+    /// Every `type == "content"` fragment the relay broadcast, concatenated.
+    fn streamed_content(events: &[WebSocketMessage<Value>]) -> String {
+        events
+            .iter()
+            .filter(|e| e.name == "message.stream")
+            .filter(|e| e.data["type"] == "content")
+            .filter_map(|e| e.data["data"]["content"].as_str())
+            .collect()
+    }
+
+    /// The `$.content` of every persisted `text` row, in insertion order.
+    fn persisted_text(inserts: &[MessageRow]) -> Vec<String> {
+        inserts
+            .iter()
+            .filter(|row| row.r#type == "text")
+            .map(|row| {
+                serde_json::from_str::<Value>(&row.content).unwrap()["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The deltas a robot turn actually produces: the bare bracketed name the
+    /// model really emits, split across a token boundary — exactly the case a
+    /// per-delta strip cannot handle.
+    const ROBOT_STAGE_DIRECTION_DELTAS: [&str; 3] = ["[wink", "ing]你好，", "[laughs]再见。"];
+
+    #[tokio::test]
+    async fn robot_session_strips_stage_directions_from_stream_and_row() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus.clone(),
+            None,
+        )
+        .with_robot_session(true);
+
+        let mut ws_rx = bus.subscribe();
+        let rx = tx.subscribe();
+        for delta in ROBOT_STAGE_DIRECTION_DELTAS {
+            tx.send(AgentStreamEvent::Text(TextEventData {
+                content: delta.into(),
+            }))
+            .unwrap();
+        }
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+        relay.consume(rx).await;
+
+        let mut ws_events = vec![];
+        while let Ok(evt) = ws_rx.try_recv() {
+            ws_events.push(evt);
+        }
+        assert_eq!(
+            streamed_content(&ws_events),
+            "你好，再见。",
+            "the live stream never carries a stage direction, split across deltas or not"
+        );
+        assert!(
+            !ws_events
+                .iter()
+                .any(|e| e.name == "message.stream" && e.data["replace"] == true),
+            "the strip happens per delta, so no end-of-turn rewrite flickers the bubble"
+        );
+        assert_eq!(persisted_text(&repo.take_inserts()), vec!["你好，再见。"]);
+    }
+
+    /// Real bracketed content is not a stage direction, in a robot thread as much
+    /// as anywhere else. `[附录2]` is the case the user named: the guard exists so
+    /// the transcript shows normal content, and deleting a footnote reference
+    /// would be the same bug in the other direction.
+    #[tokio::test]
+    async fn robot_session_keeps_real_bracketed_content() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus.clone(),
+            None,
+        )
+        .with_robot_session(true);
+
+        let rx = tx.subscribe();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "见附录[1]和[附录2]".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+        relay.consume(rx).await;
+
+        assert_eq!(persisted_text(&repo.take_inserts()), vec!["见附录[1]和[附录2]"]);
+    }
+
+    /// The blast-radius test: the exact same stream through an ordinary
+    /// conversation must be byte-identical. Every other conversation kind —
+    /// chat, customer service, channels, ACP transcripts — takes this path.
+    #[tokio::test]
+    async fn non_robot_session_preserves_stage_directions() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus.clone(),
+            None,
+        );
+
+        let mut ws_rx = bus.subscribe();
+        let rx = tx.subscribe();
+        for delta in ROBOT_STAGE_DIRECTION_DELTAS {
+            tx.send(AgentStreamEvent::Text(TextEventData {
+                content: delta.into(),
+            }))
+            .unwrap();
+        }
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+        relay.consume(rx).await;
+
+        let mut ws_events = vec![];
+        while let Ok(evt) = ws_rx.try_recv() {
+            ws_events.push(evt);
+        }
+        let raw = ROBOT_STAGE_DIRECTION_DELTAS.concat();
+        assert_eq!(
+            streamed_content(&ws_events),
+            raw,
+            "without the gate the relay is a byte-for-byte pass-through"
+        );
+        assert_eq!(persisted_text(&repo.take_inserts()), vec![raw]);
+    }
+
+    /// A withheld `[wink` is text, not a stage direction, once the text run ends.
+    /// Pins the `release_withheld_text` site in the non-`Text` branch of the
+    /// rewrite.
+    #[tokio::test]
+    async fn robot_session_releases_truncated_bracket_before_tool_call() {
+        use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
+
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus.clone(),
+            None,
+        )
+        .with_robot_session(true);
+
+        let rx = tx.subscribe();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "hi[wink".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "tc-stage".into(),
+            name: "robot_look".into(),
+            args: json!({"yaw": 0}),
+            status: ToolCallStatus::Running,
+            input: Some(json!({"yaw": 0})),
+            output: None,
+            description: None,
+            artifacts: Vec::new(),
+            retry: None,
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+        relay.consume(rx).await;
+
+        assert_eq!(
+            persisted_text(&repo.take_inserts()),
+            vec!["hi[wink"],
+            "a bracket that never closed is literal text and must not be dropped"
+        );
+    }
+
+    /// A robot turn interleaves text with `robot_*` tool calls, so it has more
+    /// than one text segment. `finalize`'s middleware-rewrite branch collapses
+    /// segment[0] and hides the rest; because the strip already happened per
+    /// delta, `processed.message == text` and that branch stays dormant.
+    #[tokio::test]
+    async fn robot_session_does_not_collapse_multi_segment_turn() {
+        use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
+
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus.clone(),
+            None,
+        )
+        .with_robot_session(true);
+
+        let rx = tx.subscribe();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "[thinking]我看看。".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "tc-turn".into(),
+            name: "robot_look".into(),
+            args: json!({"yaw": 30}),
+            status: ToolCallStatus::Completed,
+            input: Some(json!({"yaw": 30})),
+            output: Some("ok".into()),
+            description: None,
+            artifacts: Vec::new(),
+            retry: None,
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "【happy】转好了。".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+        relay.consume(rx).await;
+
+        let inserts = repo.take_inserts();
+        assert_eq!(
+            persisted_text(&inserts),
+            vec!["我看看。", "转好了。"],
+            "both narration segments survive as their own clean rows"
+        );
+        assert!(
+            inserts.iter().filter(|row| row.r#type == "text").all(|row| !row.hidden),
+            "neither text row is hidden"
+        );
+        assert!(
+            repo.take_updates()
+                .iter()
+                .all(|(_, update)| update.hidden != Some(true)),
+            "the finalize collapse branch must stay dormant"
+        );
     }
 
     #[tokio::test]
