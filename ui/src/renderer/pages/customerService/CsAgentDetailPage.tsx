@@ -296,8 +296,8 @@ const CsAgentDetailPage: React.FC = () => {
                 <div className={styles.modelControls}>
                   <NomiSelect
                     contentFit
-                    contentMinWidth={132}
-                    contentMaxWidth='min(260px, 58%)'
+                    size='small'
+                    contentMaxWidth='100%'
                     className={styles.modelSelect}
                     value={agent.provider_id ?? undefined}
                     placeholder={t('customerService.fields.provider', { defaultValue: '模型服务商' })}
@@ -312,8 +312,8 @@ const CsAgentDetailPage: React.FC = () => {
                   </NomiSelect>
                   <NomiSelect
                     contentFit
-                    contentMinWidth={116}
-                    contentMaxWidth='min(220px, 54%)'
+                    size='small'
+                    contentMaxWidth='100%'
                     className={styles.modelSelect}
                     value={agent.model ?? undefined}
                     placeholder={t('customerService.fields.model', { defaultValue: '对话模型' })}

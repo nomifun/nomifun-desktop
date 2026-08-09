@@ -72,4 +72,17 @@ describe('customer service pages structure', () => {
     expect(createSource.includes('useKnowledgeBaseOptions')).toBe(true);
     expect(createSource.includes("max={64}")).toBe(true);
   });
+
+  test('detail model selects fit their selected labels without overflowing narrow cards', () => {
+    expect(detailSource.match(/contentMaxWidth='100%'/g)?.length).toBe(2);
+    expect(detailSource.includes('contentMinWidth={132}')).toBe(false);
+    expect(detailSource.includes('contentMinWidth={116}')).toBe(false);
+    expect(detailSource.match(/size='small'/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(detailStyles.includes('flex-wrap: nowrap')).toBe(true);
+    expect(detailStyles.includes('justify-content: flex-end')).toBe(true);
+    expect(detailStyles.includes('gap: 6px')).toBe(true);
+    expect(detailStyles.includes('flex: 1 1 0 !important')).toBe(true);
+    expect(detailStyles.match(/grid-template-columns: 76px minmax\(0, 1fr\)/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(detailStyles.includes('font-size: 12px')).toBe(true);
+  });
 });
