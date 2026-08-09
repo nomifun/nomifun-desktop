@@ -15,6 +15,7 @@ import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
 import ExtensionMcpServerItem from '@/renderer/pages/settings/ToolsSettings/ExtensionMcpServerItem';
 import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
+import { ENHANCED_TOOLS_SURFACE_CLASS } from '@/renderer/pages/settings/enhancedToolsLayout';
 import { useMcpServers, useMcpConnection, useMcpModal, useMcpServerCRUD, useMcpOAuth } from '@/renderer/hooks/mcp';
 import {
   extensionMcpUiKey,
@@ -204,7 +205,7 @@ const ModalMcpManagementSection: React.FC<{
   };
 
   return (
-    <div className='flex flex-col gap-12px min-h-0'>
+    <div className='flex min-h-0 flex-col gap-10px'>
       <div className='flex gap-8px items-center justify-between'>
         <div className='text-14px text-t-primary'>{t('settings.mcpSettings')}</div>
         <div>{renderAddButton()}</div>
@@ -217,7 +218,7 @@ const ModalMcpManagementSection: React.FC<{
           </div>
         ) : (
           <NomiScrollArea className='max-h-360px max-h-none' disableOverflow>
-            <div className='space-y-12px'>
+            <div className='space-y-10px'>
               {visibleMcpServers.map((server) => {
                 const uiKey = mcpServerUiKey(server.mcp_server_id);
                 return (
@@ -313,10 +314,10 @@ export const ToolsModalContentWithState: React.FC<{
     <div className='flex flex-col h-full w-full'>
       {mcpMessageContext}
 
-      <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
+      <NomiScrollArea className='flex-1 min-h-0 pb-12px' disableOverflow>
         <div
           data-testid='mcp-installed-surface'
-          className='mt-8px box-border px-[12px] md:px-[32px] py-[10px] md:py-[12px] bg-transparent rd-12px md:rd-16px flex flex-col min-h-0 border border-solid border-[var(--color-border-2)]'
+          className={`${ENHANCED_TOOLS_SURFACE_CLASS} flex min-h-0 flex-col`}
         >
           <NomiScrollArea className='h-full overflow-visible' disableOverflow>
             <ModalMcpManagementSection
