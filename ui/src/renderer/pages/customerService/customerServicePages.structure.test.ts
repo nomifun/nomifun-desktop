@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test';
 
 const rosterSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 const detailSource = readFileSync(new URL('./CsAgentDetailPage.tsx', import.meta.url), 'utf8');
+const detailStyles = readFileSync(new URL('./CsAgentDetailPage.module.css', import.meta.url), 'utf8');
 const createSource = readFileSync(new URL('./CreateCsAgentModal.tsx', import.meta.url), 'utf8');
 const botsSectionSource = readFileSync(new URL('./CsChannelBotsSection.tsx', import.meta.url), 'utf8');
 
@@ -55,6 +56,14 @@ describe('customer service pages structure', () => {
     expect(detailSource.includes('ipcBridge.customerService.createNote.invoke')).toBe(true);
     expect(detailSource.includes('ipcBridge.customerService.removeNote')).toBe(true);
     expect(detailSource.includes('ipcBridge.customerService.patchNote')).toBe(true);
+  });
+
+  test('notes list supports compact previews, management actions, and pagination', () => {
+    expect(detailStyles.includes('-webkit-line-clamp: 3')).toBe(true);
+    expect(detailSource.includes("<Menu.Item key='view'>")).toBe(true);
+    expect(detailSource.includes("<Menu.Item key='edit'>")).toBe(true);
+    expect(detailSource.includes("<Menu.Item key='delete'>")).toBe(true);
+    expect(detailSource.includes('pageSize: NOTE_PAGE_SIZE')).toBe(true);
   });
 
   test('create modal reuses the shared model and knowledge catalogs', () => {

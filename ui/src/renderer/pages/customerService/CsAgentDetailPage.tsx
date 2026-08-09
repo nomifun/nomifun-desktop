@@ -10,8 +10,10 @@ import { useNavigate, useParams } from 'react-router-dom';
 import {
   Button,
   Checkbox,
+  Dropdown,
   Input,
   InputNumber,
+  Menu,
   Message,
   Modal,
   Popconfirm,
@@ -21,29 +23,33 @@ import {
   Table,
   Tag,
 } from '@arco-design/web-react';
-import { Delete, Headset, Left, Plus } from '@icon-park/react';
+import { DeleteOne, Down, EditOne, Left, More, Plus, PreviewOpen } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { ICsNote } from '@/common/adapter/ipcBridge';
 import { parseCsAgentId, type CsAgentId, type KnowledgeBaseId, type ProviderId } from '@/common/types/ids';
+import NomiInput from '@/renderer/components/base/NomiInput';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import CsChannelBotsSection from './CsChannelBotsSection';
+import styles from './CsAgentDetailPage.module.css';
 import { useCsAgent } from './useCsAgents';
 import { useKnowledgeBaseOptions } from './useKnowledgeBaseOptions';
 
 /** One titled card section on the detail page. */
-const Section: React.FC<{ title: string; extra?: React.ReactNode; children: React.ReactNode }> = ({
-  title,
-  extra,
-  children,
-}) => (
-  <div className='flex flex-col gap-12px rd-16px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-16px py-14px'>
-    <div className='flex items-center justify-between gap-12px'>
-      <span className='text-14px font-600 text-t-primary'>{title}</span>
+const Section: React.FC<{ title: string; extra?: React.ReactNode; children: React.ReactNode }> = ({ title, extra, children }) => (
+  <section className={styles.section}>
+    <div className={styles.sectionHeader}>
+      <span className={styles.sectionTitle}>{title}</span>
       {extra}
     </div>
     {children}
-  </div>
+  </section>
 );
+
+type NoteModalMode = 'create' | 'edit' | 'view';
+
+const NOTE_PAGE_SIZE = 5;
+const EMPTY_NOTE_DRAFT = { kind: 'faq', content: '', shared: false };
 
 /**
  * 客服详情页（/customer-service/:cs_agent_id）：身份与话术编辑、模型与知识库、
@@ -61,7 +67,7 @@ const CsAgentDetailPage: React.FC = () => {
     }
   }, [params.cs_agent_id]);
 
-  const { agent, loading, patch, reload } = useCsAgent(csAgentId);
+  const { agent, loading, patch } = useCsAgent(csAgentId);
   // Task-filtered catalog (chat): providers with at least one chat-capable model.
   const { groups: chatGroups } = useModelsForTask('chat');
   const providers = useMemo(() => chatGroups.map((g) => g.provider), [chatGroups]);
@@ -101,7 +107,10 @@ const CsAgentDetailPage: React.FC = () => {
   // ── notes ────────────────────────────────────────────────────────────
   const [notes, setNotes] = useState<ICsNote[]>([]);
   const [noteModalOpen, setNoteModalOpen] = useState(false);
-  const [noteDraft, setNoteDraft] = useState({ kind: 'faq', content: '', shared: false });
+  const [noteModalMode, setNoteModalMode] = useState<NoteModalMode>('create');
+  const [activeNote, setActiveNote] = useState<ICsNote | null>(null);
+  const [noteDraft, setNoteDraft] = useState(EMPTY_NOTE_DRAFT);
+  const [notePage, setNotePage] = useState(1);
   const [savingNote, setSavingNote] = useState(false);
 
   const refreshNotes = useCallback(async () => {
@@ -117,24 +126,94 @@ const CsAgentDetailPage: React.FC = () => {
     void refreshNotes();
   }, [refreshNotes]);
 
-  const createNote = async () => {
-    if (!csAgentId || !noteDraft.content.trim()) return;
+  useEffect(() => {
+    const lastPage = Math.max(1, Math.ceil(notes.length / NOTE_PAGE_SIZE));
+    setNotePage((currentPage) => Math.min(currentPage, lastPage));
+  }, [notes.length]);
+
+  const openCreateNote = () => {
+    setActiveNote(null);
+    setNoteModalMode('create');
+    setNoteDraft(EMPTY_NOTE_DRAFT);
+    setNoteModalOpen(true);
+  };
+
+  const openNote = (note: ICsNote, mode: Exclude<NoteModalMode, 'create'>) => {
+    setActiveNote(note);
+    setNoteModalMode(mode);
+    setNoteDraft({
+      kind: note.kind,
+      content: note.content,
+      shared: note.cs_agent_id === null,
+    });
+    setNoteModalOpen(true);
+  };
+
+  const closeNoteModal = () => {
+    if (savingNote) return;
+    setNoteModalOpen(false);
+  };
+
+  const saveNote = async () => {
+    if (!csAgentId || !noteDraft.content.trim() || noteModalMode === 'view') return;
     setSavingNote(true);
     try {
-      await ipcBridge.customerService.createNote.invoke({
-        cs_agent_id: noteDraft.shared ? null : csAgentId,
-        kind: noteDraft.kind,
-        content: noteDraft.content,
-        enabled: true,
-      });
+      if (noteModalMode === 'edit' && activeNote) {
+        await ipcBridge.customerService.patchNote.invoke({
+          cs_note_id: activeNote.cs_note_id,
+          kind: noteDraft.kind,
+          content: noteDraft.content,
+        });
+        Message.success(t('customerService.notes.updated', { defaultValue: '笔记已更新' }));
+      } else {
+        await ipcBridge.customerService.createNote.invoke({
+          cs_agent_id: noteDraft.shared ? null : csAgentId,
+          kind: noteDraft.kind,
+          content: noteDraft.content,
+          enabled: true,
+        });
+        Message.success(t('customerService.notes.created', { defaultValue: '笔记已创建' }));
+      }
       setNoteModalOpen(false);
-      setNoteDraft({ kind: 'faq', content: '', shared: false });
+      setActiveNote(null);
+      setNoteDraft(EMPTY_NOTE_DRAFT);
       await refreshNotes();
     } catch (error) {
       Message.error(error instanceof Error ? error.message : String(error));
     } finally {
       setSavingNote(false);
     }
+  };
+
+  const removeNote = (note: ICsNote) => {
+    Modal.confirm({
+      title: t('customerService.notes.deleteConfirm', { defaultValue: '删除该笔记？' }),
+      okText: t('customerService.notes.delete', { defaultValue: '删除' }),
+      cancelText: t('common.cancel', { defaultValue: '取消' }),
+      okButtonProps: { status: 'danger' },
+      onOk: async () => {
+        try {
+          await ipcBridge.customerService.removeNote.invoke({ cs_note_id: note.cs_note_id });
+          Message.success(t('customerService.notes.deleted', { defaultValue: '笔记已删除' }));
+          await refreshNotes();
+        } catch (error) {
+          Message.error(error instanceof Error ? error.message : String(error));
+          throw error;
+        }
+      },
+    });
+  };
+
+  const handleNoteMenuAction = (key: string, note: ICsNote) => {
+    if (key === 'view') {
+      openNote(note, 'view');
+      return;
+    }
+    if (key === 'edit') {
+      openNote(note, 'edit');
+      return;
+    }
+    if (key === 'delete') removeNote(note);
   };
 
   // ── delete agent ─────────────────────────────────────────────────────
@@ -167,31 +246,27 @@ const CsAgentDetailPage: React.FC = () => {
     );
   }
 
-  const provider = providers.find((p) => p.id === agent.provider_id);
   const modelOptions = chatGroups.find((g) => g.provider.id === agent.provider_id)?.models ?? [];
+  const selectedKnowledgeBases = agent.knowledge_base_ids.map((knowledgeBaseId) => ({
+    id: knowledgeBaseId,
+    label: kbOptions.find((option) => option.value === knowledgeBaseId)?.label ?? knowledgeBaseId,
+  }));
 
   return (
-    <div className='w-full min-h-full box-border overflow-y-auto px-16px py-20px'>
-      <div className='mx-auto flex w-full max-w-[920px] box-border flex-col gap-16px'>
+    <div className={styles.page}>
+      <div className={styles.shell}>
         {/* Header */}
-        <div className='flex items-center gap-12px flex-wrap'>
-          <Button size='small' onClick={() => void navigate('/customer-service')}>
-            <span className='inline-flex items-center gap-4px'>
-              <Left theme='outline' size='14' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
-              {t('customerService.detail.back', { defaultValue: '返回花名册' })}
-            </span>
-          </Button>
-          <span
-            className='flex items-center justify-center w-34px h-34px rd-10px shrink-0 text-primary-6'
-            style={{
-              background: 'linear-gradient(150deg, rgba(var(--primary-5),0.16) 0%, rgba(var(--primary-6),0.26) 100%)',
-              border: '1px solid rgba(var(--primary-6),0.22)',
-            }}
-          >
-            <Headset theme='outline' size='18' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
-          </span>
-          <h1 className='m-0 text-18px font-700 text-t-primary truncate'>{agent.name}</h1>
-          <div className='ml-auto flex items-center gap-10px'>
+        <header className={styles.header}>
+          <div className={styles.headerMain}>
+            <Button size='small' className='shrink-0' onClick={() => void navigate('/customer-service')}>
+              <span className='inline-flex items-center gap-4px'>
+                <Left theme='outline' size='14' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
+                {t('customerService.detail.back', { defaultValue: '返回花名册' })}
+              </span>
+            </Button>
+            <h1 className={styles.agentName}>{agent.name}</h1>
+          </div>
+          <div className={styles.headerActions}>
             <span className='text-12px text-t-tertiary'>
               {t('customerService.detail.enabled', { defaultValue: '启用' })}
             </span>
@@ -210,204 +285,317 @@ const CsAgentDetailPage: React.FC = () => {
               </Button>
             </Popconfirm>
           </div>
-        </div>
+        </header>
 
-        {/* 身份与话术 */}
-        <Section
-          title={t('customerService.sections.identity', { defaultValue: '身份与话术' })}
-          extra={
-            <Button type='primary' size='small' loading={savingIdentity} onClick={() => void saveIdentity()}>
-              {t('customerService.detail.save', { defaultValue: '保存' })}
-            </Button>
-          }
-        >
-          <div className='flex flex-col gap-10px'>
-            <div>
-              <div className='mb-4px text-12px text-t-tertiary'>{t('customerService.fields.name', { defaultValue: '名称' })}</div>
-              <Input value={draft.name} onChange={(value) => setDraft((d) => ({ ...d, name: value }))} />
-            </div>
-            <div>
-              <div className='mb-4px text-12px text-t-tertiary'>{t('customerService.fields.greeting', { defaultValue: '问候语' })}</div>
-              <Input.TextArea rows={2} value={draft.greeting} onChange={(value) => setDraft((d) => ({ ...d, greeting: value }))} />
-            </div>
-            <div>
-              <div className='mb-4px text-12px text-t-tertiary'>{t('customerService.fields.persona', { defaultValue: '人设话术' })}</div>
-              <Input.TextArea rows={2} value={draft.persona} onChange={(value) => setDraft((d) => ({ ...d, persona: value }))} />
-            </div>
-            <div>
-              <div className='mb-4px text-12px text-t-tertiary'>{t('customerService.fields.servicePolicy', { defaultValue: '服务策略' })}</div>
-              <Input.TextArea rows={3} value={draft.service_policy} onChange={(value) => setDraft((d) => ({ ...d, service_policy: value }))} />
-            </div>
-          </div>
-        </Section>
-
-        {/* 模型与知识库 */}
-        <Section title={t('customerService.sections.modelKnowledge', { defaultValue: '模型与知识库' })}>
-          <div className='grid grid-cols-2 gap-12px'>
-            <div>
-              <div className='mb-4px text-12px text-t-tertiary'>{t('customerService.fields.provider', { defaultValue: '模型服务商' })}</div>
-              <Select
-                value={agent.provider_id ?? undefined}
-                placeholder={t('customerService.fields.providerPlaceholder', { defaultValue: '选择服务商' })}
-                allowClear
-                onChange={(value) => void patch({ provider_id: (value as ProviderId | undefined) ?? null, model: null })}
-              >
-                {providers.map((p) => (
-                  <Select.Option key={p.id} value={p.id}>
-                    {p.name}
-                  </Select.Option>
-                ))}
-              </Select>
-            </div>
-            <div>
-              <div className='mb-4px text-12px text-t-tertiary'>{t('customerService.fields.model', { defaultValue: '对话模型' })}</div>
-              <Select
-                value={agent.model ?? undefined}
-                placeholder={t('customerService.fields.modelPlaceholder', { defaultValue: '选择模型' })}
-                allowClear
-                onChange={(value) => void patch({ model: (value as string | undefined) ?? null })}
-              >
-                {modelOptions.map((m) => (
-                  <Select.Option key={m} value={m}>
-                    {m}
-                  </Select.Option>
-                ))}
-              </Select>
-            </div>
-          </div>
-          <div>
-            <div className='mb-4px text-12px text-t-tertiary'>{t('customerService.fields.knowledgeBases', { defaultValue: '知识库' })}</div>
-            <Select
-              mode='multiple'
-              value={agent.knowledge_base_ids}
-              placeholder={t('customerService.fields.knowledgeBasesPlaceholder', { defaultValue: '选择可检索的知识库' })}
-              allowClear
-              onChange={(value) => void patch({ knowledge_base_ids: (value ?? []) as KnowledgeBaseId[] })}
-            >
-              {kbOptions.map((kb) => (
-                <Select.Option key={kb.value} value={kb.value}>
-                  {kb.label}
-                </Select.Option>
-              ))}
-            </Select>
-          </div>
-          <div className='flex items-center gap-10px'>
-            <span className='text-12px text-t-tertiary'>{t('customerService.fields.maxConcurrent', { defaultValue: '并发上限' })}</span>
-            <InputNumber
-              min={1}
-              max={64}
-              value={agent.max_concurrent}
-              onChange={(value) => {
-                if (typeof value === 'number') void patch({ max_concurrent: value });
-              }}
-            />
-          </div>
-        </Section>
-
-        {/* 绑定管理 — 客服域渠道机器人自闭环（与桌面伙伴渠道分域互斥） */}
-        {csAgentId && (
-          <Section title={t('customerService.sections.bindings', { defaultValue: '渠道机器人绑定' })}>
-            <CsChannelBotsSection csAgentId={csAgentId} />
-          </Section>
-        )}
-
-        {/* 客服笔记 */}
-        <Section
-          title={t('customerService.sections.notes', { defaultValue: '客服笔记' })}
-          extra={
-            <Button size='small' onClick={() => setNoteModalOpen(true)}>
-              <span className='inline-flex items-center gap-4px'>
-                <Plus theme='outline' size='13' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
-                {t('customerService.notes.add', { defaultValue: '新增笔记' })}
-              </span>
-            </Button>
-          }
-        >
-          <Table
-            rowKey='cs_note_id'
-            data={notes}
-            pagination={false}
-            size='small'
-            noDataElement={
-              <span className='text-13px text-t-tertiary'>
-                {t('customerService.notes.empty', { defaultValue: '还没有笔记 — FAQ/话术/业务事实都可以放在这里，客服只读引用。' })}
-              </span>
-            }
-            columns={[
-              {
-                title: t('customerService.notes.kind', { defaultValue: '类型' }),
-                dataIndex: 'kind',
-                width: 90,
-              },
-              {
-                title: t('customerService.notes.content', { defaultValue: '内容' }),
-                dataIndex: 'content',
-                render: (content: string) => <span className='whitespace-pre-wrap'>{content}</span>,
-              },
-              {
-                title: t('customerService.notes.scope', { defaultValue: '范围' }),
-                width: 90,
-                render: (_: unknown, note: ICsNote) => (
-                  <Tag size='small' color={note.cs_agent_id ? 'blue' : 'purple'}>
-                    {note.cs_agent_id
-                      ? t('customerService.notes.private', { defaultValue: '私有' })
-                      : t('customerService.notes.shared', { defaultValue: '共享' })}
-                  </Tag>
-                ),
-              },
-              {
-                title: t('customerService.notes.enabled', { defaultValue: '启用' }),
-                width: 80,
-                render: (_: unknown, note: ICsNote) => (
-                  <Switch
-                    size='small'
-                    checked={note.enabled}
-                    onChange={(checked: boolean) => {
-                      void ipcBridge.customerService.patchNote
-                        .invoke({ cs_note_id: note.cs_note_id, enabled: checked })
-                        .then(() => refreshNotes())
-                        .catch((error) => Message.error(String(error)));
-                    }}
-                  />
-                ),
-              },
-              {
-                title: '',
-                width: 50,
-                render: (_: unknown, note: ICsNote) => (
-                  <Popconfirm
-                    title={t('customerService.notes.deleteConfirm', { defaultValue: '删除该笔记？' })}
-                    onOk={() => {
-                      void ipcBridge.customerService.removeNote
-                        .invoke({ cs_note_id: note.cs_note_id })
-                        .then(() => refreshNotes())
-                        .catch((error) => Message.error(String(error)));
-                    }}
+        <main className={styles.contentGrid}>
+          <div className={`${styles.column} ${styles.leftColumn}`}>
+            {/* 模型与知识库 */}
+            <Section title={t('customerService.sections.modelKnowledge', { defaultValue: '模型与知识库' })}>
+              <div className={styles.modelRow}>
+                <span className={styles.fieldLabel}>{t('common.model', { defaultValue: '模型' })}</span>
+                <div className={styles.modelControls}>
+                  <NomiSelect
+                    contentFit
+                    contentMinWidth={132}
+                    contentMaxWidth='min(260px, 58%)'
+                    className={styles.modelSelect}
+                    value={agent.provider_id ?? undefined}
+                    placeholder={t('customerService.fields.provider', { defaultValue: '模型服务商' })}
+                    allowClear
+                    onChange={(value) => void patch({ provider_id: (value as ProviderId | undefined) ?? null, model: null })}
                   >
-                    <Button size='mini' status='danger' type='text'>
-                      <Delete theme='outline' size='14' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
-                    </Button>
-                  </Popconfirm>
-                ),
-              },
-            ]}
-          />
-        </Section>
+                    {providers.map((p) => (
+                      <NomiSelect.Option key={p.id} value={p.id}>
+                        {p.name}
+                      </NomiSelect.Option>
+                    ))}
+                  </NomiSelect>
+                  <NomiSelect
+                    contentFit
+                    contentMinWidth={116}
+                    contentMaxWidth='min(220px, 54%)'
+                    className={styles.modelSelect}
+                    value={agent.model ?? undefined}
+                    placeholder={t('customerService.fields.model', { defaultValue: '对话模型' })}
+                    allowClear
+                    onChange={(value) => void patch({ model: (value as string | undefined) ?? null })}
+                  >
+                    {modelOptions.map((m) => (
+                      <NomiSelect.Option key={m} value={m}>
+                        {m}
+                      </NomiSelect.Option>
+                    ))}
+                  </NomiSelect>
+                </div>
+              </div>
+
+              <div className={styles.divider} />
+
+              <div className={`${styles.inlineField} ${styles.knowledgeField}`}>
+                <span className={styles.fieldLabel}>{t('customerService.fields.knowledgeBases', { defaultValue: '知识库' })}</span>
+                <div className={styles.fieldControl}>
+                  <Select
+                    mode='multiple'
+                    value={agent.knowledge_base_ids}
+                    allowClear
+                    triggerElement={
+                      <Button long size='small' className={styles.selectTrigger}>
+                        <span className={styles.selectTriggerLabel}>
+                          {selectedKnowledgeBases.length > 0
+                            ? t('customerService.detail.knowledgeBasesMountedCount', {
+                                count: selectedKnowledgeBases.length,
+                                defaultValue: '已挂载{{count}}个',
+                              })
+                            : t('customerService.detail.knowledgeBasesPlaceholder', { defaultValue: '选择挂载知识库' })}
+                        </span>
+                        <Down theme='outline' size='13' fill='currentColor' className='shrink-0' />
+                      </Button>
+                    }
+                    onChange={(value) => void patch({ knowledge_base_ids: (value ?? []) as KnowledgeBaseId[] })}
+                  >
+                    {kbOptions.map((kb) => (
+                      <Select.Option key={kb.value} value={kb.value}>
+                        {kb.label}
+                      </Select.Option>
+                    ))}
+                  </Select>
+                </div>
+              </div>
+
+              {selectedKnowledgeBases.length > 0 && (
+                <div className={styles.knowledgeTagsRow}>
+                  <div className={styles.knowledgeTags}>
+                    {selectedKnowledgeBases.map((knowledgeBase) => (
+                      <Tag
+                        key={knowledgeBase.id}
+                        size='small'
+                        closable
+                        className={styles.knowledgeTag}
+                        onClose={() => {
+                          void patch({
+                            knowledge_base_ids: agent.knowledge_base_ids.filter((id) => id !== knowledgeBase.id),
+                          });
+                        }}
+                      >
+                        {knowledgeBase.label}
+                      </Tag>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className={styles.divider} />
+
+              <div className={styles.inlineField}>
+                <span className={styles.fieldLabel}>{t('customerService.fields.maxConcurrent', { defaultValue: '并发上限' })}</span>
+                <InputNumber
+                  className={styles.concurrencyControl}
+                  min={1}
+                  max={64}
+                  value={agent.max_concurrent}
+                  onChange={(value) => {
+                    if (typeof value === 'number') void patch({ max_concurrent: value });
+                  }}
+                />
+              </div>
+            </Section>
+
+            {/* 身份与话术 */}
+            <Section
+              title={t('customerService.sections.identity', { defaultValue: '身份与话术' })}
+              extra={
+                <Button type='primary' size='small' loading={savingIdentity} onClick={() => void saveIdentity()}>
+                  {t('customerService.detail.save', { defaultValue: '保存' })}
+                </Button>
+              }
+            >
+              <div className={styles.nameField}>
+                <span className={styles.fieldLabel}>{t('customerService.fields.name', { defaultValue: '名称' })}</span>
+                <NomiInput
+                  contentFit
+                  contentMinWidth={164}
+                  contentMaxWidth={360}
+                  className={styles.nameControl}
+                  value={draft.name}
+                  onChange={(value) => setDraft((d) => ({ ...d, name: value }))}
+                />
+              </div>
+              <div className={styles.divider} />
+              <div className={styles.identityFields}>
+                <div>
+                  <div className={styles.fieldLabel}>{t('customerService.fields.greeting', { defaultValue: '问候语' })}</div>
+                  <Input.TextArea rows={2} value={draft.greeting} onChange={(value) => setDraft((d) => ({ ...d, greeting: value }))} />
+                </div>
+                <div>
+                  <div className={styles.fieldLabel}>{t('customerService.fields.persona', { defaultValue: '人设话术' })}</div>
+                  <Input.TextArea rows={2} value={draft.persona} onChange={(value) => setDraft((d) => ({ ...d, persona: value }))} />
+                </div>
+                <div>
+                  <div className={styles.fieldLabel}>{t('customerService.fields.servicePolicy', { defaultValue: '服务策略' })}</div>
+                  <Input.TextArea rows={2} value={draft.service_policy} onChange={(value) => setDraft((d) => ({ ...d, service_policy: value }))} />
+                </div>
+              </div>
+            </Section>
+          </div>
+
+          <div className={styles.column}>
+            {/* 绑定管理 — 客服域渠道机器人自闭环（与桌面伙伴渠道分域互斥） */}
+            {csAgentId && (
+              <Section title={t('customerService.sections.bindings', { defaultValue: '渠道机器人绑定' })}>
+                <CsChannelBotsSection csAgentId={csAgentId} />
+              </Section>
+            )}
+
+            {/* 客服笔记 */}
+            <Section
+              title={t('customerService.sections.notes', { defaultValue: '客服笔记' })}
+              extra={
+                <Button size='small' onClick={openCreateNote}>
+                  <span className='inline-flex items-center gap-4px'>
+                    <Plus theme='outline' size='13' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
+                    {t('customerService.notes.add', { defaultValue: '新增笔记' })}
+                  </span>
+                </Button>
+              }
+            >
+              <div className={styles.tableScroll}>
+                <div className={styles.tableInner}>
+                  <Table
+                    rowKey='cs_note_id'
+                    data={notes}
+                    pagination={{
+                      current: notePage,
+                      pageSize: NOTE_PAGE_SIZE,
+                      total: notes.length,
+                      size: 'small',
+                      showTotal: true,
+                      hideOnSinglePage: notes.length <= NOTE_PAGE_SIZE,
+                      onChange: (page) => setNotePage(page),
+                    }}
+                    size='small'
+                    noDataElement={
+                      <span className='text-13px text-t-tertiary'>
+                        {t('customerService.notes.empty', { defaultValue: '还没有笔记 — FAQ/话术/业务事实都可以放在这里，客服只读引用。' })}
+                      </span>
+                    }
+                    columns={[
+                      {
+                        title: t('customerService.notes.kind', { defaultValue: '类型' }),
+                        dataIndex: 'kind',
+                        width: 64,
+                      },
+                      {
+                        title: t('customerService.notes.content', { defaultValue: '内容' }),
+                        dataIndex: 'content',
+                        render: (content: string) => <span className={styles.noteContent}>{content}</span>,
+                      },
+                      {
+                        title: t('customerService.notes.scope', { defaultValue: '范围' }),
+                        width: 72,
+                        render: (_: unknown, note: ICsNote) => (
+                          <Tag size='small' color={note.cs_agent_id ? 'blue' : 'purple'}>
+                            {note.cs_agent_id
+                              ? t('customerService.notes.private', { defaultValue: '私有' })
+                              : t('customerService.notes.shared', { defaultValue: '共享' })}
+                          </Tag>
+                        ),
+                      },
+                      {
+                        title: t('customerService.notes.enabled', { defaultValue: '启用' }),
+                        width: 60,
+                        render: (_: unknown, note: ICsNote) => (
+                          <Switch
+                            size='small'
+                            checked={note.enabled}
+                            onChange={(checked: boolean) => {
+                              void ipcBridge.customerService.patchNote
+                                .invoke({ cs_note_id: note.cs_note_id, enabled: checked })
+                                .then(() => refreshNotes())
+                                .catch((error) => Message.error(String(error)));
+                            }}
+                          />
+                        ),
+                      },
+                      {
+                        title: '',
+                        width: 48,
+                        align: 'center',
+                        render: (_: unknown, note: ICsNote) => (
+                          <Dropdown
+                            trigger='click'
+                            position='br'
+                            getPopupContainer={() => document.body}
+                            droplist={
+                              <Menu onClickMenuItem={(key) => handleNoteMenuAction(String(key), note)}>
+                                <Menu.Item key='view'>
+                                  <span className='flex items-center gap-8px'>
+                                    <PreviewOpen theme='outline' size='14' />
+                                    {t('customerService.notes.view', { defaultValue: '查看' })}
+                                  </span>
+                                </Menu.Item>
+                                <Menu.Item key='edit'>
+                                  <span className='flex items-center gap-8px'>
+                                    <EditOne theme='outline' size='14' />
+                                    {t('customerService.notes.edit', { defaultValue: '编辑' })}
+                                  </span>
+                                </Menu.Item>
+                                <Menu.Item key='delete'>
+                                  <span className='flex items-center gap-8px text-danger-6'>
+                                    <DeleteOne theme='outline' size='14' />
+                                    {t('customerService.notes.delete', { defaultValue: '删除' })}
+                                  </span>
+                                </Menu.Item>
+                              </Menu>
+                            }
+                          >
+                            <Button
+                              size='mini'
+                              type='text'
+                              aria-label={t('customerService.notes.more', { defaultValue: '更多操作' })}
+                              className={styles.noteMoreButton}
+                            >
+                              <More theme='outline' size='15' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
+                            </Button>
+                          </Dropdown>
+                        ),
+                      },
+                    ]}
+                  />
+                </div>
+              </div>
+            </Section>
+          </div>
+        </main>
       </div>
 
-      {/* 新增笔记 */}
+      {/* 新增 / 查看 / 编辑笔记 */}
       <Modal
         visible={noteModalOpen}
-        title={t('customerService.notes.add', { defaultValue: '新增笔记' })}
-        onCancel={() => setNoteModalOpen(false)}
-        onOk={() => void createNote()}
+        title={
+          noteModalMode === 'view'
+            ? t('customerService.notes.viewTitle', { defaultValue: '查看笔记' })
+            : noteModalMode === 'edit'
+              ? t('customerService.notes.editTitle', { defaultValue: '编辑笔记' })
+              : t('customerService.notes.add', { defaultValue: '新增笔记' })
+        }
+        onCancel={closeNoteModal}
+        onOk={() => void saveNote()}
         confirmLoading={savingNote}
         okButtonProps={{ disabled: !noteDraft.content.trim() }}
-        style={{ width: 460 }}
+        footer={
+          noteModalMode === 'view' ? (
+            <Button onClick={closeNoteModal}>
+              {t('customerService.notes.close', { defaultValue: '关闭' })}
+            </Button>
+          ) : undefined
+        }
+        unmountOnExit
+        style={{ width: 'min(460px, calc(100vw - 32px))' }}
       >
         <div className='flex flex-col gap-10px'>
           <Select
             value={noteDraft.kind}
+            disabled={noteModalMode === 'view'}
             onChange={(value) => setNoteDraft((d) => ({ ...d, kind: value as string }))}
           >
             <Select.Option value='faq'>{t('customerService.notes.kindFaq', { defaultValue: 'FAQ' })}</Select.Option>
@@ -415,18 +603,25 @@ const CsAgentDetailPage: React.FC = () => {
             <Select.Option value='fact'>{t('customerService.notes.kindFact', { defaultValue: '业务事实' })}</Select.Option>
           </Select>
           <Input.TextArea
-            rows={4}
+            autoSize={{ minRows: 4, maxRows: 12 }}
             value={noteDraft.content}
             placeholder={t('customerService.notes.contentPlaceholder', { defaultValue: '写下 FAQ / 话术 / 业务事实…' })}
+            readOnly={noteModalMode === 'view'}
             onChange={(value) => setNoteDraft((d) => ({ ...d, content: value }))}
           />
           <label className='flex items-center gap-8px text-13px text-t-secondary'>
             <Checkbox
               checked={noteDraft.shared}
+              disabled={noteModalMode !== 'create'}
               onChange={(checked: boolean) => setNoteDraft((d) => ({ ...d, shared: checked }))}
             />
             {t('customerService.notes.sharedHint', { defaultValue: '共享给全部客服（不勾选则仅本客服可用）' })}
           </label>
+          {noteModalMode !== 'create' && (
+            <span className='text-12px text-t-tertiary'>
+              {t('customerService.notes.scopeLocked', { defaultValue: '笔记范围创建后不可修改' })}
+            </span>
+          )}
         </div>
       </Modal>
     </div>
