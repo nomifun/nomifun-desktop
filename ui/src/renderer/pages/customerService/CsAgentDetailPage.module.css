@@ -1,0 +1,368 @@
+.page {
+  container-name: cs-agent-detail;
+  container-type: inline-size;
+  width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 16px 14px 24px;
+}
+
+.shell {
+  width: 100%;
+  max-width: 1680px;
+  min-width: 0;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.headerMain {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 320px;
+  align-items: center;
+  gap: 12px;
+}
+
+.agentName {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text-1);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headerActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.contentGrid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.column {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.leftColumn {
+  min-width: 0;
+  width: 100%;
+}
+
+.section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 14px;
+  background: var(--color-bg-2);
+}
+
+.sectionHeader {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 10px;
+}
+
+.sectionTitle {
+  min-width: 0;
+  color: var(--color-text-1);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.fieldLabel {
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.modelRow {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: clamp(120px, 33%, 180px) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.modelControls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modelSelect {
+  flex: 0 1 auto !important;
+  max-width: 100%;
+}
+
+.modelSelect :global(.arco-select-view),
+.modelSelect :global(.arco-select-view-value),
+.modelSelect :global(.arco-select-view-placeholder) {
+  min-width: 0;
+  font-size: 13px;
+}
+
+.modelSelect :global(.arco-select-view-value),
+.modelSelect :global(.arco-select-view-placeholder) {
+  overflow: hidden;
+  color: var(--color-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fieldControl {
+  min-width: 0;
+}
+
+.fieldControl > * {
+  width: 100%;
+}
+
+.divider {
+  height: 1px;
+  background: var(--color-border-2);
+}
+
+.inlineField {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.knowledgeField {
+  grid-template-columns: clamp(120px, 33%, 180px) minmax(0, 1fr);
+}
+
+.modelRow > .fieldLabel,
+.knowledgeField > .fieldLabel {
+  color: var(--color-text-1);
+  font-size: 13px;
+}
+
+.selectTrigger {
+  display: flex !important;
+  width: 100%;
+  min-width: 0;
+  justify-content: space-between !important;
+  color: var(--color-text-2) !important;
+  border: 1px solid var(--color-border-3) !important;
+  background: var(--color-bg-1) !important;
+}
+
+.selectTriggerLabel {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledgeTags {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+  background: var(--color-bg-1);
+}
+
+.knowledgeTagsRow {
+  min-width: 0;
+}
+
+.knowledgeTag {
+  max-width: 100%;
+}
+
+.knowledgeTag :global(.arco-tag-content) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.concurrencyControl {
+  width: min(164px, 100%);
+  justify-self: end;
+}
+
+.identityFields {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nameField {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.nameControl {
+  max-width: 100%;
+  justify-self: end;
+  color: var(--color-text-2);
+  font-size: 13px;
+}
+
+.nameControl :global(.arco-input) {
+  font-size: 13px;
+}
+
+.tableScroll {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.tableInner {
+  min-width: 580px;
+}
+
+.noteContent {
+  display: -webkit-box;
+  max-height: 60px;
+  overflow: hidden;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.noteMoreButton {
+  color: var(--color-text-3) !important;
+}
+
+.noteMoreButton:hover,
+.noteMoreButton:focus-visible {
+  color: var(--color-text-1) !important;
+}
+
+.tableInner :global(.arco-table-pagination) {
+  margin-top: 10px;
+  margin-bottom: 0;
+}
+
+@container cs-agent-detail (min-width: 960px) {
+  .contentGrid {
+    grid-template-columns: minmax(460px, 38%) minmax(0, 1fr);
+  }
+
+  .leftColumn {
+    width: auto;
+    min-width: 460px;
+  }
+
+  .tableInner {
+    min-width: 0;
+  }
+}
+
+@container cs-agent-detail (max-width: 599px) {
+  .header {
+    flex-wrap: wrap;
+  }
+
+  .headerMain {
+    flex-basis: 100%;
+  }
+
+  .headerActions {
+    width: 100%;
+    justify-content: flex-end;
+    margin-left: 0;
+  }
+}
+
+@container cs-agent-detail (max-width: 459px) {
+  .modelRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .modelRow > .fieldLabel {
+    grid-column: auto;
+  }
+
+  .modelControls {
+    justify-content: stretch;
+  }
+
+  .modelSelect {
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    flex: 1 1 0 !important;
+  }
+
+  .inlineField,
+  .knowledgeField,
+  .nameField {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .concurrencyControl {
+    width: 100%;
+    justify-self: stretch;
+  }
+
+  .nameControl {
+    width: 100% !important;
+    justify-self: stretch;
+  }
+}
+
+@container cs-agent-detail (max-width: 419px) {
+  .section {
+    padding: 10px 12px;
+    border-radius: 12px;
+  }
+}
