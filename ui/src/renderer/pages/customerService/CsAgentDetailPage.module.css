@@ -112,7 +112,7 @@
 .modelRow {
   display: grid;
   min-width: 0;
-  grid-template-columns: clamp(120px, 33%, 180px) minmax(0, 1fr);
+  grid-template-columns: 76px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
 }
@@ -120,9 +120,10 @@
 .modelControls {
   display: flex;
   min-width: 0;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
 }
 
 .modelSelect {
@@ -134,7 +135,7 @@
 .modelSelect :global(.arco-select-view-value),
 .modelSelect :global(.arco-select-view-placeholder) {
   min-width: 0;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .modelSelect :global(.arco-select-view-value),
@@ -167,7 +168,7 @@
 }
 
 .knowledgeField {
-  grid-template-columns: clamp(120px, 33%, 180px) minmax(0, 1fr);
+  grid-template-columns: 76px minmax(0, 1fr);
 }
 
 .modelRow > .fieldLabel,
