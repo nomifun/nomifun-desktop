@@ -16,7 +16,7 @@ type SkillMarketCardProps = {
   onAdd: (item: ISkillMarketItem) => void;
 };
 
-const MAX_VISIBLE_TAGS = 4;
+const MAX_VISIBLE_TAGS = 3;
 
 const resolveTagLabel = (tag: PresetTag, localeKey: string): string => tag.label_i18n?.[localeKey] || tag.label;
 
@@ -67,42 +67,48 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({ item, tagByKey, local
         'border-[var(--color-border-2)] bg-[var(--color-bg-2)] hover:border-[var(--color-primary-light-4)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.06)]',
       ].join(' ')}
     >
-      <Button
-        size='mini'
-        type='secondary'
-        data-testid={`btn-add-market-skill-${testId}`}
-        className='!absolute !right-12px !top-12px !rounded-[100px] !h-26px !px-10px !text-12px !font-medium !border !border-solid !border-[var(--color-border-2)] !bg-[var(--color-fill-2)] !text-[var(--color-text-1)] !shadow-none hover:!border-[var(--color-border-3)] hover:!bg-[var(--color-fill-3)] hover:!text-[var(--color-text-1)]'
-        icon={<Plus theme='outline' size={12} strokeWidth={3} />}
-        loading={adding}
-        disabled={adding}
-        onClick={() => onAdd(item)}
-      >
-        {t('common.add', { defaultValue: 'Add' })}
-      </Button>
+      <div className='flex min-w-0 items-center justify-between gap-8px'>
+        <span
+          className='min-w-0 flex-1 truncate text-14px font-medium leading-20px text-[var(--color-text-1)]'
+          title={item.name}
+        >
+          {item.name}
+        </span>
+        <Button
+          size='mini'
+          type='secondary'
+          data-testid={`btn-add-market-skill-${testId}`}
+          className='!shrink-0 !rounded-[100px] !h-26px !px-10px !text-12px !font-medium !border !border-solid !border-[var(--color-border-2)] !bg-[var(--color-fill-2)] !text-[var(--color-text-1)] !shadow-none hover:!border-[var(--color-border-3)] hover:!bg-[var(--color-fill-3)] hover:!text-[var(--color-text-1)]'
+          icon={<Plus theme='outline' size={12} strokeWidth={3} />}
+          loading={adding}
+          disabled={adding}
+          onClick={() => onAdd(item)}
+        >
+          {t('common.add', { defaultValue: 'Add' })}
+        </Button>
+      </div>
 
-      <div className='min-w-0 pr-76px'>
-        <div className='min-w-0 flex-1 pt-2px'>
-          <div className='flex items-center gap-6px min-w-0 flex-wrap'>
-            <span
-              className='truncate max-w-full text-14px font-medium leading-20px text-[var(--color-text-1)]'
-              title={item.name}
-            >
-              {item.name}
-            </span>
-            <MarketSourceBadge source={item.source} />
-            {requiresApiKey && (
-              <Tag size='small' bordered={false} className='!bg-[rgba(var(--warning-6),0.12)] !text-warning-7 !rounded-6px !text-10px'>
-                {t('settings.market.requiresApi', { defaultValue: 'Needs API' })}
-              </Tag>
-            )}
-            {!requiresApiKey && noApiKey && (
-              <Tag size='small' bordered={false} className='!bg-[rgba(var(--success-6),0.1)] !text-success-6 !rounded-6px !text-10px'>
-                {t('settings.market.noApi', { defaultValue: 'No API' })}
-              </Tag>
-            )}
-          </div>
-          {item.stats && <div className='mt-2px text-11px text-[var(--color-text-3)] truncate'>{item.stats}</div>}
-        </div>
+      <div className='mt-6px flex min-w-0 items-center gap-6px overflow-hidden'>
+        <MarketSourceBadge source={item.source} />
+        {item.stats && <span className='min-w-0 truncate text-11px text-[var(--color-text-3)]'>{item.stats}</span>}
+        {requiresApiKey && (
+          <Tag
+            size='small'
+            bordered={false}
+            className='!flex-shrink-0 !bg-[rgba(var(--warning-6),0.12)] !text-warning-7 !rounded-6px !text-10px'
+          >
+            {t('settings.market.requiresApi', { defaultValue: 'Needs API' })}
+          </Tag>
+        )}
+        {!requiresApiKey && noApiKey && (
+          <Tag
+            size='small'
+            bordered={false}
+            className='!flex-shrink-0 !bg-[rgba(var(--success-6),0.1)] !text-success-6 !rounded-6px !text-10px'
+          >
+            {t('settings.market.noApi', { defaultValue: 'No API' })}
+          </Tag>
+        )}
       </div>
 
       <div
