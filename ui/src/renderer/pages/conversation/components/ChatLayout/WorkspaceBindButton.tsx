@@ -54,7 +54,6 @@ const WorkspaceBindButton: React.FC<WorkspaceBindButtonProps> = ({ conversation_
       const ok = await ipcBridge.conversation.update.invoke({
         conversation_id: conversation_id,
         updates: { extra: { workspace: target } as TChatConversation['extra'] },
-        merge_extra: true,
       });
 
       if (ok) {
