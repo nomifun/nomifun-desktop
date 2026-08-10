@@ -11,6 +11,12 @@ import { Message } from '@arco-design/web-react';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+/**
+ * Persisted desktop switch for WebUI remote access. This context is its only
+ * writer; the only reader is the Rust startup tail
+ * (`DesktopServer::restore_lan_if_requested` in `crates/backend/nomifun-app/src/desktop.rs`),
+ * which re-opens the LAN listener at boot when this is a strict JSON `true`.
+ */
 const DESKTOP_WEBUI_ENABLED_KEY = 'webui.desktop.enabled';
 
 export interface WebuiServerContextValue {
@@ -179,7 +185,16 @@ export const WebuiServerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setRunning(false);
     setStatus((prev) => (prev ? { ...prev, running: false } : null));
     try {
-      await configService.set(DESKTOP_WEBUI_ENABLED_KEY, false);
+      // Persist "off" FIRST so a crash between the two steps can only ever
+      // under-expose (the main-process auto-restore reads this key at boot).
+      // But a failed write must NEVER swallow the actual stop: that would leave
+      // the listener serving while the UI says "off", and the next launch would
+      // dutifully "restore" a server the user had just turned off.
+      try {
+        await configService.set(DESKTOP_WEBUI_ENABLED_KEY, false);
+      } catch (error) {
+        console.error('[WebuiServer] failed to persist the disabled preference:', error);
+      }
       await webui.stop.invoke();
       Message.success({ content: t('settings.webui.stopSuccess'), duration: 1500 });
     } catch (error) {

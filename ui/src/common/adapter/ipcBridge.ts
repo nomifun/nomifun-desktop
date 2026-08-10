@@ -634,7 +634,10 @@ export const conversation = {
   ),
   // updates 额外允许顶层 `pinned`：对应 conversations 表真列（UpdateConversationRequest.pinned，
   // 服务端置位时自动维护 pinned_at）；body 构造的 `...rest` 原样透传该字段。
-  update: httpPatch<boolean, { conversation_id: ConversationId; updates: Partial<TChatConversation> & { pinned?: boolean }; merge_extra?: boolean }>(
+  // 注意：不要往 body 里加任何 UpdateConversationRequest 之外的字段——该 DTO 是
+  // `deny_unknown_fields`，多一个键整条 PATCH 直接 400。`extra` 恒为合并语义
+  // （见 nomifun-conversation/src/service.rs 的 update），无需任何开关字段。
+  update: httpPatch<boolean, { conversation_id: ConversationId; updates: Partial<TChatConversation> & { pinned?: boolean } }>(
     (p) => `/api/conversations/${p.conversation_id}`,
     (p) => {
       const updates = p.updates as Record<string, unknown>;
@@ -643,7 +646,6 @@ export const conversation = {
       return {
         ...rest,
         ...(model ? { model } : {}),
-        merge_extra: p.merge_extra,
       };
     }
   ),
