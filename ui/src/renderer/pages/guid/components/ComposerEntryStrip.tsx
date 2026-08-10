@@ -5,7 +5,7 @@
  */
 
 import { Trigger } from '@arco-design/web-react';
-import { EveryUser, Lightning, Robot } from '@icon-park/react';
+import { ApplicationOne, EveryUser, Lightning, Robot } from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveSkillDisplay, type LocalizableSkill } from '@/renderer/pages/settings/skill/skillDisplay';
@@ -29,6 +29,12 @@ export interface ComposerEntryStripProps {
   onSummonCompanion?: () => void;
   /** Name of the drafted companion; the entry shows it as its label. */
   summonedCompanionName?: string | null;
+  /** 「创建小程序」entry. Omit to hide the capability on a surface entirely. */
+  onCreateMiniApp?: () => void;
+  /** True while the composer is in mini-app mode (shows a dismissible token). */
+  miniAppActive?: boolean;
+  /** Leaves mini-app mode. */
+  onDismissMiniApp?: () => void;
 }
 
 /**
@@ -49,6 +55,9 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   collaborationPolicyNode,
   onSummonCompanion,
   summonedCompanionName,
+  onCreateMiniApp,
+  miniAppActive = false,
+  onDismissMiniApp,
 }) => {
   const { t } = useTranslation();
   const [skillsOpen, setSkillsOpen] = useState(false);
@@ -213,6 +222,41 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
     </button>
   ) : null;
 
+  // --- Mini-app entry ---
+  // Shown for every engine selection: mini-app mode pins the launch to the Nomi
+  // engine itself (spec D4), so it overrides the pill rather than depending on it.
+  // Active state copies the preset persona token: an accented, dismissible chip.
+  const miniAppEntry = !onCreateMiniApp ? null : miniAppActive ? (
+    <span
+      className={`${styles.entryButton} ${styles.entryButtonActive} ${styles.entryPersonaButton}`}
+      data-testid='guid-miniapp-token'
+    >
+      <span className={styles.entryAvatar}>
+        <ApplicationOne theme='outline' size={16} fill='currentColor' />
+      </span>
+      <span className={styles.entryButtonText}>{t('miniApps.composer.activeLabel')}</span>
+      <button
+        type='button'
+        className={styles.entryDismiss}
+        onClick={onDismissMiniApp}
+        aria-label={t('miniApps.composer.dismiss')}
+      >
+        ✕
+      </button>
+    </span>
+  ) : (
+    <button
+      type='button'
+      className={`${styles.entryButton} ${styles.entryButtonInteractive}`}
+      onClick={onCreateMiniApp}
+      aria-label={t('miniApps.composer.entry')}
+      data-testid='guid-miniapp-entry'
+    >
+      <ApplicationOne theme='outline' size={15} fill='currentColor' />
+      <span className={styles.entryButtonText}>{t('miniApps.composer.entry')}</span>
+    </button>
+  );
+
   // --- Preset selected state ---
   if (isPresetAgent) {
     const activePresetLabel = presetLabel || t('guid.entry.usePreset', { defaultValue: '使用设定' });
@@ -222,6 +266,8 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
         {collaborationPolicyNode}
 
         {summonEntry}
+
+        {miniAppEntry}
 
         {/* Persona token */}
         <span className={`${styles.entryButton} ${styles.entryButtonActive} ${styles.entryPersonaButton}`}>
@@ -264,6 +310,8 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
       {collaborationPolicyNode}
 
       {summonEntry}
+
+      {miniAppEntry}
 
       {/* Skills */}
       {skillsEntry}

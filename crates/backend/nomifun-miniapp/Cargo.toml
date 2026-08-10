@@ -1,0 +1,21 @@
+[package]
+name = "nomifun-miniapp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nomifun-common.workspace = true
+nomifun-db.workspace = true
+nomifun-api-types.workspace = true
+nomifun-auth.workspace = true
+
+axum.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The wire-shape tests assert on serialized DTO key sets; validation is pure, so
+# nothing here needs a runtime or a database. Route behavior is covered by
+# `nomifun-app`'s miniapp_e2e against the real router.
+serde_json.workspace = true

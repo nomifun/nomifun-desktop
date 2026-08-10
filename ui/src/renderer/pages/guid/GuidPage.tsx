@@ -46,6 +46,7 @@ import KnowledgeControl from '@/renderer/pages/conversation/components/Knowledge
 import { SummonDrawer, useCompanionRoster } from '@/renderer/pages/conversation/components/SummonPanel';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
 import { useGuidAdvancedConfig } from './hooks/useGuidAdvancedConfig';
+import { useMiniAppQuickStart } from '@/renderer/hooks/agent/useMiniAppQuickStart';
 import { autoWorkStartDisabled, isAutoWorkEntry } from './hooks/autoWorkEntry';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
@@ -85,6 +86,16 @@ const GuidPage: React.FC = () => {
 
   const localeKey = resolveLocaleKey(i18n.language);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+
+  // --- Mini-app mode ---
+  // When active the composer sends through `useMiniAppQuickStart` instead of the
+  // regular launch branches: engine pinned to Nomi, builder prompt injected.
+  const [miniAppMode, setMiniAppMode] = useState(false);
+  const miniAppQuickStart = useMiniAppQuickStart();
+  // Synchronous double-submit guard (mirrors `useGuidSend`'s `sendingRef`):
+  // `loading` is React state, so two gestures inside one tick would both pass
+  // the check and create two conversations.
+  const miniAppSendingRef = useRef(false);
 
   // --- Drawer state ---
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -242,6 +253,21 @@ const GuidPage: React.FC = () => {
   // created.
   const advancedConfig = useGuidAdvancedConfig();
 
+  // When AutoWork is armed (switch on + requirement tag) the primary button
+  // becomes a "Start AutoWork" action: clickable without typed input, and it
+  // creates the session + starts AutoWork without sending a first message (see
+  // planGuidEntry). Declared here because the mini-app branch below has to stay
+  // mutually exclusive with it.
+  const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
+
+  // Mini-app mode and an armed AutoWork entry are mutually exclusive: both claim
+  // the primary button, and silently launching a mini-app from the "Start
+  // AutoWork" affordance would be a lie. AutoWork wins — the mini-app entry is
+  // hidden while it is armed, and an already-armed mini-app mode is dropped.
+  useEffect(() => {
+    if (isAutoWorkMode) setMiniAppMode(false);
+  }, [isAutoWorkMode]);
+
   // 召唤伙伴 draft entry (nomi launches only): pick in the shared drawer here,
   // apply onto the conversation right after create.
   const [summonDrawerOpen, setSummonDrawerOpen] = useState(false);
@@ -309,6 +335,77 @@ const GuidPage: React.FC = () => {
   });
 
   // --- Coordinated handlers (depend on multiple hooks) ---
+  /**
+   * Composer submit. Mini-app mode owns the send path end to end and skips
+   * every `useGuidSend` branch: the launch is always one Nomi conversation
+   * carrying the builder prompt, so none of the engine/preset/AutoWork
+   * negotiation applies. The staged composer inputs (model, workspace dir,
+   * attachments) still travel with it — dropping them silently would lose the
+   * user's files. The pending overlay is reused so the transition looks
+   * identical to a normal launch.
+   */
+  const handleComposerSend = useCallback(() => {
+    // An armed AutoWork entry always wins: the effect above already dropped
+    // mini-app mode, and this second read makes the exclusion synchronous.
+    if (!miniAppMode || isAutoWorkMode) {
+      send.sendMessageHandler();
+      return;
+    }
+    const prompt = guidInput.input.trim();
+    if (!prompt || guidInput.loading || miniAppSendingRef.current) return;
+    miniAppSendingRef.current = true;
+    guidInput.setLoading(true);
+    pendingConversation.begin({
+      input: guidInput.input,
+      files: guidInput.files.length > 0 ? guidInput.files : undefined,
+      sendsInitialMessage: true,
+    });
+    void miniAppQuickStart
+      .start({
+        prompt,
+        model: modelSelection.current_model,
+        dir: guidInput.dir,
+        files: guidInput.files,
+      })
+      .then((started) => {
+        if (!started) return;
+        // Same teardown as the normal path, so a same-route return to the start
+        // page does not resurrect the launched draft.
+        guidInput.setInput('');
+        guidInput.setFiles([]);
+        guidInput.setDir('');
+        mention.setMentionOpen(false);
+        mention.setMentionQuery(null);
+        mention.setMentionSelectorOpen(false);
+        mention.setMentionActiveIndex(0);
+        setMiniAppMode(false);
+      })
+      .finally(() => {
+        miniAppSendingRef.current = false;
+        guidInput.setLoading(false);
+        pendingConversation.end();
+      });
+  }, [
+    miniAppMode,
+    isAutoWorkMode,
+    send.sendMessageHandler,
+    guidInput.input,
+    guidInput.loading,
+    guidInput.files,
+    guidInput.dir,
+    guidInput.setInput,
+    guidInput.setFiles,
+    guidInput.setDir,
+    guidInput.setLoading,
+    mention.setMentionOpen,
+    mention.setMentionQuery,
+    mention.setMentionSelectorOpen,
+    mention.setMentionActiveIndex,
+    modelSelection.current_model,
+    miniAppQuickStart.start,
+    pendingConversation,
+  ]);
+
   const handleInputChange = useCallback(
     (value: string) => {
       guidInput.setInput(value);
@@ -397,10 +494,10 @@ const GuidPage: React.FC = () => {
       if (isSubmitGesture(event, sendKey)) {
         event.preventDefault();
         if (!guidInput.input.trim()) return;
-        send.sendMessageHandler();
+        handleComposerSend();
       }
     },
-    [mention, guidInput.input, send.sendMessageHandler, sendKey],
+    [mention, guidInput.input, handleComposerSend, sendKey],
   );
 
   const handleSelectAgentFromPillBar = useCallback(
@@ -522,6 +619,22 @@ const GuidPage: React.FC = () => {
       state: null,
     });
   }, [resetPresetRequested, preselectAgentKey, location.pathname, location.search, location.hash, navigate]);
+
+  // `/guid?miniapp=1` (HashRouter query) activates mini-app mode — the library
+  // page's empty-state CTA lands here. The flag is stripped from the URL right
+  // after, which is what keeps this from re-arming after a manual dismiss: the
+  // effect's own navigate clears `location.search`, so the guard below is false
+  // on every later run. No "handled" ref: that would also block a *fresh*
+  // same-route activation from the library page.
+  const miniAppQueryRequested = useMemo(
+    () => new URLSearchParams(location.search).get('miniapp') === '1',
+    [location.search],
+  );
+  useEffect(() => {
+    if (!miniAppQueryRequested) return;
+    setMiniAppMode(true);
+    navigate(`${location.pathname}${location.hash}`, { replace: true, state: null });
+  }, [miniAppQueryRequested, location.pathname, location.hash, navigate]);
 
   const currentPresetAgentId =
     selectedPresetRecord?.preferred_agent_id || selectedPresetRecord?.agent_preferences[0]?.agent_id;
@@ -714,7 +827,6 @@ const GuidPage: React.FC = () => {
   // When AutoWork is enabled (with a tag) the primary button becomes a
   // "Start AutoWork" action: clickable without typed input, and it creates the
   // session + starts AutoWork without sending a first message (see planGuidEntry).
-  const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
   const actionRowNode = (
     <GuidActionRow
       files={guidInput.files}
@@ -757,7 +869,7 @@ const GuidPage: React.FC = () => {
       isButtonDisabled={
         isAutoWorkMode ? autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork) : send.isButtonDisabled
       }
-      onSend={send.sendMessageHandler}
+      onSend={handleComposerSend}
     />
   );
 
@@ -811,7 +923,11 @@ const GuidPage: React.FC = () => {
               onPaste={guidInput.onPaste}
               onFocus={guidInput.handleTextareaFocus}
               onBlur={guidInput.handleTextareaBlur}
-              placeholder={`${mention.selectedAgentLabel}, ${typewriterPlaceholder || t('conversation.welcome.placeholder')}`}
+              placeholder={
+                miniAppMode
+                  ? t('miniApps.composer.placeholder')
+                  : `${mention.selectedAgentLabel}, ${typewriterPlaceholder || t('conversation.welcome.placeholder')}`
+              }
               isInputActive={guidInput.isInputFocused}
               isFileDragging={guidInput.isFileDragging}
               activeBorderColor={activeBorderColor}
@@ -853,6 +969,9 @@ const GuidPage: React.FC = () => {
                     effectiveAgentType === 'nomi' ? () => setSummonDrawerOpen(true) : undefined
                   }
                   summonedCompanionName={summonedCompanionName}
+                  onCreateMiniApp={isAutoWorkMode ? undefined : () => setMiniAppMode(true)}
+                  miniAppActive={miniAppMode}
+                  onDismissMiniApp={() => setMiniAppMode(false)}
                 />
               }
             />

@@ -69,6 +69,8 @@ The source of truth is
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
 | `/nomi` | Companion configuration. |
 | `/knowledge`, `/knowledge/:id` | Knowledge base list/detail. |
+| `/mini-apps` | Mini-app library — the solidified single-file web tools, as a card grid. |
+| `/mini-apps/:id` | Mini-app runner — full-page sandboxed iframe served straight from the backend. |
 | `/settings/system` and related settings subroutes | System settings page and sub-sections. |
 
 Legacy settings paths such as `/settings/model`, `/settings/agent`,

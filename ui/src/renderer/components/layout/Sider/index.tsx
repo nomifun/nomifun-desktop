@@ -26,6 +26,7 @@ import {
   SiderCustomerServiceEntry,
   SiderKnowledgeEntry,
   SiderMcpEntry,
+  SiderMiniAppsEntry,
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
@@ -120,6 +121,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleAssetLibraryClick = () => navTo('/assets');
   const handleNomiClick = () => navTo('/nomi');
   const handleWorkshopClick = () => navTo('/workshop');
+  const handleMiniAppsClick = () => navTo('/mini-apps');
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handlePresetClick = () => navTo('/presets');
   const handleSkillsClick = () => navTo('/skills');
@@ -220,6 +222,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleWorkshopClick}
+            />
+            {/* 小程序 (Mini-apps) — solidified single-file web tools, opened instantly */}
+            <SiderMiniAppsEntry
+              isMobile={isMobile}
+              isActive={pathname.startsWith('/mini-apps')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleMiniAppsClick}
             />
             {/* 数据空间 — data & storage (文件管理 reserved for later) */}
             <SiderSectionHeader label={t('common.siderSection.data')} collapsed={collapsed} />
