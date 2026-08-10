@@ -36,8 +36,8 @@ pub mod lan_endpoint;
 
 pub use config::{AppConfig, derive_encryption_key, load_or_create_data_encryption_key};
 pub use desktop::{
-    DesktopKeepAlive, DesktopServer, DesktopStartError, StartupCleanupDisposition,
-    WebUiAsset, WebUiAssetSource, WebUiStatus,
+    DesktopKeepAlive, DesktopServer, DesktopStartError, LanRestoreOutcome,
+    StartupCleanupDisposition, WebUiAsset, WebUiAssetSource, WebUiStatus,
 };
 pub use nomifun_auth::AuthPolicy;
 pub use router::{

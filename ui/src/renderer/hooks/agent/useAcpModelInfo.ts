@@ -454,7 +454,6 @@ export const useAcpModelInfo = ({
         await ipcBridge.conversation.update.invoke({
           conversation_id: conversation_id,
           updates: { extra: { current_model_id: model_id } as TChatConversation['extra'] },
-          merge_extra: true,
         });
         logAcpModelInfo('select_model_persisted', {
           conversation_id,

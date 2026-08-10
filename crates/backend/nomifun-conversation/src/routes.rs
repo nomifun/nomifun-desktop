@@ -123,6 +123,11 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "session_mcp_servers",
             "skills",
             "temp_workspace_id",
+            // Same authority, one bind later: `retired_temp_workspace_id` is the
+            // token delete uses to reclaim a throwaway workspace directory. A
+            // client that could set it would get an arbitrary directory under the
+            // workspace root removed when the conversation is deleted.
+            "retired_temp_workspace_id",
             // Summon is written only through PUT /summon (idle-validated,
             // server-stamped) or trusted backend creators; open JSON cannot
             // smuggle or clone it.
@@ -858,6 +863,30 @@ mod tests {
         ] {
             assert!(extra.get(key).is_none(), "{key} must be server-owned");
         }
+        assert_eq!(extra["backend"], json!("claude"));
+    }
+
+    #[test]
+    fn strips_both_managed_workspace_tokens_so_a_client_cannot_forge_one() {
+        // `temp_workspace_id` is the rebase + delete-cleanup authority and
+        // `retired_temp_workspace_id` is the same token after a workspace bind.
+        // A client that could set either one could point a conversation's
+        // managed-workspace identity at an arbitrary directory under the
+        // workspace root — which delete then removes — or plant an invalid
+        // marker that makes every later read fail. Both are server-owned.
+        let mut extra = json!({
+            "temp_workspace_id": "forged-marker",
+            "retired_temp_workspace_id": "0190f5fe-7c00-7a00-8abc-000000000001",
+            "workspace": "/home/me/project",
+            "backend": "claude",
+        });
+
+        strip_server_owned_runtime_fields(&mut extra);
+
+        assert!(extra.get("temp_workspace_id").is_none());
+        assert!(extra.get("retired_temp_workspace_id").is_none());
+        // A client-chosen workspace is legitimate input and must survive.
+        assert_eq!(extra["workspace"], json!("/home/me/project"));
         assert_eq!(extra["backend"], json!("claude"));
     }
 

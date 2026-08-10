@@ -43,11 +43,54 @@ use crate::cli::Cli;
 use crate::lan_endpoint::detect_all_lan_ipv4s;
 use crate::{AppServices, bootstrap, create_router};
 use nomifun_auth::AuthPolicy;
-use nomifun_db::IUserRepository;
+use nomifun_db::{IClientPreferenceRepository, IUserRepository};
 
 /// Stable, bookmarkable port for the LAN listener (matches the UI's
 /// `WEBUI_DEFAULT_PORT`). Falls back to an ephemeral port if occupied.
 pub const WEBUI_LAN_PORT: u16 = 25808;
+
+/// `client_preferences` row holding the desktop "WebUI remote access" switch.
+///
+/// The ONLY writer is the frontend `WebuiServerContext`
+/// (`ui/src/renderer/hooks/context/WebuiServerContext.tsx`, via configService →
+/// `PUT /api/settings/client`); [`DesktopServer::restore_lan_if_requested`] is
+/// the ONLY reader. Before that reader existed the preference was write-only, so
+/// every desktop restart came up loopback-only even though the user had left the
+/// switch on — phones and robots then found a closed port until someone opened
+/// the panel and toggled it again.
+const DESKTOP_WEBUI_ENABLED_PREF_KEY: &str = "webui.desktop.enabled";
+
+/// Result of the startup LAN-restore step, so the caller (and the smoke test)
+/// can tell "the user never asked" apart from "asked, but refused/failed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanRestoreOutcome {
+    /// No stored request to expose the LAN listener: loopback only.
+    NotRequested,
+    /// Requested, but the installation still has no admin credential. Binding
+    /// `0.0.0.0` in that state would let the first visitor on the network claim
+    /// the empty-password admin via `/api/auth/setup`.
+    BlockedWithoutCredential,
+    /// The LAN listener is serving again.
+    Restored,
+    /// Restore was requested but could not be completed (preference read
+    /// failure, bind failure, missing app shell…). Startup continues.
+    Failed,
+}
+
+/// Whether the persisted preference is a positive request to expose LAN serving.
+///
+/// Fail-safe by construction: ONLY a strict JSON `true` opens a listener on
+/// `0.0.0.0`. A missing key, an empty value, `false`, the JSON *string*
+/// `"true"`, `1`, `null`, or any parse failure all read as "stay loopback-only".
+/// An ambiguous stored value must never be resolved in favour of exposing the
+/// machine to the network.
+fn lan_restore_requested(stored: Option<&str>) -> bool {
+    stored
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .is_some_and(|value| matches!(value, serde_json::Value::Bool(true)))
+}
 
 /// Whether a failed desktop startup positively verified teardown of every
 /// resource acquired before the failure was returned.
@@ -764,6 +807,12 @@ impl DesktopServer {
         });
         server.spawn_loopback(loopback);
         server.spawn_robot_endpoint_projection();
+        // Tail of startup: the backend is ready and the app-shell source has
+        // been resolved, so re-opening LAN serving here is the earliest moment
+        // that can serve a real request. Doing it in Rust (not the webview) is
+        // what makes a headless/auto-start boot and an early robot OTA poll find
+        // an open port instead of waiting for the frontend to mount.
+        server.restore_lan_if_requested().await;
         Ok((server, keep_alive))
     }
 
@@ -1107,6 +1156,79 @@ impl DesktopServer {
         // The loopback task can fail before `start` returns and before a caller
         // subscribes. Retain that early fatal value instead of dropping it.
         self.failure_tx.send_replace(Some(failure));
+    }
+
+    /// Re-open LAN serving when the user left the "WebUI remote access" switch
+    /// on, so remote access survives a desktop restart.
+    ///
+    /// Called exactly once at the tail of [`Self::start_with_outcome`]; it is
+    /// public so the desktop smoke test can drive the identical restore path
+    /// against a real backend without restarting a locked data directory.
+    ///
+    /// Two invariants:
+    /// - Nothing here can fail startup. A preference read error, a missing app
+    ///   shell, or a bind failure is logged and returns [`LanRestoreOutcome`];
+    ///   remote access is a convenience and never a reason to refuse to launch.
+    /// - No credential, no exposure. `has_users() == false` means the admin
+    ///   password was never provisioned, and `start_lan` would generate one
+    ///   silently at boot with nobody watching the one-time value — while the
+    ///   port is already reachable. We stay loopback-only and say why.
+    pub async fn restore_lan_if_requested(self: &Arc<Self>) -> LanRestoreOutcome {
+        let prefs = nomifun_db::SqliteClientPreferenceRepository::new(
+            self.database.pool().clone(),
+        );
+        let stored = match prefs.get_by_keys(&[DESKTOP_WEBUI_ENABLED_PREF_KEY]).await {
+            Ok(rows) => rows
+                .into_iter()
+                .find(|row| row.key == DESKTOP_WEBUI_ENABLED_PREF_KEY)
+                .map(|row| row.value),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    key = DESKTOP_WEBUI_ENABLED_PREF_KEY,
+                    "could not read the persisted WebUI remote-access preference; LAN access stays off — re-enable it in Settings › WebUI"
+                );
+                return LanRestoreOutcome::Failed;
+            }
+        };
+        if !lan_restore_requested(stored.as_deref()) {
+            return LanRestoreOutcome::NotRequested;
+        }
+
+        match self.user_repo.has_users().await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    "WebUI remote access was left on, but this installation has no admin password yet, \
+                     so the LAN listener was NOT restored: an exposed instance without a credential can \
+                     be claimed by the first visitor on the network. Enable WebUI once from \
+                     Settings › WebUI to provision the password; later restarts will then restore it."
+                );
+                return LanRestoreOutcome::BlockedWithoutCredential;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not verify that an admin credential exists; LAN access stays off"
+                );
+                return LanRestoreOutcome::Failed;
+            }
+        }
+
+        let status = self.start_lan().await;
+        if status.running {
+            tracing::info!(
+                port = status.port,
+                "restored WebUI remote access from the persisted desktop preference"
+            );
+            LanRestoreOutcome::Restored
+        } else {
+            tracing::warn!(
+                error = status.error.as_deref().unwrap_or("unknown"),
+                "could not restore WebUI remote access; the desktop continues on loopback only"
+            );
+            LanRestoreOutcome::Failed
+        }
     }
 
     /// Start LAN serving (bind `0.0.0.0:WEBUI_LAN_PORT`). Awaitable directly
@@ -2052,4 +2174,34 @@ mod tests {
         assert_eq!(close_calls.load(Ordering::Acquire), 0);
     }
 
+    #[test]
+    fn lan_restore_requested_only_for_strict_json_true() {
+        assert!(lan_restore_requested(Some("true")));
+        assert!(lan_restore_requested(Some(" true\n")));
+    }
+
+    #[test]
+    fn lan_restore_is_refused_for_every_ambiguous_stored_value() {
+        // Exposing 0.0.0.0 is the irreversible direction, so anything that is
+        // not a strict JSON `true` must read as "off".
+        for stored in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("false"),
+            // JSON *string* "true": what a naive string comparison would accept.
+            Some("\"true\""),
+            Some("1"),
+            Some("null"),
+            Some("TRUE"),
+            Some("on"),
+            Some("{\"enabled\":true}"),
+            Some("not json at all"),
+        ] {
+            assert!(
+                !lan_restore_requested(stored),
+                "stored value {stored:?} must not auto-expose the LAN listener"
+            );
+        }
+    }
 }
