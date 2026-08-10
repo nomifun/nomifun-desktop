@@ -204,6 +204,7 @@ import {
   parseCsNoteId,
   parseRequirementId,
   parseRemoteAgentId,
+  parseMiniAppId,
   parseSshHostId,
   parseSkillPatternId,
   parseTerminalId,
@@ -227,6 +228,7 @@ import {
   type ExecutionTemplateId,
   type McpServerId,
   type MessageId,
+  type MiniAppId,
   type ProviderId,
   type CsAgentId,
   type CsDialogueId,
@@ -2035,6 +2037,74 @@ export const ssh = {
   importHosts: withResponseMap(
     httpPost<IApiSshImportResult, { aliases: string[] }>('/api/ssh-hosts/import'),
     fromApiSshImportResult
+  ),
+};
+
+// ---------------------------------------------------------------------------
+// Mini-apps — AI-generated self-contained single-file web tools, solidified
+// from a conversation and reopened instantly from the sidebar library.
+//
+// Wire shape is snake_case (preset-style). Responses never carry the HTML
+// body: the runtime loads it through the unauthenticated
+// `GET /api/miniapps/{miniapp_id}/serve` route as an iframe `src`.
+// ---------------------------------------------------------------------------
+
+export interface IApiMiniApp {
+  miniapp_id: MiniAppId;
+  name: string;
+  description: string;
+  icon: string | null;
+  source_conversation_id: string | null;
+  /** Size of the stored HTML document in bytes; the body itself never rides list/detail responses. */
+  html_size: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface IApiCreateMiniApp {
+  name: string;
+  description?: string;
+  icon?: string;
+  html: string;
+  source_conversation_id?: string;
+}
+
+export interface IApiUpdateMiniApp {
+  name?: string;
+  description?: string;
+  icon?: string;
+  html?: string;
+}
+
+const fromApiMiniApp = (value: IApiMiniApp): IApiMiniApp => ({
+  ...value,
+  miniapp_id: parseMiniAppId(value.miniapp_id),
+});
+
+export const miniapps = {
+  list: withResponseMap(
+    httpGet<IApiMiniApp[], void>('/api/miniapps'),
+    (items) => items.map(fromApiMiniApp)
+  ),
+  get: withResponseMap(
+    httpGet<IApiMiniApp | null, { miniapp_id: MiniAppId }>(
+      (p) => `/api/miniapps/${p.miniapp_id}`
+    ),
+    (item) => (item == null ? null : fromApiMiniApp(item))
+  ),
+  create: withResponseMap(
+    httpPost<IApiMiniApp, IApiCreateMiniApp>('/api/miniapps'),
+    fromApiMiniApp
+  ),
+  update: withResponseMap(
+    httpPut<IApiMiniApp, { miniapp_id: MiniAppId; updates: IApiUpdateMiniApp }>(
+      (p) => `/api/miniapps/${p.miniapp_id}`,
+      (p) => p.updates
+    ),
+    fromApiMiniApp
+  ),
+  delete: httpDelete<boolean, { miniapp_id: MiniAppId }>(
+    (p) => `/api/miniapps/${p.miniapp_id}`
   ),
 };
 

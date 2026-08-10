@@ -1,0 +1,94 @@
+{
+  "title": "Mini-Apps",
+  "subtitle": "AI-built web tools you solidify once and reopen instantly",
+  "nav": {
+    "entry": "Mini-Apps"
+  },
+  "list": {
+    "searchPlaceholder": "Search mini-apps",
+    "updatedAt": "Updated {{time}}",
+    "filterEmpty": "No mini-apps match your search"
+  },
+  "time": {
+    "justNow": "just now",
+    "minutesAgo": "{{count}}m ago",
+    "hoursAgo": "{{count}}h ago",
+    "yesterday": "yesterday",
+    "daysAgo": "{{count}}d ago",
+    "weeksAgo": "last week"
+  },
+  "empty": {
+    "title": "No mini-apps yet",
+    "description": "Pick \"Create mini-app\" on the session start page, describe what you need, and the AI builds a ready-to-use tool. Solidify it here once you are happy.",
+    "cta": "Create one"
+  },
+  "actions": {
+    "open": "Open",
+    "rename": "Rename",
+    "delete": "Delete",
+    "refresh": "Refresh",
+    "retry": "Retry",
+    "openInBrowser": "Open in browser",
+    "dismissHint": "Dismiss",
+    "back": "Back",
+    "openSource": "Continue improving in its conversation",
+    "create": "Create mini-app"
+  },
+  "rename": {
+    "title": "Rename mini-app",
+    "label": "Name",
+    "placeholder": "Enter a new name",
+    "required": "Please enter a name",
+    "success": "Renamed"
+  },
+  "delete": {
+    "confirmTitle": "Delete mini-app",
+    "confirmContent": "Delete \"{{name}}\"? This cannot be undone.",
+    "success": "Deleted"
+  },
+  "runner": {
+    "loadError": "Failed to load the mini-app",
+    "notFound": "This mini-app does not exist or was deleted"
+  },
+  "panel": {
+    "backToList": "Back to mini-apps",
+    "openFullPage": "Open full screen"
+  },
+  "frame": {
+    "stalledHint": "Still nothing on screen? Retry, or open this mini-app in your browser."
+  },
+  "preview": {
+    "title": "Mini-app preview",
+    "refresh": "Refresh",
+    "solidify": "Solidify as mini-app",
+    "readError": "Failed to read the mini-app file"
+  },
+  "save": {
+    "title": "Solidify as mini-app",
+    "nameLabel": "Name",
+    "namePlaceholder": "Give this mini-app a name",
+    "nameRequired": "Please enter a name",
+    "descriptionLabel": "Description",
+    "descriptionPlaceholder": "One line about what it does (optional)",
+    "iconLabel": "Icon",
+    "iconPlaceholder": "Type an emoji (optional)",
+    "confirm": "Save",
+    "cancel": "Cancel",
+    "updateExisting": "Update \"{{name}}\"",
+    "saveAsNew": "Save as a new mini-app",
+    "existingHint": "This conversation already solidified a mini-app. Update it, or save a new one.",
+    "success": "Saved — find it under \"Mini-Apps\" in the sidebar",
+    "updateSuccess": "Updated \"{{name}}\"",
+    "error": "Save failed, please retry"
+  },
+  "composer": {
+    "entry": "Create mini-app",
+    "activeLabel": "Mini-app mode",
+    "dismiss": "Exit mini-app mode",
+    "placeholder": "Describe the mini-app you want, e.g. a pomodoro timer with reminders",
+    "conversationName": "Mini-app · {{name}}"
+  },
+  "errors": {
+    "loadListFailed": "Failed to load mini-apps"
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "title": "小程序",
+  "subtitle": "AI 为你生成、一次固化、随开随用的网页小工具",
+  "nav": {
+    "entry": "小程序"
+  },
+  "list": {
+    "searchPlaceholder": "搜索小程序",
+    "updatedAt": "更新于 {{time}}",
+    "filterEmpty": "没有匹配的小程序"
+  },
+  "time": {
+    "justNow": "刚刚",
+    "minutesAgo": "{{count}} 分钟前",
+    "hoursAgo": "{{count}} 小时前",
+    "yesterday": "昨天",
+    "daysAgo": "{{count}} 天前",
+    "weeksAgo": "上周"
+  },
+  "empty": {
+    "title": "还没有小程序",
+    "description": "在会话启动页选择「创建小程序」，描述你的诉求，AI 会为你生成一个即开即用的小工具，满意后固化到这里。",
+    "cta": "去创建"
+  },
+  "actions": {
+    "open": "打开使用",
+    "rename": "重命名",
+    "delete": "删除",
+    "refresh": "刷新",
+    "retry": "重试",
+    "openInBrowser": "在浏览器中打开",
+    "dismissHint": "忽略提示",
+    "back": "返回",
+    "openSource": "去来源会话继续改进",
+    "create": "创建小程序"
+  },
+  "rename": {
+    "title": "重命名小程序",
+    "label": "名称",
+    "placeholder": "输入新名称",
+    "required": "请输入名称",
+    "success": "已重命名"
+  },
+  "delete": {
+    "confirmTitle": "删除小程序",
+    "confirmContent": "确定删除「{{name}}」吗？删除后不可恢复。",
+    "success": "已删除"
+  },
+  "runner": {
+    "loadError": "小程序加载失败",
+    "notFound": "小程序不存在或已被删除"
+  },
+  "panel": {
+    "backToList": "返回小程序列表",
+    "openFullPage": "全屏打开"
+  },
+  "frame": {
+    "stalledHint": "小程序还没渲染出来？可以重试，或在浏览器中打开。"
+  },
+  "preview": {
+    "title": "小程序预览",
+    "refresh": "刷新",
+    "solidify": "固化为小程序",
+    "readError": "读取小程序文件失败"
+  },
+  "save": {
+    "title": "固化为小程序",
+    "nameLabel": "名称",
+    "namePlaceholder": "给这个小程序起个名字",
+    "nameRequired": "请输入名称",
+    "descriptionLabel": "描述",
+    "descriptionPlaceholder": "一句话说明它能做什么（可选）",
+    "iconLabel": "图标",
+    "iconPlaceholder": "输入一个 emoji（可选）",
+    "confirm": "保存",
+    "cancel": "取消",
+    "updateExisting": "更新「{{name}}」",
+    "saveAsNew": "另存为新小程序",
+    "existingHint": "本会话已固化过小程序，你可以更新它，或另存为一个新的。",
+    "success": "已保存，去左侧「小程序」里看看吧",
+    "updateSuccess": "已更新「{{name}}」",
+    "error": "保存失败，请重试"
+  },
+  "composer": {
+    "entry": "创建小程序",
+    "activeLabel": "小程序模式",
+    "dismiss": "退出小程序模式",
+    "placeholder": "描述你想要的小程序，例如：一个带提醒的番茄钟",
+    "conversationName": "小程序 · {{name}}"
+  },
+  "errors": {
+    "loadListFailed": "加载小程序列表失败"
+  }
+}
