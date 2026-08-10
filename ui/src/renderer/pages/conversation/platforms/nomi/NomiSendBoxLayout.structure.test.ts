@@ -44,30 +44,34 @@ describe('Nomi sendbox control layout', () => {
     expect(contextRingSource.includes('rd-999px b b-solid px-10px')).toBe(false);
   });
 
-  test('keeps collaborator models next to the main model and collaboration policy next to permission', () => {
+  test('merges collaboration models and policy into one control next to the main model', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
 
-    const collaboratorBlock = chatSource.slice(
-      chatSource.indexOf('const collaboratorSelectorNode'),
-      chatSource.indexOf('const { providers: healProviders'),
+    const collaborationBlock = chatSource.slice(
+      chatSource.indexOf('const collaborationControlNode'),
+      chatSource.indexOf('const { groups: healGroups'),
     );
-    expect(collaboratorBlock.includes('<GuidCollaboratorSelector')).toBe(true);
-    expect(chatSource.includes('<CollaborationPolicyControl')).toBe(true);
-    expect(chatSource.includes('extraRightTools={collaborationPolicyNode}')).toBe(true);
+    expect(collaborationBlock.includes('<GuidCollaboratorSelector')).toBe(true);
+    expect(collaborationBlock.includes('onChange={onCollaboratorsChange}')).toBe(true);
+    expect(collaborationBlock.includes('panelFooter={')).toBe(true);
+    expect(collaborationBlock.includes('<CollaborationPolicyControl')).toBe(true);
+    expect(collaborationBlock.includes('onChange={onCollaborationPolicyChange}')).toBe(true);
+    expect(collaborationBlock.includes('embedded')).toBe(true);
+    expect(collaborationBlock.includes("triggerLabel={t('collaboration.policy.button'")).toBe(true);
+    expect(collaborationBlock.includes("className='nomi-sendbox-model-btn nomi-sendbox-collaboration-btn'")).toBe(true);
+    expect(chatSource.includes('extraRightTools={collaborationPolicyNode}')).toBe(false);
 
     const rightToolsIndex = sendBoxSource.indexOf('rightTools={');
     const contextRingIndex = sendBoxSource.indexOf('<ContextUsageRing', rightToolsIndex);
     const modelIndex = sendBoxSource.indexOf('<NomiModelSelector', rightToolsIndex);
     const collaboratorIndex = sendBoxSource.indexOf('{collaboratorSelectorNode}', rightToolsIndex);
-    const policyIndex = sendBoxSource.indexOf('{extraRightTools}', rightToolsIndex);
     const permissionIndex = sendBoxSource.indexOf('<AgentModeSelector', rightToolsIndex);
 
     expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
     expect(modelIndex).toBeGreaterThan(contextRingIndex);
     expect(collaboratorIndex).toBeGreaterThan(modelIndex);
-    expect(policyIndex).toBeGreaterThan(collaboratorIndex);
-    expect(permissionIndex).toBeGreaterThan(policyIndex);
+    expect(permissionIndex).toBeGreaterThan(collaboratorIndex);
   });
 
   test('reconciles conversation collaborators before rendering or persisting executable ranges', () => {
@@ -85,16 +89,15 @@ describe('Nomi sendbox control layout', () => {
     expect(chatSource.includes('sameModelRefs(collaborators, collaboratorReconciliation.retained)')).toBe(true);
   });
 
-  test('keeps the compact collaboration policy icon ready for inline hover expansion', () => {
+  test('supports embedding the policy panel behind the unified collaboration trigger', () => {
     const source = readSource(
       new URL('../../../../components/collaboration/CollaborationPolicyControl.tsx', import.meta.url),
     );
 
     expect(source.includes("data-testid='collaboration-policy-control'")).toBe(true);
-    expect(source.includes("shape={compact ? 'circle' : 'round'}")).toBe(true);
-    expect(source.includes("compact ? 'nomi-sendbox-policy-btn' : ''")).toBe(true);
-    expect(source.includes("className='sendbox-responsive-label'")).toBe(true);
-    expect(/\{compact && active &&\s*<span className=\{styles\.triggerStatus\}/.test(source)).toBe(true);
+    expect(source.includes('embedded?: boolean')).toBe(true);
+    expect(source.includes('if (embedded)')).toBe(true);
+    expect(source.includes('return <div className={styles.embedded}>{content}</div>')).toBe(true);
   });
 
   test('collapses text pills to icons and expands their labels inline on desktop hover', () => {
@@ -109,6 +112,7 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxCss.includes('container-name: sendbox-config')).toBe(true);
     expect(sendBoxCss.includes('@container sendbox-config (max-width: 560px)')).toBe(true);
     expect(sendBoxCss.includes('.sendbox-responsive-label')).toBe(true);
+    expect(sendBoxCss.includes(".nomi-sendbox-collaboration-btn[aria-pressed='true']")).toBe(true);
     expect(sendBoxCss.includes('max-width 160ms ease')).toBe(true);
     expect(sendBoxCss.includes('@media (hover: hover) and (pointer: fine)')).toBe(true);
     expect(sendBoxCss.includes('.nomi-sendbox-model-btn:hover')).toBe(true);

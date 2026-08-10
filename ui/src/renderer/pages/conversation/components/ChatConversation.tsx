@@ -194,15 +194,13 @@ const NomiConversationLayout: React.FC<{
   conversation: NomiConversation;
   chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceCollaboration' | 'workspaceExtraTabs'>;
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
-  collaboratorSelectorNode: React.ReactNode;
-  collaborationPolicyNode: React.ReactNode;
+  collaborationControlNode: React.ReactNode;
   presetPresetName?: string;
 }> = ({
   conversation,
   chatLayoutProps,
   modelSelection,
-  collaboratorSelectorNode,
-  collaborationPolicyNode,
+  collaborationControlNode,
   presetPresetName,
 }) => {
   const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
@@ -225,8 +223,7 @@ const NomiConversationLayout: React.FC<{
           (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
         }
         agent_name={presetPresetName}
-        collaboratorSelectorNode={collaboratorSelectorNode}
-        extraRightTools={collaborationPolicyNode}
+        collaboratorSelectorNode={collaborationControlNode}
         isProcessing={isConversationProcessing(conversation)}
       />
     </ExecutionConversationLayout>
@@ -384,20 +381,6 @@ const NomiConversationPanel: React.FC<{
     void persistModelPool(mainModelRef, collaboratorReconciliation.retained);
   }, [collaboratorReconciliation, collaborators, mainModelRef, persistModelPool]);
 
-  // Collaboration selector stays adjacent to the main model selector.
-  const collaboratorSelectorNode = (
-    <GuidCollaboratorSelector
-      value={activeCollaborators}
-      onChange={onCollaboratorsChange}
-      mainModel={mainModelRef}
-      selectedTemplate={selectedCollaborationTemplate}
-      workDir={conversation.extra?.workspace}
-      onTemplateApply={(template) => void persistCollaborationTemplate(template)}
-      onTemplateClear={() => void persistCollaborationTemplate(null)}
-      className='nomi-sendbox-model-btn'
-    />
-  );
-
   const onCollaborationPolicyChange = useCallback(
     async (next: CollaborationPolicyValue) => {
       setCollaborationPolicy(next);
@@ -416,13 +399,30 @@ const NomiConversationPanel: React.FC<{
     [conversation.id],
   );
 
-  const collaborationPolicyNode = (
-    <CollaborationPolicyControl
-      runtimeType={conversation.type}
-      delegationPolicy={collaborationPolicy.delegationPolicy}
-      decisionPolicy={collaborationPolicy.decisionPolicy}
-      onChange={onCollaborationPolicyChange}
-      compact
+  // Conversation collaboration models, reusable plans, and policy share one
+  // toolbar entry. Their existing callbacks stay independent so this remains
+  // a presentation-only merge.
+  const collaborationControlNode = (
+    <GuidCollaboratorSelector
+      value={activeCollaborators}
+      onChange={onCollaboratorsChange}
+      mainModel={mainModelRef}
+      selectedTemplate={selectedCollaborationTemplate}
+      workDir={conversation.extra?.workspace}
+      onTemplateApply={(template) => void persistCollaborationTemplate(template)}
+      onTemplateClear={() => void persistCollaborationTemplate(null)}
+      className='nomi-sendbox-model-btn nomi-sendbox-collaboration-btn'
+      triggerLabel={t('collaboration.policy.button', { defaultValue: 'Collaboration' })}
+      triggerActive={collaborationPolicy.delegationPolicy !== 'disabled'}
+      panelFooter={
+        <CollaborationPolicyControl
+          runtimeType={conversation.type}
+          delegationPolicy={collaborationPolicy.delegationPolicy}
+          decisionPolicy={collaborationPolicy.decisionPolicy}
+          onChange={onCollaborationPolicyChange}
+          embedded
+        />
+      }
     />
   );
 
@@ -523,8 +523,7 @@ const NomiConversationPanel: React.FC<{
       conversation={conversation}
       chatLayoutProps={chatLayoutProps}
       modelSelection={modelSelection}
-      collaboratorSelectorNode={collaboratorSelectorNode}
-      collaborationPolicyNode={collaborationPolicyNode}
+      collaborationControlNode={collaborationControlNode}
       presetPresetName={presetPresetInfo?.name}
     />
   );
