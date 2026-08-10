@@ -107,7 +107,8 @@ nomifun-web --host 0.0.0.0 --port 8787 \
 
 1. 用 Bun 构建 SPA。
 2. 从 workspace 编译 `nomifun-web`。
-3. 组装一个精简的 `debian:bookworm-slim` 运行时，包含 `bun`、`git` 和 `ripgrep`。
+3. 组装一个精简的 `debian:trixie-slim` 运行时，包含 Bun、带 npm/npx
+   的 Node.js 22、带 PyYAML 的 Python 3、Git 和 ripgrep。
 
 它暴露端口 `8787`，并使用 `/data` 作为数据卷。
 
@@ -390,7 +391,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 |---|---|---|
 | `glibc` + `ca-certificates` | 是 | sqlite 是静态链接的，TLS 使用 rustls —— **不需要 openssl，不需要 libsqlite**。 |
 | `bun` ≥ 1.3.13 | **是** | Agent 执行运行时。1.1.38 有 stdin bug；不要使用。Docker 镜像里已包含。 |
-| `node` / `npm` / `npx` | 推荐 | 许多用户配置的 MCP stdio 服务器通过 `npx -y …` 启动。 |
+| Node.js 22 + `npm` / `npx` | 推荐 | 许多 MCP stdio 服务器以及 OfficeCLI 自动安装链路会使用。Docker 镜像里已包含。 |
+| Python 3 + PyYAML | 推荐 | 支持 Agent 的 Python 脚本模式和随附的 Python 内置技能。Docker 镜像里已包含。 |
 | `git` | 推荐 | 技能发现和一些内置工具会使用。 |
 | `ripgrep` (`rg`) | 推荐 | 代码搜索后端。缺失时回退到 `grep`。 |
 | `DISPLAY` / X11 / WebView | **否** | `nomifun-web` 是完全无头的。 |
