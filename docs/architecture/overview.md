@@ -9,7 +9,7 @@ custom protocol.
 
 This document is the map. The sibling documents drill into the parts:
 
-- [`backend-crates.md`](backend-crates.md) — the 34 `nomifun-*` backend crates.
+- [`backend-crates.md`](backend-crates.md) — the 36 `nomifun-*` backend crates.
 - [`agent-engine.md`](agent-engine.md) — the 15 `nomi-*` agent crates.
 - [`agent-execution.zh.md`](agent-execution.zh.md) — the unified persistent AgentExecution model.
 - [`frontend.md`](frontend.md) — the React SPA, adapter layer, routing.

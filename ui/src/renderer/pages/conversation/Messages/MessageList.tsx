@@ -56,6 +56,7 @@ import { formatFileTargetPreview, splitToolReceiptTargets } from './processFileT
 import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
+import { useAutoPreviewMiniApp } from '@/renderer/hooks/file/useAutoPreviewMiniApp';
 import SelectionReplyButton from './components/SelectionReplyButton';
 import ConversationQuestionLocator from '../components/ConversationTitleMinimap/ConversationQuestionLocator';
 import {
@@ -750,6 +751,7 @@ const MessageList: React.FC<{
   const conversationContext = useConversationContextSafe();
   useKnowledgeWritebackEvents(conversationContext?.conversation_id);
   useAutoPreviewOfficeFiles(conversationContext);
+  useAutoPreviewMiniApp(conversationContext);
   const workspaceRoots = useMemo(
     () => (conversationContext?.workspace ? [conversationContext.workspace] : []),
     [conversationContext?.workspace]

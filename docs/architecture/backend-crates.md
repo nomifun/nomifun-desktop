@@ -1,6 +1,6 @@
 # Backend Crates
 
-The 34 `nomifun-*` crates under [`crates/backend/`](../../crates/backend/) form
+The 36 `nomifun-*` crates under [`crates/backend/`](../../crates/backend/) form
 the HTTP/WS server. Together they compile into the `nomifun-app` library crate
 and, via `nomifun-app/src/main.rs`, the **`nomicore`** binary. The two app hosts
 (`nomifun-desktop` and `nomifun-web`) link `nomifun-app` directly and call
@@ -94,6 +94,7 @@ identifiers remain opaque.
 | [`nomifun-companion`](../../crates/backend/nomifun-companion/) | Desktop companion state, figure/image assets, memory/persona data, companion public image serving, and companion-bound token integration. |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | Knowledge bases, source ingestion, bound-base mount state, and scoped read-only knowledge MCP server. |
 | [`nomifun-workshop`](../../crates/backend/nomifun-workshop/) | Creative Workshop domain: the infinite-canvas visual-creation workspace. Owns canvases + assets (index rows in `nomifun-db`, canvas bodies and asset binaries on disk) and serves the `/api/workshop/*` surface. |
+| [`nomifun-miniapp`](../../crates/backend/nomifun-miniapp/) | Mini-apps: user-solidified, AI-generated single-file web tools. Owns the `miniapps` table (HTML stored inline), the owner-scoped `/api/miniapps` CRUD surface, and the auth-exempt `GET /api/miniapps/{id}/serve` route that renders a saved app in an iframe. |
 | [`nomifun-creation`](../../crates/backend/nomifun-creation/) | Media generation engine behind the Workshop canvas's generation nodes: provider-agnostic async task queue (`queued → running → succeeded/failed/canceled`) with per-provider concurrency plus a global cap, cancellation, and boot reconciliation. Delegates model execution to `nomifun-model-invoke` and hands produced bytes to an `AssetSink`. |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | Standalone customer-service domain for serving strangers over IM channels. Shares no concepts with the companion/conversation system: dialogues are the domain's own aggregate and replies come from a disposable one-shot engine session with a fixed read-only tool registry. |
 | [`nomifun-public`](../../crates/backend/nomifun-public/) | Companion-token authenticated public front doors: `/mcp`, `/mcp-agent`, and `/v1`. |

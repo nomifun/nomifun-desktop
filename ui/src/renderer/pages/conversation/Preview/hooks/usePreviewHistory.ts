@@ -10,7 +10,7 @@ import { Message } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { SNAPSHOT_DEBOUNCE_TIME } from '../constants';
+import { SNAPSHOT_DEBOUNCE_TIME, supportsPreviewHistory } from '../constants';
 
 /**
  * 预览历史 Hook 配置
@@ -127,8 +127,16 @@ export const usePreviewHistory = ({ activeTab, updateContent }: UsePreviewHistor
   const lastSnapshotTimeRef = useRef<number>(0); // 记录上次快照保存时间 / Track last snapshot save time
 
   // 构建历史目标对象 / Build history target object
+  //
+  // A target is built ONLY for content types the backend's preview-history store
+  // accepts. `activeTab.content_type` is serialized straight onto
+  // `/api/preview-history/*`, and renderer-only types (`miniapp`) have no variant
+  // in the Rust `PreviewContentType` enum — sending one 400s the request on every
+  // tab activation. A null target also disables the toolbar's snapshot/history
+  // buttons, which read the same predicate.
   const historyTarget = useMemo<PreviewHistoryTarget | null>(() => {
     if (!activeTab) return null;
+    if (!supportsPreviewHistory(activeTab.content_type)) return null;
     const meta = activeTab.metadata;
     const fallbackName = meta?.file_name || meta?.title || activeTab.title;
     return {

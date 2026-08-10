@@ -9,6 +9,8 @@
  * Preview panel related constants
  */
 
+import type { PreviewContentType } from '@/common/types/office/preview';
+
 /**
  * 快照保存防抖时间（毫秒）
  * Snapshot save debounce time (milliseconds)
@@ -74,3 +76,23 @@ export const LARGE_TEXT_VIEWER_RENDER_LIMIT = 20_000;
  * File types with built-in open buttons
  */
 export const FILE_TYPES_WITH_BUILTIN_OPEN = ['word', 'ppt', 'pdf', 'excel'] as const;
+
+/**
+ * 支持快照 / 历史版本的预览类型。
+ * Content types the backend's preview-history store accepts.
+ *
+ * Anything outside this set must never reach `/api/preview-history/*`: `miniapp`
+ * is renderer-only (deliberately absent from the Rust `PreviewContentType` enum,
+ * so serializing it 400s the request) and `url` is a remote page rather than a
+ * document with revisions. Shared by the toolbar's snapshot/history buttons and
+ * by `usePreviewHistory`, which must not even build a target for the rest.
+ */
+export const PREVIEW_HISTORY_CONTENT_TYPES: ReadonlySet<PreviewContentType> = new Set<PreviewContentType>([
+  'markdown',
+  'html',
+  'code',
+]);
+
+/** Whether a tab's (stringly-typed) content type may carry preview history. */
+export const supportsPreviewHistory = (content_type: string): boolean =>
+  PREVIEW_HISTORY_CONTENT_TYPES.has(content_type as PreviewContentType);

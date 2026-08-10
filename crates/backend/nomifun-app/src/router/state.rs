@@ -90,6 +90,8 @@ pub struct ModuleStates {
     pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
     /// 创意工坊 (Creative Workshop) canvas/asset domain.
     pub workshop: WorkshopRouterState,
+    /// 小程序 (mini-app) library: metadata CRUD + the document serve channel.
+    pub miniapp: nomifun_miniapp::MiniAppRouterState,
     /// 生成引擎 (creation) media task queue.
     pub creation: CreationRouterState,
     pub webhook: WebhookRouterState,
@@ -583,6 +585,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             )),
         },
         workshop: build_workshop_state(services),
+        miniapp: build_miniapp_state(services),
         creation: build_creation_state(services),
         webhook: build_webhook_state(services),
         // REST routes, model tools and attempt conversations share this one engine
@@ -1371,6 +1374,14 @@ pub fn build_webhook_state(services: &AppServices) -> WebhookRouterState {
 /// `workshop_service` (canvas/asset CRUD + on-disk docs/binaries).
 pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
     WorkshopRouterState::new(services.workshop_service.clone())
+}
+
+/// Build the 小程序 (mini-app) router state, reusing the singleton
+/// `miniapp_service`. The authenticated CRUD router and the auth-exempt serve
+/// router are both built from this one state, so the document a runner iframe
+/// loads is the document the last solidify wrote.
+pub fn build_miniapp_state(services: &AppServices) -> nomifun_miniapp::MiniAppRouterState {
+    nomifun_miniapp::MiniAppRouterState::new((*services.miniapp_service).clone())
 }
 
 /// Build the 生成引擎 (creation) router state, reusing the singleton

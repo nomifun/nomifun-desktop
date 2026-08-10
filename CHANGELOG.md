@@ -5,7 +5,25 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-No unreleased changes yet.
+- **New feature (小程序 / mini-apps).** A conversation could always generate a web
+  page, but the page died with the workspace: to use it again you had to dig up the
+  session or ask for it a second time. 小程序 closes that loop. The session start page
+  gains a 创建小程序 capability: pick it, describe what you want, and the request opens
+  a Nomi conversation pinned by a builder prompt to exactly one artifact — a
+  self-contained `miniapp.html` in the workspace root. While the agent writes it, the
+  conversation's right-hand panel renders that file live in a sandboxed frame and
+  refreshes on every rewrite, so iterating is just continuing the conversation; walk
+  away and nothing is persisted anywhere. When it is good, 固化为小程序 stores the whole
+  document (name, description, optional emoji icon) and it appears under a new 小程序
+  entry in the left rail — a card library at `/mini-apps`, and a full-page runner at
+  `/mini-apps/:id` that loads the stored HTML directly from the backend, so reopening
+  is instant and never regenerates anything. Solidifying twice from the same
+  conversation offers 更新 or 另存为新 rather than silently forking. The runner and the
+  preview share one sandbox policy, and the serve route is deliberately
+  authentication-exempt — an iframe subresource load carries no trust header, so
+  behind auth neither surface could render at all; the guard is the unguessable
+  UUIDv7, the same bet the workshop's public file route already makes. New HTTP
+  routes and DTOs mean the UI/API contract version moved **16 → 17**.
 
 ## v0.5.0 - 2026-08-08
 

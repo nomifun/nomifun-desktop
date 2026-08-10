@@ -1550,6 +1550,11 @@ pub struct AppServices {
     /// on-disk canvas docs / asset binaries under `{data_dir}/workshop/`. Shared
     /// by the `/api/workshop/*` routes.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
+    /// Singleton 小程序 (mini-app) service — owner-scoped CRUD over the
+    /// `miniapps` table plus the document read the auth-exempt serve route uses.
+    /// Shared so the serve route and the solidify route cannot disagree about
+    /// which document a given id names.
+    pub miniapp_service: Arc<nomifun_miniapp::MiniAppService>,
     /// Singleton 生成引擎 (creation) service — the media generation task queue
     /// behind the workshop canvas. Shared by the `/api/creation/*` routes.
     pub creation_service: Arc<nomifun_creation::CreationService>,
@@ -2890,6 +2895,13 @@ impl AppServices {
         let browser_lane_provider_slot =
             nomifun_ai_agent::BrowserLaneClientProviderSlot::new();
 
+        // 小程序 (mini-apps): metadata + the HTML document, both in SQLite. No
+        // on-disk root and no background task, so this is just a repository and a
+        // service over the shared pool.
+        let miniapp_service = Arc::new(nomifun_miniapp::MiniAppService::new(Arc::new(
+            nomifun_db::SqliteMiniAppRepository::new(database.pool().clone()),
+        )));
+
         // SSH remote sessions: ONE process-level connection pool, built here
         // because the agent factory below is its first consumer and the host-book
         // routes plus the conversation-delete cascade must receive this very
@@ -3076,6 +3088,7 @@ impl AppServices {
             customer_service_service,
             cs_dialogue_engine,
             workshop_service,
+            miniapp_service,
             creation_service,
             model_invoke_service,
             knowledge_service,

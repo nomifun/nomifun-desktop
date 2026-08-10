@@ -10,6 +10,19 @@ import { Dropdown } from '@arco-design/web-react';
 import { Close } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { supportsPreviewHistory } from '../../constants';
+
+/**
+ * 工具栏按钮的样式令牌。
+ * Toolbar button style tokens.
+ *
+ * Exported so viewers that publish their own buttons into the toolbar-extras
+ * portal (e.g. `MiniAppViewer`) render identical chrome instead of pasting the
+ * literals again. Complete literal class strings — never composed at runtime.
+ */
+export const PREVIEW_TOOLBAR_BTN_CLASS =
+  'flex items-center gap-2px px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 text-12px font-medium text-t-secondary hover:text-t-primary hover:bg-3';
+export const PREVIEW_TOOLBAR_BTN_ACTIVE_CLASS = '!text-white bg-brand hover:!text-white hover:bg-brand-hover';
 
 /**
  * PreviewToolbar 组件属性
@@ -192,10 +205,15 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
   const isDiff = content_type === 'diff';
   const preferActionButtonsInFront = Boolean(leftExtra);
 
-  const toolbarBtn =
-    'flex items-center gap-2px px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 text-12px font-medium text-t-secondary hover:text-t-primary hover:bg-3';
-  const toolbarBtnActive = '!text-white bg-brand hover:!text-white hover:bg-brand-hover';
+  const toolbarBtn = PREVIEW_TOOLBAR_BTN_CLASS;
+  const toolbarBtnActive = PREVIEW_TOOLBAR_BTN_ACTIVE_CLASS;
   const toolbarIconSize = 12;
+
+  // Snapshot/history are offered only for the types the backend store accepts,
+  // and only in the mode where the source text is on screen.
+  const snapshotButtonsVisible =
+    supportsPreviewHistory(content_type) &&
+    (content_type === 'code' ? isEditable && isEditMode : viewMode === 'source' || isSplitScreenEnabled);
 
   return (
     <div className='flex items-center justify-between h-32px px-10px bg-2 flex-shrink-0 border-b border-b-solid border-arco-1 overflow-x-auto'>
@@ -353,9 +371,7 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
         <div className='flex items-center gap-4px flex-shrink-0'>
           {rightExtra}
 
-          {((content_type === 'markdown' && (viewMode === 'source' || isSplitScreenEnabled)) ||
-            (content_type === 'html' && (viewMode === 'source' || isSplitScreenEnabled)) ||
-            (content_type === 'code' && isEditable && isEditMode)) && (
+          {snapshotButtonsVisible && (
             <>
               <div
                 className={`${toolbarBtn} ${historyTarget ? '' : '!cursor-not-allowed opacity-50'} ${snapshotSaving ? 'opacity-60' : ''}`}

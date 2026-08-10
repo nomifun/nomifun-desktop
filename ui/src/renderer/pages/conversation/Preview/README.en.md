@@ -48,12 +48,24 @@ interface PreviewMetadata {
   workspace?: string;
   editable?: boolean;
   truncated?: boolean;
+  conversation_id?: ConversationId;
 }
 ```
 
 Use snake_case metadata keys (`file_name`, `file_path`) because that is the
 stream/IPC payload shape. Do not use old `fileName` / `filePath` snippets in new
 docs or examples.
+
+`conversation_id` exists because the panel is mounted OUTSIDE
+`ConversationProvider`: openers stamp the owning conversation so viewers that
+need session identity (the mini-app solidify action) can read it back.
+
+The `miniapp` content type renders the mini-app conversation's single
+self-contained `miniapp.html` (`viewers/MiniAppViewer.tsx`). It is matched by
+exact basename rather than by extension (`.html` still maps to `html`), so the
+workspace file tree and the auto-preview hook converge on ONE tab. It is
+deliberately not persisted — `hooks/file/useAutoPreviewMiniApp.ts` reopens the
+tab on mount and after each completed turn.
 
 ## Persistence
 
