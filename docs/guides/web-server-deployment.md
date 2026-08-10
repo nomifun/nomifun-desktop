@@ -108,7 +108,8 @@ Hub tag when one is available. The image:
 
 1. Builds the SPA with Bun.
 2. Compiles `nomifun-web` from the workspace.
-3. Assembles a slim `debian:bookworm-slim` runtime that includes `bun`, `git`, and `ripgrep`.
+3. Assembles a slim `debian:trixie-slim` runtime that includes Bun, Node.js
+   22 with npm/npx, Python 3 with PyYAML, Git, and ripgrep.
 
 It exposes port `8787` and uses `/data` as the data volume.
 
@@ -402,7 +403,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 |---|---|---|
 | `glibc` + `ca-certificates` | Yes | sqlite is statically linked, TLS uses rustls — **no openssl, no libsqlite needed**. |
 | `bun` ≥ 1.3.13 | **Yes** | Agent execution runtime. 1.1.38 has an stdin bug; do not use. Already inside the Docker image. |
-| `node` / `npm` / `npx` | Recommended | Many user-configured MCP stdio servers launch via `npx -y …`. |
+| Node.js 22 + `npm` / `npx` | Recommended | Used by many MCP stdio servers and the automatic OfficeCLI install path. Already inside the Docker image. |
+| Python 3 + PyYAML | Recommended | Enables the Agent's Python script mode and bundled Python-based skills. Already inside the Docker image. |
 | `git` | Recommended | Skill discovery and a few built-in tools. |
 | `ripgrep` (`rg`) | Recommended | Code-search backend. Falls back to `grep` if missing. |
 | `DISPLAY` / X11 / WebView | **No** | `nomifun-web` is fully headless. |
