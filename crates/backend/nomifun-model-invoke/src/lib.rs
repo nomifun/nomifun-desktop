@@ -18,6 +18,7 @@ pub mod adapters;
 pub mod auth;
 pub mod call;
 pub mod error;
+pub mod materialize;
 pub mod resolve;
 pub mod routes_table;
 pub mod service;
@@ -29,8 +30,9 @@ pub use adapters::default_adapters;
 pub use auth::{AuthMaterial, AuthScheme};
 pub use call::{ResolvedCall, ResolvedConnection};
 pub use error::{InvokeError, InvokeErrorKind};
+pub use materialize::{MaterializeLimits, MaterializedAsset};
 pub use routes_table::{TaskRoute, platform_route};
-pub use service::{ModelInvokeService, ProbeReport};
+pub use service::{InvocationContext, ModelInvokeService, ProbeReport};
 pub use transport::{
     MAX_ARTIFACT_BYTES, decode_b64, encode_b64, error_from_response, net_err, read_body_capped,
 };

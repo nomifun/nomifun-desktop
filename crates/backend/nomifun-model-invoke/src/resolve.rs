@@ -46,12 +46,12 @@ fn parse_json_object(raw: &str) -> serde_json::Value {
     }
 }
 
-/// A catalog (local DB) read failure. Classified as [`InvokeErrorKind::Config`]:
-/// it is a local problem, must not be mistaken for an upstream provider
-/// failure, and must stay inert for error-driven self-healing loops
-/// (key rotation / failover branch on Auth/RateLimited/Network/...).
+/// A catalog (local DB) read failure. It retains the legacy
+/// [`InvokeErrorKind::Config`] kind while carrying a typed catalog-failure
+/// marker, so discovery can fail closed instead of misreporting an empty
+/// catalog. It must stay inert for upstream self-healing loops.
 fn catalog_err(what: &str, e: nomifun_db::DbError) -> InvokeError {
-    InvokeError::config(format!("{what}: {e}"))
+    InvokeError::catalog(format!("{what}: {e}"))
 }
 
 impl ModelInvokeService {

@@ -2966,6 +2966,7 @@ impl AppServices {
             remote_agent_repo,
             provider_repo,
             provider_model_repo: provider_model_repo.clone(),
+            model_invoke_service: Some(model_invoke_service.clone()),
             encryption_key,
             agent_registry: agent_registry.clone(),
             acp_agent_service: acp_agent_service.clone(),

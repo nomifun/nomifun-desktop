@@ -28,7 +28,10 @@ use super::tool_call::{
     AcpToolCallSessionUpdateKind, AcpToolCallStatus, AcpToolCallTextBlock, AcpToolCallTextBlockType,
     AcpToolCallUpdateData,
 };
-use crate::artifact_store::{ArtifactKind, ArtifactStore, ArtifactStoreError, PersistedArtifact};
+use crate::artifact_store::{
+    ArtifactKind, ArtifactRecoverySource, ArtifactStore, ArtifactStoreError,
+    PersistedArtifact,
+};
 
 use super::{AgentStreamEvent, ErrorEventData, TextEventData};
 
@@ -189,12 +192,36 @@ fn extend_unique_artifacts(
 pub(crate) struct AcpArtifactDeliveryState {
     calls: HashMap<(String, String), ToolArtifactDeliveryState>,
     turn_failures: HashMap<String, String>,
+    recovery_sources: HashMap<String, ArtifactRecoverySource>,
 }
 
 impl AcpArtifactDeliveryState {
     pub(crate) fn begin_turn(&mut self, session_id: &str) {
         self.calls.retain(|(sid, _), _| sid != session_id);
         self.turn_failures.remove(session_id);
+        self.recovery_sources.remove(session_id);
+        #[cfg(test)]
+        self.recovery_sources.insert(
+            session_id.to_owned(),
+            ArtifactRecoverySource {
+                conversation_id: "test-acp-conversation".to_owned(),
+                wire_msg_id: format!("test-acp-wire-{session_id}"),
+            },
+        );
+    }
+
+    pub(crate) fn begin_turn_for(
+        &mut self,
+        session_id: &str,
+        recovery_source: ArtifactRecoverySource,
+    ) {
+        self.begin_turn(session_id);
+        self.recovery_sources
+            .insert(session_id.to_owned(), recovery_source);
+    }
+
+    pub(crate) fn recovery_source(&self, session_id: &str) -> Option<&ArtifactRecoverySource> {
+        self.recovery_sources.get(session_id)
     }
 
     pub(crate) fn turn_failure(&self, session_id: &str) -> Option<String> {
@@ -236,6 +263,7 @@ impl AcpArtifactDeliveryState {
         artifact_store: Option<&ArtifactStore>,
         complete_verified_in_progress: bool,
     ) -> Result<Vec<AcpToolCallEventData>, String> {
+        let recovery_source = self.recovery_sources.get(session_id).cloned();
         // Local delivery-integrity failures (invalid bytes, failed atomic
         // persistence, false Completed) remain fatal for the whole turn.
         if let Some(error) = self.turn_failure(session_id) {
@@ -302,6 +330,7 @@ impl AcpArtifactDeliveryState {
                         &required_paths,
                         state.started_at,
                         contract,
+                        recovery_source.as_ref(),
                     )
                     .map_err(|error| {
                         format!("ACP artifact-producing tool `{tool_call_id}` {error}")
@@ -316,6 +345,7 @@ impl AcpArtifactDeliveryState {
                         state.started_at,
                         contract,
                         needed,
+                        recovery_source.as_ref(),
                     )
                     .map_err(|error| {
                         format!("ACP artifact-producing tool `{tool_call_id}` {error}")
@@ -405,7 +435,7 @@ impl AcpArtifactDeliveryState {
         Ok(completions)
     }
 
-    fn record_turn_failure(&mut self, session_id: &str, error: String) {
+    pub(crate) fn record_turn_failure(&mut self, session_id: &str, error: String) {
         self.turn_failures.entry(session_id.to_owned()).or_insert(error);
     }
 
@@ -783,13 +813,20 @@ fn verify_binding_path_artifacts(
     candidates: &[ArtifactPathCandidate],
     started_at: Option<SystemTime>,
     contract: ArtifactContract,
+    recovery_source: Option<&ArtifactRecoverySource>,
 ) -> Result<Vec<PersistedArtifact>, String> {
     let required = candidates
         .iter()
         .filter(|candidate| candidate.required)
         .cloned()
         .collect::<Vec<_>>();
-    verify_completed_path_artifacts(artifact_store, &required, started_at, contract)
+    verify_completed_path_artifacts(
+        artifact_store,
+        &required,
+        started_at,
+        contract,
+        recovery_source,
+    )
 }
 
 fn verify_needed_fallback_path_artifacts(
@@ -799,6 +836,7 @@ fn verify_needed_fallback_path_artifacts(
     contract: ArtifactContract,
     already_verified: &[PersistedArtifact],
     provider_scan_error: Option<&str>,
+    recovery_source: Option<&ArtifactRecoverySource>,
 ) -> Result<Vec<PersistedArtifact>, String> {
     let needed = contract
         .expected_count()
@@ -817,6 +855,7 @@ fn verify_needed_fallback_path_artifacts(
         started_at,
         contract,
         needed,
+        recovery_source,
     ) {
         Ok(artifacts) => Ok(artifacts),
         Err(error) => {
@@ -850,6 +889,7 @@ pub(crate) fn session_notification_to_events_with_delivery_state(
     delivery_state: &mut AcpArtifactDeliveryState,
 ) -> Vec<AgentStreamEvent> {
     let session_id = notif.session_id.to_string();
+    let recovery_source = delivery_state.recovery_source(&session_id).cloned();
     let mut events = Vec::new();
 
     match &notif.update {
@@ -928,6 +968,7 @@ pub(crate) fn session_notification_to_events_with_delivery_state(
                         &candidate_paths,
                         started_at,
                         contract,
+                        recovery_source.as_ref(),
                     )
                 } else {
                     Ok(Vec::new())
@@ -940,7 +981,7 @@ pub(crate) fn session_notification_to_events_with_delivery_state(
             // batch behind.
             let may_persist_artifact_content = !context_only || contract.is_some();
             let mut mapped_content = if binding_path_delivery.is_ok() && may_persist_artifact_content {
-                map_tool_call_content(&tc.content, artifact_store)
+                map_tool_call_content(&tc.content, artifact_store, recovery_source.as_ref())
             } else {
                 map_tool_call_content_without_artifact_writes(&tc.content)
             };
@@ -964,6 +1005,7 @@ pub(crate) fn session_notification_to_events_with_delivery_state(
                             contract,
                             &already_verified,
                             provider_path_error.as_deref(),
+                            recovery_source.as_ref(),
                         ) {
                             Ok(fallback_artifacts) => {
                                 extend_unique_artifacts(
@@ -1070,6 +1112,7 @@ pub(crate) fn session_notification_to_events_with_delivery_state(
                         &candidate_paths,
                         started_at,
                         contract,
+                        recovery_source.as_ref(),
                     )
                 } else {
                     Ok(Vec::new())
@@ -1080,7 +1123,7 @@ pub(crate) fn session_notification_to_events_with_delivery_state(
             let may_persist_artifact_content = !context_only || contract.is_some();
             let mut mapped_content = tcu.fields.content.as_ref().map(|content| {
                 if binding_path_delivery.is_ok() && may_persist_artifact_content {
-                    map_tool_call_content(content, artifact_store)
+                    map_tool_call_content(content, artifact_store, recovery_source.as_ref())
                 } else {
                     map_tool_call_content_without_artifact_writes(content)
                 }
@@ -1114,6 +1157,7 @@ pub(crate) fn session_notification_to_events_with_delivery_state(
                             contract,
                             &already_verified,
                             provider_path_error.as_deref(),
+                            recovery_source.as_ref(),
                         ) {
                             Ok(fallback_artifacts) => {
                                 extend_unique_artifacts(
@@ -1332,7 +1376,7 @@ fn map_permission_tool_call(tool_call: &SdkToolCallUpdate) -> AcpPermissionToolC
             .fields
             .content
             .as_ref()
-            .and_then(|content| map_tool_call_content(content, None).items),
+            .and_then(|content| map_tool_call_content(content, None, None).items),
         locations: tool_call
             .fields
             .locations
@@ -1779,6 +1823,7 @@ fn verify_completed_path_artifacts(
     candidate_paths: &[ArtifactPathCandidate],
     started_at: Option<SystemTime>,
     contract: ArtifactContract,
+    recovery_source: Option<&ArtifactRecoverySource>,
 ) -> Result<Vec<PersistedArtifact>, String> {
     if candidate_paths.is_empty() {
         return Ok(Vec::new());
@@ -1795,7 +1840,7 @@ fn verify_completed_path_artifacts(
         }
         verified_sources.push(artifact);
     }
-    import_verified_path_sources(store, &verified_sources)
+    import_verified_path_sources(store, &verified_sources, recovery_source)
 }
 
 /// Provider-observed paths are fallbacks, not binding destinations. Select a
@@ -1809,6 +1854,7 @@ fn verify_fallback_path_artifacts(
     started_at: Option<SystemTime>,
     contract: ArtifactContract,
     needed: usize,
+    recovery_source: Option<&ArtifactRecoverySource>,
 ) -> Result<Vec<PersistedArtifact>, String> {
     if needed == 0 {
         return Ok(Vec::new());
@@ -1844,7 +1890,7 @@ fn verify_fallback_path_artifacts(
             verified_sources.len()
         ));
     }
-    import_verified_path_sources(store, &verified_sources)
+    import_verified_path_sources(store, &verified_sources, recovery_source)
 }
 
 fn verify_path_artifact_source(
@@ -1902,9 +1948,18 @@ fn verify_path_artifact_source(
 fn import_verified_path_sources(
     store: &ArtifactStore,
     verified_sources: &[PersistedArtifact],
+    recovery_source: Option<&ArtifactRecoverySource>,
 ) -> Result<Vec<PersistedArtifact>, String> {
+    let recovery_source = recovery_source.ok_or_else(|| {
+        "ACP artifact output arrived outside an active recoverable turn".to_owned()
+    })?;
+    let existing_paths = verified_sources.iter().map(|artifact| artifact.path.as_str());
     let snapshots = store
-        .import_existing_batch(verified_sources.iter().map(|artifact| artifact.path.as_str()))
+        .persist_inline_and_existing_batch_recoverable(
+            std::iter::empty::<(ArtifactKind, &str, &str)>(),
+            existing_paths,
+            recovery_source,
+        )
         .map_err(|error| format!("ACP output path snapshot import failed: {error}"))?;
     if snapshots.len() != verified_sources.len()
         || snapshots
@@ -1958,6 +2013,7 @@ fn map_tool_call_content_without_artifact_writes(content: &[SdkToolCallContent])
 fn map_tool_call_content(
     content: &[SdkToolCallContent],
     artifact_store: Option<&ArtifactStore>,
+    recovery_source: Option<&ArtifactRecoverySource>,
 ) -> MappedToolContent {
     let mut items = Vec::new();
     let mut delivery_error = None;
@@ -2035,13 +2091,38 @@ fn map_tool_call_content(
         let batch_result = if let Some(error) = batch_planning_error.or(non_inline_preflight_error) {
             Err(error)
         } else if let Some(store) = artifact_store {
-            store
-                .persist_inline_and_existing_batch(
-                    inline_plans
-                        .iter()
-                        .map(|(_, plan)| (plan.kind, plan.mime_type.as_str(), plan.data.as_str())),
-                    existing_plans.iter().map(|(_, plan)| &plan.path),
-                )
+            let Some(source) = recovery_source else {
+                let error =
+                    "ACP artifact output arrived outside an active recoverable turn".to_owned();
+                batch_receipts.extend(
+                    batch_indexes
+                        .into_iter()
+                        .map(|index| (index, Err(error.clone()))),
+                );
+                return MappedToolContent {
+                    items: Some(
+                        content
+                            .iter()
+                            .filter_map(|item| match item {
+                                SdkToolCallContent::Content(content)
+                                    if content_block_is_artifact_payload(&content.content) =>
+                                {
+                                    Some(AcpToolCallContentItem::ArtifactError {
+                                        message: error.clone(),
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    delivery_error: Some(error),
+                };
+            };
+            let inline = inline_plans
+                .iter()
+                .map(|(_, plan)| (plan.kind, plan.mime_type.as_str(), plan.data.as_str()));
+            let existing = existing_plans.iter().map(|(_, plan)| &plan.path);
+            store.persist_inline_and_existing_batch_recoverable(inline, existing, source)
                 .map_err(|error| error.to_string())
                 .and_then(|artifacts| {
                     if artifacts.len() != inline_plans.len() + existing_plans.len() {
@@ -2629,45 +2710,21 @@ fn durable_source_uri(uri: Option<&str>) -> Option<String> {
 
 fn map_agent_message_content(
     block: &ContentBlock,
-    artifact_store: Option<&ArtifactStore>,
+    _artifact_store: Option<&ArtifactStore>,
 ) -> Result<Option<String>, String> {
     if let ContentBlock::Text(text) = block {
         return Ok(Some(text.text.clone()));
     }
-    let item = map_content_block(block, artifact_store)?;
-    match item {
-        AcpToolCallContentItem::Artifact { artifact, .. } => {
-            let label = match artifact.kind {
-                ArtifactKind::Image => "Generated image",
-                ArtifactKind::Audio => "Generated audio",
-                ArtifactKind::Video => "Generated video",
-                ArtifactKind::Text => "Generated text artifact",
-                ArtifactKind::File => "Generated file",
-            };
-            let target = url::Url::from_file_path(&artifact.path)
-                .map(|url| url.to_string())
-                .unwrap_or_else(|_| artifact.path.clone());
-            let markdown = if artifact.kind == ArtifactKind::Image {
-                format!("![{label}]({target})\n\n`{}`", artifact.path)
-            } else {
-                format!("[{label}]({target})\n\n`{}`", artifact.path)
-            };
-            Ok(Some(markdown))
-        }
-        AcpToolCallContentItem::ResourceLink { name, uri, .. } => {
-            Ok(Some(format!("[{}]({uri})", escape_markdown_label(&name))))
-        }
-        AcpToolCallContentItem::Content { content } => Ok(Some(content.text)),
-        AcpToolCallContentItem::Terminal { terminal_id } => {
-            Ok(Some(format!("Terminal: `{terminal_id}`")))
-        }
-        AcpToolCallContentItem::Diff { path, .. } => Ok(Some(format!("Updated `{path}`"))),
-        AcpToolCallContentItem::ArtifactError { message } => Err(message),
-    }
-}
-
-fn escape_markdown_label(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]")
+    // A standalone assistant chunk has no call identity that the relay can
+    // atomically bind to an artifact row. Persisting it here would publish a
+    // file before the lossy ACP event handoff and could leave an orphan (or a
+    // markdown-only false success). Binary/resource output must therefore use
+    // an ACP tool-call content item, which carries the durable recovery
+    // envelope and participates in the turn artifact transaction.
+    Err(
+        "ACP binary/resource assistant chunks require a typed artifact-producing tool call"
+            .to_owned(),
+    )
 }
 
 fn map_tool_call_locations(locations: &[SdkToolCallLocation]) -> Option<Vec<AcpToolCallLocationItem>> {
@@ -3397,6 +3454,7 @@ mod artifact_contract_tests {
             }],
             Some(SystemTime::now()),
             contract,
+            None,
         );
 
         assert!(
