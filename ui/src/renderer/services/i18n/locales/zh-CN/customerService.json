@@ -50,7 +50,9 @@
     "deleted": "客服已删除",
     "save": "保存",
     "saved": "已保存",
-    "notFound": "客服不存在或已删除"
+    "notFound": "客服不存在或已删除",
+    "knowledgeBasesPlaceholder": "选择挂载知识库",
+    "knowledgeBasesMountedCount": "已挂载{{count}}个"
   },
   "sections": {
     "identity": "身份与话术",
@@ -84,6 +86,17 @@
     "shared": "共享",
     "sharedHint": "共享给全部客服（不勾选则仅本客服可用）",
     "enabled": "启用",
+    "view": "查看",
+    "edit": "编辑",
+    "delete": "删除",
+    "more": "更多操作",
+    "viewTitle": "查看笔记",
+    "editTitle": "编辑笔记",
+    "close": "关闭",
+    "created": "笔记已创建",
+    "updated": "笔记已更新",
+    "deleted": "笔记已删除",
+    "scopeLocked": "笔记范围创建后不可修改",
     "deleteConfirm": "删除该笔记？"
   }
 }

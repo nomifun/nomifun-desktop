@@ -51,8 +51,8 @@ export const FigureActionButton: React.FC<{
     className={classNames(
       'figure-card-action-button flex items-center justify-center w-24px h-24px rd-6px border-none b-none bg-transparent p-0 leading-none appearance-none outline-none text-[rgba(255,255,255,0.92)] cursor-pointer transition-colors duration-150 hover:bg-[rgba(255,255,255,0.16)] focus-visible:bg-[rgba(255,255,255,0.18)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45',
       tone === 'primary'
-        ? 'hover:!text-[rgb(var(--primary-6))] focus-visible:!text-[rgb(var(--primary-6))]'
-        : 'hover:!text-[rgb(var(--danger-6))] focus-visible:!text-[rgb(var(--danger-6))]'
+        ? 'hover:!text-primary-6 focus-visible:!text-primary-6'
+        : 'hover:!text-danger-6 focus-visible:!text-danger-6'
     )}
   >
     {children}

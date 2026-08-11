@@ -1486,6 +1486,18 @@ pub struct AppServices {
     /// so the AutoWork runner drives the SAME PTYs the terminal routes
     /// created (a fresh instance would have an empty live map).
     pub terminal_service: Arc<TerminalService>,
+    /// The one SSH connection pool: every live remote session in the process.
+    /// Shared (not rebuilt) by the host-book routes, the agent factory and the
+    /// conversation-delete cascade — a per-consumer pool would report status about
+    /// sockets the agent is not using. `clone()` is a handle to the same pool.
+    pub ssh_pool: nomifun_ssh::SshConnectionPool,
+    /// LAN robot gateway: device registry, live status, tool registry, loopback
+    /// MCP front and the speech stack. `None` when the registry could not be
+    /// loaded — every robot entry point is then simply absent, which is a better
+    /// failure than refusing to boot the desktop over a robot file. The accept
+    /// loop is attached during router assembly, where the `ConversationService`
+    /// the sessions dispatch through exists.
+    pub robot: Option<Arc<crate::robot_wiring::RobotServices>>,
     pub acp_session_sync: Arc<AcpSessionSyncService>,
     /// Raw JWT secret string, used only for authentication/session signing.
     pub jwt_secret_raw: String,
@@ -1538,6 +1550,12 @@ pub struct AppServices {
     /// on-disk canvas docs / asset binaries under `{data_dir}/workshop/`. Shared
     /// by the `/api/workshop/*` routes.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
+    /// Singleton 小程序 (mini-app) service — owner-scoped CRUD over the
+    /// `miniapps` table, the document read the auth-exempt serve route uses, and
+    /// the per-app working copy under `{work_dir}/miniapps/{miniapp_id}/`.
+    /// Shared so the serve route and the publish route cannot disagree about
+    /// which document a given id names.
+    pub miniapp_service: Arc<nomifun_miniapp::MiniAppService>,
     /// Singleton 生成引擎 (creation) service — the media generation task queue
     /// behind the workshop canvas. Shared by the `/api/creation/*` routes.
     pub creation_service: Arc<nomifun_creation::CreationService>,
@@ -2892,6 +2910,70 @@ impl AppServices {
         let browser_lane_provider_slot =
             nomifun_ai_agent::BrowserLaneClientProviderSlot::new();
 
+        // 小程序 (mini-apps): the published snapshot lives in SQLite (that is what
+        // the serve route streams into an iframe), while each app's working copy
+        // lives on disk under `{work_dir}/miniapps/{miniapp_id}/`. `work_dir` is
+        // the SAME resolved value `ConversationService` uses as its workspace
+        // root — passed in, never re-resolved, or the absolute path this service
+        // hands 「继续迭代」 and the directory it materializes into could name
+        // different places. No background task: the working copy is materialized
+        // lazily on first provision/publish, so a user who never iterates pays
+        // nothing.
+        let miniapp_service = Arc::new(nomifun_miniapp::MiniAppService::new(
+            work_dir.clone(),
+            Arc::new(nomifun_db::SqliteMiniAppRepository::new(
+                database.pool().clone(),
+            )),
+        ));
+
+        // SSH remote sessions: ONE process-level connection pool, built here
+        // because the agent factory below is its first consumer and the host-book
+        // routes plus the conversation-delete cascade must receive this very
+        // handle. A second pool would supervise sockets nobody is talking to while
+        // reporting status for the ones the operator can see. Host keys are learned
+        // into the operator's own ~/.ssh/known_hosts.
+        let ssh_pool = {
+            let repo = Arc::new(nomifun_db::SqliteSshHostRepository::new(
+                database.pool().clone(),
+            )) as Arc<dyn nomifun_db::ISshHostRepository>;
+            let known_hosts = dirs::home_dir()
+                .unwrap_or_else(|| data_dir.clone())
+                .join(".ssh")
+                .join("known_hosts");
+            nomifun_ssh::SshConnectionPool::new(
+                nomifun_ssh::SshHostService::new(repo, encryption_key),
+                known_hosts,
+                nomifun_ssh::SshEventEmitter::new(event_bus.clone()),
+            )
+        };
+
+        // LAN robot gateway. Everything that does not need a
+        // `ConversationService` is built here so the device face and the OTA
+        // response are live the moment a listener comes up; the accept loop is
+        // attached during router assembly. A failure is domain-local: the
+        // desktop boots without robot support rather than not at all.
+        let robot = match crate::robot_wiring::RobotServices::build(
+            &data_dir,
+            authoritative_user_id.as_ref(),
+            event_bus.clone(),
+            model_invoke_service.clone(),
+            companion_service.clone(),
+            provider_repo_for_services.clone(),
+            provider_model_repo.clone(),
+            Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
+                database.pool().clone(),
+            )),
+            encryption_key,
+        )
+        .await
+        {
+            Ok(services) => Some(Arc::new(services)),
+            Err(error) => {
+                tracing::error!(%error, "robot: gateway unavailable this boot");
+                None
+            }
+        };
+
         let factory = build_agent_factory(AgentFactoryDeps {
             authoritative_user_id: authoritative_user_id.clone(),
             skill_manager: AcpSkillManager::new(skill_paths.clone()),
@@ -2965,6 +3047,11 @@ impl AppServices {
             companion_summon: Some(
                 companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionSummonProvider>
             ),
+            // SSH remote sessions: the factory dials through the one process pool,
+            // so a runtime rebuilt by a model switch rejoins the conversation's
+            // existing link instead of opening (and abandoning) a second one.
+            ssh_provider: Some(Arc::new(ssh_pool.clone())
+                as Arc<dyn nomifun_ai_agent::SshBackendProvider>),
         });
 
         // Agent factory is now wired. Future extension/custom agents
@@ -3004,6 +3091,8 @@ impl AppServices {
             execution_conversation_boundary,
             requirement_service,
             terminal_service,
+            ssh_pool,
+            robot,
             acp_session_sync: acp_agent_service,
             jwt_secret_raw: secret,
             encryption_key,
@@ -3023,6 +3112,7 @@ impl AppServices {
             customer_service_service,
             cs_dialogue_engine,
             workshop_service,
+            miniapp_service,
             creation_service,
             model_invoke_service,
             knowledge_service,

@@ -280,7 +280,6 @@ async fn keep_crawl_output_for_manual_inspection() {
         &seed,
         CrawlSink {
             knowledge_base_id: Some(base.knowledge_base_id.to_string()),
-            via_inbox: true,
         },
     );
     // Real sites need the politeness delay; the mock does not care.
@@ -301,7 +300,7 @@ async fn keep_crawl_output_for_manual_inspection() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn crawled_pages_land_in_the_knowledge_inbox_on_disk() {
+async fn crawled_pages_land_in_the_knowledge_base_on_disk() {
     let server = mock_site().await;
     let data_dir = tempfile::tempdir().unwrap();
     let kb_root = tempfile::tempdir().unwrap();
@@ -319,7 +318,6 @@ async fn crawled_pages_land_in_the_knowledge_inbox_on_disk() {
         &server.uri(),
         CrawlSink {
             knowledge_base_id: Some(base.knowledge_base_id.to_string()),
-            via_inbox: true,
         },
     );
     run_to_completion(db.pool(), &job, knowledge).await;
@@ -328,13 +326,12 @@ async fn crawled_pages_land_in_the_knowledge_inbox_on_disk() {
     let rels: Vec<String> = files.iter().map(|p| to_slashes(p)).collect();
     assert!(!files.is_empty(), "no markdown was written under {:?}", kb_root.path());
 
-    // Staged writes are confined to `_inbox/{scope}/…`; nothing may reach the
-    // base body without review.
-    let expected = format!("_inbox/crawl-{}/{}", job.job_id, doc_dir(&job.job_id));
+    let expected = doc_dir(&job.job_id);
     for rel in &rels {
         assert!(rel.starts_with(&expected), "unexpected path: {rel} (want {expected})");
+        assert!(!rel.contains("_inbox"), "crawler writes must be direct: {rel}");
     }
-    assert_eq!(files.len(), 2, "both linked pages should be staged: {rels:?}");
+    assert_eq!(files.len(), 2, "both linked pages should be written: {rels:?}");
 
     let bodies: Vec<String> = files
         .iter()
@@ -355,7 +352,7 @@ async fn crawled_pages_land_in_the_knowledge_inbox_on_disk() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn direct_mode_writes_the_base_body_instead_of_the_inbox() {
+async fn configured_sink_writes_the_base_body() {
     let server = mock_site().await;
     let data_dir = tempfile::tempdir().unwrap();
     let kb_root = tempfile::tempdir().unwrap();
@@ -373,7 +370,6 @@ async fn direct_mode_writes_the_base_body_instead_of_the_inbox() {
         &server.uri(),
         CrawlSink {
             knowledge_base_id: Some(base.knowledge_base_id.to_string()),
-            via_inbox: false,
         },
     );
     run_to_completion(db.pool(), &job, knowledge).await;
@@ -383,7 +379,7 @@ async fn direct_mode_writes_the_base_body_instead_of_the_inbox() {
     let expected = doc_dir(&job.job_id);
     for rel in &rels {
         assert!(rel.starts_with(&expected), "unexpected path: {rel} (want {expected})");
-        assert!(!rel.contains("_inbox"), "direct mode must not stage: {rel}");
+        assert!(!rel.contains("_inbox"), "crawler writes must be direct: {rel}");
     }
 }
 

@@ -25,7 +25,9 @@ use nomifun_db::IProviderRepository;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::profile::CompanionProfileConfig;
+use crate::profile::{
+    CompanionEvolveConfig, CompanionLearnConfig, CompanionProfileConfig, RetiredSharedLearnEvolve,
+};
 
 /// Maximum companion display-name length, counted in chars (not bytes) so CJK
 /// names get the same budget as ASCII ones.
@@ -105,6 +107,38 @@ fn validate_name(name: &str) -> Result<String, AppError> {
 /// highest-numbered companion is still alive.
 fn max_live_seq(companions: &HashMap<String, CompanionProfileConfig>) -> u64 {
     companions.values().map(|p| p.seq).max().unwrap_or(0)
+}
+
+/// 侧存储行归属的唯一裁决规则（共享记忆 / 共享技能都已删除：每条记忆、每个技能
+/// 都必须有主人）。
+/// 顺序：存活的显式默认体 → roster 中最早创建的伙伴（`created_at` 最小，
+/// `companion_id` 作为同毫秒并列时的稳定 tie-break）→ 空 roster 返回 `None`
+/// （此时没有合法主人，写入方必须干净失败而不是落一条孤儿行）。
+///
+/// 故意不走 [`CompanionRegistry::list`] 的侧栏顺序：`order_index` 是主人拖出来的
+/// 展示偏好，归属不能因为拖动侧栏而改变。一个已被删除的默认体也绝不会被采纳
+/// —— 那会写出一条启动即失败的孤儿引用。
+pub(crate) fn row_owner_of<'a>(
+    companions: impl IntoIterator<Item = &'a CompanionProfileConfig>,
+    default_companion_id: Option<&str>,
+) -> Option<String> {
+    let mut default_alive = false;
+    let mut oldest: Option<&CompanionProfileConfig> = None;
+    for profile in companions {
+        if Some(profile.companion_id.as_str()) == default_companion_id {
+            default_alive = true;
+        }
+        let beats_current = oldest.is_none_or(|best| {
+            (profile.created_at, &profile.companion_id) < (best.created_at, &best.companion_id)
+        });
+        if beats_current {
+            oldest = Some(profile);
+        }
+    }
+    if default_alive {
+        return default_companion_id.map(str::to_owned);
+    }
+    oldest.map(|profile| profile.companion_id.clone())
 }
 
 pub struct CompanionRegistry {
@@ -291,14 +325,23 @@ impl CompanionRegistry {
         })
     }
 
-    /// All companions, oldest first (`created_at` ascending, `companion_id` as tie-break so the
-    /// order is stable even for same-millisecond creations).
+    /// All companions in sidebar order: explicitly reordered ones first by
+    /// `order_index`, then never-reordered ones by `created_at` ascending
+    /// (`companion_id` as tie-break so the order is stable even for
+    /// same-millisecond creations).
     pub async fn list(&self) -> Vec<CompanionProfileConfig> {
         let mut companions: Vec<CompanionProfileConfig> = self.inner.read().await.values().cloned().collect();
         companions.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.companion_id.cmp(&b.companion_id))
+            // `None` sorts last: a companion the user never dragged belongs after
+            // the ones they positioned deliberately.
+            match (a.order_index, b.order_index) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| a.created_at.cmp(&b.created_at))
+            .then_with(|| a.companion_id.cmp(&b.companion_id))
         });
         companions
     }
@@ -344,6 +387,97 @@ impl CompanionRegistry {
             return Some(default_companion_id.to_owned());
         }
         ids.into_iter().next()
+    }
+
+    /// 侧存储行归属的唯一解析器：共享记忆 / 共享技能都已删除，每条记忆、每个
+    /// 技能都必须有主人，所以每个「没有明确伙伴」的写入方（以及启动时的两个
+    /// 认领迁移）都用这里解析出来的 owner。顺序见 [`row_owner_of`]。
+    pub async fn resolve_row_owner(&self, default_companion_id: Option<&str>) -> Option<String> {
+        row_owner_of(self.inner.read().await.values(), default_companion_id)
+    }
+
+    /// Boot migration for 学习 / 进化 moving off the install-wide shared config
+    /// onto each companion (2026-08).
+    ///
+    /// Every existing companion inherits the retired install-wide values verbatim,
+    /// so nobody's behaviour changes on upgrade — an install that had learning on
+    /// at 30-minute intervals keeps exactly that, on every companion, instead of
+    /// silently falling back to the `enabled: false` default.
+    ///
+    /// Additive and idempotent by construction:
+    /// - a companion whose `config.json` already carries its own `learn` /
+    ///   `evolve` key is skipped (see
+    ///   [`CompanionProfileConfig::has_persisted_learn_or_evolve`]), so a
+    ///   half-finished previous pass cannot clobber a value the owner has since
+    ///   changed;
+    /// - the caller only rewrites `shared/config.json` without the retired blocks
+    ///   AFTER this returns Ok, so a crash mid-migration replays it next boot.
+    ///
+    /// `interval_minutes` is CLAMPED rather than validated: a legacy out-of-range
+    /// value must not turn into a boot failure, and the profile writer range-checks.
+    pub async fn seed_learn_evolve_from_retired(
+        &self,
+        retired: &RetiredSharedLearnEvolve,
+    ) -> Result<usize, AppError> {
+        if retired.is_empty() {
+            return Ok(0);
+        }
+        let learn: Option<CompanionLearnConfig> = retired
+            .learn
+            .clone()
+            .map(|value| {
+                serde_json::from_value(value).map_err(|error| {
+                    AppError::Internal(format!(
+                        "retired install-wide learn config is unreadable: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let evolve: Option<CompanionEvolveConfig> = retired
+            .evolve
+            .clone()
+            .map(|value| {
+                serde_json::from_value(value).map_err(|error| {
+                    AppError::Internal(format!(
+                        "retired install-wide evolve config is unreadable: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let mut companions = self.inner.write().await;
+        let mut seeded = 0usize;
+        for profile in companions.values_mut() {
+            let dir = self.companions_dir.join(&profile.companion_id);
+            if CompanionProfileConfig::has_persisted_learn_or_evolve(&dir) {
+                continue;
+            }
+            if let Some(learn) = learn.clone() {
+                profile.learn = CompanionLearnConfig {
+                    interval_minutes: learn.effective_interval_minutes(),
+                    ..learn
+                };
+            }
+            if let Some(evolve) = evolve.clone() {
+                profile.evolve = CompanionEvolveConfig {
+                    interval_minutes: evolve.effective_interval_minutes(),
+                    ..evolve
+                };
+            }
+            profile.save(&dir).map_err(|error| {
+                AppError::Internal(format!(
+                    "seed per-companion learn/evolve config for {}: {error}",
+                    profile.companion_id
+                ))
+            })?;
+            seeded += 1;
+        }
+        if seeded > 0 {
+            tracing::info!(
+                companions = seeded,
+                "seeded per-companion 学习/进化 settings from the retired install-wide config"
+            );
+        }
+        Ok(seeded)
     }
 
     /// Create a companion: validate the name, allocate its short number from the
@@ -424,7 +558,9 @@ impl CompanionRegistry {
         merged.seq = current.seq;
         merged.created_at = current.created_at;
         merged.name = validate_name(&merged.name)?;
-        validate_provider_model(self.provider_repo.as_ref(), merged.model.as_ref()).await?;
+        for (_, model) in merged.provider_model_slots() {
+            validate_provider_model(self.provider_repo.as_ref(), Some(&model)).await?;
+        }
         merged
             .save(&self.companions_dir.join(&merged.companion_id))
             .map_err(|e| AppError::Internal(format!("save companion profile: {e}")))?;
@@ -461,14 +597,21 @@ impl CompanionRegistry {
     ) -> Result<(), AppError> {
         let profiles: Vec<_> = self.inner.read().await.values().cloned().collect();
         for profile in profiles {
-            validate_provider_model(self.provider_repo.as_ref(), profile.model.as_ref())
-                .await
-                .map_err(|error| {
-                    AppError::Internal(format!(
-                        "companion '{}' has an orphaned provider reference: {error}",
-                        profile.companion_id
-                    ))
-                })?;
+            // Every slot in `provider_model_slots()` is a hard binding: a missing
+            // Provider is an orphaned reference and fails startup. Provider
+            // deletion is refused while any of them points at it
+            // (`CompanionService::providers_in_use`), so an orphan means the
+            // durable state was edited behind the app's back.
+            for (what, model) in profile.provider_model_slots() {
+                validate_provider_model(self.provider_repo.as_ref(), Some(&model))
+                    .await
+                    .map_err(|error| {
+                        AppError::Internal(format!(
+                            "companion '{}' has an orphaned {what} provider reference: {error}",
+                            profile.companion_id
+                        ))
+                    })?;
+            }
         }
         Ok(())
     }
@@ -581,6 +724,53 @@ mod tests {
         assert_eq!(reg.resolve_default(Some("malformed-companion-id")).await.as_deref(), Some(first.as_str()));
         // 未配置默认体 → 首个注册
         assert_eq!(reg.resolve_default(None).await.as_deref(), Some(first.as_str()));
+    }
+
+    /// 归属的解析顺序是一个产品契约（共享记忆 / 共享技能删除后，每条记忆、每个
+    /// 技能都必须有主人）：存活的显式默认体 → 最早创建的伙伴 → 空 roster 无主人。
+    #[tokio::test]
+    async fn resolve_row_owner_prefers_alive_default_then_oldest() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = registry(dir.path());
+        // 空 roster：没有合法主人，写入方必须干净失败而不是落孤儿行。
+        assert_eq!(reg.resolve_row_owner(None).await, None);
+        assert_eq!(reg.resolve_row_owner(Some("malformed-companion-id")).await, None);
+
+        let a = reg.create("甲", "ink").await.unwrap();
+        let b = reg.create("乙", "ink").await.unwrap();
+        // 未配置默认体 → 最早创建的伙伴
+        assert_eq!(reg.resolve_row_owner(None).await.as_deref(), Some(a.companion_id.as_str()));
+        // 显式默认体且存活 → 用之
+        assert_eq!(
+            reg.resolve_row_owner(Some(&b.companion_id)).await.as_deref(),
+            Some(b.companion_id.as_str())
+        );
+        // 显式默认体已删 → 回退最早创建，绝不采纳一个已不存在的主人
+        // （那会写出启动即失败的孤儿引用）。
+        reg.remove(&b.companion_id).await.unwrap();
+        assert_eq!(
+            reg.resolve_row_owner(Some(&b.companion_id)).await.as_deref(),
+            Some(a.companion_id.as_str())
+        );
+
+        // 侧栏顺序（order_index）是展示偏好，不能改变归属。
+        reg.patch(&a.companion_id, serde_json::json!({"order_index": 99}))
+            .await
+            .unwrap();
+        assert_eq!(reg.resolve_row_owner(None).await.as_deref(), Some(a.companion_id.as_str()));
+
+        // 同毫秒并列时用 companion_id 做稳定 tie-break。
+        let mut left = CompanionProfileConfig::new("同刻甲", "ink", 90);
+        let mut right = CompanionProfileConfig::new("同刻乙", "ink", 91);
+        left.created_at = 1;
+        right.created_at = 1;
+        let (small, large) = if left.companion_id < right.companion_id {
+            (left.companion_id.clone(), right.companion_id.clone())
+        } else {
+            (right.companion_id.clone(), left.companion_id.clone())
+        };
+        assert_eq!(row_owner_of([&left, &right], None).as_deref(), Some(small.as_str()));
+        assert_ne!(row_owner_of([&left, &right], None).as_deref(), Some(large.as_str()));
     }
 
     #[tokio::test]

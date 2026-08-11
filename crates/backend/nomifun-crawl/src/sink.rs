@@ -1,8 +1,7 @@
 //! Where crawled pages land.
 //!
 //! Default target is the knowledge base, through `write_document` — the same
-//! canonical path the agent write-back uses, so the inbox review policy applies
-//! to crawled pages exactly as it does to agent writes.
+//! canonical direct-write path used by the current knowledge write-back model.
 
 use std::sync::Arc;
 
@@ -15,10 +14,6 @@ use url::Url;
 
 use crate::error::CrawlError;
 use crate::model::CrawlJob;
-
-/// Prefix of the per-job inbox scope. Not a scope by itself: a shared scope
-/// would put every job's pages in one undifferentiated review pile.
-pub const CRAWL_INBOX_SCOPE_PREFIX: &str = "crawl-";
 
 /// Root directory (inside the base) that the crawler owns. The URL-source
 /// snapshots own `snapshots/` and are rebuilt wholesale from their entries, so
@@ -48,7 +43,6 @@ pub struct IngestPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestReceipt {
     pub rel_path: String,
-    pub staged: bool,
 }
 
 #[async_trait::async_trait]
@@ -82,33 +76,19 @@ impl CrawlSinkWriter for KnowledgeSink {
         let kb_id = KnowledgeBaseId::parse(raw_kb_id)
             .map_err(|e| CrawlError::UrlRejected(format!("invalid knowledge base id: {e}")))?;
         let rel_path = document_path(&job.job_id, &job.name, &page.url);
-        let mode = if job.sink.via_inbox {
-            WriteMode::Staged { scope: inbox_scope(&job.job_id) }
-        } else {
-            WriteMode::Direct
-        };
         let request = WriteRequest {
             spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path },
             content: render_document(page),
             policy: WritePolicy {
-                mode,
+                mode: WriteMode::Direct,
                 allow_create: true,
                 surface: WriteSurface::RegularChat,
             },
             bound_kb_ids: vec![kb_id],
         };
         let outcome = self.service.write_document(request).await?;
-        Ok(Some(IngestReceipt {
-            rel_path: outcome.final_rel_path,
-            staged: outcome.staged,
-        }))
+        Ok(Some(IngestReceipt { rel_path: outcome.final_rel_path }))
     }
-}
-
-/// Staging namespace for one job. Per-job rather than shared so the review
-/// panel can group (and later bulk-accept) by job.
-pub fn inbox_scope(job_id: &CrawlJobId) -> String {
-    format!("{CRAWL_INBOX_SCOPE_PREFIX}{job_id}")
 }
 
 /// `crawl/{job}-{id8}/{page}.md`. The id suffix is what actually separates two
@@ -121,8 +101,8 @@ pub fn document_path(job_id: &CrawlJobId, job_name: &str, url: &str) -> String {
     format!("{CRAWL_REL_DIR}/{}-{}/{page}.md", slugify(job_name), id_suffix(job_id))
 }
 
-/// Front matter carries provenance so a reviewer reading the inbox diff can
-/// tell where the text came from without opening the crawl UI.
+/// Front matter carries provenance so readers can tell where the text came
+/// from without opening the crawl UI.
 fn render_document(page: &IngestPage) -> String {
     let title = page.title.clone().unwrap_or_else(|| page.url.clone());
     format!(
@@ -204,27 +184,6 @@ mod tests {
         let job_id = CrawlJobId::new();
         let path = document_path(&job_id, "!!!", "https://e.com/x");
         assert_eq!(path.split('/').nth(1), Some(format!("job-{}", id_suffix(&job_id)).as_str()));
-    }
-
-    /// `validate_inbox_scope` requires a single portable path component, so a
-    /// separator or a Windows-illegal character here would reject every staged
-    /// write at runtime rather than at compile time.
-    #[test]
-    fn inbox_scope_is_a_single_portable_component() {
-        let scope = inbox_scope(&CrawlJobId::new());
-        assert!(scope.starts_with(CRAWL_INBOX_SCOPE_PREFIX), "{scope}");
-        assert!(
-            !scope.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*']),
-            "{scope}"
-        );
-        assert!(!scope.ends_with([' ', '.']), "{scope}");
-    }
-
-    /// The staged path is `_inbox/{scope}/{rel_path}`; a scope equal to the
-    /// rel_path's own root produced `_inbox/crawl/crawl/…`.
-    #[test]
-    fn inbox_scope_does_not_repeat_the_document_root() {
-        assert_ne!(inbox_scope(&CrawlJobId::new()), CRAWL_REL_DIR);
     }
 
     #[test]

@@ -40,6 +40,7 @@ use tokio::sync::{Mutex, OnceCell, watch};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::cli::Cli;
+use crate::lan_endpoint::detect_all_lan_ipv4s;
 use crate::{AppServices, bootstrap, create_router};
 use nomifun_auth::AuthPolicy;
 use nomifun_db::IUserRepository;
@@ -425,6 +426,15 @@ pub struct DesktopServer {
     /// so the unified shutdown path can clean up all terminal sessions before
     /// the database is closed.
     terminal_service: Arc<nomifun_terminal::TerminalService>,
+    /// The process SSH connection pool. Held here so the unified shutdown path can
+    /// close every live remote session — and write the resulting host status — while
+    /// the database is still open.
+    ssh_pool: nomifun_ssh::SshConnectionPool,
+    /// LAN robot gateway. Held here for two reasons: the unified shutdown path
+    /// stops its accept loop and loopback MCP front, and the LAN listener's
+    /// status is projected into its endpoint advertiser (the OTA response is the
+    /// only channel that can tell a device where to connect).
+    robot: Option<Arc<crate::robot_wiring::RobotServices>>,
     /// Clone of the database pool used by the embedded router. Closing this
     /// clone closes the shared pool, so fatal listener failures cannot leave
     /// the backend's persistent resources alive while the host is exiting.
@@ -733,6 +743,8 @@ impl DesktopServer {
             dev_frontend_url: dev_frontend_url.map(|u| Arc::from(u.trim_end_matches('/'))),
             runtime: Handle::current(),
             terminal_service,
+            ssh_pool: services.ssh_pool.clone(),
+            robot: services.robot.clone(),
             database: services.database.clone(),
             _keep_alive: keep_alive.clone(),
             browser_platform_shutdown: services.browser_platform_shutdown.clone(),
@@ -751,12 +763,62 @@ impl DesktopServer {
             status_rx,
         });
         server.spawn_loopback(loopback);
+        server.spawn_robot_endpoint_projection();
         Ok((server, keep_alive))
     }
 
     /// The loopback port the webview connects to (`window.__backendPort`).
     pub fn loopback_port(&self) -> u16 {
         self.loopback_port
+    }
+
+    /// Keep the robot endpoint advertiser in step with the LAN listener.
+    ///
+    /// A robot is told where to connect exactly once, in its OTA response, and
+    /// that address must be an interface the robot can reach — never loopback.
+    /// So the advertiser follows the LAN listener specifically: LAN off means no
+    /// reachable endpoint, and the OTA response then carries an empty websocket
+    /// URL instead of one that dials nowhere.
+    fn spawn_robot_endpoint_projection(self: &Arc<Self>) {
+        let Some(robot) = self.robot.clone() else {
+            return;
+        };
+        let mut status = self.subscribe_status();
+        tokio::spawn(async move {
+            loop {
+                let (running, port) = {
+                    let current = status.borrow_and_update();
+                    (current.running, current.port)
+                };
+                let snapshot = nomifun_robot::endpoint::LanEndpointSnapshot {
+                    enabled: running,
+                    port,
+                    // Re-detected per change rather than cached: a laptop that
+                    // moves between networks keeps the same listener.
+                    ipv4s: if running {
+                        detect_all_lan_ipv4s()
+                    } else {
+                        Vec::new()
+                    },
+                };
+                robot.endpoint_tx.send_if_modified(|current| {
+                    if *current == snapshot {
+                        return false;
+                    }
+                    tracing::info!(
+                        enabled = snapshot.enabled,
+                        port = snapshot.port,
+                        interfaces = snapshot.ipv4s.len(),
+                        "robot: reachable endpoint changed"
+                    );
+                    *current = snapshot;
+                    true
+                });
+                if status.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
     }
 
     /// The per-boot local-trust secret to inject into the webview
@@ -960,6 +1022,40 @@ impl DesktopServer {
             self.browser_platform_shutdown.shutdown().await;
         if let Err(error) = browser_result {
             errors.push(format!("browser cleanup failed: {error:#}"));
+        }
+
+        // Stop the robot gateway before the listeners go: its accept loop and the
+        // loopback MCP front are pure in-process tasks with nothing durable to
+        // write, so this is unconditional and cannot fail. Live sessions end with
+        // their own sockets when the listener closes.
+        if let Some(robot) = &self.robot {
+            robot.shutdown();
+        }
+
+        // Quiesce the SSH pool before the database closes: closing a link walks the
+        // host row back from "connected", and a link let go of without exit evidence
+        // is a real leak on someone else's machine, so it is reported rather than
+        // silently counted as clean.
+        let ssh_result = tokio::time::timeout(            std::time::Duration::from_secs(5),
+            self.ssh_pool.shutdown_all(),
+        )
+        .await;
+        match ssh_result {
+            Ok(report) => {
+                tracing::info!(
+                    reaped = report.reaped,
+                    lost = report.lost,
+                    already_down = report.already_down,
+                    "ssh links closed during desktop shutdown"
+                );
+                if report.lost > 0 {
+                    errors.push(format!(
+                        "{} ssh link(s) were let go of without proof the remote shell died",
+                        report.lost
+                    ));
+                }
+            }
+            Err(_) => errors.push("ssh pool cleanup timed out after 5 seconds".to_owned()),
         }
 
         // Do not close the shared database after an earlier cleanup failure.
@@ -1567,71 +1663,6 @@ async fn resolve_admin(user_repo: &dyn IUserRepository) -> (String, bool) {
     }
 }
 
-/// Routing-preferred source IPv4 (the address used to reach off-box hosts).
-/// Connecting a UDP socket only sets its local address; no packets are sent.
-fn routing_primary_ipv4() -> Option<Ipv4Addr> {
-    let sock = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    sock.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
-    match sock.local_addr().ok()? {
-        SocketAddr::V4(a) => {
-            let ip = *a.ip();
-            is_webui_lan_ip_candidate(ip).then_some(ip)
-        }
-        _ => None,
-    }
-}
-
-fn is_webui_lan_ip_candidate(ip: Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    if ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.is_multicast() {
-        return false;
-    }
-    if octets == [255, 255, 255, 255] {
-        return false;
-    }
-    // RFC 2544 benchmarking addresses are commonly created by virtual network
-    // adapters and are not reachable from a phone on the user's LAN.
-    if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
-        return false;
-    }
-    // Documentation-only ranges should never be offered as a real WebUI target.
-    if (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
-        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
-        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
-    {
-        return false;
-    }
-    true
-}
-
-/// All WebUI-usable IPv4 NIC addresses — routing-preferred first, then the rest
-/// (private ranges before public). A multi-homed / VPN host still yields
-/// several; obvious virtual/special-purpose addresses are filtered out.
-fn detect_all_lan_ipv4s() -> Vec<Ipv4Addr> {
-    let mut addrs: Vec<Ipv4Addr> = Vec::new();
-    if let Some(primary) = routing_primary_ipv4() {
-        addrs.push(primary);
-    }
-    let mut rest: Vec<Ipv4Addr> = Vec::new();
-    if let Ok(ifaces) = if_addrs::get_if_addrs() {
-        for iface in ifaces {
-            if iface.is_loopback() {
-                continue;
-            }
-            if let IpAddr::V4(v4) = iface.ip()
-                && is_webui_lan_ip_candidate(v4)
-                && !addrs.contains(&v4)
-                && !rest.contains(&v4)
-            {
-                rest.push(v4);
-            }
-        }
-    }
-    rest.sort_by_key(|ip| !ip.is_private()); // private (false→0) first
-    addrs.extend(rest);
-    addrs
-}
-
 /// Reverse-proxy a SPA request to the vite dev server (DEV only) so remote
 /// browsers receive the exact live frontend the desktop webview loads — instead
 /// of a stale bundled `ui/dist`. Only reached for paths the backend router did
@@ -1739,26 +1770,6 @@ mod tests {
     fn origin_shape_check() {
         assert!(origin_is_ip_or_localhost("http://192.168.1.5:25808"));
         assert!(!origin_is_ip_or_localhost("http://evil.com"));
-    }
-
-    #[test]
-    fn webui_lan_ip_candidate_filters_special_purpose_ranges() {
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(0, 0, 0, 0)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(127, 0, 0, 1)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(169, 254, 10, 20)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(198, 18, 0, 1)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(198, 19, 255, 1)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(224, 0, 0, 1)));
-        assert!(!is_webui_lan_ip_candidate(Ipv4Addr::new(
-            255, 255, 255, 255
-        )));
-    }
-
-    #[test]
-    fn webui_lan_ip_candidate_keeps_private_lan_ranges() {
-        assert!(is_webui_lan_ip_candidate(Ipv4Addr::new(10, 8, 0, 2)));
-        assert!(is_webui_lan_ip_candidate(Ipv4Addr::new(172, 16, 1, 20)));
-        assert!(is_webui_lan_ip_candidate(Ipv4Addr::new(192, 168, 31, 5)));
     }
 
     #[test]

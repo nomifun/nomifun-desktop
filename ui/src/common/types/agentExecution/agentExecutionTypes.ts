@@ -94,7 +94,6 @@ export type TAgentExecution = {
   max_parallel: number;
   status: TAgentExecutionStatus;
   summary: string | null;
-  total_tokens: number | null;
   version: number;
   plan_revision: number;
   event_sequence: number;

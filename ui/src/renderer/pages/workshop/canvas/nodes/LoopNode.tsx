@@ -234,7 +234,7 @@ function LoopNodeImpl({ id, data, selected }: NodeProps<LoopFlowNode>) {
                     className={[
                       'nodrag flex-1 rounded-6px py-4px text-center text-11px font-600 cursor-pointer transition-colors select-none',
                       running ? 'opacity-55' : '',
-                      active ? 'bg-[rgb(var(--primary-6))] text-white' : 'text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)]',
+                      active ? 'bg-primary-6 text-white' : 'text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)]',
                     ].join(' ')}
                   >
                     {t(`workshopCanvas.node.loop.mode.${m}`, { defaultValue: m === 'serial' ? '串行' : '并发' })}
@@ -255,10 +255,10 @@ function LoopNodeImpl({ id, data, selected }: NodeProps<LoopFlowNode>) {
                 onChange={(e) => set({ countTemplate: e.target.value })}
                 onKeyDown={(e) => e.stopPropagation()}
                 placeholder={t('workshopCanvas.node.loop.templatePlaceholder', { defaultValue: '现在生成第 {i} 张' })}
-                className='nodrag w-full rounded-7px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px text-11px text-[var(--color-text-1)] outline-none focus:border-[rgb(var(--primary-6))] disabled:opacity-55'
+                className='nodrag w-full rounded-7px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px text-11px text-[var(--color-text-1)] outline-none focus:border-primary-6 disabled:opacity-55'
               />
               {injected && (
-                <span className='truncate rounded-6px bg-[rgba(var(--primary-6),0.08)] px-7px py-4px text-10px text-[rgb(var(--primary-6))]'>
+                <span className='truncate rounded-6px bg-[rgba(var(--primary-6),0.08)] px-7px py-4px text-10px text-primary-6'>
                   {t('workshopCanvas.node.loop.previewLabel', { defaultValue: '本轮注入' })}: {injected}
                 </span>
               )}
@@ -267,11 +267,11 @@ function LoopNodeImpl({ id, data, selected }: NodeProps<LoopFlowNode>) {
             {/* Tallies + failed rounds. */}
             {(running || progress.completed > 0) && (
               <div className='flex flex-wrap items-center gap-5px'>
-                <span className='inline-flex items-center gap-3px rounded-full bg-[rgba(var(--success-6),0.12)] px-7px py-2px text-10px font-600 text-[rgb(var(--success-6))]'>
+                <span className='inline-flex items-center gap-3px rounded-full bg-[rgba(var(--success-6),0.12)] px-7px py-2px text-10px font-600 text-success-6'>
                   {t('workshopCanvas.node.loop.success', { defaultValue: '成功' })} {progress.success}
                 </span>
                 {progress.failed.length > 0 && (
-                  <span className='inline-flex items-center gap-3px rounded-full bg-[rgba(var(--danger-6),0.12)] px-7px py-2px text-10px font-600 text-[rgb(var(--danger-6))]'>
+                  <span className='inline-flex items-center gap-3px rounded-full bg-[rgba(var(--danger-6),0.12)] px-7px py-2px text-10px font-600 text-danger-6'>
                     {t('workshopCanvas.node.loop.failed', { defaultValue: '失败' })} {progress.failed.join(', ')}
                   </span>
                 )}
@@ -293,7 +293,7 @@ function LoopNodeImpl({ id, data, selected }: NodeProps<LoopFlowNode>) {
                   stop();
                 }}
                 onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && stop()}
-                className='nodrag flex w-full items-center justify-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-10px py-7px text-12px font-600 text-[var(--color-text-2)] cursor-pointer transition-colors hover:border-[rgb(var(--danger-6))] hover:text-[rgb(var(--danger-6))]'
+                className='nodrag flex w-full items-center justify-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-10px py-7px text-12px font-600 text-[var(--color-text-2)] cursor-pointer transition-colors hover:border-danger-6 hover:text-danger-6'
               >
                 <Pause theme='outline' size={13} strokeWidth={3} />
                 {t('workshopCanvas.node.loop.stop', { defaultValue: '中止' })}
@@ -323,7 +323,7 @@ function LoopNodeImpl({ id, data, selected }: NodeProps<LoopFlowNode>) {
                 className={[
                   'nodrag flex w-full items-center justify-center gap-6px rounded-9px px-10px py-7px text-12px font-700 transition-all select-none',
                   canRun
-                    ? 'bg-[rgb(var(--primary-6))] text-white cursor-pointer hover:opacity-92 shadow-[0_4px_14px_rgba(var(--primary-6),0.32)]'
+                    ? 'bg-primary-6 text-white cursor-pointer hover:opacity-92 shadow-[0_4px_14px_rgba(var(--primary-6),0.32)]'
                     : 'bg-[var(--color-fill-3)] text-[var(--color-text-3)] cursor-not-allowed',
                 ].join(' ')}
               >

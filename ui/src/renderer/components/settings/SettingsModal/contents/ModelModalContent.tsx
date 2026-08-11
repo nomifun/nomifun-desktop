@@ -210,7 +210,7 @@ const ModelDescriptionEditor: React.FC<{
       <Tooltip content={t('settings.editModelDescription', { defaultValue: '编辑模型描述' })}>
         <Button
           size='mini'
-          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${description ? 'text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))]' : 'text-t-secondary hover:text-t-primary'}`}
+          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${description ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
           icon={<Write theme='outline' size='14' />}
           onClick={(e) => e.stopPropagation()}
         />
@@ -270,7 +270,7 @@ const ModelContextLimitEditor: React.FC<{
       <Tooltip content={t('settings.editModelContextLimit', { defaultValue: '编辑模型上下文窗口' })}>
         <Button
           size='mini'
-          className={`model-provider-action-btn !h-24px !min-w-44px shrink-0 px-6px text-11px ${value ? 'text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))]' : 'text-t-secondary hover:text-t-primary'}`}
+          className={`model-provider-action-btn !h-24px !min-w-44px shrink-0 px-6px text-11px ${value ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
           onClick={(e) => e.stopPropagation()}
         >
           {label}
@@ -393,7 +393,7 @@ const ModelModalityEditor: React.FC<{
       <Tooltip content={t('settings.editModelModality', { defaultValue: '编辑模型类别' })}>
         <Button
           size='mini'
-          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${hasUserSelection ? 'text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))]' : 'text-t-secondary hover:text-t-primary'}`}
+          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${hasUserSelection ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
           icon={<TagOne theme='outline' size='14' />}
           onClick={(e) => e.stopPropagation()}
         />
@@ -630,7 +630,6 @@ const ModelModalContent: React.FC = () => {
           const featureName: Record<ProviderUsageFeature, string> = {
             desktopCompanion: t('settings.providerInUse.desktopCompanion'),
             customerService: t('settings.providerInUse.customerService'),
-            smartDecision: t('settings.providerInUse.smartDecision'),
             conversation: t('settings.providerInUse.conversation'),
             agentExecution: t('settings.providerInUse.agentExecution'),
           };
@@ -889,7 +888,7 @@ const ModelModalContent: React.FC = () => {
 
   const [editModalCtrl, editModalContext] = EditModeModal.useModal({
     onChange(platform) {
-      updatePlatform(platform, () => editModalCtrl.close());
+      return updatePlatform(platform, () => undefined, true);
     },
   });
 
@@ -904,7 +903,7 @@ const ModelModalContent: React.FC = () => {
       {addModelModalContext}
 
       {/* Header with Add Button */}
-      <div className='flex-shrink-0 border-b border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
+      <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
         <div className='flex items-center justify-between gap-8px flex-wrap'>
           <div className='min-w-0'>
             <div className='text-20px font-600 text-t-primary leading-28px'>
@@ -920,7 +919,7 @@ const ModelModalContent: React.FC = () => {
               shape='round'
               icon={<Plus size='16' />}
               onClick={() => addPlatformModalCtrl.open()}
-              className='rd-100px border-1 border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
+              className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
             >
               {t('settings.addModel')}
             </Button>
@@ -933,7 +932,7 @@ const ModelModalContent: React.FC = () => {
             backgroundColor: 'rgba(var(--primary-6),0.06)',
           }}
         >
-          <Info theme='outline' size='16' className='mt-1px shrink-0 text-[rgb(var(--primary-6))]' />
+          <Info theme='outline' size='16' className='mt-1px shrink-0 text-primary-6' />
           <div className='min-w-0'>
             <div className='text-13px font-600 leading-18px text-t-primary'>
               {t('settings.modelHub.provider.noticeTitle')}
@@ -942,6 +941,10 @@ const ModelModalContent: React.FC = () => {
               {t('settings.modelHub.provider.note')}
             </div>
           </div>
+        </div>
+        {/* 职责收窄：本页只管接入与凭证；「按用途找模型」已迁到模态分区。 */}
+        <div className='mt-8px text-12px leading-18px text-t-tertiary'>
+          {t('settings.modelHub.provider.scopeNote')}
         </div>
       </div>
 
@@ -957,7 +960,7 @@ const ModelModalContent: React.FC = () => {
                 href='https://github.com/nomifun/nomifun-app/wiki/LLM-Configuration'
                 target='_blank'
                 rel='noopener noreferrer'
-                className='text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))] underline ml-4px'
+                className='text-primary-6 hover:text-primary-5 underline ml-4px'
               >
                 {t('settings.configGuide')}
               </a>
@@ -984,7 +987,7 @@ const ModelModalContent: React.FC = () => {
                   }}
                   bordered
                   expandIconPosition='left'
-                  className={`[&_.arco-collapse-item]:!border-0 [&_.arco-collapse-item]:!rounded-12px [&_.arco-collapse-item]:!overflow-hidden [&_.arco-collapse-item]:!bg-[var(--color-bg-2)] [&_.arco-collapse-item-header]:!bg-[var(--fill-0)] [&_.arco-collapse-item-header]:!pl-36px [&_.arco-collapse-item-header]:!pr-12px [&_.arco-collapse-item-header]:!py-8px [&_.arco-collapse-item-header]:transition-colors [&_.arco-collapse-item-header]:hover:!bg-[var(--color-bg-2)] [&_.arco-collapse-item-header]:!gap-8px [&_.arco-collapse-item-header-title]:!min-w-0 [&_.arco-collapse-item-header-icon]:!text-2 [&_.arco-collapse-item-header:hover_.arco-collapse-item-header-icon]:!text-1 [&_.arco-collapse-item-content]:!bg-fill-1 [&_.arco-collapse-item-content-box]:!px-10px [&_.arco-collapse-item-content-box]:!py-8px [&_.arco-collapse-item-content]:!border-t [&_.arco-collapse-item-content]:!border-[var(--color-border-2)] ${
+                  className={`[&_.arco-collapse-item]:!border-0 [&_.arco-collapse-item]:!rounded-12px [&_.arco-collapse-item]:!overflow-hidden [&_.arco-collapse-item]:!bg-[var(--color-bg-2)] [&_.arco-collapse-item-header]:!bg-[var(--fill-0)] [&_.arco-collapse-item-header]:!pl-36px [&_.arco-collapse-item-header]:!pr-12px [&_.arco-collapse-item-header]:!py-8px [&_.arco-collapse-item-header]:transition-colors [&_.arco-collapse-item-header]:hover:!bg-[var(--color-bg-2)] [&_.arco-collapse-item-header]:!gap-8px [&_.arco-collapse-item-header-title]:!min-w-0 [&_.arco-collapse-item-header-icon]:!text-2 [&_.arco-collapse-item-header:hover_.arco-collapse-item-header-icon]:!text-1 [&_.arco-collapse-item-content]:!bg-fill-1 [&_.arco-collapse-item-content-box]:!px-10px [&_.arco-collapse-item-content-box]:!py-8px [&_.arco-collapse-item-content]:!border-t [&_.arco-collapse-item-content]:!border-t-solid [&_.arco-collapse-item-content]:!border-[var(--color-border-2)] ${
                     isExpanded
                       ? '[&_.arco-collapse-item-header]:!rounded-t-12px [&_.arco-collapse-item-header]:!rounded-b-0 [&_.arco-collapse-item-content]:!rounded-b-12px'
                       : '[&_.arco-collapse-item-header]:!rounded-12px'

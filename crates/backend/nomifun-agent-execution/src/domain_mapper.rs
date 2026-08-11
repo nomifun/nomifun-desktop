@@ -99,7 +99,6 @@ pub(crate) fn execution(
         max_parallel: row.max_parallel,
         status: parse_enum("status", &row.status)?,
         summary: row.summary,
-        total_tokens: row.total_tokens,
         version: row.version,
         plan_revision: row.plan_revision,
         event_sequence: row.event_sequence,

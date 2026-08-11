@@ -36,8 +36,11 @@ pub struct CollectConfig {
     /// SHAPE only (sorted top-level arg keys + JSON types), never values. The
     /// primary mining signal for skill self-evolution (design §5.1).
     pub tool_calls: bool,
-    /// Companion-dialogue capture: owner messages + companion replies inside companion
-    /// (companion / Channel Agent) conversations.
+    /// Companion-dialogue capture: what the OWNER says inside companion
+    /// (companion / Channel Agent) conversations. The companion's own replies are
+    /// not recorded — the learner was never permitted to read a reply as owner
+    /// intent, so collecting them cost disk and tokens without ever producing a
+    /// memory.
     pub companion_dialogues: bool,
     /// Number of local calendar days kept in the raw event spool. Old files
     /// are removed only after every currently-enabled background consumer has
@@ -102,7 +105,7 @@ struct PersistedProviderModel {
     model: String,
 }
 
-fn deserialize_provider_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+pub(crate) fn deserialize_provider_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

@@ -56,6 +56,7 @@ All flags below are read by `apps/web/src/main.rs`. Each has an environment-vari
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | — | Pre-seed the first admin password at boot, skipping interactive setup. Ignored once an admin exists. |
 | `--insecure-no-auth` | `NOMIFUN_WEB_INSECURE_NO_AUTH` | `false` | **DANGER.** Disables authentication entirely (desktop-style local mode). Only use on loopback or a fully trusted private network. |
 | — | `NOMIFUN_HTTPS` | `false` | When `true`, session and CSRF cookies are flagged `Secure`. Set this whenever the app is reached over HTTPS (e.g. behind a TLS reverse proxy). |
+| — | `NOMIFUN_ROBOT_ADVERTISE` | — | The address LAN robots (ESP32) dial: `<ipv4>` or `<ipv4>:<port>`. **Required under Docker**; optional on bare metal, where the LAN interfaces are auto-detected. A malformed value stops the boot. See [LAN robots (ESP32)](#lan-robots-esp32). |
 | — | `SHELL` | platform default | Shell used by the agent engine when spawning processes. Set to `/bin/bash` on Linux servers if `$SHELL` is unset. |
 
 Boolean envs accept `1`, `true`, `yes`, `on` (case-insensitive).
@@ -107,7 +108,8 @@ Hub tag when one is available. The image:
 
 1. Builds the SPA with Bun.
 2. Compiles `nomifun-web` from the workspace.
-3. Assembles a slim `debian:bookworm-slim` runtime that includes `bun`, `git`, and `ripgrep`.
+3. Assembles a slim `debian:trixie-slim` runtime that includes Bun, Node.js
+   22 with npm/npx, Python 3 with PyYAML, Git, and ripgrep.
 
 It exposes port `8787` and uses `/data` as the data volume.
 
@@ -206,6 +208,8 @@ The app already provides its own login screen, so **do not configure HTTP basic 
 
 For a LAN-only host without a public domain you can use an internal name with `tls internal`, or just publish port `8787` directly without Caddy (the in-app login still protects it).
 
+If you use LAN robots, step 3 cuts off their only path in — see [LAN robots (ESP32)](#lan-robots-esp32).
+
 ## Other reverse proxies: preserve the original Host
 
 Realtime updates (streaming replies, tool calls, task/queue status) flow over
@@ -246,6 +250,71 @@ exact public origin(s) users type into the browser. Rejected handshakes are
 logged server-side at `WARN` with the offending `origin` / `host` /
 `forwarded_host` values, so `docker compose logs | grep "rejected websocket"`
 shows precisely what to configure.
+
+## LAN robots (ESP32)
+
+`nomifun-web` serves the robot gateway too — the device face at `/robot/*` and
+the management API at `/api/robots*` are part of the same router the desktop app
+uses. One thing is host-specific: **the address a robot is told to connect to.**
+
+A robot learns that address exactly once, from its OTA response, and then dials
+it directly over plain `http`/`ws`. So the server has to know which of its own
+addresses is reachable *from the robot's network*:
+
+- **Bare metal / systemd on a LAN host** — nothing to configure. The host's LAN
+  IPv4 addresses are auto-detected (routing-preferred interface first).
+- **Docker / Podman — you must set `NOMIFUN_ROBOT_ADVERTISE`.** Inside a
+  container, auto-detection finds the container's own address (`172.17.0.2`),
+  which no device on your network can route to. Detection cannot be fixed here:
+  the reachable address belongs to the host, and the port a robot dials is the
+  host side of the port mapping, neither of which the process can see.
+
+```bash
+# Compose (or a local .env): the LAN IP of the machine running Docker.
+NOMIFUN_ROBOT_ADVERTISE=192.168.1.50
+
+# Remapped port (`-p 9000:8787`): state the port robots dial, not the bound one.
+NOMIFUN_ROBOT_ADVERTISE=192.168.1.50:9000
+```
+
+Rules:
+
+- Value is `<ipv4>` or `<ipv4>:<port>`. Without a port, the port this process
+  actually bound is advertised.
+- **IPv4 literals only.** Host names and IPv6 are rejected — a device is handed
+  one bare `ws://<ipv4>:<port>` URL with no TLS and no name resolution. A public
+  host name with a certificate belongs to the (not-yet-shipped) remote relay,
+  not here.
+- A malformed value (not an IPv4 literal, a bad port, `0.0.0.0`) **fails the
+  boot** with a message naming the variable. There is deliberately no silent
+  fallback to auto-detection: that would look configured and behave broken.
+- Unset and empty mean the same thing (auto-detect), so a Compose file may pass
+  the name through unconditionally.
+
+Verify what is being advertised. The endpoint is owner-authenticated, so the
+easiest check is from a logged-in WebUI tab (DevTools console):
+
+```js
+await fetch('/api/robots/endpoints').then(r => r.json())
+// { ota_urls: ["http://192.168.1.50:9000/robot/ota"], lan_enabled: true }
+```
+
+On a `--insecure-no-auth` host, `curl http://<server-ip>:8787/api/robots/endpoints`
+works directly.
+
+`"lan_enabled": false` or an empty `ota_urls` means no reachable address was
+published — under Docker, that is the missing `NOMIFUN_ROBOT_ADVERTISE`. The URL
+printed there is the one you type into the firmware's OTA field. The startup log
+states the same thing: look for `robot: advertising this endpoint to devices`.
+
+**Robots do not go through the TLS reverse proxy.** The device face is plain
+`http`/`ws` on the address above, so it needs that port reachable on the LAN
+even when browsers reach the app through Caddy on 443. If you replaced
+`ports: ["8787:8787"]` with `expose:` for a Caddy-only deployment, robots lose
+their path in: republish the port (LAN-only is fine) and point
+`NOMIFUN_ROBOT_ADVERTISE` at it. Adding the device face to Caddy is *not* a
+substitute — the firmware dials the bare IPv4 URL it was given, without SNI or
+certificate validation.
 
 ## systemd (Linux server, no Docker)
 
@@ -334,7 +403,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 |---|---|---|
 | `glibc` + `ca-certificates` | Yes | sqlite is statically linked, TLS uses rustls — **no openssl, no libsqlite needed**. |
 | `bun` ≥ 1.3.13 | **Yes** | Agent execution runtime. 1.1.38 has an stdin bug; do not use. Already inside the Docker image. |
-| `node` / `npm` / `npx` | Recommended | Many user-configured MCP stdio servers launch via `npx -y …`. |
+| Node.js 22 + `npm` / `npx` | Recommended | Used by many MCP stdio servers and the automatic OfficeCLI install path. Already inside the Docker image. |
+| Python 3 + PyYAML | Recommended | Enables the Agent's Python script mode and bundled Python-based skills. Already inside the Docker image. |
 | `git` | Recommended | Skill discovery and a few built-in tools. |
 | `ripgrep` (`rg`) | Recommended | Code-search backend. Falls back to `grep` if missing. |
 | `DISPLAY` / X11 / WebView | **No** | `nomifun-web` is fully headless. |
@@ -356,6 +426,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 **Replies/task status only update after a page refresh (WebUI looks stuck on "executing").** The `/ws` WebSocket handshake is being rejected — check the server log for `rejected websocket upgrade` (WARN, includes the offending `origin`/`host`/`forwarded_host`) or `GET /ws` → `403` lines. Almost always a reverse proxy that rewrites `Host`: see [Other reverse proxies: preserve the original Host](#other-reverse-proxies-preserve-the-original-host).
 
 **Agent commands fail with `bun: command not found` under systemd.** Install bun system-wide (see the bun-on-PATH section above) or rebuild with `NOMIFUN_EMBED_BUN=1`.
+
+**A robot never connects (the firmware's OTA check succeeds but no session appears).** The server published no reachable address, so the OTA response carried an empty websocket URL. Check `/api/robots/endpoints`; under Docker set `NOMIFUN_ROBOT_ADVERTISE` to the *host* LAN IP — see [LAN robots (ESP32)](#lan-robots-esp32).
 
 **Healthcheck.** Use `GET /health` for process liveness. Use
 `GET /api/auth/status` only when the caller also needs setup/auth state.

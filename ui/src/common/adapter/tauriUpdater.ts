@@ -12,11 +12,10 @@
  * never evaluates Tauri IPC code.
  *
  * Lifecycle — one shared renderer `Update` resource flows across check →
- * download only. `check()` returns a Rust-side Resource handle (`rid`), so the
- * same object is held in `pendingUpdate` for progress download. Installation
- * crosses a custom Rust command that re-checks, re-downloads, and verifies the
- * selected version before the native installer handoff. The modal performs two
- * back-to-back checks
+ * metadata display only. Package download and installation are separate custom
+ * Rust commands backed by one native cache: download verifies and retains the
+ * exact package, while install can only consume those retained bytes and never
+ * performs network I/O. The modal performs two back-to-back checks
  * (autoUpdate.check then update.check); `checkPromise` memoizes them into ONE
  * network round-trip, while `force` re-checks on retry / modal reopen.
  *
@@ -29,25 +28,20 @@
 import type { AutoUpdateStatus } from '@/common/update/updateTypes';
 import { isTauriRuntime } from './tauriRuntime';
 import {
+  tauriDownloadUpdate,
   tauriGetUpdaterInstallContext,
   tauriInstallUpdate,
-  type TauriInstallUpdateProgress,
+  tauriUpdatePackageStatus,
+  type TauriDownloadUpdateProgress,
+  type TauriUpdatePackageStatus,
 } from './tauriShell';
 import { installUpdateWithPreflight } from './tauriUpdateInstall';
-
-// Structural mirror of @tauri-apps/plugin-updater's public surface, so this
-// module type-checks without a static import (the plugin loads lazily).
-type DownloadEvent =
-  | { event: 'Started'; data: { contentLength?: number } }
-  | { event: 'Progress'; data: { chunkLength: number } }
-  | { event: 'Finished' };
 
 interface TauriUpdate {
   version: string;
   currentVersion: string;
   date?: string;
   body?: string;
-  download(onEvent?: (e: DownloadEvent) => void): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -59,13 +53,14 @@ export interface TauriUpdateInfo {
   releaseDate?: string;
 }
 
-// The `Update` is a Rust-side Resource handle: the object returned by `check()`
-// must be the one used for `download()`. Hold it between calls.
+// Keep the check resource for version/release metadata. Package bytes — and the
+// FACT that a package exists — are owned by the Rust-side DownloadedUpdateState.
+// This module deliberately keeps no mirror of that fact: a renderer-local
+// `downloadComplete` boolean used to be cleared at the start of every download
+// attempt and never restored on failure, so a rejected attempt disabled the
+// install action while Rust still held verified bytes, and the only way to
+// re-arm it was to run a whole download again.
 let pendingUpdate: TauriUpdate | null = null;
-// Set once `pendingUpdate` has been fully downloaded. A re-check would `close()`
-// the handle and discard those bytes (forcing a full re-download), so once true
-// we preserve the handle instead of re-checking — see tauriUpdateCheck.
-let downloadComplete = false;
 // Memoize the in-flight/last check so the modal's autoUpdate.check + update.check
 // share ONE round-trip. Checks are also SERIALIZED through it (each chains after
 // any in-flight one) so two never run concurrently — concurrent runs would each
@@ -74,6 +69,23 @@ let checkPromise: Promise<TauriUpdateInfo | null> | null = null;
 
 function infoFromHandle(u: TauriUpdate): TauriUpdateInfo {
   return { version: u.version, currentVersion: u.currentVersion, releaseNotes: u.body, releaseDate: u.date };
+}
+
+/**
+ * The version the native slot is currently busy with (downloading, ready, or
+ * installing), or null when it holds nothing. Any active version means the
+ * metadata handle for it must be preserved: replacing it could point install at
+ * a different release than the one whose bytes are retained.
+ */
+async function nativeActiveVersion(): Promise<string | null> {
+  try {
+    const status = await tauriUpdatePackageStatus();
+    return status.version ?? null;
+  } catch {
+    // Treat an unavailable native side as "nothing retained" — the install path
+    // re-queries and fails closed there.
+    return null;
+  }
 }
 
 async function runCheck(): Promise<TauriUpdateInfo | null> {
@@ -101,9 +113,6 @@ async function runCheck(): Promise<TauriUpdateInfo | null> {
  */
 export async function tauriUpdateCheck(force = false): Promise<TauriUpdateInfo | null> {
   if (!isTauriRuntime()) return null;
-  // Preserve a completed in-session download: re-checking would close the handle
-  // and throw away the downloaded bytes, forcing a full re-download.
-  if (downloadComplete && pendingUpdate) return infoFromHandle(pendingUpdate);
   if (!force && checkPromise) return checkPromise;
   // Chain after any in-flight check so two never run concurrently.
   const prior = checkPromise;
@@ -113,6 +122,12 @@ export async function tauriUpdateCheck(force = false): Promise<TauriUpdateInfo |
     } catch {
       /* the prior check's failure is its caller's problem — we start fresh */
     }
+    // Preserve the metadata matching whatever the native side is working on —
+    // including DURING a download, which the old boolean could not cover: it
+    // was false for the whole download window, so a modal reopen mid-download
+    // closed the handle the download was keyed to.
+    const active = await nativeActiveVersion();
+    if (active && pendingUpdate?.version === active) return infoFromHandle(pendingUpdate);
     return runCheck();
   })();
   checkPromise = run;
@@ -122,6 +137,21 @@ export async function tauriUpdateCheck(force = false): Promise<TauriUpdateInfo |
     if (checkPromise === run) checkPromise = null;
   });
   return run;
+}
+
+/**
+ * The native slot snapshot, so the UI can derive what to show (including "a
+ * download is already running") instead of keeping its own copy of that fact.
+ * The single place the readiness rule is applied is the bridge that consumes
+ * this; deliberately no second `retainedVersion` helper exists to drift from it.
+ */
+export async function tauriUpdatePackageSnapshot(): Promise<TauriUpdatePackageStatus | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    return await tauriUpdatePackageStatus();
+  } catch {
+    return null;
+  }
 }
 
 // The running bundle version is constant for the session; cache the lookup.
@@ -141,16 +171,18 @@ export async function tauriUpdateCurrentVersion(): Promise<string> {
 }
 
 /**
- * Download the pending update, reporting progress via `emit` (the
- * autoUpdate.status channel the modal subscribes to). Emits `downloading`
- * (with running percent/speed) then a terminal `downloaded`. Re-checks if the
- * handle was lost (e.g. modal reopened after a stale check).
+ * Ask Rust to download, verify, and retain the selected update, reporting
+ * progress via `emit` (the autoUpdate.status channel the modal subscribes to).
+ * Installation later consumes this exact retained package without downloading.
  */
 export async function tauriUpdateDownload(emit: (s: AutoUpdateStatus) => void): Promise<void> {
   if (!isTauriRuntime()) throw new Error('Updater is unavailable outside the desktop shell');
   if (!pendingUpdate) await tauriUpdateCheck(true);
   if (!pendingUpdate) throw new Error('No update available to download');
-  downloadComplete = false;
+  // Pin the version for the whole flow. Re-reading the module global after the
+  // await could pick up a handle swapped in by a check that ran mid-download,
+  // silently keying the completion event to a different release.
+  const downloadVersion = pendingUpdate.version;
 
   let total = 0;
   let downloaded = 0;
@@ -158,13 +190,20 @@ export async function tauriUpdateDownload(emit: (s: AutoUpdateStatus) => void): 
   let lastTs = performance.now();
   let lastBytes = 0;
 
-  emit({ status: 'downloading', progress: { percent: 0, transferred: 0, total: 0, bytesPerSecond: 0 } });
+  // Every progress frame is stamped with the version it belongs to so the UI can
+  // discard a series from a superseded download instead of letting two
+  // independent byte counters fight over one progress bar.
+  emit({
+    status: 'downloading',
+    version: downloadVersion,
+    progress: { percent: 0, transferred: 0, total: 0, bytesPerSecond: 0 },
+  });
 
-  await pendingUpdate.download((e) => {
-    if (e.event === 'Started') {
-      total = e.data.contentLength ?? 0;
-    } else if (e.event === 'Progress') {
-      downloaded += e.data.chunkLength;
+  await tauriDownloadUpdate(downloadVersion, (event: TauriDownloadUpdateProgress) => {
+    if (event.phase === 'checking') return;
+    if (event.phase === 'downloading') {
+      total = event.contentLength ?? total;
+      downloaded += event.chunkLength ?? 0;
       const now = performance.now();
       const dt = now - lastTs;
       // Throttle speed sampling to ~4 Hz; keep the last value between samples so
@@ -176,6 +215,7 @@ export async function tauriUpdateDownload(emit: (s: AutoUpdateStatus) => void): 
       }
       emit({
         status: 'downloading',
+        version: downloadVersion,
         progress: {
           percent: total > 0 ? Math.min(100, (downloaded / total) * 100) : 0,
           transferred: downloaded,
@@ -183,23 +223,24 @@ export async function tauriUpdateDownload(emit: (s: AutoUpdateStatus) => void): 
           bytesPerSecond: speed,
         },
       });
-    } else if (e.event === 'Finished') {
-      const final = total || downloaded;
+    } else if (event.phase === 'downloaded') {
+      // Prefer the length the native side reported: on the "already retained"
+      // fast path no chunk events arrive at all, and reporting `total || 0` there
+      // painted a 100% bar over "0.0 KB / 0.0 KB".
+      const final = event.contentLength ?? (total || downloaded);
       emit({
         status: 'downloading',
+        version: downloadVersion,
         progress: { percent: 100, transferred: final, total: final, bytesPerSecond: 0 },
       });
     }
   });
 
-  // Mark the handle as holding downloaded bytes so a subsequent re-check (e.g.
-  // the modal being reopened) preserves it instead of discarding the download.
-  downloadComplete = true;
-  emit({ status: 'downloaded', version: pendingUpdate.version });
+  emit({ status: 'downloaded', version: downloadVersion });
 }
 
 /**
- * Ask Rust to re-check and install the selected version, then relaunch on
+ * Ask Rust to install the already-downloaded version, then relaunch on
  * platforms where installation returns. Windows exits inside the updater
  * plugin after its fail-closed pre-exit hook. No-op outside the desktop shell.
  *
@@ -211,66 +252,16 @@ export async function tauriUpdateDownload(emit: (s: AutoUpdateStatus) => void): 
  */
 export async function tauriUpdateInstallAndRelaunch(emit: (s: AutoUpdateStatus) => void): Promise<void> {
   if (!isTauriRuntime()) throw new Error('Updater is unavailable outside the desktop shell');
-  if (!pendingUpdate || !downloadComplete) throw new Error('No downloaded update is ready to install');
-  const version = pendingUpdate.version;
-  let total = 0;
-  let transferred = 0;
-  let speed = 0;
-  let lastTs = performance.now();
-  let lastBytes = 0;
+  // Ask the owner of the bytes, not a local mirror. This runs BEFORE any
+  // shutdown/cleanup, so a "nothing retained" answer is a plain recoverable
+  // error: the app stays usable and the user can retry.
+  const status = await tauriUpdatePackageStatus();
+  if (status.state !== 'ready' || !status.version) {
+    throw new Error('No downloaded update is ready to install');
+  }
+  const version = status.version;
 
-  const reportInstallProgress = (event: TauriInstallUpdateProgress): void => {
-    if (event.phase === 'checking') {
-      emit({ status: 'installing', installPhase: 'preparing' });
-      return;
-    }
-
-    if (event.phase === 'downloading') {
-      total = event.contentLength ?? total;
-      transferred += event.chunkLength ?? 0;
-      const now = performance.now();
-      const dt = now - lastTs;
-      if (dt >= 250) {
-        speed = ((transferred - lastBytes) / dt) * 1000;
-        lastTs = now;
-        lastBytes = transferred;
-      }
-      emit({
-        status: 'installing',
-        installPhase: 'downloading',
-        progress: {
-          percent: total > 0 ? Math.min(100, (transferred / total) * 100) : 0,
-          transferred,
-          total,
-          bytesPerSecond: speed,
-        },
-      });
-      return;
-    }
-
-    if (event.phase === 'downloaded') {
-      const final = total || transferred;
-      total = final;
-      transferred = final;
-      emit({
-        status: 'installing',
-        installPhase: 'downloading',
-        progress: { percent: 100, transferred: final, total: final, bytesPerSecond: 0 },
-      });
-      return;
-    }
-
-    if (event.phase === 'installing') {
-      const final = total || transferred;
-      emit({
-        status: 'installing',
-        installPhase: 'installing',
-        progress: { percent: 100, transferred: final, total: final, bytesPerSecond: 0 },
-      });
-    }
-  };
-
-  // Give immediate feedback while the native preflight and version check begin.
+  // Give immediate feedback while the native install preflight begins.
   emit({ status: 'installing', installPhase: 'preparing' });
   await installUpdateWithPreflight({
     getContext: tauriGetUpdaterInstallContext,
@@ -278,7 +269,10 @@ export async function tauriUpdateInstallAndRelaunch(emit: (s: AutoUpdateStatus) 
     // today; the hook keeps the ordering contract (cleanup failure must
     // prevent installation) wired for when one appears.
     prepareShutdown: async () => {},
-    install: () => tauriInstallUpdate(version, reportInstallProgress),
+    install: async () => {
+      emit({ status: 'installing', installPhase: 'installing' });
+      await tauriInstallUpdate(version);
+    },
     relaunch: async () => {
       const { relaunch } = await import('@tauri-apps/plugin-process');
       await relaunch();
@@ -298,8 +292,8 @@ export async function tauriUpdateInstallAndRelaunch(emit: (s: AutoUpdateStatus) 
 }
 
 // ---------------------------------------------------------------------------
-// autoUpdate.status — a renderer-local emitter (the source is the JS download
-// callback above, not a Tauri backend event), shaped like tauriShell's
+// autoUpdate.status — a renderer-local emitter (fed by the native download
+// channel above), shaped like tauriShell's
 // ShellEmitter so ipcBridge can expose it directly as `autoUpdate.status`.
 // ---------------------------------------------------------------------------
 

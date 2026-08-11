@@ -63,8 +63,6 @@
     "knowledgeBase": "产出知识库",
     "knowledgeBasePlaceholder": "选择知识库",
     "knowledgeBaseHint": "留空则只记录抓取结果，不保存页面内容。",
-    "knowledgeBaseEmpty": "还没有知识库，请先在「知识库」页新建一个。",
-    "viaInbox": "先进评审收件箱",
-    "viaInboxHint": "关闭后抓取内容会直接写入知识库正文。"
+    "knowledgeBaseEmpty": "还没有知识库，请先在「知识库」页新建一个。"
   }
 }

@@ -191,6 +191,22 @@ define_entity_id!(
     RemoteAgentId
 );
 define_entity_id!(
+    /// Globally unique SSH host identifier.
+    ///
+    /// Identifies a saved, reusable SSH connection profile in the `ssh_hosts`
+    /// table. Referenced from `conversations.extra.$.ssh_host_id`.
+    SshHostId
+);
+define_entity_id!(
+    /// Globally unique mini-app identifier.
+    ///
+    /// Identifies a solidified single-file web tool in the `miniapps` table. It
+    /// is also the capability in the auth-exempt
+    /// `GET /api/miniapps/{miniapp_id}/serve` URL, so it must stay unguessable —
+    /// which a bare UUIDv7 is.
+    MiniAppId
+);
+define_entity_id!(
     /// Globally unique user identifier.
     UserId
 );
@@ -312,10 +328,6 @@ define_entity_id!(
 define_entity_id!(
     /// Globally unique companion memory identifier.
     CompanionMemoryId
-);
-define_entity_id!(
-    /// Globally unique companion suggestion identifier.
-    CompanionSuggestionId
 );
 define_entity_id!(
     /// Globally unique companion collected-event identifier.

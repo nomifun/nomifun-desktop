@@ -1214,7 +1214,6 @@ impl TerminalService {
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
         let _sync_guard = sync_lock.lock().await;
-        let id_str = id.to_string();
         // Workpath-only (session-list unification spec §7): the binding
         // belongs to the workspace path, never the terminal session.
         // `session_workpath_key` maps a backend-managed default cwd —one
@@ -1254,9 +1253,7 @@ impl TerminalService {
             &nomifun_knowledge::KnowledgeContextOptions {
                 format: nomifun_knowledge::KnowledgeContextFormat::TerminalReadme,
                 writeback: outcome.writeback,
-                writeback_mode: Some(&outcome.writeback_mode),
                 writeback_eagerness: Some(&outcome.writeback_eagerness),
-                target_id: &id_str,
                 has_search_tool: tool_available,
                 // The same scoped MCP bridge that exposes knowledge_search also
                 // exposes knowledge_write, so point the model at the tool (not
@@ -4219,7 +4216,6 @@ mod tests {
             kb_ids: &[String],
             enabled: bool,
             writeback: bool,
-            writeback_mode: &str,
             writeback_eagerness: &str,
             channel_write_enabled: bool,
             updated_at: nomifun_common::TimestampMs,
@@ -4253,7 +4249,6 @@ mod tests {
                 target_companion_id: None,
                 enabled,
                 writeback,
-                writeback_mode: writeback_mode.to_owned(),
                 writeback_eagerness: writeback_eagerness.to_owned(),
                 channel_write_enabled,
                 updated_at,
@@ -4491,10 +4486,9 @@ mod tests {
             nomifun_knowledge::KnowledgeBinding {
                 enabled: true,
                 writeback: true,
-                writeback_mode: "direct".into(),
-                writeback_eagerness: "aggressive".into(),
+                writeback_eagerness: "auto".into(),
                 kb_ids: vec![test_kb_id()],
-                channel_write_enabled: false,
+                channel_write_enabled: true,
             },
         )
         .await
@@ -4512,13 +4506,15 @@ mod tests {
             "create selection replaces the base list"
         );
         assert!(binding.writeback, "writeback flag must be preserved");
+        // Two independent fields the caller never mentioned: a read-modify-write
+        // that resets either of them would silently change the user's policy.
         assert_eq!(
-            binding.writeback_mode, "direct",
-            "writeback mode must be preserved"
+            binding.writeback_eagerness, "auto",
+            "writeback disposition must be preserved"
         );
-        assert_eq!(
-            binding.writeback_eagerness, "aggressive",
-            "writeback eagerness must be preserved"
+        assert!(
+            binding.channel_write_enabled,
+            "channel write opt-in must be preserved"
         );
 
         svc.kill(&resp.terminal_id).await.ok();
@@ -4547,8 +4543,7 @@ mod tests {
             nomifun_knowledge::KnowledgeBinding {
                 enabled: true,
                 writeback: false,
-                writeback_mode: "staged".into(),
-                writeback_eagerness: "conservative".into(),
+                                writeback_eagerness: "manual".into(),
                 kb_ids: vec![test_kb_id()],
                 channel_write_enabled: false,
             },

@@ -16,6 +16,7 @@ import type { PresetTagId } from '@/common/types/ids';
 import type { ImportedAgentSkill } from '@/renderer/pages/settings/skill/AgentSkillImportDrawer';
 import type { AgentSkillImportRow } from '@/renderer/pages/settings/skill/agentSkillImportUtils';
 import AgentSkillImportDrawer from '@/renderer/pages/settings/skill/AgentSkillImportDrawer';
+import { stripSkillFrontmatter } from '@/renderer/pages/settings/skill/skillDetail';
 import {
   resolveSkillDisplay,
   type LocalizableSkill,
@@ -209,6 +210,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
   const [drawerWidth, setDrawerWidth] = useState(500);
   const [rulesExpanded, setRulesExpanded] = useState(false);
   const [agentImportVisible, setAgentImportVisible] = useState(false);
+  const promptPreviewContent = useMemo(() => stripSkillFrontmatter(editContext).trim(), [editContext]);
 
   const { resetPendingTagDrafts, closeDrawer, handleDrawerSave } = useMemo(
     () => createPresetTagDraftLifecycle(audiencePickerRef, scenarioPickerRef, setEditVisible, handleSave),
@@ -421,7 +423,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
             </Typography.Text>
             <div className='mt-10px flex items-center gap-12px'>
               {activePreset?.source === 'builtin' ? (
-                <Avatar shape='square' size={40} className='bg-bg-1 rounded-4px'>
+                <Avatar shape='square' size={40} className='bg-1 rounded-4px'>
                   {editAvatarImage ? (
                     <img src={editAvatarImage} alt='' width={24} height={24} style={{ objectFit: 'contain' }} />
                   ) : editAvatar ? (
@@ -433,7 +435,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
               ) : (
                 <EmojiPicker value={editAvatar} onChange={(emoji) => setEditAvatar(emoji)} placement='br'>
                   <div className='cursor-pointer'>
-                    <Avatar shape='square' size={40} className='bg-bg-1 rounded-4px hover:bg-fill-2 transition-colors'>
+                    <Avatar shape='square' size={40} className='bg-1 rounded-4px hover:bg-fill-2 transition-colors'>
                       {editAvatarImage ? (
                         <img src={editAvatarImage} alt='' width={24} height={24} style={{ objectFit: 'contain' }} />
                       ) : editAvatar ? (
@@ -445,13 +447,19 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                   </div>
                 </EmojiPicker>
               )}
+              {/* 不写 bg-1：styles/layout.css 用 `.arco-input { background-color:
+                  var(--fill-0) !important }` 统一了全站输入框底色，`!important` 一定赢，
+                  所以这里的 bg-1 从来没生效过（改成 !bg-1 反而会把输入框拉成和抽屉
+                  正文 --color-bg-1 几乎同色，暗色下等于看不见的输入框）。留白即正确。
+                  Dropping a token the cascade can never honour: layout.css already owns
+                  `.arco-input` with `!important`, and --fill-0 is the better surface. */}
               <Input
                 value={editName}
                 onChange={(value) => setEditName(value)}
                 disabled={readOnly}
                 placeholder={t('settings.presetNamePlaceholder', { defaultValue: 'Enter a name for this preset' })}
                 data-testid='input-preset-name'
-                className='flex-1 rounded-4px bg-bg-1'
+                className='flex-1 rounded-4px'
               />
             </div>
           </div>
@@ -462,7 +470,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
               {t('settings.presetDescription', { defaultValue: 'Preset Description' })}
             </Typography.Text>
             <Input
-              className='mt-10px rounded-4px bg-bg-1'
+              className='mt-10px rounded-4px'
               value={editDescription}
               onChange={(value) => setEditDescription(value)}
               disabled={readOnly}
@@ -478,7 +486,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
               {t('settings.presetRoutingDescription', { defaultValue: 'Agent-facing description' })}
             </Typography.Text>
             <Input.TextArea
-              className='mt-10px rounded-4px bg-bg-1'
+              className='mt-10px rounded-4px bg-1'
               value={editRoutingDescription}
               onChange={setEditRoutingDescription}
               disabled={readOnly}
@@ -580,7 +588,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
             </Tag>
           </div>
 
-          <div className='flex-shrink-0 p-12px rd-10px border border-solid border-border-2 bg-bg-1'>
+          <div className='flex-shrink-0 p-12px rd-10px border border-solid border-arco-2 bg-1'>
             <Typography.Text bold>{t('settings.presetApplication', { defaultValue: 'Application' })}</Typography.Text>
             <Checkbox.Group
               className='preset-scope-selection-checkbox mt-10px flex flex-wrap gap-x-16px gap-y-8px'
@@ -609,7 +617,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
             </div>
           </div>
 
-          <div className='flex-shrink-0 p-12px rd-10px border border-solid border-border-2 bg-bg-1'>
+          <div className='flex-shrink-0 p-12px rd-10px border border-solid border-arco-2 bg-1'>
             <div className='flex items-center justify-between gap-12px'>
               <div>
                 <Typography.Text bold>{t('settings.presetKnowledge', { defaultValue: 'Knowledge scope' })}</Typography.Text>
@@ -641,16 +649,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                     <NomiSelect.Option key={base.knowledge_base_id} value={base.knowledge_base_id}>{base.name}</NomiSelect.Option>
                   ))}
                 </NomiSelect>
-                <div className='grid grid-cols-1 md:grid-cols-3 gap-10px'>
-                  <Select
-                    value={knowledgePolicy.mode}
-                    disabled={readOnly}
-                    onChange={(mode) => setKnowledgePolicy({ ...knowledgePolicy, mode: String(mode) })}
-                  >
-                    <Select.Option value='inherit'>{t('settings.presetKnowledgeModeInherit', { defaultValue: 'Inherit defaults' })}</Select.Option>
-                    <Select.Option value='staged'>{t('settings.presetKnowledgeModeStaged', { defaultValue: 'Selected bases (staged)' })}</Select.Option>
-                    <Select.Option value='direct'>{t('settings.presetKnowledgeModeDirect', { defaultValue: 'Selected bases (direct)' })}</Select.Option>
-                  </Select>
+                <div className='grid grid-cols-1 md:grid-cols-2 gap-10px'>
                   <Checkbox checked={knowledgePolicy.grounded} disabled={readOnly} onChange={(grounded) => setKnowledgePolicy({ ...knowledgePolicy, grounded })}>
                     {t('settings.presetKnowledgeGrounded', { defaultValue: 'Require grounding' })}
                   </Checkbox>
@@ -661,23 +660,23 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                 {knowledgePolicy.writeback && (
                   <div className='grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(180px,0.45fr)] gap-10px items-center'>
                     <div className='text-12px text-t-secondary'>
-                      {t('knowledge.mount.eagernessLabel', { defaultValue: 'Write-back eagerness' })}
+                      {t('knowledge.mount.eagernessLabel', { defaultValue: 'Write-back disposition' })}
                     </div>
                     <Select
-                      value={knowledgePolicy.eagerness ?? 'conservative'}
+                      value={knowledgePolicy.eagerness ?? 'manual'}
                       disabled={readOnly}
                       onChange={(eagerness) =>
                         setKnowledgePolicy({
                           ...knowledgePolicy,
-                          eagerness: eagerness as 'conservative' | 'aggressive',
+                          eagerness: eagerness as 'manual' | 'auto',
                         })
                       }
                     >
-                      <Select.Option value='conservative'>
-                        {t('knowledge.control.eagernessConservative', { defaultValue: 'Conservative' })}
+                      <Select.Option value='manual'>
+                        {t('knowledge.control.eagernessManual', { defaultValue: 'Manual (recommended)' })}
                       </Select.Option>
-                      <Select.Option value='aggressive'>
-                        {t('knowledge.control.eagernessAggressive', { defaultValue: 'Aggressive' })}
+                      <Select.Option value='auto'>
+                        {t('knowledge.control.eagernessAuto', { defaultValue: 'Automatic' })}
                       </Select.Option>
                     </Select>
                   </div>
@@ -736,19 +735,22 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
               </Button>
             </div>
             <div
-              className='mt-10px border border-border-2 overflow-hidden rounded-4px'
+              className='mt-10px border border-solid border-arco-2 overflow-hidden rounded-4px'
               style={{ height: rulesContainerHeight }}
             >
               {isRuleEditable && (
-                <div className='flex items-center h-36px bg-fill-2 border-b border-border-2 flex-shrink-0'>
+                // 编辑/预览 Tab 的选中下划线：`border-b-2` 是「下边框颜色 = --bg-2」而不是
+                // 2px 宽度，配上仓库没有 border-style 重置，下划线一直没画出来。
+                // `border-b-2` is a bottom colour, not a 2px width.
+                <div className='flex items-center h-36px bg-fill-2 border-b border-b-solid border-arco-2 flex-shrink-0'>
                   <div
-                    className={`flex items-center h-full px-16px cursor-pointer transition-all text-13px font-medium ${promptViewMode === 'edit' ? 'text-primary border-b-2 border-primary bg-bg-1' : 'text-t-secondary hover:text-t-primary'}`}
+                    className={`flex items-center h-full px-16px cursor-pointer transition-all text-13px font-medium ${promptViewMode === 'edit' ? 'text-primary border-b-2px border-b-solid border-primary bg-1' : 'text-t-secondary hover:text-t-primary'}`}
                     onClick={() => setPromptViewMode('edit')}
                   >
                     {t('settings.promptEdit', { defaultValue: 'Edit' })}
                   </div>
                   <div
-                    className={`flex items-center h-full px-16px cursor-pointer transition-all text-13px font-medium ${promptViewMode === 'preview' ? 'text-primary border-b-2 border-primary bg-bg-1' : 'text-t-secondary hover:text-t-primary'}`}
+                    className={`flex items-center h-full px-16px cursor-pointer transition-all text-13px font-medium ${promptViewMode === 'preview' ? 'text-primary border-b-2px border-b-solid border-primary bg-1' : 'text-t-secondary hover:text-t-primary'}`}
                     onClick={() => setPromptViewMode('preview')}
                   >
                     {t('settings.promptPreview', { defaultValue: 'Preview' })}
@@ -775,9 +777,11 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                     />
                   </div>
                 ) : (
-                  <div className='p-16px text-14px leading-7'>
-                    {editContext ? (
-                      <MarkdownView hiddenCodeCopyButton>{editContext}</MarkdownView>
+                  <div className='p-16px'>
+                    {promptPreviewContent ? (
+                      <MarkdownView hiddenCodeCopyButton compact>
+                        {promptPreviewContent}
+                      </MarkdownView>
                     ) : (
                       <div className='text-t-secondary text-center py-32px'>
                         {t('settings.promptPreviewEmpty', { defaultValue: 'No content to preview' })}
@@ -870,7 +874,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                         <div className='flex-1 min-w-0'>
                           <div className='flex items-center gap-6px'>
                             <div className='text-13px font-medium text-t-primary'>{skill.name}</div>
-                            <span className='bg-[rgba(var(--primary-6),0.08)] text-primary-6 border border-[rgba(var(--primary-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
+                            <span className='bg-[rgba(var(--primary-6),0.08)] text-primary-6 border border-solid border-[rgba(var(--primary-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
                               {t('settings.pending', { defaultValue: 'Pending' })}
                             </span>
                           </div>
@@ -912,7 +916,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                           skill={skill}
                           localeKey={localeKey}
                           badge={
-                            <span className='bg-[rgba(242,156,27,0.08)] text-[rgb(242,156,27)] border border-[rgba(242,156,27,0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
+                            <span className='bg-[rgba(242,156,27,0.08)] text-[rgb(242,156,27)] border border-solid border-[rgba(242,156,27,0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
                               {t('settings.skillsHub.custom', { defaultValue: 'Custom' })}
                             </span>
                           }
@@ -1028,7 +1032,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                             skill={skill}
                             localeKey={localeKey}
                             badge={
-                              <span className='bg-[rgba(var(--primary-6),0.08)] text-primary-6 border border-[rgba(var(--primary-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
+                              <span className='bg-[rgba(var(--primary-6),0.08)] text-primary-6 border border-solid border-[rgba(var(--primary-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
                                 {t('settings.extensionSkillsBadge', { defaultValue: 'Extension' })}
                               </span>
                             }
@@ -1080,7 +1084,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                             skill={skill}
                             localeKey={localeKey}
                             badge={
-                              <span className='bg-[rgba(var(--success-6),0.08)] text-[rgb(var(--success-6))] border border-[rgba(var(--success-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
+                              <span className='bg-[rgba(var(--success-6),0.08)] text-success-6 border border-solid border-[rgba(var(--success-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
                                 {t('settings.autoInjectedSkillsBadge', { defaultValue: 'Auto' })}
                               </span>
                             }

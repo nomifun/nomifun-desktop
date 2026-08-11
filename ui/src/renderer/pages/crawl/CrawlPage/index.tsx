@@ -102,7 +102,6 @@ const CrawlPage: React.FC = () => {
       scope: { same_site: values.same_site },
       sink: {
         knowledge_base_id: values.knowledge_base_id || undefined,
-        via_inbox: values.via_inbox,
       },
     };
     try {
@@ -272,7 +271,6 @@ const CrawlPage: React.FC = () => {
             delay_ms: 500,
             respect_robots: true,
             same_site: true,
-            via_inbox: true,
             render_mode: 'auto',
           }}
         >
@@ -342,14 +340,6 @@ const CrawlPage: React.FC = () => {
                 </Select.Option>
               ))}
             </Select>
-          </Form.Item>
-          <Form.Item
-            label={t('crawl.field.viaInbox')}
-            field='via_inbox'
-            triggerPropName='checked'
-            extra={t('crawl.field.viaInboxHint')}
-          >
-            <Switch />
           </Form.Item>
         </Form>
       </Modal>

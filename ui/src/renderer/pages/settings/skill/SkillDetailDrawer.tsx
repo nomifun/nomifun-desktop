@@ -89,19 +89,19 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
         ? t('settings.skillsHub.sourceExtension', { defaultValue: 'Extension' })
         : t('settings.skillsHub.builtin', { defaultValue: 'Built-in' });
   const sourceBadgeClass = isAutoInjected
-    ? 'bg-[rgba(var(--success-6),0.1)] text-[rgb(var(--success-6))]'
+    ? 'bg-[rgba(var(--success-6),0.1)] text-success-6'
     : skill?.source === 'custom'
-      ? 'bg-[rgba(var(--orange-6),0.1)] text-[rgb(var(--orange-6))]'
+      ? 'bg-[rgba(var(--orange-6),0.1)] text-[rgba(var(--orange-6),1)]'
       : skill?.source === 'extension'
         ? 'bg-fill-2 text-t-secondary'
         : 'bg-primary-1 text-primary-6';
 
   const renderTagGroup = (label: string, values: PresetTag[]) => (
-    <div className='flex min-w-0 items-start gap-10px'>
+    <div className='flex min-w-0 items-start gap-8px'>
       <span className='w-72px flex-shrink-0 pt-2px text-11px font-600 uppercase tracking-[0.08em] text-t-tertiary'>
         {label}
       </span>
-      <div className='flex min-w-0 flex-1 flex-wrap gap-6px'>
+      <div className='flex min-w-0 flex-1 flex-wrap gap-4px'>
         {values.length > 0 ? (
           values.map((tag) => (
             <span
@@ -155,13 +155,13 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
     >
       {skill && display && (
         <div className='flex h-full min-h-0 flex-col' data-testid='skill-detail-content'>
-          <div className='flex-shrink-0 border-b border-solid border-[var(--color-border-1)] px-24px py-20px'>
-            <div className='flex items-start gap-14px'>
+          <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-1)] px-20px py-16px'>
+            <div className='flex items-start gap-12px'>
               <div
                 className={[
                   'flex h-44px w-44px flex-shrink-0 items-center justify-center rounded-12px text-17px font-700 uppercase shadow-sm',
                   isAutoInjected
-                    ? 'bg-[rgba(var(--success-6),0.1)] text-[rgb(var(--success-6))]'
+                    ? 'bg-[rgba(var(--success-6),0.1)] text-success-6'
                     : 'bg-primary-1 text-primary-6',
                 ].join(' ')}
               >
@@ -180,10 +180,10 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
               </div>
             </div>
 
-            <div className='mt-18px flex flex-col gap-10px rounded-12px bg-fill-2 p-12px'>
+            <div className='mt-12px flex flex-col gap-6px rounded-12px bg-fill-2 p-10px'>
               {renderTagGroup(t('settings.presetTagAudience', { defaultValue: 'Audience' }), audienceTags)}
               {renderTagGroup(t('settings.presetTagScenario', { defaultValue: 'Skill Scenario' }), scenarioTags)}
-              <div className='flex min-w-0 items-start gap-10px pt-10px'>
+              <div className='flex min-w-0 items-start gap-8px'>
                 <span className='w-72px flex-shrink-0 pt-2px text-11px font-600 uppercase tracking-[0.08em] text-t-tertiary'>
                   {t('settings.skillsHub.detailLocation', { defaultValue: 'Location' })}
                 </span>
@@ -197,8 +197,8 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
             </div>
           </div>
 
-          <div className='flex min-h-0 flex-1 flex-col px-24px py-18px'>
-            <div className='mb-12px flex flex-shrink-0 items-center justify-between gap-12px'>
+          <div className='flex min-h-0 flex-1 flex-col px-20px py-14px'>
+            <div className='mb-10px flex flex-shrink-0 items-center justify-between gap-10px'>
               <div>
                 <div className='text-13px font-700 text-t-primary'>
                   {t('settings.skillsHub.detailInstructions', { defaultValue: 'Instructions' })}
@@ -234,7 +234,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
               </div>
             </div>
 
-            <div className='min-h-0 flex-1 overflow-auto rounded-14px border border-solid border-[var(--color-border-1)] bg-base p-18px'>
+            <div className='min-h-0 flex-1 overflow-auto rounded-14px border border-solid border-[var(--color-border-1)] bg-base p-14px'>
               {loading ? (
                 <div className='flex h-full min-h-180px items-center justify-center' data-testid='skill-detail-loading'>
                   <Spin size={24} />

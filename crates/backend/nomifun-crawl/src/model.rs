@@ -141,22 +141,11 @@ fn default_true() -> bool {
 }
 
 /// Where extracted content is written.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CrawlSink {
     /// Target knowledge base. `None` keeps results in the task rows only.
     #[serde(default)]
     pub knowledge_base_id: Option<String>,
-    /// Route through the knowledge review inbox instead of writing directly.
-    #[serde(default = "default_true")]
-    pub via_inbox: bool,
-}
-
-/// Same reasoning as [`CrawlScope`]: a derived `Default` would turn inbox
-/// review off and let crawled pages land straight in the knowledge base.
-impl Default for CrawlSink {
-    fn default() -> Self {
-        Self { knowledge_base_id: None, via_inbox: true }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -286,7 +275,6 @@ mod tests {
     #[test]
     fn rust_and_json_defaults_agree_on_sink() {
         let from_json: CrawlSink = serde_json::from_str("{}").unwrap();
-        assert!(CrawlSink::default().via_inbox);
-        assert_eq!(CrawlSink::default().via_inbox, from_json.via_inbox);
+        assert_eq!(CrawlSink::default().knowledge_base_id, from_json.knowledge_base_id);
     }
 }

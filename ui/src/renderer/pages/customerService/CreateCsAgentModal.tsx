@@ -11,6 +11,7 @@ import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import { useKnowledgeBaseOptions } from '@/renderer/hooks/knowledge/useKnowledgeBaseOptions';
 import type { ICsAgent, ICsAgentPatch } from '@/common/adapter/ipcBridge';
 import type { KnowledgeBaseId, ProviderId } from '@/common/types/ids';
+import styles from './CreateCsAgentModal.module.css';
 
 interface Props {
   visible: boolean;
@@ -72,72 +73,123 @@ const CreateCsAgentModal: React.FC<Props> = ({ visible, onClose, onCreated, crea
       confirmLoading={submitting}
       autoFocus={false}
       maskClosable={false}
-      style={{ width: 520 }}
+      alignCenter
+      className={styles.modal}
     >
-      <Form form={form} layout='vertical'>
-        <Form.Item
-          label={t('customerService.fields.name', { defaultValue: '名称' })}
-          field='name'
-          rules={[{ required: true, message: t('customerService.fields.nameRequired', { defaultValue: '请输入客服名称' }) }]}
-        >
-          <Input placeholder={t('customerService.fields.namePlaceholder', { defaultValue: '例如：售后小助' })} />
-        </Form.Item>
-        <div className='grid grid-cols-2 gap-x-12px'>
-          <Form.Item label={t('customerService.fields.provider', { defaultValue: '模型服务商' })} field='provider_id'>
-            <Select
-              placeholder={t('customerService.fields.providerPlaceholder', { defaultValue: '选择服务商' })}
-              allowClear
-              onChange={(value) => {
-                setProviderId(value as ProviderId | undefined);
-                form.setFieldValue('model', undefined);
-              }}
-            >
-              {providers.map((p) => (
-                <Select.Option key={p.id} value={p.id}>
-                  {p.name}
-                </Select.Option>
-              ))}
-            </Select>
+      <Form form={form} layout='vertical' className={styles.form}>
+        <div className={styles.formRow}>
+          <div className={styles.fieldLabel}>
+            <span className={styles.required}>*</span>
+            {t('customerService.fields.name', { defaultValue: '名称' })}
+          </div>
+          <Form.Item
+            className={styles.fieldItem}
+            field='name'
+            rules={[{ required: true, message: t('customerService.fields.nameRequired', { defaultValue: '请输入客服名称' }) }]}
+          >
+            <Input placeholder={t('customerService.fields.namePlaceholder', { defaultValue: '例如：售后小助' })} />
           </Form.Item>
-          <Form.Item label={t('customerService.fields.model', { defaultValue: '对话模型' })} field='model'>
-            <Select placeholder={t('customerService.fields.modelPlaceholder', { defaultValue: '选择模型' })} allowClear>
-              {modelOptions.map((m) => (
-                <Select.Option key={m} value={m}>
-                  {m}
+        </div>
+
+        <div className={styles.formRow}>
+          <div className={styles.fieldLabel}>
+            {t('customerService.fields.model', { defaultValue: '对话模型' })}
+          </div>
+          <div className={styles.modelFields}>
+            <Form.Item className={styles.fieldItem} field='provider_id'>
+              <Select
+                placeholder={t('customerService.fields.providerPlaceholder', { defaultValue: '选择服务商' })}
+                allowClear
+                onChange={(value) => {
+                  setProviderId(value as ProviderId | undefined);
+                  form.setFieldValue('model', undefined);
+                }}
+              >
+                {providers.map((p) => (
+                  <Select.Option key={p.id} value={p.id}>
+                    {p.name}
+                  </Select.Option>
+                ))}
+              </Select>
+            </Form.Item>
+            <Form.Item className={styles.fieldItem} field='model'>
+              <Select placeholder={t('customerService.fields.modelPlaceholder', { defaultValue: '选择模型' })} allowClear>
+                {modelOptions.map((m) => (
+                  <Select.Option key={m} value={m}>
+                    {m}
+                  </Select.Option>
+                ))}
+              </Select>
+            </Form.Item>
+          </div>
+        </div>
+
+        <div className={styles.formRow}>
+          <div className={styles.fieldLabel}>
+            {t('customerService.fields.knowledgeBases', { defaultValue: '知识库' })}
+          </div>
+          <Form.Item className={styles.fieldItem} field='knowledge_base_ids'>
+            <Select
+              mode='multiple'
+              placeholder={t('customerService.fields.knowledgeBasesPlaceholder', { defaultValue: '选择可检索的知识库' })}
+              allowClear
+            >
+              {kbOptions.map((kb) => (
+                <Select.Option key={kb.value} value={kb.value}>
+                  {kb.label}
                 </Select.Option>
               ))}
             </Select>
           </Form.Item>
         </div>
-        <Form.Item label={t('customerService.fields.knowledgeBases', { defaultValue: '知识库' })} field='knowledge_base_ids'>
-          <Select
-            mode='multiple'
-            placeholder={t('customerService.fields.knowledgeBasesPlaceholder', { defaultValue: '选择可检索的知识库' })}
-            allowClear
-          >
-            {kbOptions.map((kb) => (
-              <Select.Option key={kb.value} value={kb.value}>
-                {kb.label}
-              </Select.Option>
-            ))}
-          </Select>
-        </Form.Item>
-        <Form.Item label={t('customerService.fields.greeting', { defaultValue: '问候语' })} field='greeting'>
-          <Input.TextArea rows={2} placeholder={t('customerService.fields.greetingPlaceholder', { defaultValue: '访客打招呼时的开场白' })} />
-        </Form.Item>
-        <Form.Item label={t('customerService.fields.persona', { defaultValue: '人设话术' })} field='persona'>
-          <Input.TextArea rows={2} placeholder={t('customerService.fields.personaPlaceholder', { defaultValue: '语气与人设，例如：耐心、简洁、以事实为准' })} />
-        </Form.Item>
-        <Form.Item label={t('customerService.fields.servicePolicy', { defaultValue: '服务策略' })} field='service_policy'>
-          <Input.TextArea rows={2} placeholder={t('customerService.fields.servicePolicyPlaceholder', { defaultValue: '业务范围 / 禁答话题 / 合规话术' })} />
-        </Form.Item>
-        <Form.Item
-          label={t('customerService.fields.maxConcurrent', { defaultValue: '并发上限' })}
-          field='max_concurrent'
-          initialValue={8}
-        >
-          <InputNumber min={1} max={64} />
-        </Form.Item>
+
+        <div className={styles.formRow}>
+          <div className={styles.fieldLabel}>
+            {t('customerService.fields.greeting', { defaultValue: '问候语' })}
+          </div>
+          <Form.Item className={styles.fieldItem} field='greeting'>
+            <Input.TextArea
+              className={styles.textarea}
+              rows={2}
+              placeholder={t('customerService.fields.greetingPlaceholder', { defaultValue: '访客打招呼时的开场白' })}
+            />
+          </Form.Item>
+        </div>
+
+        <div className={styles.formRow}>
+          <div className={styles.fieldLabel}>
+            {t('customerService.fields.persona', { defaultValue: '人设话术' })}
+          </div>
+          <Form.Item className={styles.fieldItem} field='persona'>
+            <Input.TextArea
+              className={styles.textarea}
+              rows={2}
+              placeholder={t('customerService.fields.personaPlaceholder', { defaultValue: '语气与人设，例如：耐心、简洁、以事实为准' })}
+            />
+          </Form.Item>
+        </div>
+
+        <div className={styles.formRow}>
+          <div className={styles.fieldLabel}>
+            {t('customerService.fields.servicePolicy', { defaultValue: '服务策略' })}
+          </div>
+          <Form.Item className={styles.fieldItem} field='service_policy'>
+            <Input.TextArea
+              className={styles.textarea}
+              rows={2}
+              placeholder={t('customerService.fields.servicePolicyPlaceholder', { defaultValue: '业务范围 / 禁答话题 / 合规话术' })}
+            />
+          </Form.Item>
+        </div>
+
+        <div className={styles.formRow}>
+          <div className={styles.fieldLabel}>
+            {t('customerService.fields.maxConcurrent', { defaultValue: '并发上限' })}
+          </div>
+          <Form.Item className={`${styles.fieldItem} ${styles.concurrencyControl}`} field='max_concurrent' initialValue={8}>
+            <InputNumber min={1} max={64} />
+          </Form.Item>
+        </div>
       </Form>
     </Modal>
   );

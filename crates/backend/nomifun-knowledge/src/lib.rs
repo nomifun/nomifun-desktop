@@ -36,7 +36,7 @@ mod workspace_binding;
 pub(crate) mod testutil;
 
 pub use autogen::KnowledgeCompleter;
-pub use context::{KnowledgeContextFormat, KnowledgeContextOptions, WritebackEagerness, WritebackMode, build_knowledge_context};
+pub use context::{KnowledgeContextFormat, KnowledgeContextOptions, WritebackEagerness, build_knowledge_context};
 pub use events::KnowledgeEventEmitter;
 pub use mcp_server::KnowledgeMcpServer;
 pub use broker::{
@@ -44,11 +44,10 @@ pub use broker::{
 };
 pub use routes::knowledge_routes;
 pub use service::{
-    AutogenOutcome, ConsumerInfo, InboxDiff, InboxEntry, InboxMergeResult, KB_INBOX_REL_DIR, KnowledgeBinding,
-    KnowledgeService, MountOutcome, PreparedMountPlan, RefreshSourceSummary, TurnWritebackFailure, TurnWritebackReport,
-    TurnWritebackPhase, TurnWritebackRequest, TurnWritebackStatus, WriteMode, WriteOp, WriteOutcome, WritePolicy,
-    WriteRequest, WriteResolution, WriteSurface, WriteTargetSpec, decode_doc_handle, encode_doc_handle,
-    resolve_write_policy,
+    AutogenOutcome, ConsumerInfo, KnowledgeBinding, KnowledgeService, MountOutcome, PreparedMountPlan,
+    RefreshSourceSummary, TurnWritebackFailure, TurnWritebackReport, TurnWritebackPhase, TurnWritebackRequest,
+    TurnWritebackStatus, WriteMode, WriteOp, WriteOutcome, WritePolicy, WriteRequest, WriteResolution, WriteSurface,
+    WriteTargetSpec, decode_doc_handle, encode_doc_handle, resolve_write_policy,
 };
 pub use source_url::{HttpFetcher, PageFetcher};
 pub use state::KnowledgeRouterState;

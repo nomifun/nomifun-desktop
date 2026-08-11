@@ -1,0 +1,75 @@
+[package]
+name = "nomifun-robot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Exposes the mock service implementations to integration tests.
+test-support = []
+
+[dependencies]
+# The `[emotion:name]` vocabulary and its strippers live here, not in this
+# crate: the desktop relay removes the same marker from the same stream and
+# cannot depend on the device pipeline. Free anyway — nomifun-api-types
+# already pulls nomifun-common in.
+nomifun-common = { workspace = true }
+nomifun-api-types = { workspace = true }
+nomifun-realtime = { workspace = true }
+# ASR/TTS go through the one non-chat resolve algorithm.
+nomifun-model-invoke = { workspace = true }
+# One-shot vision bypasses the invoke layer (its chat request is text-only) and
+# talks to a provider directly, so the raw LLM types come along.
+nomi-config = { workspace = true }
+nomi-providers = { workspace = true }
+nomi-types = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# Session ids are opaque and random. `v4` is additive on top of the workspace
+# `v7` feature; naming it here keeps the crate compiling on its own rather than
+# relying on workspace feature unification.
+uuid = { workspace = true, features = ["v4"] }
+# Statically linked vendored libopus (see the workspace entry for why this and
+# not `audiopus`/`opus`); the FFI is wrapped in `src/audio/opus.rs`.
+opusic-sys = { workspace = true }
+symphonia = { workspace = true }
+# Silero VAD (ONNX Runtime). Loading is fallible at runtime and every failure
+# path degrades to the energy VAD, so this is never a hard requirement.
+ort = { workspace = true }
+
+[dev-dependencies]
+# Self dev-dependency with `test-support` on: the integration tests need
+# `services::mock`, which is feature-gated so mocks never reach a release build.
+# Without this line `tests/fake_device.rs` only compiles when the caller
+# remembers `--features test-support` — and a plain `cargo test --workspace`
+# fails to BUILD (unresolved import), taking the whole suite down rather than
+# skipping one test. This makes the feature implicit for tests only.
+nomifun-robot = { path = ".", features = ["test-support"] }
+tempfile = { workspace = true }
+# The MCP proxy is only correct if it is driven over real HTTP, headers and all.
+reqwest = { workspace = true }
+# `test-util` is not in tokio's `full`, and the downlink pacer's cadence tests
+# need `start_paused` virtual time rather than real 60 ms sleeps.
+tokio = { workspace = true, features = ["test-util"] }
+# Drives the device router in-process (`oneshot`), so route tests exercise the
+# real handlers and extractors instead of calling private functions.
+tower = { workspace = true }
+# The fake-device end-to-end test plays the firmware over a real WebSocket, so
+# the handshake, the frame types and the 401 rejection are all exercised for
+# real rather than asserted about.
+tokio-tungstenite = { workspace = true }

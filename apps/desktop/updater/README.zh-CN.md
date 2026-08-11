@@ -16,10 +16,12 @@
   -> 安装并重启
 ```
 
+下载与安装是两个严格分离的阶段：原生命令下载、验签并保留指定版本的更新包；安装命令只消费这个已下载包，不会检查更新，也不会在“安装”操作背后再次下载。渲染层只拥有更新检查权限，不能直接调用 updater 的原始下载或安装接口。
+
 当前 endpoint：
 
 ```text
-https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json
+https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json
 ```
 
 ## 密钥区别
@@ -132,7 +134,7 @@ gh release upload "v<version>" apps/desktop/updater/latest.json --clobber
 
 ```bash
 gh release view "v<version>" --json tagName,assets,url
-curl -fsSL https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json
+curl -fsSL https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json
 ```
 
 确认 `latest.json` 的版本、平台 key、URL 和 Release 资产一致。

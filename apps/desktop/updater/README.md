@@ -16,19 +16,22 @@ App (running version, from workspace Cargo.toml)
                     └─ install (swap .app / run NSIS) ──► relaunch
 ```
 
-- **Frontend wiring (done):** `ui/src/common/adapter/tauriUpdater.ts` wraps
-  `@tauri-apps/plugin-updater` (+ `plugin-process` for relaunch) and backs the
-  `ipcBridge.update` / `ipcBridge.autoUpdate` channels. The in-app `UpdateModal`
-  drives check → download (progress) → install. Entry points:
+- **Frontend wiring (done):** `ui/src/common/adapter/tauriUpdater.ts` uses
+  `@tauri-apps/plugin-updater` for update checks and separate Rust commands for
+  package download and installation (+ `plugin-process` for relaunch). The
+  native download command retains the verified package; the install command can
+  only consume that package and never performs a hidden second download. The
+  in-app `UpdateModal` drives check → download (progress) → install. Entry points:
   - **About page** "检查更新" button (shell-gated on `isDesktopShell()`).
   - **Startup silent check** (`Layout.tsx`): on launch, if a newer version is
     available the modal opens automatically; otherwise it stays silent.
 - **Config:** `apps/desktop/tauri.conf.json` →
-  - `plugins.updater.endpoints` = `https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json`
+  - `plugins.updater.endpoints` = `https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json`
   - `plugins.updater.pubkey` = the project updater public key (committed; safe).
-- **Permissions:** `apps/desktop/capabilities/default.json` grants
-  `updater:default` + `updater:allow-check` + `updater:allow-download-and-install`,
-  and `process:default` (relaunch).
+- **Permissions:** `apps/desktop/capabilities/default.json` grants the renderer
+  `updater:allow-check` and `process:default` (relaunch/exit). Raw updater
+  download/install permissions are intentionally absent; the version-bound Rust
+  commands own those operations.
 
 ## Signing keys
 

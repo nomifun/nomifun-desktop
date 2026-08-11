@@ -10,6 +10,19 @@ import { Dropdown } from '@arco-design/web-react';
 import { Close } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { supportsPreviewHistory } from '../../constants';
+
+/**
+ * 工具栏按钮的样式令牌。
+ * Toolbar button style tokens.
+ *
+ * Exported so viewers that publish their own buttons into the toolbar-extras
+ * portal (e.g. `MiniAppViewer`) render identical chrome instead of pasting the
+ * literals again. Complete literal class strings — never composed at runtime.
+ */
+export const PREVIEW_TOOLBAR_BTN_CLASS =
+  'flex items-center gap-2px px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 text-12px font-medium text-t-secondary hover:text-t-primary hover:bg-3';
+export const PREVIEW_TOOLBAR_BTN_ACTIVE_CLASS = '!text-white bg-brand hover:!text-white hover:bg-brand-hover';
 
 /**
  * PreviewToolbar 组件属性
@@ -192,21 +205,31 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
   const isDiff = content_type === 'diff';
   const preferActionButtonsInFront = Boolean(leftExtra);
 
-  const toolbarBtn =
-    'flex items-center gap-2px px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 text-12px font-medium text-t-secondary hover:text-t-primary hover:bg-bg-3';
-  const toolbarBtnActive = '!text-white bg-brand hover:!text-white hover:bg-brand-hover';
+  const toolbarBtn = PREVIEW_TOOLBAR_BTN_CLASS;
+  const toolbarBtnActive = PREVIEW_TOOLBAR_BTN_ACTIVE_CLASS;
   const toolbarIconSize = 12;
 
+  // Snapshot/history are offered only for the types the backend store accepts,
+  // and only in the mode where the source text is on screen.
+  const snapshotButtonsVisible =
+    supportsPreviewHistory(content_type) &&
+    (content_type === 'code' ? isEditable && isEditMode : viewMode === 'source' || isSplitScreenEnabled);
+
   return (
-    <div className='flex items-center justify-between h-32px px-10px bg-bg-2 flex-shrink-0 border-b border-border-1 overflow-x-auto'>
+    <div className='flex items-center justify-between h-32px px-10px bg-2 flex-shrink-0 border-b border-b-solid border-arco-1 overflow-x-auto'>
       <div className='flex items-center justify-between gap-8px w-full' style={{ minWidth: 'max-content' }}>
         {/* 左侧：Tabs（Markdown/HTML）+ 文件名 / Left: Tabs (Markdown/HTML) + Filename */}
         <div className='flex items-center h-full gap-8px'>
           {(isMarkdown || isHTML || isDiff) && (
             <>
+              {/* 选中态下划线：曾写 `border-b-4 border-brand`，但 `border-b-4` 会被 UnoCSS
+                  解析成「下边框颜色 = --bg-4」而不是 4px 宽度，还把 border-brand 覆盖掉；
+                  再加上仓库没有 border-style 重置，这条下划线一直不存在。宽度/样式/颜色分开写。
+                  The active-tab underline never rendered: `border-b-4` is a bottom *colour*
+                  (--bg-4), not a 4px width, and it also overrode border-brand. */}
               <div className='flex items-center h-full gap-0'>
                 <div
-                  className={`flex items-center h-full px-10px cursor-pointer transition-all duration-150 text-12px font-medium ${viewMode === 'source' ? 'text-brand bg-aou-2 border-b-4 border-brand' : 'text-t-secondary hover:text-t-primary hover:bg-bg-3'}`}
+                  className={`flex items-center h-full px-10px cursor-pointer transition-all duration-150 text-12px font-medium ${viewMode === 'source' ? 'text-brand bg-aou-2 border-b-4px border-b-solid border-brand' : 'text-t-secondary hover:text-t-primary hover:bg-3'}`}
                   onClick={() => {
                     try {
                       onViewModeChange('source');
@@ -218,7 +241,7 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
                   {isHTML ? t('preview.code') : t('preview.source')}
                 </div>
                 <div
-                  className={`flex items-center h-full px-10px cursor-pointer transition-all duration-150 text-12px font-medium ${viewMode === 'preview' ? 'text-brand bg-aou-2 border-b-4 border-brand' : 'text-t-secondary hover:text-t-primary hover:bg-bg-3'}`}
+                  className={`flex items-center h-full px-10px cursor-pointer transition-all duration-150 text-12px font-medium ${viewMode === 'preview' ? 'text-brand bg-aou-2 border-b-4px border-b-solid border-brand' : 'text-t-secondary hover:text-t-primary hover:bg-3'}`}
                   onClick={() => {
                     try {
                       onViewModeChange('preview');
@@ -232,7 +255,7 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
               </div>
               {!isDiff && (
                 <div
-                  className={`flex items-center px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 ${isSplitScreenEnabled ? toolbarBtnActive : 'text-t-secondary hover:bg-bg-3'}`}
+                  className={`flex items-center px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 ${isSplitScreenEnabled ? toolbarBtnActive : 'text-t-secondary hover:bg-3'}`}
                   onClick={() => {
                     try {
                       onSplitScreenToggle();
@@ -282,7 +305,7 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
 
           {isEditable && isEditMode && (
             <div
-              className={`flex items-center px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 ${isSplitScreenEnabled ? toolbarBtnActive : 'text-t-secondary hover:bg-bg-3'}`}
+              className={`flex items-center px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 ${isSplitScreenEnabled ? toolbarBtnActive : 'text-t-secondary hover:bg-3'}`}
               onClick={() => {
                 try {
                   onSplitScreenToggle();
@@ -348,9 +371,7 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
         <div className='flex items-center gap-4px flex-shrink-0'>
           {rightExtra}
 
-          {((content_type === 'markdown' && (viewMode === 'source' || isSplitScreenEnabled)) ||
-            (content_type === 'html' && (viewMode === 'source' || isSplitScreenEnabled)) ||
-            (content_type === 'code' && isEditable && isEditMode)) && (
+          {snapshotButtonsVisible && (
             <>
               <div
                 className={`${toolbarBtn} ${historyTarget ? '' : '!cursor-not-allowed opacity-50'} ${snapshotSaving ? 'opacity-60' : ''}`}

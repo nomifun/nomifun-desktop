@@ -64,7 +64,7 @@ const ExtendedCapabilitiesPanel: React.FC<ExtendedCapabilitiesPanelProps> = ({
   const hasKnowledge = knowledgeBases.length > 0;
 
   return (
-    <div className='mt-20px rounded-12px b-1 b-solid b-color-border-2 bg-fill-1'>
+    <div className='mt-20px rounded-12px b-1px b-solid border-arco-2 bg-fill-1'>
       {/* Collapsible header — this is an optional drawer, collapsed by default */}
       <button
         type='button'
@@ -144,7 +144,7 @@ const ExtendedCapabilitiesPanel: React.FC<ExtendedCapabilitiesPanelProps> = ({
             </div>
             <div className='shrink-0'>
               <IdmmControl
-                draft={{ value: idmm, onChange: onIdmmChange }}
+                draft={{ value: idmm, onChange: onIdmmChange, kind: 'terminal' }}
                 applyNote={t('terminal.extended.idmmApplyNote', {
                   defaultValue: '创建终端后立即生效，可在终端内继续调整。',
                 })}

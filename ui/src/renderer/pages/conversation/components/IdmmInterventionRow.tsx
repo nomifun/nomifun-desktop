@@ -31,14 +31,13 @@ const outcomeBadgeStyle = (outcome: string): React.CSSProperties => {
 };
 
 /**
- * 单条 IDMM 决策记录(「思路」审计行)的展示。被会话内时间线
- * (`IdmmControl`)与全局决策活动总览(`IdmmActivityContent`)共用,
- * 保证两处行布局完全一致。纯展示组件,不读后端。
+ * 单条 IDMM 决策记录(「思路」审计行)的展示。用在会话内的决策时间线
+ * (`IdmmControl` 的弹层)里。纯展示组件,不读后端。
  */
 const IdmmInterventionRow: React.FC<{ rec: IIdmmIntervention }> = ({ rec }) => {
   const { t } = useTranslation();
   return (
-    <div className='flex flex-col gap-2px rounded-6px bg-[rgb(var(--gray-2))] px-8px py-6px'>
+    <div className='flex flex-col gap-2px rounded-6px bg-[rgba(var(--gray-2),1)] px-8px py-6px'>
       <div className='flex items-center gap-6px flex-wrap'>
         <span className='text-t-tertiary text-10px tabular-nums'>{formatLogTime(rec.at)}</span>
         <span

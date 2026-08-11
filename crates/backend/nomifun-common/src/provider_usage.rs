@@ -10,7 +10,6 @@ pub enum ProviderUsageFeature {
     Conversation,
     DesktopCompanion,
     CustomerService,
-    SmartDecision,
     AgentExecution,
 }
 

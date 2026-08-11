@@ -4,7 +4,7 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
 
 本文档是这张地图的总图。配套文档分别深入介绍各个部分：
 
-- [`backend-crates.md`](backend-crates.zh.md) —— 34 个 `nomifun-*` crate。
+- [`backend-crates.md`](backend-crates.zh.md) —— 36 个 `nomifun-*` crate。
 - [`agent-engine.md`](agent-engine.zh.md) —— 15 个 `nomi-*` crate（AI 引擎）。
 - [`agent-execution.zh.md`](agent-execution.zh.md) —— 统一的持久化 AgentExecution 模型。
 - [`frontend.md`](frontend.zh.md) —— React SPA、适配层、路由。

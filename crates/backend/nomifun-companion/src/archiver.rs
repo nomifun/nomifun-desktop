@@ -13,7 +13,7 @@
 //! atomic facts from the event log into `companion_memories`; the archiver writes
 //! per-session narrative digests from the window's chat messages. Different
 //! sources, different tables, no double processing. Both are opt-in background
-//! LLM loops driven by the shared learn model.
+//! LLM loops; each runs on the subject companion's own 学习 model.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,7 +113,10 @@ pub struct Archiver {
     pub store: CompanionStore,
     pub config: SharedConfig,
     pub registry: Arc<CompanionRegistry>,
-    /// Reuses the learn LLM seam (same model config, `cfg.learn.model`).
+    /// Reuses the learn LLM seam. The MODEL, though, is each companion's own
+    /// `learn.model`: the archiver summarises one companion's chat window, so the
+    /// model that companion learns with is the honest choice now that there is no
+    /// install-wide learn model left to borrow.
     pub completer: Arc<dyn CompanionCompleter>,
     pub port: Arc<dyn ArchiveConversationPort>,
     /// Guards against overlapping sweeps (tick vs. a future "run now").
@@ -141,28 +144,31 @@ impl Archiver {
     }
 
     /// One sweep over every companion. Skips entirely when disabled or when a
-    /// sweep is already running.
+    /// sweep is already running. A companion with no learn model configured is
+    /// skipped rather than aborting the sweep: its siblings can still archive.
     pub async fn sweep_once(&self) -> Result<(), AppError> {
         let Ok(_guard) = self.run_lock.try_lock() else {
             return Ok(());
         };
-        let (enabled, thresholds, model) = {
+        let (enabled, thresholds) = {
             let cfg = self.config.read().await;
             (
                 cfg.archive.enabled,
                 ArchiveThresholds { idle_minutes: cfg.archive.idle_minutes, min_chars: cfg.archive.min_chars },
-                cfg.learn.model.clone(),
             )
         };
         if !enabled {
             return Ok(());
         }
-        let Some(model) = model else {
-            return Ok(());
-        };
-        for id in self.registry.ids().await {
-            if let Err(e) = self.sweep_companion(&id, &thresholds, &model).await {
-                tracing::warn!(companion = %id, error = %e, "companion archive sweep failed");
+        for profile in self.registry.list().await {
+            let Some(model) = profile.learn.model.clone() else {
+                continue;
+            };
+            if let Err(e) = self
+                .sweep_companion(&profile.companion_id, &thresholds, &model)
+                .await
+            {
+                tracing::warn!(companion = %profile.companion_id, error = %e, "companion archive sweep failed");
             }
         }
         Ok(())
@@ -348,16 +354,22 @@ mod tests {
         config.archive.enabled = true;
         config.archive.idle_minutes = 30;
         config.archive.min_chars = 20;
-        config.learn.model = Some(ProviderWithModel {
-            provider_id: nomifun_common::ProviderId::new().into_string(),
-            model: "test-model".into(),
-            use_model: None,
-        });
         let registry = Arc::new(
             CompanionRegistry::scan(dir.join("companions"), dir.join("shared"))
                 .unwrap(),
         );
         let companion = registry.create("测试宠", "ink").await.unwrap();
+        // The archiver summarises with the companion's OWN 学习 model.
+        registry
+            .patch(
+                &companion.companion_id,
+                serde_json::json!({"learn": {"model": {
+                    "provider_id": nomifun_common::ProviderId::new().into_string(),
+                    "model": "test-model"
+                }}}),
+            )
+            .await
+            .unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
         // Point the companion at a chat thread the port will answer for.
         crate::companion::set_active_thread_ptr(&store, &companion.companion_id, Some(&conversation_fixture())).await.unwrap();
@@ -386,7 +398,7 @@ mod tests {
         ];
         let (archiver, id, resets, calls) = make_archiver(dir.path(), msgs, GOOD_DIGEST).await;
         let action = archiver
-            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone().unwrap())
+            .sweep_companion(&id, &thr(30, 20), &archiver.registry.get(&id).await.unwrap().learn.model.clone().unwrap())
             .await
             .unwrap();
         assert_eq!(action, SweepAction::Wait);
@@ -408,7 +420,7 @@ mod tests {
         ];
         let (archiver, id, resets, calls) = make_archiver(dir.path(), msgs, GOOD_DIGEST).await;
         let action = archiver
-            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone().unwrap())
+            .sweep_companion(&id, &thr(30, 20), &archiver.registry.get(&id).await.unwrap().learn.model.clone().unwrap())
             .await
             .unwrap();
         assert_eq!(action, SweepAction::Archive);
@@ -436,7 +448,7 @@ mod tests {
         let msgs = vec![WindowMessage { is_user: false, content: "在的~".into(), created_at: old }];
         let (archiver, id, resets, calls) = make_archiver(dir.path(), msgs, GOOD_DIGEST).await;
         let action = archiver
-            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone().unwrap())
+            .sweep_companion(&id, &thr(30, 20), &archiver.registry.get(&id).await.unwrap().learn.model.clone().unwrap())
             .await
             .unwrap();
         assert_eq!(action, SweepAction::Skip);
@@ -454,7 +466,7 @@ mod tests {
         let msgs = vec![WindowMessage { is_user: true, content: "帮我看看这个很长的 bug 报错信息吧".into(), created_at: old }];
         let (archiver, id, resets, _calls) = make_archiver(dir.path(), msgs, "我不会输出 JSON").await;
         let action = archiver
-            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone().unwrap())
+            .sweep_companion(&id, &thr(30, 20), &archiver.registry.get(&id).await.unwrap().learn.model.clone().unwrap())
             .await
             .unwrap();
         assert_eq!(action, SweepAction::Skip, "unparseable digest degrades to skip");

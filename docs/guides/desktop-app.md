@@ -19,8 +19,42 @@ server.
 The desktop app requires:
 
 - A platform Tauri supports (Windows 10+, macOS 11+, mainstream Linux distros).
-- A WebView runtime: **WebView2** on Windows (preinstalled on Win 11; on Win 10 install the [Evergreen Bootstrapper](https://developer.microsoft.com/microsoft-edge/webview2/)), **WKWebView** on macOS (built-in), **WebKitGTK** on Linux (`libwebkit2gtk-4.1-0`).
-- For development: Rust toolchain, [Bun](https://bun.sh) ≥ 1.3.13, and the platform Tauri build deps (see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)).
+- A WebView runtime: **WebView2** on Windows (preinstalled on Win 11; on Win 10 install the [Evergreen Bootstrapper](https://developer.microsoft.com/microsoft-edge/webview2/)), **WKWebView** on macOS (built-in), **WebKitGTK** on Linux (`libwebkit2gtk-4.1-0` is enough to *run* a packaged build; building from source needs the `-dev` package below).
+- For development: Rust toolchain, [Bun](https://bun.sh) ≥ 1.3.13, Git, CMake, and the platform Tauri build deps (see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)). That upstream list is complete for Windows and macOS; on Linux this repo needs three libraries beyond it, because the computer-use screen capture stack (`xcap`, reached through `nomi-computer`) links PipeWire and GBM and runs `bindgen`.
+
+#### Linux system packages (Debian/Ubuntu)
+
+Verified on Ubuntu 26.04. This set is enough for `bun run dev` to compile and launch:
+
+```bash
+sudo apt install build-essential cmake pkg-config git \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  libpipewire-0.3-dev libgbm-dev libclang-dev
+```
+
+`bun run build` / `bun run build:linux` also produce an AppImage, which needs two more:
+
+```bash
+sudo apt install librsvg2-dev xdg-utils
+```
+
+Why the less obvious entries are there:
+
+| Package | Required by |
+| --- | --- |
+| `libwebkit2gtk-4.1-dev` | `webkit2gtk-sys`, `soup3-sys`, `javascriptcore-rs-sys` and `gtk-sys` under `tauri` → `wry`. Its dependency closure is also the only source of the `egl.pc`, `dbus-1.pc`, `wayland-client.pc`, X11/XCB and xkbcommon development files that other crates probe, so installing the runtime-only `libwebkit2gtk-4.1-0` instead breaks several unrelated crates at once. |
+| `cmake` | `opusic-sys` compiles a vendored libopus for the robot gateway ([`crates/backend/nomifun-robot/Cargo.toml`](../../crates/backend/nomifun-robot/Cargo.toml)). It is a plain dependency, not an optional one, so a missing CMake stops the build with ``is `cmake` not installed?``. |
+| `libpipewire-0.3-dev` | `libspa-sys` and `pipewire-sys` probe `libpipewire-0.3.pc` and `libspa-0.2.pc` and panic when either is absent. The second file ships in `libspa-0.2-dev`, which this package depends on, so one install covers both. Wayland screen capture for computer use. |
+| `libgbm-dev` | `gbm-sys` links `-lgbm` through a source-level `#[link]` attribute, so nothing checks it until the final link step. Only the `-dev` package ships the unversioned `libgbm.so`. Same screen-capture chain. |
+| `libclang-dev` | `bindgen`, a build dependency of `libspa-sys` and `pipewire-sys`, loads `libclang.so` while generating bindings. The `clang` package alone does not ship that file. |
+| `libayatana-appindicator3-dev` | The tray icon. `libappindicator-sys` opens `libayatana-appindicator3.so.1` at **runtime**, and that library is not part of a default Ubuntu desktop; the `-dev` package pulls it in and also satisfies the pkg-config preflight in [`scripts/desktop-build-linux.sh`](../../scripts/desktop-build-linux.sh). |
+| `librsvg2-dev`, `xdg-utils` | Packaging only: the linuxdeploy GTK plugin reads `librsvg-2.0.pc`, and the AppImage target shells out to `xdg-open` / `xdg-mime`. No Rust crate in this tree needs either. |
+
+Three more notes specific to this dependency tree:
+
+- Tauri's generic list also names `libssl-dev`, `libxdo-dev` and `libasound2-dev`, and a missing `-lgbm` is often blamed on `libdrm-dev`. None of the four are used here: there is no `openssl-sys` (TLS is rustls with vendored crypto), no `libxdo` (input simulation goes through pure-Rust `x11rb`), no ALSA consumer (Opus is vendored and `symphonia` is pure Rust), and `drm-sys` uses pregenerated bindings and emits no `-ldrm`. They are harmless if you already have them.
+- The first build needs network access: `ort-sys` downloads a prebuilt ONNX Runtime (see [First build needs network access to pyke](../contributing/development.md#first-build-needs-network-access-to-pyke)), and `bun run build` fetches linuxdeploy and its plugins from GitHub.
+- `lsof` is optional. `bun run dev` uses it to free port 5173 ([`scripts/free-ports.mjs`](../../scripts/free-ports.mjs)) and silently skips that cleanup when it is missing.
 
 ### Run from source (development)
 
@@ -98,7 +132,7 @@ To start fresh, **quit the app** and delete that directory. To migrate, copy the
 ~/Library/Application Support/NomiFun/    # macOS (see paths above for Windows/Linux)
 ├── nomifun-backend.db        # SQLite state (conversations, settings, sessions, …)
 ├── logs/                     # nomicore.log
-├── companion/                # companions + the shared memory hub
+├── companion/                # companions + their memory database (one file, per-companion rows)
 ├── knowledge/                # managed knowledge bases
 ├── runtime/                  # extracted Bun runtime cache (regenerable)
 └── server.lock               # exclusive lock held while a backend is running
@@ -139,6 +173,12 @@ code-signing certificate.
 
 **The window opens to a blank white area.**
 Make sure the WebView runtime is installed (WebView2 on Windows 10 needs the Evergreen Bootstrapper). On Linux, `libwebkit2gtk-4.1-0` is required.
+
+**The Linux build compiles ~1300 crates and then fails with `rust-lld: error: unable to find library -lgbm`.**
+`gbm-sys` requests `-lgbm` from a source-level `#[link]` attribute, so nothing detects the missing library until the final link step. Install `libgbm-dev` — the runtime `libgbm1` package does not ship the unversioned `libgbm.so` — and re-run; only the link is redone, not the crates. See [Linux system packages](#linux-system-packages-debianubuntu).
+
+**The Linux build stops early with `Cannot find libraries: PkgConfig ... libpipewire-0.3` (or `libspa-0.2`).**
+`libspa-sys` and `pipewire-sys` probe pkg-config in their build scripts and panic when the `.pc` files are absent. Install `libpipewire-0.3-dev`; it depends on `libspa-0.2-dev`, which owns `libspa-0.2.pc`. Both crates come from the computer-use screen capture stack, so they build even when you never use screen capture.
 
 **"Failed to bind backend port".**
 Another process is holding `127.0.0.1` ephemeral ports. The backend tries `pick_free_port()` and falls back to `8799` if that fails — quit any other NomiFun instance and try again.

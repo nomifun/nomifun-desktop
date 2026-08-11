@@ -259,6 +259,37 @@ mod tests {
     fn tts_is_speech_synthesis() {
         assert!(tasks_of("openai", "gpt-4o-mini-tts").contains(&ModelTask::SpeechSynthesis));
         assert!(tasks_of("stepfun", "step-tts-mini").contains(&ModelTask::SpeechSynthesis));
+        assert!(tasks_of("stepfun", "stepaudio-2.5-tts").contains(&ModelTask::SpeechSynthesis));
+    }
+
+    #[test]
+    fn stepfun_speech_models_classify_so_the_robot_voice_slots_resolve() {
+        // The robot's ASR/TTS slots only accept models the catalog classifies as
+        // speech_recognition / speech_synthesis; a mis-typed row is rejected by
+        // the invoke task gate and the device stays silent. See 2026-08-08 spec.
+        for asr in ["stepaudio-2.5-asr", "step-asr"] {
+            let tasks = tasks_of("stepfun", asr);
+            assert!(tasks.contains(&ModelTask::SpeechRecognition), "{asr} must be ASR");
+            assert!(!tasks.contains(&ModelTask::Chat), "{asr} must not fall back to chat");
+        }
+        for tts in ["stepaudio-2.5-tts", "step-tts-mini"] {
+            assert!(
+                tasks_of("stepfun", tts).contains(&ModelTask::SpeechSynthesis),
+                "{tts} must be TTS"
+            );
+        }
+    }
+
+    #[test]
+    fn stepfun_vision_models_carry_the_vision_trait() {
+        for m in ["step-1v-32k", "step-1v-8k", "step-1o-turbo-vision", "step-3.7-flash"] {
+            let (tasks, traits) = derive_tasks_and_traits("stepfun", m);
+            assert_eq!(tasks, vec![ModelTask::Chat], "{m} is a vision-capable chat model");
+            assert!(traits.contains(&ModelTrait::VisionInput), "{m} must accept image input");
+        }
+        // The text-only flagship must NOT be tagged vision by the `step-3.7` rule.
+        let (_, traits) = derive_tasks_and_traits("stepfun", "step-3.5-flash");
+        assert!(!traits.contains(&ModelTrait::VisionInput));
     }
 
     #[test]

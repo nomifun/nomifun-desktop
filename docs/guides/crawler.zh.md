@@ -33,8 +33,7 @@
 | **渲染模式** | `自动` 和 `仅 HTTP` 目前都走普通 HTTP。浏览器渲染尚未开放。 |
 | **只抓种子所在站点** | 限制在种子的可注册域内（`docs.example.com` 与 `example.com` 视为同站）。 |
 | **遵守 robots.txt** | 默认开启，见下方合规一节。 |
-| **知识库 ID** | 页面写到哪里。留空则不保存内容——适合先试跑一遍。 |
-| **先进评审收件箱** | 默认开启：页面进入知识库的评审收件箱并附带差异预览，而不是直接写入。 |
+| **知识库 ID** | 页面直接写到哪里。留空则不保存内容——适合先试跑一遍。 |
 
 ## 礼貌抓取
 
@@ -86,6 +85,6 @@
 ## 代码位置
 
 - 后端：[`crates/backend/nomifun-crawl/`](../../crates/backend/nomifun-crawl/)
-- 表结构：[`024_crawl_jobs_and_tasks.sql`](../../crates/backend/nomifun-db/migrations/024_crawl_jobs_and_tasks.sql)
+- 表结构：[`030_crawl_jobs_and_tasks.sql`](../../crates/backend/nomifun-db/migrations/030_crawl_jobs_and_tasks.sql)
 - 前端：[`ui/src/renderer/pages/crawl/`](../../ui/src/renderer/pages/crawl/)
 - 设计文档：[`docs/specs/2026-08-05-distributed-crawler-design.zh.md`](../specs/2026-08-05-distributed-crawler-design.zh.md)

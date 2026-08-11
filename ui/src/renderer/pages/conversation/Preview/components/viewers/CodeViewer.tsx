@@ -141,18 +141,18 @@ const CodePreview: React.FC<CodePreviewProps> = ({
     <div className='flex flex-col w-full h-full overflow-hidden'>
       {/* 工具栏：原文/预览切换 + 下载按钮 / Toolbar: Source/Preview toggle + Download button */}
       {!hideToolbar && (
-        <div className='flex items-center justify-between h-40px px-12px bg-bg-2 flex-shrink-0'>
+        <div className='flex items-center justify-between h-40px px-12px bg-2 flex-shrink-0'>
           <div className='flex items-center gap-4px'>
             {/* 原文按钮 / Source button */}
             <div
-              className={`px-12px py-4px rd-4px cursor-pointer transition-colors text-12px ${viewMode === 'source' ? 'bg-primary text-white' : 'text-t-secondary hover:bg-bg-3'}`}
+              className={`px-12px py-4px rd-4px cursor-pointer transition-colors text-12px ${viewMode === 'source' ? 'bg-primary text-white' : 'text-t-secondary hover:bg-3'}`}
               onClick={() => handleViewModeChange('source')}
             >
               {t('preview.source')}
             </div>
             {/* 预览按钮 / Preview button */}
             <div
-              className={`px-12px py-4px rd-4px cursor-pointer transition-colors text-12px ${viewMode === 'preview' ? 'bg-primary text-white' : 'text-t-secondary hover:bg-bg-3'}`}
+              className={`px-12px py-4px rd-4px cursor-pointer transition-colors text-12px ${viewMode === 'preview' ? 'bg-primary text-white' : 'text-t-secondary hover:bg-3'}`}
               onClick={() => handleViewModeChange('preview')}
             >
               {t('preview.preview')}
@@ -163,7 +163,7 @@ const CodePreview: React.FC<CodePreviewProps> = ({
           <div className='flex items-center gap-8px'>
             {/* 下载按钮 / Download button */}
             <div
-              className='flex items-center gap-4px px-8px py-4px rd-4px cursor-pointer hover:bg-bg-3 transition-colors'
+              className='flex items-center gap-4px px-8px py-4px rd-4px cursor-pointer hover:bg-3 transition-colors'
               onClick={handleDownload}
               title={t('preview.downloadCode', { language: language.toUpperCase() })}
             >
@@ -189,14 +189,14 @@ const CodePreview: React.FC<CodePreviewProps> = ({
       {/* 内容区域 / Content area */}
       <div ref={containerRef} className='flex-1 overflow-auto p-16px'>
         {isRenderedTruncated && (
-          <div className='mb-12px px-10px py-8px rd-6px bg-bg-2 text-12px text-t-secondary'>
+          <div className='mb-12px px-10px py-8px rd-6px bg-2 text-12px text-t-secondary'>
             {t('preview.largeTextTruncatedHint', { count: renderedContent.length })}
           </div>
         )}
         {viewMode === 'source' || isLargeContent ? (
           // 原文模式或大文本：显示纯文本，避免高亮器阻塞
           // Source mode or large text: render plain text to avoid highlighter blocking
-          <pre className='w-full m-0 p-12px bg-bg-2 rd-8px overflow-auto font-mono text-12px text-t-primary whitespace-pre-wrap break-words'>
+          <pre className='w-full m-0 p-12px bg-2 rd-8px overflow-auto font-mono text-12px text-t-primary whitespace-pre-wrap break-words'>
             {displayedContent}
           </pre>
         ) : (

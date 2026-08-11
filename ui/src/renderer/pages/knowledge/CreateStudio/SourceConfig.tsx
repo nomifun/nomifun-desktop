@@ -75,11 +75,11 @@ const URL_MODES: { key: UrlMode; labelKey: string; label: string }[] = [
 ];
 
 const sourcePanelClass =
-  'knowledge-source-panel space-y-16px rounded-16px bg-[var(--color-bg-2)] p-16px shadow-[0_10px_30px_rgba(15,23,42,0.035)]';
+  'knowledge-source-panel space-y-12px rounded-16px bg-[var(--color-bg-2)] p-14px shadow-[0_10px_30px_rgba(15,23,42,0.035)]';
 
 const sourceTitleClass = 'text-13px font-700 text-[var(--color-text-1)]';
 
-const sourceLabelClass = 'mb-7px block text-13px font-500 text-[var(--color-text-2)]';
+const sourceLabelClass = 'mb-5px block text-13px font-500 text-[var(--color-text-2)]';
 
 const sourceInputClass =
   'knowledge-source-input rounded-12px border-transparent bg-[var(--color-fill-1)] transition-[background-color,border-color,box-shadow] hover:bg-[var(--color-fill-2)] focus-within:shadow-[0_0_0_3px_rgba(var(--primary-6),0.1)]';
@@ -88,14 +88,14 @@ const sourceButtonClass =
   'knowledge-source-button rounded-10px border-transparent bg-[var(--color-fill-1)] text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]';
 
 const sourceNoteClass =
-  'knowledge-source-note flex gap-10px rounded-12px bg-[var(--color-fill-1)] px-12px py-10px text-12px leading-relaxed text-[var(--color-text-2)] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)]';
+  'knowledge-source-note flex gap-8px rounded-12px bg-[var(--color-fill-1)] px-10px py-8px text-12px leading-relaxed text-[var(--color-text-2)] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)]';
 
 const segmentGroupClass = 'inline-flex gap-4px rounded-11px bg-[var(--color-fill-1)] p-4px';
 
 const segmentButtonBaseClass =
   'rounded-8px border-none px-13px py-7px text-12px font-inherit cursor-pointer transition-[background-color,color,box-shadow] focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
 
-const segmentButtonActiveClass = 'bg-[var(--color-bg-2)] font-600 text-[rgb(var(--primary-6))] shadow-[0_2px_8px_rgba(var(--primary-6),0.12)]';
+const segmentButtonActiveClass = 'bg-[var(--color-bg-2)] font-600 text-primary-6 shadow-[0_2px_8px_rgba(var(--primary-6),0.12)]';
 
 const segmentButtonIdleClass = 'bg-transparent text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]';
 
@@ -335,7 +335,7 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
               />
               <button
                 type='button'
-                className='flex size-34px flex-none cursor-pointer items-center justify-center rounded-10px border-none bg-[var(--color-fill-1)] text-[var(--color-text-3)] transition-colors hover:bg-[var(--color-danger-light-1)] hover:text-[rgb(var(--danger-6))] disabled:cursor-not-allowed disabled:opacity-45'
+                className='flex size-34px flex-none cursor-pointer items-center justify-center rounded-10px border-none bg-[var(--color-fill-1)] text-[var(--color-text-3)] transition-colors hover:bg-[var(--color-danger-light-1)] hover:text-danger-6 disabled:cursor-not-allowed disabled:opacity-45'
                 onClick={() => handleDeleteEntry(idx)}
                 disabled={entries.length <= 1}
               >
@@ -346,7 +346,7 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
           {entries.length < MAX_URLS && (
             <button
               type='button'
-              className='w-full cursor-pointer rounded-12px border-none bg-[rgba(var(--primary-6),0.07)] p-10px text-12px font-500 text-[rgb(var(--primary-6))] transition-colors hover:bg-[rgba(var(--primary-6),0.12)] focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
+              className='w-full cursor-pointer rounded-12px border-none bg-[rgba(var(--primary-6),0.07)] p-10px text-12px font-500 text-primary-6 transition-colors hover:bg-[rgba(var(--primary-6),0.12)] focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
               onClick={handleAddEntry}
             >
               ＋ {t('knowledge.studio.webAddUrl', { defaultValue: '添加网址' })}

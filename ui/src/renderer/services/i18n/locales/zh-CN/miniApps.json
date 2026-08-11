@@ -1,0 +1,206 @@
+{
+  "title": "小程序",
+  "subtitle": "AI 为你生成、随开随用的网页小工具",
+  "nav": {
+    "entry": "小程序"
+  },
+  "list": {
+    "searchPlaceholder": "搜索小程序",
+    "updatedAt": "更新于 {{time}}",
+    "filterEmpty": "没有匹配的小程序"
+  },
+  "time": {
+    "justNow": "刚刚",
+    "minutesAgo": "{{count}} 分钟前",
+    "hoursAgo": "{{count}} 小时前",
+    "yesterday": "昨天",
+    "daysAgo": "{{count}} 天前",
+    "weeksAgo": "上周"
+  },
+  "empty": {
+    "title": "还没有小程序",
+    "description": "在会话启动页选择「创建小程序」，描述你的诉求，AI 会在会话里写好第一版，你在预览里点「发布为小程序」把它收进这里。之后随时点「继续迭代」改它、点「发布」让改动生效。已经写好的网页应用，也可以用右上角的「导入」直接收进来。",
+    "cta": "去创建"
+  },
+  "actions": {
+    "open": "打开使用",
+    "rename": "重命名",
+    "delete": "删除",
+    "refresh": "刷新",
+    "retry": "重试",
+    "openInBrowser": "在浏览器中打开",
+    "dismissHint": "忽略提示",
+    "back": "返回",
+    "create": "创建小程序"
+  },
+  "rename": {
+    "title": "重命名小程序",
+    "label": "名称",
+    "placeholder": "输入新名称",
+    "required": "请输入名称",
+    "success": "已重命名"
+  },
+  "delete": {
+    "confirmTitle": "删除小程序",
+    "confirmContent": "确定删除「{{name}}」吗？删除后不可恢复。",
+    "success": "已删除"
+  },
+  "runner": {
+    "loadError": "小程序加载失败",
+    "notFound": "小程序不存在或已被删除"
+  },
+  "iterate": {
+    "toggle": "继续迭代",
+    "conversationName": "继续迭代 · {{name}}",
+    "firstMessage": "请帮我继续改这个小程序。\n\n- 名称：{{name}}\n- 小程序 id：{{id}}\n- 源码文件（绝对路径，整个小程序就这一个文件）：{{path}}\n\n要求：\n1. 动手之前先把 {{path}} 完整读一遍，不要凭猜改。\n2. 只改这一个文件，不要新建、移动或删除其它文件；它必须保持自包含：CSS 与 JavaScript 内联在文件里，需要第三方库时走 CDN。\n3. 每轮回复结束时它都要是完整可运行的版本。\n4. 改完不会自动生效：我会去「小程序」页面点「发布」让它上线。",
+    "failed": "打不开迭代会话，请重试",
+    "failedDetail": "打不开迭代会话：{{detail}}"
+  },
+  "publish": {
+    "action": "发布",
+    "pending": "有未发布改动",
+    "explain": "这个小程序运行的是已发布版本；迭代出的改动要点「发布」才会生效。",
+    "success": "已发布，正在运行的已经是最新版本",
+    "failed": "发布失败：{{message}}"
+  },
+  "panel": {
+    "backToList": "返回小程序列表",
+    "openFullPage": "全屏打开"
+  },
+  "frame": {
+    "stalledHint": "小程序还没渲染出来？可以重试，或在浏览器中打开。"
+  },
+  "preview": {
+    "title": "小程序预览",
+    "refresh": "刷新",
+    "publish": "发布为小程序",
+    "readError": "读取小程序文件失败"
+  },
+  "save": {
+    "title": "发布为小程序",
+    "nameLabel": "名称",
+    "namePlaceholder": "给这个小程序起个名字",
+    "nameRequired": "请输入名称",
+    "descriptionLabel": "描述",
+    "descriptionPlaceholder": "一句话说明它能做什么（可选）",
+    "iconLabel": "图标",
+    "iconPlaceholder": "输入一个 emoji（可选）",
+    "confirm": "发布",
+    "cancel": "取消",
+    "publishAsNew": "发布为新的小程序",
+    "replaceExisting": "替换已有小程序",
+    "replaceLabel": "选择要替换的小程序",
+    "replaceHint": "可以把本会话写好的这一版发布成新的小程序，也可以替换你已有的某一个 —— 替换会同时更新它正在运行的版本。",
+    "success": "已发布，去左侧「小程序」里看看吧",
+    "replaceSuccess": "已替换「{{name}}」，正在运行的已经是最新版本",
+    "error": "发布失败，请重试"
+  },
+  "composer": {
+    "entry": "创建小程序",
+    "activeLabel": "小程序模式",
+    "dismiss": "退出小程序模式",
+    "placeholder": "描述你想要的小程序，例如：一个带提醒的番茄钟",
+    "conversationName": "小程序 · {{name}}"
+  },
+  "import": {
+    "entry": "导入小程序",
+    "title": "导入小程序",
+    "intro": "把你已经写好的网页应用托管进来。小程序只提供一个自包含的 HTML 文档：CSS 与 JavaScript 需要写在文件里，第三方库可以走 CDN。",
+    "pickFile": "选择 HTML 文件",
+    "pickFileHint": "单个 .html / .htm 文件",
+    "pickFolder": "选择文件夹",
+    "pickFolderHint": "读取其中的 index.html",
+    "pickUpload": "选择 HTML 文件",
+    "pickUploadHint": "从这台设备上传",
+    "webUiOnlyFile": "网页版只能选单个 HTML 文件；导入整个文件夹请在桌面端操作。",
+    "sourceFile": "{{name}}（{{size}}）",
+    "reselect": "换一个来源",
+    "validating": "正在校验…",
+    "clean": "校验通过，没有发现问题。",
+    "action": "导入",
+    "success": "已导入「{{name}}」",
+    "appliedFixes": "导入时已自动处理：{{items}}",
+    "convert": "用会话改造",
+    "convertHint": "改造会新开一个会话：把上面这些问题交给 NomiFun，让它把你的应用改写成一个自包含的单文件小程序，写完在预览里点「发布为小程序」收进来即可。",
+    "conversationName": "改造小程序 · {{name}}",
+    "detailUnknown": "（未给出位置）",
+    "severity": {
+      "fatal": "必须先解决（{{total}}）",
+      "fatalHint": "存在这些问题时无法导入。",
+      "autofix": "导入时自动处理（{{total}}）",
+      "autofixHint": "NomiFun 会在导入时替你补好，不用改。",
+      "warning": "注意（{{total}}）",
+      "warningHint": "不影响导入，但最好知道。",
+      "other": "其他（{{total}}）",
+      "otherHint": "这个版本还不认识这一档，先如实列出来。"
+    },
+    "errors": {
+      "validateFailed": "校验失败：{{message}}",
+      "importFailed": "导入失败：{{message}}",
+      "blockedOnImport": "导入被拒绝：来源在校验之后发生了变化，请按下面的问题处理后重试。",
+      "pickFailed": "打不开文件选择框",
+      "readFailed": "读取所选文件失败"
+    },
+    "rules": {
+      "unknown": {
+        "title": "未知的校验项（{{ruleId}}）",
+        "fix": "这个版本的客户端还不认识这条规则。升级 NomiFun 后再看，或者用「用会话改造」让它帮你处理。"
+      },
+      "empty_payload": {
+        "title": "内容是空的",
+        "fix": "这个来源里没有任何可校验的内容。请选择真正的 HTML 文件，或先把页面内容写进去。"
+      },
+      "size_over_limit": {
+        "title": "文档太大",
+        "fix": "文档大小 {{detail}}，超过 4 MiB 上限。把内联的大图或大段数据去掉（改用 CDN 或外链），再导入一次。"
+      },
+      "not_html": {
+        "title": "这不是一个 HTML 文档",
+        "fix": "内容看起来是脚本、样式或数据，不是网页。请选择应用的 HTML 入口文件。"
+      },
+      "no_root_document": {
+        "title": "文件夹里找不到入口页面",
+        "fix": "所选文件夹里没有 index.html，根目录下也没有唯一的 .html 文件。把入口页面命名为 index.html，或者直接选中那个 HTML 文件。"
+      },
+      "fragment_not_document": {
+        "title": "只是一段 HTML 片段",
+        "fix": "缺少 html / body 外壳。导入时 NomiFun 会自动补成完整文档，你不需要改。"
+      },
+      "local_ref_unsupported": {
+        "title": "引用了本地文件",
+        "fix": "引用 {{detail}} 加载不到：小程序只对外提供一个文档，即使这个文件和它一起导入也不会被提供。请把它并进这一个文件（CSS/JS 直接写进去，小图片转成 data URI），或者用「用会话改造」让 NomiFun 帮你合并。"
+      },
+      "dev_server_ref": {
+        "title": "指向了本机开发服务器",
+        "fix": "{{detail}} 只在你本地的开发服务器运行时才有效。把它换成写进文件的内容，或者公网可访问的 CDN 地址。"
+      },
+      "framework_source_entry": {
+        "title": "这是需要构建的框架源码",
+        "fix": "Vue / React / Svelte 这类源码入口（例如 /src/main.ts）必须先打包才能运行。请先构建，再导入产物里的单页 HTML；或者用「用会话改造」重写成单文件。"
+      },
+      "server_template_markers": {
+        "title": "含有服务端模板语法",
+        "fix": "发现模板标记 {{detail}}，它要靠服务端渲染才会变成 HTML。请导入渲染之后的页面，或者把数据直接写进静态 HTML。"
+      },
+      "esm_bare_specifier": {
+        "title": "模块脚本里有裸包名导入",
+        "fix": "从 {{detail}} 这样的裸包名导入，浏览器里解析不了。改成 CDN 的完整地址，或者加一个 importmap 把它映射过去。"
+      },
+      "external_cdn_ref": {
+        "title": "用到了外部 CDN 资源",
+        "fix": "可以导入，但要联网才能用：断网或 CDN 不可达时会退化。关键资源建议直接写进文件。"
+      },
+      "web_storage_use": {
+        "title": "用到了浏览器存储",
+        "fix": "小程序运行在沙箱里、来源不透明（opaque origin），localStorage 这类接口可能直接抛错，也可能只在本次会话内有效。存取都请包在 try/catch 里，核心功能不要依赖它。"
+      },
+      "nested_iframe_embed": {
+        "title": "内部还嵌了 iframe",
+        "fix": "嵌套的 iframe 会继承同一套沙箱限制，很多站点也不允许被嵌入，可能显示一片空白。请为加载失败准备兜底内容。"
+      }
+    }
+  },
+  "errors": {
+    "loadListFailed": "加载小程序列表失败"
+  }
+}

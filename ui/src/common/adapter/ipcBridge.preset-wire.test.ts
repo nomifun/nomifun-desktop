@@ -46,7 +46,6 @@ const rawPreset = (
   excluded_auto_skills: [],
   knowledge_policy: {
     enabled: false,
-    mode: 'inherit',
     writeback: false,
     grounded: false,
   },

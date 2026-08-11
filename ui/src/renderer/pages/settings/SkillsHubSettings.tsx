@@ -5,7 +5,7 @@
  * vocabulary. Cards open a SkillTagModal to assign tags; the "Manage Tags" chip
  * opens the shared TagManagementModal for vocabulary CRUD.
  *
- * Visual language mirrors the preset page: a soft fill-2 panel, an
+ * Visual language mirrors the preset page: an outlined library surface, a
  * PresetTagFilterBar, and PresetCard-style grid items (see SkillCard).
  * Theme variables only; `<div onClick>`/Arco controls (no <button>).
  */
@@ -28,6 +28,13 @@ import SkillDetailDrawer from './skill/SkillDetailDrawer';
 import SkillTagModal from './skill/SkillTagModal';
 import { resolveSkillDisplay } from './skill/skillDisplay';
 import { filterSkillsByTags, type SkillTagFilterState } from './skill/skillFilter';
+import {
+  ENHANCED_TOOLS_EMPTY_STATE_CLASS,
+  ENHANCED_TOOLS_GRID_CLASS,
+  ENHANCED_TOOLS_HEADER_CLASS,
+  ENHANCED_TOOLS_PAGE_STACK_CLASS,
+  ENHANCED_TOOLS_SURFACE_CLASS,
+} from './enhancedToolsLayout';
 import { Button, Input, Modal } from '@arco-design/web-react';
 import { CloseSmall, FileZip, FolderOpen, Info, Refresh, Search } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -251,35 +258,32 @@ const SkillsHubSettings: React.FC = () => {
   const mainContent = (
     <div className='flex flex-col h-full w-full'>
       {messageContext}
-      <div className='space-y-16px pb-24px'>
-        <div className={`bg-fill-2 rounded-24px ${isMobile ? 'p-16px' : 'p-20px'}`}>
-          {/* Header: title + actions */}
-          <div className='flex flex-col gap-16px mb-20px'>
-            <div className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-start justify-between'}`}>
+      <div className={ENHANCED_TOOLS_PAGE_STACK_CLASS}>
+        <div
+          data-testid='skills-library-surface'
+          className={ENHANCED_TOOLS_SURFACE_CLASS}
+        >
+          {/* Header: description + actions */}
+          <div className={ENHANCED_TOOLS_HEADER_CLASS}>
+            <div
+              data-testid='skills-library-header-row'
+              className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-center justify-between'}`}
+            >
               <div className='min-w-0'>
-                <h2 className='m-0 text-28px font-700 leading-[1.1] text-t-primary'>
-                  {t('settings.skillsHub.gridTitle', { defaultValue: 'Skills' })}
-                </h2>
-                <p className='mt-8px mb-0 max-w-[680px] text-14px text-t-secondary leading-relaxed'>
+                <p
+                  data-testid='skills-library-description'
+                  className='m-0 max-w-[680px] text-14px text-t-secondary leading-relaxed'
+                >
                   {t('settings.skillsHub.gridDescription', {
                     defaultValue:
                       'Reusable skill packages your presets can call on. Tag them so they surface under the right filters.',
                   })}
                 </p>
               </div>
-              <div className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap' : 'flex-shrink-0'}`}>
-                <Button
-                  type='text'
-                  size='small'
-                  data-testid='btn-refresh-skills'
-                  className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
-                  icon={<Refresh size={16} fill='currentColor' className={loading ? 'animate-spin' : ''} />}
-                  onClick={async () => {
-                    await fetchData();
-                    message.success(t('common.refreshSuccess', { defaultValue: 'Refreshed' }));
-                  }}
-                  title={t('common.refresh', { defaultValue: 'Refresh' })}
-                />
+              <div
+                data-testid='skills-library-actions'
+                className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap' : 'flex-shrink-0'}`}
+              >
                 <Button
                   type={isSearchVisible ? 'secondary' : 'text'}
                   size='small'
@@ -298,32 +302,17 @@ const SkillsHubSettings: React.FC = () => {
                   }}
                 />
                 <Button
+                  type='text'
                   size='small'
-                  data-testid='btn-import-agent-skills'
-                  className={IMPORT_ACTION_BUTTON_CLASS}
-                  icon={<FolderOpen size={14} fill='currentColor' />}
-                  onClick={() => setAgentImportVisible(true)}
-                >
-                  {t('settings.agentSkillImport.shortAction', { defaultValue: 'Import from Agent' })}
-                </Button>
-                <Button
-                  size='small'
-                  data-testid='btn-manual-import'
-                  className={IMPORT_ACTION_BUTTON_CLASS}
-                  icon={<FolderOpen size={14} fill='currentColor' />}
-                  onClick={handleImportFolder}
-                >
-                  {t('settings.skillsHub.manualImport', { defaultValue: 'Import Skills' })}
-                </Button>
-                <Button
-                  size='small'
-                  data-testid='btn-import-zip'
-                  className={IMPORT_ACTION_BUTTON_CLASS}
-                  icon={<FileZip size={14} fill='currentColor' />}
-                  onClick={handleImportZip}
-                >
-                  {t('settings.skillsHub.importZip', { defaultValue: 'Import .zip' })}
-                </Button>
+                  data-testid='btn-refresh-skills'
+                  className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
+                  icon={<Refresh size={16} fill='currentColor' className={loading ? 'animate-spin' : ''} />}
+                  onClick={async () => {
+                    await fetchData();
+                    message.success(t('common.refreshSuccess', { defaultValue: 'Refreshed' }));
+                  }}
+                  title={t('common.refresh', { defaultValue: 'Refresh' })}
+                />
               </div>
             </div>
 
@@ -348,12 +337,47 @@ const SkillsHubSettings: React.FC = () => {
               onChange={setTagFilter}
               localeKey={localeKey}
               onManageTags={() => setTagMgmtVisible(true)}
+              manageTagsInlineIcon
+              actions={(
+                <div
+                  data-testid='skills-import-actions'
+                  className={`flex items-center gap-8px ${isMobile ? 'w-full flex-wrap' : 'ml-auto flex-none justify-end'}`}
+                >
+                  <Button
+                    size='small'
+                    data-testid='btn-import-agent-skills'
+                    className={IMPORT_ACTION_BUTTON_CLASS}
+                    icon={<FolderOpen size={14} fill='currentColor' />}
+                    onClick={() => setAgentImportVisible(true)}
+                  >
+                    {t('settings.agentSkillImport.shortAction', { defaultValue: 'Import from Agent' })}
+                  </Button>
+                  <Button
+                    size='small'
+                    data-testid='btn-manual-import'
+                    className={IMPORT_ACTION_BUTTON_CLASS}
+                    icon={<FolderOpen size={14} fill='currentColor' />}
+                    onClick={handleImportFolder}
+                  >
+                    {t('settings.skillsHub.manualImport', { defaultValue: 'Import Skills' })}
+                  </Button>
+                  <Button
+                    size='small'
+                    data-testid='btn-import-zip'
+                    className={IMPORT_ACTION_BUTTON_CLASS}
+                    icon={<FileZip size={14} fill='currentColor' />}
+                    onClick={handleImportZip}
+                  >
+                    {t('settings.skillsHub.importZip', { defaultValue: 'Import .zip' })}
+                  </Button>
+                </div>
+              )}
             />
           </div>
 
           {/* Single card grid for all skills */}
           {filteredSkills.length > 0 ? (
-            <div className='grid gap-12px' style={{ gridTemplateColumns: CARD_GRID_COLS }}>
+            <div className={ENHANCED_TOOLS_GRID_CLASS} style={{ gridTemplateColumns: CARD_GRID_COLS }}>
               {filteredSkills.map((skill) => (
                 <SkillCard
                   key={skill.name}
@@ -372,7 +396,7 @@ const SkillsHubSettings: React.FC = () => {
               ))}
             </div>
           ) : (
-            <div className='text-center text-t-secondary py-40px'>
+            <div className={ENHANCED_TOOLS_EMPTY_STATE_CLASS}>
               {loading
                 ? t('common.loading', { defaultValue: 'Please wait...' })
                 : availableSkills.length === 0
@@ -383,7 +407,7 @@ const SkillsHubSettings: React.FC = () => {
 
           {/* Skill directory path */}
           {skillPaths && (
-            <div className='mt-16px flex items-center gap-8px text-12px text-t-tertiary font-mono'>
+            <div className='mt-12px flex items-center gap-8px text-12px text-t-tertiary font-mono'>
               <FolderOpen size={14} className='shrink-0' />
               <span className='truncate' title={skillPaths.user_skills_dir} data-testid='skill-paths-display'>
                 {skillPaths.user_skills_dir}
@@ -393,7 +417,7 @@ const SkillsHubSettings: React.FC = () => {
         </div>
 
         {/* Usage tip */}
-        <div className='px-16px md:px-[24px] py-20px bg-base border border-b-base shadow-sm rd-16px flex items-start gap-12px text-t-secondary'>
+        <div className='flex items-start gap-10px rounded-16px border border-solid border-[var(--border-base)] bg-base px-14px py-12px text-t-secondary shadow-sm md:px-16px'>
           <Info size={18} className='text-primary-6 mt-2px shrink-0' />
           <div className='flex flex-col gap-4px'>
             <span className='font-bold text-t-primary text-14px'>

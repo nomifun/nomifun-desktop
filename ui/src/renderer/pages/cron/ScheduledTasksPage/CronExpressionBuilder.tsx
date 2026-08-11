@@ -200,7 +200,10 @@ const CronExpressionBuilder: React.FC<CronExpressionBuilderProps> = ({ value, on
             </span>
           </div>
         ) : (
-          <div className='text-12px text-error'>
+          // semanticColors 把这个状态叫 danger，没有 error 键：`text-error` 产出 0 条
+          // CSS，非法表达式的提示语和上面那支 text-success 不成对，只是普通正文色。
+          // The state is named `danger`, so `text-error` emitted nothing.
+          <div className='text-12px text-danger'>
             {validation.error === 'unsupported_token'
               ? t('cron.page.cronExpression.unsupportedToken', {
                   defaultValue: '不支持 L / W / # 等高级符号，请使用 * , - / ? 与星期名。',

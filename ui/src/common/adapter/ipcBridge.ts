@@ -49,6 +49,7 @@ import {
   tauriUpdateCheck,
   tauriUpdateCurrentVersion,
   tauriUpdateDownload,
+  tauriUpdatePackageSnapshot,
   tauriUpdateInstallAndRelaunch,
 } from './tauriUpdater';
 import type {
@@ -84,6 +85,7 @@ import type { AcpModelInfo } from '../types/platform/acpTypes';
 import {
   fromProviderResponse,
   toCreateProviderRequest,
+  toUpdateProviderRequest,
   type CreateProviderInput,
   type FetchModelsAnonymousRequest,
   type FetchModelsResponse,
@@ -180,7 +182,6 @@ import {
   parseCompanionMemoryId,
   parseCompanionSessionWindowId,
   parseCompanionSkillId,
-  parseCompanionSuggestionId,
   parseConversationId,
   parseCronJobId,
   parseCronJobRunId,
@@ -203,6 +204,8 @@ import {
   parseCsNoteId,
   parseRequirementId,
   parseRemoteAgentId,
+  parseMiniAppId,
+  parseSshHostId,
   parseSkillPatternId,
   parseTerminalId,
   parseUserId,
@@ -217,7 +220,6 @@ import {
   type CompanionMemoryId,
   type CompanionSessionWindowId,
   type CompanionSkillId,
-  type CompanionSuggestionId,
   type FigureId,
   type IdmmInterventionId,
   type ExecutionAttemptId,
@@ -226,6 +228,7 @@ import {
   type ExecutionTemplateId,
   type McpServerId,
   type MessageId,
+  type MiniAppId,
   type ProviderId,
   type CsAgentId,
   type CsDialogueId,
@@ -235,6 +238,7 @@ import {
   type KnowledgeBaseId,
   type RequirementId,
   type RemoteAgentId,
+  type SshHostId,
   type SkillPatternId,
   type TerminalId,
   type WebhookId,
@@ -248,6 +252,7 @@ import {
   httpPost,
   httpPut,
   httpRequest,
+  isBackendHttpError,
   stubProvider,
   withResponseMap,
   wsEmitter,
@@ -1030,16 +1035,34 @@ export const autoUpdate = {
         releaseDate?: string;
         releaseNotes?: string;
       };
+      /**
+       * Version whose verified package the native side already holds, if any.
+       * The modal derives its install affordance from this instead of trusting
+       * React state to have survived a re-check.
+       */
+      retainedVersion?: string | null;
+      /** Native slot state, so a re-check can also land on "already downloading". */
+      packageState?: import('./tauriShell').TauriUpdatePackageState | null;
+      packageVersion?: string | null;
     }>,
     { includePrerelease?: boolean }
   >(async () => {
     // `force` so each modal open / retry performs a fresh check; update.check
     // (called right after) then reuses this same in-flight result.
     const info = await tauriUpdateCheck(true);
-    if (!info) return { success: true, data: {} };
+    const snapshot = await tauriUpdatePackageSnapshot();
+    const slot = {
+      retainedVersion: snapshot?.state === 'ready' ? (snapshot.version ?? null) : null,
+      packageState: snapshot?.state ?? null,
+      packageVersion: snapshot?.version ?? null,
+    };
+    if (!info) return { success: true, data: slot };
     return {
       success: true,
-      data: { updateInfo: { version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes } },
+      data: {
+        updateInfo: { version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes },
+        ...slot,
+      },
     };
   }, { success: false }),
   download: shellProvider<IBridgeResponse, void>(async () => {
@@ -1306,16 +1329,11 @@ export const mode = {
   ),
   updateProvider: withResponseMap(httpPut<ProviderResponse, { provider_id: ProviderId } & UpdateProviderRequest>(
     (p) => `/api/providers/${p.provider_id}`,
-    (p) => {
-      // Call sites read-modify-write whole `IProvider` records into this body
-      // (`const { id, ...body } = provider`). `models_detail` is a
-      // response-only projection (`ProviderResponse.models_detail` →
-      // `IProvider.models_detail`); the deny_unknown_fields backend update
-      // contract must never see it.
-      const { provider_id: _provider_id, models_detail: _modelsDetail, ...body } =
-        p as typeof p & { models_detail?: unknown };
-      return body;
-    }
+    // Call sites may derive this object from a whole renderer record or form.
+    // Serialize only the strict UpdateProviderRequest contract: response-only
+    // (`models_detail`) and form-only (`model`, Bedrock helper) fields must not
+    // reach the backend's deny_unknown_fields DTO.
+    toUpdateProviderRequest
   ), fromProviderResponse),
   deleteProvider: httpDelete<void, { provider_id: ProviderId }>(
     (p) => `/api/providers/${p.provider_id}`
@@ -1797,6 +1815,555 @@ export const remoteAgent = {
 };
 
 // ---------------------------------------------------------------------------
+// SSH host book — saved, reusable remote-host connection profiles.
+// Secrets are write-only from the client: the server returns them masked as
+// '***', never as plaintext/ciphertext.
+// ---------------------------------------------------------------------------
+
+/** Owner-visible SSH host (secrets masked as '***' when present, else null). */
+export interface IApiSshHost {
+  sshHostId: SshHostId;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authType: 'password' | 'key' | 'certificate' | 'agent';
+  password: string | null;
+  privateKey: string | null;
+  passphrase: string | null;
+  certificate: string | null;
+  sudoPassword: string | null;
+  hostFingerprint: string | null;
+  status: string;
+  lastConnectedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Create payload (secrets are plaintext here, encrypted server-side). */
+export interface IApiCreateSshHost {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authType: 'password' | 'key' | 'certificate' | 'agent';
+  password?: string | null;
+  privateKey?: string | null;
+  passphrase?: string | null;
+  certificate?: string | null;
+  sudoPassword?: string | null;
+}
+
+export type IApiUpdateSshHost = Partial<IApiCreateSshHost>;
+
+/**
+ * Live phase of one conversation↔host link (backend `SshLinkPhase`).
+ *
+ * `degraded` = the transport is fine and the remote shell is being recycled.
+ * `dropped` = the link is gone; `detail` says why. `closed` is a finished link,
+ * whose `reaped` flag says whether the remote shell was *proven* to have exited.
+ */
+export type ISshLinkPhase =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'degraded'
+  | 'reconnecting'
+  | 'dropped'
+  | 'closed';
+
+/**
+ * The single wire shape for link state: the realtime `ssh.status` event and the
+ * `/api/ssh-hosts/statuses` snapshot both carry it, so a link cannot look
+ * different depending on how the client learned about it. Every field is always
+ * present — "unknown" is an explicit null, never an omitted key.
+ *
+ * This — not {@link IApiSshHost.status} — is live link state. The host row's
+ * `status` column is a per-host hint that is written on first connect and never
+ * walked back, so it is permanently green once a host has ever worked.
+ */
+export interface IApiSshStatus {
+  sshHostId: SshHostId;
+  conversationId: string;
+  state: ISshLinkPhase;
+  /** Which dial attempt this is; 0 outside connecting/reconnecting. */
+  attempt: number;
+  nextRetryInMs: number | null;
+  hostFingerprint: string | null;
+  /** Operator-facing transport diagnostics — never credential material. */
+  detail: string | null;
+  /** Non-null only for `closed`; `false` there means the exit was NOT proven. */
+  reaped: boolean | null;
+  /**
+   * Non-null only for `dropped`. `false` means a retry cannot fix it — a
+   * credential was rejected or the host key changed, and a person has to act.
+   * Never infer this from `detail`, which is free-form operator text.
+   */
+  retryable: boolean | null;
+  changedAt: number;
+}
+
+const fromApiSshHost = (value: IApiSshHost): IApiSshHost => ({
+  ...value,
+  sshHostId: parseSshHostId(value.sshHostId),
+});
+
+/**
+ * A host the server found in this machine's `~/.ssh/config` and could add to the
+ * host book.
+ *
+ * Non-secret by construction: `identityFile` is a *path*. The server reads that
+ * file's contents only during an import the user confirmed, and never puts key
+ * material in this payload.
+ */
+export interface IApiSshConfigHost {
+  /** The `Host` alias, which becomes the host's display name. */
+  alias: string;
+  /** `HostName`, or the alias itself when the config gives none (ssh semantics). */
+  host: string;
+  port: number;
+  /** `null` when the config names no user — the form asks rather than guesses. */
+  username: string | null;
+  /** `IdentityFile` with `~/` expanded, or `null`. A path, never contents. */
+  identityFile: string | null;
+}
+
+/** One read of `~/.ssh/config`, including what it could not offer and why. */
+export interface IApiSshConfigScan {
+  /** The file that was read, `null` only when this account has no home dir. */
+  configPath: string | null;
+  hosts: IApiSshConfigHost[];
+  /**
+   * Aliases left out because they go through a jump host (unsupported in v1).
+   * Named rather than dropped: a user whose config is entirely bastion-fronted
+   * would otherwise see an empty list with no explanation.
+   */
+  skippedProxy: string[];
+  /**
+   * How many `Include` directives the parser did not follow. Reported so a short
+   * candidate list is never a silent one.
+   */
+  skippedIncludes: number;
+}
+
+export interface IApiSshImportedHost {
+  alias: string;
+  sshHostId: SshHostId;
+  /**
+   * The row was created but holds no credential — the config named no identity
+   * file, or the one it named had no readable private key. Everything else about
+   * the host is right; it just cannot connect until someone supplies a secret.
+   */
+  needsCredential: boolean;
+  /**
+   * The config named no `User`, so the row's username is empty. A separate
+   * missing piece from {@link needsCredential}: a host whose key was read fine is
+   * still undialable without a username.
+   */
+  needsUsername: boolean;
+}
+
+export type IApiSshImportSkipReason = 'duplicateName' | 'duplicateEndpoint' | 'notInConfig';
+
+export interface IApiSshImportSkipped {
+  alias: string;
+  reason: IApiSshImportSkipReason;
+}
+
+/** What an import did, per alias. A report — never credential material. */
+export interface IApiSshImportResult {
+  imported: IApiSshImportedHost[];
+  skipped: IApiSshImportSkipped[];
+}
+
+const fromApiSshImportResult = (value: IApiSshImportResult): IApiSshImportResult => ({
+  ...value,
+  imported: value.imported.map((item) => ({
+    ...item,
+    sshHostId: parseSshHostId(item.sshHostId),
+  })),
+});
+
+const fromApiSshStatus = (value: IApiSshStatus): IApiSshStatus => ({
+  ...value,
+  sshHostId: parseSshHostId(value.sshHostId),
+});
+
+export const ssh = {
+  list: withResponseMap(
+    httpGet<IApiSshHost[], void>('/api/ssh-hosts'),
+    (items) => items.map(fromApiSshHost)
+  ),
+  get: withResponseMap(
+    httpGet<IApiSshHost | null, { ssh_host_id: SshHostId }>(
+      (p) => `/api/ssh-hosts/${p.ssh_host_id}`
+    ),
+    (item) => (item == null ? null : fromApiSshHost(item))
+  ),
+  create: withResponseMap(
+    httpPost<IApiSshHost, IApiCreateSshHost>('/api/ssh-hosts'),
+    fromApiSshHost
+  ),
+  update: withResponseMap(
+    httpPut<IApiSshHost, { ssh_host_id: SshHostId; updates: IApiUpdateSshHost }>(
+      (p) => `/api/ssh-hosts/${p.ssh_host_id}`,
+      (p) => p.updates
+    ),
+    fromApiSshHost
+  ),
+  delete: httpDelete<void, { ssh_host_id: SshHostId }>(
+    (p) => `/api/ssh-hosts/${p.ssh_host_id}`
+  ),
+  testConnection: httpPost<{ ok: boolean; message: string }, { ssh_host_id: SshHostId }>(
+    (p) => `/api/ssh-hosts/${p.ssh_host_id}/test-connection`
+  ),
+  /**
+   * Snapshot of every live link the caller owns. Plural on purpose: a singular
+   * `/api/ssh-hosts/status` would be shadowed by the `/{ssh_host_id}` capture
+   * on the same prefix.
+   */
+  statuses: withResponseMap(
+    httpGet<IApiSshStatus[], void>('/api/ssh-hosts/statuses'),
+    (items) => items.map(fromApiSshStatus)
+  ),
+  /** Every link transition, owner-scoped. Same payload as `statuses`. */
+  onStatus: wsMappedEmitter<IApiSshStatus>('ssh.status', (raw) =>
+    fromApiSshStatus(raw as IApiSshStatus)
+  ),
+  /** Hosts in this machine's `~/.ssh/config` that are not in the book yet. */
+  importCandidates: httpGet<IApiSshConfigScan, void>('/api/ssh-hosts/import-candidates'),
+  /**
+   * Add the confirmed candidates to the book. Aliases only: the server re-reads
+   * its own config to learn what they point at, so the client can never name a
+   * file for the server to read.
+   */
+  importHosts: withResponseMap(
+    httpPost<IApiSshImportResult, { aliases: string[] }>('/api/ssh-hosts/import'),
+    fromApiSshImportResult
+  ),
+};
+
+// ---------------------------------------------------------------------------
+// Mini-apps — AI-generated self-contained single-file web tools, solidified
+// from a conversation and reopened instantly from the sidebar library.
+//
+// Wire shape is snake_case (preset-style). Responses never carry the HTML
+// body: the runtime loads it through the unauthenticated
+// `GET /api/miniapps/{miniapp_id}/serve` route as an iframe `src`.
+//
+// Two copies of the document exist and the distinction is the whole reason
+// `has_unpublished_changes` is on the wire: `/serve` returns the PUBLISHED
+// snapshot, while a conversation edits the working copy on disk. Only `publish`
+// promotes one into the other.
+// ---------------------------------------------------------------------------
+
+export interface IApiMiniApp {
+  miniapp_id: MiniAppId;
+  name: string;
+  description: string;
+  icon: string | null;
+  /**
+   * Provenance only — the conversation that first published this app. It is
+   * deliberately left unbranded because nothing may navigate to it: a mini-app
+   * outlives its source thread, so that jump is a link that rots. Its one reader
+   * is the default target of 「替换已有小程序」 in the preview panel.
+   */
+  source_conversation_id: string | null;
+  /** Size of the published snapshot in bytes; the body itself never rides list/detail responses. */
+  html_size: number;
+  /** Ms epoch of the last publish, or null when no document was ever promoted. */
+  published_at: number | null;
+  /** Derived per request: the on-disk working copy is newer than the snapshot. */
+  has_unpublished_changes: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * Where a mini-app's source lives on disk, as answered by
+ * `POST /api/miniapps/{miniapp_id}/workspace`.
+ *
+ * `source_path` is the absolute `{work_dir}/miniapps/{miniapp_id}/miniapp.html`.
+ * It is never an input — the server derives it from the id and runs it through
+ * its escape guard — and the client only reads it back to write it into the first
+ * message of an ORDINARY conversation (spec D19). No conversation is created by
+ * this call.
+ */
+export interface IApiMiniAppWorkspace {
+  source_path: string;
+}
+
+export interface IApiCreateMiniApp {
+  name: string;
+  description?: string;
+  icon?: string;
+  html: string;
+  source_conversation_id?: string;
+}
+
+export interface IApiUpdateMiniApp {
+  name?: string;
+  description?: string;
+  icon?: string;
+  html?: string;
+}
+
+const fromApiMiniApp = (value: IApiMiniApp): IApiMiniApp => ({
+  ...value,
+  miniapp_id: parseMiniAppId(value.miniapp_id),
+});
+
+/**
+ * Import intake. Supply EXACTLY ONE of `html` / `path` — the backend rejects both
+ * and neither with its own message rather than guessing.
+ *
+ * `path` must be absolute: either one `.html`/`.htm` document, or the folder that
+ * holds its `index.html`. It only works where the picker and the backend share a
+ * filesystem (the desktop shell), which is why the dialog also has an inline
+ * `html` flow for a WebUI browser session.
+ */
+export interface IApiMiniAppImportRequest {
+  /** Overrides the document's `<title>` when naming the app. */
+  name?: string;
+  description?: string;
+  icon?: string;
+  html?: string;
+  path?: string;
+}
+
+/**
+ * How much a finding costs the user: `fatal` refuses the import, `autofix` is
+ * repaired during import, `warning` only informs.
+ */
+export type IApiMiniAppImportSeverity = 'fatal' | 'autofix' | 'warning';
+
+/**
+ * One validation finding. `rule_id` is the join key to the UI's copy catalogue —
+ * the backend deliberately sends no prose, and `detail` is structured data (the
+ * offending reference, a byte count) the UI interpolates into its own sentence.
+ */
+export interface IApiMiniAppImportFinding {
+  rule_id: string;
+  severity: IApiMiniAppImportSeverity;
+  detail?: string;
+}
+
+export interface IApiMiniAppImportReport {
+  findings: IApiMiniAppImportFinding[];
+  /** True when any finding is fatal. The import route refuses on this flag alone. */
+  blocked: boolean;
+}
+
+/**
+ * Answer of BOTH import routes, so one mapper serves both and a client can never
+ * mistake "reported" for "adopted": `app` is present only on a real import.
+ */
+export interface IApiMiniAppImportResponse {
+  report: IApiMiniAppImportReport;
+  /** Rule ids actually repaired — never the ones the catalogue merely hoped to repair. */
+  applied_fixes: string[];
+  app?: IApiMiniApp;
+}
+
+const fromApiMiniAppImportResponse = (value: IApiMiniAppImportResponse): IApiMiniAppImportResponse => ({
+  ...value,
+  ...(value.app ? { app: fromApiMiniApp(value.app) } : {}),
+});
+
+/**
+ * Recover the report from a REJECTED import.
+ *
+ * `POST /api/miniapps/import` answers a blocked candidate with **400 whose body
+ * is still the full success envelope** (`{ success, data: { report, … } }`), so
+ * the findings survive the throw: `httpRequest` reads the error body and hands it
+ * to `BackendHttpError.body`. Returns `null` for anything that is not that shape
+ * — a real BadRequest (`{ success: false, error }`), a 500, a transport failure —
+ * which callers must then treat as a plain error.
+ *
+ * This is a backstop, not the main path: the dialog validates first, so a 400
+ * here means the source changed underneath the user between the two calls.
+ */
+export function miniAppImportReportFromError(error: unknown): IApiMiniAppImportResponse | null {
+  if (!isBackendHttpError(error) || error.status !== 400) return null;
+  const body = error.body;
+  if (!body || typeof body !== 'object') return null;
+  const data = (body as { data?: unknown }).data;
+  if (!data || typeof data !== 'object') return null;
+  const report = (data as { report?: unknown }).report;
+  if (!report || typeof report !== 'object') return null;
+  if (!Array.isArray((report as { findings?: unknown }).findings)) return null;
+  return fromApiMiniAppImportResponse(data as IApiMiniAppImportResponse);
+}
+
+export const miniapps = {
+  list: withResponseMap(
+    httpGet<IApiMiniApp[], void>('/api/miniapps'),
+    (items) => items.map(fromApiMiniApp)
+  ),
+  get: withResponseMap(
+    httpGet<IApiMiniApp | null, { miniapp_id: MiniAppId }>(
+      (p) => `/api/miniapps/${p.miniapp_id}`
+    ),
+    (item) => (item == null ? null : fromApiMiniApp(item))
+  ),
+  create: withResponseMap(
+    httpPost<IApiMiniApp, IApiCreateMiniApp>('/api/miniapps'),
+    fromApiMiniApp
+  ),
+  update: withResponseMap(
+    httpPut<IApiMiniApp, { miniapp_id: MiniAppId; updates: IApiUpdateMiniApp }>(
+      (p) => `/api/miniapps/${p.miniapp_id}`,
+      (p) => p.updates
+    ),
+    fromApiMiniApp
+  ),
+  delete: httpDelete<boolean, { miniapp_id: MiniAppId }>(
+    (p) => `/api/miniapps/${p.miniapp_id}`
+  ),
+  /**
+   * Idempotently provision this app's directory and materialize its working copy,
+   * answering the ABSOLUTE source path (spec D19). Creates no conversation — the
+   * caller writes the path into the first message of an ordinary one.
+   *
+   * No request body: the server derives the directory from the id, and the client
+   * never names a path.
+   */
+  provisionWorkspace: httpPost<IApiMiniAppWorkspace, { miniapp_id: MiniAppId }>(
+    (p) => `/api/miniapps/${p.miniapp_id}/workspace`,
+    () => ({})
+  ),
+  /**
+   * Promote the on-disk working copy into the served snapshot. 400 when there is
+   * no working copy yet (nothing to publish) — iterate first.
+   */
+  publish: withResponseMap(
+    httpPost<IApiMiniApp, { miniapp_id: MiniAppId }>(
+      (p) => `/api/miniapps/${p.miniapp_id}/publish`,
+      () => ({})
+    ),
+    fromApiMiniApp
+  ),
+  /**
+   * Judge a candidate and write nothing. Always 200 for a readable candidate,
+   * even a blocked one — the verdict is `report.blocked`, not the status.
+   *
+   * Registered before the `{miniapp_id}` capture on the backend, so `validate`
+   * and `import` are never read as ids.
+   */
+  validateImport: withResponseMap(
+    httpPost<IApiMiniAppImportResponse, IApiMiniAppImportRequest>('/api/miniapps/validate'),
+    fromApiMiniAppImportResponse
+  ),
+  /**
+   * Adopt a candidate. 200 carries the new `app`; a blocked candidate is a 400
+   * whose body is still the report — see {@link miniAppImportReportFromError}.
+   */
+  importApp: withResponseMap(
+    httpPost<IApiMiniAppImportResponse, IApiMiniAppImportRequest>('/api/miniapps/import'),
+    fromApiMiniAppImportResponse
+  ),
+};
+
+// ---------------------------------------------------------------------------
+// Physical robots — ESP32 devices bound to a companion, served by the embedded
+// robot gateway (`/robot/*` for the DEVICE, `/api/robots*` for this UI).
+//
+// A robot is keyed by `robot_id`, which is the firmware's Device-Id — a MAC
+// address, not a UUIDv7 — so unlike every other entity id in this bridge it is
+// deliberately NOT branded: a parser would reject every real device.
+// ---------------------------------------------------------------------------
+
+/** Live phase of one robot. `offline` = no WS session right now. */
+export type IApiRobotPhase = 'offline' | 'idle' | 'listening' | 'speaking';
+
+/** One registered robot. `companion_id === null` = paired with nobody yet. */
+export interface IApiRobot {
+  robot_id: string;
+  name: string;
+  companion_id: CompanionId | null;
+  /** Firmware board type, e.g. `esp32-s3n16r8-emoji`. */
+  board: string;
+  firmware_version: string;
+  /** RFC 3339, or null when the device has never reported in. */
+  last_seen: string | null;
+  /** RFC 3339. */
+  created_at: string;
+}
+
+/**
+ * The single wire shape for robot liveness: the `robot.status` event and the
+ * `/api/robots/statuses` snapshot both carry it, so a robot cannot look
+ * different depending on how the client learned about it. `changed_at` is when
+ * the phase CHANGED (ms), not when it was asked — which is what makes it a
+ * usable tiebreak across both arrival paths.
+ */
+export interface IApiRobotStatus {
+  robot_id: string;
+  companion_id: CompanionId | null;
+  phase: IApiRobotPhase;
+  changed_at: number;
+}
+
+/**
+ * Where a device should be pointed, and whether it can reach us at all.
+ * `ota_urls` lists one candidate per non-loopback NIC; `lan_enabled` is the LAN
+ * listener's state — with it off, no device can connect no matter what it is
+ * configured with.
+ */
+export interface IApiRobotEndpoints {
+  ota_urls: string[];
+  lan_enabled: boolean;
+}
+
+const fromApiRobot = (value: IApiRobot): IApiRobot => ({
+  ...value,
+  companion_id: value.companion_id == null ? null : parseCompanionId(value.companion_id),
+});
+
+const fromApiRobotStatus = (value: IApiRobotStatus): IApiRobotStatus => ({
+  ...value,
+  companion_id: value.companion_id == null ? null : parseCompanionId(value.companion_id),
+});
+
+export const robot = {
+  list: withResponseMap(httpGet<{ robots: IApiRobot[] }, void>('/api/robots'), (payload) =>
+    (payload.robots ?? []).map(fromApiRobot)
+  ),
+  /**
+   * Claim the device showing `code` for `companion_id`.
+   * 404 = no such code (mistyped or expired); 409 = already bound to another
+   * companion. The caller surfaces the backend message verbatim.
+   */
+  claim: withResponseMap(
+    httpPost<IApiRobot, { code: string; companion_id: CompanionId }>('/api/robots/claim'),
+    fromApiRobot
+  ),
+  /** Rename, rebind (`companion_id`) or unbind (`companion_id: null`). */
+  update: withResponseMap(
+    httpPatch<
+      IApiRobot,
+      { robot_id: string; updates: { name?: string; companion_id?: CompanionId | null } }
+    >(
+      (p) => `/api/robots/${p.robot_id}`,
+      (p) => p.updates
+    ),
+    fromApiRobot
+  ),
+  /** Revoke the device token and forget the record; the device becomes new again. */
+  remove: httpDelete<void, { robot_id: string }>((p) => `/api/robots/${p.robot_id}`),
+  /** Snapshot of every robot's phase. Plural for the same reason ssh statuses is. */
+  statuses: withResponseMap(
+    httpGet<{ statuses: IApiRobotStatus[] }, void>('/api/robots/statuses'),
+    (payload) => (payload.statuses ?? []).map(fromApiRobotStatus)
+  ),
+  endpoints: httpGet<IApiRobotEndpoints, void>('/api/robots/endpoints'),
+  /** Every phase transition, owner-scoped. Same payload as `statuses`. */
+  onStatus: wsMappedEmitter<IApiRobotStatus>('robot.status', (raw) =>
+    fromApiRobotStatus(raw as IApiRobotStatus)
+  ),
+};
+
+// ---------------------------------------------------------------------------
 // Database — routed to conversation/message endpoints
 // ---------------------------------------------------------------------------
 
@@ -1821,6 +2388,11 @@ export const database = {
         // persisted message. When
         // set (incl. ''), the backend ignores page/offset pagination.
         cursor?: string;
+        // One LOCAL calendar day (`YYYYMMDD`), oldest-first and complete: the
+        // backend decides the day boundary (the same one that partitions
+        // companion session digests), so a reader never re-derives days in a
+        // browser whose timezone may differ. Mutually exclusive with `cursor`.
+        day?: string;
       }
     >((p) => {
       const params = new URLSearchParams();
@@ -1831,6 +2403,7 @@ export const database = {
       // Send even an empty cursor (the "newest window" request) — distinct from
       // omitting it, which selects offset pagination.
       if (p.cursor !== undefined) params.set('cursor', p.cursor);
+      if (p.day) params.set('day', p.day);
       return `/api/conversations/${p.conversation_id}/messages?${params.toString()}`;
     }),
     (page) => ({ ...page, items: page.items.map(fromApiStoredMessage) })
@@ -2700,6 +3273,11 @@ export interface ICreateConversationParams {
     /** Legacy marker for pre-provider-probe health-check conversations. */
     is_health_check?: boolean;
     remote_agent_id?: import('../types/ids').RemoteAgentId;
+    /** Binds a nomi conversation to a saved SSH host: the remote tool family
+     *  operates that host. Optional companion `ssh_remote_cwd` sets the shell's
+     *  starting directory (defaults to the remote $HOME). */
+    ssh_host_id?: import('../types/ids').SshHostId;
+    ssh_remote_cwd?: string;
     extra_skill_paths?: string[];
   };
 }
@@ -2788,7 +3366,6 @@ export interface IKnowledgeWritebackEvent {
   written?: Array<{
     kb_id?: KnowledgeBaseId | null;
     rel_path?: string | null;
-    staged?: boolean;
   }>;
   failures?: Array<{
     kb_id?: KnowledgeBaseId | null;
@@ -3719,12 +4296,6 @@ export interface IIdmmIntervention {
   bypass_model?: string;
 }
 
-export interface IIdmmSettings {
-  backup_provider_id?: ProviderId;
-  backup_model?: string;
-  default_steering_prompt: string;
-}
-
 const parseIdmmTargetId = (kind: IdmmTargetKind, value: unknown): SessionCapabilityTargetId =>
   kind === 'conversation' ? parseConversationId(value) : parseTerminalId(value);
 
@@ -3762,13 +4333,6 @@ const fromApiIdmmIntervention = (record: IIdmmIntervention): IIdmmIntervention =
   target_id: parseIdmmTargetId(record.target_kind, record.target_id),
 });
 
-const fromApiIdmmSettings = (settings: IIdmmSettings): IIdmmSettings => ({
-  ...settings,
-  ...(settings.backup_provider_id == null
-    ? {}
-    : { backup_provider_id: parseProviderId(settings.backup_provider_id) }),
-});
-
 export const idmm = {
   set: withResponseMap(httpPost<IIdmmState, IIdmmSetParams>('/api/idmm'), fromApiIdmmState),
   getStatus: withResponseMap(httpGet<IIdmmState, { kind: IdmmTargetKind; target_id: SessionCapabilityTargetId }>(
@@ -3784,15 +4348,6 @@ export const idmm = {
   clearLog: httpDelete<void, { kind: IdmmTargetKind; target_id: SessionCapabilityTargetId }>(
     (p) => `/api/idmm/${p.kind}/${p.target_id}/log`
   ),
-  /** Cross-session recent interventions for the global activity overview
-   * (most-recent-first, across all targets; honours the same aggressive
-   * eviction the per-target records do). */
-  getActivity: withResponseMap(httpGet<IIdmmIntervention[], { limit?: number }>(
-    (p) => `/api/idmm/activity${p.limit ? `?limit=${p.limit}` : ''}`
-  ), (records) => records.map(fromApiIdmmIntervention)),
-  clearActivity: httpDelete<void, void>('/api/idmm/activity'),
-  getSettings: withResponseMap(httpGet<IIdmmSettings, void>('/api/idmm/settings'), fromApiIdmmSettings),
-  updateSettings: withResponseMap(httpPut<IIdmmSettings, IIdmmSettings>('/api/idmm/settings'), fromApiIdmmSettings),
   onStatus: wsMappedEmitter<IIdmmState>('idmm.statusChanged', fromApiIdmmState),
   onIntervention: wsMappedEmitter<IIdmmIntervention>('idmm.intervention', fromApiIdmmIntervention),
 };
@@ -3800,8 +4355,7 @@ export const idmm = {
 // ── Phase-3 model failover queue (mirrors `ModelFailoverConfig`, plan D1/D8). ──
 // A global, ordered list of provider+model candidates the conversation send-loop
 // falls back through when a NOMI session hits a pre-response provider fault. Read
-// & written through the `agent.model_failover` client preference (one JSON blob),
-// the same idmm-settings-style channel as `idmm.getSettings`/`updateSettings`.
+// & written through the `agent.model_failover` client preference (one JSON blob).
 
 /** One ordered candidate in the failover queue. */
 export interface IModelFailoverCandidate {
@@ -4280,10 +4834,21 @@ export interface ICompanionMemory {
   created_at: number;
   updated_at: number;
   last_reinforced_at: number;
-  /** `'user'` = shared (all companions) / `'companion'` = private to one. */
-  scope_kind: 'user' | 'companion';
-  /** Owning canonical companion id when private; `null` when shared. */
-  scope_companion_id: CompanionId | null;
+  /**
+   * The companion this memory belongs to. Memory is strictly per-companion —
+   * there is no shared/install-wide scope any more, and no way to re-home a
+   * memory. `null` is only the vestigial state of a legacy row the backend's
+   * one-time re-homing migration has not reached yet (it runs at every launch
+   * that has at least one companion), so no surface should build behaviour on it
+   * beyond "belongs to nobody in particular yet".
+   *
+   * This is the WHOLE answer to "whose memory is this": the `scope_kind`
+   * discriminator that used to travel beside it is gone from the wire and from
+   * the database (one nullable owner column, `companion_memories.companion_id`),
+   * and the field itself no longer travels under its historical name
+   * `scope_companion_id` — wire, column and contract now agree.
+   */
+  companion_id: CompanionId | null;
   /** FTS highlight snippet (`<b>…</b>` markers) — list results of a full-text query only. */
   snippet?: string | null;
   /** Fused relevance rank — list results of a full-text query only. */
@@ -4306,28 +4871,21 @@ export interface ICompanionMemoryMergeGroup {
   memories: ICompanionMemory[];
 }
 
-export interface ICompanionSuggestion {
-  suggestion_id: CompanionSuggestionId;
-  kind: string;
-  title: string;
-  body: string;
-  action?: { type: string; to?: string } | null;
-  status: 'new' | 'accepted' | 'dismissed';
-  created_at: number;
-  decided_at?: number | null;
-}
-
-export interface ICompanionSuggestionPage {
-  items: ICompanionSuggestion[];
-  total: number;
-}
-
 /** A companion's self-evolved skill (registry row + SKILL.md description). snake_case = Rust JSON 1:1. */
 export interface ICompanionSkill {
   companion_skill_id: CompanionSkillId;
   skill_name: string;
-  scope_kind: string;
-  scope_companion_id: CompanionId | null; // null = shared
+  /**
+   * The companion this skill belongs to. A self-evolved skill is strictly
+   * per-companion — there is no shared tier and no way to hand one to another
+   * companion. `null` is only the vestigial state of a legacy row the backend's
+   * one-time re-homing migration has not claimed yet.
+   *
+   * Named after the column it comes from (`companion_skills.companion_id`), like
+   * the memory owner above: the field used to travel as `scope_companion_id`, and
+   * that spelling is now gone from the wire as well as from the database.
+   */
+  companion_id: CompanionId | null;
   status: 'draft' | 'active' | 'archived';
   source: string;
   confidence: number;
@@ -4363,7 +4921,6 @@ export interface ICompanionLearnResult {
   status: string;
   events_processed: number;
   memories_added: number;
-  suggestions_added: number;
   error?: string | null;
   summary?: string | null;
 }
@@ -4376,17 +4933,14 @@ export interface ICompanionStatus {
   mood: string;
   memories_active: number;
   memories_archived: number;
-  suggestions_new: number;
-  skills_active: number;
   model_configured: boolean;
   collect_any_enabled: boolean;
 }
 
-/** "What I learned this week" digest (skills per-companion; memories global). */
+/** "What I learned this week" digest for one companion (skills + memories it gained). */
 export interface ICompanionWeeklyDigest {
   since_ms: number;
   skills_learned: number;
-  skills_active_new: number;
   memories_added: number;
   new_skill_names: string[];
 }
@@ -4427,6 +4981,19 @@ export interface ICompanionDayDigest {
   token_estimate: number;
 }
 
+/** One day of a companion's readable history (聊天历史 的日期索引), newest first.
+ *  Server-side and complete: `day` is the backend's LOCAL calendar day, the same
+ *  key `ICompanionDayDigest.session_day` uses, so the digest marker can never
+ *  attach to the wrong day near midnight. */
+export interface ICompanionHistoryDay {
+  /** Local calendar day, `YYYYMMDD`. */
+  day: string;
+  /** Visible messages persisted that day. */
+  message_count: number;
+  /** 会话归档 left a diary on that day. */
+  has_digest: boolean;
+}
+
 /** 伙伴的唯一专属会话 — 一条真实的 `type='nomi'` 会话。每个伙伴生命周期内恒一条。 */
 export interface ICompanionThread {
   conversation_id: ConversationId;
@@ -4449,6 +5016,36 @@ export interface ICompanionModelRef {
   provider_id: ProviderId;
   model: string;
   use_model?: string | null;
+}
+
+/** One companion's speech-synthesis选择: catalog model + provider voice id. */
+export interface ICompanionTtsSelection {
+  provider_id: ProviderId;
+  model: string;
+  /** Provider voice id (free text); `null` = the provider's own default voice. */
+  voice: string | null;
+}
+
+/**
+ * One companion's voice-activity-detection tuning. The engine runs locally, so
+ * there is no Provider reference here — only tuning. `engine` is a string
+ * rather than a union because the backend recognises exactly `'silero'` today
+ * and falls back to its built-in energy detector for anything else; a union
+ * would make a future engine a breaking type change.
+ */
+export interface ICompanionVadConfig {
+  engine: string;
+  /** Speech-probability threshold, 0..1. */
+  sensitivity: number;
+  /** Trailing silence (ms) that closes one utterance, 200..3000. */
+  min_silence_ms: number;
+}
+
+/** One companion's voice stack. `asr`/`tts` null = use the install-wide default. */
+export interface ICompanionVoiceConfig {
+  asr: ICompanionModelRef | null;
+  tts: ICompanionTtsSelection | null;
+  vad: ICompanionVadConfig;
 }
 
 /** Desktop-companion window settings of one companion (`character` lives on ICompanionProfile). */
@@ -4505,14 +5102,46 @@ export interface ICompanionProfile {
   character: string;
   persona: ICompanionPersona;
   model: ICompanionModelRef | null;
+  /** 备用对话模型: replayed once when the main model's turn fails. */
+  fallback_model: ICompanionModelRef | null;
+  /** 视觉大模型; null = use the main chat model when it can see images. */
+  vision_model: ICompanionModelRef | null;
+  /** ASR / TTS / VAD for this companion. */
+  voice: ICompanionVoiceConfig;
+  /** This companion's own 定时学习 loop (install-wide until 2026-08). */
+  learn: ICompanionLearnConfig;
+  /** This companion's own 技能进化 loop (install-wide until 2026-08). */
+  evolve: ICompanionEvolveConfig;
   skills: ICompanionSkillConfig;
   appearance: ICompanionWindowConfig;
   /** Frozen execution configuration last applied to this companion. */
   applied_preset?: ResolvedPresetSnapshot;
+  /**
+   * User-chosen sidebar position. Absent = never reordered; such companions sort
+   * after every explicitly ordered one, by creation time. Distinct from `seq`,
+   * which is a registry-owned never-reused display ordinal.
+   */
+  order_index?: number | null;
   created_at: number;
 }
 
-/** Shared skill-evolution settings (P1/P2 backend; P3 surfaces in UI). */
+/** One companion's periodic-learning settings (定时学习). */
+export interface ICompanionLearnConfig {
+  enabled: boolean;
+  /** 5..=1440. */
+  interval_minutes: number;
+  model: ICompanionModelRef | null;
+}
+
+/**
+ * One companion's skill-evolution settings (技能进化).
+ *
+ * Every field the backend serializes is listed, including the four tuning knobs
+ * the UI deliberately never surfaces (`min_pattern_count`, `auto_threshold`,
+ * `skill_half_life_days`, `skill_archive_threshold`) — the wire shape is the
+ * truth, and omitting a field here just makes the type lie about what arrives.
+ * `auto_activate` IS the 保守/激进 preference the 进化 tab renders.
+ */
 export interface ICompanionEvolveConfig {
   enabled: boolean;
   interval_minutes: number;
@@ -4521,6 +5150,8 @@ export interface ICompanionEvolveConfig {
   min_distinct_sessions: number;
   auto_activate: boolean;
   auto_threshold: number;
+  skill_half_life_days: number;
+  skill_archive_threshold: number;
 }
 
 /** Shared session-window archiving settings (伙伴会话窗口归档). Default OFF (opt-in). */
@@ -4531,21 +5162,29 @@ export interface ICompanionArchiveConfig {
   inject_recent_days: number;
 }
 
-/** Shared (cross-companion) config — `shared/config.json`, served by /api/companion/config. */
+/**
+ * Machine-level (cross-companion) config — `shared/config.json`, served by
+ * /api/companion/config.
+ *
+ * `learn` / `evolve` used to live here, which is what made the 进化 tab
+ * install-wide; they are per companion on {@link ICompanionProfile} since
+ * 2026-08. What remains is genuinely machine-level: which events this device
+ * records, the session archiver, and the default-companion pointer.
+ */
 export interface ICompanionSharedConfig {
   collect: ICompanionCollectConfig;
-  learn: {
-    enabled: boolean;
-    interval_minutes: number;
-    model: ICompanionModelRef | null;
-  };
-  evolve: ICompanionEvolveConfig;
   /** Session-window archiving (伙伴会话归档). */
   archive: ICompanionArchiveConfig;
   /** 智能协作：开启后本地伙伴可把复杂任务拆给多个协作者并行推进。 */
   smart_collaboration: boolean;
   /** Null when no companion exists yet (zero-companion state is allowed). */
   default_companion_id: CompanionId | null;
+  /**
+   * Opt-in (default null = off): when set to a directory path, companion `save`
+   * memories are ALSO mirrored into the nomi agent's file-memory there, so the
+   * agent recalls companion-learned facts.
+   */
+  bridge_to_memory_dir: string | null;
 }
 
 export type ICompanionWithStatus = ICompanionProfile & {
@@ -4558,21 +5197,26 @@ export type ICompanionProfilePatch = {
   character?: string;
   persona?: Partial<ICompanionPersona>;
   model?: ICompanionModelRef | null;
+  fallback_model?: ICompanionModelRef | null;
+  vision_model?: ICompanionModelRef | null;
+  voice?: {
+    asr?: ICompanionModelRef | null;
+    tts?: ICompanionTtsSelection | null;
+    vad?: Partial<ICompanionVadConfig>;
+  };
+  learn?: Partial<ICompanionLearnConfig>;
+  evolve?: Partial<ICompanionEvolveConfig>;
   skills?: Partial<ICompanionSkillConfig>;
   appearance?: Partial<ICompanionWindowConfig>;
+  order_index?: number | null;
 };
 
 /// RFC 7396 merge patch over ICompanionSharedConfig — nested partial objects merge.
 export type ICompanionSharedConfigPatch = {
   collect?: Partial<ICompanionCollectConfig>;
-  learn?: Partial<{
-    enabled: boolean;
-    interval_minutes: number;
-    model: ICompanionModelRef | null;
-  }>;
-  evolve?: Partial<ICompanionEvolveConfig>;
   archive?: Partial<ICompanionArchiveConfig>;
   smart_collaboration?: boolean;
+  bridge_to_memory_dir?: string | null;
 };
 
 /** Export endpoint result — backend echoes the resolved destination path
@@ -4618,30 +5262,36 @@ const nullableCompanionId = (value: unknown): CompanionId | null =>
 
 const fromApiCompanionMemory = (raw: unknown): ICompanionMemory => {
   const value = asWireObject(raw, 'companion memory');
+  for (const retiredField of ['scope_kind', 'scope_companion_id']) {
+    // `scope_kind` was the shared/private discriminator and `scope_companion_id`
+    // the owner's historical name; both are gone from the memory wire, which now
+    // spells the owner exactly like its column (`companion_id`). Rejecting them
+    // is what stops a downgraded backend from quietly serving memories whose
+    // owner this adapter would then read as `undefined` — the same guard
+    // `fromApiCompanionSkill` has always had.
+    if (Object.prototype.hasOwnProperty.call(value, retiredField)) {
+      throw new TypeError(`companion memory must not contain retired field "${retiredField}"`);
+    }
+  }
   return {
     ...(value as unknown as ICompanionMemory),
     memory_id: parseCompanionMemoryId(value.memory_id),
-    scope_companion_id: nullableCompanionId(value.scope_companion_id),
-  };
-};
-
-const fromApiCompanionSuggestion = (raw: unknown): ICompanionSuggestion => {
-  const value = asWireObject(raw, 'companion suggestion');
-  return {
-    ...(value as unknown as ICompanionSuggestion),
-    suggestion_id: parseCompanionSuggestionId(value.suggestion_id),
+    companion_id: nullableCompanionId(value.companion_id),
   };
 };
 
 const fromApiCompanionSkill = (raw: unknown): ICompanionSkill => {
   const value = asWireObject(raw, 'companion skill');
-  if (
-    Object.prototype.hasOwnProperty.call(value, 'provenance') ||
-    Object.prototype.hasOwnProperty.call(value, 'superseded_by')
-  ) {
-    throw new TypeError(
-      'companion skill legacy fields "provenance" and "superseded_by" are not accepted'
-    );
+  for (const retiredField of ['provenance', 'superseded_by', 'scope_kind', 'scope_companion_id']) {
+    // `scope_kind` was the shared/private discriminator; 共享技能 is gone and the
+    // owner alone answers "whose skill is this", so the backend must not send it.
+    // `scope_companion_id` was that owner's own historical name, which outlived the
+    // column rename as a bare `#[serde(rename)]`. Rejecting it rather than ignoring
+    // it is what stops a mismatched backend from serving skills whose owner every
+    // caller then reads as `undefined` — the guard the memory adapter mirrors.
+    if (Object.prototype.hasOwnProperty.call(value, retiredField)) {
+      throw new TypeError(`companion skill must not contain retired field "${retiredField}"`);
+    }
   }
   if (!Array.isArray(value.provenance_event_ids)) {
     throw new TypeError('companion skill provenance_event_ids must be an array');
@@ -4649,7 +5299,7 @@ const fromApiCompanionSkill = (raw: unknown): ICompanionSkill => {
   return {
     ...(value as unknown as ICompanionSkill),
     companion_skill_id: parseCompanionSkillId(value.companion_skill_id),
-    scope_companion_id: nullableCompanionId(value.scope_companion_id),
+    companion_id: nullableCompanionId(value.companion_id),
     provenance_event_ids: value.provenance_event_ids.map(parseCompanionEventId),
     skill_pattern_id:
       value.skill_pattern_id == null ? null : parseSkillPatternId(value.skill_pattern_id),
@@ -4666,7 +5316,7 @@ const fromApiCompanionLearnResult = (raw: unknown): ICompanionLearnResult => {
   if (typeof value.status !== 'string') {
     throw new TypeError('companion learn result status must be a string');
   }
-  for (const countField of ['events_processed', 'memories_added', 'suggestions_added'] as const) {
+  for (const countField of ['events_processed', 'memories_added'] as const) {
     if (typeof value[countField] !== 'number' || !Number.isSafeInteger(value[countField])) {
       throw new TypeError(`companion learn result ${countField} must be a safe integer`);
     }
@@ -4680,7 +5330,6 @@ const fromApiCompanionLearnResult = (raw: unknown): ICompanionLearnResult => {
     status: value.status,
     events_processed: value.events_processed as number,
     memories_added: value.memories_added as number,
-    suggestions_added: value.suggestions_added as number,
     error: value.error as string | null | undefined,
     summary: value.summary as string | null | undefined,
   };
@@ -4765,6 +5414,11 @@ const fromApiCompanionSharedConfig = (raw: unknown): ICompanionSharedConfig => {
 };
 
 export const companion = {
+  /**
+   * `companion_id` narrows the list to ONE companion's memories (plus any
+   * legacy row not yet re-homed). Omitting it returns every companion's memories
+   * and is only for an owner-level administrative view.
+   */
   listMemories: withResponseMap(
     httpGet<
       { items: unknown[]; total: number },
@@ -4772,7 +5426,7 @@ export const companion = {
       kind?: string;
       q?: string;
       status?: string;
-      scope_companion_id?: CompanionId;
+      companion_id?: CompanionId;
       sort?: ICompanionMemorySort;
       limit?: number;
       offset?: number;
@@ -4782,7 +5436,7 @@ export const companion = {
       if (p?.kind) params.set('kind', p.kind);
       if (p?.q) params.set('q', p.q);
       if (p?.status) params.set('status', p.status);
-      if (p?.scope_companion_id) params.set('scope_companion_id', p.scope_companion_id);
+      if (p?.companion_id) params.set('companion_id', p.companion_id);
       if (p?.sort) params.set('sort', p.sort);
       if (p?.limit) params.set('limit', String(p.limit));
       if (p?.offset) params.set('offset', String(p.offset));
@@ -4791,34 +5445,59 @@ export const companion = {
     }),
     (raw): ICompanionMemoryPage => ({ ...raw, items: raw.items.map(fromApiCompanionMemory) })
   ),
+  /** `companion_id` is the OWNER of the new memory (omitted = server-resolved). */
   addMemory: withResponseMap(
-    httpPost<unknown, { kind: string; content: string; tags?: string[]; scope_companion_id?: CompanionId }>(
+    httpPost<unknown, { kind: string; content: string; tags?: string[]; companion_id?: CompanionId }>(
       '/api/companion/memories'
     ),
     fromApiCompanionMemory
   ),
+  /**
+   * Content / pin / lifecycle only: a memory's owner is fixed at write time.
+   *
+   * `companion_id` is the companion DOING the edit, not a new owner — the
+   * store rejects a row owned by anyone else with a 404. Required on every memory
+   * mutation below for the same reason: the invariant is enforced server-side, so
+   * the caller has to say who it is.
+   */
   updateMemory: httpPut<
     void,
-    { memory_id: CompanionMemoryId; content?: string; pinned?: boolean; status?: string; scope_kind?: string; scope_companion_id?: CompanionId }
+    {
+      memory_id: CompanionMemoryId;
+      companion_id: CompanionId;
+      content?: string;
+      pinned?: boolean;
+      status?: string;
+    }
   >(
     (p) => `/api/companion/memories/${p.memory_id}`,
     (p) => ({
       content: p.content,
       pinned: p.pinned,
       status: p.status,
-      scope_kind: p.scope_kind,
-      scope_companion_id: p.scope_companion_id,
+      companion_id: p.companion_id,
     })
   ),
-  deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId }>((p) => `/api/companion/memories/${p.memory_id}`),
-  /** Atomic batch memory op (single transaction — any bad id rolls the whole batch back). */
+  deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId; companion_id: CompanionId }>(
+    (p) => `/api/companion/memories/${p.memory_id}?companion_id=${encodeURIComponent(p.companion_id)}`
+  ),
+  /** Atomic batch memory op (single transaction — any bad or foreign id rolls the whole batch back). */
   batchMemories: httpPost<
     void,
-    { ids: CompanionMemoryId[]; action: ICompanionMemoryBatchAction; kind?: ICompanionMemoryKind }
+    {
+      ids: CompanionMemoryId[];
+      action: ICompanionMemoryBatchAction;
+      kind?: ICompanionMemoryKind;
+      companion_id: CompanionId;
+    }
   >('/api/companion/memories/batch'),
-  /** Merge-assistant dry run: suspected-duplicate groups over the active layer. */
+  /**
+   * Merge-assistant dry run: suspected-duplicate groups over the active layer of
+   * ONE companion. Scoped server-side — the response carries memory content, so
+   * this surface never receives another companion's text to filter out.
+   */
   memoryMergeSuggestions: withResponseMap(
-    httpPost<unknown[], void>('/api/companion/memories/merge-suggestions'),
+    httpPost<unknown[], { companion_id: CompanionId }>('/api/companion/memories/merge-suggestions'),
     (raw): ICompanionMemoryMergeGroup[] =>
       raw.map((entry) => {
         const value = asWireObject(entry, 'companion memory merge group');
@@ -4830,43 +5509,30 @@ export const companion = {
   ),
   /** Merge-assistant confirm: insert the merged memory, archive the source group. */
   mergeMemories: withResponseMap(
-    httpPost<unknown, { group: CompanionMemoryId[]; merged_content: string; kind: ICompanionMemoryKind }>(
-      '/api/companion/memories/merge'
-    ),
+    httpPost<
+      unknown,
+      {
+        group: CompanionMemoryId[];
+        merged_content: string;
+        kind: ICompanionMemoryKind;
+        companion_id: CompanionId;
+      }
+    >('/api/companion/memories/merge'),
     fromApiCompanionMemory
   ),
-  listSuggestions: withResponseMap(
-    httpGet<{ items: unknown[]; total: number }, { status?: string; limit?: number; offset?: number }>((p) => {
-      const params = new URLSearchParams();
-      if (p?.status) params.set('status', p.status);
-      if (p?.limit) params.set('limit', String(p.limit));
-      if (p?.offset) params.set('offset', String(p.offset));
-      const qs = params.toString();
-      return `/api/companion/suggestions${qs ? `?${qs}` : ''}`;
-    }),
-    (raw): ICompanionSuggestionPage => ({ ...raw, items: raw.items.map(fromApiCompanionSuggestion) })
-  ),
-  decideSuggestion: withResponseMap(
-    httpPost<unknown, { suggestion_id: CompanionSuggestionId; accept: boolean }>(
-      (p) => `/api/companion/suggestions/${p.suggestion_id}/decide`,
-      (p) => ({ accept: p.accept })
-    ),
-    fromApiCompanionSuggestion
-  ),
   // ── Self-evolved skills (P2: see + edit). Addressed by companion_id + companion_skill_id. ──
+  /** One companion's own skills — the companion in the path IS the whole scope. */
   listSkills: withResponseMap(
     httpGet<
       { items: unknown[]; total: number },
       {
       companion_id: CompanionId;
-      include_shared?: boolean;
       status?: string;
       limit?: number;
       offset?: number;
       }
     >((p) => {
       const params = new URLSearchParams();
-      if (p.include_shared === false) params.set('include_shared', 'false');
       if (p.status) params.set('status', p.status);
       if (p.limit) params.set('limit', String(p.limit));
       if (p.offset) params.set('offset', String(p.offset));
@@ -4935,29 +5601,26 @@ export const companion = {
     }),
     (raw): ICompanionDayDigest[] => raw.map(fromApiCompanionDayDigest)
   ),
+  /** The companion's complete history day index (聊天历史 左侧日期栏). Read-only:
+   *  never mints a session, and a companion that has never chatted returns []. */
+  listHistoryDays: withResponseMap(
+    httpGet<unknown[], { companion_id: CompanionId }>(
+      (p) => `/api/companion/companions/${p.companion_id}/history/days`
+    ),
+    (raw): ICompanionHistoryDay[] =>
+      raw.map((entry) => asWireObject(entry, 'companion history day') as unknown as ICompanionHistoryDay)
+  ),
   /** Learn-by-demonstration: draft a skill from a work session's tool sequence. Returns the name. */
   draftFromSession: httpPost<string | null, { companion_id: CompanionId; conversation_id: ConversationId }>(
     (p) => `/api/companion/companions/${p.companion_id}/skills/from-session`,
     (p) => ({ conversation_id: p.conversation_id })
   ),
-  /** Gift a skill to another companion (互教). */
-  giftSkill: withResponseMap(
-    httpPost<
-      unknown,
-      {
-        companion_id: CompanionId;
-        companion_skill_id: CompanionSkillId;
-        to_companion_id: CompanionId;
-      }
-    >(
-      (p) =>
-        `/api/companion/companions/${p.companion_id}/skills/${p.companion_skill_id}/gift`,
-      (p) => ({ to_companion_id: p.to_companion_id })
-    ),
-    fromApiCompanionSkill
-  ),
+  /** Run ONE companion's 定时学习 pass now (the run lock is per companion). */
   runLearn: withResponseMap(
-    httpPost<unknown, void>('/api/companion/learn/run'),
+    httpPost<unknown, { companion_id: CompanionId }>(
+      (p) => `/api/companion/companions/${p.companion_id}/learn/run`,
+      () => ({})
+    ),
     fromApiCompanionLearnResult
   ),
   eventStats: httpGet<ICompanionSourceStats[], void>('/api/companion/events/stats'),
@@ -5069,32 +5732,29 @@ export const companion = {
   ),
   // ── Import / export (spec §4.8) ──
   exportMemory: httpPost<ICompanionExportResult, { dest_path: string; include_events: boolean }>('/api/companion/export/memory'),
-  exportCompanion: httpPost<ICompanionExportResult, { companion_id: CompanionId; dest_path: string; knowledge_names?: string[] }>(
+  /** Export one companion. Its settings are always included; `include_memories`
+   *  defaults to true and `include_skills` to false, and a custom figure travels
+   *  whenever the companion wears one. */
+  exportCompanion: httpPost<
+    ICompanionExportResult,
+    {
+      companion_id: CompanionId;
+      dest_path: string;
+      knowledge_names?: string[];
+      include_memories?: boolean;
+      include_skills?: boolean;
+    }
+  >(
     (p) => `/api/companion/export/companions/${p.companion_id}`,
     (p) => ({
       dest_path: p.dest_path,
       knowledge_names: p.knowledge_names ?? [],
+      include_memories: p.include_memories ?? true,
+      include_skills: p.include_skills ?? false,
     })
   ),
   /** Import a memory/companion bundle; the backend dispatches on manifest.kind. */
   importCompanionBundle: httpPost<Record<string, unknown>, { src_path: string }>('/api/companion/import'),
-  onSuggestionCreated: wsMappedEmitter<ICompanionSuggestion & { companion_id?: CompanionId }>(
-    'companion.suggestion-created',
-    (raw) => {
-      const value = asWireObject(raw, 'companion suggestion-created event');
-      return {
-        ...fromApiCompanionSuggestion(value),
-        ...(value.companion_id == null ? {} : { companion_id: parseCompanionId(value.companion_id) }),
-      };
-    }
-  ),
-  /** A suggestion was accepted/dismissed (any surface) — drop the now-decided
-   *  card live so other open surfaces don't keep a stale `new` snapshot that
-   *  404s on the next decide. Payload carries the decided suggestion. */
-  onSuggestionDecided: wsMappedEmitter<ICompanionSuggestion>(
-    'companion.suggestion-decided',
-    fromApiCompanionSuggestion
-  ),
   onLearnStarted: wsMappedEmitter<{ companion_id?: CompanionId }>('companion.learn-started', (raw) => {
     const value = asWireObject(raw, 'companion learn-started event');
     return value.companion_id == null ? {} : { companion_id: parseCompanionId(value.companion_id) };
@@ -5275,8 +5935,6 @@ export interface IKnowledgeBase {
   tags: string[];
   /** Source kind discriminator. */
   kind: 'blank' | 'local' | 'web';
-  /** Number of unreviewed staged inbox proposals. */
-  pending_inbox: number;
 }
 
 /** A knowledge-base tag (for categorization / filtering). */
@@ -5324,24 +5982,25 @@ export interface IKnowledgeFileContent {
 export interface IKnowledgeBinding {
   enabled: boolean;
   writeback: boolean;
-  /** 'staged' = writes confined to _inbox/{conversation_id}/ (conflict-free, default); 'direct' = agent may edit the base body. */
-  writeback_mode: KnowledgeWritebackMode;
-  /** Write-back disposition ("回写意识"), orthogonal to writeback_mode: 'conservative' (restrained, default) only writes clearly-useful knowledge; 'aggressive' captures anything plausibly relevant. */
+  /**
+   * Write-back disposition ("回写意识"). 'manual' (default) writes back ONLY
+   * when the user explicitly asks — the turn-final extractor is not scheduled
+   * at all; 'auto' lets the agent decide on its own against a high bar
+   * (durable, reusable, clearly correct — no trivia, no transient state, no
+   * duplicates).
+   */
   writeback_eagerness: KnowledgeWritebackEagerness;
   /**
    * Opt-in switch letting an unattended IM-channel (bot) session write back to
-   * the base. Off by default; channel writes are ALWAYS staged into the review
-   * inbox even when on. Set by the gateway/MCP path (the bot), not the in-app
-   * control — but it MUST round-trip through `setBinding` so an in-app edit
-   * (toggling bases / write-back) never silently clears it.
+   * the base. Off by default. Set by the gateway/MCP path (the bot), not the
+   * in-app control — but it MUST round-trip through `setBinding` so an in-app
+   * edit (toggling bases / write-back) never silently clears it.
    */
   channel_write_enabled: boolean;
   kb_ids: KnowledgeBaseId[];
 }
 
-export type KnowledgeWritebackMode = 'staged' | 'direct';
-
-export type KnowledgeWritebackEagerness = 'conservative' | 'aggressive';
+export type KnowledgeWritebackEagerness = 'manual' | 'auto';
 
 export type KnowledgeBindingKind = 'conversation' | 'terminal' | 'companion' | 'workpath';
 export type KnowledgeBindingTarget =
@@ -5355,29 +6014,6 @@ type KnowledgeBindingTargetInput = {
   kind: KnowledgeBindingKind;
   target_id: unknown;
 };
-
-/** One staged write-back proposal under `_inbox/{scope}/{rel_path}`. */
-export interface IKnowledgeInboxEntry {
-  /** First path segment under `_inbox/` — the session/conversation id that staged it. */
-  scope: string;
-  /** Base-relative path the proposal mirrors. */
-  rel_path: string;
-  size: number;
-  modified_at: number | null;
-}
-
-/** A staged proposal vs. its current base version (for the review panel). */
-export interface IKnowledgeInboxDiff {
-  scope: string;
-  rel_path: string;
-  inbox_content: string;
-  /** Current base document; absent when the proposal would create a new file. */
-  base_content?: string | null;
-  /** Server-computed unified diff, ready for the diff renderer. */
-  unified_diff: string;
-  /** true when there's no existing base document (a brand-new doc). */
-  is_new: boolean;
-}
 
 /** A consumer (binding) of a base — a workspace/conversation/etc. that mounts it. */
 export interface IKnowledgeConsumer {
@@ -5761,10 +6397,9 @@ export const knowledge = {
       return `/api/knowledge/binding/${target.kind}/${encodeURIComponent(target.target_id)}`;
     },
     // Forward EVERY binding field by destructuring off the routing params only.
-    // A hand-maintained whitelist here silently dropped writeback_mode,
-    // writeback_eagerness and channel_write_enabled in turn (the backend POST
-    // is a full replace), so any new IKnowledgeBinding field stays in the body
-    // automatically.
+    // A hand-maintained whitelist here silently dropped writeback_eagerness and
+    // channel_write_enabled in turn (the backend POST is a full replace), so any
+    // new IKnowledgeBinding field stays in the body automatically.
     (p) => {
       const { kind: _kind, target_id: _target_id, ...body } = p;
       return body;
@@ -5777,28 +6412,8 @@ export const knowledge = {
   ),
   /** Import a knowledge-base bundle — a new managed base is provisioned (name conflicts get a "(2)" suffix). */
   importBase: withResponseMap(httpPost<IKnowledgeBase, { src_path: string }>('/api/knowledge/bases/import'), fromApiKnowledgeBase),
-  // ── P4 inbox review (staged write-back proposals) ──
-  /** List staged write-back proposals under `_inbox/` (group by `scope` client-side). */
-  listInbox: httpGet<IKnowledgeInboxEntry[], { knowledge_base_id: KnowledgeBaseId }>((p) => `/api/knowledge/bases/${p.knowledge_base_id}/inbox`, { timeoutMs: KB_READ_TIMEOUT_MS }),
-  /** Server-computed unified diff of one proposal vs. the current base document. */
-  getInboxDiff: httpGet<IKnowledgeInboxDiff, { knowledge_base_id: KnowledgeBaseId; scope: string; path: string }>(
-    (p) =>
-      `/api/knowledge/bases/${p.knowledge_base_id}/inbox/diff?scope=${encodeURIComponent(p.scope)}&path=${encodeURIComponent(p.path)}`
-  ),
-  /** Accept a proposal: overwrite the base document and drop the staged copy. */
-  mergeInbox: httpPost<{ merged_path: string }, { knowledge_base_id: KnowledgeBaseId; scope: string; path: string }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/inbox/merge`,
-    (p) => ({ scope: p.scope, path: p.path })
-  ),
-  /** Discard a proposal (delete the staged copy, base untouched). */
-  discardInbox: httpPost<void, { knowledge_base_id: KnowledgeBaseId; scope: string; path: string }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/inbox/discard`,
-    (p) => ({ scope: p.scope, path: p.path })
-  ),
   /** Bindings currently mounting this base (enabled AND disabled). */
   listConsumers: httpGet<IKnowledgeConsumer[], { knowledge_base_id: KnowledgeBaseId }>((p) => `/api/knowledge/bases/${p.knowledge_base_id}/consumers`, { timeoutMs: KB_READ_TIMEOUT_MS }),
-  /** Total unreviewed staged proposals across all bases (sidebar red-dot signal). */
-  pendingInboxCount: httpGet<number, void>('/api/knowledge/inbox/pending-count', { timeoutMs: KB_READ_TIMEOUT_MS }),
   onBaseCreated: wsMappedEmitter<IKnowledgeBase>('knowledge.base-created', fromApiKnowledgeBase),
   onBaseUpdated: wsMappedEmitter<IKnowledgeBase>('knowledge.base-updated', fromApiKnowledgeBase),
   onBaseDeleted: wsMappedEmitter<{ knowledge_base_id: KnowledgeBaseId }>(
@@ -5835,15 +6450,6 @@ export const knowledge = {
       limit: p.limit,
     })
   ), (hits) => hits.map((hit) => ({ ...hit, kb_id: parseKnowledgeBaseId(hit.kb_id) }))),
-  // ── Batch inbox operations ──
-  mergeAllInbox: httpPost<void, { kbId: KnowledgeBaseId; scope?: string }>(
-    '/api/knowledge/inbox/merge-all',
-    (p) => ({ kbId: p.kbId, scope: p.scope })
-  ),
-  discardAllInbox: httpPost<void, { kbId: KnowledgeBaseId; scope?: string }>(
-    '/api/knowledge/inbox/discard-all',
-    (p) => ({ kbId: p.kbId, scope: p.scope })
-  ),
 };
 
 // ==================== Crawl jobs (crawl) ====================
@@ -5863,8 +6469,6 @@ export interface ICrawlScope {
 
 export interface ICrawlSink {
   knowledge_base_id?: string;
-  /** Stage into the knowledge review inbox instead of writing the base body. */
-  via_inbox: boolean;
 }
 
 export interface ICrawlProgress {

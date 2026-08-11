@@ -63,8 +63,6 @@
     "knowledgeBase": "Target knowledge base",
     "knowledgeBasePlaceholder": "Select a knowledge base",
     "knowledgeBaseHint": "Leave empty to record crawl results without saving page content.",
-    "knowledgeBaseEmpty": "No knowledge base yet — create one on the Knowledge page first.",
-    "viaInbox": "Stage into the review inbox",
-    "viaInboxHint": "Turning this off writes crawled pages straight into the knowledge base."
+    "knowledgeBaseEmpty": "No knowledge base yet — create one on the Knowledge page first."
   }
 }

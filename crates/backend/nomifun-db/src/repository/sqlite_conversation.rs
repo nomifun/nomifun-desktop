@@ -15,12 +15,23 @@ use crate::models::{
 use crate::repository::bind::{BindValue, bind_value, bind_value_as};
 use crate::repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
-    ConversationRowUpdate, ConversationTurnAdmissionState, IConversationRepository, MessageRowUpdate, MessageSearchRow,
+    ConversationRowUpdate, ConversationTurnAdmissionState, IConversationRepository, MessageDayBucket, MessageRowUpdate, MessageSearchRow,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
     RequirementConversationTurnAuthority, SortOrder, TurnArtifactMessageCommit,
     TurnLifecycleTransition, TurnReceiptCompletion, UnsettledConversationTurnAdmission,
     strip_runtime_resume_extra,
 };
+
+/// LOCAL calendar day (`YYYYMMDD`) of a `created_at` ms timestamp. `'localtime'`
+/// resolves through the same OS timezone `chrono::Local` reads, which is what
+/// keeps this day key identical to the companion domain's `session_day`.
+const LOCAL_DAY_EXPR: &str = "strftime('%Y%m%d', created_at / 1000, 'unixepoch', 'localtime')";
+
+/// The rows a human can actually read back: the two synthetic types the whole
+/// message API already hides, minus hidden engine plumbing. Shared by the day
+/// index and the day read so a day never renders rows its index did not count.
+const VISIBLE_MESSAGE_PREDICATE: &str =
+    "type NOT IN ('cron_trigger', 'skill_suggest') AND hidden = 0";
 
 /// SQLite-backed implementation of [`IConversationRepository`].
 #[derive(Clone, Debug)]
@@ -4005,6 +4016,17 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(conversation_id)
         .execute(&mut *tx)
         .await?;
+        // A mini-app is a finished artifact, not a child of its build log: it
+        // keeps running from the stored HTML alone. Forget the provenance link and
+        // keep the app.
+        sqlx::query(
+            "UPDATE miniapps \
+             SET source_conversation_id = NULL \
+             WHERE source_conversation_id = ?",
+        )
+        .bind(conversation_id)
+        .execute(&mut *tx)
+        .await?;
         let requirement_delete_detail = format!(
             "Conversation {conversation_id} was deleted while this requirement could be executing; the outcome is ambiguous and automatic execution was not restarted."
         );
@@ -4328,6 +4350,25 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(rows)
     }
 
+    async fn list_robot_threads_by_companion(
+        &self,
+        user_id: &str,
+        companion_id: &str,
+    ) -> Result<Vec<ConversationRow>, DbError> {
+        Ok(sqlx::query_as::<_, ConversationRow>(
+            "SELECT * FROM conversations \
+             WHERE user_id = ? \
+               AND type = 'nomi' \
+               AND json_extract(extra, '$.companion_id') = ? \
+               AND json_extract(extra, '$.robot_session') = 1 \
+             ORDER BY updated_at DESC, conversation_id",
+        )
+        .bind(user_id)
+        .bind(companion_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     async fn list_conversations_using_model_provider(
         &self,
         provider_id: &str,
@@ -4445,6 +4486,74 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(PaginatedResult {
             items: rows,
             total: 0, // keyset windows don't compute a full count
+            has_more,
+        })
+    }
+
+    async fn message_local_day_index(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<MessageDayBucket>, DbError> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(&format!(
+            "SELECT {LOCAL_DAY_EXPR} AS day, COUNT(*) AS message_count FROM messages \
+             WHERE conversation_id = ? \
+               AND {VISIBLE_MESSAGE_PREDICATE} \
+             GROUP BY day \
+             ORDER BY day DESC"
+        ))
+        .bind(conversation_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(day, message_count)| MessageDayBucket { day, message_count })
+            .collect())
+    }
+
+    async fn get_messages_for_local_day(
+        &self,
+        conversation_id: &str,
+        day: &str,
+        limit: u32,
+    ) -> Result<PaginatedResult<MessageRow>, DbError> {
+        let effective_limit = if limit == 0 { 500 } else { limit };
+        let fetch_limit = effective_limit + 1;
+
+        let count_row: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM messages \
+             WHERE conversation_id = ? \
+               AND {VISIBLE_MESSAGE_PREDICATE} \
+               AND {LOCAL_DAY_EXPR} = ?"
+        ))
+        .bind(conversation_id)
+        .bind(day)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // Oldest-first: a day reads top→bottom, exactly as it was lived.
+        let mut rows = sqlx::query_as::<_, MessageRow>(&format!(
+            "SELECT * FROM messages \
+             WHERE conversation_id = ? \
+               AND {VISIBLE_MESSAGE_PREDICATE} \
+               AND {LOCAL_DAY_EXPR} = ? \
+             ORDER BY created_at ASC, message_id ASC \
+             LIMIT ?"
+        ))
+        .bind(conversation_id)
+        .bind(day)
+        .bind(fetch_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let has_more = rows.len() as u32 > effective_limit;
+        if has_more {
+            rows.pop();
+        }
+
+        Ok(PaginatedResult {
+            items: rows,
+            total: count_row.0 as u64,
             has_more,
         })
     }
@@ -6762,6 +6871,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_robot_threads_by_companion_excludes_other_companion_sessions() {
+        let (repo, _db) = setup().await;
+        let companion_id = nomifun_common::CompanionId::new().into_string();
+        let other_companion_id = nomifun_common::CompanionId::new().into_string();
+
+        let mut robot = sample_conversation(TEST_INSTALLATION_OWNER);
+        robot.r#type = "nomi".to_owned();
+        robot.model = None;
+        robot.extra = serde_json::json!({
+            "robot_session": true,
+            "robot_id": "aa:bb:cc:dd:ee:ff",
+            "companion_session": true,
+            "companion_id": companion_id,
+        })
+        .to_string();
+        let robot_id = repo.create(&robot).await.unwrap();
+
+        let mut desktop = sample_conversation(TEST_INSTALLATION_OWNER);
+        desktop.r#type = "nomi".to_owned();
+        desktop.extra = serde_json::json!({
+            "companion_session": true,
+            "companion_id": companion_id,
+        })
+        .to_string();
+        repo.create(&desktop).await.unwrap();
+
+        let mut other_robot = sample_conversation(TEST_INSTALLATION_OWNER);
+        other_robot.r#type = "nomi".to_owned();
+        other_robot.extra = serde_json::json!({
+            "robot_session": true,
+            "robot_id": "11:22:33:44:55:66",
+            "companion_session": true,
+            "companion_id": other_companion_id,
+        })
+        .to_string();
+        repo.create(&other_robot).await.unwrap();
+
+        let rows = repo
+            .list_robot_threads_by_companion(TEST_INSTALLATION_OWNER, &companion_id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].conversation_id, robot_id);
+    }
+
+    #[tokio::test]
     async fn cron_job_id_roundtrips_as_column() {
         let (repo, _db) = setup().await;
 
@@ -7422,6 +7577,78 @@ mod tests {
         assert!(page1.has_more);
         // DESC: most recent first
         assert!(page1.items[0].created_at > page1.items[1].created_at);
+    }
+
+    /// The local-day index and the day read must agree exactly: every bucket's
+    /// count is the number of rows the day read returns, and neither counts a
+    /// hidden engine row or a synthetic type. Day KEYS are taken from the index
+    /// itself — the test must not assume the runner's timezone.
+    #[tokio::test]
+    async fn local_day_index_and_day_read_agree_and_skip_invisible_rows() {
+        let (repo, _db) = setup().await;
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
+        conv.conversation_id = repo.create(&conv).await.unwrap();
+
+        // 48h apart is more than any local day is long, so these are two
+        // different local days in every timezone.
+        let earlier = 1_770_000_000_000i64;
+        let later = earlier + 2 * 86_400_000;
+        let insert = |created_at: i64, hidden: bool, kind: &'static str| {
+            let conversation_id = conv.conversation_id.clone();
+            let repo = repo.clone();
+            async move {
+                let mut msg = sample_message(conversation_id);
+                msg.message_id = MessageId::new().into_string();
+                msg.msg_id = Some(msg.message_id.clone());
+                msg.created_at = created_at;
+                msg.hidden = hidden;
+                msg.r#type = kind.to_owned();
+                repo.insert_message(&msg).await.unwrap();
+            }
+        };
+        insert(earlier, false, "text").await;
+        insert(earlier + 60_000, false, "text").await;
+        insert(earlier + 120_000, true, "text").await; // hidden plumbing
+        insert(earlier + 180_000, false, "cron_trigger").await; // synthetic type
+        insert(later, false, "text").await;
+
+        let index = repo
+            .message_local_day_index(&conv.conversation_id)
+            .await
+            .unwrap();
+        assert_eq!(index.len(), 2, "two distinct local days: {index:?}");
+        assert!(index[0].day > index[1].day, "newest day first: {index:?}");
+        assert_eq!(index[0].message_count, 1);
+        assert_eq!(index[1].message_count, 2);
+
+        for bucket in &index {
+            let day = repo
+                .get_messages_for_local_day(&conv.conversation_id, &bucket.day, 500)
+                .await
+                .unwrap();
+            assert_eq!(day.total, bucket.message_count as u64);
+            assert_eq!(day.items.len() as i64, bucket.message_count);
+            assert!(!day.has_more);
+            assert!(day.items.iter().all(|row| !row.hidden && row.r#type == "text"));
+            assert!(
+                day.items.windows(2).all(|pair| pair[0].created_at <= pair[1].created_at),
+                "a day reads oldest-first"
+            );
+        }
+
+        // An unknown day is empty, not an error; the limit is honored.
+        let empty = repo
+            .get_messages_for_local_day(&conv.conversation_id, "19700101", 500)
+            .await
+            .unwrap();
+        assert!(empty.items.is_empty() && empty.total == 0 && !empty.has_more);
+        let capped = repo
+            .get_messages_for_local_day(&conv.conversation_id, &index[1].day, 1)
+            .await
+            .unwrap();
+        assert_eq!(capped.items.len(), 1);
+        assert_eq!(capped.total, 2, "total stays the day's full count");
+        assert!(capped.has_more);
     }
 
     #[tokio::test]

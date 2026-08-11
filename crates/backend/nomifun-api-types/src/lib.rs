@@ -141,7 +141,7 @@ pub use file::{
 };
 pub use idmm::{
     BlockedBehavior, BudgetConfig, BypassModelRef, CategoryMode, CategoryRules, DecisionStrategy,
-    DecisionWatchConfig, FaultWatchConfig, IdmmConfig, IdmmRunState, IdmmSettings, IdmmState,
+    DecisionWatchConfig, FaultWatchConfig, IdmmConfig, IdmmRunState, IdmmState,
     IdmmTargetKind, InterventionRecord, ModelFailoverConfig, OpenQuestionRule, OptionRule,
     PermissionRule, ScanScope, SetIdmmRequest, Tendency, WakeStrategy, WatchBase, WatchTier,
 };
@@ -209,7 +209,7 @@ pub use shell::{
     CheckToolInstalledRequest, CheckToolInstalledResponse, DeepgramSpeechToTextConfig,
     OpenAISpeechToTextConfig, OpenExternalRequest, OpenFileRequest, OpenFolderWithRequest,
     ShowItemInFolderRequest, SpeechToTextConfig, SpeechToTextProvider, SpeechToTextResult,
-    ToolType, TtsApiRequest,
+    TEXT_TO_SPEECH_PREFERENCE_KEY, TextToSpeechConfig, ToolType, TtsApiRequest,
 };
 pub use skill::{
     AddExternalPathRequest, BuiltinAutoSkillResponse, ExportSkillRequest,

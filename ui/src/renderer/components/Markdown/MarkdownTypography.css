@@ -1,0 +1,247 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Shared Markdown article typography.
+ *
+ * This stylesheet is loaded normally by document previews and injected as raw
+ * CSS by ShadowView. Keep document surfaces on the compact preset so knowledge
+ * documents, workspace previews, preset instructions and Skill details share
+ * one visual rhythm. Message surfaces may keep the default/explicit presets.
+ */
+.markdown-article {
+  --markdown-paragraph-margin: 16px;
+  --markdown-list-margin: 16px;
+  --markdown-list-padding: 24px;
+  --markdown-list-item-margin: 6px;
+  --markdown-h1-font-size: 24px;
+  --markdown-h1-line-height: 32px;
+  --markdown-h1-margin: 0;
+  --markdown-h2-font-size: 16px;
+  --markdown-h2-line-height: 24px;
+  --markdown-h2-margin: 20px 0 12px;
+  --markdown-h3-font-size: 16px;
+  --markdown-h3-line-height: 24px;
+  --markdown-h3-margin: 20px 0 12px;
+  --markdown-minor-heading-font-size: 16px;
+  --markdown-minor-heading-line-height: 24px;
+  --markdown-minor-heading-margin: 20px 0 12px;
+  --markdown-rule-margin: 28px 0;
+  --markdown-quote-margin: 16px 0;
+  --markdown-quote-padding: 12px;
+  --markdown-quote-border-width: 3px;
+  --markdown-code-margin: 8px;
+
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: var(--markdown-body-font-size, 16px);
+  line-height: var(--markdown-body-line-height, 28px);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.markdown-article--explicit {
+  --markdown-paragraph-margin: 10px;
+  --markdown-list-margin: 10px;
+  --markdown-list-item-margin: 4px;
+  --markdown-h1-font-size: var(--markdown-body-font-size);
+  --markdown-h1-line-height: var(--markdown-body-line-height);
+  --markdown-h2-font-size: var(--markdown-body-font-size);
+  --markdown-h2-line-height: var(--markdown-body-line-height);
+  --markdown-h2-margin: 12px 0 8px;
+  --markdown-h3-font-size: var(--markdown-body-font-size);
+  --markdown-h3-line-height: var(--markdown-body-line-height);
+  --markdown-h3-margin: 12px 0 8px;
+  --markdown-minor-heading-font-size: var(--markdown-body-font-size);
+  --markdown-minor-heading-line-height: var(--markdown-body-line-height);
+  --markdown-minor-heading-margin: 12px 0 8px;
+}
+
+/* Knowledge-base document preview is the canonical document density. */
+.markdown-article--compact {
+  --markdown-body-font-size: 14px;
+  --markdown-body-line-height: 22px;
+  --markdown-paragraph-margin: 8px;
+  --markdown-list-margin: 7px;
+  --markdown-list-padding: 20px;
+  --markdown-list-item-margin: 2px;
+  --markdown-h1-font-size: 22px;
+  --markdown-h1-line-height: 30px;
+  --markdown-h1-margin: 0 0 12px;
+  --markdown-h2-font-size: 18px;
+  --markdown-h2-line-height: 26px;
+  --markdown-h2-margin: 16px 0 7px;
+  --markdown-h3-font-size: 16px;
+  --markdown-h3-line-height: 24px;
+  --markdown-h3-margin: 14px 0 6px;
+  --markdown-minor-heading-font-size: 14px;
+  --markdown-minor-heading-line-height: 22px;
+  --markdown-minor-heading-margin: 12px 0 5px;
+  --markdown-rule-margin: 16px 0;
+  --markdown-quote-margin: 10px 0;
+  --markdown-quote-padding: 10px;
+  --markdown-quote-border-width: 2px;
+  --markdown-code-margin: 6px;
+}
+
+.markdown-article > :first-child {
+  margin-top: 0;
+}
+
+.markdown-article > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-article h1,
+.markdown-article h2,
+.markdown-article h3,
+.markdown-article h4,
+.markdown-article h5,
+.markdown-article h6 {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.markdown-article h1 {
+  margin: var(--markdown-h1-margin);
+  font-size: var(--markdown-h1-font-size);
+  line-height: var(--markdown-h1-line-height);
+}
+
+.markdown-article h2 {
+  margin: var(--markdown-h2-margin);
+  font-size: var(--markdown-h2-font-size);
+  line-height: var(--markdown-h2-line-height);
+}
+
+.markdown-article h3 {
+  margin: var(--markdown-h3-margin);
+  font-size: var(--markdown-h3-font-size);
+  line-height: var(--markdown-h3-line-height);
+}
+
+.markdown-article h4,
+.markdown-article h5,
+.markdown-article h6 {
+  margin: var(--markdown-minor-heading-margin);
+  font-size: var(--markdown-minor-heading-font-size);
+  line-height: var(--markdown-minor-heading-line-height);
+}
+
+.markdown-article p {
+  margin-block: var(--markdown-paragraph-margin);
+}
+
+.markdown-article ol,
+.markdown-article ul {
+  margin-block: var(--markdown-list-margin);
+  padding-inline-start: var(--markdown-list-padding);
+}
+
+.markdown-article li {
+  margin-block: var(--markdown-list-item-margin);
+}
+
+.markdown-article a {
+  color: var(--markdown-link-color, var(--color-primary, #4a58fa));
+  text-decoration: none;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.markdown-article strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.markdown-article hr {
+  margin: var(--markdown-rule-margin);
+  border: 0;
+  border-top: 1px solid var(--bg-3);
+}
+
+.markdown-article blockquote {
+  margin: var(--markdown-quote-margin);
+  padding-left: var(--markdown-quote-padding);
+  border-left: var(--markdown-quote-border-width) solid var(--bg-3);
+  color: var(--text-primary);
+}
+
+.markdown-article blockquote > :first-child {
+  margin-top: 0;
+}
+
+.markdown-article blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-article pre {
+  max-width: 100%;
+  margin-block: var(--markdown-code-margin);
+  overflow-x: auto;
+}
+
+.markdown-article code,
+.markdown-article pre,
+.markdown-article .hljs {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.markdown-article code:not(pre code) {
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-3);
+  color: var(--text-primary);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.markdown-article code span {
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.markdown-article img {
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-article table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.markdown-article th,
+.markdown-article td {
+  min-width: 120px;
+  padding: 8px;
+  border: 1px solid var(--bg-3);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-article th {
+  background: var(--bg-1);
+  font-weight: 600;
+}
+
+/* Let KaTeX own its internal metrics. */
+.markdown-article .katex,
+.markdown-article .katex * {
+  line-height: normal;
+}
+
+.markdown-article .katex-display {
+  padding: 0.5em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}

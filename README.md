@@ -24,7 +24,7 @@
   <img alt="Built with Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white">
   <img alt="Rust 2024" src="https://img.shields.io/badge/Rust-edition_2024-CE412B?style=flat-square&logo=rust&logoColor=white">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white">
-  <a href="https://github.com/nomifun/nomifun-tauri/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/nomifun/nomifun-tauri?style=flat-square&color=FF6F91"></a>
+  <a href="https://github.com/nomifun/nomifun-desktop/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/nomifun/nomifun-desktop?style=flat-square&color=FF6F91"></a>
 </p>
 
 <p>
@@ -35,7 +35,7 @@
   <a href="https://www.nomifun.com">🌐 Website</a>&nbsp;·&nbsp;
   <a href="docs/README.md">📖 Docs</a>&nbsp;·&nbsp;
   <a href="#-getting-started">🚀 Get started</a>&nbsp;·&nbsp;
-  <a href="https://github.com/nomifun/nomifun-tauri/releases">📦 Releases</a>&nbsp;·&nbsp;
+  <a href="https://github.com/nomifun/nomifun-desktop/releases">📦 Releases</a>&nbsp;·&nbsp;
   <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">China mirror</a>&nbsp;·&nbsp;
   <a href="./RELEASING.zh-CN.md">发版手册</a>&nbsp;·&nbsp;
   <a href="#-contact--community">💬 Community</a>
@@ -131,11 +131,22 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 The companion you talk to every day quietly becomes the partner who *gets* you.
 
 - **Make it yours.** Upload a custom companion figure (DIY), or pick from an independent figure library decoupled from any single companion.
-- **One brain, many faces.** Run multiple companions that share a common memory hub, while each keeps its own **private** memory and can mount different domain knowledge bases. Teach *one* companion well, then have it teach the others.
+- **A family, not a hive mind.** Run multiple companions side by side, each a complete individual with **its own** chat model, persona, memory, and domain knowledge bases. Memory belongs to exactly one companion — nothing you tell the work companion leaks into the one you chat with at home.
 - **Chat with them where you already work.** Companion chats now live in the main **Sessions** UI under a dedicated desktop-companion group, while `/nomi` stays focused on companion management.
 - **It learns you (opt-in, on by default after a one-time consent).** A background learner distills your usage into durable memories; a deterministic evolution engine mines your recurring multi-step tool sequences into **draft skills** it proposes for your review. Memory is fully **visible and editable**.
-- **Skills that spread.** Companions generate their own skills, discuss them with you, and can **gift** a skill to another companion (the recipient gets a copy) — opt-in shared learning across your roster.
+- **Skills it writes itself.** Companions distill their own skills out of real work and discuss them with you before anything is kept.
 - **A super gateway, not just a buddy.** Each companion is a complete, independent individual that can connect to multiple IM channels. From anywhere with a network and a chat app, message your companion to drive your computer for you. Each companion can fully operate the desktop's capabilities.
+
+### 🤖 XiaoZhi robot — give your companion a physical presence
+
+> Guide: [`docs/guides/xiaozhi-robot.md`](docs/guides/xiaozhi-robot.md) · Firmware: [nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai)
+
+Connect a compatible XiaoZhi ESP32 robot directly to NomiFun over your LAN. The
+robot supplies the microphone, speaker, display, servos, and device-side MCP
+tools, while NomiFun supplies the companion's persona, models, memory, ASR, TTS,
+sessions, and tool coordination. Setup is built into each companion's **Remote
+control → Robot connection** page: copy its OTA address, enter the six-digit
+activation code shown by the robot, and bind the device to that companion.
 
 ### 🧠 Agent collaboration
 
@@ -164,7 +175,7 @@ You give the orders; NomiFun reliably does the work.
 Pull the knowledge scattered across your system into one managed, trackable place.
 
 - **Centralized management & tracking** — create, mount, and track consumers across conversations, terminals, and companions.
-- **Safe write-back** — a code-enforced, per-surface write policy. By default, writes are **staged into a review inbox** with unified-diff preview and merge/discard — so agents never scribble into the wrong place.
+- **Safe write-back** — a code-enforced, per-surface write policy. Every mount picks its **write-back disposition**: **manual** (the default — nothing is written back unless you ask for it in the conversation) or **automatic** (the agent decides on its own, and only writes what it is confident is durably worth keeping). Either way an update **appends** to the existing document under compare-and-swap, so a write-back can add to the text you curated but never overwrite it.
 - **Real-time URL snapshot** — turn any web page into a knowledge source (SSRF-guarded fetch, HTML→Markdown), in *snapshot* (persisted, re-fetchable) or *live* mode.
 - **Scoped retrieval** — agents call a `knowledge_search` tool whose scope is decided server-side and cannot be widened.
 
@@ -301,7 +312,7 @@ Start with [`docs/architecture/overview.md`](docs/architecture/overview.md) for 
 
 ## 🚀 Getting started
 
-> 📦 **Installers**: use [GitHub Releases](https://github.com/nomifun/nomifun-tauri/releases) first. Mainland China users can use the [Baidu Netdisk mirror](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA) (shared as `nomifun`). You can also install from source or run the server with Docker.
+> 📦 **Installers**: use [GitHub Releases](https://github.com/nomifun/nomifun-desktop/releases) first. Mainland China users can use the [Baidu Netdisk mirror](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA) (shared as `nomifun`). You can also install from source or run the server with Docker.
 
 **Prerequisites**
 
@@ -312,7 +323,7 @@ Start with [`docs/architecture/overview.md`](docs/architecture/overview.md) for 
 **Desktop app (from source)**
 
 ```bash
-git clone https://github.com/nomifun/nomifun-tauri.git
+git clone https://github.com/nomifun/nomifun-desktop.git
 cd nomifun-tauri
 bun install
 
@@ -499,6 +510,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | **运行（组装好的应用）** | |
 | `bun run serve:web` | 启动 Web 服务器，托管已构建的前端 |
 | **测试** | |
+| `bun run test:git-attribution` | Validate the repository-local human-only Git attribution policy. |
 | `bun run test` | 运行全部 Rust 测试（含 doctest） |
 | `bun run test:fast` | 用 nextest 快速跑 Rust 测试（日常） |
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
@@ -510,14 +522,16 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
 | `bun run check:browser-platform-boundary` | Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
-| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
+| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
+| `bun run check:dead-css` | 死 CSS 工具类棘轮：拦住新增的 {text,bg,border}-[rgb(var(--ramp-N))] / border-border-N / border-b-base / border-b-light（存量记在脚本 BASELINE，只许变少） |
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
 | **维护 / 工具** | |
+| `bun run setup:git-hooks` | Enable this repository's human-only Git attribution hooks without changing global Git config. |
 | `bun run clean` | 深度回收构建空间（debug 产物 + flycheck + 旧安装包） |
 | `bun run seed:dev` | 用生产数据目录播种 dev 数据目录 |
 | `bun run bump` | 统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag |
@@ -534,6 +548,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 - [`docs/README.md`](docs/README.md) — documentation index
 - [`docs/getting-started/`](docs/getting-started) — installation and first run
 - [`docs/guides/`](docs/guides) — user & operator guides (companions, channels, AutoWork, knowledge, computer/browser use, terminal, remote API, …)
+- [`docs/guides/xiaozhi-robot.md`](docs/guides/xiaozhi-robot.md) — connect a XiaoZhi ESP32 robot to a NomiFun companion
 - [`docs/architecture/`](docs/architecture) — technical architecture
 - [`docs/reference/`](docs/reference) — configuration, API overview, FAQ, troubleshooting
 
@@ -554,7 +569,7 @@ NomiFun very much needs your help to grow — code contributions, community buil
 - Read [`CONTRIBUTING.md`](CONTRIBUTING.md) to get set up and learn the check ladder. Simplified Chinese: [`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md).
 - Be excellent to each other — see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 - Found a vulnerability? Follow [`SECURITY.md`](SECURITY.md).
-- Browse [open issues](https://github.com/nomifun/nomifun-tauri/issues) for a place to start.
+- Browse [open issues](https://github.com/nomifun/nomifun-desktop/issues) for a place to start.
 
 ---
 
@@ -591,7 +606,7 @@ We'd love to hear from you. The fastest way to reach us is GitHub; the social ch
 | Channel | Where |
 |---|---|
 | 🌐 **Website** | [www.nomifun.com](https://www.nomifun.com) |
-| 🐙 **GitHub** | [nomifun/nomifun-tauri](https://github.com/nomifun/nomifun-tauri) · [Issues](https://github.com/nomifun/nomifun-tauri/issues) · [Releases](https://github.com/nomifun/nomifun-tauri/releases) |
+| 🐙 **GitHub** | [nomifun/nomifun-desktop](https://github.com/nomifun/nomifun-desktop) · [Issues](https://github.com/nomifun/nomifun-desktop/issues) · [Releases](https://github.com/nomifun/nomifun-desktop/releases) |
 | ✉️ **Email** | `hello@nomifun.com` <sub>(provisional — being finalized)</sub> |
 | 📕 **小红书 / RED** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
 | 📺 **Bilibili** | [NomiFun](https://b23.tv/0UhgKDh) · [demo video](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |

@@ -105,7 +105,7 @@ const TagPicker: React.FC<TagPickerProps> = ({ value, onChange, tags, createTag 
       <div className='relative inline-flex items-center'>
         <input
           ref={inputRef}
-          className='knowledge-studio-tag-input w-86px rounded-8px border border-transparent bg-[var(--color-fill-1)] px-9px py-5px text-12px text-[var(--color-text-2)] outline-none font-[inherit] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)] transition-[background-color,border-color,box-shadow] placeholder:text-[var(--color-text-4)] hover:bg-[var(--color-fill-2)] focus:border-[rgba(var(--primary-6),0.32)] focus:bg-[var(--color-bg-2)] focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
+          className='knowledge-studio-tag-input w-86px rounded-8px border border-solid border-transparent bg-[var(--color-fill-1)] px-9px py-5px text-12px text-[var(--color-text-2)] outline-none font-[inherit] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)] transition-[background-color,border-color,box-shadow] placeholder:text-[var(--color-text-4)] hover:bg-[var(--color-fill-2)] focus:border-[rgba(var(--primary-6),0.32)] focus:bg-[var(--color-bg-2)] focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
           placeholder={t('knowledge.studio.tagNewPlaceholder', { defaultValue: '+ 新标签' })}
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}

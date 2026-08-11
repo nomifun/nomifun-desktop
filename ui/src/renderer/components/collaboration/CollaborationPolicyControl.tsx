@@ -14,6 +14,9 @@ type CollaborationPolicyControlProps = CollaborationPolicyValue & {
   runtimeType?: string;
   onChange: (next: CollaborationPolicyValue) => void | Promise<void>;
   compact?: boolean;
+  /** Render only the policy panel so a parent collaboration control can
+   * combine models and policy behind one trigger. */
+  embedded?: boolean;
   className?: string;
 };
 
@@ -25,6 +28,7 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
   decisionPolicy,
   onChange,
   compact = false,
+  embedded = false,
   className,
 }) => {
   const { t } = useTranslation();
@@ -94,6 +98,10 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
   );
 
   const active = delegationPolicy !== 'disabled';
+  if (embedded) {
+    return <div className={styles.embedded}>{content}</div>;
+  }
+
   const trigger = (
     <Button
       type={compact ? 'text' : 'secondary'}

@@ -124,7 +124,6 @@ export type KnowledgeWritebackStatus =
 export type KnowledgeWritebackFile = {
   kb_id?: KnowledgeBaseId | null;
   rel_path?: string | null;
-  staged?: boolean;
 };
 
 export type KnowledgeWritebackFailure = {
@@ -473,7 +472,6 @@ const normalizeKnowledgeWritebackFiles = (value: unknown): KnowledgeWritebackFil
           ? { kb_id: parseKnowledgeBaseId(file.kb_id) }
           : {}),
       ...(typeof file.rel_path === 'string' || file.rel_path === null ? { rel_path: file.rel_path } : {}),
-      ...(typeof file.staged === 'boolean' ? { staged: file.staged } : {}),
     }));
 };
 
@@ -1469,7 +1467,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'system': // Cron system responses, ignored
     case 'acp_model_info': // Model info updates, handled by AcpModelSelector
     case 'codex_model_info': // Legacy Codex model info updates
-    case 'acp_context_usage': // Context usage updates, handled by AcpSendBox
+    case 'acp_context_usage': // Known engine event; no UI consumer, swallowed
     case 'request_trace': // Request trace events, logged to F12 console (not persisted)
       return undefined;
     default: {

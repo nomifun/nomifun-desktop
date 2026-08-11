@@ -1,8 +1,9 @@
 /**
  * MarketSettingsPanel — shared ranking-market surface for the skill, MCP,
- * plugin, and preset-package markets. Renders the source switcher, sync /
- * search controls, the card grid, and (optionally) the shared audience /
- * scenario tag filter bar. Consumers own what "Add" means via `onAdd`.
+ * plugin, and preset-package markets. Renders an outlined, transparent library
+ * surface with the source switcher, sync / search controls, card grid, and
+ * (optionally) the shared audience / scenario tag filter bar. Consumers own
+ * what "Add" means via `onAdd`.
  */
 import { ipcBridge } from '@/common';
 import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBridge';
@@ -15,6 +16,12 @@ import PresetTagFilterBar from './PresetSettings/PresetTagFilterBar';
 import type { TagFilterState } from './PresetSettings/presetUtils';
 import type { SkillTagFilterState } from './skill/skillFilter';
 import SkillMarketCard from './skill/SkillMarketCard';
+import {
+  ENHANCED_TOOLS_EMPTY_STATE_CLASS,
+  ENHANCED_TOOLS_GRID_CLASS,
+  ENHANCED_TOOLS_HEADER_CLASS,
+  ENHANCED_TOOLS_SURFACE_CLASS,
+} from './enhancedToolsLayout';
 import {
   cleanMarketText,
   filterSkillMarketItems,
@@ -99,6 +106,8 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [searchExpanded, setSearchExpanded] = useState(false);
   const [tagFilter, setTagFilter] = useState<TagFilterState>({ audience: [], scenario: [] });
+  const pendingAddIdsRef = useRef<Set<string>>(new Set());
+  const [pendingAddIds, setPendingAddIds] = useState<Set<string>>(new Set());
 
   const testId = useCallback(
     (id: string): string | undefined => (testIdPrefix ? id.replace('{market}', testIdPrefix) : undefined),
@@ -234,6 +243,29 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
     }
   }, [activeSource, message, t, text]);
 
+  const handleMarketAdd = useCallback(
+    async (item: ISkillMarketItem) => {
+      if (pendingAddIdsRef.current.has(item.id)) return;
+      const started = new Set(pendingAddIdsRef.current);
+      started.add(item.id);
+      pendingAddIdsRef.current = started;
+      setPendingAddIds(started);
+      try {
+        await onAdd(item);
+      } catch (error) {
+        // Consumers normally own their user-facing error message. Keep the
+        // shared callback boundary rejection-safe for future consumers.
+        console.error('Market add callback failed:', error);
+      } finally {
+        const finished = new Set(pendingAddIdsRef.current);
+        finished.delete(item.id);
+        pendingAddIdsRef.current = finished;
+        setPendingAddIds(finished);
+      }
+    },
+    [onAdd]
+  );
+
   const isSearchVisible = searchExpanded || searchQuery.length > 0;
   const activeSearch = searchQuery.trim().length > 0;
   const resolvedEmptyText = loading
@@ -249,56 +281,90 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
         ? emptyText
         : (text?.noFilterMatch ?? emptyText);
 
+  const marketSourceSwitcher = (
+    <div
+      data-testid={testId('{market}-source-actions')}
+      className='inline-flex flex-none items-center gap-4px rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-3px'
+    >
+      {sources.map((source) => (
+        <Button
+          key={source}
+          size='small'
+          type={activeSource === source ? 'primary' : 'text'}
+          data-testid={testId(`btn-{market}-source-${source}`)}
+          className='!rounded-9px !h-28px !px-12px !text-12px'
+          onClick={() => setActiveSource(source)}
+        >
+          {marketSourceLabel(source)}
+          {(sourceCounts[source] ?? 0) > 0 ? ` ${sourceCounts[source]}` : ''}
+        </Button>
+      ))}
+    </div>
+  );
+
+  const marketIconActions = (
+    <div
+      data-testid={testId('{market}-icon-actions')}
+      className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap justify-end' : 'ml-auto flex-none justify-end'}`}
+    >
+      <Button
+        type={isSearchVisible ? 'secondary' : 'text'}
+        size='small'
+        data-testid={testId('btn-search-{market}')}
+        className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
+        icon={isSearchVisible ? <CloseSmall size={16} fill='currentColor' /> : <Search size={16} fill='currentColor' />}
+        onClick={() => {
+          if (isSearchVisible) {
+            setSearchExpanded(false);
+            setSearchQuery('');
+            return;
+          }
+          setSearchExpanded(true);
+        }}
+      />
+      <Button
+        type='text'
+        size='small'
+        data-testid={testId('btn-sync-{market}')}
+        className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
+        icon={<Refresh size={16} fill='currentColor' className={loading ? 'animate-spin' : ''} />}
+        onClick={() => void syncMarket()}
+        title={t('common.refresh', { defaultValue: '刷新' })}
+      />
+    </div>
+  );
+
+  const marketActions = (
+    <div
+      data-testid={testId('{market}-actions')}
+      className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap' : 'ml-auto flex-none justify-end'}`}
+    >
+      {marketSourceSwitcher}
+      {marketIconActions}
+    </div>
+  );
+
   return (
-    <div className={`bg-fill-2 rounded-24px ${isMobile ? 'p-16px' : 'p-20px'}`}>
+    <div
+      aria-label={title}
+      data-testid={testId('{market}-surface')}
+      className={ENHANCED_TOOLS_SURFACE_CLASS}
+    >
       {messageContext}
-      <div className='flex flex-col gap-16px mb-20px'>
-        <div className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-start justify-between'}`}>
+      <div className={ENHANCED_TOOLS_HEADER_CLASS}>
+        <div
+          data-testid={testId('{market}-header-row')}
+          className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-center justify-between'}`}
+        >
           <div className='min-w-0'>
-            <h2 className='m-0 text-28px font-700 leading-[1.1] text-t-primary'>{title}</h2>
-            <p className='mt-8px mb-0 max-w-[680px] text-14px text-t-secondary leading-relaxed'>{description}</p>
+            <p
+              data-testid={testId('{market}-description')}
+              className='m-0 max-w-[680px] text-14px text-t-secondary leading-relaxed'
+            >
+              {description}
+            </p>
           </div>
-          <div className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap' : 'flex-shrink-0'}`}>
-            <div className='inline-flex items-center gap-4px rounded-12px bg-[var(--color-bg-2)] p-3px border border-solid border-[var(--color-border-2)]'>
-              {sources.map((source) => (
-                <Button
-                  key={source}
-                  size='small'
-                  type={activeSource === source ? 'primary' : 'text'}
-                  data-testid={testId(`btn-{market}-source-${source}`)}
-                  className='!rounded-9px !h-28px !px-12px !text-12px'
-                  onClick={() => setActiveSource(source)}
-                >
-                  {marketSourceLabel(source)}
-                  {(sourceCounts[source] ?? 0) > 0 ? ` ${sourceCounts[source]}` : ''}
-                </Button>
-              ))}
-            </div>
-            <Button
-              type='text'
-              size='small'
-              data-testid={testId('btn-sync-{market}')}
-              className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
-              icon={<Refresh size={16} fill='currentColor' className={loading ? 'animate-spin' : ''} />}
-              onClick={() => void syncMarket()}
-              title={t('common.refresh', { defaultValue: '刷新' })}
-            />
-            <Button
-              type={isSearchVisible ? 'secondary' : 'text'}
-              size='small'
-              data-testid={testId('btn-search-{market}')}
-              className='!rounded-10px !h-34px !w-34px !p-0 flex items-center justify-center !text-t-secondary hover:!bg-fill-1 hover:!text-t-primary'
-              icon={isSearchVisible ? <CloseSmall size={16} fill='currentColor' /> : <Search size={16} fill='currentColor' />}
-              onClick={() => {
-                if (isSearchVisible) {
-                  setSearchExpanded(false);
-                  setSearchQuery('');
-                  return;
-                }
-                setSearchExpanded(true);
-              }}
-            />
-          </div>
+          {enableTagFilter ? marketIconActions : marketActions}
         </div>
 
         {isSearchVisible && (
@@ -323,34 +389,36 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
             localeKey={localeKey}
             onManageTags={() => undefined}
             hideManageTags
+            actions={marketSourceSwitcher}
           />
         )}
       </div>
 
       {errors.length > 0 && (
-        <div className='mb-14px rounded-12px border border-solid border-[rgba(var(--orange-6),0.24)] bg-[rgba(var(--orange-6),0.08)] px-14px py-10px text-12px leading-18px text-[rgb(var(--orange-7))]'>
+        <div className='mb-14px rounded-12px border border-solid border-[rgba(var(--orange-6),0.24)] bg-[rgba(var(--orange-6),0.08)] px-14px py-10px text-12px leading-18px text-[rgba(var(--orange-7),1)]'>
           {errors.join(' / ')}
         </div>
       )}
 
       {filteredItems.length > 0 ? (
-        <div className='grid gap-12px' style={{ gridTemplateColumns: CARD_GRID_COLS }}>
+        <div className={ENHANCED_TOOLS_GRID_CLASS} style={{ gridTemplateColumns: CARD_GRID_COLS }}>
           {filteredItems.map((item) => (
             <SkillMarketCard
               key={item.id}
               item={item}
               tagByKey={tags.tagByKey}
               localeKey={localeKey}
-              onAdd={(marketItem) => void onAdd(marketItem)}
+              adding={pendingAddIds.has(item.id)}
+              onAdd={(marketItem) => void handleMarketAdd(marketItem)}
             />
           ))}
         </div>
       ) : (
-        <div className='text-center text-t-secondary py-40px'>{resolvedEmptyText}</div>
+        <div className={ENHANCED_TOOLS_EMPTY_STATE_CLASS}>{resolvedEmptyText}</div>
       )}
 
       {(fetchedAt || items.length > 0) && (
-        <div className='mt-16px flex items-center justify-between gap-12px text-12px text-t-tertiary'>
+        <div className='mt-12px flex items-center justify-between gap-10px text-12px text-t-tertiary'>
           <span>
             {fetchedAt
               ? (text?.lastUpdated?.(new Date(fetchedAt).toLocaleString()) ??

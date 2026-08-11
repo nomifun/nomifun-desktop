@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { ICompanionWithStatus } from '@/common/adapter/ipcBridge';
+import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId } from '@/common/types/ids';
 import CompanionAvatar from '@renderer/pages/companion/CompanionAvatar';
 import type { CompanionMood } from '@renderer/pages/companion/characters';
@@ -13,16 +14,18 @@ import { customFigureMetaOf } from '@renderer/pages/companion/characters/customM
 import { useCompanions } from '@renderer/pages/nomi/useNomi';
 import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
 import { Message, Tooltip } from '@arco-design/web-react';
-import { Info } from '@icon-park/react';
+import { Info, Robot } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import useSWR from 'swr';
 
 import {
   COMPANION_COLLAPSED_LIST_LIMIT,
   getVisibleCompanionEntries,
 } from './utils/companionVisibleEntries';
+import { useConversationListSync } from './hooks/useConversationListSync';
 
 interface Props {
   /** Active conversation id parsed from the `/conversation/:id` route, for row highlight. */
@@ -127,12 +130,44 @@ const CompanionSessionGroup: React.FC<Props> = ({
     [navigate, onSessionClick, sessionMap]
   );
 
+  // Robot threads bound to each companion. A device's chat belongs to its 伙伴,
+  // shown nested under that companion row rather than in a separate top-level
+  // bucket — the robot thread stays distinct (its own voice-tuned prompt), it is
+  // just attributed to its companion here.
+  const { robotConversations } = useConversationListSync();
+  const { data: robots } = useSWR('robots.list', () => ipcBridge.robot.list.invoke());
+  const robotNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const r of robots ?? []) names.set(r.robot_id, r.name);
+    return names;
+  }, [robots]);
+  const robotsByCompanion = useMemo(() => {
+    const byCompanion = new Map<string, TChatConversation[]>();
+    for (const conv of robotConversations) {
+      const companionId = (conv.extra as { companion_id?: string } | undefined)?.companion_id;
+      if (companionId == null) continue;
+      const bucket = byCompanion.get(companionId);
+      if (bucket) bucket.push(conv);
+      else byCompanion.set(companionId, [conv]);
+    }
+    return byCompanion;
+  }, [robotConversations]);
+
+  const openRobotConversation = useCallback(
+    (id: ConversationId) => {
+      cleanupSiderTooltips();
+      onSessionClick?.();
+      void navigate(`/conversation/${id}`);
+    },
+    [navigate, onSessionClick]
+  );
+
   // 无伙伴时不渲染分组（避免对不使用伙伴的用户造成噪音；创建后经 WS 刷新即出现）。
   if (companions.length === 0) return null;
 
   if (collapsed) {
     return (
-      <div className='min-w-0 flex flex-col items-center gap-4px mb-4px'>
+      <div className='min-w-0 flex flex-col items-center gap-2px mb-3px'>
         {companions.map((c) => {
           const active =
             activeConversationId != null &&
@@ -144,7 +179,7 @@ const CompanionSessionGroup: React.FC<Props> = ({
                 aria-label={c.name}
                 onClick={() => void handleOpen(c)}
                 className={classNames(
-                  'flex items-center justify-center w-36px h-36px rd-10px cursor-pointer transition-colors',
+                  'flex items-center justify-center w-34px h-34px rd-10px cursor-pointer transition-colors',
                   active ? '!bg-primary-1' : 'hover:bg-fill-2 active:bg-fill-3'
                 )}
               >
@@ -178,12 +213,12 @@ const CompanionSessionGroup: React.FC<Props> = ({
   );
 
   return (
-    <div className='min-w-0 mb-2px'>
+    <div className='min-w-0 mb-1px'>
       {/* 与「项目/工作路径」完全同款的纯 section 标题（无边框/盒子/箭头，只有标签 + 数字）。
           点击整行切换持久化折叠态（默认展开）。 */}
       <div className='px-2px'>
         <div
-          className='h-22px px-2px flex items-center justify-between gap-8px select-none cursor-pointer min-w-0'
+          className='h-20px px-2px flex items-center justify-between gap-8px select-none cursor-pointer min-w-0'
           onClick={() => onToggleExpanded?.()}
         >
           <span className='text-13px text-t-tertiary font-[500] leading-none tracking-wide truncate min-w-0'>
@@ -194,8 +229,8 @@ const CompanionSessionGroup: React.FC<Props> = ({
       </div>
 
       {expanded && (
-        <div className='flex flex-col gap-2px mt-2px'>
-          <div className='mx-6px mb-2px flex min-h-28px items-center gap-6px rounded-8px bg-[rgba(var(--primary-6),0.06)] px-8px py-5px text-11px text-t-tertiary'>
+        <div className='flex flex-col gap-1px mt-1px'>
+          <div className='mx-6px mb-1px flex min-h-26px items-center gap-6px rounded-8px bg-[rgba(var(--primary-6),0.06)] px-8px py-4px text-11px text-t-tertiary'>
             <span className='inline-flex h-16px w-16px shrink-0 items-center justify-center text-primary opacity-70'>
               <Info theme='outline' size='13' fill='currentColor' className='block leading-none' />
             </span>
@@ -206,12 +241,13 @@ const CompanionSessionGroup: React.FC<Props> = ({
               activeConversationId != null &&
               sessionMap.get(c.companion_id) === activeConversationId;
             const modelReady = modelReadyOf(c);
+            const companionRobots = robotsByCompanion.get(c.companion_id) ?? [];
             return (
+              <React.Fragment key={c.companion_id}>
               <div
-                key={c.companion_id}
                 onClick={() => void handleOpen(c)}
                 className={classNames(
-                  'group flex items-center gap-8px shrink-0 rd-10px px-8px py-6px cursor-pointer transition-colors box-border',
+                  'group flex items-center gap-8px shrink-0 rd-10px px-8px py-4px cursor-pointer transition-colors box-border',
                   active ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
                 )}
               >
@@ -224,8 +260,12 @@ const CompanionSessionGroup: React.FC<Props> = ({
                     activity='idle'
                     size={32}
                   />
+                  {/* 这圈边框把状态点从头像上「抠」出来，所以宽度和样式都得写实：
+                      `border-2` 只是 --bg-2 颜色，没有宽度也没有 border-style（本仓库
+                      没有全局 border reset），整圈一个像素都不画。
+                      The cut-out ring needs a real width AND a style to exist. */}
                   <span
-                    className='absolute -right-1px -bottom-1px w-9px h-9px rd-full border-2 border-[var(--color-bg-1)]'
+                    className='absolute -right-1px -bottom-1px w-9px h-9px rd-full border-2px border-solid border-[var(--color-bg-1)]'
                     style={{ background: modelReady ? 'rgb(var(--success-6))' : 'rgb(var(--warning-6))' }}
                     title={modelReady ? undefined : t('nomi.chat.modelUnset')}
                   />
@@ -244,6 +284,40 @@ const CompanionSessionGroup: React.FC<Props> = ({
                   </span>
                 </div>
               </div>
+              {/* 机器人对话：归属到该伙伴之下，缩进为二级条目。点击直达其会话
+                  （ChatConversation 识别 type='nomi'+companion_session 渲染）。 */}
+              {companionRobots.map((conv) => {
+                const robotId = (conv.extra as { robot_id?: string } | undefined)?.robot_id ?? '';
+                const label = robotNames.get(robotId) ?? t('nomi.robot.group.deviceUnknown');
+                const activeRobot = activeConversationId != null && conv.id === activeConversationId;
+                return (
+                  <Tooltip key={conv.id} content={t('nomi.robot.group.deviceTooltip', { robot: label })} position='right' mini>
+                    <div
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openRobotConversation(conv.id);
+                      }}
+                      className={classNames(
+                        'flex items-center gap-6px shrink-0 rd-8px pl-40px pr-8px py-3px cursor-pointer transition-colors box-border min-w-0',
+                        activeRobot ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
+                      )}
+                    >
+                      <span className='size-16px flex items-center justify-center shrink-0 text-t-tertiary'>
+                        <Robot theme='outline' size={12} fill='currentColor' className='block leading-none' />
+                      </span>
+                      <span
+                        className={classNames(
+                          'text-12px truncate min-w-0',
+                          activeRobot ? '!text-primary-6' : 'text-t-secondary'
+                        )}
+                      >
+                        {label}
+                      </span>
+                    </div>
+                  </Tooltip>
+                );
+              })}
+              </React.Fragment>
             );
           })}
           {visibleCompanions.hasOverflow && !forceShowActiveCompanion && (

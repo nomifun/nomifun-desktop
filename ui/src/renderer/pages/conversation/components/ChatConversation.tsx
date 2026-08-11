@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ConversationId } from '@/common/types/ids';
+import type { ConversationId, SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import addChatIcon from '@/renderer/assets/icons/add-chat.svg';
@@ -12,7 +12,7 @@ import { CronJobManager } from '@/renderer/pages/cron';
 import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
 import { iconColors } from '@/renderer/styles/colors';
 import { Button, Dropdown, Menu, Message, Tooltip, Typography } from '@arco-design/web-react';
-import { ChartHistogram, History, Terminal } from '@icon-park/react';
+import { History } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -47,8 +47,8 @@ import { ExecutionProvider } from '../execution/ExecutionContext';
 import ExecutionConversationLayout from '../execution/ExecutionConversationLayout';
 import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
 import StarOfficeMonitorCard from '../platforms/openclaw/StarOfficeMonitorCard.tsx';
-import NomiSessionMetricsPanel from '../platforms/nomi/NomiSessionMetricsPanel';
-import ConversationTerminalPanel from './ConversationTerminalPanel';
+import SshHostStatusPill from './SshHostStatusPill';
+import { useWorkspaceExtraTabs } from '../hooks/useWorkspaceExtraTabs';
 import { useExecutionModelPool } from '../execution/useExecutionModelPool';
 import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
 
@@ -57,6 +57,10 @@ const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: 
   const skills = (conversation?.extra as { skills?: string[] } | undefined)?.skills;
   return skills?.includes(skillName) ?? false;
 };
+
+/** Host id of an SSH-bound session, or undefined for every other conversation. */
+const sshHostIdOf = (conversation: TChatConversation | undefined): SshHostId | undefined =>
+  (conversation?.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
 
 const buildConversationModelPool = (
   mainRef: TExecutionModelRef | null,
@@ -190,35 +194,16 @@ const NomiConversationLayout: React.FC<{
   conversation: NomiConversation;
   chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceCollaboration' | 'workspaceExtraTabs'>;
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
-  collaboratorSelectorNode: React.ReactNode;
-  collaborationPolicyNode: React.ReactNode;
+  collaborationControlNode: React.ReactNode;
   presetPresetName?: string;
 }> = ({
   conversation,
   chatLayoutProps,
   modelSelection,
-  collaboratorSelectorNode,
-  collaborationPolicyNode,
+  collaborationControlNode,
   presetPresetName,
 }) => {
-  const { t } = useTranslation();
-  const workspaceExtraTabs = useMemo(
-    () => [
-      {
-        key: 'conversation-terminals',
-        title: t('terminal.conversationPanel.tab'),
-        icon: <Terminal size={18} />,
-        content: <ConversationTerminalPanel conversationId={conversation.id} />,
-      },
-      {
-        key: 'nomi-session-metrics',
-        title: t('conversation.sessionMetrics.tab'),
-        icon: <ChartHistogram size={18} />,
-        content: <NomiSessionMetricsPanel conversation={conversation} />,
-      },
-    ],
-    [conversation, t],
-  );
+  const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
 
   return (
     <ExecutionConversationLayout
@@ -238,8 +223,7 @@ const NomiConversationLayout: React.FC<{
           (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
         }
         agent_name={presetPresetName}
-        collaboratorSelectorNode={collaboratorSelectorNode}
-        extraRightTools={collaborationPolicyNode}
+        collaboratorSelectorNode={collaborationControlNode}
         isProcessing={isConversationProcessing(conversation)}
       />
     </ExecutionConversationLayout>
@@ -397,20 +381,6 @@ const NomiConversationPanel: React.FC<{
     void persistModelPool(mainModelRef, collaboratorReconciliation.retained);
   }, [collaboratorReconciliation, collaborators, mainModelRef, persistModelPool]);
 
-  // Collaboration selector stays adjacent to the main model selector.
-  const collaboratorSelectorNode = (
-    <GuidCollaboratorSelector
-      value={activeCollaborators}
-      onChange={onCollaboratorsChange}
-      mainModel={mainModelRef}
-      selectedTemplate={selectedCollaborationTemplate}
-      workDir={conversation.extra?.workspace}
-      onTemplateApply={(template) => void persistCollaborationTemplate(template)}
-      onTemplateClear={() => void persistCollaborationTemplate(null)}
-      className='nomi-sendbox-model-btn'
-    />
-  );
-
   const onCollaborationPolicyChange = useCallback(
     async (next: CollaborationPolicyValue) => {
       setCollaborationPolicy(next);
@@ -429,13 +399,30 @@ const NomiConversationPanel: React.FC<{
     [conversation.id],
   );
 
-  const collaborationPolicyNode = (
-    <CollaborationPolicyControl
-      runtimeType={conversation.type}
-      delegationPolicy={collaborationPolicy.delegationPolicy}
-      decisionPolicy={collaborationPolicy.decisionPolicy}
-      onChange={onCollaborationPolicyChange}
-      compact
+  // Conversation collaboration models, reusable plans, and policy share one
+  // toolbar entry. Their existing callbacks stay independent so this remains
+  // a presentation-only merge.
+  const collaborationControlNode = (
+    <GuidCollaboratorSelector
+      value={activeCollaborators}
+      onChange={onCollaboratorsChange}
+      mainModel={mainModelRef}
+      selectedTemplate={selectedCollaborationTemplate}
+      workDir={conversation.extra?.workspace}
+      onTemplateApply={(template) => void persistCollaborationTemplate(template)}
+      onTemplateClear={() => void persistCollaborationTemplate(null)}
+      className='nomi-sendbox-model-btn nomi-sendbox-collaboration-btn'
+      triggerLabel={t('collaboration.policy.button', { defaultValue: 'Collaboration' })}
+      triggerActive={collaborationPolicy.delegationPolicy !== 'disabled'}
+      panelFooter={
+        <CollaborationPolicyControl
+          runtimeType={conversation.type}
+          delegationPolicy={collaborationPolicy.delegationPolicy}
+          decisionPolicy={collaborationPolicy.decisionPolicy}
+          onChange={onCollaborationPolicyChange}
+          embedded
+        />
+      }
     />
   );
 
@@ -499,6 +486,7 @@ const NomiConversationPanel: React.FC<{
 
   const workspaceEnabled = Boolean(conversation.extra?.workspace);
   const { info: presetPresetInfo } = usePresetInfo(conversation);
+  const sshHostId = sshHostIdOf(conversation);
 
   const chatLayoutProps = {
     title: conversation.name,
@@ -506,6 +494,13 @@ const NomiConversationPanel: React.FC<{
     sider: <ChatSlider conversation={conversation} />,
     headerExtra: (
       <div className='flex items-center gap-8px'>
+        {/* An SSH-bound session is indistinguishable from a local one everywhere
+            else in the chrome, so the host it drives — and whether the link is
+            actually up — leads the header. It is also the one control kept on
+            mobile (ChatLayout portals headerExtra into the mobile actions slot):
+            knowing which machine you are typing at matters more on a phone, not
+            less. */}
+        {sshHostId ? <SshHostStatusPill conversationId={conversation.id} sshHostId={sshHostId} /> : null}
         {/* The collaboration canvas lives beside the mounted conversation; the
             header keeps the existing capability controls. */}
         <CronJobManager
@@ -528,8 +523,7 @@ const NomiConversationPanel: React.FC<{
       conversation={conversation}
       chatLayoutProps={chatLayoutProps}
       modelSelection={modelSelection}
-      collaboratorSelectorNode={collaboratorSelectorNode}
-      collaborationPolicyNode={collaborationPolicyNode}
+      collaborationControlNode={collaborationControlNode}
       presetPresetName={presetPresetInfo?.name}
     />
   );
@@ -624,20 +618,7 @@ const ChatConversation: React.FC<{
     );
   }, [t]);
 
-  const workspaceExtraTabs = useMemo(
-    () =>
-      conversation?.extra?.workspace
-        ? [
-            {
-              key: 'conversation-terminals',
-              title: t('terminal.conversationPanel.tab'),
-              icon: <Terminal size={18} />,
-              content: <ConversationTerminalPanel conversationId={conversation.id} />,
-            },
-          ]
-        : [],
-    [conversation?.id, conversation?.extra?.workspace, t],
-  );
+  const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
 
   const isRetainedAttemptTranscript = Boolean(
     conversation?.execution_step_id || conversation?.execution_attempt_id,

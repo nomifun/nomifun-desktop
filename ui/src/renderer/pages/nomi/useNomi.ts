@@ -9,23 +9,11 @@ import { requestCompanionWindowSync } from '@renderer/hooks/useCompanionWindowsS
 import type {
   ICompanionProfile,
   ICompanionProfilePatch,
-  ICompanionSharedConfig,
-  ICompanionSharedConfigPatch,
   ICompanionStatus,
   ICompanionWithStatus,
 } from '@/common/adapter/ipcBridge';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CompanionId } from '@/common/types/ids';
-
-/** Optimistic RFC 7396-style merge of a shared-config patch (client mirror). */
-const mergeSharedConfig = (prev: ICompanionSharedConfig, patch: ICompanionSharedConfigPatch): ICompanionSharedConfig => ({
-  ...prev,
-  ...(patch.collect ? { collect: { ...prev.collect, ...patch.collect } } : {}),
-  ...(patch.learn ? { learn: { ...prev.learn, ...patch.learn } } : {}),
-  ...(patch.evolve ? { evolve: { ...prev.evolve, ...patch.evolve } } : {}),
-  ...(patch.archive ? { archive: { ...prev.archive, ...patch.archive } } : {}),
-  ...(patch.smart_collaboration !== undefined ? { smart_collaboration: patch.smart_collaboration } : {}),
-});
 
 /** Optimistic RFC 7396-style merge of a companion-profile patch (client mirror). */
 const mergeProfile = (prev: ICompanionProfile, patch: ICompanionProfilePatch): ICompanionProfile => ({
@@ -34,83 +22,23 @@ const mergeProfile = (prev: ICompanionProfile, patch: ICompanionProfilePatch): I
   ...(patch.character !== undefined ? { character: patch.character } : {}),
   ...(patch.persona ? { persona: { ...prev.persona, ...patch.persona } } : {}),
   ...(patch.model !== undefined ? { model: patch.model } : {}),
+  ...(patch.fallback_model !== undefined ? { fallback_model: patch.fallback_model } : {}),
+  ...(patch.vision_model !== undefined ? { vision_model: patch.vision_model } : {}),
+  // `voice.vad` sits one level below `voice`: a single spread would replace the
+  // whole vad block, so patching 灵敏度 alone would snap 停顿判停 back to its
+  // default until the server response landed.
+  ...(patch.voice
+    ? {
+        voice: {
+          ...prev.voice,
+          ...patch.voice,
+          vad: { ...prev.voice.vad, ...patch.voice.vad },
+        },
+      }
+    : {}),
   ...(patch.skills ? { skills: { ...prev.skills, ...patch.skills } } : {}),
   ...(patch.appearance ? { appearance: { ...prev.appearance, ...patch.appearance } } : {}),
 });
-
-/**
- * Shared (cross-companion) domain: collect/learn/default_companion_id config plus the
- * global counters (memories/suggestions — surfaced through the default companion's
- * status, since the memory store is shared).
- */
-export const useCompanionShared = () => {
-  const [sharedConfig, setSharedConfig] = useState<ICompanionSharedConfig | null>(null);
-  const [status, setStatus] = useState<ICompanionStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-  const configRef = useRef<ICompanionSharedConfig | null>(null);
-  configRef.current = sharedConfig;
-
-  const refreshStatus = useCallback(async (defaultCompanionId?: CompanionId | null) => {
-    const companionId = defaultCompanionId !== undefined ? defaultCompanionId : configRef.current?.default_companion_id;
-    if (!companionId) {
-      setStatus(null);
-      return;
-    }
-    try {
-      setStatus(await ipcBridge.companion.getCompanionStatus.invoke({ companion_id: companionId }));
-    } catch {
-      /* ignore — counters refresh on the next event */
-    }
-  }, []);
-
-  const refresh = useCallback(async () => {
-    try {
-      const cfg = await ipcBridge.companion.getSharedConfig.invoke();
-      setSharedConfig(cfg);
-      await refreshStatus(cfg.default_companion_id);
-    } finally {
-      setLoading(false);
-    }
-  }, [refreshStatus]);
-
-  useEffect(() => {
-    void refresh();
-    const refreshStats = () => void refreshStatus();
-    const unsubs = [
-      // Only shared-scope config changes belong to this hook.
-      ipcBridge.companion.onConfigUpdated.on((evt) => {
-        if (evt.scope === 'shared') void refresh();
-      }),
-      ipcBridge.companion.onLearnFinished.on(refreshStats),
-      ipcBridge.companion.onSuggestionCreated.on(refreshStats),
-      ipcBridge.companion.onSuggestionDecided.on(refreshStats),
-      ipcBridge.companion.onMemoryCreated.on(refreshStats),
-      // default_companion_id may be cleared/reassigned when a companion disappears.
-      ipcBridge.companion.onCompanionDeleted.on(() => void refresh()),
-    ];
-    return () => unsubs.forEach((u) => u());
-  }, [refresh, refreshStatus]);
-
-  /**
-   * Partial save (RFC 7396 merge patch) of the shared config. Applies the
-   * patch optimistically so switches don't lag the round-trip; the server's
-   * merged config (or a refresh on failure) reconciles.
-   */
-  const patchSharedConfig = useCallback(async (patch: ICompanionSharedConfigPatch) => {
-    setSharedConfig((prev) => (prev ? mergeSharedConfig(prev, patch) : prev));
-    try {
-      const saved = await ipcBridge.companion.patchSharedConfig.invoke(patch);
-      setSharedConfig(saved);
-      return saved;
-    } catch (e) {
-      // Roll back the optimistic merge to the server's truth.
-      void ipcBridge.companion.getSharedConfig.invoke().then(setSharedConfig).catch(() => {});
-      throw e;
-    }
-  }, []);
-
-  return { sharedConfig, status, loading, refresh, patchSharedConfig };
-};
 
 /** One companion's profile + status. Re-fetches when `companionId` changes.
  *  The loaded profile/status are bundled WITH the companion id they belong to
@@ -171,14 +99,13 @@ export const useCompanion = (companionId: CompanionId | null) => {
     if (!companionId) return;
     const refreshStats = () => void refreshStatus();
     const unsubs = [
-      // Per-companion scope only; shared-scope changes are useCompanionShared's business.
+      // Per-companion scope only. Install-wide config changes are the concern of
+      // whoever owns that config (today the 进化 tab's own adapter), not this hook.
       ipcBridge.companion.onConfigUpdated.on((evt) => {
         if (evt.scope === companionId || evt.companion_id === companionId) void refresh();
       }),
       ipcBridge.companion.onMoodChanged.on(refreshStats),
       ipcBridge.companion.onLearnFinished.on(refreshStats),
-      ipcBridge.companion.onSuggestionCreated.on(refreshStats),
-      ipcBridge.companion.onSuggestionDecided.on(refreshStats),
       ipcBridge.companion.onMemoryCreated.on(refreshStats),
     ];
     return () => unsubs.forEach((u) => u());

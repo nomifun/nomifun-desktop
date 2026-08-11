@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", "apps/desktop"]
 
 [workspace.package]
-version = "0.3.8"
+version = "0.5.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "local/nomifun-tauri"
@@ -41,14 +41,18 @@ nomifun-terminal = { path = "crates/backend/nomifun-terminal" }
 nomifun-preset = { path = "crates/backend/nomifun-preset" }
 nomifun-customer-service = { path = "crates/backend/nomifun-customer-service" }
 nomifun-workshop = { path = "crates/backend/nomifun-workshop" }
+nomifun-miniapp = { path = "crates/backend/nomifun-miniapp" }
 nomifun-creation = { path = "crates/backend/nomifun-creation" }
 nomifun-app = { path = "crates/backend/nomifun-app" }
+nomifun-robot = { path = "crates/backend/nomifun-robot" }
 nomifun-browser-platform = { path = "crates/backend/nomifun-browser-platform" }
 
 # --- Internal crates: shared ---
 nomifun-net = { path = "crates/shared/nomifun-net" }
 nomi-redact = { path = "crates/shared/nomi-redact" }
 nomi-process-runtime = { path = "crates/shared/nomi-process-runtime" }
+nomi-ssh = { path = "crates/shared/nomi-ssh" }
+nomifun-ssh = { path = "crates/backend/nomifun-ssh" }
 
 # --- Internal crates: agent (from nomifun-agent-rs, now local) ---
 nomi-types = { path = "crates/agent/nomi-types" }
@@ -109,6 +113,9 @@ jsonwebtoken = "10"
 bcrypt = "0.17"
 aes-gcm = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+# CSPRNG for robot device tokens / activation codes. 0.9 renamed `thread_rng()`
+# to `rng()`; 0.9.x is already in the lockfile via transitive deps.
+rand = "0.9"
 # Public Suffix List (compile-time embedded, offline) for browser domain policy.
 psl = "2"
 
@@ -128,7 +135,6 @@ notify = "8"
 walkdir = "2"
 ignore = "0.4"
 # Unified-diff computation for the knowledge-base inbox review panel (P4).
-similar = "2"
 zip = "2"
 # Node portable-runtime archive extraction (provisioner): tar.gz on unix/macos.
 flate2 = "1"
@@ -152,6 +158,15 @@ chrono-tz = "0.10"
 
 # --- PTY / shell ---
 portable-pty = "0.8"
+
+# --- SSH remote sessions ---
+# russh: crypto backend = `ring` (0.17.14 already in the lock), which avoids the
+# aws-lc-sys native toolchain burden (NASM on Windows x86, clang-cl on ARM64).
+# Pinned exactly: russh's Handler API churns fast (8 releases in July 2026), so
+# the `nomi-ssh` adapter crate isolates it and an upgrade touches one place.
+russh = { version = "=0.62.5", default-features = false, features = ["ring", "flate2"] }
+russh-sftp = "2.4.0"
+zeroize = { version = "1.8", features = ["derive"] }
 # `shellexecute-on-windows`: launch via real ShellExecuteExW on Windows instead
 # of the default `cmd /c start "" <target>` fallback. The `start` builtin
 # mis-parses URLs/paths as window titles, runs with no console (CREATE_NO_WINDOW)
@@ -185,6 +200,9 @@ toml = "0.8"
 
 # --- Encoding / misc ---
 base64 = "0.22"
+# Cheap refcounted byte buffers for the robot audio frame path. Already in the
+# graph via axum/hyper, so this adds nothing to the lockfile.
+bytes = "1"
 http-body-util = "0.1"
 getrandom = "0.2"
 hex = "0.4"
@@ -226,6 +244,34 @@ enigo = "0.6"
 # `zip0`/`zip8` also won't compile in 0.9.1). CDP generated types arrive
 # transitively via `chromiumoxide_cdp`, so no separate workspace entry.
 chromiumoxide = { version = "0.9" }
+
+# --- Robot audio (LAN robot gateway) ---
+# Opus codec for the robot uplink/downlink. `opusic-sys` is used instead of the
+# higher-level `audiopus`/`opus` crates because both of those pull
+# `audiopus_sys`, whose vendored libopus still declares
+# `cmake_minimum_required(VERSION 3.1)` — removed in CMake 4 — and whose 0.1.x
+# line needs autotools. `opusic-sys` bundles a modern libopus, builds it with
+# CMake >= 3.16 and links it **statically**, so no platform needs a preinstalled
+# libopus and nothing extra has to be shipped beside the binary. The safe
+# wrappers live in `nomifun-robot/src/audio/opus.rs` and are the only FFI here.
+opusic-sys = "0.7.5"
+# Container decode for TTS audio that does not come back as raw PCM. Features are
+# exactly the formats providers actually return; `all-codecs` would pull video
+# and subtitle decoders we never touch.
+symphonia = { version = "0.6.0", features = ["mp3", "wav", "isomp4", "aac", "vorbis"] }
+# Silero VAD inference. `download-binaries` fetches a prebuilt ONNX Runtime at
+# build time, so no system onnxruntime is required; if the runtime cannot be
+# loaded at all, `nomifun-robot` degrades to its energy VAD. Defaults are
+# narrowed: `tls-rustls` keeps the build off system OpenSSL, and `ndarray` is
+# dropped because the VAD reads tensors as plain slices.
+ort = { version = "2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "tracing",
+    "download-binaries",
+    "tls-rustls",
+    "copy-dylibs",
+    "api-27",
+] }
 
 # --- Testing ---
 tempfile = "3"

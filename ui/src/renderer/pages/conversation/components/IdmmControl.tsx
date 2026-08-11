@@ -52,6 +52,11 @@ export type IdmmTarget =
 export type IdmmDraft = {
   value: IIdmmConfig;
   onChange: (next: IIdmmConfig) => void;
+  /** Which kind of session this draft will become. It decides whether the model
+   * tier can borrow the session's own model as its bypass model: a conversation
+   * has one, a terminal does not (its agent CLI owns the model), so a terminal
+   * watch must name its own. Defaults to `'conversation'`. */
+  kind?: IdmmTargetKind;
 };
 
 type IdmmControlProps = {
@@ -135,9 +140,10 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
   const isDraft = !!draft;
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  // Draft mode has no live IIdmmState, so the global backup-provider check is
-  // resolved from the global settings instead of `sidecar_provider_resolved`.
-  const [draftBackupResolved, setDraftBackupResolved] = useState(false);
+  // Draft mode has no live IIdmmState to carry `sidecar_provider_resolved`, so
+  // the same rule the backend applies is evaluated locally: a conversation lends
+  // its own model to the model tier, a terminal has none to lend.
+  const draftBackupResolved = (draft?.kind ?? 'conversation') === 'conversation';
 
   // Which watch sections are expanded in the popover. Default: open whatever is
   // enabled so the user lands on their active config; otherwise both collapsed.
@@ -202,27 +208,13 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
     };
   }, [kind, id, isDraft]);
 
-  // Draft mode: resolve whether a global backup provider exists (the live-state
-  // flag is unavailable before the conversation is created). Only expand watches
-  // that are already enabled so the first view stays compact.
+  // Draft mode: only expand watches that are already enabled so the first view
+  // stays compact.
   useEffect(() => {
     if (!isDraft) return;
-    let cancelled = false;
     setFaultOpen(draftRef.current?.value.fault_watch.enabled ?? false);
     setDecisionOpen(draftRef.current?.value.decision_watch.enabled ?? false);
     setStrategyOpen(false);
-    void (async () => {
-      try {
-        const g = await ipcBridge.idmm.getSettings.invoke();
-        if (cancelled) return;
-        setDraftBackupResolved(Boolean(g.backup_provider_id));
-      } catch {
-        /* ignore — keep defaults */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
   }, [isDraft]);
 
   // Live status updates over WebSocket. Status events do NOT carry the
@@ -290,9 +282,9 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
 
   // A model-tier watch needs a complete local backup model or a resolvable
   // fallback. Surface a hint before mutating the toggle state.
-  const globalBackupResolved = draft ? draftBackupResolved : (state?.sidecar_provider_resolved ?? false);
+  const backupResolved = draft ? draftBackupResolved : (state?.sidecar_provider_resolved ?? false);
   const watchBackupErrorKey = (w: IIdmmWatchBase): IdmmBackupValidationKey | null =>
-    getWatchBackupValidationErrorKey(w, globalBackupResolved);
+    getWatchBackupValidationErrorKey(w, backupResolved);
   const faultBackupErrorKey = watchBackupErrorKey(cfg.fault_watch);
   const decisionBackupErrorKey = watchBackupErrorKey(cfg.decision_watch);
 
@@ -328,9 +320,9 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
         message.error(String(e));
       }
     },
-    // watchBackupErrorKey closes over draft/globalBackupResolved; recompute when those change.
+    // watchBackupErrorKey closes over draft/backupResolved; recompute when those change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [kind, id, message, t, globalBackupResolved, draft]
+    [kind, id, message, t, backupResolved, draft]
   );
 
   // Apply an edit and persist the freshly-computed config in ONE write (never a
@@ -474,7 +466,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
             <div className='flex items-center justify-between gap-8px'>
               <span className={fieldLabelClass}>{t('idmm.watch.bypassModel')}</span>
               {backupErrorKey ? (
-                <span className='rounded-full bg-[rgb(var(--warning-1))] px-6px py-2px text-10px text-[rgb(var(--warning-6))]'>
+                <span className='rounded-full bg-warning-1 px-6px py-2px text-10px text-warning-6'>
                   {t(backupErrorKey)}
                 </span>
               ) : null}
@@ -507,7 +499,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
             </div>
             <span className='text-t-tertiary text-11px leading-16px'>{t('idmm.sessionBackupHint')}</span>
             {backupErrorKey ? (
-              <span className='text-11px text-[rgb(var(--warning-6))]'>{t(backupErrorKey)}</span>
+              <span className='text-11px text-warning-6'>{t(backupErrorKey)}</span>
             ) : null}
           </div>
         ) : null}
@@ -1004,7 +996,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
               </button>
               {logOpen && log.length > 0 ? (
                 <span
-                  className='shrink-0 text-t-tertiary text-11px cursor-pointer hover:text-[rgb(var(--danger-6))]'
+                  className='shrink-0 text-t-tertiary text-11px cursor-pointer hover:text-danger-6'
                   onClick={clearLog}
                 >
                   {t('idmm.log.clear')}

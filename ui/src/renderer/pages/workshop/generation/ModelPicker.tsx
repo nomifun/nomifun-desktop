@@ -65,9 +65,18 @@ const ModelPicker: React.FC<ModelPickerProps> = ({ mode, providerId, model, onCh
     setOpen(false);
   };
 
+  // 每种生成模式都有自己的模型管理分区，直接送到对的那一栏；text 没有专属分区，
+  // 落到供应商与密钥（那里才是加模型的地方）。
+  const MODEL_HUB_SECTION: Record<GenMode, string> = {
+    text: 'models',
+    image: 'image',
+    video: 'video',
+    tts: 'tts',
+  };
+
   const goToModelHub = (): void => {
     setOpen(false);
-    navigate(mode === 'text' ? '/models?section=models' : '/models?section=creation');
+    navigate(`/models?section=${MODEL_HUB_SECTION[mode]}`);
   };
 
   return (
@@ -90,12 +99,12 @@ const ModelPicker: React.FC<ModelPickerProps> = ({ mode, providerId, model, onCh
           'nodrag flex w-full box-border items-center gap-8px rounded-9px border border-solid px-10px py-7px cursor-pointer',
           'transition-colors select-none',
           open
-            ? 'border-[rgb(var(--primary-6))] bg-[rgba(var(--primary-6),0.06)]'
+            ? 'border-primary-6 bg-[rgba(var(--primary-6),0.06)]'
             : 'border-[var(--color-border-2)] bg-[var(--color-fill-1)] hover:border-[var(--color-border-3)]',
         ].join(' ')}
       >
         <span
-          className='flex h-20px w-20px shrink-0 items-center justify-center rounded-6px text-[rgb(var(--primary-6))]'
+          className='flex h-20px w-20px shrink-0 items-center justify-center rounded-6px text-primary-6'
           style={{ background: 'rgba(var(--primary-6),0.12)' }}
         >
           <MagicWand theme='outline' size={12} strokeWidth={3} />
@@ -129,7 +138,7 @@ const ModelPicker: React.FC<ModelPickerProps> = ({ mode, providerId, model, onCh
               tabIndex={0}
               onClick={goToModelHub}
               onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && goToModelHub()}
-              className='rounded-7px bg-[rgb(var(--primary-6))] px-12px py-6px text-11px font-600 text-white cursor-pointer hover:opacity-90'
+              className='rounded-7px bg-primary-6 px-12px py-6px text-11px font-600 text-white cursor-pointer hover:opacity-90'
             >
               {t('workshopGeneration.model.goToHub', { defaultValue: '前往模型中心' })}
             </div>
@@ -169,13 +178,13 @@ const ModelPicker: React.FC<ModelPickerProps> = ({ mode, providerId, model, onCh
                           className={[
                             'mx-4px flex items-center gap-8px rounded-7px px-8px py-6px cursor-pointer transition-colors',
                             active
-                              ? 'bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))]'
+                              ? 'bg-[rgba(var(--primary-6),0.12)] text-primary-6'
                               : 'text-[var(--color-text-1)] hover:bg-[var(--color-fill-2)]',
                           ].join(' ')}
                         >
                           <span className='truncate text-12px font-500'>{m.model}</span>
                           {active && (
-                            <span className='ml-auto h-6px w-6px shrink-0 rounded-full bg-[rgb(var(--primary-6))]' />
+                            <span className='ml-auto h-6px w-6px shrink-0 rounded-full bg-primary-6' />
                           )}
                         </div>
                       );

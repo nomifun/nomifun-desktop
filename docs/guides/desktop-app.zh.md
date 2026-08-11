@@ -17,8 +17,42 @@
 桌面应用需要：
 
 - Tauri 支持的平台 (Windows 10+、macOS 11+、主流 Linux 发行版)。
-- WebView 运行时：Windows 上的 **WebView2** (Win 11 预装；Win 10 上请安装 [Evergreen Bootstrapper](https://developer.microsoft.com/microsoft-edge/webview2/))，macOS 上的 **WKWebView** (内置)，Linux 上的 **WebKitGTK** (`libwebkit2gtk-4.1-0`)。
-- 用于开发：Rust 工具链、[Bun](https://bun.sh) ≥ 1.3.13，以及对应平台的 Tauri 构建依赖 (参见 [Tauri 前置条件](https://v2.tauri.app/start/prerequisites/))。
+- WebView 运行时：Windows 上的 **WebView2** (Win 11 预装；Win 10 上请安装 [Evergreen Bootstrapper](https://developer.microsoft.com/microsoft-edge/webview2/))，macOS 上的 **WKWebView** (内置)，Linux 上的 **WebKitGTK** (只是*运行*已打包版本时 `libwebkit2gtk-4.1-0` 就够了；从源码构建需要下面的 `-dev` 包)。
+- 用于开发：Rust 工具链、[Bun](https://bun.sh) ≥ 1.3.13、Git、CMake，以及对应平台的 Tauri 构建依赖 (参见 [Tauri 前置条件](https://v2.tauri.app/start/prerequisites/))。上游那份清单对 Windows 和 macOS 是完整的；在 Linux 上本仓库还额外需要三个库，因为 computer use 的截屏栈 (`xcap`，经由 `nomi-computer` 引入) 会链接 PipeWire 与 GBM，并运行 `bindgen`。
+
+#### Linux 系统包 (Debian/Ubuntu)
+
+已在 Ubuntu 26.04 上验证。这一组足以让 `bun run dev` 完成编译并启动：
+
+```bash
+sudo apt install build-essential cmake pkg-config git \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  libpipewire-0.3-dev libgbm-dev libclang-dev
+```
+
+`bun run build` / `bun run build:linux` 还会产出 AppImage，需要再加两个：
+
+```bash
+sudo apt install librsvg2-dev xdg-utils
+```
+
+其中不太直观的几项各自的来源：
+
+| 包 | 被谁需要 |
+| --- | --- |
+| `libwebkit2gtk-4.1-dev` | `tauri` → `wry` 下的 `webkit2gtk-sys`、`soup3-sys`、`javascriptcore-rs-sys` 和 `gtk-sys`。它的依赖闭包同时是 `egl.pc`、`dbus-1.pc`、`wayland-client.pc`、X11/XCB 与 xkbcommon 开发文件的唯一来源，而这些都会被其他 crate 探测；因此换成只装运行时的 `libwebkit2gtk-4.1-0` 会一次性弄坏好几个互不相关的 crate。 |
+| `cmake` | `opusic-sys` 会为机器人网关现场编译内置的 libopus ([`crates/backend/nomifun-robot/Cargo.toml`](../../crates/backend/nomifun-robot/Cargo.toml))。它是普通依赖而非可选依赖，所以缺少 CMake 时构建会直接停在 ``is `cmake` not installed?``。 |
+| `libpipewire-0.3-dev` | `libspa-sys` 与 `pipewire-sys` 会探测 `libpipewire-0.3.pc` 和 `libspa-0.2.pc`，任一缺失即 panic。后一个文件属于 `libspa-0.2-dev`，而本包依赖它，所以装一个就够。用于 computer use 的 Wayland 截屏。 |
+| `libgbm-dev` | `gbm-sys` 通过源码级的 `#[link]` 属性请求 `-lgbm`，因此直到最后的链接步骤才会被发现。只有 `-dev` 包提供不带版本号的 `libgbm.so`。同属截屏链路。 |
+| `libclang-dev` | `libspa-sys` 与 `pipewire-sys` 的构建依赖 `bindgen` 在生成绑定时要加载 `libclang.so`。只装 `clang` 包并不会提供这个文件。 |
+| `libayatana-appindicator3-dev` | 托盘图标。`libappindicator-sys` 在**运行时**打开 `libayatana-appindicator3.so.1`，而这个库不属于默认的 Ubuntu 桌面；`-dev` 包会带上它，同时满足 [`scripts/desktop-build-linux.sh`](../../scripts/desktop-build-linux.sh) 里的 pkg-config 预检。 |
+| `librsvg2-dev`、`xdg-utils` | 只用于打包：linuxdeploy 的 GTK 插件要读 `librsvg-2.0.pc`，AppImage 目标会调用 `xdg-open` / `xdg-mime`。本仓库没有任何 Rust crate 需要它们。 |
+
+关于这棵依赖树，还有三点需要说明：
+
+- Tauri 的通用清单里还有 `libssl-dev`、`libxdo-dev` 和 `libasound2-dev`，而缺少 `-lgbm` 也常被误归因到 `libdrm-dev`。这四个在这里都用不到：没有 `openssl-sys` (TLS 走 rustls 与内置静态加密库)，没有 `libxdo` (输入模拟走纯 Rust 的 `x11rb`)，没有任何 ALSA 使用方 (Opus 是内置编译的，`symphonia` 是纯 Rust)，`drm-sys` 用的是预生成绑定、不会产出 `-ldrm`。已经装了也无害。
+- 首次构建需要网络：`ort-sys` 会下载预编译的 ONNX Runtime (参见[首次构建需要访问 pyke 的 CDN](../contributing/development.zh.md#首次构建需要访问-pyke-的-cdn))，`bun run build` 还会从 GitHub 拉取 linuxdeploy 及其插件。
+- `lsof` 是可选的。`bun run dev` 用它来释放 5173 端口 ([`scripts/free-ports.mjs`](../../scripts/free-ports.mjs))，缺失时会静默跳过这一步清理。
 
 ### 从源码运行 (开发模式)
 
@@ -95,7 +129,7 @@ $ bun run build
 ~/Library/Application Support/NomiFun/    # macOS（Windows/Linux 路径见上文）
 ├── nomifun-backend.db        # SQLite 状态（会话、设置、session 等）
 ├── logs/                     # nomicore.log
-├── companion/                # 伙伴 + 共享记忆中枢
+├── companion/                # 伙伴 + 记忆数据库（整机一个文件，每行记忆各归其主）
 ├── knowledge/                # 受管理的知识库
 ├── runtime/                  # 解压出的 Bun 运行时缓存（可再生）
 └── server.lock               # 后端运行期间持有的排他锁
@@ -133,6 +167,12 @@ Developer ID 签名与公证已通过 `bun run build:signed` 和
 
 **窗口打开后是空白白屏。**
 确保已安装 WebView 运行时 (Windows 10 上的 WebView2 需要 Evergreen Bootstrapper)。在 Linux 上需要 `libwebkit2gtk-4.1-0`。
+
+**Linux 上编译完约 1300 个 crate 后失败并报 `rust-lld: error: unable to find library -lgbm`。**
+`gbm-sys` 通过源码级的 `#[link]` 属性请求 `-lgbm`，所以直到最后的链接步骤才会发现库缺失。安装 `libgbm-dev` —— 运行时包 `libgbm1` 并不提供不带版本号的 `libgbm.so` —— 然后重跑；只会重做链接，不会重编 crate。参见[Linux 系统包 (Debian/Ubuntu)](#linux-系统包-debianubuntu)。
+
+**Linux 上构建早期就停下并报 `Cannot find libraries: PkgConfig ... libpipewire-0.3` (或 `libspa-0.2`)。**
+`libspa-sys` 与 `pipewire-sys` 在构建脚本里探测 pkg-config，`.pc` 文件缺失时直接 panic。安装 `libpipewire-0.3-dev` 即可；它依赖持有 `libspa-0.2.pc` 的 `libspa-0.2-dev`。这两个 crate 来自 computer use 的截屏栈，因此即使你从不使用截屏也会被编译。
 
 **"Failed to bind backend port"。**
 另一个进程占用了 `127.0.0.1` 临时端口。后端会尝试 `pick_free_port()`，失败时回退到 `8799` —— 退出任何其他 NomiFun 实例后再试。

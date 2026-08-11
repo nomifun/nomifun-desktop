@@ -152,7 +152,7 @@ const KnowledgeEmptyState: React.FC<KnowledgeEmptyStateProps> = ({ onCreate, onI
                 'text-[var(--color-text-2)]',
                 k.disabled
                   ? 'cursor-not-allowed opacity-50'
-                  : 'cursor-pointer hover:border-[var(--color-primary-light-3)] hover:text-[rgb(var(--primary-6))] hover:bg-[var(--color-primary-light-1)]',
+                  : 'cursor-pointer hover:border-[var(--color-primary-light-3)] hover:text-primary-6 hover:bg-[var(--color-primary-light-1)]',
                 'transition-all duration-150',
               ].join(' ')}
             >
@@ -187,11 +187,11 @@ const KnowledgeEmptyState: React.FC<KnowledgeEmptyStateProps> = ({ onCreate, onI
             'bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)]',
             'shadow-[0_6px_18px_rgba(var(--primary-6),0.14)]',
             'hover:bg-[rgba(var(--primary-6),0.18)]',
-            'focus-visible:border-[rgb(var(--primary-6))] focus-visible:outline-none',
+            'focus-visible:border-primary-6 focus-visible:outline-none',
             'transition-all duration-150',
           ].join(' ')}
         >
-          <Plus theme='outline' size='15' className='text-[rgb(var(--primary-6))]' />
+          <Plus theme='outline' size='15' className='text-primary-6' />
           {t('knowledge.newBase', { defaultValue: '新建知识库' })}
         </div>
         {onImport && (
@@ -209,7 +209,7 @@ const KnowledgeEmptyState: React.FC<KnowledgeEmptyStateProps> = ({ onCreate, onI
               'inline-flex items-center gap-7px cursor-pointer select-none',
               'rounded-full px-22px py-10px text-14px font-medium',
               'border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] text-[var(--color-text-2)]',
-              'hover:border-[var(--color-primary-light-3)] hover:text-[rgb(var(--primary-6))] hover:bg-[var(--color-primary-light-1)]',
+              'hover:border-[var(--color-primary-light-3)] hover:text-primary-6 hover:bg-[var(--color-primary-light-1)]',
               'transition-all duration-150',
             ].join(' ')}
           >

@@ -27,20 +27,36 @@ describe('model-owned tool configuration placement', () => {
     expect(source.includes('const visibleMcpServers = useMemo(() => mcpServers, [mcpServers])')).toBe(true);
   });
 
-  test('speech-to-text has a dedicated peer section and old copied cards are removed', () => {
+  test('every model capability is its own section; no host page hides categories', () => {
     const hubSource = readSource('./index.tsx');
-    const speechSource = readSource('./SpeechToTextContent.tsx');
-    const creationSource = readSource('./CreationModelsContent.tsx');
+    const asrSource = readSource('./SpeechToTextContent.tsx');
+    const creationSource = readSource('./CreationModelsPanel.tsx');
     const providerSource = readSource(
       '../../components/settings/SettingsModal/contents/ModelModalContent.tsx'
     );
 
-    expect(hubSource.includes("key: 'speech'")).toBe(true);
+    // 语音 and 创作能力 were hosts stacking several categories behind one entry.
+    expect(hubSource.includes("key: 'asr'")).toBe(true);
+    expect(hubSource.includes("key: 'tts'")).toBe(true);
+    expect(hubSource.includes("key: 'image'")).toBe(true);
+    expect(hubSource.includes("key: 'video'")).toBe(true);
+    expect(hubSource.includes('SpeechModelsContent')).toBe(false);
     expect(hubSource.includes('<SpeechToTextContent />')).toBe(true);
+    expect(hubSource.includes('<TextToSpeechContent />')).toBe(true);
+
+    // VAD is not a model picker (bundled local Silero), so it rides along with
+    // recognition — it decides when listening starts and stops.
+    expect(asrSource.includes("t('settings.modelHub.speech.vadTitle')")).toBe(true);
+
     // Candidates come from the authoritative catalog resolve, not provider
-    // rows + name guessing.
-    expect(speechSource.includes("useModelsForTask('speech_recognition')")).toBe(true);
-    expect(speechSource.includes('inferCloudSpeechService')).toBe(false);
+    // rows + name guessing — reached through the ONE shared selector, which is
+    // what performs the `speech_recognition` resolution.
+    expect(asrSource.includes("task='speech_recognition'")).toBe(true);
+    expect(asrSource.includes('<TaskModelSelect')).toBe(true);
+    expect(asrSource.includes('inferCloudSpeechService')).toBe(false);
+
+    // One capability per section means no page-level capability filter either.
+    expect(creationSource.includes('SegmentedTabs')).toBe(false);
     expect(creationSource.includes('ImageGenerationToolSettings')).toBe(false);
     expect(providerSource.includes('SpeechToTextCloudSettings')).toBe(false);
   });

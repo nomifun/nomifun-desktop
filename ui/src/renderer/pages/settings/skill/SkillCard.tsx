@@ -48,7 +48,7 @@ const SourceBadge: React.FC<{ skill: SkillInfo; isAutoInjected: boolean }> = ({ 
       <Tag
         size='small'
         bordered={false}
-        className='!flex-shrink-0 !text-10px !leading-14px !px-6px !py-0 !rounded-6px !bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]'
+        className='!flex-shrink-0 !h-14px !text-9px !leading-12px !px-5px !py-0 !rounded-5px !bg-[rgba(var(--success-6),0.1)] !text-success-6'
       >
         {t('settings.skillsHub.sourceAuto', { defaultValue: 'Auto' })}
       </Tag>
@@ -59,7 +59,7 @@ const SourceBadge: React.FC<{ skill: SkillInfo; isAutoInjected: boolean }> = ({ 
       <Tag
         size='small'
         bordered={false}
-        className='!flex-shrink-0 !text-10px !leading-14px !px-6px !py-0 !rounded-6px !bg-[rgba(var(--orange-6),0.1)] !text-[rgb(var(--orange-6))]'
+        className='!flex-shrink-0 !h-14px !text-9px !leading-12px !px-5px !py-0 !rounded-5px !bg-[rgba(var(--orange-6),0.1)] !text-[rgba(var(--orange-6),1)]'
       >
         {t('settings.skillsHub.custom', { defaultValue: 'Custom' })}
       </Tag>
@@ -70,7 +70,7 @@ const SourceBadge: React.FC<{ skill: SkillInfo; isAutoInjected: boolean }> = ({ 
       <Tag
         size='small'
         bordered={false}
-        className='!flex-shrink-0 !text-10px !leading-14px !px-6px !py-0 !rounded-6px !bg-fill-2 !text-t-secondary'
+        className='!flex-shrink-0 !h-14px !text-9px !leading-12px !px-5px !py-0 !rounded-5px !bg-fill-2 !text-t-secondary'
       >
         {t('settings.skillsHub.sourceExtension', { defaultValue: 'Extension' })}
       </Tag>
@@ -80,7 +80,7 @@ const SourceBadge: React.FC<{ skill: SkillInfo; isAutoInjected: boolean }> = ({ 
     <Tag
       size='small'
       bordered={false}
-      className='!flex-shrink-0 !text-10px !leading-14px !px-6px !py-0 !rounded-6px !bg-primary-1 !text-primary-6'
+      className='!flex-shrink-0 !h-14px !text-9px !leading-12px !px-5px !py-0 !rounded-5px !bg-primary-1 !text-primary-6'
     >
       {t('settings.skillsHub.builtin', { defaultValue: 'Built-in' })}
     </Tag>
@@ -125,15 +125,15 @@ const SkillCard: React.FC<SkillCardProps> = ({
         }
       }}
       className={[
-        'group relative flex flex-col rounded-16px border border-solid p-14px pb-42px cursor-pointer outline-none',
+        'group relative flex flex-col rounded-16px border border-solid p-12px pb-34px cursor-pointer outline-none',
         'transition-all duration-180',
         highlighted
-          ? 'border-[rgb(var(--primary-5))] bg-[var(--color-primary-light-1)] shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
+          ? 'border-primary-5 bg-[var(--color-primary-light-1)] shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
           : 'border-[var(--color-border-2)] bg-[var(--color-bg-2)] hover:border-[var(--color-primary-light-4)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.06)]',
       ].join(' ')}
     >
       {/* Header: avatar + name/badge */}
-      <div className='flex items-start gap-10px'>
+      <div className='flex items-center gap-10px'>
         {isAutoInjected ? (
           <div className='flex-shrink-0 w-36px h-36px rounded-10px flex items-center justify-center bg-[rgba(var(--success-6),0.1)] shadow-sm'>
             <Lightning theme='filled' size={18} fill='rgb(var(--success-6))' />
@@ -145,14 +145,16 @@ const SkillCard: React.FC<SkillCardProps> = ({
             {skill.name.charAt(0).toUpperCase()}
           </div>
         )}
-        <div className='min-w-0 flex-1 pt-2px'>
-          <div className='flex items-center gap-6px min-w-0 flex-wrap'>
+        <div className='flex h-36px min-w-0 flex-1 flex-col justify-between'>
+          <div className='flex h-20px min-w-0 items-center'>
             <span
-              className='truncate max-w-full text-14px font-medium leading-20px text-[var(--color-text-1)]'
+              className='min-w-0 flex-1 truncate text-14px font-medium leading-20px text-[var(--color-text-1)]'
               title={display.name}
             >
               {display.name}
             </span>
+          </div>
+          <div className='flex h-14px items-center'>
             <SourceBadge skill={skill} isAutoInjected={isAutoInjected} />
           </div>
         </div>
@@ -160,7 +162,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
 
       {/* Description — fixed 2-line clamp so cards stay even-height */}
       <div
-        className='mt-10px text-12px leading-18px text-[var(--color-text-3)] min-h-[36px]'
+        className='mt-6px text-12px leading-18px text-[var(--color-text-3)] min-h-[36px]'
         title={display.description || undefined}
         style={{
           display: '-webkit-box',
@@ -174,7 +176,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
 
       {/* Tag chips — static pills resolved from the shared vocabulary */}
       {visibleTags.length > 0 && (
-        <div className='mt-12px flex flex-wrap items-center gap-6px'>
+        <div className='mt-8px flex flex-wrap items-center gap-5px'>
           {visibleTags.map((tag) => (
             <span
               key={tag.key}
@@ -196,7 +198,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
 
       {/* Hover footer — quiet action links, revealed on card hover */}
       <div
-        className='absolute bottom-14px right-14px flex items-center justify-end gap-14px opacity-0 group-hover:opacity-100 transition-opacity duration-180'
+        className='absolute bottom-10px right-12px flex items-center justify-end gap-12px opacity-0 group-hover:opacity-100 transition-opacity duration-180'
         onClick={(e) => e.stopPropagation()}
       >
         {canDelete && (
@@ -212,7 +214,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
                 onDelete(skill);
               }
             }}
-            className='inline-flex items-center gap-4px text-12px text-[var(--color-text-3)] cursor-pointer hover:text-[rgb(var(--danger-6))] transition-colors'
+            className='inline-flex items-center gap-4px text-12px text-[var(--color-text-3)] cursor-pointer hover:text-danger-6 transition-colors'
           >
             <Delete theme='outline' size={13} strokeWidth={3} />
             {t('common.delete', { defaultValue: 'Delete' })}

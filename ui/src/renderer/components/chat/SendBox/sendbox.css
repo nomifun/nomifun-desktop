@@ -192,6 +192,17 @@
   color: var(--text-primary) !important;
 }
 
+/* The unified collaboration pill keeps the former policy control's enabled
+ * affordance even though it now shares the generic model-pill surface. */
+.sendbox-actions .nomi-sendbox-collaboration-btn[aria-pressed='true'],
+.sendbox-actions .nomi-sendbox-collaboration-btn[aria-pressed='true']:hover,
+.sendbox-actions .nomi-sendbox-collaboration-btn[aria-pressed='true']:active,
+.sendbox-actions .nomi-sendbox-collaboration-btn[aria-pressed='true']:focus,
+.sendbox-actions .nomi-sendbox-collaboration-btn[aria-pressed='true']:focus-visible {
+  background: color-mix(in srgb, rgb(var(--primary-6)) 9%, var(--color-fill-1)) !important;
+  color: rgb(var(--primary-6)) !important;
+}
+
 .speech-input-control {
   display: inline-flex;
   align-items: center;

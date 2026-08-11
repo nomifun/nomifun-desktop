@@ -21,6 +21,7 @@ export type EntityKind =
   | 'conversation'
   | 'terminal'
   | 'remote-agent'
+  | 'ssh-host'
   | 'webhook'
   | 'knowledge-base'
   | 'knowledge-binding'
@@ -43,7 +44,6 @@ export type EntityKind =
   | 'companion-event'
   | 'companion-skill'
   | 'companion-memory'
-  | 'companion-suggestion'
   | 'companion-session-window'
   | 'skill-pattern'
   | 'figure'
@@ -67,7 +67,8 @@ export type EntityKind =
   | 'asset'
   | 'creation-task'
   | 'workshop-node'
-  | 'workshop-edge';
+  | 'workshop-edge'
+  | 'miniapp';
 
 export type ConversationId = EntityId<'conversation'>;
 export type TerminalId = EntityId<'terminal'>;
@@ -75,6 +76,7 @@ export type RequirementId = EntityId<'requirement'>;
 export type ConversationArtifactId = EntityId<'conversation-artifact'>;
 export type McpServerId = EntityId<'mcp-server'>;
 export type RemoteAgentId = EntityId<'remote-agent'>;
+export type SshHostId = EntityId<'ssh-host'>;
 export type WebhookId = EntityId<'webhook'>;
 export type KnowledgeBaseId = EntityId<'knowledge-base'>;
 export type KnowledgeBindingId = EntityId<'knowledge-binding'>;
@@ -97,7 +99,6 @@ export type CompanionId = EntityId<'companion'>;
 export type CompanionEventId = EntityId<'companion-event'>;
 export type CompanionSkillId = EntityId<'companion-skill'>;
 export type CompanionMemoryId = EntityId<'companion-memory'>;
-export type CompanionSuggestionId = EntityId<'companion-suggestion'>;
 export type CompanionSessionWindowId = EntityId<'companion-session-window'>;
 export type SkillPatternId = EntityId<'skill-pattern'>;
 export type FigureId = EntityId<'figure'>;
@@ -119,6 +120,7 @@ export type AssetId = EntityId<'asset'>;
 export type CreationTaskId = EntityId<'creation-task'>;
 export type WorkshopNodeId = EntityId<'workshop-node'>;
 export type WorkshopEdgeId = EntityId<'workshop-edge'>;
+export type MiniAppId = EntityId<'miniapp'>;
 
 export class InvalidEntityIdError extends TypeError {
   readonly entityKind: string;
@@ -176,6 +178,8 @@ export const parseMcpServerId = (value: unknown): McpServerId =>
   parseEntityId('mcp-server', value);
 export const parseRemoteAgentId = (value: unknown): RemoteAgentId =>
   parseEntityId('remote-agent', value);
+export const parseSshHostId = (value: unknown): SshHostId =>
+  parseEntityId('ssh-host', value);
 export const parseWebhookId = (value: unknown): WebhookId => parseEntityId('webhook', value);
 export const parseKnowledgeBaseId = (value: unknown): KnowledgeBaseId =>
   parseEntityId('knowledge-base', value);
@@ -212,8 +216,6 @@ export const parseCompanionSkillId = (value: unknown): CompanionSkillId =>
   parseEntityId('companion-skill', value);
 export const parseCompanionMemoryId = (value: unknown): CompanionMemoryId =>
   parseEntityId('companion-memory', value);
-export const parseCompanionSuggestionId = (value: unknown): CompanionSuggestionId =>
-  parseEntityId('companion-suggestion', value);
 export const parseCompanionSessionWindowId = (value: unknown): CompanionSessionWindowId =>
   parseEntityId('companion-session-window', value);
 export const parseSkillPatternId = (value: unknown): SkillPatternId =>
@@ -253,6 +255,7 @@ export const parseWorkshopNodeId = (value: unknown): WorkshopNodeId =>
   parseEntityId('workshop-node', value);
 export const parseWorkshopEdgeId = (value: unknown): WorkshopEdgeId =>
   parseEntityId('workshop-edge', value);
+export const parseMiniAppId = (value: unknown): MiniAppId => parseEntityId('miniapp', value);
 
 export type SessionTarget =
   | { readonly kind: 'conversation'; readonly id: ConversationId }

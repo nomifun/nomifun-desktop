@@ -126,10 +126,7 @@ struct SetBindingParams {
     /// Write-back ("回血") switch (omit to keep).
     #[serde(default)]
     writeback: Option<bool>,
-    /// Write-back mode: "staged" | "direct" (omit to keep).
-    #[serde(default)]
-    writeback_mode: Option<String>,
-    /// Write-back disposition: "conservative" | "aggressive" (omit to keep).
+    /// Write-back disposition: "manual" | "auto" (omit to keep).
     #[serde(default)]
     writeback_eagerness: Option<String>,
     /// Allow write-back from external IM channel sessions (omit to keep).
@@ -356,22 +353,22 @@ async fn create_base(deps: Arc<GatewayDeps>, p: CreateBaseParams) -> Value {
 async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) -> Value {
     let companion_id = ctx.companion_id.as_ref().map(|id| id.as_str());
     let surface = gateway_surface(ctx.channel_platform.as_deref(), companion_id);
-    let (scope, binding) = match (surface, companion_id) {
-        (WriteSurface::Companion, Some(cid)) => (
-            cid.to_owned(),
-            deps.knowledge_service.get_binding("companion", cid).await.unwrap_or_default(),
-        ),
+    let binding = match (surface, companion_id) {
+        (WriteSurface::Companion, Some(cid)) => {
+            deps.knowledge_service.get_binding("companion", cid).await.unwrap_or_default()
+        }
         _ => {
-            let Some(conversation_id) = &ctx.conversation_id else {
+            if ctx.conversation_id.is_none() {
                 return json!({ "error": "knowledge writes require a companion or conversation identity" });
-            };
-            (
-                conversation_id.to_string(),
-                KnowledgeBinding { enabled: true, writeback: true, ..Default::default() },
-            )
+            }
+            // A fabricated binding with write-back on: the caller reached a
+            // signed knowledge capability, so the surface is already authorized.
+            // `Default` no longer carries a placement, and an external channel
+            // still needs its own opt-in below.
+            KnowledgeBinding { enabled: true, writeback: true, ..Default::default() }
         }
     };
-    let policy = resolve_write_policy(surface, &binding, &scope);
+    let policy = resolve_write_policy(surface, &binding);
     let bound_kb_ids = deps.knowledge_service.resolve_kb_ids_for_cwd("").await;
     let req = WriteRequest {
         spec: WriteTargetSpec::Path { kb_id: p.kb_id, rel_path: p.rel_path },
@@ -383,9 +380,8 @@ async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) 
         Ok(out) => ok(json!({
             "kb_id": out.kb_id,
             "rel_path": out.final_rel_path,
-            "staged": out.staged,
             "updated": matches!(out.op, nomifun_knowledge::WriteOp::Update),
-            "note": "written via the unified write path (placement enforced by session policy); after substantial additions refresh the overview via nomi_knowledge_autogen",
+            "note": "written via the unified write path (an update appends to the document under compare-and-swap); after substantial additions refresh the overview via nomi_knowledge_autogen",
         })),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -443,9 +439,6 @@ async fn set_binding(deps: Arc<GatewayDeps>, p: SetBindingParams) -> Value {
     }
     if let Some(wb) = p.writeback {
         binding.writeback = wb;
-    }
-    if let Some(mode) = p.writeback_mode {
-        binding.writeback_mode = mode;
     }
     if let Some(eagerness) = p.writeback_eagerness {
         binding.writeback_eagerness = eagerness;

@@ -15,11 +15,13 @@ mod fsname;
 mod hooks;
 mod id;
 mod idempotency;
+pub mod miniapp_workspace;
 mod scoped_auth;
 mod pagination;
 pub mod paths;
 pub mod provider_lifecycle;
 pub mod provider_usage;
+pub mod stage_direction;
 mod timestamp;
 mod types;
 pub mod vision_registry;
@@ -57,14 +59,14 @@ pub use id::{
     AgentId, AttachmentId, ChannelPendingPromptId, ChannelPluginId, ChannelSessionId, ChannelUserId,
     CompanionEventId, CompanionEvolutionFeedbackId, CompanionId,
     CompanionMemoryId, CompanionSessionWindowId, CompanionSkillId, CompanionSkillPatternId,
-    CompanionSuggestionId,
     ConversationArtifactId, ConversationId, CrawlJobId, CrawlTaskId, CreationTaskId, CronJobId,
     CronJobRunId, CsAgentId, CsNoteId,
     EntityId, FigureId,
     IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId, McpServerId, MessageId,
+    MiniAppId,
     PersistedArtifactId, PresetId, PresetTagId, PreviewSnapshotId, ProviderId,
     RemoteAgentId, TerminalId, UUID_STRING_LEN,
-    RequirementId, UserId, UuidV7Error, WebhookId,
+    RequirementId, SshHostId, UserId, UuidV7Error, WebhookId,
     WorkshopAssetId, WorkshopCanvasId, WorkshopEdgeId, WorkshopNodeId, generate_id,
     validate_uuidv7,
 };

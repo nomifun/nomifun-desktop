@@ -21,6 +21,7 @@ use nomifun_auth::{
 use nomifun_channel::channel_routes;
 use nomifun_companion::{companion_public_routes, companion_routes};
 use nomifun_customer_service::customer_service_routes;
+use nomifun_miniapp::{miniapp_public_routes, miniapp_routes};
 use nomifun_workshop::{workshop_public_routes, workshop_routes};
 use nomifun_creation::creation_routes;
 use nomifun_conversation::{conversation_ops_routes, conversation_routes};
@@ -692,6 +693,21 @@ pub fn create_router_with_all_state(
     let instance_owner_state =
         InstanceOwnerState::new(services.authoritative_user_id.clone());
 
+    // LAN robot gateway. Assembled here because this is where the
+    // `ConversationService` the robot sessions dispatch through exists; the two
+    // faces are mounted separately below because they belong in different
+    // middleware groups.
+    let robot_faces = services.robot.as_ref().map(|robot| {
+        crate::robot_wiring::mount(
+            robot,
+            states.conversation.service.clone(),
+            services.agent_runtime_registry.clone(),
+            services.companion_service.clone(),
+            services.authoritative_user_id.clone(),
+            services.data_dir.clone(),
+        )
+    });
+
     // Per-companion Remote access-token mint/revoke/status endpoints. Local-trust
     // gated (the desktop webview's own per-boot secret) — merged into the pre-CSRF
     // section alongside the auth routes so it never falls under cookie-CSRF.
@@ -719,6 +735,23 @@ pub fn create_router_with_all_state(
     // Remote agent routes protected by auth middleware
     let remote_agent_authenticated = protect_instance_owner(
         remote_agent_routes(states.remote_agent),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
+    // SSH host book (owner-only): saved connection profiles + test-connection.
+    let ssh_host_authenticated = protect_instance_owner(
+        nomifun_ssh::ssh_host_routes(states.ssh_host),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
+    // 小程序 (mini-app) library (owner-only): metadata CRUD. The document serve
+    // route is split off into `miniapp_public_routes` below and mounted
+    // auth-exempt, because an iframe document load carries no trust header.
+    // `states.miniapp` is cloned so both routers share the one service.
+    let miniapp_authenticated = protect_instance_owner(
+        miniapp_routes(states.miniapp.clone()),
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -983,6 +1016,13 @@ pub fn create_router_with_all_state(
     // and canvas ids; listing/upload/mutation stay authenticated.
     let workshop_public = workshop_public_routes(states.workshop);
 
+    // 小程序 document serving — exempt from auth for the same reason as the
+    // workshop binaries: an `<iframe>` document load can't carry the local-trust
+    // header, so an authenticated route would 403 every mini-app the user opens.
+    // GET-only, opaque bare UUIDv7 ids; every metadata read and every write stays
+    // authenticated.
+    let miniapp_public = miniapp_public_routes(states.miniapp);
+
     // WebSocket upgrade route — exempt from CSRF (no cookie-based
     // double-submit) but still gets security response headers.
     let ws_routes = Router::new()
@@ -1063,6 +1103,8 @@ pub fn create_router_with_all_state(
         .merge(conversation_authenticated)
         .merge(conversation_ops_authenticated)
         .merge(remote_agent_authenticated)
+        .merge(ssh_host_authenticated)
+        .merge(miniapp_authenticated)
         .merge(agent_authenticated)
         .merge(model_failover_authenticated)
         .merge(connection_test_authenticated)
@@ -1089,6 +1131,17 @@ pub fn create_router_with_all_state(
         .merge(shell_authenticated)
         .merge(preset_authenticated);
 
+    // Robot management face (owner-only), same group and same gates as the SSH
+    // host book: the desktop UI is talking, not a device.
+    let router = match robot_faces.as_ref() {
+        Some(faces) => router.merge(protect_instance_owner(
+            faces.admin.clone(),
+            &auth_mw_state,
+            &instance_owner_state,
+        )),
+        None => router,
+    };
+
     // Phase 2b: mount the login-browser routes (browser-use builds only).
     #[cfg(feature = "browser-use")]
     let router = router
@@ -1114,7 +1167,19 @@ pub fn create_router_with_all_state(
     .merge(public_assets)
     .merge(companion_public)
     .merge(workshop_public)
-    .layer(middleware::from_fn(security_headers_middleware));
+    .merge(miniapp_public);
+
+    // Robot device face. `nest` (not `merge`) scopes it to `/robot`, and it sits
+    // in this post-CSRF group on purpose: a robot presents a bearer token minted
+    // by its own OTA response and has neither a cookie nor a session, so
+    // cookie-CSRF has nothing to protect and would only reject it. It still
+    // inherits the security headers, the body limit and the access log below.
+    let router = match robot_faces {
+        Some(faces) => router.nest("/robot", faces.device),
+        None => router,
+    };
+
+    let router = router.layer(middleware::from_fn(security_headers_middleware));
 
     // Raise the default request body limit from axum's 2MB default to
     // `BODY_LIMIT` (10MB). Routes that need a larger cap (e.g. `/api/fs/upload`)

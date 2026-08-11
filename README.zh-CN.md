@@ -24,7 +24,7 @@
   <img alt="Built with Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white">
   <img alt="Rust 2024" src="https://img.shields.io/badge/Rust-edition_2024-CE412B?style=flat-square&logo=rust&logoColor=white">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white">
-  <a href="https://github.com/nomifun/nomifun-tauri/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/nomifun/nomifun-tauri?style=flat-square&color=FF6F91"></a>
+  <a href="https://github.com/nomifun/nomifun-desktop/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/nomifun/nomifun-desktop?style=flat-square&color=FF6F91"></a>
 </p>
 
 <p>
@@ -35,7 +35,7 @@
   <a href="https://www.nomifun.com">🌐 官网</a>&nbsp;·&nbsp;
   <a href="docs/README.zh.md">📖 文档</a>&nbsp;·&nbsp;
   <a href="#-快速开始">🚀 快速开始</a>&nbsp;·&nbsp;
-  <a href="https://github.com/nomifun/nomifun-tauri/releases">📦 下载</a>&nbsp;·&nbsp;
+  <a href="https://github.com/nomifun/nomifun-desktop/releases">📦 下载</a>&nbsp;·&nbsp;
   <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">百度网盘</a>&nbsp;·&nbsp;
   <a href="#-联系我们--社区">💬 社区</a>
 </p>
@@ -130,11 +130,20 @@
 每天与你对话的伙伴，会悄悄变成那个最懂你的助理。
 
 - **专属形象。** 上传自定义伙伴形象（DIY），或从与具体伙伴解耦的独立**形象库**中挑选。
-- **一脑多面。** 运行多个伙伴，共享统一记忆中枢，同时各自保留**专属**私有记忆，并可挂载不同领域的知识库。你只需教好*一个*伙伴，再让它去教其他伙伴。
+- **一家人，而非一个脑。** 运行多个伙伴并同时使用，每一个都是完整的独立个体：**各自**的聊天模型、人格、记忆和领域知识库。每条记忆都只属于一个伙伴——你对工作伙伴说的话，不会漏进你在家里聊天的那一个。
 - **聊天入口回到主会话。** 伙伴聊天现在直接进入主 **会话** 体系，并在侧边栏拥有独立的「桌面伙伴」分组；`/nomi` 则专注于伙伴管理。
 - **它在学你（默认开启，首启动一次性确认）。** 后台 Learner 把你的使用蒸馏为长期记忆；确定性的进化引擎从你反复出现的多步工具序列中挖掘出 **skill 草稿**，提交给你审阅。记忆**完全可见、可编辑**。
-- **会传播的 skill。** 伙伴自动总结、生成 skill 并与你商议，还能把 skill **赠予**另一个伙伴（对方得到一份副本）—— 开启跨伙伴的共享学习。
+- **自己写 skill。** 伙伴从真实工作里自动总结、生成 skill 并与你商议，确认后才留下。
 - **不只是伙伴，更是超级网关。** 每个伙伴都是完整、独立的个体，可连接多个 IM 渠道。只要有网络和社交平台，随时随地一条消息，就能指挥伙伴帮你操作电脑。每个伙伴都能完整驱动桌面的系统能力。
+
+### 🤖 小智机器人 —— 让桌面伙伴走进实体设备
+
+> 指南：[`docs/guides/xiaozhi-robot.zh.md`](docs/guides/xiaozhi-robot.zh.md) · 固件：[nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai)
+
+通过局域网把兼容的小智 ESP32 机器人直接连接到 NomiFun。机器人提供麦克风、
+扬声器、显示屏、舵机和设备端 MCP 工具；NomiFun 提供伙伴人格、模型、记忆、
+ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控制 → 机器人连接**：
+复制 OTA 地址，输入机器人显示的 6 位激活码，即可把实体设备绑定到该伙伴。
 
 ### 🧠 Agent 协作
 
@@ -163,7 +172,7 @@
 把散落在系统各处的知识，收拢到一个可管理、可追踪的地方。
 
 - **集中管理与追踪** —— 创建、挂载，并跨会话、终端、伙伴追踪消费方。
-- **安全回写** —— 代码强制、按使用面分级的写策略。默认把写入**暂存到审阅收件箱**，提供 unified-diff 预览与合并/丢弃 —— 智能体绝不会把内容写错地方。
+- **安全回写** —— 代码强制、按使用面分级的写策略。每个挂载点自选**回写意识**：**手动型**（默认 —— 除非你在对话里明确要求，否则不回写）或**自动型**（智能体自主判断，只写它有把握、确有长期价值的内容）。两种意识下，更新已有文档都以 compare-and-swap **追加**，回写只能给你整理好的正文添内容，绝不覆盖。
 - **实时 URL 快照** —— 把任意网页变成知识来源（带 SSRF 防护抓取、HTML→Markdown），支持*快照*（持久化、可重抓）与*实时*两种模式。
 - **作用域受控的检索** —— 智能体调用 `knowledge_search` 工具，其作用域由服务端裁定、无法被擅自放大。
 
@@ -300,7 +309,7 @@ packaging/      web 宿主的 Linux 部署支持
 
 ## 🚀 快速开始
 
-> 📦 **下载安装包**：优先使用 [GitHub Releases](https://github.com/nomifun/nomifun-tauri/releases)；中国大陆下载可使用 [百度网盘镜像](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA)（分享名：`nomifun`）。也可以从源码安装，或用 Docker 跑服务器。
+> 📦 **下载安装包**：优先使用 [GitHub Releases](https://github.com/nomifun/nomifun-desktop/releases)；中国大陆下载可使用 [百度网盘镜像](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA)（分享名：`nomifun`）。也可以从源码安装，或用 Docker 跑服务器。
 
 **前置依赖**
 
@@ -311,7 +320,7 @@ packaging/      web 宿主的 Linux 部署支持
 **桌面应用（源码）**
 
 ```bash
-git clone https://github.com/nomifun/nomifun-tauri.git
+git clone https://github.com/nomifun/nomifun-desktop.git
 cd nomifun-tauri
 bun install
 
@@ -432,6 +441,7 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | **运行（组装好的应用）** | |
 | `bun run serve:web` | 启动 Web 服务器，托管已构建的前端 |
 | **测试** | |
+| `bun run test:git-attribution` | Validate the repository-local human-only Git attribution policy. |
 | `bun run test` | 运行全部 Rust 测试（含 doctest） |
 | `bun run test:fast` | 用 nextest 快速跑 Rust 测试（日常） |
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
@@ -443,14 +453,16 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
 | `bun run check:browser-platform-boundary` | Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
-| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
+| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
+| `bun run check:dead-css` | 死 CSS 工具类棘轮：拦住新增的 {text,bg,border}-[rgb(var(--ramp-N))] / border-border-N / border-b-base / border-b-light（存量记在脚本 BASELINE，只许变少） |
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
 | **维护 / 工具** | |
+| `bun run setup:git-hooks` | Enable this repository's human-only Git attribution hooks without changing global Git config. |
 | `bun run clean` | 深度回收构建空间（debug 产物 + flycheck + 旧安装包） |
 | `bun run seed:dev` | 用生产数据目录播种 dev 数据目录 |
 | `bun run bump` | 统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag |
@@ -469,6 +481,7 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 - [`docs/README.zh.md`](docs/README.zh.md) —— 文档索引
 - [`docs/getting-started/`](docs/getting-started) —— 安装与首次运行
 - [`docs/guides/`](docs/guides) —— 用户与运维指南（伙伴、渠道、AutoWork、知识库、computer/browser use、终端、远程 API……）
+- [`docs/guides/xiaozhi-robot.zh.md`](docs/guides/xiaozhi-robot.zh.md) —— 把小智 ESP32 机器人连接到 NomiFun 桌面伙伴
 - [`docs/architecture/`](docs/architecture) —— 技术架构
 - [`docs/reference/`](docs/reference) —— 配置、API 概览、FAQ、排障
 
@@ -489,7 +502,7 @@ NomiFun 非常需要你的加入来壮大 —— 代码贡献、社区运营、�
 - 阅读 [`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md) 完成环境搭建、了解检查阶梯；英文版见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 - 友善相待 —— 见 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)。
 - 发现漏洞？请按 [`SECURITY.md`](SECURITY.md) 操作。
-- 从 [open issues](https://github.com/nomifun/nomifun-tauri/issues) 找一个起点。
+- 从 [open issues](https://github.com/nomifun/nomifun-desktop/issues) 找一个起点。
 
 ---
 
@@ -526,7 +539,7 @@ NomiFun **完全开源、毫无保留**。个人与企业都可以在它之上�
 | 渠道 | 入口 |
 |---|---|
 | 🌐 **官网** | [www.nomifun.com](https://www.nomifun.com) |
-| 🐙 **GitHub** | [nomifun/nomifun-tauri](https://github.com/nomifun/nomifun-tauri) · [Issues](https://github.com/nomifun/nomifun-tauri/issues) · [Releases](https://github.com/nomifun/nomifun-tauri/releases) |
+| 🐙 **GitHub** | [nomifun/nomifun-desktop](https://github.com/nomifun/nomifun-desktop) · [Issues](https://github.com/nomifun/nomifun-desktop/issues) · [Releases](https://github.com/nomifun/nomifun-desktop/releases) |
 | ✉️ **邮箱** | `hello@nomifun.com` <sub>（占位 · 待确认）</sub> |
 | 📕 **小红书** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
 | 📺 **哔哩哔哩** | [NomiFun](https://b23.tv/0UhgKDh) · [演示视频](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |

@@ -16,6 +16,11 @@ import {
   PLUGIN_MARKET_SOURCES,
 } from '@/renderer/pages/settings/skill/skillMarket';
 import { useNomiQuickStart } from '@/renderer/hooks/agent/useNomiQuickStart';
+import {
+  ENHANCED_TOOLS_GRID_CLASS,
+  ENHANCED_TOOLS_PAGE_STACK_CLASS,
+  ENHANCED_TOOLS_SURFACE_CLASS,
+} from '@/renderer/pages/settings/enhancedToolsLayout';
 
 type PluginSettingsPanelProps = {
   section?: 'installed' | 'market' | 'both';
@@ -58,15 +63,15 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
   );
 
   return (
-    <div className='space-y-16px pb-24px'>
+    <div className={ENHANCED_TOOLS_PAGE_STACK_CLASS}>
       {showInstalled && (
-        <div className='bg-fill-2 rounded-24px p-20px'>
-          <div className='flex items-start justify-between gap-12px mb-14px'>
+        <div
+          data-testid='plugin-installed-surface'
+          className={ENHANCED_TOOLS_SURFACE_CLASS}
+        >
+          <div className='mb-10px flex items-center justify-between gap-10px'>
             <div>
-              <h2 className='m-0 text-22px font-600 text-t-primary'>
-                {t('settings.plugins.installedTitle', { defaultValue: 'Installed Plugins' })}
-              </h2>
-              <p className='mt-6px mb-0 text-13px text-t-secondary'>
+              <p className='m-0 text-13px text-t-secondary'>
                 {t('settings.plugins.installedDescription', {
                   defaultValue: 'Loaded Nomi extensions and plugin packages currently available to the app.',
                 })}
@@ -75,22 +80,22 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
           </div>
 
           {loading ? (
-            <div className='py-24px text-center text-t-secondary text-14px'>
+            <div className='py-20px text-center text-t-secondary text-14px'>
               {t('common.loading', { defaultValue: 'Loading...' })}
             </div>
           ) : extensions.length === 0 ? (
-            <div className='py-24px text-center text-t-secondary text-14px border border-dashed border-border-2 rd-12px'>
+            <div className='py-20px text-center text-t-secondary text-14px border border-dashed border-arco-2 rd-12px'>
               {t('settings.plugins.emptyInstalled', { defaultValue: 'No installed plugins found.' })}
             </div>
           ) : (
             <div
-              className='grid gap-12px'
+              className={ENHANCED_TOOLS_GRID_CLASS}
               style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(260px, 100%), 1fr))' }}
             >
               {extensions.map((extension) => (
                 <div
                   key={extension.name}
-                  className='rounded-16px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-14px'
+                  className='rounded-16px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-12px'
                 >
                   <div className='flex items-start justify-between gap-10px'>
                     <div className='min-w-0'>
@@ -104,7 +109,7 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
                       bordered={false}
                       className={
                         extension.enabled
-                          ? '!bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]'
+                          ? '!bg-[rgba(var(--success-6),0.1)] !text-success-6'
                           : '!bg-[var(--color-fill-2)] !text-t-tertiary'
                       }
                     >
@@ -114,11 +119,11 @@ const PluginSettingsPanel: React.FC<PluginSettingsPanelProps> = ({ section = 'bo
                     </Tag>
                   </div>
                   {extension.description && (
-                    <div className='mt-10px text-12px leading-18px text-t-secondary line-clamp-2'>
+                    <div className='mt-8px text-12px leading-18px text-t-secondary line-clamp-2'>
                       {extension.description}
                     </div>
                   )}
-                  <div className='mt-12px text-11px text-t-tertiary'>v{extension.version}</div>
+                  <div className='mt-10px text-11px text-t-tertiary'>v{extension.version}</div>
                 </div>
               ))}
             </div>

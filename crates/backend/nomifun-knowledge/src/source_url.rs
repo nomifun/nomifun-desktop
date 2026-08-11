@@ -524,17 +524,15 @@ pub fn slug_for_url(url: &Url) -> String {
     if slug.is_empty() { "page".into() } else { slug }
 }
 
-/// Assemble a snapshot document: YAML frontmatter (`source_url`,
-/// `fetched_at`, optional `title`) followed by the markdown body.
+/// Assemble a snapshot document: a readable Markdown metadata quote
+/// (`source_url`, `fetched_at`, optional `title`) followed by the page body.
 pub fn snapshot_markdown(source_url: &str, fetched_at: &str, title: Option<&str>, body: &str) -> String {
-    let mut out = String::from("---\n");
-    out.push_str(&format!("source_url: {source_url}\n"));
-    out.push_str(&format!("fetched_at: {fetched_at}\n"));
+    let mut out = format!("> **source_url**: {source_url}\n> **fetched_at**: {fetched_at}\n");
     if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
         // Collapse runs of whitespace (incl. newlines/tabs): a multi-line
-        // title would break out of its YAML frontmatter line.
+        // title must remain on one metadata line.
         let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-        out.push_str(&format!("title: \"{}\"\n", title.replace('"', "'")));
+        out.push_str(&format!("> **title**: \"{}\"\n", title.replace('"', "'")));
     }
     out.push_str("---\n\n");
     out.push_str(body.trim_end());
@@ -542,13 +540,20 @@ pub fn snapshot_markdown(source_url: &str, fetched_at: &str, title: Option<&str>
     out
 }
 
-/// Extract the `source_url` value from a snapshot's YAML frontmatter (the
-/// shape written by [`snapshot_markdown`]). Returns `None` for documents
-/// without a leading frontmatter block, or whose frontmatter has no
-/// `source_url` line — i.e. user-authored files that merely live in
-/// `snapshots/`. Only the frontmatter block is consulted; a `source_url:`
-/// line in the body never matches.
+/// Extract the `source_url` value from a snapshot header. New snapshots use
+/// the Markdown quote written by [`snapshot_markdown`]; legacy YAML
+/// frontmatter remains supported so existing knowledge bases keep refreshing.
+/// Only a leading header is consulted, so a body-level source label never
+/// marks a user-authored file as a managed snapshot.
 pub fn snapshot_source_url(content: &str) -> Option<&str> {
+    let first_line = content.lines().next()?.trim();
+    if let Some(value) = first_line.strip_prefix("> **source_url**:") {
+        let value = value.trim();
+        return (!value.is_empty()).then_some(value);
+    }
+
+    // Backward compatibility for snapshots created with the former YAML
+    // frontmatter template.
     let rest = content.strip_prefix("---")?;
     let rest = rest.strip_prefix("\r\n").or_else(|| rest.strip_prefix('\n'))?;
     for line in rest.lines() {
@@ -729,7 +734,7 @@ mod tests {
         assert!(!forbidden_ip(&"2606:4700:4700::1111".parse().unwrap()));
     }
 
-    // ── slug / frontmatter / conversion ──────────────────────────────
+    // ── slug / snapshot metadata / conversion ───────────────────────
 
     #[test]
     fn slug_rules() {
@@ -743,37 +748,47 @@ mod tests {
     }
 
     #[test]
-    fn frontmatter_shape() {
+    fn snapshot_metadata_shape() {
         let md = snapshot_markdown(
             "https://example.com/docs",
             "2026-06-12T12:00:00Z",
             Some("My \"Docs\""),
             "# Title\n\nBody",
         );
-        assert!(md.starts_with("---\nsource_url: https://example.com/docs\nfetched_at: 2026-06-12T12:00:00Z\n"), "got: {md}");
-        assert!(md.contains("title: \"My 'Docs'\""), "got: {md}");
+        assert!(
+            md.starts_with(
+                "> **source_url**: https://example.com/docs\n> **fetched_at**: 2026-06-12T12:00:00Z\n"
+            ),
+            "got: {md}"
+        );
+        assert!(md.contains("> **title**: \"My 'Docs'\""), "got: {md}");
         assert!(md.contains("---\n\n# Title\n\nBody\n"), "got: {md}");
         // No title line when absent.
         let md = snapshot_markdown("https://e.com", "2026-01-01T00:00:00Z", None, "b");
-        assert!(!md.contains("title:"), "got: {md}");
+        assert!(!md.contains("**title**:"), "got: {md}");
         // Newlines/tabs in a title collapse to single spaces — a multi-line
-        // title must not break out of its frontmatter line.
+        // title must not break out of its metadata line.
         let md = snapshot_markdown("https://e.com", "2026-01-01T00:00:00Z", Some("Line one\nLine\ttwo"), "b");
-        assert!(md.contains("title: \"Line one Line two\"\n"), "got: {md}");
+        assert!(md.contains("> **title**: \"Line one Line two\"\n"), "got: {md}");
     }
 
     #[test]
-    fn snapshot_source_url_reads_only_frontmatter() {
+    fn snapshot_source_url_reads_only_managed_headers() {
         // Round-trip with the writer.
         let md = snapshot_markdown("https://e.com/docs", "2026-01-01T00:00:00Z", Some("T"), "body");
         assert_eq!(snapshot_source_url(&md), Some("https://e.com/docs"));
-        // User-authored files: no frontmatter at all, or frontmatter without
-        // the field — a body-level `source_url:` line never counts.
+        // User-authored files: no managed header, or a body-level label.
         assert_eq!(snapshot_source_url("# notes\nsource_url: https://nope"), None);
+        assert_eq!(snapshot_source_url("# notes\n> **source_url**: https://nope"), None);
         assert_eq!(snapshot_source_url("---\ntitle: x\n---\n\nsource_url: https://nope"), None);
+        assert_eq!(snapshot_source_url("> **source_url**:\n---\n"), None, "empty value is no value");
         assert_eq!(snapshot_source_url("---\nsource_url:\n---\n"), None, "empty value is no value");
         assert_eq!(snapshot_source_url(""), None);
-        // CRLF frontmatter still parses.
+        // Both the new header and legacy YAML remain compatible with CRLF.
+        assert_eq!(
+            snapshot_source_url("> **source_url**: https://e.com/new\r\n> **fetched_at**: now\r\n---\r\nbody"),
+            Some("https://e.com/new")
+        );
         assert_eq!(snapshot_source_url("---\r\nsource_url: https://e.com/x\r\n---\r\nbody"), Some("https://e.com/x"));
     }
 

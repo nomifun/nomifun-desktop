@@ -24,6 +24,7 @@ import { CheckOne, Close, Delete, Download, FileText, FolderClose, ImageFiles, S
 
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
+import { HUB_PAGE_TITLE_CLASS } from '@/renderer/components/layout/HubPageShell';
 
 import type { AssetSortKey, PatchAssetBody, WorkshopAsset } from '../workshop/types';
 import type { AssetId } from '@/common/types/ids';
@@ -85,7 +86,7 @@ const BulkBar: React.FC<BulkBarProps> = ({ count, t, onMove, onTag, onDownload, 
             className={[
               'inline-flex items-center gap-5px rounded-8px border border-solid px-10px py-5px text-12px font-500 cursor-pointer transition-colors',
               a.danger
-                ? 'border-[rgba(var(--danger-6),0.35)] text-[rgb(var(--danger-6))] bg-[var(--color-bg-2)] hover:bg-[rgba(var(--danger-6),0.08)]'
+                ? 'border-[rgba(var(--danger-6),0.35)] text-danger-6 bg-[var(--color-bg-2)] hover:bg-[rgba(var(--danger-6),0.08)]'
                 : 'border-[var(--color-border-2)] text-[var(--color-text-2)] bg-[var(--color-bg-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
             ].join(' ')}
           >
@@ -484,26 +485,15 @@ const AssetLibraryPage: React.FC = () => {
       <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-16px'>
         {/* Header */}
         <div className='flex w-full flex-wrap items-start justify-between gap-x-20px gap-y-12px'>
-          <div className='flex items-start gap-12px min-w-0'>
-            <span
-              className='flex items-center justify-center w-40px h-40px rd-11px shrink-0 text-[rgb(var(--primary-6))]'
-              style={{
-                background: 'linear-gradient(150deg, rgba(var(--primary-5),0.16) 0%, rgba(var(--primary-6),0.26) 100%)',
-                border: '1px solid rgba(var(--primary-6),0.22)',
-              }}
-            >
-              <ImageFiles theme='outline' size='22' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
-            </span>
-            <div className='min-w-0'>
-              <h1 className='m-0 mb-3px text-22px font-bold text-[var(--color-text-1)] tracking-tight'>
-                {t('assetLibrary.title', { defaultValue: '资产库' })}
-              </h1>
-              <p className='m-0 text-13px text-[var(--color-text-3)] leading-19px max-w-560px'>
-                {t('assetLibrary.subtitle', {
-                  defaultValue: '统一管理你在创意工坊中沉淀的图片、视频与文本素材：上传、分组、打标签、批量整理与复用。',
-                })}
-              </p>
-            </div>
+          <div className='min-w-0'>
+            <h1 className={`${HUB_PAGE_TITLE_CLASS} mb-3px`}>
+              {t('assetLibrary.title', { defaultValue: '资产库' })}
+            </h1>
+            <p className='m-0 text-13px text-[var(--color-text-3)] leading-19px max-w-560px'>
+              {t('assetLibrary.subtitle', {
+                defaultValue: '统一管理你在创意工坊中沉淀的图片、视频与文本素材：上传、分组、打标签、批量整理与复用。',
+              })}
+            </p>
           </div>
 
           <div className='flex items-center gap-10px'>
@@ -526,7 +516,7 @@ const AssetLibraryPage: React.FC = () => {
 
         {/* Controls */}
         <div className='flex flex-wrap items-center gap-10px'>
-          <div className='flex min-w-200px flex-1 items-center gap-8px rounded-10px border border-solid border-[var(--color-border-3)] bg-[var(--color-fill-2)] px-12px py-8px'>
+          <div className='box-border flex h-32px min-w-200px flex-1 items-center gap-8px rounded-10px border border-solid border-[var(--color-border-3)] bg-[var(--color-fill-2)] px-12px'>
             <Search theme='outline' size={14} className='shrink-0 text-[var(--color-text-3)]' />
             <input
               className='w-full border-none bg-transparent font-[inherit] text-13px text-[var(--color-text-1)] outline-none placeholder:text-[var(--color-text-3)]'
@@ -557,7 +547,7 @@ const AssetLibraryPage: React.FC = () => {
                     openRename();
                   }
                 }}
-                className='text-12px text-[var(--color-text-3)] cursor-pointer whitespace-nowrap hover:text-[rgb(var(--primary-6))]'
+                className='text-12px text-[var(--color-text-3)] cursor-pointer whitespace-nowrap hover:text-primary-6'
               >
                 {t('assetLibrary.renameCollection.trigger', { defaultValue: '重命名集合' })}
               </div>
@@ -671,7 +661,7 @@ const AssetLibraryPage: React.FC = () => {
         ) : lib.displayItems.length === 0 ? (
           <div className='flex flex-col items-center justify-center gap-14px px-24px py-64px text-center'>
             <span
-              className='flex items-center justify-center w-72px h-72px rounded-full text-[rgb(var(--primary-6))]'
+              className='flex items-center justify-center w-72px h-72px rounded-full text-primary-6'
               style={{
                 background: 'var(--color-fill-2)',
               }}
@@ -745,8 +735,8 @@ const AssetLibraryPage: React.FC = () => {
 
       {/* Drag-to-upload overlay */}
       {dragActive && (
-        <div className='pointer-events-none fixed inset-16px z-40 grid place-items-center rounded-16px border-2 border-dashed border-[rgb(var(--primary-6))] bg-[rgba(var(--primary-6),0.08)] backdrop-blur-sm'>
-          <div className='flex flex-col items-center gap-8px text-center text-[rgb(var(--primary-6))]'>
+        <div className='pointer-events-none fixed inset-16px z-40 grid place-items-center rounded-16px border-2px border-dashed border-primary-6 bg-[rgba(var(--primary-6),0.08)] backdrop-blur-sm'>
+          <div className='flex flex-col items-center gap-8px text-center text-primary-6'>
             <Upload theme='outline' size={34} strokeWidth={3} />
             <span className='text-16px font-700'>{t('workshopAssets.upload.dropTitle', { defaultValue: '松开以上传' })}</span>
             <span className='max-w-[260px] text-13px text-[var(--color-text-2)]'>

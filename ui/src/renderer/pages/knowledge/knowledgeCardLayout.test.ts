@@ -27,4 +27,16 @@ describe('KnowledgeCard footer layout', () => {
     expect(cardSource.includes("title={t('knowledge.actions.delete'")).toBe(true);
     expect(cardSource.includes("<Delete theme='outline' size={13} strokeWidth={3} />")).toBe(true);
   });
+
+  test('caps visible tags and exposes the complete tag list in a tooltip', () => {
+    expect(cardSource.includes('const MAX_VISIBLE_TAGS = 5')).toBe(true);
+    expect(cardSource.includes('resolved.slice(0, MAX_VISIBLE_TAGS)')).toBe(true);
+    expect(cardSource.includes('+{overflowCount}')).toBe(true);
+    expect(cardSource.includes('<Tooltip content={tooltipContent}')).toBe(true);
+  });
+
+  test('strictly clips descriptions to two lines inside compact cards', () => {
+    expect(cardSource.includes('max-h-40px min-h-0 flex-1 overflow-hidden')).toBe(true);
+    expect(cardSource.includes('WebkitLineClamp: 2')).toBe(true);
+  });
 });

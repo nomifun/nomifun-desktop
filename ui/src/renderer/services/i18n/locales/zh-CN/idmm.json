@@ -78,16 +78,8 @@
   "disabledOk": "已关闭智能决策",
   "draftIncomplete": "智能决策配置未完成。请先关闭值守，补齐必填配置后再开启。",
   "settings": {
-    "title": "智能决策（IDMM）",
-    "desc": "旁路模型模式的默认配置，值守未单独设置时使用。",
-    "backupProvider": "旁路供应商",
-    "backupModel": "旁路模型",
     "selectProvider": "选择供应商",
-    "selectModel": "选择模型",
-    "defaultSteering": "默认决策策略",
-    "defaultSteeringPlaceholder": "当值守未填写自由文本策略时套用的默认决策策略。",
-    "saved": "智能决策设置已保存",
-    "none": "无"
+    "selectModel": "选择模型"
   },
   "log": {
     "title": "决策记录",
@@ -134,14 +126,5 @@
       "halted": "已停手",
       "skipped": "已跳过"
     }
-  },
-  "activity": {
-    "title": "决策活动",
-    "desc": "所有会话最近的 IDMM 介入记录(最新在前)。这是滚动窗口而非完整历史——旧记录会自动淘汰。",
-    "empty": "尚无任何会话的介入记录。",
-    "refresh": "刷新",
-    "clearAll": "清空全部",
-    "clearConfirm": "清空所有会话的决策活动?此操作不可撤销。",
-    "clearOk": "已清空决策活动"
   }
 }

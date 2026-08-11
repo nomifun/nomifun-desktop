@@ -38,8 +38,7 @@ that were in flight. Start the job again and it resumes where it stopped.
 | **Render mode** | `Auto` and `HTTP only` both fetch over plain HTTP today. Browser rendering is not available yet. |
 | **Stay on the seed's site** | Restricts the crawl to the seeds' registrable domains (`docs.example.com` and `example.com` count as the same site). |
 | **Respect robots.txt** | On by default. See the compliance section below. |
-| **Knowledge base ID** | Where pages are written. Leave empty to crawl without saving content — useful for a dry run. |
-| **Stage into the review inbox** | On by default: pages land in the knowledge base's review inbox with a diff preview instead of being written directly. |
+| **Knowledge base ID** | Where pages are written directly. Leave empty to crawl without saving content — useful for a dry run. |
 
 ## Politeness
 
@@ -105,6 +104,6 @@ times is otherwise left alone on purpose.
 ## Where it lives
 
 - Backend: [`crates/backend/nomifun-crawl/`](../../crates/backend/nomifun-crawl/)
-- Schema: [`024_crawl_jobs_and_tasks.sql`](../../crates/backend/nomifun-db/migrations/024_crawl_jobs_and_tasks.sql)
+- Schema: [`030_crawl_jobs_and_tasks.sql`](../../crates/backend/nomifun-db/migrations/030_crawl_jobs_and_tasks.sql)
 - Frontend: [`ui/src/renderer/pages/crawl/`](../../ui/src/renderer/pages/crawl/)
 - Design notes: [`docs/specs/2026-08-05-distributed-crawler-design.zh.md`](../specs/2026-08-05-distributed-crawler-design.zh.md)

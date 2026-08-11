@@ -160,6 +160,16 @@ pub struct TurnArtifactMessageCommit {
     pub content: String,
 }
 
+/// One LOCAL-calendar-day bucket of a conversation's messages — the durable
+/// day index a history reader pages by (`day` is `YYYYMMDD`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageDayBucket {
+    /// Local calendar day, `YYYYMMDD`.
+    pub day: String,
+    /// Visible messages persisted on that day.
+    pub message_count: i64,
+}
+
 /// Conversation + message data access abstraction.
 ///
 /// Covers conversation CRUD, extended queries (source/chat, cron-job,
@@ -809,6 +819,21 @@ pub trait IConversationRepository: Send + Sync {
         conversation_id: &str,
     ) -> Result<Vec<ConversationRow>, DbError>;
 
+    /// Lists the durable robot conversations owned by one companion.
+    ///
+    /// `extra.companion_id` is indexed in the v3 schema. The additional
+    /// `robot_session` gate keeps the companion's ordinary desktop thread and
+    /// remote channel sessions out of this device-specific projection.
+    async fn list_robot_threads_by_companion(
+        &self,
+        _user_id: &str,
+        _companion_id: &str,
+    ) -> Result<Vec<ConversationRow>, DbError> {
+        Err(DbError::Init(
+            "robot conversation lookup is not supported".to_owned(),
+        ))
+    }
+
     /// Lists every retained Conversation whose top-level current model is
     /// logically bound to `provider_id`. Deletion policy is enforced by the
     /// service layer.
@@ -865,6 +890,39 @@ pub trait IConversationRepository: Send + Sync {
         &self,
         _conversation_id: &str,
         _before: Option<(i64, String)>,
+        _limit: u32,
+    ) -> Result<PaginatedResult<MessageRow>, DbError> {
+        Ok(PaginatedResult {
+            items: Vec::new(),
+            total: 0,
+            has_more: false,
+        })
+    }
+
+    /// Complete LOCAL-calendar-day index of a conversation's visible messages,
+    /// newest day first. Hidden engine rows and the two synthetic message types
+    /// are excluded, so a bucket's `message_count` is exactly what
+    /// [`Self::get_messages_for_local_day`] returns for that day.
+    ///
+    /// The day is derived from the OS timezone (SQLite `'localtime'`), the same
+    /// source `chrono::Local` reads, so these keys line up with the companion
+    /// domain's `session_day` digest partitions. Default returns empty so mock
+    /// repos compile; the SQLite repo overrides it.
+    async fn message_local_day_index(
+        &self,
+        _conversation_id: &str,
+    ) -> Result<Vec<MessageDayBucket>, DbError> {
+        Ok(Vec::new())
+    }
+
+    /// One local calendar day (`YYYYMMDD`) of a conversation's visible messages,
+    /// oldest-first, capped at `limit`. Filtered identically to
+    /// [`Self::message_local_day_index`] so a day never renders rows its own
+    /// index did not count. `total` is that day's full count.
+    async fn get_messages_for_local_day(
+        &self,
+        _conversation_id: &str,
+        _day: &str,
         _limit: u32,
     ) -> Result<PaginatedResult<MessageRow>, DbError> {
         Ok(PaginatedResult {

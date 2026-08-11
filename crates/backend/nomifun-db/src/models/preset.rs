@@ -65,7 +65,6 @@ pub struct PresetKnowledgePolicyRow {
     pub id: i64,
     pub preset_id: String,
     pub enabled: bool,
-    pub mode: String,
     pub writeback: bool,
     pub eagerness: Option<String>,
     pub grounded: bool,
@@ -158,8 +157,8 @@ pub struct PresetWriteParams {
     pub model_preferences: Vec<(Option<String>, String, bool)>,
     /// skill_name, binding, required
     pub skill_bindings: Vec<(String, String, bool)>,
-    /// enabled, mode, writeback, eagerness, grounded
-    pub knowledge_policy: (bool, String, bool, Option<String>, bool),
+    /// enabled, writeback, eagerness, grounded
+    pub knowledge_policy: (bool, bool, Option<String>, bool),
     /// knowledge_base_id, required
     pub knowledge_bases: Vec<(String, bool)>,
     /// locale, prompt

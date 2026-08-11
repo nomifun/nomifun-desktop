@@ -48,6 +48,8 @@ type MarkdownViewProps = {
   onRef?: (el?: HTMLDivElement | null) => void;
   fontSize?: string;
   lineHeight?: string;
+  /** Use denser article typography in constrained workspace panels. */
+  compact?: boolean;
   /** Enable raw HTML rendering in markdown content. Use with caution — only for trusted sources. */
   allowHtml?: boolean;
   /** Model/tool Markdown is not a verified artifact-delivery receipt. */
@@ -62,6 +64,7 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
     onRef,
     fontSize,
     lineHeight,
+    compact,
     allowHtml,
     allowUnverifiedImages = true,
     children: childrenProp,
@@ -156,7 +159,13 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
     return (
       <div className={classNames('relative w-full', className)}>
         <ShadowView fontSize={fontSize} lineHeight={lineHeight}>
-          <div ref={onRef} className='markdown-shadow-body'>
+          <div
+            ref={onRef}
+            className={classNames('markdown-shadow-body markdown-article', {
+              'markdown-article--explicit': Boolean(fontSize || lineHeight),
+              'markdown-article--compact': compact,
+            })}
+          >
             <ReactMarkdown
               remarkPlugins={REMARK_PLUGINS}
               rehypePlugins={rehypePlugins}

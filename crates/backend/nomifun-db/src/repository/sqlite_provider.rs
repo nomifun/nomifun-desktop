@@ -614,17 +614,18 @@ impl IProviderRepository for SqliteProviderRepository {
         // references are enforced by the centralized registry in the
         // client-preference repository rather than by SQL FK/trigger logic.
         // Resolve every registered preference before deleting the parent:
-        // IDMM backup is RESTRICT; arrays are filtered in order; defaults are
-        // deleted and optional references are set to null.
+        // arrays are filtered in order; defaults are deleted and optional
+        // references are set to null. No registered preference RESTRICTs the
+        // delete any more.
         let preference_rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT key, value FROM client_preferences \
-             WHERE key = 'idmm_backup_provider_id' \
-                OR key = 'agent.model_failover' \
+             WHERE key = 'agent.model_failover' \
                 OR key = 'nomi.collaborationModels' \
                 OR key = 'nomi.defaultModel' \
                 OR key = 'knowledge.autogenModel' \
                 OR key = 'tools.imageGenerationModel' \
                 OR key = 'tools.speechToText' \
+                OR key = 'tools.textToSpeech' \
                 OR key LIKE 'channels.%.defaultModel'",
         )
         .fetch_all(&mut *transaction)
@@ -633,11 +634,6 @@ impl IProviderRepository for SqliteProviderRepository {
         for (key, value) in preference_rows {
             match provider_preference_delete_action(&key, &value, id)? {
                 ProviderPreferenceDeleteAction::Keep => {}
-                ProviderPreferenceDeleteAction::Restrict => {
-                    return Err(DbError::Conflict(
-                        "provider is still referenced by an IDMM backup preference".to_owned(),
-                    ));
-                }
                 action => preference_actions.push((key, action)),
             }
         }
@@ -765,8 +761,7 @@ impl IProviderRepository for SqliteProviderRepository {
                     .execute(&mut *transaction)
                     .await?;
                 }
-                ProviderPreferenceDeleteAction::Keep
-                | ProviderPreferenceDeleteAction::Restrict => unreachable!(),
+                ProviderPreferenceDeleteAction::Keep => unreachable!(),
             }
         }
 
@@ -1279,6 +1274,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((models, connections), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn delete_sweeps_the_text_to_speech_preference_and_leaves_no_orphan() {
+        // Registering the key in `provider_preference_kind` only covers the WRITE
+        // boundary. The deletion sweep selects its rows by an explicit key list,
+        // so a key missing from that list survives its Provider — a dangling
+        // reference nothing in the app can see, which the boot-time data contract
+        // audit then reports (or, worse, does not, if its probe misses the key
+        // too).
+        let (repo, db) = setup().await;
+        let p = repo.create(sample_params()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO client_preferences (key, value, updated_at) \
+             VALUES ('tools.textToSpeech', ?, 1)",
+        )
+        .bind(
+            serde_json::json!({"provider_id": p.provider_id, "model": "tts-1", "voice": "alloy"})
+                .to_string(),
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        repo.delete(&p.provider_id).await.unwrap();
+
+        let surviving: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM client_preferences WHERE key = 'tools.textToSpeech'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(surviving, 0, "the global TTS default must not outlive its Provider");
+        crate::validate_id_data_contract(db.pool()).await.unwrap();
     }
 
     #[tokio::test]

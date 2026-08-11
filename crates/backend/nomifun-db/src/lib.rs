@@ -52,7 +52,7 @@ pub use repository::SqliteCustomerServiceRepository;
 pub use repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
     ConversationTurnAdmissionState,
-    ConversationRowUpdate, MessageRowUpdate, MessageSearchRow, SortOrder,
+    ConversationRowUpdate, MessageDayBucket, MessageRowUpdate, MessageSearchRow, SortOrder,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
     RequirementConversationTurnAuthority,
     TurnArtifactMessageCommit, TurnLifecycleTransition, TurnReceiptCompletion,
@@ -64,9 +64,17 @@ pub use repository::cron::{
     UpdateCronJobParams,
 };
 pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};
+pub use repository::miniapp::{CreateMiniAppParams, IMiniAppRepository, UpdateMiniAppParams};
 pub use repository::oauth_token::UpsertOAuthTokenParams;
 pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
 pub use repository::remote_agent::{CreateRemoteAgentParams, UpdateRemoteAgentParams};
+pub use repository::ssh_host::{
+    CreateSshHostParams, ISshHostRepository, UpdateSshHostParams,
+};
+pub use repository::SqliteMiniAppRepository;
+pub use models::{MiniAppDocumentRow, MiniAppRow};
+pub use repository::SqliteSshHostRepository;
+pub use models::SshHostRow;
 pub use repository::{
     AdoptAgentExecutionStepOutputParams, AgentExecutionAttemptRecoveryDisposition,
     AgentExecutionAttemptRecoveryResult, AgentExecutionLeaseToken, AgentExecutionTurnAuthority,

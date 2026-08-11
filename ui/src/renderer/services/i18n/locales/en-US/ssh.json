@@ -1,0 +1,112 @@
+{
+  "title": "Remote hosts",
+  "description": "Saved SSH hosts can be reused by any session; credentials are encrypted on this machine.",
+  "empty": {
+    "title": "No saved hosts yet",
+    "description": "Add a remote Linux host and the agent can operate it from a chat session.",
+    "add": "Add host"
+  },
+  "sessionGroup": "SSH sessions",
+  "newSession": "New SSH session",
+  "import": {
+    "cta": "Import from ~/.ssh/config",
+    "entry": "Import from ~/.ssh/config",
+    "detected": "{{count}} host detected in ~/.ssh/config",
+    "detected_other": "{{count}} hosts detected in ~/.ssh/config",
+    "title": "Import from ~/.ssh/config",
+    "description": "Found in {{path}}. Importing saves these to the host book; where an entry names an IdentityFile, that private key is read and encrypted on this machine so the host can connect right away.",
+    "confirm": "Import {{count}} host",
+    "confirm_other": "Import {{count}} hosts",
+    "noKey": "No key in the config",
+    "noteProxy": "{{count}} entry goes through a jump host and cannot be imported yet: {{aliases}}",
+    "noteProxy_other": "{{count}} entries go through a jump host and cannot be imported yet: {{aliases}}",
+    "noteIncludes": "{{count}} Include directive was not followed, so hosts defined in included files are not listed here.",
+    "noteIncludes_other": "{{count}} Include directives were not followed, so hosts defined in included files are not listed here.",
+    "summaryImported": "Imported {{count}} host.",
+    "summaryImported_other": "Imported {{count}} hosts.",
+    "summaryNothing": "No host was imported.",
+    "summaryNeedsCredential": "{{count}} still needs a credential — open it to add one.",
+    "summaryNeedsCredential_other": "{{count}} still need a credential — open them to add one.",
+    "summaryNeedsUsername": "{{count}} has no username in the config — open it to fill one in.",
+    "summaryNeedsUsername_other": "{{count}} have no username in the config — open them to fill one in.",
+    "summaryDuplicate": "{{count}} was already saved.",
+    "summaryDuplicate_other": "{{count}} were already saved.",
+    "summaryVanished": "{{count}} is no longer in the config.",
+    "summaryVanished_other": "{{count}} are no longer in the config.",
+    "failed": "Could not import from ~/.ssh/config: {{message}}"
+  },
+  "group": {
+    "hostTooltip": "SSH host {{host}}",
+    "hostUnknown": "Unknown host",
+    "hostMissing": "Deleted host"
+  },
+  "form": {
+    "addTitle": "Add SSH host",
+    "editTitle": "Edit SSH host",
+    "name": "Display name",
+    "host": "Host",
+    "port": "Port",
+    "username": "Username",
+    "authType": "Authentication",
+    "authPassword": "Password",
+    "authKey": "Private key",
+    "authCertificate": "Certificate",
+    "authAgent": "SSH agent",
+    "password": "Password",
+    "privateKey": "Private key",
+    "privateKeyPlaceholder": "Paste the private key (PEM / OpenSSH), or leave blank to keep the stored one.",
+    "passphrase": "Key passphrase",
+    "certificate": "Certificate",
+    "sudoPassword": "sudo password",
+    "sudoHint": "Injected on the remote sudo prompt; the agent never sees it. Leave blank for passwordless sudo.",
+    "secretKept": "A value is stored. Leave as is to keep it, or type a new one to replace it.",
+    "test": "Test connection",
+    "save": "Save",
+    "cancel": "Cancel"
+  },
+  "status": {
+    "connected": "Connected",
+    "connecting": "Connecting…",
+    "reconnecting": "Reconnecting…",
+    "idle": "No link",
+    "degraded": "Recycling shell…",
+    "dropped": "Link lost",
+    "closed": "Closed",
+    "unknown": "Not connected",
+    "error": "Connection error"
+  },
+  "pill": {
+    "endpoint": "Endpoint",
+    "hostKey": "Host key",
+    "hostKeyUnpinned": "Not pinned yet",
+    "sudoStored": "A sudo password is stored for this host.",
+    "sudoMissing": "No sudo password stored — sudo must be passwordless.",
+    "attempt": "Dial attempt {{attempt}}",
+    "retryIn": "Next retry in {{seconds}}s",
+    "detail": "Detail",
+    "noLink": "This session has no live link to the host yet.",
+    "droppedHint": "Commands cannot reach the host until the link is back. If it does not return on its own, check the credentials and the host key.",
+    "droppedActionRequired": "This link will not come back on its own. Open 「Settings → Remote hosts」 to fix this host's credentials, or — if its host key changed — to review and trust the new key before reconnecting.",
+    "unconfirmedExit": "The remote shell could not be confirmed as exited — a process may still be running on the host."
+  },
+  "test": {
+    "running": "Testing connection…",
+    "ok": "Connection succeeded",
+    "failed": "Connection failed: {{message}}"
+  },
+  "delete": {
+    "confirm": "Delete this host? Sessions bound to it must be removed first.",
+    "ok": "Delete",
+    "cancel": "Cancel"
+  },
+  "sessionsOnline": "{{count}} session online",
+  "sessionsOnline_other": "{{count}} sessions online",
+  "validation": {
+    "nameRequired": "A display name is required.",
+    "hostRequired": "Host is required.",
+    "portRange": "Port must be between 1 and 65535.",
+    "usernameRequired": "Username is required.",
+    "passwordRequired": "A password is required for password authentication.",
+    "privateKeyRequired": "A private key is required for this authentication method."
+  }
+}
