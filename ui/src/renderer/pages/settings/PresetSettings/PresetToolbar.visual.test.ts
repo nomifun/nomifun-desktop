@@ -17,6 +17,7 @@ const mcpInstalledSource = readFileSync(
   new URL('../../../components/settings/SettingsModal/contents/ToolsModalContent.tsx', import.meta.url),
   'utf8'
 );
+const layoutSource = readFileSync(new URL('../enhancedToolsLayout.ts', import.meta.url), 'utf8');
 
 describe('Preset library compact toolbar', () => {
   test('keeps search, tag management, and creation in the filter action row', () => {
@@ -36,9 +37,10 @@ describe('Preset library compact toolbar', () => {
 
   test('keeps preset and skill library surfaces transparent, outlined, and free of duplicate headings', () => {
     for (const source of [panelSource, skillsSource]) {
-      expect(source.includes('border-[var(--color-border-2)] bg-transparent')).toBe(true);
+      expect(source.includes('ENHANCED_TOOLS_SURFACE_CLASS')).toBe(true);
       expect(source.includes('bg-fill-2 rounded-24px')).toBe(false);
     }
+    expect(layoutSource.includes('border-[var(--color-border-2)] bg-transparent')).toBe(true);
 
     expect(panelSource.includes("t('settings.presets', { defaultValue: 'Presets' })")).toBe(false);
     expect(skillsSource.includes("t('settings.skillsHub.gridTitle', { defaultValue: 'Skills' })")).toBe(false);
@@ -53,9 +55,10 @@ describe('Preset library compact toolbar', () => {
 
   test('applies the same surface rule to every enhanced-tools market and MCP/plugin installed tab', () => {
     for (const source of [marketSource, pluginSource, mcpInstalledSource]) {
-      expect(source.includes('border-[var(--color-border-2)]')).toBe(true);
-      expect(source.includes('bg-transparent')).toBe(true);
+      expect(source.includes('ENHANCED_TOOLS_SURFACE_CLASS')).toBe(true);
     }
+    expect(layoutSource.includes('border-[var(--color-border-2)]')).toBe(true);
+    expect(layoutSource.includes('bg-transparent')).toBe(true);
 
     expect(marketSource.includes('<h2')).toBe(false);
     expect(pluginSource.includes('<h2')).toBe(false);
@@ -68,7 +71,7 @@ describe('Preset library compact toolbar', () => {
     expect(marketSource.includes("isMobile ? 'flex-col' : 'items-center justify-between'")).toBe(true);
     expect(marketSource.includes('{enableTagFilter ? marketIconActions : marketActions}')).toBe(true);
     expect(skillsSource.includes("isMobile ? 'flex-col' : 'items-center justify-between'")).toBe(true);
-    expect(pluginSource.includes("className='flex items-center justify-between gap-12px mb-12px'")).toBe(true);
+    expect(pluginSource.includes("className='mb-10px flex items-center justify-between gap-10px'")).toBe(true);
   });
 
   test('keeps tagged-market source controls on the filter row and moves reversed icon actions to the header', () => {
@@ -90,21 +93,16 @@ describe('Preset library compact toolbar', () => {
     expect(marketSource.includes("'ml-auto flex-none justify-end'")).toBe(true);
   });
 
-  test('keeps one compact outer gap above every enhanced-tools surface', () => {
+  test('uses one shared compact spacing contract for every enhanced-tools surface', () => {
     for (const source of [panelSource, skillsSource, marketSource, pluginSource, mcpInstalledSource]) {
-      expect(source.includes('mt-8px')).toBe(true);
-    }
-  });
-
-  test('uses the same tighter vertical rhythm across enhanced-tools surfaces', () => {
-    for (const source of [panelSource, skillsSource, marketSource]) {
-      expect(source.includes("isMobile ? 'px-16px py-10px' : 'px-20px py-12px'")).toBe(true);
-      expect(source.includes("className='flex flex-col gap-10px mb-12px'")).toBe(true);
+      expect(source.includes('ENHANCED_TOOLS_SURFACE_CLASS')).toBe(true);
     }
 
-    expect(pluginSource.includes('px-16px py-10px md:px-20px md:py-12px')).toBe(true);
-    expect(mcpInstalledSource.includes('py-[10px] md:py-[12px]')).toBe(true);
-    expect(mcpInstalledSource.includes("className='flex flex-col gap-12px min-h-0'")).toBe(true);
+    expect(layoutSource.includes("'mt-4px box-border rounded-24px")).toBe(true);
+    expect(layoutSource.includes('px-14px py-8px md:px-16px md:py-10px')).toBe(true);
+    expect(layoutSource.includes("'flex flex-col gap-8px mb-10px'")).toBe(true);
+    expect(layoutSource.includes("'grid gap-10px'")).toBe(true);
+    expect(mcpInstalledSource.includes("className='flex min-h-0 flex-col gap-10px'")).toBe(true);
   });
 
   test('keeps skill imports on the filter row and renders tag management as a tooltip icon', () => {

@@ -138,6 +138,23 @@
   line-height: 1;
 }
 
+.collaborationTriggerActive,
+.collaborationTriggerActive:hover,
+.collaborationTriggerActive:active,
+.collaborationTriggerActive:focus,
+.collaborationTriggerActive:focus-visible {
+  background: color-mix(in srgb, rgb(var(--primary-6)) 9%, var(--color-fill-1)) !important;
+  color: rgb(var(--primary-6)) !important;
+}
+
+.collaborationTriggerStatus {
+  background: currentColor;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  height: 5px;
+  width: 5px;
+}
+
 /* Segmented mode track (auto/single/range, interactive/supervised) — mirrors
  * KnowledgeControl's tinted track + primary active pill. */
 .composerSegment {

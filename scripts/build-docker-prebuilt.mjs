@@ -35,6 +35,7 @@ const DOCKERFILE = join(ROOT, 'Dockerfile.prebuilt');
 const TAG = '[docker:prebuilt]';
 const DEFAULT_REPOSITORY = 'nomifun/nomifun-web';
 const DEFAULT_BUN_IMAGE = 'oven/bun:1';
+const DEFAULT_NODE_IMAGE = 'node:22-bookworm-slim';
 const DEFAULT_RUNTIME_IMAGE = 'ubuntu:26.04';
 
 const args = parseArgs(process.argv.slice(2).filter((arg) => arg !== '--'));
@@ -87,6 +88,8 @@ const dockerArgs = [
   '--build-arg',
   `BUN_IMAGE=${args.bunImage}`,
   '--build-arg',
+  `NODE_IMAGE=${args.nodeImage}`,
+  '--build-arg',
   `RUNTIME_IMAGE=${args.runtimeImage}`,
   '--build-arg',
   `NOMIFUN_VERSION=${version}`,
@@ -115,6 +118,7 @@ function parseArgs(argv) {
     dockerBin: process.env.DOCKER || 'docker',
     dryRun: false,
     help: false,
+    nodeImage: process.env.NODE_IMAGE || DEFAULT_NODE_IMAGE,
     repository: process.env.DOCKER_REPOSITORY || DEFAULT_REPOSITORY,
     runtimeImage: process.env.RUNTIME_IMAGE || DEFAULT_RUNTIME_IMAGE,
     sudo: false,
@@ -148,6 +152,9 @@ function parseArgs(argv) {
         break;
       case '--bun-image':
         parsed.bunImage = value();
+        break;
+      case '--node-image':
+        parsed.nodeImage = value();
         break;
       case '--apt-mirror':
         parsed.aptMirror = value();
@@ -188,6 +195,7 @@ Options:
       --build-missing      Build missing/outdated local artifacts first; no-op when they already match.
       --dry-run            Stage artifacts and print the docker command only.
       --bun-image <image>  Bun image for copying /usr/local/bin/bun.
+      --node-image <image> Node image for copying Node.js plus npm/npx.
       --runtime-image <i>  Runtime image for the prebuilt Linux binary.
       --apt-mirror <url>   Optional apt mirror for Debian/Ubuntu runtime images.
       --docker <command>   Docker-compatible CLI command.
@@ -397,6 +405,7 @@ function buildMissingSuggestion() {
     commandArgs.push('--repository', args.repository);
   }
   if (args.bunImage !== DEFAULT_BUN_IMAGE) commandArgs.push('--bun-image', args.bunImage);
+  if (args.nodeImage !== DEFAULT_NODE_IMAGE) commandArgs.push('--node-image', args.nodeImage);
   if (args.runtimeImage !== DEFAULT_RUNTIME_IMAGE) commandArgs.push('--runtime-image', args.runtimeImage);
   if (args.aptMirror) commandArgs.push('--apt-mirror', args.aptMirror);
   if (args.dockerBin !== 'docker') commandArgs.push('--docker', args.dockerBin);
