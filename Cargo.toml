@@ -27,6 +27,7 @@ nomifun-model-invoke = { path = "crates/backend/nomifun-model-invoke" }
 nomifun-conversation = { path = "crates/backend/nomifun-conversation" }
 nomifun-extension = { path = "crates/backend/nomifun-extension" }
 nomifun-channel = { path = "crates/backend/nomifun-channel" }
+nomifun-crawl = { path = "crates/backend/nomifun-crawl" }
 nomifun-cron = { path = "crates/backend/nomifun-cron" }
 nomifun-requirement = { path = "crates/backend/nomifun-requirement" }
 nomifun-idmm = { path = "crates/backend/nomifun-idmm" }
@@ -194,6 +195,13 @@ md-5 = "0.10"
 nostr = { version = "0.37", default-features = false, features = ["std", "nip04"] }
 # HTML → Markdown (URL knowledge-source snapshots)
 htmd = "0.5"
+# --- Crawler (nomifun-crawl) ---
+# robots.txt with crawl-delay and sitemap extensions.
+robotxt = "0.6"
+# DOM query for link extraction.
+scraper = "0.23"
+# readability.js port: strips nav/ads before the markdown conversion.
+dom_smoothie = "0.9"
 libc = "0.2"
 lru = "0.18"
 url = "2"

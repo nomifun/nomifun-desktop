@@ -31,6 +31,51 @@ pub const MAX_REDIRECTS: usize = 3;
 /// Slug length cap (ASCII chars).
 pub const SLUG_MAX_LEN: usize = 80;
 
+/// Conditional-request validators for an incremental re-fetch.
+#[derive(Debug, Clone, Default)]
+pub struct Validators {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+impl Validators {
+    pub fn is_empty(&self) -> bool {
+        self.etag.is_none() && self.last_modified.is_none()
+    }
+}
+
+/// A fetched response before any markdown conversion. Crawlers need the raw
+/// bytes (to extract links) and the cache validators (to skip unchanged
+/// pages), neither of which survive the markdown conversion.
+#[derive(Debug, Clone)]
+pub struct RawPage {
+    /// URL after redirects (the one the content actually came from).
+    pub final_url: String,
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    /// Raw `Retry-After`. Kept verbatim so the caller decides how to read it.
+    pub retry_after: Option<String>,
+    pub body: Vec<u8>,
+    pub truncated: bool,
+}
+
+impl RawPage {
+    /// True when the server confirmed the cached copy is still current.
+    pub fn is_not_modified(&self) -> bool {
+        self.status == 304
+    }
+
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    pub fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
 /// A fetched page, converted to markdown.
 #[derive(Debug, Clone)]
 pub struct FetchedPage {
@@ -66,7 +111,12 @@ pub struct HttpFetcher {
     timeout: Duration,
     max_bytes: usize,
     allow_private: bool,
+    user_agent: String,
 }
+
+/// Default identifiable agent string. Callers that crawl at volume should
+/// override it so operators can attribute and rate-limit the traffic.
+pub const DEFAULT_USER_AGENT: &str = "NomiFun-Knowledge/1.0";
 
 impl Default for HttpFetcher {
     fn default() -> Self {
@@ -74,6 +124,7 @@ impl Default for HttpFetcher {
             timeout: FETCH_TIMEOUT,
             max_bytes: FETCH_MAX_BYTES,
             allow_private: false,
+            user_agent: DEFAULT_USER_AGENT.to_string(),
         }
     }
 }
@@ -102,6 +153,11 @@ impl HttpFetcher {
         self
     }
 
+    pub fn user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = user_agent.into();
+        self
+    }
+
     /// Disable the private/local address guard. ONLY for tests (mock HTTP
     /// servers bind to loopback).
     pub fn allow_private_for_tests(mut self) -> Self {
@@ -112,10 +168,37 @@ impl HttpFetcher {
     /// Fetch `raw_url` and convert the response to markdown. Every hop is
     /// SSRF-validated; bodies larger than the cap are truncated, not failed.
     pub async fn fetch_page(&self, raw_url: &str) -> Result<FetchedPage, AppError> {
+        let raw = self.fetch_raw(raw_url, &Validators::default()).await?;
+        if !raw.is_success() {
+            return Err(AppError::BadGateway(format!(
+                "fetch failed: HTTP {} for {}",
+                raw.status, raw.final_url
+            )));
+        }
+        let text = raw.body_text();
+        let (title, markdown) = if looks_like_html(raw.content_type.as_deref(), &text) {
+            html_to_markdown(&text)
+        } else {
+            (None, text)
+        };
+        Ok(FetchedPage {
+            final_url: raw.final_url,
+            title,
+            markdown,
+            truncated: raw.truncated,
+        })
+    }
+
+    /// Fetch `raw_url` and return the raw response. Shares the whole SSRF
+    /// pipeline with [`Self::fetch_page`], but reports the status instead of
+    /// judging it: 4xx and 5xx come back as `Ok`. Callers that need the
+    /// distinction — `robots.txt` handling turns on 404-vs-503, and a crawler
+    /// records the status either way — cannot recover it from an error string.
+    pub async fn fetch_raw(&self, raw_url: &str, validators: &Validators) -> Result<RawPage, AppError> {
         let mut url = parse_fetch_url(raw_url)?;
         for _hop in 0..=MAX_REDIRECTS {
             let addrs = resolve_validated(&url, self.allow_private).await?;
-            let response = self.send(&url, &addrs).await?;
+            let response = self.send(&url, &addrs, validators).await?;
             let status = response.status();
 
             if status.is_redirection() {
@@ -130,34 +213,53 @@ impl HttpFetcher {
                 url = check_scheme(next)?;
                 continue;
             }
-            if !status.is_success() {
-                return Err(AppError::BadGateway(format!("fetch failed: HTTP {status} for {url}")));
+
+            let header = |name: reqwest::header::HeaderName| {
+                response
+                    .headers()
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            };
+            let content_type = header(reqwest::header::CONTENT_TYPE);
+            let etag = header(reqwest::header::ETAG);
+            let last_modified = header(reqwest::header::LAST_MODIFIED);
+            let retry_after = header(reqwest::header::RETRY_AFTER);
+
+            if status == reqwest::StatusCode::NOT_MODIFIED {
+                return Ok(RawPage {
+                    final_url: url.to_string(),
+                    status: status.as_u16(),
+                    content_type,
+                    etag,
+                    last_modified,
+                    retry_after,
+                    body: Vec::new(),
+                    truncated: false,
+                });
             }
 
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
             let (body, truncated) = self.read_capped(response).await?;
-            let text = String::from_utf8_lossy(&body).into_owned();
-
-            let (title, markdown) = if looks_like_html(content_type.as_deref(), &text) {
-                html_to_markdown(&text)
-            } else {
-                (None, text)
-            };
-            return Ok(FetchedPage {
+            return Ok(RawPage {
                 final_url: url.to_string(),
-                title,
-                markdown,
+                status: status.as_u16(),
+                content_type,
+                etag,
+                last_modified,
+                retry_after,
+                body,
                 truncated,
             });
         }
         Err(AppError::BadGateway(format!("too many redirects fetching {raw_url}")))
     }
 
-    async fn send(&self, url: &Url, addrs: &[SocketAddr]) -> Result<reqwest::Response, AppError> {
+    async fn send(
+        &self,
+        url: &Url,
+        addrs: &[SocketAddr],
+        validators: &Validators,
+    ) -> Result<reqwest::Response, AppError> {
         // A fresh Client per hop is deliberate: `resolve_to_addrs` pins one
         // host's pre-validated addresses onto the client, and every redirect
         // hop may land on a different host needing its own pinning.
@@ -174,9 +276,16 @@ impl HttpFetcher {
         let client = builder
             .build()
             .map_err(|e| AppError::Internal(format!("failed to build http client: {e}")))?;
-        client
+        let mut request = client
             .get(url.clone())
-            .header(reqwest::header::USER_AGENT, "NomiFun-Knowledge/1.0")
+            .header(reqwest::header::USER_AGENT, self.user_agent.as_str());
+        if let Some(etag) = validators.etag.as_deref() {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        if let Some(last_modified) = validators.last_modified.as_deref() {
+            request = request.header(reqwest::header::IF_MODIFIED_SINCE, last_modified);
+        }
+        request
             .send()
             .await
             .map_err(|e| {

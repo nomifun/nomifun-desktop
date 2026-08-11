@@ -238,6 +238,8 @@ import {
   type SkillPatternId,
   type TerminalId,
   type WebhookId,
+  type CrawlJobId,
+  type CrawlTaskId,
 } from '../types/ids';
 import {
   httpDelete,
@@ -5842,4 +5844,132 @@ export const knowledge = {
     '/api/knowledge/inbox/discard-all',
     (p) => ({ kbId: p.kbId, scope: p.scope })
   ),
+};
+
+// ==================== Crawl jobs (crawl) ====================
+
+export type CrawlRenderMode = 'auto' | 'http' | 'browser';
+export type CrawlJobStatus = 'draft' | 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
+export type CrawlTaskStatus = 'pending' | 'in_progress' | 'done' | 'failed' | 'skipped';
+
+/** What a job is allowed to follow. Empty is not "everything" — see `same_site`. */
+export interface ICrawlScope {
+  /** Restrict to the seeds' registrable domains. Defaults to true server-side. */
+  same_site: boolean;
+  path_prefixes: string[];
+  allow: string[];
+  deny: string[];
+}
+
+export interface ICrawlSink {
+  knowledge_base_id?: string;
+  /** Stage into the knowledge review inbox instead of writing the base body. */
+  via_inbox: boolean;
+}
+
+export interface ICrawlProgress {
+  pending: number;
+  in_progress: number;
+  done: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface ICrawlJob {
+  job_id: CrawlJobId;
+  name: string;
+  seeds: string[];
+  scope: ICrawlScope;
+  max_depth: number;
+  max_urls: number;
+  render_mode: CrawlRenderMode;
+  concurrency: number;
+  per_host_concurrency: number;
+  delay_ms: number;
+  respect_robots: boolean;
+  sink: ICrawlSink;
+  status: CrawlJobStatus;
+  error_detail?: string;
+  started_at?: number;
+  finished_at?: number;
+  created_at: number;
+  progress: ICrawlProgress;
+}
+
+export interface ICrawlTask {
+  task_id: CrawlTaskId;
+  url: string;
+  host: string;
+  depth: number;
+  status: CrawlTaskStatus;
+  attempt_count: number;
+  http_status?: number;
+  error_code?: string;
+  error_detail?: string;
+  completed_at?: number;
+}
+
+export interface ICreateCrawlJobParams {
+  name: string;
+  seeds: string[];
+  scope?: Partial<ICrawlScope>;
+  max_depth?: number;
+  max_urls?: number;
+  render_mode?: CrawlRenderMode;
+  concurrency?: number;
+  per_host_concurrency?: number;
+  delay_ms?: number;
+  respect_robots?: boolean;
+  sink?: Partial<ICrawlSink>;
+}
+
+export const crawl = {
+  listJobs: httpGet<ICrawlJob[], void>('/api/crawl/jobs'),
+  createJob: httpPost<ICrawlJob, ICreateCrawlJobParams>('/api/crawl/jobs'),
+  getJob: httpGet<ICrawlJob, { job_id: CrawlJobId }>((p) => `/api/crawl/jobs/${p.job_id}`),
+  deleteJob: httpDelete<void, { job_id: CrawlJobId }>((p) => `/api/crawl/jobs/${p.job_id}`),
+  startJob: httpPost<ICrawlJob, { job_id: CrawlJobId }>((p) => `/api/crawl/jobs/${p.job_id}/start`),
+  cancelJob: httpPost<void, { job_id: CrawlJobId }>((p) => `/api/crawl/jobs/${p.job_id}/cancel`),
+  /** Requeue every parked task, clearing the attempt budget. */
+  retryFailed: httpPost<number, { job_id: CrawlJobId }>(
+    (p) => `/api/crawl/jobs/${p.job_id}/retry-failed`
+  ),
+  listTasks: httpGet<ICrawlTask[], { job_id: CrawlJobId; status?: string; limit?: number }>(
+    (p) => {
+      const query = new URLSearchParams();
+      if (p.status) query.set('status', p.status);
+      if (p.limit) query.set('limit', String(p.limit));
+      const suffix = query.toString();
+      return `/api/crawl/jobs/${p.job_id}/tasks${suffix ? `?${suffix}` : ''}`;
+    }
+  ),
+};
+
+export interface ICrawlProgressEvent {
+  kind: 'progress';
+  job_id: string;
+  progress: ICrawlProgress;
+}
+
+export interface ICrawlTaskEvent {
+  kind: 'task';
+  job_id: string;
+  task_id: string;
+  url: string;
+  status: string;
+  http_status?: number;
+  detail?: string;
+}
+
+export interface ICrawlFinishedEvent {
+  kind: 'finished';
+  job_id: string;
+  status: CrawlJobStatus;
+  progress: ICrawlProgress;
+}
+
+export const crawlEvents = {
+  progress: wsEmitter<ICrawlProgressEvent>('crawl.progress'),
+  task: wsEmitter<ICrawlTaskEvent>('crawl.task'),
+  finished: wsEmitter<ICrawlFinishedEvent>('crawl.finished'),
 };

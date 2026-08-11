@@ -167,6 +167,17 @@
 - **实时 URL 快照** —— 把任意网页变成知识来源（带 SSRF 防护抓取、HTML→Markdown），支持*快照*（持久化、可重抓）与*实时*两种模式。
 - **作用域受控的检索** —— 智能体调用 `knowledge_search` 工具，其作用域由服务端裁定、无法被擅自放大。
 
+### 🕷️ 站点爬虫
+
+> 指南：[`docs/guides/crawler.zh.md`](docs/guides/crawler.zh.md)
+
+从种子 URL 出发遍历整站，把正文归档进知识库。
+
+- **持久化队列** —— URL 队列存在 SQLite，具备原子 claim、可续期租约与围栏令牌。worker 崩溃不会弄脏队列，也不需要任何探活机制；抓到一半关掉应用，重启后从中断处继续。
+- **礼貌是设计出来的** —— robots.txt（按 RFC 9309 区分状态语义）、`Crawl-delay`、`Retry-After`、在队列分配器内部强制的单站点并发，以及不会拖垮整个作业的按站点熔断。
+- **增量抓取** —— `ETag`/`Last-Modified` 加上基于**抽取后正文**的内容哈希，轮播广告和 CSRF token 不会伪造成「内容变了」。
+- **先评审再落地** —— 抓取内容默认进知识库的评审收件箱，与智能体回写同一套策略。
+
 ### 🖥️ 原生 Computer Use 与 Browser Use *（桌面版）*
 
 > 指南：[`docs/guides/computer-browser-use.zh.md`](docs/guides/computer-browser-use.zh.md)

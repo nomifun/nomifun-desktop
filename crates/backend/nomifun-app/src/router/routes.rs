@@ -28,6 +28,7 @@ use nomifun_cron::cron_routes;
 use nomifun_extension::{extension_routes, hub_routes, skill_routes};
 use nomifun_file::file_routes;
 use nomifun_idmm::idmm_routes;
+use nomifun_crawl::crawl_routes;
 use nomifun_knowledge::knowledge_routes;
 use nomifun_mcp::mcp_routes;
 use nomifun_office::{office_proxy_routes, office_routes};
@@ -849,6 +850,13 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
+    // Crawl jobs feed the knowledge base and share its owner-only boundary.
+    let crawl_authenticated = protect_instance_owner(
+        crawl_routes(states.crawl),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
     // Webhook + tag-settings routes protected by auth middleware
     let webhook_authenticated = protect_instance_owner(
         webhook_routes(states.webhook),
@@ -1072,6 +1080,7 @@ pub fn create_router_with_all_state(
         .merge(workshop_authenticated)
         .merge(creation_authenticated)
         .merge(knowledge_authenticated)
+        .merge(crawl_authenticated)
         .merge(webhook_authenticated)
         .merge(agent_execution_authenticated)
         .merge(agent_execution_template_authenticated)

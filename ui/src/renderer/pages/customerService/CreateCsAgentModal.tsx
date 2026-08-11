@@ -8,7 +8,7 @@ import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Form, Input, InputNumber, Message, Modal, Select } from '@arco-design/web-react';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
-import { useKnowledgeBaseOptions } from './useKnowledgeBaseOptions';
+import { useKnowledgeBaseOptions } from '@/renderer/hooks/knowledge/useKnowledgeBaseOptions';
 import type { ICsAgent, ICsAgentPatch } from '@/common/adapter/ipcBridge';
 import type { KnowledgeBaseId, ProviderId } from '@/common/types/ids';
 

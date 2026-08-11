@@ -1,0 +1,70 @@
+{
+  "title": "Crawler",
+  "empty": "No crawl jobs yet.",
+  "created": "Crawl job created.",
+  "confirmDelete": "Delete this job and all of its queued URLs?",
+  "requeued": "Requeued {{count}} failed task(s).",
+  "progressDetail": "{{done}} done · {{failed}} failed · {{pending}} queued",
+  "error": {
+    "noSeeds": "Add at least one seed URL."
+  },
+  "column": {
+    "name": "Job",
+    "status": "Status",
+    "progress": "Progress",
+    "actions": "Actions",
+    "url": "URL",
+    "depth": "Depth",
+    "httpStatus": "HTTP",
+    "error": "Error"
+  },
+  "action": {
+    "create": "New job",
+    "start": "Start",
+    "cancel": "Stop",
+    "tasks": "URLs",
+    "retryFailed": "Retry failed",
+    "delete": "Delete"
+  },
+  "status": {
+    "draft": "Draft",
+    "running": "Running",
+    "paused": "Paused",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled"
+  },
+  "taskStatus": {
+    "pending": "Queued",
+    "in_progress": "Fetching",
+    "done": "Done",
+    "failed": "Failed",
+    "skipped": "Skipped"
+  },
+  "renderMode": {
+    "auto": "Auto (HTTP)",
+    "http": "HTTP only",
+    "browser": "Browser (coming soon)"
+  },
+  "field": {
+    "name": "Name",
+    "namePlaceholder": "Product docs crawl",
+    "seeds": "Seed URLs (one per line)",
+    "maxDepth": "Max depth",
+    "maxUrls": "Max URLs",
+    "concurrency": "Concurrency",
+    "perHostConcurrency": "Per-host concurrency",
+    "delayMs": "Delay between requests (ms)",
+    "renderMode": "Render mode",
+    "sameSite": "Stay on the seed's site",
+    "sameSiteHint": "Turning this off lets the crawler follow links to any domain.",
+    "respectRobots": "Respect robots.txt",
+    "respectRobotsHint": "Turning this off ignores the site operator's crawl rules.",
+    "knowledgeBase": "Target knowledge base",
+    "knowledgeBasePlaceholder": "Select a knowledge base",
+    "knowledgeBaseHint": "Leave empty to record crawl results without saving page content.",
+    "knowledgeBaseEmpty": "No knowledge base yet — create one on the Knowledge page first.",
+    "viaInbox": "Stage into the review inbox",
+    "viaInboxHint": "Turning this off writes crawled pages straight into the knowledge base."
+  }
+}

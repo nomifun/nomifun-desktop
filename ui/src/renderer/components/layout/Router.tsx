@@ -30,6 +30,7 @@ const TerminalCreatePage = React.lazy(() => import('@renderer/pages/terminal/Ter
 const NomiConfigPage = React.lazy(() => import('@renderer/pages/nomi'));
 const CustomerServiceRosterPage = React.lazy(() => import('@renderer/pages/customerService'));
 const CustomerServiceDetailPage = React.lazy(() => import('@renderer/pages/customerService/CsAgentDetailPage'));
+const CrawlPage = React.lazy(() => import('@renderer/pages/crawl/CrawlPage'));
 const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeListPage'));
 const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
 const WorkshopListPage = React.lazy(() => import('@renderer/pages/workshop'));
@@ -249,6 +250,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           {/* 客服 (Customer Service) — a first-class domain separate from desktop companions. */}
           <Route path='/customer-service' element={withRouteFallback(CustomerServiceRosterPage)} />
           <Route path='/customer-service/:cs_agent_id' element={withRouteFallback(CustomerServiceDetailPage)} />
+          <Route path='/crawl' element={withRouteFallback(CrawlPage)} />
           <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
           <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
           {/* 资产库 (Asset Library) — platform-level management of workshop assets. */}

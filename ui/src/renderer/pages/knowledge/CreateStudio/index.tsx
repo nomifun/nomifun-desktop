@@ -22,7 +22,7 @@ import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import { isAutogenNoProviderError, knowledgeErrorText, notifySourceFetchResult } from '../useKnowledge';
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
-import SourceConfig from './SourceConfig';
+import SourceConfig, { SITE_DEFAULT_MAX_DEPTH, SITE_DEFAULT_MAX_URLS } from './SourceConfig';
 import type { SourceConfigValue } from './SourceConfig';
 import TeachingCard from './TeachingCard';
 import TypeRail from './TypeRail';
@@ -51,6 +51,15 @@ const studioFieldClass =
 
 const studioInputClass =
   'knowledge-studio-input w-full rounded-12px border border-transparent bg-[var(--color-fill-1)] px-13px py-11px text-13px text-[var(--color-text-1)] outline-none font-[inherit] transition-[background-color,border-color,box-shadow,color] placeholder:text-[var(--color-text-4)] hover:bg-[var(--color-fill-2)] focus:border-[rgba(var(--primary-6),0.36)] focus:bg-[var(--color-bg-2)] focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
+
+const isHttpUrl = (raw: string): boolean => {
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
 
 const studioActionClass =
   'knowledge-studio-ai-action inline-flex items-center gap-4px border-0 bg-transparent p-0 text-12px font-500 leading-20px text-[var(--color-text-2)] appearance-none transition-colors hover:text-[rgb(var(--primary-6))] focus-visible:outline-none focus-visible:text-[rgb(var(--primary-6))]';
@@ -223,6 +232,55 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
         return;
       }
 
+      // Site crawl: a plain managed base (no `source` entries) plus a crawl
+      // job that owns `crawl/`. Keeping those two owners apart is what makes
+      // "who refreshes this base?" unambiguous — see the 2026-08-07 spec.
+      if (sourceType === 'web' && sourceConfigValue.urlMode === 'site') {
+        const seed = sourceConfigValue.siteSeed?.trim();
+        if (!seed || !isHttpUrl(seed)) {
+          Message.warning(
+            t('knowledge.studio.webSeedRequired', {
+              defaultValue: '请填写种子网址,需以 http:// 或 https:// 开头',
+            }),
+          );
+          setSubmitting(false);
+          return;
+        }
+        const created = await ipcBridge.knowledge.createBase.invoke({
+          name: trimmedName,
+          description: desc,
+          tags: tagKeys,
+        });
+        try {
+          const job = await ipcBridge.crawl.createJob.invoke({
+            name: trimmedName,
+            seeds: [seed],
+            scope: { same_site: sourceConfigValue.siteSameSite ?? true },
+            max_depth: sourceConfigValue.siteMaxDepth ?? SITE_DEFAULT_MAX_DEPTH,
+            max_urls: sourceConfigValue.siteMaxUrls ?? SITE_DEFAULT_MAX_URLS,
+            render_mode: sourceConfigValue.browserRender ? 'browser' : 'auto',
+            // The base was created for this crawl seconds ago, so there is
+            // nothing in it to protect: inbox review exists for writes into a
+            // base someone is already using.
+            sink: { knowledge_base_id: created.knowledge_base_id, via_inbox: false },
+          });
+          await ipcBridge.crawl.startJob.invoke({ job_id: job.job_id });
+          Message.success(
+            t('knowledge.studio.crawlStarted', { defaultValue: '知识库已创建,爬取作业已开始' }),
+          );
+        } catch (crawlErr) {
+          // The base exists — only the job failed. Saying "creation failed"
+          // here would send the user looking for a base that is already there.
+          Message.warning(
+            t('knowledge.studio.crawlStartFailed', {
+              defaultValue: '库已创建,但爬取作业启动失败,请到「爬虫」页重试',
+            }),
+          );
+        }
+        onCreated(created);
+        return;
+      }
+
       // Build source for non-blank/non-local/non-import
       let source: {
         kind: string;
@@ -231,7 +289,8 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
       } | undefined;
 
       if (sourceType === 'web') {
-        const urlMode = sourceConfigValue.urlMode ?? 'snapshot';
+        // 'site' already returned above, so only these two remain.
+        const urlMode = sourceConfigValue.urlMode === 'live' ? 'live' : 'snapshot';
         const entries = (sourceConfigValue.urlEntries ?? [])
           .map((e) => ({
             url: e.url.trim(),
@@ -247,14 +306,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
         // Validate each URL is a well-formed http(s) address before submitting:
         // snapshot mode fails on first fetch for a malformed URL, and live mode
         // would otherwise silently store a dead source.
-        const invalidEntry = entries.find((e) => {
-          try {
-            const u = new URL(e.url);
-            return u.protocol !== 'http:' && u.protocol !== 'https:';
-          } catch {
-            return true;
-          }
-        });
+        const invalidEntry = entries.find((e) => !isHttpUrl(e.url));
         if (invalidEntry) {
           Message.warning(
             t('knowledge.studio.webUrlInvalid', {

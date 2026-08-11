@@ -39,6 +39,8 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "conversation_execution_links",
     "conversation_mcp_servers",
     "conversations",
+    "crawl_jobs",
+    "crawl_tasks",
     "creation_tasks",
     "cron_job_runs",
     "cron_run_reservations",
@@ -111,6 +113,8 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("channel_users", "channel_user_id"),
     ("conversation_artifacts", "conversation_artifact_id"),
     ("conversations", "conversation_id"),
+    ("crawl_jobs", "job_id"),
+    ("crawl_tasks", "task_id"),
     ("creation_tasks", "creation_task_id"),
     ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
@@ -182,6 +186,11 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("conversation_delivery_receipts", "operation_id"),
     ("conversations", "conversation_id"),
     ("conversations", "channel_chat_id"),
+    ("crawl_jobs", "job_id"),
+    ("crawl_tasks", "task_id"),
+    // Worker identity, not a relational link: L1 has no node table and the
+    // lease — not the node row — is what guarantees correctness.
+    ("crawl_tasks", "owner_node_id"),
     ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
     ("cron_jobs", "cron_job_id"),
@@ -625,6 +634,9 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_aggregate_scope(
             "parent.execution_id = child.execution_id AND parent.step_id = child.step_id",
         ),
+    text_ref!("crawl_jobs", "user_id" => "users", "user_id", false, "idx_crawl_jobs_user_id", Cascade),
+    text_ref!("crawl_tasks", "job_id" => "crawl_jobs", "job_id", false, "idx_crawl_tasks_job_id", Cascade),
+    text_ref!("crawl_tasks", "parent_task_id" => "crawl_tasks", "task_id", true, "idx_crawl_tasks_parent_task_id", KeepHistory),
     text_ref!("cron_jobs", "user_id" => "users", "user_id", false, "idx_cron_jobs_user_id", Cascade),
     text_ref!("cron_jobs", "preset_id" => "presets", "preset_id", true, "idx_cron_jobs_preset_id", SetNull),
     text_ref!("cron_jobs", "conversation_id" => "conversations", "conversation_id", true, "idx_cron_jobs_conversation_id", Cascade),
@@ -1369,6 +1381,66 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "NEW.ACTIVE_TURN_OPERATION_ID IS NOT OLD.ACTIVE_TURN_OPERATION_ID",
                 "NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH",
                 "RAISE( ABORT, 'CONVERSATION RUNNING OWNER AND EPOCH ARE IMMUTABLE' )",
+            ],
+        ),
+        (
+            "trg_crawl_tasks_absorb_terminal",
+            &[
+                "BEFORE UPDATE OF STATUS ON CRAWL_TASKS",
+                "OLD.STATUS IN ('DONE', 'SKIPPED') AND NEW.STATUS IS NOT OLD.STATUS",
+                "RAISE(ABORT, 'COMPLETED OR SKIPPED CRAWL TASK STATUS IS IMMUTABLE')",
+            ],
+        ),
+        (
+            "trg_crawl_tasks_in_progress_insert_guard",
+            &[
+                "BEFORE INSERT ON CRAWL_TASKS",
+                "NEW.STATUS = 'IN_PROGRESS'",
+                "RAISE(ABORT, 'IN-PROGRESS CRAWL TASK MAY ONLY BE ENTERED BY ATOMICALLY CLAIMING A PENDING ROW')",
+            ],
+        ),
+        (
+            "trg_crawl_tasks_in_progress_update_guard",
+            &[
+                "BEFORE UPDATE ON CRAWL_TASKS",
+                "NEW.STATUS = 'IN_PROGRESS'",
+                "NEW.CLAIM_TOKEN IS NULL",
+                "NEW.OWNER_NODE_ID IS NULL",
+                "NEW.LEASE_EXPIRES_AT <= NEW.CLAIMED_AT",
+                "NEW.CLAIM_GENERATION IS NOT OLD.CLAIM_GENERATION + 1",
+                "NEW.ATTEMPT_COUNT IS NOT OLD.ATTEMPT_COUNT + 1",
+                "RAISE(ABORT, 'IN-PROGRESS CRAWL TASK REQUIRES A FRESH GENERATION, CAPABILITY, OWNER, AND LEASE')",
+            ],
+        ),
+        (
+            "trg_crawl_tasks_pending_insert_guard",
+            &[
+                "BEFORE INSERT ON CRAWL_TASKS",
+                "NEW.STATUS = 'PENDING'",
+                "NEW.CLAIM_TOKEN IS NOT NULL",
+                "NEW.OWNER_NODE_ID IS NOT NULL",
+                "NEW.LEASE_EXPIRES_AT IS NOT NULL",
+                "RAISE(ABORT, 'PENDING CRAWL TASK CANNOT CARRY EXECUTION AUTHORITY')",
+            ],
+        ),
+        (
+            "trg_crawl_tasks_pending_update_guard",
+            &[
+                "BEFORE UPDATE ON CRAWL_TASKS",
+                "NEW.STATUS = 'PENDING'",
+                "NEW.CLAIM_TOKEN IS NOT NULL",
+                "NEW.OWNER_NODE_ID IS NOT NULL",
+                "NEW.LEASE_EXPIRES_AT IS NOT NULL",
+                "RAISE(ABORT, 'PENDING CRAWL TASK CANNOT CARRY EXECUTION AUTHORITY')",
+            ],
+        ),
+        (
+            "trg_crawl_tasks_settled_release_guard",
+            &[
+                "BEFORE UPDATE ON CRAWL_TASKS",
+                "NEW.STATUS IN ('DONE', 'FAILED', 'SKIPPED')",
+                "NEW.CLAIM_TOKEN IS NOT NULL",
+                "RAISE(ABORT, 'SETTLED CRAWL TASK MUST RELEASE ITS CLAIM CAPABILITY')",
             ],
         ),
         (

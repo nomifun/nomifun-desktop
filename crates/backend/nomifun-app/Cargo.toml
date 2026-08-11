@@ -232,6 +232,7 @@ nomifun-cron.workspace = true
 nomifun-requirement.workspace = true
 nomifun-idmm.workspace = true
 nomifun-knowledge.workspace = true
+nomifun-crawl.workspace = true
 nomifun-agent-execution.workspace = true
 nomifun-companion.workspace = true
 nomifun-customer-service.workspace = true

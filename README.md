@@ -168,6 +168,17 @@ Pull the knowledge scattered across your system into one managed, trackable plac
 - **Real-time URL snapshot** — turn any web page into a knowledge source (SSRF-guarded fetch, HTML→Markdown), in *snapshot* (persisted, re-fetchable) or *live* mode.
 - **Scoped retrieval** — agents call a `knowledge_search` tool whose scope is decided server-side and cannot be widened.
 
+### 🕷️ Site crawler
+
+> Guide: [`docs/guides/crawler.md`](docs/guides/crawler.md)
+
+Walk a whole site from a seed URL and file the readable content into a knowledge base.
+
+- **Durable frontier** — the URL queue lives in SQLite with atomic claims, renewable leases, and fencing tokens. A worker that crashes never corrupts the queue and never needs a liveness probe; close the app mid-crawl and the job resumes where it stopped.
+- **Polite by construction** — robots.txt (RFC 9309 status semantics), `Crawl-delay`, `Retry-After`, per-host concurrency enforced inside the queue allocator, and a per-host circuit breaker that never stalls the rest of the job.
+- **Incremental** — `ETag`/`Last-Modified` plus a content hash taken over the *extracted* text, so ad rotation and CSRF tokens don't fake a change.
+- **Review before it lands** — crawled pages default to the knowledge base's review inbox, same policy as agent write-back.
+
 ### 🖥️ Native Computer Use & Browser Use *(desktop build)*
 
 > Guide: [`docs/guides/computer-browser-use.md`](docs/guides/computer-browser-use.md)

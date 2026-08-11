@@ -119,7 +119,7 @@ async fn every_product_table_has_one_integer_autoincrement_row_primary_key() {
     .await
     .expect("tables");
 
-    assert_eq!(tables.len(), 78);
+    assert_eq!(tables.len(), 80);
     for table in tables {
         let columns = sqlx::query(&format!("PRAGMA table_info(\"{table}\")"))
             .fetch_all(pool)
@@ -309,6 +309,12 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_conversations_running_exit_guard",
             "trg_conversations_running_insert_guard",
             "trg_conversations_running_owner_immutable",
+            "trg_crawl_tasks_absorb_terminal",
+            "trg_crawl_tasks_in_progress_insert_guard",
+            "trg_crawl_tasks_in_progress_update_guard",
+            "trg_crawl_tasks_pending_insert_guard",
+            "trg_crawl_tasks_pending_update_guard",
+            "trg_crawl_tasks_settled_release_guard",
             "trg_requirements_absorb_done_cancelled",
             "trg_requirements_active_identity_exit_guard",
             "trg_requirements_active_to_pending_pre_effect_guard",
