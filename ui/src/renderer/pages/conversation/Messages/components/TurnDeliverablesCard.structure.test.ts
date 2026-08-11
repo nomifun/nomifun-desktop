@@ -8,6 +8,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const cardSource = readFileSync(new URL('./TurnDeliverablesCard.tsx', import.meta.url), 'utf8');
+const imageCardSource = readFileSync(new URL('./VerifiedImageArtifactCard.tsx', import.meta.url), 'utf8');
+const modelSource = readFileSync(new URL('../turnDeliverablesModel.ts', import.meta.url), 'utf8');
 const listSource = readFileSync(new URL('../MessageList.tsx', import.meta.url), 'utf8');
 
 describe('TurnDeliverablesCard structure', () => {
@@ -28,12 +30,38 @@ describe('TurnDeliverablesCard structure', () => {
     expect(cardSource.includes('isDesktopShell()')).toBe(true);
   });
 
-  test('truncates to the first three files with an explicit reveal control', () => {
+  test('truncates files and full-resolution images to three with explicit reveal controls', () => {
     expect(cardSource.includes('DEFAULT_VISIBLE_COUNT = 3')).toBe(true);
-    expect(cardSource.includes('available.slice(0, DEFAULT_VISIBLE_COUNT)')).toBe(true);
+    expect(cardSource.includes('fileDeliverables.slice(0, DEFAULT_VISIBLE_COUNT)')).toBe(true);
+    expect(cardSource.includes('verifiedImages.slice(0, DEFAULT_VISIBLE_COUNT)')).toBe(true);
     expect(cardSource.includes("aria-expanded={showAll}")).toBe(true);
+    expect(cardSource.includes("aria-expanded={showAllImages}")).toBe(true);
     expect(cardSource.includes('messages.turnDeliverables.showMore')).toBe(true);
     expect(cardSource.includes('messages.turnDeliverables.showLess')).toBe(true);
+    expect(cardSource.includes('messages.turnDeliverables.showMoreImages')).toBe(true);
+    expect(cardSource.includes('messages.turnDeliverables.showLessImages')).toBe(true);
+  });
+
+  test('renders verified image receipts as first-class cards outside the file rows', () => {
+    expect(modelSource.includes("item.tier === 'receipt'")).toBe(true);
+    expect(modelSource.includes("item.artifactKind === 'image'")).toBe(true);
+    expect(modelSource.includes("item.mimeType.toLowerCase().startsWith('image/')")).toBe(true);
+    expect(cardSource.includes('available.filter(isVerifiedImageDeliverable)')).toBe(true);
+    expect(cardSource.includes('!isVerifiedImageDeliverable(item)')).toBe(true);
+    expect(cardSource.includes('<VerifiedImageArtifactCard')).toBe(true);
+    expect(cardSource.includes("key={item.artifactId}")).toBe(true);
+    expect(imageCardSource.includes("data-testid='verified-image-artifact-card'")).toBe(true);
+    expect(imageCardSource.includes('<LocalImageView')).toBe(true);
+  });
+
+  test('image actions use only the persisted artifact path', () => {
+    expect(imageCardSource.includes('item.absolutePath ?? item.statPath ?? item.relativePath')).toBe(true);
+    expect(imageCardSource.includes('downloadFileFromPath(item.statPath, item.fileName, workspace)')).toBe(true);
+    expect(imageCardSource.includes('await copyText(copyTarget)')).toBe(true);
+    expect(imageCardSource.includes('launchPreview({')).toBe(true);
+    expect(imageCardSource.includes("from '@/renderer/components/Markdown'")).toBe(false);
+    expect(imageCardSource.includes('http://')).toBe(false);
+    expect(imageCardSource.includes('https://')).toBe(false);
   });
 
   test('uses compact padding across the card header, file rows and reveal control', () => {

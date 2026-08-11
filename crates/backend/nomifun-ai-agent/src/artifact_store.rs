@@ -4,18 +4,23 @@
 //! module is the delivery boundary: bytes are decoded, bounded, format-checked,
 //! written atomically, and read back before a caller may publish `Completed`.
 
-use std::fs::{self, OpenOptions};
+use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
+use fs2::FileExt;
 use nomifun_common::PersistedArtifactId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const ARTIFACT_DIRECTORY: &str = "nomifun-artifacts";
-const MAX_INLINE_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_INLINE_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_INLINE_IMAGE_BATCH_BYTES: usize = 40 * 1024 * 1024;
+pub(crate) const MAX_INLINE_IMAGE_COUNT: usize = 8;
 const MAX_EXISTING_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_IMAGE_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
@@ -23,6 +28,11 @@ const MAX_ZIP_ENTRIES: usize = 10_000;
 const MAX_ZIP_EXPANDED_BYTES: u64 = MAX_EXISTING_ARTIFACT_BYTES;
 const MAX_OGG_PACKET_BYTES: usize = 16 * 1024 * 1024;
 const STALE_TEMP_AGE: Duration = Duration::from_secs(60 * 60);
+const ARTIFACT_RECOVERY_VERSION: u8 = 1;
+const ARTIFACT_RECOVERY_PREFIX: &str = ".recovery-";
+const ARTIFACT_RECOVERY_SUFFIX: &str = ".json";
+const MAX_ARTIFACT_RECOVERY_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
+const ARTIFACT_RECOVERY_LOCK_SUFFIX: &str = ".lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,12 +57,96 @@ pub struct PersistedArtifact {
     pub sha256: String,
 }
 
+/// Durable pre-handoff envelope written before a receipt-bearing event is
+/// exposed on the lossy broadcast channel. `event_json` is the complete
+/// serialized terminal event payload; the relay can reconstruct a skipped
+/// delivery from `(conversation_id, wire_msg_id)` without guessing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRecoveryEnvelope {
+    pub conversation_id: String,
+    pub wire_msg_id: String,
+    pub event_kind: String,
+    pub event_json: String,
+}
+
+/// The exact conversation wire that owns a provisional artifact from the
+/// moment its recovery journal is created. Keeping this identity outside the
+/// later event envelope makes even a crash between file publication and event
+/// construction recoverable without guessing which turn owned the bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRecoverySource {
+    pub conversation_id: String,
+    pub wire_msg_id: String,
+}
+
+/// Exact durable projection identity installed by the relay before its first
+/// provisional database write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRecoveryOwner {
+    pub conversation_id: String,
+    pub wire_msg_id: String,
+    pub root_turn_id: String,
+    pub message_id: String,
+    pub message_type: String,
+    pub committed_content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ArtifactRecoveryState {
+    /// The crash-durable journal exists, but the persistence worker may still
+    /// be publishing or verifying the artifact file. Its lease must never be
+    /// handed to another relay in the same process.
+    Unprepared,
+    /// File publication and read-back verification completed, but no event
+    /// envelope has been attached yet. A terminating relay may safely hand
+    /// this lease to the next reconciler, which will roll it back.
+    PersistedUnprepared,
+    Prepared {
+        envelope: ArtifactRecoveryEnvelope,
+    },
+    ClaimedActive {
+        envelope: ArtifactRecoveryEnvelope,
+        owner: ArtifactRecoveryOwner,
+    },
+    /// The enclosing turn passed its successful terminal gate and durably
+    /// recorded an exact batch intent immediately before the database COMMIT.
+    CommitAttempting {
+        envelope: ArtifactRecoveryEnvelope,
+        owner: ArtifactRecoveryOwner,
+    },
+    NeedsReconcile {
+        envelope: ArtifactRecoveryEnvelope,
+        owner: ArtifactRecoveryOwner,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRecoveryRecord {
+    version: u8,
+    pub producer_boot_id: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub source: ArtifactRecoverySource,
+    pub receipt: PersistedArtifact,
+    pub state: ArtifactRecoveryState,
+}
+
+impl ArtifactRecoveryRecord {
+    pub fn produced_by_current_boot(&self) -> bool {
+        self.producer_boot_id == artifact_recovery_boot_id()
+    }
+
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactStoreError {
     #[error("artifact payload is empty")]
     Empty,
     #[error("artifact payload exceeds the {limit} byte limit")]
     TooLarge { limit: usize },
+    #[error("artifact batch exceeds the {limit} item limit")]
+    TooMany { limit: usize },
     #[error("artifact payload is not valid base64")]
     InvalidBase64,
     #[error("unsupported or invalid artifact MIME type: {0}")]
@@ -67,6 +161,8 @@ pub enum ArtifactStoreError {
     Io(#[from] std::io::Error),
     #[error("artifact verification failed after writing")]
     VerificationFailed,
+    #[error("artifact recovery journal failed: {0}")]
+    Recovery(String),
 }
 
 #[derive(Debug, Clone)]
@@ -105,10 +201,11 @@ impl ArtifactStore {
         M: AsRef<str>,
         D: AsRef<str>,
     {
-        let validated = images
-            .into_iter()
-            .map(|(mime, data)| validate_inline(ArtifactKind::Image, mime.as_ref(), data.as_ref()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let validated = validate_inline_batch(
+            images
+                .into_iter()
+                .map(|(mime, data)| (ArtifactKind::Image, mime, data)),
+        )?;
         if validated.is_empty() {
             return Err(ArtifactStoreError::Empty);
         }
@@ -129,10 +226,7 @@ impl ArtifactStore {
         M: AsRef<str>,
         D: AsRef<str>,
     {
-        let validated = artifacts
-            .into_iter()
-            .map(|(kind, mime, data)| validate_inline(kind, mime.as_ref(), data.as_ref()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let validated = validate_inline_batch(artifacts)?;
         if validated.is_empty() {
             return Err(ArtifactStoreError::Empty);
         }
@@ -275,6 +369,535 @@ impl ArtifactStore {
         Ok(())
     }
 
+    /// Attach the complete, turn-scoped event envelope before publishing a
+    /// receipt on a lossy channel. Every receipt must still be in the
+    /// `PersistedUnprepared` state created after the exact recoverable
+    /// persistence call completed file publication and read-back verification.
+    pub fn prepare_recovery_receipts(
+        &self,
+        receipts: &[PersistedArtifact],
+        envelope: &ArtifactRecoveryEnvelope,
+    ) -> Result<(), ArtifactStoreError> {
+        let _state_guard = recovery_state_guard()?;
+        if receipts.is_empty()
+            || envelope.conversation_id.trim().is_empty()
+            || envelope.wire_msg_id.trim().is_empty()
+            || envelope.event_kind.trim().is_empty()
+            || envelope.event_json.is_empty()
+        {
+            return Err(ArtifactStoreError::Recovery(
+                "recovery envelope is incomplete".to_owned(),
+            ));
+        }
+        let artifact_root = self.prepare_root()?;
+        let mut errors = Vec::new();
+        for receipt in receipts {
+            let (path, mut record) = match load_recovery_record(&artifact_root, receipt) {
+                Ok(record) => record,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", receipt.id));
+                    continue;
+                }
+            };
+            match &record.state {
+                ArtifactRecoveryState::PersistedUnprepared => {
+                    if record.source.conversation_id != envelope.conversation_id
+                        || record.source.wire_msg_id != envelope.wire_msg_id
+                    {
+                        errors.push(format!(
+                            "{}: recovery envelope belongs to a different relay wire",
+                            receipt.id
+                        ));
+                        continue;
+                    }
+                    record.state = ArtifactRecoveryState::Prepared {
+                        envelope: envelope.clone(),
+                    };
+                    record.updated_at_ms = unix_time_ms();
+                    if let Err(error) = replace_recovery_record(&artifact_root, &path, &record) {
+                        errors.push(format!("{}: {error}", receipt.id));
+                    }
+                }
+                ArtifactRecoveryState::Prepared { envelope: existing }
+                    if existing == envelope => {}
+                ArtifactRecoveryState::Prepared { envelope: existing }
+                    if existing.conversation_id == envelope.conversation_id
+                        && existing.wire_msg_id == envelope.wire_msg_id =>
+                {
+                    record.state = ArtifactRecoveryState::Prepared {
+                        envelope: envelope.clone(),
+                    };
+                    record.updated_at_ms = unix_time_ms();
+                    if let Err(error) = replace_recovery_record(&artifact_root, &path, &record) {
+                        errors.push(format!("{}: {error}", receipt.id));
+                    }
+                }
+                _ => {
+                    errors.push(format!(
+                        "artifact {} recovery owner changed before event publication",
+                        receipt.id
+                    ));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ArtifactStoreError::Recovery(errors.join("; ")))
+        }
+    }
+
+    /// Transfer a prepared envelope to the exact relay projection. This must
+    /// complete before the relay writes even a provisional artifact row.
+    pub fn claim_recovery_receipts(
+        &self,
+        receipts: &[PersistedArtifact],
+        owner: &ArtifactRecoveryOwner,
+    ) -> Result<(), ArtifactStoreError> {
+        self.claim_recovery_receipts_with_envelope(receipts, owner, None)
+    }
+
+    pub fn claim_recovery_receipts_with_envelope(
+        &self,
+        receipts: &[PersistedArtifact],
+        owner: &ArtifactRecoveryOwner,
+        terminal_envelope: Option<&ArtifactRecoveryEnvelope>,
+    ) -> Result<(), ArtifactStoreError> {
+        let _state_guard = recovery_state_guard()?;
+        if receipts.is_empty()
+            || owner.conversation_id.trim().is_empty()
+            || owner.wire_msg_id.trim().is_empty()
+            || owner.root_turn_id.trim().is_empty()
+            || owner.message_id.trim().is_empty()
+            || owner.message_type.trim().is_empty()
+            || owner.committed_content.is_empty()
+        {
+            return Err(ArtifactStoreError::Recovery(
+                "recovery relay owner is incomplete".to_owned(),
+            ));
+        }
+        let artifact_root = self.prepare_root()?;
+        let mut errors = Vec::new();
+        for receipt in receipts {
+            let (path, mut record) = match load_recovery_record(&artifact_root, receipt) {
+                Ok(record) => record,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", receipt.id));
+                    continue;
+                }
+            };
+            match &record.state {
+                ArtifactRecoveryState::Prepared { envelope } => {
+                    if envelope.conversation_id != owner.conversation_id
+                        || envelope.wire_msg_id != owner.wire_msg_id
+                    {
+                        errors.push(format!(
+                            "artifact {} was prepared for a different relay wire",
+                            receipt.id
+                        ));
+                        continue;
+                    }
+                    let claimed_envelope = terminal_envelope.unwrap_or(envelope);
+                    if claimed_envelope.conversation_id != owner.conversation_id
+                        || claimed_envelope.wire_msg_id != owner.wire_msg_id
+                    {
+                        errors.push(format!(
+                            "artifact {} terminal envelope belongs to a different relay wire",
+                            receipt.id
+                        ));
+                        continue;
+                    }
+                    record.state = ArtifactRecoveryState::ClaimedActive {
+                        envelope: claimed_envelope.clone(),
+                        owner: owner.clone(),
+                    };
+                    record.updated_at_ms = unix_time_ms();
+                    if let Err(error) = replace_recovery_record(&artifact_root, &path, &record) {
+                        errors.push(format!("{}: {error}", receipt.id));
+                    }
+                }
+                ArtifactRecoveryState::ClaimedActive {
+                    owner: existing, ..
+                }
+                | ArtifactRecoveryState::CommitAttempting {
+                    owner: existing, ..
+                }
+                | ArtifactRecoveryState::NeedsReconcile {
+                    owner: existing, ..
+                } if existing == owner => {}
+                _ => {
+                    errors.push(format!(
+                        "artifact {} could not transfer to the relay owner",
+                        receipt.id
+                    ));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ArtifactStoreError::Recovery(errors.join("; ")))
+        }
+    }
+
+    /// Persist the exact successful-turn commit intent before entering the
+    /// database transaction. Recovery may replay only this state (or a later
+    /// NeedsReconcile), never a merely ClaimedActive provider event.
+    pub fn mark_recovery_receipts_commit_attempting(
+        &self,
+        receipts: &[PersistedArtifact],
+    ) -> Result<(), ArtifactStoreError> {
+        let _state_guard = recovery_state_guard()?;
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        let artifact_root = self.prepare_root()?;
+        let mut errors = Vec::new();
+        for receipt in receipts {
+            let (path, mut record) = match load_recovery_record(&artifact_root, receipt) {
+                Ok(record) => record,
+                Err(ArtifactStoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound => {
+                    errors.push(format!("{}: recovery journal is missing", receipt.id));
+                    continue;
+                }
+                Err(error) => {
+                    errors.push(format!("{}: {error}", receipt.id));
+                    continue;
+                }
+            };
+            match &record.state {
+                ArtifactRecoveryState::ClaimedActive { envelope, owner } => {
+                    record.state = ArtifactRecoveryState::CommitAttempting {
+                        envelope: envelope.clone(),
+                        owner: owner.clone(),
+                    };
+                    record.updated_at_ms = unix_time_ms();
+                    if let Err(error) = replace_recovery_record(&artifact_root, &path, &record) {
+                        errors.push(format!("{}: {error}", receipt.id));
+                    }
+                }
+                ArtifactRecoveryState::CommitAttempting { .. }
+                | ArtifactRecoveryState::NeedsReconcile { .. } => {}
+                _ => errors.push(format!(
+                    "{}: no claimed relay owner to commit",
+                    receipt.id
+                )),
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ArtifactStoreError::Recovery(errors.join("; ")))
+        }
+    }
+
+    /// Persist an unresolved COMMIT owner. The receipt maps may now be drained:
+    /// a later relay can reconstruct the exact row intent from this record.
+    pub fn mark_recovery_receipts_needs_reconcile(
+        &self,
+        receipts: &[PersistedArtifact],
+    ) -> Result<(), ArtifactStoreError> {
+        let _state_guard = recovery_state_guard()?;
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        let artifact_root = self.prepare_root()?;
+        let mut errors = Vec::new();
+        for receipt in receipts {
+            let (path, mut record) = match load_recovery_record(&artifact_root, receipt) {
+                Ok(record) => record,
+                Err(ArtifactStoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", receipt.id));
+                    continue;
+                }
+            };
+            match &record.state {
+                ArtifactRecoveryState::CommitAttempting { envelope, owner } => {
+                    record.state = ArtifactRecoveryState::NeedsReconcile {
+                        envelope: envelope.clone(),
+                        owner: owner.clone(),
+                    };
+                    record.updated_at_ms = unix_time_ms();
+                    if let Err(error) = replace_recovery_record(&artifact_root, &path, &record) {
+                        errors.push(format!("{}: {error}", receipt.id));
+                    }
+                }
+                ArtifactRecoveryState::NeedsReconcile { .. } => {}
+                _ => {
+                    errors.push(format!(
+                        "{}: no claimed relay owner to reconcile",
+                        receipt.id
+                    ));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ArtifactStoreError::Recovery(errors.join("; ")))
+        }
+    }
+
+    /// Complete ownership transfer after every exact artifact row is durable.
+    /// Files remain immutable; only their provisional recovery records vanish.
+    pub fn finalize_recovery_receipts(
+        &self,
+        receipts: &[PersistedArtifact],
+    ) -> Result<(), ArtifactStoreError> {
+        let _state_guard = recovery_state_guard()?;
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        let artifact_root = match fs::canonicalize(&self.artifact_root) {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut removed = false;
+        let mut errors = Vec::new();
+        for receipt in receipts {
+            if !valid_recovery_artifact_id(&receipt.id) {
+                errors.push(format!("{}: invalid artifact id", receipt.id));
+                continue;
+            }
+            let path = recovery_journal_path(&artifact_root, &receipt.id);
+            let mut finalized = false;
+            match load_recovery_record(&artifact_root, receipt) {
+                Ok((loaded_path, _)) if loaded_path == path => {
+                    match fs::remove_file(path) {
+                        Ok(()) => {
+                            removed = true;
+                            finalized = true;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            finalized = true;
+                        }
+                        Err(error) => errors.push(format!("{}: {error}", receipt.id)),
+                    }
+                }
+                Err(ArtifactStoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound => finalized = true,
+                Err(error) => errors.push(format!("{}: {error}", receipt.id)),
+                _ => errors.push(format!("{}: journal path mismatch", receipt.id)),
+            }
+            if finalized
+                && let Err(error) = release_recovery_lease(&artifact_root, &receipt.id)
+            {
+                errors.push(format!("{}: {error}", receipt.id));
+            }
+        }
+        if removed {
+            sync_parent_directory(&artifact_root)?;
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ArtifactStoreError::Recovery(errors.join("; ")))
+        }
+    }
+
+    /// Read durable recovery intents. Callers must apply the state-specific
+    /// ownership rules; merely finding a record never authorizes deletion.
+    pub fn recovery_records(&self) -> Result<Vec<ArtifactRecoveryRecord>, ArtifactStoreError> {
+        let artifact_root = match fs::canonicalize(&self.artifact_root) {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let workspace = fs::canonicalize(&self.workspace_root)?;
+        if !artifact_root.starts_with(workspace) {
+            return Err(ArtifactStoreError::OutsideWorkspace);
+        }
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&artifact_root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with(ARTIFACT_RECOVERY_PREFIX)
+                || !name.ends_with(ARTIFACT_RECOVERY_SUFFIX)
+                || !entry.file_type()?.is_file()
+            {
+                continue;
+            }
+            records.push(read_recovery_record_path(&entry.path())?);
+        }
+        records.sort_by(|left, right| left.receipt.id.cmp(&right.receipt.id));
+        Ok(records)
+    }
+
+    /// Acquire the OS-backed lease of a journal whose producer may have
+    /// disappeared. `false` means another live process still owns the exact
+    /// receipt and callers must leave both journal and bytes untouched.
+    pub fn try_acquire_recovery_lease(
+        &self,
+        record: &ArtifactRecoveryRecord,
+    ) -> Result<bool, ArtifactStoreError> {
+        let artifact_root = fs::canonicalize(&self.artifact_root)?;
+        let workspace = fs::canonicalize(&self.workspace_root)?;
+        if !artifact_root.starts_with(workspace) {
+            return Err(ArtifactStoreError::OutsideWorkspace);
+        }
+        let (_, current) = load_recovery_record(&artifact_root, &record.receipt)?;
+        if current != *record {
+            return Ok(false);
+        }
+        acquire_recovery_lease(&artifact_root, &record.receipt.id)
+    }
+
+    pub fn release_acquired_recovery_lease(
+        &self,
+        record: &ArtifactRecoveryRecord,
+    ) -> Result<(), ArtifactStoreError> {
+        let artifact_root = fs::canonicalize(&self.artifact_root)?;
+        release_recovery_lease(&artifact_root, &record.receipt.id)
+    }
+
+    /// Relinquish the process-local producer guards for an exact completed
+    /// wire while retaining every recovery journal and artifact byte. This is
+    /// the ownership handoff from a terminating relay to a later reconciler;
+    /// it never authorizes deletion by itself.
+    pub fn release_recovery_leases_for_source(
+        &self,
+        source: &ArtifactRecoverySource,
+    ) -> Result<(), ArtifactStoreError> {
+        let _state_guard = recovery_state_guard()?;
+        let artifact_root = match fs::canonicalize(&self.artifact_root) {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut first_error = None;
+        for record in self.recovery_records()? {
+            if record.source != *source {
+                continue;
+            }
+            if matches!(record.state, ArtifactRecoveryState::Unprepared) {
+                // The blocking persistence worker may still be between its
+                // durable journal write and artifact rename/read-back.
+                continue;
+            }
+            if let Err(error) = release_recovery_lease(&artifact_root, &record.receipt.id) {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Roll back provisional snapshots created by this store for a turn that
+    /// will not commit. Ownership is proven from the canonical artifact root,
+    /// non-symlink file type, receipt id and exact relative locator before any
+    /// delete. Caller-owned declared paths are never eligible: existing files
+    /// are imported into this immutable namespace before receipts are emitted.
+    pub fn rollback_owned_receipts(
+        &self,
+        receipts: &[PersistedArtifact],
+    ) -> Result<(), ArtifactStoreError> {
+        let _state_guard = recovery_state_guard()?;
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        let artifact_root = match fs::canonicalize(&self.artifact_root) {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let workspace = fs::canonicalize(&self.workspace_root)?;
+        if !artifact_root.starts_with(&workspace) {
+            return Err(ArtifactStoreError::OutsideWorkspace);
+        }
+
+        let mut first_error = None;
+        for receipt in receipts {
+            // `receipt.path` is a historical locator and may still resolve in
+            // an old/copy source workspace. Deletion ownership is always
+            // rooted in this store's canonical artifact directory and the
+            // strictly validated relative locator; otherwise rollback after a
+            // workspace copy could delete the source while orphaning the
+            // current snapshot and journal.
+            let path = match relocated_owned_artifact_path(&artifact_root, receipt) {
+                Ok(path) => path,
+                Err(ArtifactStoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    if let Err(error) = remove_matching_recovery_record(&artifact_root, receipt) {
+                        first_error.get_or_insert(error);
+                    }
+                    if let Err(error) = release_recovery_lease(&artifact_root, &receipt.id) {
+                        first_error.get_or_insert(error);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if let Err(error) = remove_matching_recovery_record(&artifact_root, receipt) {
+                        first_error.get_or_insert(error);
+                    }
+                    if let Err(error) = release_recovery_lease(&artifact_root, &receipt.id) {
+                        first_error.get_or_insert(error);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    first_error.get_or_insert(ArtifactStoreError::Io(error));
+                    continue;
+                }
+            };
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                first_error.get_or_insert(ArtifactStoreError::VerificationFailed);
+                continue;
+            }
+            let canonical = match fs::canonicalize(&path) {
+                Ok(canonical) => canonical,
+                Err(error) => {
+                    first_error.get_or_insert(ArtifactStoreError::Io(error));
+                    continue;
+                }
+            };
+            if canonical.parent() != Some(artifact_root.as_path()) {
+                first_error.get_or_insert(ArtifactStoreError::OutsideWorkspace);
+                continue;
+            }
+            let Some(file_name) = canonical.file_name().and_then(|name| name.to_str()) else {
+                first_error.get_or_insert(ArtifactStoreError::VerificationFailed);
+                continue;
+            };
+            let owned_prefix = format!("artifact-{}.", receipt.id);
+            let expected_relative = format!("{ARTIFACT_DIRECTORY}/{file_name}");
+            if !file_name.starts_with(&owned_prefix)
+                || receipt.relative_path != expected_relative
+            {
+                first_error.get_or_insert(ArtifactStoreError::VerificationFailed);
+                continue;
+            }
+            if let Err(error) = fs::remove_file(&canonical) {
+                first_error.get_or_insert(ArtifactStoreError::Io(error));
+                continue;
+            }
+            if let Err(error) = remove_matching_recovery_record(&artifact_root, receipt) {
+                first_error.get_or_insert(error);
+            }
+            if let Err(error) = release_recovery_lease(&artifact_root, &receipt.id) {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     /// Import a tool-created workspace file into the immutable artifact area.
     ///
     /// Unlike [`Self::verify_existing_path`], the returned receipt never points
@@ -324,15 +947,64 @@ impl ArtifactStore {
         P: AsRef<Path>,
     {
         let mut existing = self.prepare_existing_batch(existing_paths)?;
-        let mut validated_inline = inline
-            .into_iter()
-            .map(|(kind, mime, data)| validate_inline(kind, mime.as_ref(), data.as_ref()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut validated_inline = validate_inline_batch(inline)?;
         existing.append(&mut validated_inline);
         if existing.is_empty() {
             return Err(ArtifactStoreError::Empty);
         }
         self.persist_validated_batch(existing)
+    }
+
+    /// Persist a batch whose ownership has not yet transferred to conversation
+    /// history. A crash-durable `Unprepared` recovery record is committed
+    /// before each artifact rename, so an emitted receipt can never become an
+    /// ownerless file even if the event channel drops its terminal frame.
+    pub fn persist_inline_and_existing_batch_recoverable<I, M, D, E, P>(
+        &self,
+        inline: I,
+        existing_paths: E,
+        source: &ArtifactRecoverySource,
+    ) -> Result<Vec<PersistedArtifact>, ArtifactStoreError>
+    where
+        I: IntoIterator<Item = (ArtifactKind, M, D)>,
+        M: AsRef<str>,
+        D: AsRef<str>,
+        E: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut existing = self.prepare_existing_batch(existing_paths)?;
+        let mut validated_inline = validate_inline_batch(inline)?;
+        existing.append(&mut validated_inline);
+        if existing.is_empty() {
+            return Err(ArtifactStoreError::Empty);
+        }
+        if source.conversation_id.trim().is_empty() || source.wire_msg_id.trim().is_empty() {
+            return Err(ArtifactStoreError::Recovery(
+                "artifact recovery source is incomplete".to_owned(),
+            ));
+        }
+        self.persist_validated_batch_with_recovery(existing, Some(source))
+    }
+
+    /// Perform only allocation-bound checks needed before a synchronous output
+    /// callback copies image payloads into the deferred-delivery ledger. The
+    /// actual base64 decode and format validation remain in
+    /// [`Self::persist_inline_and_existing_batch`] and run on a blocking pool.
+    pub(crate) fn preflight_inline_image_batch<I, D>(
+        images: I,
+    ) -> Result<(), ArtifactStoreError>
+    where
+        I: IntoIterator<Item = D>,
+        D: AsRef<str>,
+    {
+        let mut budget = InlineImageBudget::default();
+        for image in images {
+            budget.reserve_encoded(image.as_ref())?;
+        }
+        if budget.count == 0 {
+            return Err(ArtifactStoreError::Empty);
+        }
+        Ok(())
     }
 
     fn prepare_existing_batch<I, P>(
@@ -418,8 +1090,22 @@ impl ArtifactStore {
         &self,
         validated: Vec<ValidatedArtifact>,
     ) -> Result<Vec<PersistedArtifact>, ArtifactStoreError> {
+        self.persist_validated_batch_with_recovery(validated, None)
+    }
+
+    fn persist_validated_batch_with_recovery(
+        &self,
+        validated: Vec<ValidatedArtifact>,
+        recovery_source: Option<&ArtifactRecoverySource>,
+    ) -> Result<Vec<PersistedArtifact>, ArtifactStoreError> {
+        // Serialize the journal-before-file publication window with terminal
+        // lease handoff. Handoff therefore observes either no record or a
+        // fully read-back `PersistedUnprepared` record, never an active rename.
+        let _recovery_guard = recovery_source
+            .map(|_| recovery_state_guard())
+            .transpose()?;
         let artifact_root = self.prepare_root()?;
-        let mut written: Vec<PathBuf> = Vec::with_capacity(validated.len());
+        let mut written: Vec<(PathBuf, Option<PathBuf>)> = Vec::with_capacity(validated.len());
         let mut output = Vec::with_capacity(validated.len());
 
         for item in validated {
@@ -429,8 +1115,11 @@ impl ArtifactStore {
             let file_name = format!("artifact-{id}.{}", item.extension);
             let final_path = artifact_root.join(&file_name);
             let temp_path = artifact_root.join(format!(".artifact-{id}.tmp"));
+            let journal_path = recovery_source.map(|_| recovery_journal_path(&artifact_root, &id));
 
             let mut published_by_this_batch = false;
+            let mut journaled_by_this_batch = false;
+            let mut leased_by_this_batch = false;
             let result = (|| -> Result<PersistedArtifact, ArtifactStoreError> {
                 let mut file = OpenOptions::new()
                     .create_new(true)
@@ -439,6 +1128,41 @@ impl ArtifactStore {
                 file.write_all(&item.bytes)?;
                 file.sync_all()?;
                 drop(file);
+
+                let canonical_locator = final_path
+                    .to_str()
+                    .ok_or(ArtifactStoreError::VerificationFailed)?;
+                let artifact = PersistedArtifact {
+                    id: id.clone(),
+                    kind: item.kind,
+                    mime_type: item.mime_type.clone(),
+                    path: canonical_locator.to_owned(),
+                    relative_path: format!("{ARTIFACT_DIRECTORY}/{file_name}"),
+                    size_bytes: item.bytes.len() as u64,
+                    sha256: item.sha256.clone(),
+                };
+                if let Some(journal_path) = journal_path.as_ref() {
+                    if !acquire_recovery_lease(&artifact_root, &id)? {
+                        return Err(ArtifactStoreError::Recovery(format!(
+                            "artifact {id} recovery lease is already owned"
+                        )));
+                    }
+                    leased_by_this_batch = true;
+                    let now = unix_time_ms();
+                    let record = ArtifactRecoveryRecord {
+                        version: ARTIFACT_RECOVERY_VERSION,
+                        producer_boot_id: artifact_recovery_boot_id().to_owned(),
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                        source: recovery_source
+                            .expect("journal paths are created only for a recovery source")
+                            .clone(),
+                        receipt: artifact.clone(),
+                        state: ArtifactRecoveryState::Unprepared,
+                    };
+                    write_recovery_record_new(&artifact_root, journal_path, &record)?;
+                    journaled_by_this_batch = true;
+                }
 
                 durable_rename_no_replace(&temp_path, &final_path)?;
                 published_by_this_batch = true;
@@ -452,24 +1176,24 @@ impl ArtifactStore {
                 if !canonical_path.starts_with(&artifact_root) {
                     return Err(ArtifactStoreError::OutsideWorkspace);
                 }
-                let canonical_locator = canonical_path
-                    .to_str()
-                    .ok_or(ArtifactStoreError::VerificationFailed)?;
-
-                Ok(PersistedArtifact {
-                    id,
-                    kind: item.kind,
-                    mime_type: item.mime_type,
-                    path: canonical_locator.to_owned(),
-                    relative_path: format!("{ARTIFACT_DIRECTORY}/{file_name}"),
-                    size_bytes: read_back.len() as u64,
-                    sha256: item.sha256,
-                })
+                if journal_path.is_some() {
+                    let (record_path, mut record) =
+                        load_recovery_record(&artifact_root, &artifact)?;
+                    if !matches!(record.state, ArtifactRecoveryState::Unprepared) {
+                        return Err(ArtifactStoreError::Recovery(format!(
+                            "artifact {id} recovery state changed during publication"
+                        )));
+                    }
+                    record.state = ArtifactRecoveryState::PersistedUnprepared;
+                    record.updated_at_ms = unix_time_ms();
+                    replace_recovery_record(&artifact_root, &record_path, &record)?;
+                }
+                Ok(artifact)
             })();
 
             match result {
                 Ok(artifact) => {
-                    written.push(final_path);
+                    written.push((final_path, journal_path));
                     output.push(artifact);
                 }
                 Err(error) => {
@@ -478,8 +1202,22 @@ impl ArtifactStore {
                         &final_path,
                         published_by_this_batch,
                     );
-                    for path in written {
+                    if journaled_by_this_batch
+                        && let Some(journal_path) = journal_path.as_ref()
+                    {
+                        let _ = fs::remove_file(journal_path);
+                    }
+                    if leased_by_this_batch {
+                        let _ = release_recovery_lease(&artifact_root, &id);
+                    }
+                    for (path, journal_path) in written {
                         let _ = fs::remove_file(path);
+                        if let Some(journal_path) = journal_path {
+                            if let Some(recovery_id) = recovery_artifact_id_from_path(&journal_path) {
+                                let _ = release_recovery_lease(&artifact_root, &recovery_id);
+                            }
+                            let _ = fs::remove_file(journal_path);
+                        }
                     }
                     let _ = sync_parent_directory(&artifact_root);
                     return Err(error);
@@ -499,6 +1237,343 @@ fn cleanup_failed_publication(temp: &Path, target: &Path, target_is_owned: bool)
     if target_is_owned {
         let _ = fs::remove_file(target);
     }
+}
+
+fn artifact_recovery_boot_id() -> &'static str {
+    static BOOT_ID: OnceLock<String> = OnceLock::new();
+    BOOT_ID
+        .get_or_init(|| PersistedArtifactId::new().into_string())
+        .as_str()
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn valid_recovery_artifact_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn recovery_journal_path(artifact_root: &Path, artifact_id: &str) -> PathBuf {
+    artifact_root.join(format!(
+        "{ARTIFACT_RECOVERY_PREFIX}{artifact_id}{ARTIFACT_RECOVERY_SUFFIX}"
+    ))
+}
+
+fn recovery_lock_path(artifact_root: &Path, artifact_id: &str) -> PathBuf {
+    artifact_root.join(format!(
+        "{ARTIFACT_RECOVERY_PREFIX}{artifact_id}{ARTIFACT_RECOVERY_LOCK_SUFFIX}"
+    ))
+}
+
+fn recovery_lease_key(artifact_root: &Path, artifact_id: &str) -> String {
+    format!("{}\0{artifact_id}", artifact_root.to_string_lossy())
+}
+
+fn recovery_lease_registry() -> &'static Mutex<HashMap<String, File>> {
+    static LEASES: OnceLock<Mutex<HashMap<String, File>>> = OnceLock::new();
+    LEASES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn recovery_state_guard() -> Result<MutexGuard<'static, ()>, ArtifactStoreError> {
+    static STATE: OnceLock<Mutex<()>> = OnceLock::new();
+    STATE
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| ArtifactStoreError::Recovery("recovery state mutex was poisoned".to_owned()))
+}
+
+fn acquire_recovery_lease(
+    artifact_root: &Path,
+    artifact_id: &str,
+) -> Result<bool, ArtifactStoreError> {
+    if !valid_recovery_artifact_id(artifact_id) {
+        return Err(ArtifactStoreError::Recovery(
+            "invalid artifact recovery lease id".to_owned(),
+        ));
+    }
+    let key = recovery_lease_key(artifact_root, artifact_id);
+    let mut leases = recovery_lease_registry()
+        .lock()
+        .map_err(|_| ArtifactStoreError::Recovery("recovery lease registry was poisoned".to_owned()))?;
+    if leases.contains_key(&key) {
+        // The process-local entry is an active producer/reconciler guard, not
+        // proof that this caller owns it. Returning true here allowed a second
+        // relay in the same process to take over another live wire.
+        return Ok(false);
+    }
+    let lock_path = recovery_lock_path(artifact_root, artifact_id);
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            leases.insert(key, file);
+            Ok(true)
+        }
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Ok(false)
+        }
+        Err(error) => Err(ArtifactStoreError::Io(error)),
+    }
+}
+
+fn release_recovery_lease(
+    artifact_root: &Path,
+    artifact_id: &str,
+) -> Result<(), ArtifactStoreError> {
+    if !valid_recovery_artifact_id(artifact_id) {
+        return Err(ArtifactStoreError::Recovery(
+            "invalid artifact recovery lease id".to_owned(),
+        ));
+    }
+    let key = recovery_lease_key(artifact_root, artifact_id);
+    let mut leases = recovery_lease_registry()
+        .lock()
+        .map_err(|_| ArtifactStoreError::Recovery("recovery lease registry was poisoned".to_owned()))?;
+    if let Some(file) = leases.remove(&key) {
+        FileExt::unlock(&file)?;
+        drop(file);
+    } else {
+        let lock_path = recovery_lock_path(artifact_root, artifact_id);
+        if !lock_path.exists() {
+            return Ok(());
+        }
+        let file = OpenOptions::new().read(true).write(true).open(&lock_path)?;
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => FileExt::unlock(&file)?,
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                return Err(ArtifactStoreError::Recovery(format!(
+                    "artifact {artifact_id} recovery lease is owned by another process"
+                )));
+            }
+            Err(error) => return Err(ArtifactStoreError::Io(error)),
+        }
+    }
+    // Keep the lock file as a stable inode. Unlinking after unlock permits a
+    // waiter holding the old inode and a third process opening the recreated
+    // path to acquire two independent "exclusive" locks for one receipt.
+    Ok(())
+}
+
+fn recovery_artifact_id_from_path(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let id = name
+        .strip_prefix(ARTIFACT_RECOVERY_PREFIX)?
+        .strip_suffix(ARTIFACT_RECOVERY_SUFFIX)?;
+    valid_recovery_artifact_id(id).then(|| id.to_owned())
+}
+
+fn relocated_owned_artifact_path(
+    artifact_root: &Path,
+    receipt: &PersistedArtifact,
+) -> Result<PathBuf, ArtifactStoreError> {
+    let mut components = receipt.relative_path.split('/');
+    if components.next() != Some(ARTIFACT_DIRECTORY) {
+        return Err(ArtifactStoreError::OutsideWorkspace);
+    }
+    let file_name = components
+        .next()
+        .filter(|name| !name.is_empty())
+        .ok_or(ArtifactStoreError::VerificationFailed)?;
+    if components.next().is_some()
+        || file_name.contains('\\')
+        || file_name.contains('/')
+        || !file_name.starts_with(&format!("artifact-{}.", receipt.id))
+    {
+        return Err(ArtifactStoreError::OutsideWorkspace);
+    }
+    let candidate = artifact_root.join(file_name);
+    let metadata = fs::symlink_metadata(&candidate)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+    Ok(candidate)
+}
+
+fn recovery_temp_path(artifact_root: &Path, artifact_id: &str) -> PathBuf {
+    artifact_root.join(format!(
+        "{ARTIFACT_RECOVERY_PREFIX}{artifact_id}.{}.tmp",
+        PersistedArtifactId::new().into_string()
+    ))
+}
+
+fn encoded_recovery_record(
+    record: &ArtifactRecoveryRecord,
+) -> Result<Vec<u8>, ArtifactStoreError> {
+    let encoded = serde_json::to_vec(record)
+        .map_err(|error| ArtifactStoreError::Recovery(error.to_string()))?;
+    if encoded.len() as u64 > MAX_ARTIFACT_RECOVERY_JOURNAL_BYTES {
+        return Err(ArtifactStoreError::Recovery(format!(
+            "journal exceeds the {MAX_ARTIFACT_RECOVERY_JOURNAL_BYTES}-byte limit"
+        )));
+    }
+    Ok(encoded)
+}
+
+fn write_recovery_temp(path: &Path, encoded: &[u8]) -> Result<(), ArtifactStoreError> {
+    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    if let Err(error) = (|| -> std::io::Result<()> {
+        file.write_all(encoded)?;
+        file.sync_all()
+    })() {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn write_recovery_record_new(
+    artifact_root: &Path,
+    journal_path: &Path,
+    record: &ArtifactRecoveryRecord,
+) -> Result<(), ArtifactStoreError> {
+    if !valid_recovery_artifact_id(&record.receipt.id) {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+    let encoded = encoded_recovery_record(record)?;
+    let temp_path = recovery_temp_path(artifact_root, &record.receipt.id);
+    write_recovery_temp(&temp_path, &encoded)?;
+    if let Err(error) = durable_rename_no_replace(&temp_path, journal_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn replace_recovery_record(
+    artifact_root: &Path,
+    journal_path: &Path,
+    record: &ArtifactRecoveryRecord,
+) -> Result<(), ArtifactStoreError> {
+    if !valid_recovery_artifact_id(&record.receipt.id) {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+    let encoded = encoded_recovery_record(record)?;
+    let temp_path = recovery_temp_path(artifact_root, &record.receipt.id);
+    write_recovery_temp(&temp_path, &encoded)?;
+    if let Err(error) = durable_rename_replace(&temp_path, journal_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn read_recovery_record_path(
+    path: &Path,
+) -> Result<ArtifactRecoveryRecord, ArtifactStoreError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_ARTIFACT_RECOVERY_JOURNAL_BYTES
+    {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+    let file = File::open(path)?;
+    let mut encoded = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_ARTIFACT_RECOVERY_JOURNAL_BYTES + 1)
+        .read_to_end(&mut encoded)?;
+    if encoded.len() as u64 > MAX_ARTIFACT_RECOVERY_JOURNAL_BYTES {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+    let record: ArtifactRecoveryRecord = serde_json::from_slice(&encoded)
+        .map_err(|error| ArtifactStoreError::Recovery(error.to_string()))?;
+    if record.version != ARTIFACT_RECOVERY_VERSION
+        || !valid_recovery_artifact_id(&record.receipt.id)
+    {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+    Ok(record)
+}
+
+fn load_recovery_record(
+    artifact_root: &Path,
+    receipt: &PersistedArtifact,
+) -> Result<(PathBuf, ArtifactRecoveryRecord), ArtifactStoreError> {
+    if !valid_recovery_artifact_id(&receipt.id) {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+    let path = recovery_journal_path(artifact_root, &receipt.id);
+    let record = read_recovery_record_path(&path)?;
+    if &record.receipt != receipt {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+    Ok((path, record))
+}
+
+fn remove_matching_recovery_record(
+    artifact_root: &Path,
+    receipt: &PersistedArtifact,
+) -> Result<(), ArtifactStoreError> {
+    match load_recovery_record(artifact_root, receipt) {
+        Ok((path, _)) => {
+            fs::remove_file(path)?;
+            sync_parent_directory(artifact_root)?;
+            Ok(())
+        }
+        Err(ArtifactStoreError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn durable_rename_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    fs::rename(source, target)?;
+    sync_parent_directory(target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "recovery journal target has no parent directory",
+        )
+    })?)
+}
+
+#[cfg(windows)]
+fn durable_rename_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let target: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn durable_rename_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    fs::rename(source, target)
 }
 
 #[cfg(unix)]
@@ -704,7 +1779,9 @@ fn cleanup_temp_files_before(directory: &Path, cutoff: SystemTime) -> std::io::R
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with(".artifact-") || !name.ends_with(".tmp") || !entry.file_type()?.is_file() {
+        let is_artifact_temp = name.starts_with(".artifact-") && name.ends_with(".tmp");
+        let is_recovery_temp = name.starts_with(ARTIFACT_RECOVERY_PREFIX) && name.ends_with(".tmp");
+        if (!is_artifact_temp && !is_recovery_temp) || !entry.file_type()?.is_file() {
             continue;
         }
         let metadata = entry.metadata()?;
@@ -776,6 +1853,116 @@ fn mime_for_extension(extension: &str) -> Option<&'static str> {
         "pptx" => Some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         _ => None,
     }
+}
+
+#[derive(Debug, Default)]
+struct InlineImageBudget {
+    count: usize,
+    decoded_bytes: usize,
+}
+
+impl InlineImageBudget {
+    fn reserve_encoded(&mut self, input: &str) -> Result<(), ArtifactStoreError> {
+        let encoded = encoded_base64_payload(input)?;
+        self.reserve_decoded_len(base64_decoded_len_upper_bound(encoded)?)
+    }
+
+    fn reserve_decoded_len(&mut self, decoded_len: usize) -> Result<(), ArtifactStoreError> {
+        if self.count >= MAX_INLINE_IMAGE_COUNT {
+            return Err(ArtifactStoreError::TooMany {
+                limit: MAX_INLINE_IMAGE_COUNT,
+            });
+        }
+        if decoded_len > MAX_INLINE_ARTIFACT_BYTES {
+            return Err(ArtifactStoreError::TooLarge {
+                limit: MAX_INLINE_ARTIFACT_BYTES,
+            });
+        }
+        let total = self
+            .decoded_bytes
+            .checked_add(decoded_len)
+            .ok_or(ArtifactStoreError::TooLarge {
+                limit: MAX_INLINE_IMAGE_BATCH_BYTES,
+            })?;
+        if total > MAX_INLINE_IMAGE_BATCH_BYTES {
+            return Err(ArtifactStoreError::TooLarge {
+                limit: MAX_INLINE_IMAGE_BATCH_BYTES,
+            });
+        }
+        self.count += 1;
+        self.decoded_bytes = total;
+        Ok(())
+    }
+}
+
+fn encoded_base64_payload(input: &str) -> Result<&str, ArtifactStoreError> {
+    if let Some(rest) = input.strip_prefix("data:") {
+        return rest
+            .split_once(',')
+            .map(|(_, encoded)| encoded)
+            .ok_or(ArtifactStoreError::InvalidBase64);
+    }
+    Ok(input)
+}
+
+/// Exact for structurally valid padded or unpadded standard base64, and a safe
+/// upper bound for malformed alphabets that the real decoder will reject.
+fn base64_decoded_len_upper_bound(encoded: &str) -> Result<usize, ArtifactStoreError> {
+    let len = encoded.len();
+    if len == 0 || len % 4 == 1 {
+        return Err(if len == 0 {
+            ArtifactStoreError::Empty
+        } else {
+            ArtifactStoreError::InvalidBase64
+        });
+    }
+    let complete = len / 4;
+    let tail = match len % 4 {
+        0 => {
+            let bytes = encoded.as_bytes();
+            if bytes.last() == Some(&b'=') {
+                if bytes.get(len.saturating_sub(2)) == Some(&b'=') {
+                    1
+                } else {
+                    2
+                }
+            } else {
+                3
+            }
+        }
+        2 => 1,
+        3 => 2,
+        _ => unreachable!(),
+    };
+    complete
+        .checked_sub(usize::from(len % 4 == 0))
+        .and_then(|groups| groups.checked_mul(3))
+        .and_then(|bytes| bytes.checked_add(tail))
+        .ok_or(ArtifactStoreError::TooLarge {
+            limit: MAX_INLINE_IMAGE_BATCH_BYTES,
+        })
+}
+
+fn validate_inline_batch<I, M, D>(
+    artifacts: I,
+) -> Result<Vec<ValidatedArtifact>, ArtifactStoreError>
+where
+    I: IntoIterator<Item = (ArtifactKind, M, D)>,
+    M: AsRef<str>,
+    D: AsRef<str>,
+{
+    let mut image_budget = InlineImageBudget::default();
+    let mut validated = Vec::new();
+    for (kind, mime, data) in artifacts {
+        if kind == ArtifactKind::Image {
+            // Reserve the decoded size before allocating or invoking the image
+            // decoder, so malformed/oversized batches cannot make validation
+            // work exceed the native generation contract.
+            image_budget.reserve_encoded(data.as_ref())?;
+        }
+        validated.push(validate_inline(kind, mime.as_ref(), data.as_ref())?);
+    }
+    Ok(validated)
 }
 
 fn decode_base64_payload(declared_mime: &str, input: &str) -> Result<(String, Vec<u8>), ArtifactStoreError> {
@@ -3460,6 +4647,32 @@ mod tests {
     }
 
     #[test]
+    fn artifact_delivery_guard_stops_before_ninth_or_over_40_mib_decode() {
+        let mut budget = InlineImageBudget::default();
+        budget.reserve_decoded_len(MAX_INLINE_ARTIFACT_BYTES).unwrap();
+        budget.reserve_decoded_len(MAX_INLINE_ARTIFACT_BYTES).unwrap();
+        assert!(matches!(
+            budget.reserve_decoded_len(1),
+            Err(ArtifactStoreError::TooLarge {
+                limit: MAX_INLINE_IMAGE_BATCH_BYTES
+            })
+        ));
+
+        let mut count_budget = InlineImageBudget::default();
+        for _ in 0..MAX_INLINE_IMAGE_COUNT {
+            count_budget.reserve_decoded_len(1).unwrap();
+        }
+        assert!(matches!(
+            count_budget.reserve_decoded_len(1),
+            Err(ArtifactStoreError::TooMany {
+                limit: MAX_INLINE_IMAGE_COUNT
+            })
+        ));
+        assert_eq!(base64_decoded_len_upper_bound("YQ==").unwrap(), 1);
+        assert_eq!(base64_decoded_len_upper_bound("YWI").unwrap(), 2);
+    }
+
+    #[test]
     fn verifies_existing_workspace_file_and_rejects_empty_or_outside_paths() {
         let workspace = tempfile::tempdir().unwrap();
         fs::write(workspace.path().join("report.md"), b"# Generated report\n").unwrap();
@@ -4037,17 +5250,23 @@ mod tests {
     }
 
     #[test]
-    fn stale_owned_temp_files_are_cleaned_without_touching_other_files() {
+    fn artifact_recovery_stale_temp_files_are_cleaned_without_touching_journals() {
         let temp = tempfile::tempdir().unwrap();
         let owned_temp = temp.path().join(".artifact-018f.tmp");
+        let recovery_temp = temp.path().join(".recovery-018f.random.tmp");
+        let recovery_journal = temp.path().join(".recovery-018f.json");
         let unrelated = temp.path().join(".another.tmp");
         fs::write(&owned_temp, b"partial").unwrap();
+        fs::write(&recovery_temp, b"partial journal").unwrap();
+        fs::write(&recovery_journal, b"durable journal").unwrap();
         fs::write(&unrelated, b"keep").unwrap();
 
         let future_cutoff = SystemTime::now() + Duration::from_secs(1);
         cleanup_temp_files_before(temp.path(), future_cutoff).unwrap();
 
         assert!(!owned_temp.exists());
+        assert!(!recovery_temp.exists());
+        assert_eq!(fs::read(recovery_journal).unwrap(), b"durable journal");
         assert_eq!(fs::read(unrelated).unwrap(), b"keep");
     }
 
@@ -4084,5 +5303,447 @@ mod tests {
             store.persist_inline(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG),
             Err(ArtifactStoreError::OutsideWorkspace)
         ));
+    }
+
+    #[test]
+    fn artifact_recovery_journal_tracks_claim_reconcile_and_finalize() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(workspace.path());
+        let source = ArtifactRecoverySource {
+            conversation_id: "conversation-a".to_owned(),
+            wire_msg_id: "wire-a".to_owned(),
+        };
+        let artifact = store
+            .persist_inline_and_existing_batch_recoverable(
+                [(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG)],
+                std::iter::empty::<&Path>(),
+                &source,
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(Path::new(&artifact.path).is_file());
+        assert!(matches!(
+            store.recovery_records().unwrap()[0].state,
+            ArtifactRecoveryState::PersistedUnprepared
+        ));
+
+        let envelope = ArtifactRecoveryEnvelope {
+            conversation_id: "conversation-a".to_owned(),
+            wire_msg_id: "wire-a".to_owned(),
+            event_kind: "tool_call".to_owned(),
+            event_json: r#"{"call_id":"call-a"}"#.to_owned(),
+        };
+        store
+            .prepare_recovery_receipts(std::slice::from_ref(&artifact), &envelope)
+            .unwrap();
+        assert!(matches!(
+            store.recovery_records().unwrap()[0].state,
+            ArtifactRecoveryState::Prepared { .. }
+        ));
+
+        let owner = ArtifactRecoveryOwner {
+            conversation_id: "conversation-a".to_owned(),
+            wire_msg_id: "wire-a".to_owned(),
+            root_turn_id: "turn-a".to_owned(),
+            message_id: "message-a".to_owned(),
+            message_type: "tool_call".to_owned(),
+            committed_content: r#"{"artifact_delivery_committed":true}"#.to_owned(),
+        };
+        store
+            .claim_recovery_receipts(std::slice::from_ref(&artifact), &owner)
+            .unwrap();
+        store
+            .mark_recovery_receipts_commit_attempting(std::slice::from_ref(&artifact))
+            .unwrap();
+        store
+            .mark_recovery_receipts_needs_reconcile(std::slice::from_ref(&artifact))
+            .unwrap();
+        assert!(matches!(
+            store.recovery_records().unwrap()[0].state,
+            ArtifactRecoveryState::NeedsReconcile { .. }
+        ));
+
+        store
+            .release_recovery_leases_for_source(&source)
+            .unwrap();
+        let reconciler_record = store.recovery_records().unwrap().pop().unwrap();
+        assert!(
+            store
+                .try_acquire_recovery_lease(&reconciler_record)
+                .unwrap(),
+            "a terminal NeedsReconcile owner must be acquirable by the next same-process relay"
+        );
+
+        store
+            .finalize_recovery_receipts(std::slice::from_ref(&artifact))
+            .unwrap();
+        assert!(store.recovery_records().unwrap().is_empty());
+        assert!(Path::new(&artifact.path).is_file());
+    }
+
+    #[test]
+    fn recovery_regression_batch_transitions_are_idempotent_and_visit_later_receipts_after_errors() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(workspace.path());
+        let source = ArtifactRecoverySource {
+            conversation_id: "conversation-batch".to_owned(),
+            wire_msg_id: "wire-batch".to_owned(),
+        };
+        let artifacts = store
+            .persist_inline_and_existing_batch_recoverable(
+                [
+                    (ArtifactKind::Image, "image/png", ONE_PIXEL_PNG),
+                    (ArtifactKind::Image, "image/png", ONE_PIXEL_PNG),
+                    (ArtifactKind::Image, "image/png", ONE_PIXEL_PNG),
+                ],
+                std::iter::empty::<&Path>(),
+                &source,
+            )
+            .unwrap();
+        assert_eq!(artifacts.len(), 3);
+
+        let mut missing = artifacts[0].clone();
+        missing.id = PersistedArtifactId::new().into_string();
+        let with_missing = vec![
+            artifacts[0].clone(),
+            missing,
+            artifacts[1].clone(),
+            artifacts[2].clone(),
+        ];
+        let envelope = ArtifactRecoveryEnvelope {
+            conversation_id: source.conversation_id.clone(),
+            wire_msg_id: source.wire_msg_id.clone(),
+            event_kind: "tool_call".to_owned(),
+            event_json: r#"{"call_id":"batch-image"}"#.to_owned(),
+        };
+
+        assert!(store
+            .prepare_recovery_receipts(&with_missing, &envelope)
+            .is_err());
+        assert!(store.recovery_records().unwrap().iter().all(|record| matches!(
+            record.state,
+            ArtifactRecoveryState::Prepared { .. }
+        )));
+        store
+            .prepare_recovery_receipts(&artifacts, &envelope)
+            .expect("repeating the exact prepare must be idempotent");
+
+        let owner = ArtifactRecoveryOwner {
+            conversation_id: source.conversation_id.clone(),
+            wire_msg_id: source.wire_msg_id.clone(),
+            root_turn_id: "turn-batch".to_owned(),
+            message_id: "message-batch".to_owned(),
+            message_type: "tool_call".to_owned(),
+            committed_content: r#"{"artifact_delivery_committed":true}"#.to_owned(),
+        };
+        assert!(store
+            .claim_recovery_receipts(&with_missing, &owner)
+            .is_err());
+        assert!(store.recovery_records().unwrap().iter().all(|record| matches!(
+            record.state,
+            ArtifactRecoveryState::ClaimedActive { .. }
+        )));
+        store
+            .claim_recovery_receipts(&artifacts, &owner)
+            .expect("repeating the exact claim must be idempotent");
+
+        assert!(store
+            .mark_recovery_receipts_commit_attempting(&with_missing)
+            .is_err());
+        assert!(store.recovery_records().unwrap().iter().all(|record| matches!(
+            record.state,
+            ArtifactRecoveryState::CommitAttempting { .. }
+        )));
+        store
+            .mark_recovery_receipts_commit_attempting(&artifacts)
+            .expect("repeating the commit fence must be idempotent");
+
+        store
+            .mark_recovery_receipts_needs_reconcile(&with_missing)
+            .expect("a missing journal is already finalized for reconcile marking");
+        assert!(store.recovery_records().unwrap().iter().all(|record| matches!(
+            record.state,
+            ArtifactRecoveryState::NeedsReconcile { .. }
+        )));
+        store
+            .mark_recovery_receipts_needs_reconcile(&artifacts)
+            .expect("repeating reconcile marking must be idempotent");
+
+        let mut invalid = artifacts[0].clone();
+        invalid.id = "invalid/id".to_owned();
+        let with_invalid = vec![
+            artifacts[0].clone(),
+            invalid,
+            artifacts[1].clone(),
+            artifacts[2].clone(),
+        ];
+        assert!(store.finalize_recovery_receipts(&with_invalid).is_err());
+        assert!(
+            store.recovery_records().unwrap().is_empty(),
+            "an invalid middle entry must not prevent later valid journals from finalizing"
+        );
+        store
+            .finalize_recovery_receipts(&artifacts)
+            .expect("repeating finalization after every journal is gone must be idempotent");
+        assert!(artifacts.iter().all(|artifact| Path::new(&artifact.path).is_file()));
+    }
+
+    #[test]
+    fn recovery_regression_boot_identity_never_overrides_live_leases_for_crash_visible_states() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(workspace.path());
+        let source = ArtifactRecoverySource {
+            conversation_id: "conversation-restart".to_owned(),
+            wire_msg_id: "wire-restart".to_owned(),
+        };
+        let artifacts = store
+            .persist_inline_and_existing_batch_recoverable(
+                [
+                    (ArtifactKind::Image, "image/png", ONE_PIXEL_PNG),
+                    (ArtifactKind::Image, "image/png", ONE_PIXEL_PNG),
+                    (ArtifactKind::Image, "image/png", ONE_PIXEL_PNG),
+                ],
+                std::iter::empty::<&Path>(),
+                &source,
+            )
+            .unwrap();
+        let envelope = ArtifactRecoveryEnvelope {
+            conversation_id: source.conversation_id.clone(),
+            wire_msg_id: source.wire_msg_id.clone(),
+            event_kind: "tool_call".to_owned(),
+            event_json: r#"{"call_id":"restart-image"}"#.to_owned(),
+        };
+        store.prepare_recovery_receipts(&artifacts, &envelope).unwrap();
+        let owner = ArtifactRecoveryOwner {
+            conversation_id: source.conversation_id.clone(),
+            wire_msg_id: source.wire_msg_id.clone(),
+            root_turn_id: "turn-restart".to_owned(),
+            message_id: "message-restart".to_owned(),
+            message_type: "tool_call".to_owned(),
+            committed_content: r#"{"artifact_delivery_committed":true}"#.to_owned(),
+        };
+        store
+            .claim_recovery_receipts(&artifacts[1..], &owner)
+            .unwrap();
+        store
+            .mark_recovery_receipts_commit_attempting(&artifacts[2..])
+            .unwrap();
+
+        let artifact_root = fs::canonicalize(workspace.path().join(ARTIFACT_DIRECTORY)).unwrap();
+        let mut records = store.recovery_records().unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.state, ArtifactRecoveryState::Prepared { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    record.state,
+                    ArtifactRecoveryState::ClaimedActive { .. }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    record.state,
+                    ArtifactRecoveryState::CommitAttempting { .. }
+                ))
+                .count(),
+            1
+        );
+
+        for record in &mut records {
+            record.producer_boot_id = "simulated-previous-process-boot".to_owned();
+            let path = recovery_journal_path(&artifact_root, &record.receipt.id);
+            replace_recovery_record(&artifact_root, &path, record).unwrap();
+            assert!(!record.produced_by_current_boot());
+        }
+        for record in &records {
+            assert!(
+                !store.try_acquire_recovery_lease(record).unwrap(),
+                "a boot-id mismatch alone must never steal a live producer lease"
+            );
+        }
+
+        store.release_recovery_leases_for_source(&source).unwrap();
+        for record in &records {
+            assert!(
+                store.try_acquire_recovery_lease(record).unwrap(),
+                "the next reconciler may take over only after the exact OS lease is released"
+            );
+        }
+
+        store.rollback_owned_receipts(&artifacts[..2]).unwrap();
+        store
+            .mark_recovery_receipts_needs_reconcile(&artifacts[2..])
+            .unwrap();
+        assert!(matches!(
+            store.recovery_records().unwrap()[0].state,
+            ArtifactRecoveryState::NeedsReconcile { .. }
+        ));
+        store
+            .finalize_recovery_receipts(&artifacts[2..])
+            .unwrap();
+        assert!(store.recovery_records().unwrap().is_empty());
+        assert!(!Path::new(&artifacts[0].path).exists());
+        assert!(!Path::new(&artifacts[1].path).exists());
+        assert!(Path::new(&artifacts[2].path).is_file());
+    }
+
+    #[test]
+    fn artifact_recovery_rollback_removes_receipt_and_journal() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(workspace.path());
+        let source = ArtifactRecoverySource {
+            conversation_id: "conversation-a".to_owned(),
+            wire_msg_id: "wire-a".to_owned(),
+        };
+        let artifacts = store
+            .persist_inline_and_existing_batch_recoverable(
+                [(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG)],
+                std::iter::empty::<&Path>(),
+                &source,
+            )
+            .unwrap();
+        let path = PathBuf::from(&artifacts[0].path);
+
+        store.rollback_owned_receipts(&artifacts).unwrap();
+
+        assert!(!path.exists());
+        assert!(store.recovery_records().unwrap().is_empty());
+    }
+
+    #[test]
+    fn artifact_recovery_rollback_uses_owned_relative_locator_after_workspace_move() {
+        let parent = tempfile::tempdir().unwrap();
+        let old_workspace = parent.path().join("old-workspace");
+        let moved_workspace = parent.path().join("moved-workspace");
+        fs::create_dir(&old_workspace).unwrap();
+        let old_store = ArtifactStore::new(&old_workspace);
+        let source = ArtifactRecoverySource {
+            conversation_id: "conversation-moved".to_owned(),
+            wire_msg_id: "wire-moved".to_owned(),
+        };
+        let artifacts = old_store
+            .persist_inline_and_existing_batch_recoverable(
+                [(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG)],
+                std::iter::empty::<&Path>(),
+                &source,
+            )
+            .unwrap();
+        let record = old_store.recovery_records().unwrap().pop().unwrap();
+        old_store
+            .release_acquired_recovery_lease(&record)
+            .unwrap();
+
+        fs::rename(&old_workspace, &moved_workspace).unwrap();
+        let moved_store = ArtifactStore::new(&moved_workspace);
+        let moved_artifact = moved_workspace.join(&artifacts[0].relative_path);
+        assert!(moved_artifact.is_file());
+        assert!(!Path::new(&artifacts[0].path).exists());
+
+        let old_artifact = PathBuf::from(&artifacts[0].path);
+        fs::create_dir_all(old_artifact.parent().unwrap()).unwrap();
+        fs::copy(&moved_artifact, &old_artifact).unwrap();
+        assert!(old_artifact.is_file(), "the historical path also exists");
+
+        moved_store.rollback_owned_receipts(&artifacts).unwrap();
+
+        assert!(!moved_artifact.exists());
+        assert!(
+            old_artifact.exists(),
+            "rollback must never delete the historical/source workspace copy"
+        );
+        assert!(moved_store.recovery_records().unwrap().is_empty());
+    }
+
+    #[test]
+    fn artifact_recovery_lease_is_process_exclusive_and_keeps_a_stable_lock_inode() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(workspace.path());
+        let source = ArtifactRecoverySource {
+            conversation_id: "conversation-lease".to_owned(),
+            wire_msg_id: "wire-lease".to_owned(),
+        };
+        store
+            .persist_inline_and_existing_batch_recoverable(
+                [(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG)],
+                std::iter::empty::<&Path>(),
+                &source,
+            )
+            .unwrap();
+        let record = store.recovery_records().unwrap().pop().unwrap();
+        let competing_store = store.clone();
+        let competing_record = record.clone();
+        assert!(!std::thread::spawn(move || competing_store
+            .try_acquire_recovery_lease(&competing_record)
+            .unwrap())
+        .join()
+        .unwrap());
+
+        store.release_acquired_recovery_lease(&record).unwrap();
+        let lock_path = recovery_lock_path(
+            &fs::canonicalize(workspace.path().join(ARTIFACT_DIRECTORY)).unwrap(),
+            &record.receipt.id,
+        );
+        assert!(lock_path.is_file(), "unlock must not unlink the stable lock inode");
+        assert!(store.try_acquire_recovery_lease(&record).unwrap());
+        store.release_acquired_recovery_lease(&record).unwrap();
+        assert!(lock_path.is_file());
+        store
+            .rollback_owned_receipts(std::slice::from_ref(&record.receipt))
+            .unwrap();
+    }
+
+    #[test]
+    fn artifact_recovery_terminal_handoff_never_unlocks_an_active_publication() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(workspace.path());
+        let source = ArtifactRecoverySource {
+            conversation_id: "conversation-active-worker".to_owned(),
+            wire_msg_id: "wire-active-worker".to_owned(),
+        };
+        store
+            .persist_inline_and_existing_batch_recoverable(
+                [(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG)],
+                std::iter::empty::<&Path>(),
+                &source,
+            )
+            .unwrap();
+        let artifact_root = fs::canonicalize(workspace.path().join(ARTIFACT_DIRECTORY)).unwrap();
+        let mut record = store.recovery_records().unwrap().pop().unwrap();
+        let record_path = recovery_journal_path(&artifact_root, &record.receipt.id);
+
+        record.state = ArtifactRecoveryState::Unprepared;
+        replace_recovery_record(&artifact_root, &record_path, &record).unwrap();
+        store
+            .release_recovery_leases_for_source(&source)
+            .unwrap();
+        assert!(
+            !store.try_acquire_recovery_lease(&record).unwrap(),
+            "handoff must not unlock a persistence worker before rename/read-back finishes"
+        );
+
+        record.state = ArtifactRecoveryState::PersistedUnprepared;
+        replace_recovery_record(&artifact_root, &record_path, &record).unwrap();
+        store
+            .release_recovery_leases_for_source(&source)
+            .unwrap();
+        assert!(
+            store.try_acquire_recovery_lease(&record).unwrap(),
+            "a fully persisted receipt without an envelope must be handed to the next relay"
+        );
+        store.release_acquired_recovery_lease(&record).unwrap();
+        store
+            .rollback_owned_receipts(std::slice::from_ref(&record.receipt))
+            .unwrap();
     }
 }

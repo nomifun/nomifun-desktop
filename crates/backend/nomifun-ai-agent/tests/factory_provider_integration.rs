@@ -111,6 +111,7 @@ fn make_factory_with_summon(
         remote_agent_repo,
         provider_repo,
         provider_model_repo,
+        model_invoke_service: None,
         encryption_key: test_encryption_key(),
         agent_registry,
         acp_agent_service,

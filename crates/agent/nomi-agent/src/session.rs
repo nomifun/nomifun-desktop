@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -15,6 +16,10 @@ use nomi_types::message::{Message, TokenUsage};
 pub struct EditableTurnCheckpoint {
     pub source_message_id: String,
     pub start_len: usize,
+    /// Host routing state immediately before this root turn. Rewind restores
+    /// this exact snapshot instead of guessing from free-form transcript text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prior_host_context: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +56,12 @@ pub struct Session {
     /// messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editable_turn: Option<EditableTurnCheckpoint>,
+    /// Small host-owned state that must survive runtime refresh/resume. Keys
+    /// and values are opaque to the engine; the host owns their validation and
+    /// lifecycle. This avoids reconstructing security-sensitive routing state
+    /// from free-form transcript text after a restart.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_context: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +125,7 @@ impl SessionManager {
             owner_token: None,
             activated_deferred_tools: Vec::new(),
             editable_turn: None,
+            host_context: BTreeMap::new(),
         };
         self.save(&session)?;
         self.update_index(&session)?;
@@ -351,6 +363,7 @@ mod tests {
         session.editable_turn = Some(EditableTurnCheckpoint {
             source_message_id: "message-root".into(),
             start_len: 0,
+            prior_host_context: Default::default(),
         });
         manager.save(&session).unwrap();
         let loaded = manager.load(&session.id).unwrap();
@@ -470,6 +483,29 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let id2 = generate_short_id();
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn host_context_survives_session_refresh() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = manager
+            .create("openai", "gpt-4", "/tmp", Some("host-context"))
+            .unwrap();
+        session.host_context.insert(
+            "nomifun.image_generation.route".to_owned(),
+            "explicit_external".to_owned(),
+        );
+        manager.save(&session).unwrap();
+
+        let restored = manager.load("host-context").unwrap();
+        assert_eq!(
+            restored
+                .host_context
+                .get("nomifun.image_generation.route")
+                .map(String::as_str),
+            Some("explicit_external")
+        );
     }
 
     #[test]

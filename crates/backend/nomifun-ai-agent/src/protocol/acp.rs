@@ -42,7 +42,9 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, info, warn};
 
 use crate::protocol::error::AcpError;
-use crate::artifact_store::ArtifactStore;
+use crate::artifact_store::{
+    ArtifactRecoveryEnvelope, ArtifactRecoverySource, ArtifactStore, PersistedArtifact,
+};
 use crate::protocol::events::{
     self as stream_event, AcpArtifactDeliveryState, AcpToolCallEventData, AgentStreamEvent,
 };
@@ -205,12 +207,26 @@ impl AcpProtocol {
         })
     }
 
-    /// Reset artifact receipts at the exact start of a prompt turn.
-    pub(crate) fn begin_artifact_delivery_turn(&self, session_id: &str) {
+    pub(crate) fn begin_artifact_delivery_turn_for(
+        &self,
+        session_id: &str,
+        conversation_id: &str,
+        wire_msg_id: &str,
+    ) -> Result<(), String> {
+        if conversation_id.trim().is_empty() || wire_msg_id.trim().is_empty() {
+            return Err("ACP artifact recovery owner is incomplete".to_owned());
+        }
         self.artifact_delivery_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .begin_turn(session_id);
+            .begin_turn_for(
+                session_id,
+                ArtifactRecoverySource {
+                    conversation_id: conversation_id.to_owned(),
+                    wire_msg_id: wire_msg_id.to_owned(),
+                },
+            );
+        Ok(())
     }
 
     /// Seal the active prompt turn. A normal EndTurn may normalize a provider
@@ -230,6 +246,45 @@ impl AcpProtocol {
                 self.artifact_store.as_deref(),
                 complete_verified_in_progress,
             )
+    }
+
+    pub(crate) fn prepare_artifact_delivery_event(
+        &self,
+        session_id: &str,
+        data: &AcpToolCallEventData,
+    ) -> Result<(), String> {
+        let artifacts = acp_tool_call_artifacts(data);
+        if artifacts.is_empty() {
+            return Ok(());
+        }
+        let store = self
+            .artifact_store
+            .as_deref()
+            .ok_or_else(|| "ACP artifact recovery lost its workspace store".to_owned())?;
+        let source = self
+            .artifact_delivery_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recovery_source(session_id)
+            .cloned()
+            .ok_or_else(|| "ACP artifact recovery lost its turn owner".to_owned())?;
+        let envelope = ArtifactRecoveryEnvelope {
+            conversation_id: source.conversation_id,
+            wire_msg_id: source.wire_msg_id,
+            event_kind: "acp_tool_call".to_owned(),
+            event_json: serde_json::to_string(data)
+                .map_err(|error| format!("ACP recovery serialization failed: {error}"))?,
+        };
+        store
+            .prepare_recovery_receipts(&artifacts, &envelope)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn rollback_artifact_delivery_event(&self, data: &AcpToolCallEventData) {
+        let artifacts = acp_tool_call_artifacts(data);
+        if let Some(store) = self.artifact_store.as_deref() {
+            let _ = store.rollback_owned_receipts(&artifacts);
+        }
     }
 
     pub fn initialize_response(&self) -> Option<InitializeResponse> {
@@ -502,24 +557,113 @@ async fn handle_session_notification(
 ) {
     log_agent_notify("session/update", &json_str(&notification));
 
-    let events = {
+    let session_id = notification.session_id.to_string();
+    let (events, recovery_source) = {
         let mut delivery_state = artifact_delivery_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        stream_event::session_notification_to_events_with_delivery_state(
+        let events = stream_event::session_notification_to_events_with_delivery_state(
             &notification,
             artifact_store,
             &mut delivery_state,
-        )
+        );
+        let source = delivery_state.recovery_source(&session_id).cloned();
+        (events, source)
     };
     for event in events {
+        let artifacts = acp_event_artifacts(&event);
+        if !artifacts.is_empty() {
+            let Some(store) = artifact_store else {
+                continue;
+            };
+            let Some(source) = recovery_source.as_ref() else {
+                let _ = store.rollback_owned_receipts(&artifacts);
+                artifact_delivery_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .record_turn_failure(
+                        &session_id,
+                        "ACP artifact event had no turn recovery owner".to_owned(),
+                    );
+                continue;
+            };
+            let event_json = match &event {
+                AgentStreamEvent::AcpToolCall(data) => serde_json::to_string(data),
+                _ => unreachable!("only ACP tool call events expose ACP artifacts"),
+            };
+            let envelope = match event_json {
+                Ok(event_json) => ArtifactRecoveryEnvelope {
+                    conversation_id: source.conversation_id.clone(),
+                    wire_msg_id: source.wire_msg_id.clone(),
+                    event_kind: "acp_tool_call".to_owned(),
+                    event_json,
+                },
+                Err(error) => {
+                    let _ = store.rollback_owned_receipts(&artifacts);
+                    artifact_delivery_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .record_turn_failure(
+                            &session_id,
+                            format!("ACP artifact recovery event serialization failed: {error}"),
+                        );
+                    continue;
+                }
+            };
+            if let Err(error) = store.prepare_recovery_receipts(&artifacts, &envelope) {
+                let _ = store.rollback_owned_receipts(&artifacts);
+                artifact_delivery_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .record_turn_failure(
+                        &session_id,
+                        format!("ACP artifact recovery envelope failed: {error}"),
+                    );
+                continue;
+            }
+        }
         if let Err(e) = event_tx.send(event) {
+            if !artifacts.is_empty()
+                && let Some(store) = artifact_store
+            {
+                let _ = store.rollback_owned_receipts(&artifacts);
+            }
+            if !artifacts.is_empty() {
+                artifact_delivery_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .record_turn_failure(
+                        &session_id,
+                        "ACP artifact event had no live relay receiver".to_owned(),
+                    );
+            }
             // broadcast::SendError means no active receivers — expected when
             // no subscribers are attached to this agent. Log at debug so it
             // doesn't spam after a turn finishes.
             debug!(error = %e, "Dropping ACP event: no active broadcast receivers");
         }
     }
+}
+
+fn acp_event_artifacts(event: &AgentStreamEvent) -> Vec<PersistedArtifact> {
+    let AgentStreamEvent::AcpToolCall(data) = event else {
+        return Vec::new();
+    };
+    acp_tool_call_artifacts(data)
+}
+
+fn acp_tool_call_artifacts(data: &AcpToolCallEventData) -> Vec<PersistedArtifact> {
+    data.update
+        .content
+        .iter()
+        .flatten()
+        .filter_map(|item| match item {
+            stream_event::AcpToolCallContentItem::Artifact { artifact, .. } => {
+                Some(artifact.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Relay a CLI permission request to the pending-permission channel and
