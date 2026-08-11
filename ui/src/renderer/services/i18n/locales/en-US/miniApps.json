@@ -1,0 +1,206 @@
+{
+  "title": "Mini-Apps",
+  "subtitle": "AI-built web tools you reopen instantly",
+  "nav": {
+    "entry": "Mini-Apps"
+  },
+  "list": {
+    "searchPlaceholder": "Search mini-apps",
+    "updatedAt": "Updated {{time}}",
+    "filterEmpty": "No mini-apps match your search"
+  },
+  "time": {
+    "justNow": "just now",
+    "minutesAgo": "{{count}}m ago",
+    "hoursAgo": "{{count}}h ago",
+    "yesterday": "yesterday",
+    "daysAgo": "{{count}}d ago",
+    "weeksAgo": "last week"
+  },
+  "empty": {
+    "title": "No mini-apps yet",
+    "description": "Pick \"Create mini-app\" on the session start page and describe what you need — the AI writes the first version in that conversation, and you publish it into this library from the preview. After that, \"Keep iterating\" changes it and \"Publish\" makes the change live. Already wrote a web app? Import it with the button above.",
+    "cta": "Create one"
+  },
+  "actions": {
+    "open": "Open",
+    "rename": "Rename",
+    "delete": "Delete",
+    "refresh": "Refresh",
+    "retry": "Retry",
+    "openInBrowser": "Open in browser",
+    "dismissHint": "Dismiss",
+    "back": "Back",
+    "create": "Create mini-app"
+  },
+  "rename": {
+    "title": "Rename mini-app",
+    "label": "Name",
+    "placeholder": "Enter a new name",
+    "required": "Please enter a name",
+    "success": "Renamed"
+  },
+  "delete": {
+    "confirmTitle": "Delete mini-app",
+    "confirmContent": "Delete \"{{name}}\"? This cannot be undone.",
+    "success": "Deleted"
+  },
+  "runner": {
+    "loadError": "Failed to load the mini-app",
+    "notFound": "This mini-app does not exist or was deleted"
+  },
+  "iterate": {
+    "toggle": "Keep iterating",
+    "conversationName": "Keep iterating · {{name}}",
+    "firstMessage": "Please help me keep changing this mini-app.\n\n- Name: {{name}}\n- Mini-app id: {{id}}\n- Source file (absolute path; the whole mini-app is this one file): {{path}}\n\nRules:\n1. Read all of {{path}} before you change anything — do not guess at its contents.\n2. Change only this one file. Do not create, move or delete any other file, and keep it self-contained: CSS and JavaScript inline, third-party libraries from a CDN.\n3. It must be a complete, runnable document at the end of every reply.\n4. Nothing goes live on its own: I publish it from the Mini-Apps page when it is ready.",
+    "failed": "Could not start the iteration conversation, please retry",
+    "failedDetail": "Could not start the iteration conversation: {{detail}}"
+  },
+  "publish": {
+    "action": "Publish",
+    "pending": "Unpublished changes",
+    "explain": "This mini-app runs the published version; changes from iterating go live only when you publish.",
+    "success": "Published — the running version is up to date",
+    "failed": "Publish failed: {{message}}"
+  },
+  "panel": {
+    "backToList": "Back to mini-apps",
+    "openFullPage": "Open full screen"
+  },
+  "frame": {
+    "stalledHint": "Still nothing on screen? Retry, or open this mini-app in your browser."
+  },
+  "preview": {
+    "title": "Mini-app preview",
+    "refresh": "Refresh",
+    "publish": "Publish as mini-app",
+    "readError": "Failed to read the mini-app file"
+  },
+  "save": {
+    "title": "Publish as mini-app",
+    "nameLabel": "Name",
+    "namePlaceholder": "Give this mini-app a name",
+    "nameRequired": "Please enter a name",
+    "descriptionLabel": "Description",
+    "descriptionPlaceholder": "One line about what it does (optional)",
+    "iconLabel": "Icon",
+    "iconPlaceholder": "Type an emoji (optional)",
+    "confirm": "Publish",
+    "cancel": "Cancel",
+    "publishAsNew": "Publish as a new mini-app",
+    "replaceExisting": "Replace an existing mini-app",
+    "replaceLabel": "Mini-app to replace",
+    "replaceHint": "Publish this conversation's version as a new mini-app, or replace one you already have — replacing also updates the version it is running.",
+    "success": "Published — find it under \"Mini-Apps\" in the sidebar",
+    "replaceSuccess": "Replaced \"{{name}}\" — the running version is up to date",
+    "error": "Publish failed, please retry"
+  },
+  "composer": {
+    "entry": "Create mini-app",
+    "activeLabel": "Mini-app mode",
+    "dismiss": "Exit mini-app mode",
+    "placeholder": "Describe the mini-app you want, e.g. a pomodoro timer with reminders",
+    "conversationName": "Mini-app · {{name}}"
+  },
+  "import": {
+    "entry": "Import mini-app",
+    "title": "Import a mini-app",
+    "intro": "Adopt a web app you already wrote. A mini-app serves exactly one self-contained HTML document: CSS and JavaScript belong inside the file, third-party libraries may come from a CDN.",
+    "pickFile": "Pick an HTML file",
+    "pickFileHint": "One .html / .htm file",
+    "pickFolder": "Pick a folder",
+    "pickFolderHint": "Reads its index.html",
+    "pickUpload": "Pick an HTML file",
+    "pickUploadHint": "Upload from this device",
+    "webUiOnlyFile": "On the web the picker takes a single HTML file; importing a whole folder needs the desktop app.",
+    "sourceFile": "{{name}} ({{size}})",
+    "reselect": "Pick another source",
+    "validating": "Checking…",
+    "clean": "All checks passed — nothing to fix.",
+    "action": "Import",
+    "success": "Imported \"{{name}}\"",
+    "appliedFixes": "Handled during import: {{items}}",
+    "convert": "Rewrite in a session",
+    "convertHint": "This opens a new conversation: NomiFun gets the findings above and rewrites your app as one self-contained mini-app, which you then publish from the preview.",
+    "conversationName": "Convert mini-app · {{name}}",
+    "detailUnknown": "(location not reported)",
+    "severity": {
+      "fatal": "Must be fixed ({{total}})",
+      "fatalHint": "The import cannot proceed while these stand.",
+      "autofix": "Handled on import ({{total}})",
+      "autofixHint": "NomiFun repairs this for you during the import — nothing to change.",
+      "warning": "Heads-up ({{total}})",
+      "warningHint": "These do not block the import, but they are worth knowing.",
+      "other": "Other ({{total}})",
+      "otherHint": "This build does not know this severity yet, so it is listed as-is."
+    },
+    "errors": {
+      "validateFailed": "Validation failed: {{message}}",
+      "importFailed": "Import failed: {{message}}",
+      "blockedOnImport": "The import was refused: the source changed after it was checked. Handle the findings below and retry.",
+      "pickFailed": "Could not open the file picker",
+      "readFailed": "Could not read the file you picked"
+    },
+    "rules": {
+      "unknown": {
+        "title": "Unknown check ({{ruleId}})",
+        "fix": "This build does not know this rule yet. Update NomiFun to see the explanation, or let a session rewrite the app for you."
+      },
+      "empty_payload": {
+        "title": "There is no content",
+        "fix": "This source holds nothing to judge. Pick a real HTML file, or write the page first."
+      },
+      "size_over_limit": {
+        "title": "The document is too large",
+        "fix": "The document is {{detail}}, over the 4 MiB limit. Drop the inlined images or data blobs (use a CDN or a link instead) and import again."
+      },
+      "not_html": {
+        "title": "This is not an HTML document",
+        "fix": "The content reads as a script, a stylesheet or data rather than a page. Pick the app's HTML entry file."
+      },
+      "no_root_document": {
+        "title": "No entry page in that folder",
+        "fix": "The folder has no index.html and no single .html file at its root. Name the entry page index.html, or pick that HTML file directly."
+      },
+      "fragment_not_document": {
+        "title": "This is only an HTML fragment",
+        "fix": "There is no html / body shell. NomiFun wraps it into a complete document during the import — nothing for you to change."
+      },
+      "local_ref_unsupported": {
+        "title": "It references a local file",
+        "fix": "The reference {{detail}} cannot load: a mini-app serves exactly one document, so even a file imported alongside it is not served. Fold it into this single file (paste the CSS/JS in, turn small images into data URIs), or let a session merge it for you."
+      },
+      "dev_server_ref": {
+        "title": "It points at a local dev server",
+        "fix": "{{detail}} only resolves while your dev server runs. Replace it with content written into the file, or a publicly reachable CDN URL."
+      },
+      "framework_source_entry": {
+        "title": "This is framework source that needs a build",
+        "fix": "A Vue / React / Svelte source entry (e.g. /src/main.ts) has to be bundled first. Build it and import the single-page output, or have a session rewrite it as one file."
+      },
+      "server_template_markers": {
+        "title": "It contains server template syntax",
+        "fix": "Found the template marker {{detail}}, which only becomes HTML on a server. Import the rendered page, or write the data straight into static HTML."
+      },
+      "esm_bare_specifier": {
+        "title": "A module script imports a bare package name",
+        "fix": "Importing from a bare name like {{detail}} cannot resolve in a browser. Use the library's full CDN URL, or map it with an importmap."
+      },
+      "external_cdn_ref": {
+        "title": "It loads resources from a CDN",
+        "fix": "Allowed, but it needs the network: the app degrades when offline or when the CDN is unreachable. Write anything critical into the file."
+      },
+      "web_storage_use": {
+        "title": "It uses browser storage",
+        "fix": "A mini-app runs sandboxed with an opaque origin, so localStorage and friends may throw outright or only last for this session. Wrap every read and write in try/catch and never let core features depend on it."
+      },
+      "nested_iframe_embed": {
+        "title": "It embeds another iframe",
+        "fix": "A nested iframe inherits the same sandbox and many sites refuse to be framed, so it may render blank. Provide a fallback for when it fails to load."
+      }
+    }
+  },
+  "errors": {
+    "loadListFailed": "Failed to load mini-apps"
+  }
+}

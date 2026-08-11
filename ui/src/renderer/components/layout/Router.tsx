@@ -35,6 +35,8 @@ const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/Kno
 const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
 const WorkshopListPage = React.lazy(() => import('@renderer/pages/workshop'));
 const WorkshopCanvasPage = React.lazy(() => import('@renderer/pages/workshop/CanvasPage'));
+const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
+const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
 const AssetLibraryPage = React.lazy(() => import('@renderer/pages/assets'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
@@ -256,6 +258,9 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           {/* 创意工坊 (Creative Workshop) — infinite-canvas AI visual creation. */}
           <Route path='/workshop' element={withRouteFallback(WorkshopListPage)} />
           <Route path='/workshop/:id' element={withRouteFallback(WorkshopCanvasPage)} />
+          {/* 小程序 (Mini-apps) — the solidified library and its full-page runner. */}
+          <Route path='/mini-apps' element={withRouteFallback(MiniAppsListPage)} />
+          <Route path='/mini-apps/:id' element={withRouteFallback(MiniAppRunnerPage)} />
         </Route>
         <Route path='*' element={<Navigate to={status === 'authenticated' ? '/guid' : '/login'} replace />} />
       </Routes>

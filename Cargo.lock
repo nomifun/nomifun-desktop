@@ -6062,6 +6062,7 @@ dependencies = [
  "nomifun-idmm",
  "nomifun-knowledge",
  "nomifun-mcp",
+ "nomifun-miniapp",
  "nomifun-model-invoke",
  "nomifun-net",
  "nomifun-office",
@@ -6599,6 +6600,24 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "toml 0.8.2",
+ "tracing",
+]
+
+[[package]]
+name = "nomifun-miniapp"
+version = "0.5.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "nomifun-api-types",
+ "nomifun-auth",
+ "nomifun-common",
+ "nomifun-db",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
  "tracing",
 ]
 

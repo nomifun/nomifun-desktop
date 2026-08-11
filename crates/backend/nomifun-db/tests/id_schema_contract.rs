@@ -160,6 +160,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "mcp_servers",
     "message_correlations",
     "messages",
+    "miniapps",
     "oauth_tokens",
     "preset_agent_preferences",
     "preset_examples",
