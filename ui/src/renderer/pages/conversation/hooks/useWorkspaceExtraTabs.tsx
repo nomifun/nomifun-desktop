@@ -8,8 +8,9 @@ import type { TChatConversation } from '@/common/config/storage';
 import ConversationTerminalPanel from '@/renderer/pages/conversation/components/ConversationTerminalPanel';
 import type { SessionKnowledgeSource } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/knowledgeBindingTarget';
 import { useSessionKnowledgeTab } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeTab';
+import MiniAppPanel from '@/renderer/pages/conversation/Workspace/MiniAppPanel';
 import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
-import { Terminal } from '@icon-park/react';
+import { ApplicationOne, Terminal } from '@icon-park/react';
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -48,6 +49,17 @@ export function useWorkspaceExtraTabs(conversation?: TChatConversation): Workspa
         title: t('terminal.conversationPanel.tab'),
         icon: <Terminal size={18} />,
         content: <ConversationTerminalPanel conversationId={conversationId} />,
+      },
+      // Directly below the terminal: a permanent, read-only way to USE a
+      // solidified mini-app without leaving the conversation. Unconditional on
+      // purpose — a tab that appears asynchronously would make WorkspaceRailBody
+      // persist its `files` fallback over the user's stored selection. Loading,
+      // empty and error states are handled inside the panel.
+      {
+        key: 'conversation-miniapps',
+        title: t('miniApps.nav.entry'),
+        icon: <ApplicationOne size={18} />,
+        content: <MiniAppPanel />,
       },
       ...knowledgeTabs,
     ];

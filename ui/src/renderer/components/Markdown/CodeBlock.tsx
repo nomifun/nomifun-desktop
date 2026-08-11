@@ -27,6 +27,7 @@ type CodeBlockProps = {
   node?: unknown;
   hiddenCodeCopyButton?: boolean;
   codeStyle?: React.CSSProperties;
+  showMermaidOpenInPanelButton?: boolean;
   [key: string]: unknown;
 };
 
@@ -57,7 +58,15 @@ function CodeBlock(props: CodeBlockProps) {
     }
   };
 
-  const { children, className, node: _node, hiddenCodeCopyButton: _h, codeStyle: _c, ...rest } = props;
+  const {
+    children,
+    className,
+    node: _node,
+    hiddenCodeCopyButton: _h,
+    codeStyle: _c,
+    showMermaidOpenInPanelButton,
+    ...rest
+  } = props;
   const match = /language-(\w+)/.exec(className || '');
   const language = match?.[1] || 'text';
 
@@ -76,7 +85,13 @@ function CodeBlock(props: CodeBlockProps) {
   }
 
   if (language === 'mermaid') {
-    return <MermaidBlock code={formatCode(children)} style={props.codeStyle} />;
+    return (
+      <MermaidBlock
+        code={formatCode(children)}
+        style={props.codeStyle}
+        showOpenInPanelButton={showMermaidOpenInPanelButton}
+      />
+    );
   }
 
   // Inline code (single line)

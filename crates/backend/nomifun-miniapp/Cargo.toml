@@ -1,0 +1,30 @@
+[package]
+name = "nomifun-miniapp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nomifun-common.workspace = true
+nomifun-db.workspace = true
+nomifun-api-types.workspace = true
+nomifun-auth.workspace = true
+
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# DTO wire-shape and validation-rule tests are pure — no database, no router
+# (`serde_json` is already a normal dependency). `tempfile` backs the
+# workspace/atomic-write tests, which need a real directory but still no
+# database; route behavior is covered by `nomifun-app`'s miniapp_e2e against the
+# real router.
+tempfile.workspace = true
+# The workspace/publish tests stand an in-memory `IMiniAppRepository` up in front
+# of the service so the two-layer storage rules (materialize once, publish
+# validates like create) are covered without a SQLite fixture.
+async-trait.workspace = true

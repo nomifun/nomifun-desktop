@@ -1,0 +1,33 @@
+-- Mini-app publishing: when a mini-app's served snapshot was last written.
+--
+-- Append-only, one nullable column, no index. `html` is deliberately NOT
+-- dropped: it stays the PUBLISHED SNAPSHOT that the auth-exempt
+-- `GET /api/miniapps/{miniapp_id}/serve` hands to an iframe, while the working
+-- copy a conversation edits lives on disk at
+-- `{work_dir}/miniapps/{miniapp_id}/miniapp.html`. Two reasons the snapshot must
+-- stay in SQLite: a serve read can then never emit a half-written document (a
+-- shell redirect inside the workspace truncates before it writes), and a
+-- destructive edit never breaks the app the user is already using — publishing is
+-- an explicit act (`POST /api/miniapps/{miniapp_id}/publish`).
+--
+--   * `published_at` — ms epoch, nullable. The instant the snapshot in `html`
+--     was written from the working copy. NULL on every row that predates this
+--     migration, and on every app whose working copy was never materialized.
+--     Comparing it against the working copy's mtime is how
+--     `has_unpublished_changes` is derived, so no second column has to be kept
+--     in step with the filesystem. It is deliberately NOT backfilled from
+--     `updated_at`: that column moves on a plain rename, and a working copy with
+--     no stamp must read as unpublished rather than as published-by-rename.
+--
+-- `source_conversation_id` (migration 028) is kept, with its semantics reduced to
+-- pure provenance: the preview panel uses it to preselect which app this
+-- conversation previously published to. It drives no navigation and no storage
+-- behaviour, so no column is added or dropped for it here.
+--
+-- Verification performed: `cargo test -p nomifun-db --test miniapps_schema` and
+-- `--test id_schema_contract` boot an in-memory database, apply this migration
+-- and run validate_id_schema_contract + validate_id_data_contract;
+-- `cargo test -p nomifun-app --test miniapp_e2e` exercises the workspace,
+-- publish and serve routes over the real router.
+
+ALTER TABLE miniapps ADD COLUMN published_at INTEGER;

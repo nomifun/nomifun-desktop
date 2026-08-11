@@ -5,9 +5,11 @@
 #   bun run docker:prebuilt -- --tag nomifun/nomifun-web:v0.3.4
 
 ARG BUN_IMAGE="oven/bun:1"
+ARG NODE_IMAGE="node:22-bookworm-slim"
 ARG RUNTIME_IMAGE="ubuntu:26.04"
 
 FROM ${BUN_IMAGE} AS bun-base
+FROM ${NODE_IMAGE} AS node-base
 
 FROM ${RUNTIME_IMAGE}
 
@@ -21,10 +23,19 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi
 RUN apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-        ca-certificates git liblzma5 ripgrep zlib1g \
+        ca-certificates git liblzma5 python3 python3-yaml ripgrep zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=bun-base /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=node-base /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-base /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && bun --version \
+    && node --version \
+    && npm --version \
+    && npx --version \
+    && python3 -c "import yaml"
 COPY --chmod=755 nomifun-web /usr/local/bin/nomifun-web
 COPY web /opt/nomifun/web
 

@@ -5,16 +5,28 @@
  */
 
 import { ipcBridge } from '@/common';
+import type { ICreateConversationParams } from '@/common/adapter/ipcBridge';
+import type { TProviderWithModel } from '@/common/config/storage';
 import { Message } from '@arco-design/web-react';
 import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { emitter } from '@/renderer/utils/emitter';
 import { seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
+import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { useGuidModelSelection } from '@/renderer/pages/guid/hooks/useGuidModelSelection';
 import { conversationTarget } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { uuidv7 } from '@/common/utils/uuidv7';
+
+/**
+ * Additions merged onto the create call's `extra` bag.
+ *
+ * The index signature is deliberate: `extra` is a closed literal shape owned by
+ * the integration spine, but the backend keeps unknown keys, which is how
+ * capability markers (e.g. the mini-app flag) and `system_prompt` ride along.
+ */
+export type NomiQuickStartExtra = Partial<ICreateConversationParams['extra']> & Record<string, unknown>;
 
 export interface NomiQuickStartOptions {
   /** Conversation title. */
@@ -23,6 +35,14 @@ export interface NomiQuickStartOptions {
   prompt: string;
   /** Defaults to true. When false, the prompt is prefilled instead of sent. */
   send?: boolean;
+  /**
+   * Overrides the hook's own model selection. Pass this when the caller already
+   * owns a `useGuidModelSelection` instance (a second instance would not see the
+   * model the user picked in the caller's picker).
+   */
+  model?: TProviderWithModel;
+  /** Merged onto `extra`, overriding the workspace defaults below. */
+  extra?: NomiQuickStartExtra;
 }
 
 /**
@@ -38,8 +58,9 @@ export const useNomiQuickStart = () => {
   const { current_model } = useGuidModelSelection('nomi');
 
   const start = useCallback(
-    async ({ name, prompt, send = true }: NomiQuickStartOptions): Promise<boolean> => {
-      if (!current_model) {
+    async ({ name, prompt, send = true, model, extra }: NomiQuickStartOptions): Promise<boolean> => {
+      const effectiveModel = model ?? current_model;
+      if (!effectiveModel) {
         Message.warning(t('conversation.noModelConfigured'));
         return false;
       }
@@ -47,8 +68,13 @@ export const useNomiQuickStart = () => {
         const conversation = await ipcBridge.conversation.create.invoke({
           type: 'nomi',
           name,
-          model: current_model,
-          extra: { workspace: '', custom_workspace: false, default_files: [] },
+          model: effectiveModel,
+          extra: {
+            workspace: '',
+            custom_workspace: false,
+            default_files: [],
+            ...extra,
+          } as ICreateConversationParams['extra'],
         });
         if (!conversation || !conversation.id) {
           Message.error(t('conversation.createFailed'));
@@ -76,7 +102,7 @@ export const useNomiQuickStart = () => {
         return true;
       } catch (error) {
         console.error('Nomi quick start failed:', error);
-        Message.error(t('conversation.createFailed'));
+        Message.error(getConversationCreateErrorMessage(error, t));
         return false;
       }
     },

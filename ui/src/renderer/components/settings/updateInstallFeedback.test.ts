@@ -23,22 +23,23 @@ describe('update install interaction feedback', () => {
   });
 
   test('install progress has a dedicated live region and cannot be dismissed mid-handoff', () => {
-    expect(modalSource.includes("case 'installing':")).toBe(true);
+    expect(modalSource.includes("status === 'installing'")).toBe(true);
     expect(modalSource.includes("installPhase === 'downloading'")).toBe(false);
     expect(modalSource.includes("aria-live='polite'")).toBe(true);
-    expect(modalSource.includes("showClose: status !== 'installing'")).toBe(true);
+    expect(modalSource.includes("const canDismiss = status !== 'installing'")).toBe(true);
     expect(modalSource.includes('if (installRequestedRef.current) return;\n    setVisible(false)')).toBe(true);
   });
 
   test('download and install actions use distinct labels and states', () => {
-    const availableStart = modalSource.lastIndexOf("case 'available':");
-    const downloadingStart = modalSource.indexOf("case 'downloading':", availableStart);
-    const available = modalSource.slice(availableStart, downloadingStart);
+    const compactStart = modalSource.indexOf('const renderCompactContent = () =>');
+    const detailStart = modalSource.indexOf('const renderDetailContent = () =>', compactStart);
+    const compact = modalSource.slice(compactStart, detailStart);
 
-    expect(available.includes("t('update.downloadButton')")).toBe(true);
-    expect(available.includes("t('update.downloadAndInstall')")).toBe(false);
-    expect(modalSource.includes("case 'downloaded':")).toBe(true);
-    expect(modalSource.includes("t('update.installNow')")).toBe(true);
+    expect(compact.includes("status === 'available'")).toBe(true);
+    expect(compact.includes("t('update.updateNow')")).toBe(true);
+    expect(compact.includes("status === 'downloaded'")).toBe(true);
+    expect(compact.includes("t('update.installNow')")).toBe(true);
+    expect(compact.includes("t('update.downloadAndInstall')")).toBe(false);
   });
 
   test('reopening the modal cannot reset an in-flight install', () => {

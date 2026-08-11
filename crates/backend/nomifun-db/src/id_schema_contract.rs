@@ -59,6 +59,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "mcp_servers",
     "message_correlations",
     "messages",
+    "miniapps",
     "oauth_tokens",
     "preset_agent_preferences",
     "preset_examples",
@@ -126,6 +127,7 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_bindings", "knowledge_binding_id"),
     ("mcp_servers", "mcp_server_id"),
     ("messages", "message_id"),
+    ("miniapps", "miniapp_id"),
     ("preset_tags", "preset_tag_id"),
     ("presets", "preset_id"),
     ("provider_connections", "connection_id"),
@@ -201,6 +203,7 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_bindings", "knowledge_binding_id"),
     ("mcp_servers", "mcp_server_id"),
     ("messages", "message_id"),
+    ("miniapps", "miniapp_id"),
     ("preset_tags", "preset_tag_id"),
     ("presets", "preset_id"),
     ("provider_connections", "connection_id"),
@@ -533,6 +536,13 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
     text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, "idx_terminal_sessions_user_id", Cascade),
     text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, "idx_ssh_hosts_user_id", Cascade),
+    text_ref!("miniapps", "user_id" => "users", "user_id", false, "idx_miniapps_user_id", Cascade),
+    // Provenance, not ownership: the app is a finished artifact that outlives the
+    // conversation it was solidified from, so deleting that conversation walks
+    // this column back to NULL (as `channel_sessions.conversation_id` does) and
+    // leaves the app runnable. Cascade would delete a working tool because its
+    // build log was tidied up.
+    text_ref!("miniapps", "source_conversation_id" => "conversations", "conversation_id", true, "idx_miniapps_source_conversation_id", SetNull),
     // Delivery receipts intentionally survive Terminal/Requirement deletion so
     // a replay can never regain PTY write authority.
     text_ref!("terminal_turn_admissions", "terminal_id" => "terminal_sessions", "terminal_id", false, "idx_terminal_turn_admissions_terminal_epoch", KeepHistory),

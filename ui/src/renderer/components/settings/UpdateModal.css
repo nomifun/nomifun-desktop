@@ -1,4 +1,268 @@
-/* Presentation-only styles for the expanded available and error states. */
+/* Compact update surface --------------------------------------------------- */
+
+.update-compact-card-host {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 10020;
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.update-compact-card {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px;
+  border: 1px solid var(--bg-3);
+  border-radius: 12px;
+  background: var(--bg-base);
+  box-shadow:
+    0 14px 36px rgba(15, 23, 42, 0.16),
+    0 3px 10px rgba(15, 23, 42, 0.08);
+  color: var(--text-primary);
+  pointer-events: auto;
+  animation: update-compact-card-enter 180ms ease-out;
+}
+
+.update-compact-card__header {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.update-compact-card__title {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-compact-card__close {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.update-compact-card__close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.update-compact-card__close:focus-visible,
+.update-compact-card__detail-link:focus-visible {
+  outline: 2px solid rgba(var(--primary-6), 0.32);
+  outline-offset: 2px;
+}
+
+.update-compact-card__status {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.update-compact-card__status-label {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 19px;
+}
+
+.update-compact-card__status-icon {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+}
+
+.update-compact-card__status-icon--success {
+  background: rgba(var(--success-6), 0.12);
+  color: rgb(var(--success-6));
+}
+
+.update-compact-card__spinner {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  margin-top: 1px;
+  border: 2px solid rgba(var(--primary-6), 0.2);
+  border-top-color: rgb(var(--primary-6));
+  border-radius: 999px;
+  animation: update-compact-card-spin 800ms linear infinite;
+}
+
+.update-compact-card__muted {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-compact-card__version-row {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.update-compact-card__version-row strong {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.update-compact-card__version-arrow {
+  color: var(--text-tertiary);
+}
+
+.update-compact-card__detail-link {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: rgb(var(--link-6, var(--primary-6)));
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  text-underline-offset: 2px;
+}
+
+.update-compact-card__detail-link:hover {
+  text-decoration: underline;
+}
+
+.update-compact-card__actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.update-compact-card .update-compact-card__action.arco-btn {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  justify-content: center;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.update-compact-card__download-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.update-compact-card__progress.arco-progress {
+  display: block;
+  margin: 0;
+}
+
+.update-compact-card__progress-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 5px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.update-compact-card__progress-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-compact-card__error-message {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.update-compact-card__error-tools {
+  margin-top: 6px;
+}
+
+.update-compact-card__error-tools > .update-compact-card__detail-link {
+  display: block;
+  margin-left: 0;
+}
+
+body[arco-theme='dark'] .update-compact-card,
+[data-theme='dark'] .update-compact-card {
+  box-shadow:
+    0 16px 38px rgba(0, 0, 0, 0.42),
+    0 3px 10px rgba(0, 0, 0, 0.26);
+}
+
+@keyframes update-compact-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes update-compact-card-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Expanded available/error details ---------------------------------------- */
 
 .nomifun-update-modal .arco-modal-content {
   overflow: hidden;
@@ -267,6 +531,11 @@ body[arco-theme='dark'] .nomifun-update-modal .arco-modal-content,
 }
 
 @media (max-width: 560px) {
+  .update-compact-card-host {
+    right: 16px;
+    bottom: 16px;
+  }
+
   .update-modal__actions {
     gap: 10px;
     padding-inline: 0;
@@ -294,6 +563,10 @@ body[arco-theme='dark'] .nomifun-update-modal .arco-modal-content,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .update-compact-card,
+  .update-compact-card *,
+  .update-compact-card *::before,
+  .update-compact-card *::after,
   .nomifun-update-modal *,
   .nomifun-update-modal *::before,
   .nomifun-update-modal *::after {

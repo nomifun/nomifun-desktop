@@ -21,6 +21,7 @@ use nomifun_auth::{
 use nomifun_channel::channel_routes;
 use nomifun_companion::{companion_public_routes, companion_routes};
 use nomifun_customer_service::customer_service_routes;
+use nomifun_miniapp::{miniapp_public_routes, miniapp_routes};
 use nomifun_workshop::{workshop_public_routes, workshop_routes};
 use nomifun_creation::creation_routes;
 use nomifun_conversation::{conversation_ops_routes, conversation_routes};
@@ -744,6 +745,16 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
+    // 小程序 (mini-app) library (owner-only): metadata CRUD. The document serve
+    // route is split off into `miniapp_public_routes` below and mounted
+    // auth-exempt, because an iframe document load carries no trust header.
+    // `states.miniapp` is cloned so both routers share the one service.
+    let miniapp_authenticated = protect_instance_owner(
+        miniapp_routes(states.miniapp.clone()),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
     // Unified agent listing/refresh/test routes protected by auth middleware
     let agent_authenticated = protect_instance_owner(
         agent_routes(states.agent),
@@ -997,6 +1008,13 @@ pub fn create_router_with_all_state(
     // and canvas ids; listing/upload/mutation stay authenticated.
     let workshop_public = workshop_public_routes(states.workshop);
 
+    // 小程序 document serving — exempt from auth for the same reason as the
+    // workshop binaries: an `<iframe>` document load can't carry the local-trust
+    // header, so an authenticated route would 403 every mini-app the user opens.
+    // GET-only, opaque bare UUIDv7 ids; every metadata read and every write stays
+    // authenticated.
+    let miniapp_public = miniapp_public_routes(states.miniapp);
+
     // WebSocket upgrade route — exempt from CSRF (no cookie-based
     // double-submit) but still gets security response headers.
     let ws_routes = Router::new()
@@ -1078,6 +1096,7 @@ pub fn create_router_with_all_state(
         .merge(conversation_ops_authenticated)
         .merge(remote_agent_authenticated)
         .merge(ssh_host_authenticated)
+        .merge(miniapp_authenticated)
         .merge(agent_authenticated)
         .merge(model_failover_authenticated)
         .merge(connection_test_authenticated)
@@ -1138,7 +1157,8 @@ pub fn create_router_with_all_state(
     .merge(office_proxy)
     .merge(public_assets)
     .merge(companion_public)
-    .merge(workshop_public);
+    .merge(workshop_public)
+    .merge(miniapp_public);
 
     // Robot device face. `nest` (not `merge`) scopes it to `/robot`, and it sits
     // in this post-CSRF group on purpose: a robot presents a bearer token minted

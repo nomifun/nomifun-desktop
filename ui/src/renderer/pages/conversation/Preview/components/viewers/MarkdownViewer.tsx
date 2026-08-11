@@ -11,7 +11,6 @@ import { useTextSelection } from '@/renderer/hooks/ui/useTextSelection';
 import { useTypingAnimation } from '@/renderer/hooks/chat/useTypingAnimation';
 import { iconColors } from '@/renderer/styles/colors';
 import { Close } from '@icon-park/react';
-import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -26,8 +25,8 @@ import MarkdownEditor from '../editors/MarkdownEditor';
 import SelectionToolbar from '../renderers/SelectionToolbar';
 import { useContainerScroll, useContainerScrollTarget } from '../../hooks/useScrollSyncHelpers';
 import { convertLatexDelimiters } from '@/renderer/utils/chat/latexDelimiters';
-import MermaidBlock from '@/renderer/components/Markdown/MermaidBlock';
-import SyntaxHighlighter, { vs, vs2015 } from '@/renderer/components/Markdown/SyntaxHighlighter';
+import CodeBlock from '@/renderer/components/Markdown/CodeBlock';
+import '@/renderer/components/Markdown/MarkdownTypography.css';
 
 interface MarkdownPreviewProps {
   content: string; // Markdown 内容 / Markdown content
@@ -213,10 +212,6 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
   const { t } = useTranslation();
   const internalContainerRef = useRef<HTMLDivElement>(null);
   const containerRef = externalContainerRef || internalContainerRef; // 使用外部 ref 或内部 ref / Use external ref or internal ref
-  const [currentTheme, setCurrentTheme] = useState<'light' | 'dark'>(() => {
-    return (document.documentElement.getAttribute('data-theme') as 'light' | 'dark') || 'light';
-  });
-
   // 使用滚动同步 Hooks / Use scroll sync hooks
   useContainerScroll(containerRef, externalOnScroll);
   useContainerScrollTarget(containerRef);
@@ -243,21 +238,6 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
     enabled: viewMode === 'preview', // 仅在预览模式下启用 / Only enable in preview mode
     threshold: 200, // 距离底部 200px 以内时跟随 / Follow when within 200px from bottom
   });
-
-  // 监听主题变化 / Monitor theme changes
-  useEffect(() => {
-    const observer = new MutationObserver((mutations) => {
-      mutations.forEach((mutation) => {
-        if (mutation.type === 'attributes' && mutation.attributeName === 'data-theme') {
-          const theme = (document.documentElement.getAttribute('data-theme') as 'light' | 'dark') || 'light';
-          setCurrentTheme(theme);
-        }
-      });
-    });
-
-    observer.observe(document.documentElement, { attributes: true });
-    return () => observer.disconnect();
-  }, []);
 
   // 监听文本选择 / Monitor text selection
   const { selectedText, selectionPosition, clearSelection } = useTextSelection(containerRef);
@@ -417,7 +397,7 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
       {/* 内容区域 / Content area */}
       <div
         ref={containerRef}
-        className={`flex-1 ${viewMode === 'source' ? 'overflow-hidden' : 'overflow-auto p-32px text-t-primary'}`}
+        className={`flex-1 ${viewMode === 'source' ? 'overflow-hidden' : 'overflow-auto p-20px md:p-24px text-t-primary'}`}
         style={{ minWidth: 0 }}
       >
         {viewMode === 'source' ? (
@@ -425,16 +405,7 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
           <MarkdownEditor value={content} onChange={(value) => onContentChange?.(value)} />
         ) : (
           // 预览模式：渲染 Markdown / Preview mode: Render Markdown
-          <div
-            style={{
-              wordWrap: 'break-word',
-              overflowWrap: 'break-word',
-              width: '100%',
-              maxWidth: '100%',
-              minWidth: 0,
-              boxSizing: 'border-box',
-            }}
-          >
+          <div className='markdown-article markdown-article--compact'>
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath, remarkBreaks]}
               rehypePlugins={[rehypeRaw, rehypeKatex]}
@@ -457,55 +428,10 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
                   );
                 },
                 code({ className, children, ...props }: React.HTMLAttributes<HTMLElement>) {
-                  const match = /language-(\w+)/.exec(className || '');
-                  const codeContent = String(children).replace(/\n$/, '');
-                  const language = match ? match[1] : '';
-                  const codeTheme = currentTheme === 'dark' ? vs2015 : vs;
-
-                  // Render latex/math code blocks as KaTeX display math
-                  // Skip full LaTeX documents (with \documentclass, \begin{document}, etc.) — KaTeX only handles math
-                  if (language === 'latex' || language === 'math' || language === 'tex') {
-                    const isFullDocument = /\\(documentclass|begin\{document\}|usepackage)\b/.test(codeContent);
-                    if (!isFullDocument) {
-                      try {
-                        const html = katex.renderToString(codeContent, {
-                          displayMode: true,
-                          throwOnError: false,
-                        });
-                        return <div className='katex-display' dangerouslySetInnerHTML={{ __html: html }} />;
-                      } catch {
-                        // Fall through to render as code block if KaTeX fails
-                      }
-                    }
-                  }
-
-                  if (language === 'mermaid') {
-                    return <MermaidBlock code={codeContent} showOpenInPanelButton={false} />;
-                  }
-
-                  // 代码高亮 / Code highlighting
-                  return language ? (
-                    <SyntaxHighlighter
-                      // @ts-expect-error - style 属性类型定义问题
-                      style={codeTheme}
-                      language={language}
-                      PreTag='div'
-                      customStyle={{
-                        margin: 0,
-                        borderRadius: '8px',
-                        padding: '16px',
-                        fontSize: '14px',
-                        maxWidth: '100%',
-                        overflow: 'auto',
-                      }}
-                      {...props}
-                    >
-                      {codeContent}
-                    </SyntaxHighlighter>
-                  ) : (
-                    <code className={className} {...props}>
-                      {children}
-                    </code>
+                  return (
+                    <CodeBlock className={className} showMermaidOpenInPanelButton={false} {...props}>
+                      {String(children)}
+                    </CodeBlock>
                   );
                 },
               }}

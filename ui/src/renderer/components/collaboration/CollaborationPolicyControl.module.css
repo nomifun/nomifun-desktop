@@ -34,6 +34,19 @@
   width: min(280px, calc(100vw - 32px));
 }
 
+.embedded {
+  border-top: 1px solid var(--color-border-1);
+  margin-top: 2px;
+  padding-top: 12px;
+  width: 100%;
+}
+
+.embedded .panel {
+  background: transparent;
+  padding: 0;
+  width: 100%;
+}
+
 .header {
   align-items: center;
   display: grid;

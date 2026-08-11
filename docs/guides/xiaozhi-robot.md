@@ -5,7 +5,7 @@
 NomiFun can act as a local AI backend for a compatible XiaoZhi ESP32 robot. The
 robot handles the microphone, speaker, display, buttons, and device-side MCP
 tools; NomiFun provides the companion, chat model, ASR, TTS, memory, sessions,
-and tool orchestration.
+and tool coordination.
 
 This integration is optional. A firmware build configured for NomiFun connects
 to your desktop over the LAN instead of using the default `xiaozhi.me` service.
@@ -101,7 +101,7 @@ Speaker <- Opus audio <- XiaoZhi firmware <- NomiFun TTS
 
 Voice data and conversation content are processed according to the providers
 selected in NomiFun. "Local backend" describes the robot gateway and session
-orchestration; it does not make a cloud ASR, TTS, or chat provider local.
+coordination; it does not make a cloud ASR, TTS, or chat provider local.
 
 ## Troubleshooting
 

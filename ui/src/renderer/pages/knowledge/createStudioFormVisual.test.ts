@@ -5,6 +5,7 @@ const studioSource = readFileSync(new URL('./CreateStudio/index.tsx', import.met
 const sourceConfigSource = readFileSync(new URL('./CreateStudio/SourceConfig.tsx', import.meta.url), 'utf8');
 const teachingCardSource = readFileSync(new URL('./CreateStudio/TeachingCard.tsx', import.meta.url), 'utf8');
 const tagPickerSource = readFileSync(new URL('./CreateStudio/TagPicker.tsx', import.meta.url), 'utf8');
+const studioStyles = readFileSync(new URL('./CreateStudio/CreateStudio.module.css', import.meta.url), 'utf8');
 
 describe('CreateStudio form visual design', () => {
   test('uses a modern card-based form surface with soft focusable controls', () => {
@@ -14,6 +15,15 @@ describe('CreateStudio form visual design', () => {
     expect(studioSource.includes('knowledge-studio-input')).toBe(true);
     expect(studioSource.includes('focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]')).toBe(true);
     expect(studioSource.includes("className='w-full rounded-9px border border-[var(--color-border-2)] bg-[var(--color-fill-1)]")).toBe(false);
+  });
+
+  test('keeps the dialog and configuration cards compact without changing the form structure', () => {
+    expect(studioSource.includes("className={[styles.modal, isMobile ? styles.mobileModal : ''].filter(Boolean).join(' ')}")).toBe(true);
+    expect(studioStyles.includes('padding: 10px 12px')).toBe(true);
+    expect(studioSource.includes('knowledge-studio-config-panel min-h-0 flex-1 overflow-y-auto bg-[var(--color-fill-1)] p-16px')).toBe(true);
+    expect(studioSource.includes('knowledge-studio-basic-card mb-12px')).toBe(true);
+    expect(studioSource.includes("'knowledge-studio-field rounded-14px bg-[var(--color-bg-2)] p-10px")).toBe(true);
+    expect(studioSource.includes('px-20px py-10px')).toBe(true);
   });
 
   test('turns AI description helpers into real action controls instead of plain text links', () => {
