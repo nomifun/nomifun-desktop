@@ -623,7 +623,7 @@ impl IProviderRepository for SqliteProviderRepository {
                 OR key = 'nomi.collaborationModels' \
                 OR key = 'nomi.defaultModel' \
                 OR key = 'knowledge.autogenModel' \
-                OR key = 'tools.imageGenerationModel' \
+                OR key = 'models.default.imageGeneration' \
                 OR key = 'tools.speechToText' \
                 OR key = 'tools.textToSpeech' \
                 OR key LIKE 'channels.%.defaultModel'",
@@ -1307,6 +1307,41 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(surviving, 0, "the global TTS default must not outlive its Provider");
+        crate::validate_id_data_contract(db.pool()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_sweeps_the_canonical_image_generation_default() {
+        let (repo, db) = setup().await;
+        let provider = repo.create(sample_params()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO client_preferences (key, value, updated_at) \
+             VALUES ('models.default.imageGeneration', ?, 1)",
+        )
+        .bind(
+            serde_json::json!({
+                "provider_id": provider.provider_id,
+                "model": "image-model"
+            })
+            .to_string(),
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        repo.delete(&provider.provider_id).await.unwrap();
+
+        let surviving: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM client_preferences \
+             WHERE key = 'models.default.imageGeneration'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            surviving, 0,
+            "the default image model must not outlive its Provider"
+        );
         crate::validate_id_data_contract(db.pool()).await.unwrap();
     }
 

@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use nomifun_ai_agent::{
     AgentStreamEvent,
-    artifact_store::{ArtifactKind, ArtifactStore, PersistedArtifact},
+    artifact_store::{
+        ArtifactKind, ArtifactRecoveryEnvelope, ArtifactRecoverySource, ArtifactStore,
+        PersistedArtifact,
+    },
     protocol::events::{
         AcpToolCallContentItem, FinishEventData, TextEventData, TurnStopReason,
         tool_call::{
@@ -133,15 +136,23 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
     let (repo, _db, conversation_id, owner) = setup_repo().await;
     let workspace = TestWorkspace::new();
     let store = ArtifactStore::new(workspace.path());
-    let artifact = store
-        .persist_inline(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG)
-        .expect("persist verified image receipt");
 
     // A continuation/failover segment has a distinct wire id but still belongs
     // to the original user-visible turn.
     let root_turn_id = MessageId::new().into_string();
     let wire_segment_id = MessageId::new().into_string();
     assert_ne!(root_turn_id, wire_segment_id);
+    let artifact = store
+        .persist_inline_and_existing_batch_recoverable(
+            [(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG)],
+            std::iter::empty::<&Path>(),
+            &ArtifactRecoverySource {
+                conversation_id: conversation_id.clone(),
+                wire_msg_id: wire_segment_id.clone(),
+            },
+        )
+        .expect("persist verified image receipt");
+    let artifact = artifact.into_iter().next().expect("one image receipt");
     insert_turn_parent(&repo, &conversation_id, &root_turn_id).await;
 
     let bus = Arc::new(BroadcastEventBus::new(64));
@@ -188,7 +199,7 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
     // This is the intentionally sparse Completed frame synthesized at the
     // ordered ACP PromptResponse boundary. The relay must materialize it
     // against the active snapshot before its artifact 2PC commit.
-    tx.send(AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
+    let sparse_completion = AcpToolCallEventData {
         session_id: "session-imagegen".into(),
         update: AcpToolCallUpdateData {
             session_update: AcpToolCallSessionUpdateKind::ToolCallUpdate,
@@ -205,7 +216,20 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
             locations: None,
         },
         meta: None,
-    }))
+    };
+    store
+        .prepare_recovery_receipts(
+            std::slice::from_ref(&artifact),
+            &ArtifactRecoveryEnvelope {
+                conversation_id: conversation_id.clone(),
+                wire_msg_id: wire_segment_id.clone(),
+                event_kind: "acp_tool_call".to_owned(),
+                event_json: serde_json::to_string(&sparse_completion)
+                    .expect("serialize ACP recovery envelope"),
+            },
+        )
+        .expect("prepare ACP recovery envelope");
+    tx.send(AgentStreamEvent::AcpToolCall(sparse_completion))
     .expect("send sparse synthesized completion");
     tx.send(AgentStreamEvent::Text(TextEventData {
         content: "已生成。".into(),

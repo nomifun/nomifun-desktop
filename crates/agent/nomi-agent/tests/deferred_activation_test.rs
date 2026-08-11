@@ -147,6 +147,7 @@ fn resumed_session(id: &str) -> Session {
         owner_token: None,
         activated_deferred_tools: vec![DEFERRED_TOOL.into()],
         editable_turn: None,
+        host_context: Default::default(),
     }
 }
 

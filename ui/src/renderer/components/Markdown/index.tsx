@@ -20,15 +20,22 @@ import { openExternalUrl } from '@/renderer/utils/platform';
 import classNames from 'classnames';
 import React, { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { convertLatexDelimiters } from '@renderer/utils/chat/latexDelimiters';
 import LocalImageView from '@renderer/components/media/LocalImageView';
 import { isLocalImageSource } from '@/common/utils/localPath';
 import CodeBlock from './CodeBlock';
+import { getMarkdownInternalRoute } from './markdownLinkPolicy';
 import ShadowView from './ShadowView';
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkBreaks];
 
 const markdownUrlTransform: UrlTransform = (url, key, node) => {
+  if (key === 'href' && node.tagName === 'a' && getMarkdownInternalRoute(url)) {
+    // react-markdown rejects custom schemes by default. The one exact internal
+    // destination is admitted here; every other URL keeps the default policy.
+    return url;
+  }
   if (key === 'src' && node.tagName === 'img') {
     // react-markdown rejects unknown schemes by default. Permit filesystem
     // references for LocalImageView and inline/blob images for the browser,
@@ -70,6 +77,7 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
     children: childrenProp,
   }) => {
     const { t } = useTranslation();
+    const navigate = useNavigate();
 
     const normalizedChildren = useMemo(() => {
       if (typeof childrenProp === 'string') {
@@ -82,13 +90,20 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
       (e: React.MouseEvent<HTMLAnchorElement>) => {
         e.preventDefault();
         e.stopPropagation();
-        const href = (e.currentTarget as HTMLAnchorElement).href;
+        const href = e.currentTarget.dataset.markdownHref ?? '';
         if (!href) return;
-        openExternalUrl(href).catch((error: unknown) => {
+        const internalRoute = getMarkdownInternalRoute(href);
+        if (internalRoute) {
+          void navigate(internalRoute);
+          return;
+        }
+        const externalHref = e.currentTarget.href;
+        if (!externalHref) return;
+        openExternalUrl(externalHref).catch((error: unknown) => {
           console.error(t('messages.openLinkFailed'), error);
         });
       },
-      [t]
+      [navigate, t]
     );
 
     // Memoize components so React preserves component identity across re-renders.
@@ -108,9 +123,19 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
             hiddenCodeCopyButton={hiddenCodeCopyButton}
           />
         ),
-        a: ({ node: _node, ...rest }: React.JSX.IntrinsicElements['a'] & ExtraProps) => (
-          <a {...rest} target='_blank' rel='noreferrer' onClick={handleLinkClick} />
-        ),
+        a: ({ node: _node, href = '', ...rest }: React.JSX.IntrinsicElements['a'] & ExtraProps) => {
+          const internalRoute = getMarkdownInternalRoute(href);
+          return (
+            <a
+              {...rest}
+              href={internalRoute ?? href}
+              data-markdown-href={href}
+              target={internalRoute ? undefined : '_blank'}
+              rel={internalRoute ? undefined : 'noreferrer'}
+              onClick={handleLinkClick}
+            />
+          );
+        },
         table: ({ node: _node, style, ...rest }: React.JSX.IntrinsicElements['table'] & ExtraProps) => (
           <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
             <table

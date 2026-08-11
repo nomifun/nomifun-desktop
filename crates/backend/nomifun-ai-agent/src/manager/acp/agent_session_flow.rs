@@ -254,7 +254,13 @@ impl AcpAgentManager {
         // session-scoped receipt immediately before Start/prompt so any
         // delivery failure observed by the notification handler belongs to
         // this turn and can veto a nominal EndTurn response.
-        self.protocol.begin_artifact_delivery_turn(sid);
+        self.protocol
+            .begin_artifact_delivery_turn_for(
+                sid,
+                self.runtime.conversation_id(),
+                &data.msg_id,
+            )
+            .map_err(AppError::Internal)?;
 
         // Emit Start event
         self.runtime.emit(AgentStreamEvent::Start(StartEventData {
@@ -305,10 +311,19 @@ impl AcpAgentManager {
             }
         };
         for completed in completed_artifact_calls {
+            if let Err(error) = self
+                .protocol
+                .prepare_artifact_delivery_event(sid, &completed)
+            {
+                self.protocol.rollback_artifact_delivery_event(&completed);
+                emit_artifact_delivery_terminal(&self.runtime, turn, error);
+                return Ok(false);
+            }
             if !self
                 .runtime
-                .emit_for_turn(turn, AgentStreamEvent::AcpToolCall(completed))
+                .emit_for_turn(turn, AgentStreamEvent::AcpToolCall(completed.clone()))
             {
+                self.protocol.rollback_artifact_delivery_event(&completed);
                 warn!(
                     session_id = sid,
                     "Discarding stale ACP artifact completion after its runtime turn closed"

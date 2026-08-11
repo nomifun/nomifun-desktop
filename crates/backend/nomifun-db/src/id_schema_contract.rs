@@ -830,7 +830,7 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
     ),
     json_text_ref!(
         "client_preferences", "value", "$.provider_id",
-        "SELECT json_extract(value, '$.provider_id') AS value FROM client_preferences WHERE (key = 'nomi.defaultModel' OR key = 'knowledge.autogenModel' OR key = 'tools.imageGenerationModel' OR key = 'tools.speechToText' OR key = 'tools.textToSpeech' OR key LIKE 'channels.%.defaultModel') AND json_valid(value)" =>
+        "SELECT json_extract(value, '$.provider_id') AS value FROM client_preferences WHERE (key = 'nomi.defaultModel' OR key = 'knowledge.autogenModel' OR key = 'models.default.imageGeneration' OR key = 'tools.speechToText' OR key = 'tools.textToSpeech' OR key LIKE 'channels.%.defaultModel') AND json_valid(value)" =>
         "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
     ),
     json_text_ref!(

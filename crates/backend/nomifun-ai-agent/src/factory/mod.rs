@@ -113,6 +113,12 @@ pub struct AgentFactoryDeps {
     /// Authoritative per-model rows (protocol/context-limit overrides for the
     /// selected model live here since migration 016).
     pub provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
+    /// Process-wide multimodal invocation service. Native Nomi image
+    /// generation consumes this directly (parallel to CreationService) so a
+    /// chat never routes an ordinary image request through Browser or the
+    /// workshop queue. `None` is reserved for lightweight tests/standalone
+    /// hosts and means the capability is not exposed.
+    pub model_invoke_service: Option<Arc<nomifun_model_invoke::ModelInvokeService>>,
     pub encryption_key: [u8; 32],
     pub agent_registry: Arc<AgentRegistry>,
     pub acp_agent_service: Arc<AcpSessionSyncService>,

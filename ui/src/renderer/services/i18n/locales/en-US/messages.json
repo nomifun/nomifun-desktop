@@ -85,10 +85,17 @@
   "fileChangesCount": "{{count}} File Changes",
   "turnDeliverables": {
     "title": "Generated {{count}} files",
+    "imagesTitle": "Generated {{count}} images",
+    "mixedTitle": "Generated {{count}} items",
     "showMore": "Show {{count}} more files",
     "showLess": "Show less",
+    "showMoreImages": "Show {{count}} more images",
+    "showLessImages": "Show fewer images",
     "verified": "Integrity verified (SHA-256)",
     "open": "Open",
+    "openImage": "Open image",
+    "saveImage": "Save image",
+    "copyImagePath": "Copy image path",
     "reveal": "Reveal in folder",
     "viewDiff": "View changes"
   },
