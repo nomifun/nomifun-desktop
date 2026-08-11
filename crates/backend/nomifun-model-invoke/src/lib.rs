@@ -36,5 +36,6 @@ pub use transport::{
 };
 pub use types::{
     AsrRequest, ChatTextRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle,
-    ModelRef, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, TtsRequest, VideoGenRequest,
+    ModelRef, ProducedAsset, ProducedData, RerankRequest, RerankResult, TaskOutcome, TaskRequest, TaskResult,
+    TtsRequest, VideoGenRequest,
 };

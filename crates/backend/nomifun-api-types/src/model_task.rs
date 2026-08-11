@@ -147,26 +147,133 @@ fn push_unique(tasks: &mut Vec<ModelTask>, task: ModelTask) {
     }
 }
 
+/// Provider/model combinations whose official task is known and whose name is
+/// either ambiguous or actively misleading to generic substring inference.
+/// Keep this table intentionally small: live provider catalogs decide which
+/// model IDs are available, while this function only supplies their task
+/// metadata to the provider -> modality -> model picker.
+fn verified_provider_profile(
+    platform: &str,
+    model: &str,
+) -> Option<(Vec<ModelTask>, Vec<ModelTrait>)> {
+    use ModelTask::*;
+    let base = base_model_name(model);
+
+    match platform {
+        "mimo" | "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams" => {
+            match base.as_str() {
+                "mimo-v2.5-pro" | "mimo-v2.5-pro-ultraspeed" => Some((vec![Chat], vec![])),
+                "mimo-v2.5" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
+                "mimo-v2.5-asr" => Some((vec![SpeechRecognition], vec![])),
+                "mimo-v2.5-tts" | "mimo-v2.5-tts-voicedesign" | "mimo-v2.5-tts-voiceclone" => {
+                    Some((vec![SpeechSynthesis], vec![]))
+                }
+                _ => None,
+            }
+        }
+        "minimax" | "minimax-code" | "minimax-coding-plan" => match base.as_str() {
+            "minimax-m3" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
+            "minimax-m2.7" | "minimax-m2.7-highspeed" => Some((vec![Chat], vec![])),
+            "minimax-h3" | "minimax-hailuo-2.3" | "minimax-hailuo-2.3-fast"
+            | "minimax-hailuo-02" => Some((vec![VideoGeneration], vec![])),
+            "image-01" | "image-01-live" => Some((vec![ImageGeneration], vec![])),
+            "speech-2.8-hd" | "speech-2.8-turbo" => Some((vec![SpeechSynthesis], vec![])),
+            _ => None,
+        },
+        "openai" => match base.as_str() {
+            "gpt-image-2" | "gpt-image-1" | "gpt-image-1.5" | "gpt-image-1-mini"
+            | "chatgpt-image-latest" => Some((vec![ImageGeneration, ImageEdit], vec![])),
+            "dall-e-2" => Some((vec![ImageGeneration, ImageEdit], vec![])),
+            "dall-e-3" => Some((vec![ImageGeneration], vec![])),
+            _ if base.starts_with("sora-2") => Some((vec![VideoGeneration], vec![])),
+            _ => None,
+        },
+        "xai" => match base.as_str() {
+            "xai-tts" => Some((vec![SpeechSynthesis], vec![])),
+            "xai-stt" => Some((vec![SpeechRecognition], vec![])),
+            "grok-imagine-image" | "grok-imagine-image-quality" => {
+                Some((vec![ImageGeneration, ImageEdit], vec![]))
+            }
+            "grok-imagine-video" | "grok-imagine-video-1.5" => {
+                Some((vec![VideoGeneration], vec![]))
+            }
+            _ => None,
+        },
+        "stepfun" | "stepfun-plan" => match base.as_str() {
+            "stepaudio-2.5-asr" => Some((vec![SpeechRecognition], vec![])),
+            "stepaudio-2.5-tts" => Some((vec![SpeechSynthesis], vec![])),
+            "step-image-edit-2" => Some((vec![ImageGeneration, ImageEdit], vec![])),
+            _ => None,
+        },
+        "gemini" => match base.as_str() {
+            "gemini-3.1-flash-image" | "gemini-3.1-flash-lite-image"
+            | "gemini-3-pro-image" | "gemini-2.5-flash-image" => {
+                Some((vec![ImageGeneration, ImageEdit], vec![]))
+            }
+            _ => None,
+        },
+        "zhipu" => match base.as_str() {
+            "glm-image" | "cogview-4-250304" | "cogview-4" | "cogview-3-flash" => {
+                Some((vec![ImageGeneration], vec![]))
+            }
+            "cogvideox-3" | "cogvideox-2" | "cogvideox-flash" => {
+                Some((vec![VideoGeneration], vec![]))
+            }
+            "glm-asr-2512" => Some((vec![SpeechRecognition], vec![])),
+            "glm-tts" => Some((vec![SpeechSynthesis], vec![])),
+            "embedding-3" | "embedding-2" => Some((vec![Embedding], vec![])),
+            "rerank" => Some((vec![Rerank], vec![])),
+            "glm-5v-turbo" | "glm-4.6v" | "autoglm-phone" | "glm-4.6v-flash"
+            | "glm-4.6v-flashx" | "glm-4v-flash" | "glm-4.1v-thinking-flashx"
+            | "glm-4.1v-thinking-flash" => {
+                Some((vec![Chat], vec![ModelTrait::VisionInput]))
+            }
+            // GLM-4-Voice is an audio-input/output chat model, not ordinary
+            // speech synthesis; the current task taxonomy records Chat only.
+            "glm-4-voice" => Some((vec![Chat], vec![])),
+            _ => None,
+        },
+        "moonshot-cn" | "moonshot-global" => match base.as_str() {
+            "kimi-k3" | "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" | "kimi-k2.6"
+            | "kimi-k2.5" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
+            _ if base.contains("vision-preview") => {
+                Some((vec![Chat], vec![ModelTrait::VisionInput]))
+            }
+            _ => None,
+        },
+        "lingyi" if base == "yi-vision-v2" => {
+            Some((vec![Chat], vec![ModelTrait::VisionInput]))
+        }
+        "hunyuan" | "hunyuan-global" => match base.as_str() {
+            "hy-vision-2.0-instruct" | "hunyuan-t1-vision-20250916"
+            | "hunyuan-turbos-vision-video-20250728" | "youtu-vita" => {
+                Some((vec![Chat], vec![ModelTrait::VisionInput]))
+            }
+            "kinfra-text-embedding-0.6b" | "kinfra-text-embedding-4b" => {
+                Some((vec![Embedding], vec![]))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Seed a model's `(tasks, traits)` from its platform + name.
 ///
-/// Platform acts as a first-class authority where it is unambiguous (e.g.
-/// `stepfun-plan` is StepFun's image-only Step Plan product, so every model on
-/// it is an image model — this is why `step-image-edit-2` is correctly typed
-/// even though its name matches no generic image substring). Otherwise the
-/// model name drives the classification. A model that matches no specialized
-/// (image/video/audio/embedding/rerank) signal is treated as a Chat model.
+/// Platform acts as a first-class authority where it is unambiguous. Otherwise
+/// the model name drives the classification. A model that matches no
+/// specialized (image/video/audio/embedding/rerank) signal is treated as a
+/// Chat model.
 pub fn derive_tasks_and_traits(platform: &str, model: &str) -> (Vec<ModelTask>, Vec<ModelTrait>) {
+    if let Some(profile) = verified_provider_profile(platform, model) {
+        return profile;
+    }
+
     let base = base_model_name(model);
     let mut tasks: Vec<ModelTask> = Vec::new();
     let mut traits: Vec<ModelTrait> = Vec::new();
 
-    // 1. Platform-level authority.
-    if platform.eq_ignore_ascii_case("stepfun-plan") {
-        push_unique(&mut tasks, ModelTask::ImageGeneration);
-        push_unique(&mut tasks, ModelTask::ImageEdit);
-    }
-
-    // 2. Generation capabilities from the existing name heuristic.
+    // 1. Generation capabilities from the existing name heuristic.
     for cap in infer_generation_capabilities(model) {
         match cap {
             ModelType::ImageGeneration => push_unique(&mut tasks, ModelTask::ImageGeneration),
@@ -175,11 +282,11 @@ pub fn derive_tasks_and_traits(platform: &str, model: &str) -> (Vec<ModelTask>, 
         }
     }
 
-    // 3. Broader image signal: an "image" model id that the family list missed.
+    // 2. Broader image signal: an "image" model id that the family list missed.
     if base.contains("image") {
         push_unique(&mut tasks, ModelTask::ImageGeneration);
     }
-    // 4. Image editing signal (only meaningful for image models).
+    // 3. Image editing signal (only meaningful for image models).
     if !tasks.is_empty()
         && (tasks.contains(&ModelTask::ImageGeneration))
         && IMAGE_EDIT_INCLUDE.iter().any(|k| base.contains(k))
@@ -187,7 +294,7 @@ pub fn derive_tasks_and_traits(platform: &str, model: &str) -> (Vec<ModelTask>, 
         push_unique(&mut tasks, ModelTask::ImageEdit);
     }
 
-    // 5. Audio / embedding / rerank (mutually exclusive families, checked in priority order).
+    // 4. Audio / embedding / rerank (mutually exclusive families, checked in priority order).
     if RERANK_INCLUDE.iter().any(|k| base.contains(k)) {
         push_unique(&mut tasks, ModelTask::Rerank);
     } else if EMBEDDING_INCLUDE.iter().any(|k| base.contains(k)) {
@@ -198,12 +305,12 @@ pub fn derive_tasks_and_traits(platform: &str, model: &str) -> (Vec<ModelTask>, 
         push_unique(&mut tasks, ModelTask::SpeechSynthesis);
     }
 
-    // 6. Vision-input trait (a vision model is a Chat model that accepts images).
+    // 5. Vision-input trait (a vision model is a Chat model that accepts images).
     if infer_model_modalities(model).iter().any(|m| m == "vision") {
         traits.push(ModelTrait::VisionInput);
     }
 
-    // 7. Default: no specialized task means it is a Chat model.
+    // 6. Default: no specialized task means it is a Chat model.
     if tasks.is_empty() {
         tasks.push(ModelTask::Chat);
     }
@@ -233,13 +340,53 @@ mod tests {
     }
 
     #[test]
-    fn stepfun_plan_model_is_image_even_without_name_match() {
-        // The reported failing case: name matches no generic image substring,
-        // but the platform is StepFun's image-only Step Plan product.
-        let tasks = tasks_of("stepfun-plan", "step-image-edit-2");
-        assert!(tasks.contains(&ModelTask::ImageGeneration));
-        assert!(tasks.contains(&ModelTask::ImageEdit));
-        assert!(!tasks.contains(&ModelTask::Chat));
+    fn verified_mimo_audio_models_use_chat_wire_protocol_but_audio_tasks() {
+        assert_eq!(tasks_of("mimo", "mimo-v2.5-asr"), vec![ModelTask::SpeechRecognition]);
+        assert_eq!(tasks_of("mimo", "mimo-v2.5-tts"), vec![ModelTask::SpeechSynthesis]);
+        assert_eq!(tasks_of("mimo", "mimo-v2.5-tts-voiceclone"), vec![ModelTask::SpeechSynthesis]);
+    }
+
+    #[test]
+    fn mimo_pro_is_not_mistagged_as_vision_by_family_substring() {
+        let (_, pro_traits) = derive_tasks_and_traits("mimo", "mimo-v2.5-pro");
+        let (_, omni_traits) = derive_tasks_and_traits("mimo", "mimo-v2.5");
+        assert!(!pro_traits.contains(&ModelTrait::VisionInput));
+        assert!(omni_traits.contains(&ModelTrait::VisionInput));
+    }
+
+    #[test]
+    fn gpt_image_models_declare_generation_and_editing() {
+        assert_eq!(
+            tasks_of("openai", "gpt-image-2"),
+            vec![ModelTask::ImageGeneration, ModelTask::ImageEdit]
+        );
+    }
+
+    #[test]
+    fn current_minimax_media_models_do_not_fall_back_to_chat() {
+        assert_eq!(tasks_of("minimax", "MiniMax-H3"), vec![ModelTask::VideoGeneration]);
+        assert_eq!(tasks_of("minimax", "speech-2.8-hd"), vec![ModelTask::SpeechSynthesis]);
+    }
+
+    #[test]
+    fn verified_multi_task_image_models_are_filterable_in_both_picker_modes() {
+        for (platform, model) in [
+            ("gemini", "gemini-3.1-flash-image"),
+            ("stepfun-plan", "step-image-edit-2"),
+            ("xai", "grok-imagine-image"),
+        ] {
+            let tasks = tasks_of(platform, model);
+            assert!(tasks.contains(&ModelTask::ImageGeneration), "{platform}/{model}");
+            assert!(tasks.contains(&ModelTask::ImageEdit), "{platform}/{model}");
+        }
+    }
+
+    #[test]
+    fn stepfun_plan_router_is_chat() {
+        // Step Plan is a subscription chat-completions gateway. Treating the
+        // whole platform as image-only made its router/chat models impossible
+        // to select for conversations.
+        assert_eq!(tasks_of("stepfun-plan", "step-router-v1"), vec![ModelTask::Chat]);
     }
 
     #[test]

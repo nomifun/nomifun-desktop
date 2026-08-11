@@ -184,7 +184,7 @@ pub use office::{
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,
     DetectProtocolRequest, DetectedProtocol, DetectionSuggestion, FetchModelsAnonymousRequest,
-    FetchModelsRequest, FetchModelsResponse, HealthStatus, KeyTestResult,
+    FetchModelsRequest, FetchModelsResponse, FetchedModelProfile, HealthStatus, KeyTestResult,
     ModelHealthStatus, ModelInfo, ModelType, MultiKeyResult, ProtocolDetectionResponse,
     ProviderHealthCheckErrorKind, ProviderHealthCheckRequest, ProviderHealthCheckResponse,
     ProviderResponse, SuggestionType, UpdateProviderRequest,

@@ -61,5 +61,12 @@ export const platformHasNoModelsEndpoint = (platform?: string | null): boolean =
  * end-to-end validation.
  */
 export const platformSkipsPreSaveKeyProbe = (platform?: string | null): boolean => {
-  return platformHasNoModelsEndpoint(platform) || platform === 'stepfun';
+  return (
+    platformHasNoModelsEndpoint(platform) ||
+    platform === 'stepfun' ||
+    platform === 'zhipu' ||
+    platform === 'mimo-token-plan-cn' ||
+    platform === 'mimo-token-plan-sgp' ||
+    platform === 'mimo-token-plan-ams'
+  );
 };
