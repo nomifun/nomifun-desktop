@@ -20,7 +20,7 @@ use nomifun_common::{ConversationId, MessageId, now_ms};
 use nomifun_conversation::stream_relay::{RelayTerminal, StreamRelay};
 use nomifun_db::{
     IConversationRepository, SortOrder, SqliteConversationRepository, init_database_memory,
-    models::{ConversationRow, MessageRow},
+    models::ConversationRow,
 };
 use nomifun_realtime::BroadcastEventBus;
 use serde_json::{Value, json};
@@ -110,27 +110,6 @@ fn artifact_items(content: &Value) -> Vec<PersistedArtifact> {
         .collect()
 }
 
-async fn insert_turn_parent(
-    repo: &SqliteConversationRepository,
-    conversation_id: &str,
-    turn_id: &str,
-) {
-    repo.insert_message(&MessageRow {
-        id: 0,
-        message_id: turn_id.to_owned(),
-        conversation_id: conversation_id.to_owned(),
-        msg_id: Some(turn_id.to_owned()),
-        r#type: "system".to_owned(),
-        content: r#"{"kind":"turn_root"}"#.to_owned(),
-        position: Some("center".to_owned()),
-        status: Some("finish".to_owned()),
-        hidden: true,
-        created_at: now_ms(),
-    })
-    .await
-    .expect("insert logical root turn message");
-}
-
 #[tokio::test]
 async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished() {
     let (repo, _db, conversation_id, owner) = setup_repo().await;
@@ -153,8 +132,6 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
         )
         .expect("persist verified image receipt");
     let artifact = artifact.into_iter().next().expect("one image receipt");
-    insert_turn_parent(&repo, &conversation_id, &root_turn_id).await;
-
     let bus = Arc::new(BroadcastEventBus::new(64));
     let mut live_rx = bus.subscribe_user();
     let (tx, _) = broadcast::channel(64);
@@ -243,6 +220,20 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
 
     let outcome = relay.consume(rx).await;
     assert_eq!(outcome.terminal, RelayTerminal::Finish);
+    assert_eq!(outcome.committed_artifact_count, 1);
+
+    let root = repo
+        .get_message(&conversation_id, &root_turn_id)
+        .await
+        .expect("load logical turn root")
+        .expect("relay persisted logical turn root");
+    assert_eq!(root.r#type, "turn_root");
+    assert_eq!(root.msg_id.as_deref(), Some(root_turn_id.as_str()));
+    assert!(root.hidden);
+    assert_eq!(
+        serde_json::from_str::<Value>(&root.content).expect("parse logical root")["kind"],
+        "turn_root"
+    );
 
     // Query the real SQLite repository, as the history endpoint does before
     // DTO normalization. There must be no provisional row left behind.
@@ -323,7 +314,6 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
 async fn enclosing_finish_closes_an_unfinished_acp_projection_in_real_history() {
     let (repo, _db, conversation_id, owner) = setup_repo().await;
     let root_turn_id = MessageId::new().into_string();
-    insert_turn_parent(&repo, &conversation_id, &root_turn_id).await;
     let wire_segment_id = MessageId::new().into_string();
     let bus = Arc::new(BroadcastEventBus::new(32));
     let (tx, _) = broadcast::channel(32);
@@ -387,7 +377,6 @@ async fn enclosing_finish_closes_an_unfinished_acp_projection_in_real_history() 
 async fn continuation_reused_call_ids_keep_distinct_wire_rows_with_one_root_owner() {
     let (repo, _db, conversation_id, owner) = setup_repo().await;
     let root_turn_id = MessageId::new().into_string();
-    insert_turn_parent(&repo, &conversation_id, &root_turn_id).await;
 
     for index in 0..2 {
         let wire_segment_id = MessageId::new().into_string();
@@ -469,6 +458,8 @@ async fn continuation_reused_call_ids_keep_distinct_wire_rows_with_one_root_owne
         .collect::<Vec<_>>();
     assert_eq!(text_rows.len(), 2);
     for row in text_rows {
+        assert_ne!(row.message_id, root_turn_id);
+        assert_eq!(row.msg_id.as_deref(), Some(row.message_id.as_str()));
         let content: Value = serde_json::from_str(&row.content).expect("parse assistant text row");
         assert_eq!(
             content["turn_id"], root_turn_id,

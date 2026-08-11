@@ -27,11 +27,11 @@ use crate::repository::conversation::{
 /// keeps this day key identical to the companion domain's `session_day`.
 const LOCAL_DAY_EXPR: &str = "strftime('%Y%m%d', created_at / 1000, 'unixepoch', 'localtime')";
 
-/// The rows a human can actually read back: the two synthetic types the whole
+/// The rows a human can actually read back: synthetic protocol types the whole
 /// message API already hides, minus hidden engine plumbing. Shared by the day
 /// index and the day read so a day never renders rows its index did not count.
 const VISIBLE_MESSAGE_PREDICATE: &str =
-    "type NOT IN ('cron_trigger', 'skill_suggest') AND hidden = 0";
+    "type NOT IN ('cron_trigger', 'skill_suggest', 'turn_root') AND hidden = 0";
 
 /// SQLite-backed implementation of [`IConversationRepository`].
 #[derive(Clone, Debug)]
@@ -4390,7 +4390,7 @@ impl IConversationRepository for SqliteConversationRepository {
         let count_row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM messages \
                  WHERE conversation_id = ? \
-                   AND type NOT IN ('cron_trigger', 'skill_suggest')",
+                   AND type NOT IN ('cron_trigger', 'skill_suggest', 'turn_root')",
         )
         .bind(conversation_id)
         .fetch_one(&self.pool)
@@ -4400,7 +4400,7 @@ impl IConversationRepository for SqliteConversationRepository {
         let sql = format!(
             "SELECT * FROM messages \
              WHERE conversation_id = ? \
-               AND type NOT IN ('cron_trigger', 'skill_suggest') \
+               AND type NOT IN ('cron_trigger', 'skill_suggest', 'turn_root') \
              ORDER BY created_at {}, message_id {} \
              LIMIT ? OFFSET ?",
             order.as_sql(),
@@ -4441,7 +4441,7 @@ impl IConversationRepository for SqliteConversationRepository {
             sqlx::query_as::<_, MessageRow>(
                 "SELECT * FROM messages \
                  WHERE conversation_id = ? \
-                   AND type NOT IN ('cron_trigger', 'skill_suggest') \
+                   AND type NOT IN ('cron_trigger', 'skill_suggest', 'turn_root') \
                    AND (created_at < ? OR (created_at = ? AND message_id < ?)) \
                  ORDER BY created_at DESC, message_id DESC \
                  LIMIT ?",
@@ -4457,7 +4457,7 @@ impl IConversationRepository for SqliteConversationRepository {
             sqlx::query_as::<_, MessageRow>(
                 "SELECT * FROM messages \
                  WHERE conversation_id = ? \
-                   AND type NOT IN ('cron_trigger', 'skill_suggest') \
+                   AND type NOT IN ('cron_trigger', 'skill_suggest', 'turn_root') \
                  ORDER BY created_at DESC, message_id DESC \
                  LIMIT ?",
             )
@@ -5147,7 +5147,8 @@ impl IConversationRepository for SqliteConversationRepository {
         let count_row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM messages m \
              INNER JOIN conversations c ON m.conversation_id = c.conversation_id \
-             WHERE c.user_id = ? AND m.content LIKE ?",
+             WHERE c.user_id = ? AND m.content LIKE ? \
+               AND m.type <> 'turn_root'",
         )
         .bind(user_id)
         .bind(&like_pattern)
@@ -5180,6 +5181,7 @@ impl IConversationRepository for SqliteConversationRepository {
              FROM messages m \
              INNER JOIN conversations c ON m.conversation_id = c.conversation_id \
              WHERE c.user_id = ? AND m.content LIKE ? \
+               AND m.type <> 'turn_root' \
              ORDER BY m.created_at DESC \
              LIMIT ? OFFSET ?",
         )
