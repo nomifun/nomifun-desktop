@@ -78,6 +78,18 @@ use std::sync::RwLock;
 
 const MAX_CRON_CONTINUATIONS_PER_TURN: usize = 4;
 const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
+/// Where a managed workspace token goes once the conversation has been bound to
+/// a real project directory.
+///
+/// `temp_workspace_id` is BOTH the rebase marker (`get`/`list` recompute
+/// `extra.workspace` from it on every read, so a data-root move can never leave
+/// a stale absolute path) AND the delete-time cleanup token for the throwaway
+/// directory. Binding a workspace must stop the first behaviour — otherwise the
+/// user's chosen directory is silently overwritten on the next read — without
+/// losing the second, so the token is renamed rather than dropped. Only
+/// `temp_workspace_id` drives rebasing; both keys are honoured when reclaiming
+/// the temp directory during delete.
+const RETIRED_TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "retired_temp_workspace_id";
 pub(crate) const PUBLIC_IDEMPOTENCY_KEY_MAX_BYTES: usize = 128;
 /// Origin marker of a spec-D2 delivery-notify receipt message. A turn whose
 /// durable request payload carries this origin may never register another
@@ -127,6 +139,10 @@ pub(crate) fn strip_clone_instance_state(extra: &mut serde_json::Value) {
         "custom_workspace",
         "is_temporary_workspace",
         TEMP_WORKSPACE_ID_EXTRA_KEY,
+        // A retired token still names a directory under THIS installation's
+        // workspace root: inheriting it would make deleting the clone reclaim
+        // the source conversation's temp directory.
+        RETIRED_TEMP_WORKSPACE_ID_EXTRA_KEY,
         "workspace_id",
         "workspaceId",
         // ACP/runtime resume snapshots.
@@ -5013,6 +5029,7 @@ impl ConversationService {
             merge_json(&mut existing_extra, new_extra);
             if new_extra.get("workspace").is_some() {
                 normalize_workspace_extra(&mut existing_extra)?;
+                retire_temp_workspace_marker_after_bind(new_extra, &mut existing_extra);
             }
             Some(
                 serde_json::to_string(&existing_extra)
@@ -12755,6 +12772,51 @@ fn temp_workspace_marker_present(extra: &serde_json::Value) -> bool {
         .is_some_and(|object| object.contains_key(TEMP_WORKSPACE_ID_EXTRA_KEY))
 }
 
+/// Hand the managed-workspace token over to [`RETIRED_TEMP_WORKSPACE_ID_EXTRA_KEY`]
+/// when a PATCH explicitly bound this conversation to a real directory.
+///
+/// Without this the bind is silently reverted: `get`/`list` run
+/// [`rebase_managed_workspace_in_row`], which sees the marker and overwrites
+/// `extra.workspace` with the derived temp path again. Deleting the key outright
+/// is not an option either — it is also the token used to reclaim the throwaway
+/// directory on delete — so it is renamed, and the delete path accepts both
+/// names.
+///
+/// Only an explicit non-empty `workspace` string retires the marker: a PATCH
+/// that carries `workspace: ""` or a non-string value has not bound anything,
+/// and must leave the managed workspace exactly as it was.
+fn retire_temp_workspace_marker_after_bind(
+    requested_extra: &serde_json::Value,
+    merged_extra: &mut serde_json::Value,
+) {
+    let bound = requested_extra
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|workspace| !workspace.trim().is_empty());
+    if !bound {
+        return;
+    }
+    let Some(object) = merged_extra.as_object_mut() else {
+        return;
+    };
+    if let Some(token) = object.remove(TEMP_WORKSPACE_ID_EXTRA_KEY) {
+        object.insert(RETIRED_TEMP_WORKSPACE_ID_EXTRA_KEY.to_owned(), token);
+    }
+}
+
+/// The retired managed-workspace token of a bound conversation, if any.
+///
+/// Rebasing deliberately ignores this key (a bound conversation must keep the
+/// directory the user chose); only temp-directory reclamation reads it, so
+/// binding a workspace never orphans the throwaway directory it replaced.
+fn retired_temp_workspace_id_from_extra(extra: &serde_json::Value) -> Option<&str> {
+    extra
+        .get(RETIRED_TEMP_WORKSPACE_ID_EXTRA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 fn require_temp_workspace_id<'a>(
     extra: &'a serde_json::Value,
     conversation_id: &str,
@@ -12821,14 +12883,26 @@ fn managed_temp_workspace_path_from_row(
             row.conversation_id
         ))
     })?;
-    if !temp_workspace_marker_present(&extra) {
-        return Ok(None);
+    if temp_workspace_marker_present(&extra) {
+        let temp_workspace_id = require_temp_workspace_id(&extra, &row.conversation_id)?;
+        return Ok(Some(auto_temp_workspace_path(
+            workspace_root,
+            temp_workspace_id,
+        )));
     }
-    let temp_workspace_id = require_temp_workspace_id(&extra, &row.conversation_id)?;
-    Ok(Some(auto_temp_workspace_path(
-        workspace_root,
-        temp_workspace_id,
-    )))
+    // A conversation that has since been bound to a real project directory
+    // still owns the throwaway directory it started in; the retired token is
+    // what lets delete reclaim it instead of leaking it on disk forever.
+    let Some(retired) = retired_temp_workspace_id_from_extra(&extra) else {
+        return Ok(None);
+    };
+    validate_uuidv7(retired).map_err(|error| {
+        AppError::Internal(format!(
+            "conversation {} has invalid retired_temp_workspace_id '{retired}': {error}",
+            row.conversation_id
+        ))
+    })?;
+    Ok(Some(auto_temp_workspace_path(workspace_root, retired)))
 }
 
 fn rebase_managed_workspace_in_row(
