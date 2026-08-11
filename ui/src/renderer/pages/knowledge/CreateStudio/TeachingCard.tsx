@@ -131,9 +131,9 @@ const TeachingCard: React.FC<TeachingCardProps> = ({ sourceType }) => {
   const rows = getTeachRows(sourceType);
 
   return (
-    <div className='knowledge-studio-teaching-card mt-12px rounded-16px bg-[var(--color-bg-2)] p-14px shadow-[0_10px_30px_rgba(15,23,42,0.035)]'>
+    <div className='knowledge-studio-teaching-card mt-10px rounded-16px bg-[var(--color-bg-2)] p-12px shadow-[0_10px_30px_rgba(15,23,42,0.035)]'>
       {/* Header */}
-      <div className='mb-10px flex items-center gap-8px text-12px font-700 text-[var(--color-text-1)]'>
+      <div className='mb-8px flex items-center gap-7px text-12px font-700 text-[var(--color-text-1)]'>
         <span className='grid size-24px place-items-center rounded-8px bg-[rgba(var(--primary-6),0.08)] text-primary-6'>
           <Info theme='outline' size='14' />
         </span>
@@ -141,9 +141,9 @@ const TeachingCard: React.FC<TeachingCardProps> = ({ sourceType }) => {
       </div>
 
       {/* Rows */}
-      <div className='grid gap-6px'>
+      <div className='grid gap-5px'>
         {rows.map((row, idx) => (
-          <div key={idx} className='flex gap-10px rounded-10px bg-[var(--color-fill-1)] px-10px py-7px text-12px leading-relaxed text-[var(--color-text-2)]'>
+          <div key={idx} className='flex gap-8px rounded-10px bg-[var(--color-fill-1)] px-9px py-6px text-12px leading-relaxed text-[var(--color-text-2)]'>
             <span className='w-54px flex-none font-600 text-[var(--color-text-1)]'>
               {t(row.labelKey, { defaultValue: row.labelDefault })}
             </span>

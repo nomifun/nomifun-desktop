@@ -27,6 +27,7 @@ import type { SourceConfigValue } from './SourceConfig';
 import TeachingCard from './TeachingCard';
 import TypeRail from './TypeRail';
 import TagPicker from './TagPicker';
+import styles from './CreateStudio.module.css';
 import {
   canSubmitStudioSourceConfig,
   canSubmitStudioSourceType,
@@ -47,10 +48,10 @@ export interface CreateStudioProps {
 }
 
 const studioFieldClass =
-  'knowledge-studio-field rounded-14px bg-[var(--color-bg-2)] p-12px shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)]';
+  'knowledge-studio-field rounded-14px bg-[var(--color-bg-2)] p-10px shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)]';
 
 const studioInputClass =
-  'knowledge-studio-input w-full rounded-12px border border-solid border-transparent bg-[var(--color-fill-1)] px-13px py-11px text-13px text-[var(--color-text-1)] outline-none font-[inherit] transition-[background-color,border-color,box-shadow,color] placeholder:text-[var(--color-text-4)] hover:bg-[var(--color-fill-2)] focus:border-[rgba(var(--primary-6),0.36)] focus:bg-[var(--color-bg-2)] focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
+  'knowledge-studio-input w-full rounded-12px border border-solid border-transparent bg-[var(--color-fill-1)] px-12px py-9px text-13px text-[var(--color-text-1)] outline-none font-[inherit] transition-[background-color,border-color,box-shadow,color] placeholder:text-[var(--color-text-4)] hover:bg-[var(--color-fill-2)] focus:border-[rgba(var(--primary-6),0.36)] focus:bg-[var(--color-bg-2)] focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]';
 
 const studioActionClass =
   'knowledge-studio-ai-action inline-flex items-center gap-4px border-0 bg-transparent p-0 text-12px font-500 leading-20px text-[var(--color-text-2)] appearance-none transition-colors hover:text-primary-6 focus-visible:outline-none focus-visible:text-primary-6';
@@ -298,8 +299,6 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
     ? { width: '100vw', maxWidth: '100vw', top: 0, padding: 0, borderRadius: 0 }
     : { width: 1000, maxWidth: '92vw', borderRadius: 16 };
 
-  const modalClassName = isMobile ? 'create-studio-modal--mobile' : '';
-
   const studioViewportHeight = isMobile
     ? 'calc(100dvh - 48px)'
     : 'min(760px, calc(100dvh - 80px))';
@@ -317,7 +316,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
       mountOnEnter
       unmountOnExit
       style={modalStyle}
-      className={modalClassName}
+      className={[styles.modal, isMobile ? styles.mobileModal : ''].filter(Boolean).join(' ')}
       maskClosable
     >
       <div
@@ -325,7 +324,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
         style={{ height: studioViewportHeight, maxHeight: studioViewportHeight }}
       >
         {/* ─── Header ──────────────────────────────────────────────────────── */}
-        <div className='flex shrink-0 items-start justify-between gap-16px border-b border-b-solid border-b-[var(--color-border)] px-24px pb-16px pt-20px'>
+        <div className='flex shrink-0 items-start justify-between gap-14px border-b border-b-solid border-b-[var(--color-border)] px-20px pb-12px pt-16px'>
           <div>
             <h2 className='m-0 text-19px font-700 text-[var(--color-text-1)]'>
               {t('knowledge.studio.title', { defaultValue: '新建知识库' })}
@@ -355,10 +354,10 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
           <TypeRail value={sourceType} onChange={setSourceType} />
 
           {/* Right config area */}
-          <div className='knowledge-studio-config-panel min-h-0 flex-1 overflow-y-auto bg-[var(--color-fill-1)] p-22px'>
+          <div className='knowledge-studio-config-panel min-h-0 flex-1 overflow-y-auto bg-[var(--color-fill-1)] p-16px'>
             {/* ─── Basic Info Section ──────────────────────────────────────── */}
-            <div className='knowledge-studio-basic-card mb-14px rounded-16px bg-[var(--color-bg-2)] p-16px shadow-[0_10px_30px_rgba(15,23,42,0.04)]'>
-              <div className='mb-14px flex items-start justify-between gap-12px'>
+            <div className='knowledge-studio-basic-card mb-12px rounded-16px bg-[var(--color-bg-2)] p-14px shadow-[0_10px_30px_rgba(15,23,42,0.04)]'>
+              <div className='mb-10px flex items-start justify-between gap-10px'>
                 <div>
                   <div className='text-13px font-700 text-[var(--color-text-1)]'>
                     {t('knowledge.studio.basicInfoTitle', { defaultValue: '基本信息' })}
@@ -374,7 +373,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
 
               {/* Name (required) */}
               <div className={studioFieldClass}>
-                <label className='mb-7px block text-13px font-500 text-[var(--color-text-2)]'>
+                <label className='mb-5px block text-13px font-500 text-[var(--color-text-2)]'>
                   <span className='text-warning-6'>*</span>{' '}
                   {t('knowledge.studio.nameLabel', { defaultValue: '名称' })}
                 </label>
@@ -388,15 +387,15 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
               </div>
 
               {/* Description */}
-              <div className={`${studioFieldClass} mt-10px`}>
-                <label className='mb-7px block text-13px font-500 text-[var(--color-text-2)]'>
+              <div className={`${studioFieldClass} mt-8px`}>
+                <label className='mb-5px block text-13px font-500 text-[var(--color-text-2)]'>
                   {t('knowledge.studio.descLabel', { defaultValue: '描述' })}
                   <span className='ml-6px font-400 text-[var(--color-text-3)] text-11px'>
                     {t('knowledge.studio.descHint', { defaultValue: '会注入会话提示词，帮 AI 判断何时查阅此库' })}
                   </span>
                 </label>
                 <textarea
-                  className={`${studioInputClass} min-h-82px resize-y`}
+                  className={`${studioInputClass} min-h-72px resize-y`}
                   placeholder={t('knowledge.studio.descPlaceholder', { defaultValue: '这个知识库收录什么、什么场景下该查阅它' })}
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
@@ -405,7 +404,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
                 />
 
                 {/* AI action row */}
-                <div className='knowledge-studio-ai-actions mt-9px flex flex-wrap items-center gap-8px'>
+                <div className='knowledge-studio-ai-actions mt-7px flex flex-wrap items-center gap-6px'>
                   {/* AI Generate (only for local with rootPath) */}
                   <Tooltip disabled={canGenerate} content={t('knowledge.studio.aiGenerateNeedPath', { defaultValue: '需要先选择本地目录' })}>
                     <button
@@ -462,8 +461,8 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
               </div>
 
               {/* Tags */}
-              <div className={`${studioFieldClass} mt-10px`}>
-                <label className='mb-7px block text-13px font-500 text-[var(--color-text-2)]'>
+              <div className={`${studioFieldClass} mt-8px`}>
+                <label className='mb-5px block text-13px font-500 text-[var(--color-text-2)]'>
                   {t('knowledge.studio.tagLabel', { defaultValue: '标签' })}
                   <span className='ml-6px font-400 text-[var(--color-text-3)] text-11px'>
                     {t('knowledge.studio.tagHint', { defaultValue: '可选，方便分类筛选' })}
@@ -485,7 +484,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
         </div>
 
         {/* ─── Footer ──────────────────────────────────────────────────────── */}
-        <div className='flex shrink-0 items-center justify-between gap-12px border-t border-t-solid border-t-[var(--color-border)] bg-[var(--color-bg-1)] px-24px py-14px'>
+        <div className='flex shrink-0 items-center justify-between gap-10px border-t border-t-solid border-t-[var(--color-border)] bg-[var(--color-bg-1)] px-20px py-10px'>
           {/* Left hint */}
           <div className='flex items-center gap-7px text-12px text-[var(--color-text-3)]'>
             <span className='rounded-6px bg-[var(--color-success-light-1)] px-7px py-2px text-10px font-600 text-success-6'>

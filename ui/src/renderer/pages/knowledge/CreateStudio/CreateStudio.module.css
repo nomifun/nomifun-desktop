@@ -1,0 +1,7 @@
+.modal :global(.arco-modal-content) {
+  padding: 10px 12px;
+}
+
+.mobileModal :global(.arco-modal-content) {
+  padding: 0;
+}

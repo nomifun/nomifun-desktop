@@ -40,6 +40,12 @@ export interface GuidCollaboratorSelectorProps {
   /** Optional extra class merged onto the trigger button so callers (e.g. the
    * conversation composer) can restyle the pill. */
   className?: string;
+  /** Optional content rendered below the model/template controls. */
+  panelFooter?: React.ReactNode;
+  /** Optional unified label used when this selector fronts a larger control. */
+  triggerLabel?: string;
+  /** Highlights a unified trigger when collaboration is enabled. */
+  triggerActive?: boolean;
 }
 
 /** Case-insensitive substring match against an option's text label. */
@@ -60,6 +66,9 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
   onTemplateApply,
   onTemplateClear,
   className,
+  panelFooter,
+  triggerLabel,
+  triggerActive = false,
 }) => {
   const { t } = useTranslation();
   const { providers, getAvailableModels, formatModelLabel, allPairs, hasModels, isLoading } = useExecutionModelPool();
@@ -180,27 +189,43 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
           onApply={onTemplateApply}
           onClear={onTemplateClear}
         />
+        {panelFooter}
       </div>
     </div>
   );
 
+  const visibleLabel = triggerLabel ?? label;
+
   return (
     <Dropdown trigger='click' popupVisible={open} onVisibleChange={setOpen} droplist={panel} position='tr'>
       <Button
-        className={classNames('sendbox-model-btn guid-config-btn', className)}
+        className={classNames(
+          'sendbox-model-btn guid-config-btn',
+          triggerActive && ocStyles.collaborationTriggerActive,
+          className,
+        )}
         shape='round'
         size='small'
         disabled={isLoading}
         data-testid='guid-collaborator-selector'
-        aria-label={label}
+        aria-label={visibleLabel}
+        aria-pressed={triggerLabel ? triggerActive : undefined}
       >
         <span className='flex items-center gap-6px min-w-0'>
-          <Branch theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
-          <span className='sendbox-responsive-label truncate'>{label}</span>
+          <Branch
+            theme='outline'
+            size='14'
+            fill={triggerActive ? 'currentColor' : iconColors.secondary}
+            className='shrink-0'
+          />
+          <span className='sendbox-responsive-label truncate'>{visibleLabel}</span>
+          {triggerLabel && triggerActive && (
+            <span className={ocStyles.collaborationTriggerStatus} aria-hidden='true' />
+          )}
           <Down
             theme='outline'
             size='12'
-            fill={iconColors.secondary}
+            fill={triggerActive ? 'currentColor' : iconColors.secondary}
             className='sendbox-responsive-chevron shrink-0'
           />
         </span>

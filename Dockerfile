@@ -4,8 +4,11 @@
 # can point at registry-compatible mirrors without editing this file. The slim
 # Rust image avoids downloading the full buildpack image on first install.
 ARG BUN_IMAGE="oven/bun:1"
-ARG RUST_IMAGE="rust:1-slim-bookworm"
-ARG RUNTIME_IMAGE="debian:bookworm-slim"
+ARG NODE_IMAGE="node:22-bookworm-slim"
+# The bundled ONNX Runtime archive requires the newer glibc/C++ ABI in Trixie.
+# Keep the source-build and runtime distributions aligned.
+ARG RUST_IMAGE="rust:1-slim-trixie"
+ARG RUNTIME_IMAGE="debian:trixie-slim"
 
 # ============================================================================
 # nomifun-web — headless WebUI server image (no GUI / WebView; runs anywhere)
@@ -21,6 +24,7 @@ ARG RUNTIME_IMAGE="debian:bookworm-slim"
 
 # ---- Stage 1: build the SPA -------------------------------------------------
 FROM ${BUN_IMAGE} AS bun-base
+FROM ${NODE_IMAGE} AS node-base
 FROM bun-base AS ui
 WORKDIR /app
 # Install deps first for layer caching (only re-runs when manifests change).
@@ -94,13 +98,21 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi
 RUN apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-        ca-certificates git ripgrep \
+        ca-certificates git python3 python3-yaml ripgrep \
     && rm -rf /var/lib/apt/lists/*
 # bun is a hard runtime dependency of the agent engine (>= 1.3.13).
 COPY --from=bun-base /usr/local/bin/bun /usr/local/bin/bun
-# Optional: user-configured MCP stdio servers often launch via `npx`.
-# RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
-#     && rm -rf /var/lib/apt/lists/*
+# Node/npm/npx power stdio MCP servers and the OfficeCLI install path. Copying
+# the LTS runtime avoids Debian bookworm's older Node package.
+COPY --from=node-base /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-base /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && bun --version \
+    && node --version \
+    && npm --version \
+    && npx --version \
+    && python3 -c "import yaml"
 
 COPY --from=rust /usr/local/bin/nomifun-web /usr/local/bin/nomifun-web
 COPY --from=ui   /app/ui/dist                    /opt/nomifun/web

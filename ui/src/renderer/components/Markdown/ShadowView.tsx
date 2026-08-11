@@ -10,6 +10,7 @@ import ReactDOM from 'react-dom';
 import { addImportantToAll } from '@renderer/utils/theme/customCssProcessor';
 import { configService } from '@/common/config/configService';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
+import markdownTypographyCss from './MarkdownTypography.css?raw';
 
 /**
  * Create the base style element for Shadow DOM with CSS variables, theme styles, and optional custom CSS.
@@ -20,8 +21,7 @@ const createInitStyle = (
   customCss?: string,
   isMobile?: boolean,
   fontSize?: string,
-  lineHeight?: string,
-  compact = false
+  lineHeight?: string
 ) => {
   const style = document.createElement('style');
   // Inject external CSS variables into Shadow DOM for dark mode support
@@ -33,156 +33,18 @@ const createInitStyle = (
 
   const resolvedFontSize = fontSize ?? (isMobile ? '14px' : '16px');
   const resolvedLineHeight = lineHeight ?? (isMobile ? '19.6px' : '28px');
-  const usesExplicitTypography = Boolean(fontSize || lineHeight);
-  const compactTypographyCss = compact
-    ? `
-  * {
-    font-size: 14px;
-    line-height: 22px;
-  }
-  .markdown-shadow-body h1 {
-    margin: 0 0 12px;
-    font-size: 22px;
-    line-height: 30px;
-  }
-  .markdown-shadow-body h2 {
-    margin: 16px 0 7px;
-    font-size: 18px;
-    line-height: 26px;
-  }
-  .markdown-shadow-body h3 {
-    margin: 14px 0 6px;
-    font-size: 16px;
-    line-height: 24px;
-  }
-  .markdown-shadow-body h4,
-  .markdown-shadow-body h5,
-  .markdown-shadow-body h6 {
-    margin: 12px 0 5px;
-    font-size: 14px;
-    line-height: 22px;
-  }
-  .markdown-shadow-body p {
-    margin-block-start: 8px;
-    margin-block-end: 8px;
-  }
-  .markdown-shadow-body ol,
-  .markdown-shadow-body ul {
-    margin-block-start: 7px;
-    margin-block-end: 7px;
-    padding-inline-start: 20px;
-  }
-  .markdown-shadow-body li {
-    margin-block-start: 2px;
-    margin-block-end: 2px;
-  }
-  .markdown-shadow-body hr {
-    margin: 16px 0;
-  }
-  .markdown-shadow-body blockquote {
-    margin: 10px 0;
-    padding-left: 10px;
-    border-left-width: 2px;
-  }
-  .markdown-shadow-body pre {
-    margin-block-start: 6px;
-    margin-block-end: 6px;
-  }
-  `
-    : '';
 
   style.innerHTML = `
   /* Shadow DOM CSS variable definitions */
   :host {
     ${cssVarsDeclaration}
+    --markdown-body-font-size: ${resolvedFontSize};
+    --markdown-body-line-height: ${resolvedLineHeight};
+    --markdown-link-color: ${theme.Color.PrimaryColor};
   }
 
   * {
-    line-height:${resolvedLineHeight};
-    font-size:${resolvedFontSize};
     color: inherit;
-  }
-
-  .markdown-shadow-body {
-    word-break: break-word;
-    overflow-wrap: anywhere;
-    color: var(--text-primary);
-    max-width: 100%;
-  }
-  .markdown-shadow-body>p:first-child
-  {
-    margin-top:0px;
-  }
-  h1,h2,h3,h4,h5,h6{
-    margin-block-start:0px;
-    margin-block-end:0px;
-  }
-  .markdown-shadow-body p {
-    margin-block-start: ${usesExplicitTypography ? '10px' : '16px'};
-    margin-block-end: ${usesExplicitTypography ? '10px' : '16px'};
-  }
-  .markdown-shadow-body li {
-    margin-block-start: ${usesExplicitTypography ? '4px' : '6px'};
-    margin-block-end: ${usesExplicitTypography ? '4px' : '6px'};
-  }
-  a{
-    color:${theme.Color.PrimaryColor};
-    text-decoration: none;
-    cursor: pointer;
-    word-break: break-all;
-    overflow-wrap: anywhere;
-  }
-  h1{
-    font-size: ${usesExplicitTypography ? resolvedFontSize : '24px'};
-    line-height: ${usesExplicitTypography ? resolvedLineHeight : '32px'};
-    font-weight: bold;
-  }
-  h2,h3,h4,h5,h6{
-    font-size: ${usesExplicitTypography ? resolvedFontSize : '16px'};
-    line-height: ${usesExplicitTypography ? resolvedLineHeight : '24px'};
-    font-weight: bold;
-    margin-top: ${usesExplicitTypography ? '12px' : '20px'};
-    margin-bottom: ${usesExplicitTypography ? '8px' : '12px'};
-  }
-  code span{
-    font-size:13px;
-    line-height:20px;
-  }
-
-  .markdown-shadow-body>p:last-child{
-    margin-bottom:0px;
-  }
-  ol, ul {
-    padding-inline-start:24px;
-  }
-  hr {
-    border: none;
-    border-top: 1px solid var(--bg-3);
-    margin: 28px 0;
-  }
-  strong {
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-  .markdown-shadow-body code:not(pre code) {
-    background: var(--bg-3);
-    color: var(--text-primary);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.92em;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  blockquote {
-    border-left: 3px solid var(--bg-3);
-    padding-left: 12px;
-    color: var(--text-primary);
-    margin: 16px 0;
-  }
-  pre {
-    max-width: 100%;
-    overflow-x: auto;
-    margin-block-start: 8px;
-    margin-block-end: 8px;
   }
   /* Code block horizontal scrollbar — blends with bg-2 */
   pre,
@@ -210,44 +72,6 @@ const createInitStyle = (
   .hljs::-webkit-scrollbar-thumb:hover {
     background-color: ${currentTheme === 'dark' ? 'rgba(255, 255, 255, 0.28)' : 'rgba(0, 0, 0, 0.2)'};
   }
-  img {
-    max-width: 100%;
-    height: auto;
-  }
-   /* Table border styles */
-  table {
-    border-collapse: collapse;
-    th{
-      padding: 8px;
-      border: 1px solid var(--bg-3);
-      background-color: var(--bg-1);
-      font-weight: bold;
-    }
-    td{
-        padding: 8px;
-        border: 1px solid var(--bg-3);
-        min-width: 120px;
-    }
-  }
-  /* Inline code should wrap on small screens to avoid horizontal overflow */
-  .markdown-shadow-body code {
-    word-break: break-word;
-    overflow-wrap: anywhere;
-    max-width: 100%;
-  }
-  /* Allow KaTeX to use its own line-height for proper fraction/superscript rendering */
-  .katex,
-  .katex * {
-    line-height: normal;
-  }
-
-  /* Display math: only scroll horizontally when formula exceeds container width */
-  .katex-display {
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding: 0.5em 0;
-  }
-
   .loading {
     animation: loading 1s linear infinite;
   }
@@ -262,7 +86,7 @@ const createInitStyle = (
     }
   }
 
-  ${compactTypographyCss}
+  ${markdownTypographyCss}
 
   /* User Custom CSS (injected into Shadow DOM) */
   ${customCss || ''}
@@ -324,12 +148,10 @@ const ShadowView = ({
   children,
   fontSize,
   lineHeight,
-  compact = false,
 }: {
   children: React.ReactNode;
   fontSize?: string;
   lineHeight?: string;
-  compact?: boolean;
 }) => {
   const [root, setRoot] = useState<ShadowRoot | null>(null);
   const styleRef = React.useRef<HTMLStyleElement | null>(null);
@@ -382,7 +204,7 @@ const ShadowView = ({
       if (styleRef.current) {
         styleRef.current.remove();
       }
-      const newStyle = createInitStyle(currentTheme, cssVars, customCss, isMobile, fontSize, lineHeight, compact);
+      const newStyle = createInitStyle(currentTheme, cssVars, customCss, isMobile, fontSize, lineHeight);
       styleRef.current = newStyle;
       shadowRoot.appendChild(newStyle);
 
@@ -393,7 +215,7 @@ const ShadowView = ({
         shadowRoot.adoptedStyleSheets = [...shadowRoot.adoptedStyleSheets, katexSheet];
       }
     },
-    [compact, customCss, fontSize, isMobile, lineHeight]
+    [customCss, fontSize, isMobile, lineHeight]
   );
 
   React.useEffect(() => {
