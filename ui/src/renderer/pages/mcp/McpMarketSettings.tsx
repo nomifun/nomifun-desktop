@@ -24,6 +24,57 @@ import {
 
 type McpMarketSettingsProps = {
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
+  mcpServers: IMcpServer[];
+  addedStateLoading?: boolean;
+};
+
+const MCP_MARKET_ORIGIN_KEY = '_nomifun_market';
+
+export const attachMcpMarketOrigin = (originalJson: string, marketItemId: string): string => {
+  let original: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(originalJson) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      original = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Importable market configs normally contain valid JSON. Keep provenance
+    // even if an upstream formatter produced malformed original_json.
+  }
+  return JSON.stringify(
+    {
+      ...original,
+      [MCP_MARKET_ORIGIN_KEY]: { version: 1, item_id: marketItemId },
+    },
+    null,
+    2
+  );
+};
+
+export const getMcpMarketOrigin = (server: Pick<IMcpServer, 'original_json'>): string | null => {
+  try {
+    const parsed = JSON.parse(server.original_json) as Record<string, unknown>;
+    const origin = parsed[MCP_MARKET_ORIGIN_KEY];
+    if (!origin || typeof origin !== 'object' || Array.isArray(origin)) return null;
+    const itemId = (origin as Record<string, unknown>).item_id;
+    return typeof itemId === 'string' && itemId.trim() ? itemId : null;
+  } catch {
+    return null;
+  }
+};
+
+const normalizeMcpMarketName = (value: string): string =>
+  value.trim().toLocaleLowerCase().replace(/[\s_]+/g, '-');
+
+export const isMcpMarketItemInstalled = (
+  item: Pick<ISkillMarketItem, 'id' | 'name'>,
+  servers: readonly IMcpServer[]
+): boolean => {
+  if (servers.some((server) => getMcpMarketOrigin(server) === item.id)) return true;
+
+  const idSlug = item.id.split(':').slice(1).join(':').split('/').filter(Boolean).at(-1) ?? '';
+  const legacyNames = new Set([item.name, idSlug].map(normalizeMcpMarketName).filter(Boolean));
+  return servers.some((server) => legacyNames.has(normalizeMcpMarketName(server.name)));
 };
 
 /** Read-only transport summary so the user can review exactly what would run or be contacted. */
@@ -81,7 +132,11 @@ const TransportDetails: React.FC<{ transport: IMcpServerTransport }> = ({ transp
   );
 };
 
-const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({ saveMcpServers }) => {
+const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
+  saveMcpServers,
+  mcpServers,
+  addedStateLoading = false,
+}) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { handleBatchImportMcpServers } = useMcpServerCRUD(saveMcpServers);
@@ -102,6 +157,7 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({ saveMcpServers })
         const servers = toImportableMcpServersFromConfig(resolved.config_json, false).map((server) => ({
           ...server,
           enabled: false,
+          original_json: attachMcpMarketOrigin(server.original_json, item.id),
         }));
         if (servers.length === 0) {
           Message.error(t('settings.mcpMarket.configMissing', { defaultValue: 'No importable MCP config found.' }));
@@ -145,6 +201,10 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({ saveMcpServers })
   }, [handleBatchImportMcpServers, importing, navigate, pendingServers, t]);
 
   const hasStdioServer = (pendingServers ?? []).some((server) => server.transport.type === 'stdio');
+  const isAdded = useCallback(
+    (item: ISkillMarketItem) => isMcpMarketItemInstalled(item, mcpServers),
+    [mcpServers]
+  );
 
   return (
     <>
@@ -160,6 +220,8 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({ saveMcpServers })
         searchPlaceholder={t('settings.mcpMarket.searchPlaceholder', { defaultValue: 'Search MCP servers...' })}
         emptyText={t('settings.mcpMarket.empty', { defaultValue: 'Refresh to load MCP market entries.' })}
         onAdd={handleAdd}
+        isAdded={isAdded}
+        addedStateLoading={addedStateLoading}
         testIdPrefix='mcp-market'
       />
 
