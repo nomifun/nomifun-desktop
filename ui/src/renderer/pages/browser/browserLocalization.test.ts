@@ -30,7 +30,6 @@ const flatten = (
 const componentSources = [
   new URL('./index.tsx', import.meta.url),
   new URL('./BrowserPageHeader.tsx', import.meta.url),
-  new URL('./BrowserDisplayModeControl.tsx', import.meta.url),
   new URL('./BrowserHostDiagnostics.tsx', import.meta.url),
   new URL('./BrowserInventoryTree.tsx', import.meta.url),
   new URL('./BrowserLaneDetails.tsx', import.meta.url),
