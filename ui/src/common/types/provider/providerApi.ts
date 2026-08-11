@@ -194,8 +194,16 @@ export function toUpdateProviderRequest(input: UpdateProviderRequest): UpdatePro
  * `POST /api/providers/fetch-models`.
  */
 export interface FetchModelsResponse {
-  /** Mixed-shape array: bare id strings or `{ id, name }` pairs. */
+  /** Compatibility accepts old bare strings; current servers return objects. */
   models: Array<string | { id: string; name?: string | null }>;
+  /** Exact model-id capability profiles used by the modality-first selector. */
+  model_profiles?: Record<
+    string,
+    {
+      tasks?: ModelTask[];
+      traits?: ModelTrait[];
+    }
+  >;
   /** Present when backend auto-corrected the provider's base_url. */
   fixed_base_url?: string;
 }

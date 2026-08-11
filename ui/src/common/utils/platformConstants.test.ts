@@ -40,10 +40,12 @@ describe('platformHasNoModelsEndpoint', () => {
 });
 
 describe('platformSkipsPreSaveKeyProbe', () => {
-  test('true for catalog-less plans and StepFun transport fallback', () => {
+  test('true for catalog-less plans and provider-specific catalog fallbacks', () => {
     expect(platformSkipsPreSaveKeyProbe('ark-agent-plan')).toBe(true);
     expect(platformSkipsPreSaveKeyProbe('stepfun-plan')).toBe(true);
     expect(platformSkipsPreSaveKeyProbe('stepfun')).toBe(true);
+    expect(platformSkipsPreSaveKeyProbe('zhipu')).toBe(true);
+    expect(platformSkipsPreSaveKeyProbe('mimo-token-plan-cn')).toBe(true);
   });
 
   test('false for providers whose catalog probe remains authoritative', () => {

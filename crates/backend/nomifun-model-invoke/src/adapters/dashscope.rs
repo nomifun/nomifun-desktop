@@ -56,17 +56,20 @@ const EMBEDDINGS_ADAPTER_ID: &str = "dashscope.embeddings";
 const IMAGES_PATH: &str = "/services/aigc/text2image/image-synthesis";
 const EMBEDDINGS_PATH: &str = "/services/embeddings/text-embedding/text-embedding";
 
-/// Compose a DashScope endpoint: `{root}/api/v1{path}`. The configured base is
-/// tolerated with or without a trailing `/api/v1` (stripped then re-added) so
-/// both `https://dashscope.aliyuncs.com` and
-/// `https://dashscope.aliyuncs.com/api/v1` resolve identically. A full-url
-/// connection base is already the complete endpoint (no path appended).
+/// Compose a DashScope endpoint: `{root}/api/v1{path}`. The settings preset is
+/// the OpenAI-compatible chat root (`/compatible-mode/v1`), while the native
+/// image/embedding APIs live under `/api/v1`. Strip either suffix before
+/// appending the native path. A full-url connection base is already the
+/// complete endpoint (no path appended).
 fn dashscope_v1_url(conn: &ResolvedConnection, path: &str) -> String {
     let base = conn.base_url.trim().trim_end_matches('/');
     if conn.is_full_url {
         return base.to_string();
     }
-    let root = base.strip_suffix("/api/v1").unwrap_or(base);
+    let root = base
+        .strip_suffix("/compatible-mode/v1")
+        .or_else(|| base.strip_suffix("/api/v1"))
+        .unwrap_or(base);
     format!("{root}/api/v1{path}")
 }
 
@@ -361,7 +364,7 @@ mod tests {
     // -- URL composition ------------------------------------------------------
 
     #[test]
-    fn dashscope_url_tolerates_trailing_api_v1_and_full_url() {
+    fn dashscope_url_tolerates_chat_compatible_and_native_roots_and_full_url() {
         let conn = |base: &str, full: bool| ResolvedConnection {
             role: "default".into(),
             base_url: base.into(),
@@ -379,6 +382,13 @@ mod tests {
         assert_eq!(
             dashscope_v1_url(&conn("https://dashscope.aliyuncs.com/api/v1/", false), "/tasks/t1"),
             "https://dashscope.aliyuncs.com/api/v1/tasks/t1"
+        );
+        assert_eq!(
+            dashscope_v1_url(
+                &conn("https://dashscope.aliyuncs.com/compatible-mode/v1", false),
+                IMAGES_PATH
+            ),
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
         );
         assert_eq!(
             dashscope_v1_url(&conn("https://proxy.example/exact", true), IMAGES_PATH),

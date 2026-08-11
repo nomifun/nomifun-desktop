@@ -19,6 +19,7 @@ import HTMLRenderer from '../renderers/HTMLRenderer';
 import ImagePreview from '../viewers/ImageViewer';
 import MarkdownEditor from '../editors/MarkdownEditor';
 import MarkdownPreview from '../viewers/MarkdownViewer';
+import MiniAppViewer from '../viewers/MiniAppViewer';
 import PDFPreview from '../viewers/PDFViewer';
 import OfficeDocPreview from '../viewers/OfficeDocViewer';
 import PptViewer from '../viewers/PptViewer';
@@ -632,6 +633,17 @@ const PreviewPanel: React.FC = () => {
     } else if (content_type === 'url') {
       // URL 预览模式 / URL preview mode
       return <URLViewer url={content} title={metadata?.title} />;
+    } else if (content_type === 'miniapp') {
+      // 小程序：沙箱 iframe 实时渲染 + 「发布为小程序」工具栏
+      // Mini-app: sandboxed live render with the publish toolbar
+      return (
+        <MiniAppViewer
+          content={content}
+          file_path={metadata?.file_path}
+          workspace={metadata?.workspace}
+          conversation_id={metadata?.conversation_id}
+        />
+      );
     }
 
     return null;

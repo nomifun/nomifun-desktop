@@ -1,11 +1,19 @@
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { normalizeApiKeyList } from '@/common/utils/apiKeys';
+import type { ModelTask, ModelTrait } from '@/common/config/storage';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 
 // Gemini 模型排序函数：Pro 优先，版本号降序
-const sortGeminiModels = (models: { label: string; value: string }[]) => {
+export interface FetchedModelOption {
+  label: string;
+  value: string;
+  tasks: ModelTask[];
+  traits: ModelTrait[];
+}
+
+const sortGeminiModels = (models: FetchedModelOption[]) => {
   return models.toSorted((a, b) => {
     const aPro = a.value.toLowerCase().includes('pro');
     const bPro = b.value.toLowerCase().includes('pro');
@@ -51,7 +59,7 @@ const useModeModeList = (
   return useSWR(
     [platform + '/models', { platform, base_url, api_key, try_fix, bedrock_config }],
     async ([_url, { platform, base_url, api_key, try_fix, bedrock_config }]): Promise<{
-      models: { label: string; value: string }[];
+      models: FetchedModelOption[];
       fix_base_url?: string;
     }> => {
       // Only call the backend when we have credentials it can actually use:
@@ -69,10 +77,17 @@ const useModeModeList = (
           });
           let modelList = res.models.map((v) => {
             // Handle both string and object formats (Bedrock returns objects with id and name)
+            const id = typeof v === 'string' ? v : v.id;
+            const profile = res.model_profiles?.[id];
             if (typeof v === 'string') {
-              return { label: v, value: v };
+              return { label: v, value: v, tasks: profile?.tasks ?? [], traits: profile?.traits ?? [] };
             } else {
-              return { label: v.name || v.id, value: v.id };
+              return {
+                label: v.name || v.id,
+                value: v.id,
+                tasks: profile?.tasks ?? [],
+                traits: profile?.traits ?? [],
+              };
             }
           });
 
