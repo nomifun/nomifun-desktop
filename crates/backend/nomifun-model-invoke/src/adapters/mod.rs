@@ -24,8 +24,15 @@
 //! - [`dashscope`] — Alibaba DashScope forced-async image generation
 //!   (`"dashscope.images"`) and sync embeddings (`"dashscope.embeddings"`),
 //!   input/parameters wrapper protocol.
-//! - [`minimax`] — MiniMax sync TTS (`"minimax.t2a"`, hex audio + GroupId
-//!   query).
+//! - [`minimax`] — MiniMax sync TTS (`"minimax.t2a"`, hex audio; optional
+//!   legacy GroupId query).
+//! - [`mimo`] — MiMo ASR/TTS models serialized over specialized chat
+//!   completions (`"mimo.chat_asr"` / `"mimo.chat_tts"`).
+//! - [`siliconflow`] — SiliconFlow native JSON image/edit and asynchronous
+//!   video submit/status protocols.
+//! - [`xai`] — xAI JSON image/edit, deferred video, `/tts`, and `/stt`
+//!   protocols.
+//! - [`zhipu`] — Zhipu v4 asynchronous video submit/result protocol.
 
 use std::sync::Arc;
 
@@ -49,13 +56,18 @@ pub mod ark;
 pub mod dashscope;
 pub mod deepgram;
 pub mod gemini;
+pub mod generic_rerank;
 pub mod minimax;
+pub mod mimo;
 pub mod openai_audio;
 pub mod openai_chat_text;
 pub mod openai_embeddings;
 pub mod openai_images;
 pub mod openai_videos;
+pub mod siliconflow;
 pub mod volc_voice;
+pub mod xai;
+pub mod zhipu;
 
 /// Build the standard adapter set registered on the service at assembly time.
 /// Adapters are stateless — the shared HTTP client is passed per call by the
@@ -66,6 +78,7 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(openai_videos::OpenAiVideosAdapter),
         Arc::new(openai_chat_text::OpenAiChatTextAdapter),
         Arc::new(openai_embeddings::OpenAiEmbeddingsAdapter),
+        Arc::new(generic_rerank::GenericRerankAdapter),
         Arc::new(openai_audio::OpenAiAudioTranscriptionsAdapter),
         Arc::new(openai_audio::OpenAiAudioSpeechAdapter),
         Arc::new(gemini::GeminiGenerateContentAdapter),
@@ -78,6 +91,15 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(dashscope::DashScopeImagesAdapter),
         Arc::new(dashscope::DashScopeEmbeddingsAdapter),
         Arc::new(minimax::MiniMaxT2aAdapter),
+        Arc::new(mimo::MiMoChatAsrAdapter),
+        Arc::new(mimo::MiMoChatTtsAdapter),
+        Arc::new(siliconflow::SiliconFlowImagesAdapter),
+        Arc::new(siliconflow::SiliconFlowVideoJobsAdapter),
+        Arc::new(xai::XaiImagesJsonAdapter),
+        Arc::new(xai::XaiVideoJobsAdapter),
+        Arc::new(xai::XaiTtsAdapter),
+        Arc::new(xai::XaiSttAdapter),
+        Arc::new(zhipu::ZhipuVideoJobsAdapter),
     ]
 }
 
@@ -130,6 +152,7 @@ mod tests {
             ("openai.videos", ModelTask::VideoGeneration),
             ("openai.chat_text", ModelTask::Chat),
             ("openai.embeddings", ModelTask::Embedding),
+            ("generic.rerank", ModelTask::Rerank),
             ("openai.audio_transcriptions", ModelTask::SpeechRecognition),
             ("openai.audio_speech", ModelTask::SpeechSynthesis),
             ("gemini.generate_content", ModelTask::ImageGeneration),
@@ -143,12 +166,22 @@ mod tests {
             ("dashscope.images", ModelTask::ImageGeneration),
             ("dashscope.embeddings", ModelTask::Embedding),
             ("minimax.t2a", ModelTask::SpeechSynthesis),
+            ("mimo.chat_asr", ModelTask::SpeechRecognition),
+            ("mimo.chat_tts", ModelTask::SpeechSynthesis),
+            ("siliconflow.images", ModelTask::ImageGeneration),
+            ("siliconflow.images", ModelTask::ImageEdit),
+            ("siliconflow.video_jobs", ModelTask::VideoGeneration),
+            ("xai.images_json", ModelTask::ImageGeneration),
+            ("xai.images_json", ModelTask::ImageEdit),
+            ("xai.video_jobs", ModelTask::VideoGeneration),
+            ("xai.tts", ModelTask::SpeechSynthesis),
+            ("xai.stt", ModelTask::SpeechRecognition),
+            ("zhipu.video_jobs", ModelTask::VideoGeneration),
         ] {
             let adapter = registry.get(protocol, task).expect("registered + supported");
             assert_eq!(adapter.id(), protocol);
         }
-        // The P3 target set: 16 adapters in the default assembly.
-        assert_eq!(default_adapters().len(), 16);
+        assert_eq!(default_adapters().len(), 26);
         // Tasks outside an adapter's declared support are refused.
         assert!(registry.get("openai.images", ModelTask::Chat).is_err());
         assert!(registry.get("openai.videos", ModelTask::ImageGeneration).is_err());
@@ -168,5 +201,14 @@ mod tests {
         assert!(registry.get("dashscope.images", ModelTask::ImageEdit).is_err());
         assert!(registry.get("dashscope.embeddings", ModelTask::Chat).is_err());
         assert!(registry.get("minimax.t2a", ModelTask::SpeechRecognition).is_err());
+        assert!(registry.get("mimo.chat_asr", ModelTask::SpeechSynthesis).is_err());
+        assert!(registry.get("mimo.chat_tts", ModelTask::SpeechRecognition).is_err());
+        assert!(registry.get("siliconflow.images", ModelTask::Chat).is_err());
+        assert!(registry.get("siliconflow.video_jobs", ModelTask::ImageGeneration).is_err());
+        assert!(registry.get("xai.images_json", ModelTask::Chat).is_err());
+        assert!(registry.get("xai.video_jobs", ModelTask::ImageGeneration).is_err());
+        assert!(registry.get("xai.tts", ModelTask::SpeechRecognition).is_err());
+        assert!(registry.get("xai.stt", ModelTask::SpeechSynthesis).is_err());
+        assert!(registry.get("zhipu.video_jobs", ModelTask::ImageGeneration).is_err());
     }
 }

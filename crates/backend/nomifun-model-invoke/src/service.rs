@@ -14,7 +14,7 @@ use crate::adapter::AdapterRegistry;
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::types::{
     AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle, ModelRef,
-    TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
+    RerankRequest, TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
 };
 
 /// Ceiling on one modality probe (resolution + submit), matching the legacy
@@ -252,11 +252,15 @@ fn probe_request(task: ModelTask, params: &serde_json::Value) -> TaskRequest {
         ModelTask::Embedding => {
             TaskRequest::Embedding(EmbedRequest { inputs: vec!["health check".into()], extra: json!({}) })
         }
-        // Rerank has no TaskRequest shape yet; the probe still flows through
-        // resolution so the registry's NoAdapter is the honest "nothing serves
-        // rerank" signal — this placeholder payload is never submitted. Chat
-        // is unreachable here (guarded in `probe`), folded in for exhaustiveness.
-        ModelTask::Rerank | ModelTask::Chat => {
+        ModelTask::Rerank => TaskRequest::Rerank(RerankRequest {
+            query: "health check".into(),
+            documents: vec!["health check".into()],
+            top_n: Some(1),
+            extra: json!({}),
+        }),
+        // Chat is unreachable here (guarded in `probe`), folded in only for
+        // exhaustiveness.
+        ModelTask::Chat => {
             TaskRequest::Embedding(EmbedRequest { inputs: vec!["health check".into()], extra: json!({}) })
         }
     }

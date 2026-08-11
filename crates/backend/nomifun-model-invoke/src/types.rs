@@ -80,6 +80,23 @@ pub struct EmbedRequest {
     pub extra: serde_json::Value,
 }
 
+/// Query + candidate documents → relevance-ranked results.
+#[derive(Clone)]
+pub struct RerankRequest {
+    pub query: String,
+    pub documents: Vec<String>,
+    pub top_n: Option<u32>,
+    pub extra: serde_json::Value,
+}
+
+/// One normalized rerank result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RerankResult {
+    pub index: usize,
+    pub relevance_score: f32,
+    pub document: Option<String>,
+}
+
 /// Single-turn text chat (probe / simple text generation path).
 #[derive(Clone)]
 pub struct ChatTextRequest {
@@ -97,6 +114,7 @@ pub enum TaskRequest {
     SpeechSynthesis(TtsRequest),
     SpeechRecognition(AsrRequest),
     Embedding(EmbedRequest),
+    Rerank(RerankRequest),
     ChatText(ChatTextRequest),
 }
 
@@ -112,6 +130,7 @@ impl TaskRequest {
             Self::SpeechSynthesis(_) => ModelTask::SpeechSynthesis,
             Self::SpeechRecognition(_) => ModelTask::SpeechRecognition,
             Self::Embedding(_) => ModelTask::Embedding,
+            Self::Rerank(_) => ModelTask::Rerank,
             Self::ChatText(_) => ModelTask::Chat,
         }
     }
@@ -140,6 +159,8 @@ pub enum TaskResult {
     Transcript { text: String, language: Option<String>, model: Option<String> },
     /// Embedding vectors, one per input.
     Embeddings(Vec<Vec<f32>>),
+    /// Documents ranked by relevance to a query.
+    Reranked(Vec<RerankResult>),
     /// Plain text reply (chat).
     Text(String),
 }
@@ -228,6 +249,15 @@ mod tests {
             (
                 TaskRequest::Embedding(EmbedRequest { inputs: vec!["x".into()], extra: json!({}) }),
                 ModelTask::Embedding,
+            ),
+            (
+                TaskRequest::Rerank(RerankRequest {
+                    query: "q".into(),
+                    documents: vec!["x".into()],
+                    top_n: Some(1),
+                    extra: json!({}),
+                }),
+                ModelTask::Rerank,
             ),
             (
                 TaskRequest::ChatText(ChatTextRequest { prompt: "hi".into(), system: None, extra: json!({}) }),

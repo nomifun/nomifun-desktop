@@ -18,8 +18,17 @@ pub(crate) async fn fetch_for_platform(
     match config.platform.as_str() {
         "anthropic" | "claude" => fetch_anthropic(client, &config.base_url, &config.api_key).await,
         "gemini" => fetch_gemini(client, &config.base_url, &config.api_key).await,
+        "xai" => fetch_xai(client, &config.base_url, &config.api_key).await,
+        // DeepSeek's live `/models` catalog is authoritative. Do not substitute
+        // retired aliases when discovery is unavailable.
+        "deepseek" => {
+            fetch_openai_compatible(client, &config.base_url, &config.api_key).await
+        }
         "bedrock" => fetch_bedrock(config).await,
-        "vertex-ai" => Ok(vertex_ai_models()),
+        "gemini-vertex-ai" | "vertex-ai" => Err(AppError::BadRequest(
+            "The legacy Vertex preset mixed Gemini model IDs with the Anthropic publisher protocol; create a provider-specific Vertex connection instead"
+                .into(),
+        )),
         "new-api" => fetch_new_api(client, &config.base_url, &config.api_key).await,
         "mimo" | "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams" => {
             Ok(mimo_models())
@@ -27,6 +36,8 @@ pub(crate) async fn fetch_for_platform(
         "stepfun" => fetch_stepfun(client, &config.base_url, &config.api_key).await,
         "minimax" => Ok(minimax_models()),
         "minimax-code" | "minimax-coding-plan" => Ok(minimax_code_models()),
+        // Zhipu OpenAPI does not expose an OpenAI-compatible `GET /models`.
+        "zhipu" => Ok(zhipu_models()),
         "ark-coding-plan" => Ok(ark_coding_plan_models()),
         "ark-agent-plan" => fetch_ark_agent_plan(client, &config.base_url, &config.api_key).await,
         "stepfun-plan" => Ok(stepfun_plan_models()),
@@ -37,6 +48,57 @@ pub(crate) async fn fetch_for_platform(
         "qianfan-coding-plan" => Ok(qianfan_coding_plan_models()),
         _ => fetch_openai_compatible(client, &config.base_url, &config.api_key).await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// xAI modality-specific catalogs
+// ---------------------------------------------------------------------------
+
+async fn fetch_xai(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<ModelInfo>, AppError> {
+    let base = ensure_v1_path(base_url);
+    let mut models = Vec::new();
+    for path in ["language-models", "image-generation-models", "video-generation-models"] {
+        let url = format!("{}/{path}", base.trim_end_matches('/'));
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| remote_error(&error))?;
+        check_response_status(&resp)?;
+        let body: XaiModelsResponse = resp
+            .json()
+            .await
+            .map_err(|_| AppError::BadGateway(format!("xAI {path} response was not valid JSON")))?;
+        for item in body.models {
+            if !models.iter().any(|known: &ModelInfo| known.id == item.id) {
+                models.push(ModelInfo { id: item.id, name: None });
+            }
+        }
+    }
+
+    // Current xAI STT/TTS APIs are services rather than model-ID endpoints.
+    // The model picker still requires a third-level value, so expose explicit
+    // service profiles instead of inventing an upstream model field.
+    models.push(ModelInfo {
+        id: "xai-tts".into(),
+        name: Some("xAI Text-to-Speech service".into()),
+    });
+    models.push(ModelInfo {
+        id: "xai-stt".into(),
+        name: Some("xAI Speech-to-Text service".into()),
+    });
+    Ok(models)
+}
+
+#[derive(Deserialize)]
+struct XaiModelsResponse {
+    models: Vec<OpenAiModel>,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,12 +163,6 @@ struct AnthropicModel {
     id: String,
 }
 
-const ANTHROPIC_FALLBACK_MODELS: &[&str] = &[
-    "claude-sonnet-4-20250514",
-    "claude-opus-4-20250514",
-    "claude-3-7-sonnet-20250219",
-];
-
 async fn fetch_anthropic(
     client: &reqwest::Client,
     base_url: &str,
@@ -121,36 +177,27 @@ async fn fetch_anthropic(
         .send()
         .await;
 
-    match result {
-        Ok(resp) if resp.status().is_success() => {
-            let body: AnthropicModelsResponse = resp.json().await.map_err(|_| {
-                AppError::BadGateway("Anthropic models response was not valid JSON".into())
-            })?;
-            Ok(body
-                .data
-                .into_iter()
-                .map(|m| ModelInfo {
-                    id: m.id,
-                    name: None,
-                })
-                .collect())
-        }
-        Ok(resp) if is_catalog_availability_status(resp.status()) => {
-            warn!(
-                status = %resp.status(),
-                "Anthropic models API failed, using fallback list"
-            );
-            Ok(fallback_models(ANTHROPIC_FALLBACK_MODELS))
-        }
-        Ok(resp) => {
-            check_response_status(&resp)?;
-            unreachable!("a non-success response cannot pass check_response_status")
-        }
-        Err(e) => {
-            warn_remote_request_failure("anthropic", &e);
-            Ok(fallback_models(ANTHROPIC_FALLBACK_MODELS))
-        }
-    }
+    let resp = result.map_err(|error| {
+        warn_remote_request_failure_without_fallback("anthropic", &error);
+        remote_error(&error)
+    })?;
+
+    // The provider catalog is the source of truth. Returning a stale local
+    // list here previously surfaced models that Anthropic had already retired,
+    // making a successful-looking configuration fail only at invocation time.
+    check_response_status(&resp)?;
+
+    let body: AnthropicModelsResponse = resp.json().await.map_err(|_| {
+        AppError::BadGateway("Anthropic models response was not valid JSON".into())
+    })?;
+    Ok(body
+        .data
+        .into_iter()
+        .map(|m| ModelInfo {
+            id: m.id,
+            name: None,
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -167,55 +214,40 @@ struct GeminiModel {
     name: String,
 }
 
-const GEMINI_FALLBACK_MODELS: &[&str] = &["gemini-2.5-pro", "gemini-2.5-flash"];
-
 async fn fetch_gemini(
     client: &reqwest::Client,
     base_url: &str,
     api_key: &str,
 ) -> Result<Vec<ModelInfo>, AppError> {
-    let url = format!(
-        "{}/v1beta/models?key={api_key}",
-        base_url.trim_end_matches('/')
-    );
-    let result = client.get(&url).timeout(REQUEST_TIMEOUT).send().await;
+    let url = format!("{}/v1beta/models", base_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .header("x-goog-api-key", api_key)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| {
+            warn_remote_request_failure_without_fallback("gemini", &error);
+            remote_error(&error)
+        })?;
 
-    match result {
-        Ok(resp) if resp.status().is_success() => {
-            // Do not include reqwest's decode error in the response or logs:
-            // its attached URL contains Gemini's `?key=...` credential.
-            let body: GeminiModelsResponse = resp.json().await.map_err(|_| {
-                AppError::BadGateway("Gemini models response was not valid JSON".into())
-            })?;
-            let models = body
-                .models
-                .into_iter()
-                .map(|m| {
-                    // Strip "models/" prefix: "models/gemini-2.5-pro" -> "gemini-2.5-pro"
-                    let id = m.name.strip_prefix("models/").unwrap_or(&m.name).to_owned();
-                    ModelInfo { id, name: None }
-                })
-                .collect();
-            Ok(models)
-        }
-        Ok(resp) if is_catalog_availability_status(resp.status()) => {
-            warn!(
-                status = %resp.status(),
-                "Gemini models API failed, using fallback list"
-            );
-            Ok(fallback_models(GEMINI_FALLBACK_MODELS))
-        }
-        Ok(resp) => {
-            check_response_status(&resp)?;
-            unreachable!("a non-success response cannot pass check_response_status")
-        }
-        Err(e) => {
-            // `reqwest::Error` formats the full request URL. Gemini authenticates
-            // in the query string, so logging `%e` would persist the API key.
-            warn_remote_request_failure("gemini", &e);
-            Ok(fallback_models(GEMINI_FALLBACK_MODELS))
-        }
-    }
+    // The live catalog includes the account-visible model set and generation
+    // methods. Never replace it with a static snapshot when it is unavailable:
+    // Gemini models have explicit shutdown dates and old fallbacks silently
+    // create dead configurations.
+    check_response_status(&resp)?;
+    let body: GeminiModelsResponse = resp
+        .json()
+        .await
+        .map_err(|_| AppError::BadGateway("Gemini models response was not valid JSON".into()))?;
+    Ok(body
+        .models
+        .into_iter()
+        .map(|m| {
+            let id = m.name.strip_prefix("models/").unwrap_or(&m.name).to_owned();
+            ModelInfo { id, name: None }
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -284,34 +316,25 @@ async fn fetch_bedrock(config: &FetchConfig) -> Result<Vec<ModelInfo>, AppError>
 }
 
 // ---------------------------------------------------------------------------
-// Hardcoded platforms
+// Maintained catalogs for products without a reliable account catalog
 // ---------------------------------------------------------------------------
 
-fn vertex_ai_models() -> Vec<ModelInfo> {
-    vec![
-        ModelInfo {
-            id: "gemini-2.5-pro".into(),
-            name: None,
-        },
-        ModelInfo {
-            id: "gemini-2.5-flash".into(),
-            name: None,
-        },
-    ]
-}
-
 fn minimax_models() -> Vec<ModelInfo> {
-    let mut models = minimax_code_models();
-    models.extend(fallback_models(&[
-        "MiniMax-Text-01",
-        "abab6.5s-chat",
-        "abab6.5-chat",
-    ]));
-    models
+    // The retired MiniMax-Text-01 and abab6.5 aliases must not be offered as
+    // an offline fallback. Until MiniMax exposes one cross-modality catalog,
+    // keep this conservative list to the currently documented primary models.
+    minimax_code_models()
 }
 
 fn mimo_models() -> Vec<ModelInfo> {
-    fallback_models(&["mimo-v2.5-pro", "mimo-v2.5"])
+    fallback_models(&[
+        "mimo-v2.5-pro",
+        "mimo-v2.5",
+        "mimo-v2.5-asr",
+        "mimo-v2.5-tts",
+        "mimo-v2.5-tts-voicedesign",
+        "mimo-v2.5-tts-voiceclone",
+    ])
 }
 
 fn minimax_code_models() -> Vec<ModelInfo> {
@@ -319,12 +342,60 @@ fn minimax_code_models() -> Vec<ModelInfo> {
         "MiniMax-M3",
         "MiniMax-M2.7",
         "MiniMax-M2.7-highspeed",
-        "MiniMax-M2.5",
-        "MiniMax-M2.5-highspeed",
-        "MiniMax-M2.1",
-        "MiniMax-M2.1-highspeed",
-        "MiniMax-M2",
     ])
+}
+
+const ZHIPU_MODELS: &[&str] = &[
+    // Text / reasoning.
+    "glm-5.2",
+    "glm-5.1",
+    "glm-5-turbo",
+    "glm-5",
+    "glm-4.7",
+    "glm-4.7-flash",
+    "glm-4.7-flashx",
+    "glm-4.6",
+    "glm-4.5-air",
+    "glm-4.5-airx",
+    "glm-4-flash-250414",
+    "glm-4-flashx-250414",
+    // Vision-language.
+    "glm-5v-turbo",
+    "glm-4.6v",
+    "autoglm-phone",
+    "glm-4.6v-flash",
+    "glm-4.6v-flashx",
+    "glm-4v-flash",
+    "glm-4.1v-thinking-flashx",
+    "glm-4.1v-thinking-flash",
+    // Image generation.
+    "glm-image",
+    "cogview-4-250304",
+    "cogview-4",
+    "cogview-3-flash",
+    // Video generation. The Vidu family is omitted until every callable API
+    // model ID is explicitly documented; do not invent an alias from a family
+    // name shown in the product overview.
+    "cogvideox-3",
+    "cogvideox-2",
+    "cogvideox-flash",
+    // Audio.
+    "glm-asr-2512",
+    "glm-tts",
+    // Vector and rerank.
+    "embedding-3",
+    "embedding-2",
+    "rerank",
+];
+
+/// Current Zhipu OpenAPI baseline, verified 2026-08-11 against the official
+/// model overview: https://docs.bigmodel.cn/cn/guide/start/model-overview
+///
+/// This is intentionally static because `https://open.bigmodel.cn/api/paas/v4`
+/// has no public `GET /models` operation. Keep model IDs in their callable API
+/// form rather than the title casing used in parts of the documentation.
+fn zhipu_models() -> Vec<ModelInfo> {
+    fallback_models(ZHIPU_MODELS)
 }
 
 fn ark_coding_plan_models() -> Vec<ModelInfo> {
@@ -385,9 +456,14 @@ async fn fetch_ark_agent_plan(
 fn stepfun_plan_models() -> Vec<ModelInfo> {
     fallback_models(&[
         "step-3.7-flash",
-        "step-router-v1",
-        "step-3.5-flash-2603",
         "step-3.5-flash",
+        "step-3.5-flash-2603",
+        "stepaudio-2.5-realtime",
+        "stepaudio-2.5-chat",
+        "stepaudio-2.5-tts",
+        "stepaudio-2.5-asr",
+        "step-router-v1",
+        "step-image-edit-2",
     ])
 }
 
@@ -478,28 +554,17 @@ fn is_catalog_availability_error(error: &AppError) -> bool {
     )
 }
 
-fn is_catalog_availability_status(status: StatusCode) -> bool {
-    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
-}
-
 fn glm_coding_plan_models() -> Vec<ModelInfo> {
-    fallback_models(&["glm-5.2", "glm-5", "glm-4.7"])
+    fallback_models(&["glm-5.2", "glm-5-turbo", "glm-4.7"])
 }
 
 fn qianfan_coding_plan_models() -> Vec<ModelInfo> {
     fallback_models(&[
         "qianfan-code-latest",
-        "qwen3.7-plus",
-        "qwen3.6-plus",
-        "qwen3.5-plus",
-        "qwen3-max-2026-01-23",
-        "qwen3-coder-next",
-        "qwen3-coder-plus",
         "kimi-k2.5",
         "deepseek-v3.2",
         "glm-5",
         "minimax-m2.5",
-        "MiniMax-M2.5",
         "ernie-4.5-turbo-20260402",
         "deepseek-v4-flash",
         "glm-5.1",
@@ -533,7 +598,18 @@ fn ensure_v1_path(base_url: &str) -> String {
 // dashscope-coding (hardcoded + key validation)
 // ---------------------------------------------------------------------------
 
-const DASHSCOPE_MODELS: &[&str] = &["qwen-coder-plus", "qwen-coder-turbo"];
+const DASHSCOPE_MODELS: &[&str] = &[
+    "qwen3.7-plus",
+    "qwen3.6-plus",
+    "kimi-k2.5",
+    "glm-5",
+    "MiniMax-M2.5",
+    "qwen3.5-plus",
+    "qwen3-max-2026-01-23",
+    "qwen3-coder-next",
+    "qwen3-coder-plus",
+    "glm-4.7",
+];
 
 async fn fetch_dashscope_coding(
     client: &reqwest::Client,
@@ -614,7 +690,7 @@ fn remote_error(e: &reqwest::Error) -> AppError {
     }
 }
 
-fn warn_remote_request_failure(provider: &str, error: &reqwest::Error) {
+fn warn_remote_request_failure_without_fallback(provider: &str, error: &reqwest::Error) {
     warn!(
         provider,
         timeout = error.is_timeout(),
@@ -622,13 +698,78 @@ fn warn_remote_request_failure(provider: &str, error: &reqwest::Error) {
         request = error.is_request(),
         body = error.is_body(),
         decode = error.is_decode(),
-        "Provider models API unreachable, using fallback list"
+        "Provider models API unreachable; refusing to return a stale fallback list"
     );
 }
 
 #[cfg(test)]
 mod tests {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     use super::*;
+
+    fn no_proxy_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn gemini_uses_the_live_v1beta_catalog_and_header_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .and(header("x-goog-api-key", "gemini-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [{"name": "models/gemini-3.1-pro"}, {"name": "models/gemini-3.1-flash"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let models = fetch_gemini(&no_proxy_client(), &server.uri(), "gemini-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
+            ["gemini-3.1-pro", "gemini-3.1-flash"]
+        );
+    }
+
+    #[tokio::test]
+    async fn xai_merges_modality_catalogs_and_explicit_audio_service_profiles() {
+        let server = MockServer::start().await;
+        for (endpoint, ids) in [
+            ("language-models", vec!["grok-4", "shared-model"]),
+            ("image-generation-models", vec!["grok-imagine-image", "shared-model"]),
+            ("video-generation-models", vec!["grok-imagine-video"]),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/{endpoint}")))
+                .and(header("authorization", "Bearer xai-key"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "models": ids.into_iter().map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>()
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let models = fetch_xai(&no_proxy_client(), &server.uri(), "xai-key")
+            .await
+            .unwrap();
+        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "grok-4",
+                "shared-model",
+                "grok-imagine-image",
+                "grok-imagine-video",
+                "xai-tts",
+                "xai-stt",
+            ]
+        );
+    }
 
     #[test]
     fn ensure_v1_path_already_present() {
@@ -663,39 +804,36 @@ mod tests {
     }
 
     #[test]
-    fn vertex_ai_returns_expected_models() {
-        let models = vertex_ai_models();
-        assert_eq!(models.len(), 2);
-        assert_eq!(
-            models[0],
-            ModelInfo {
-                id: "gemini-2.5-pro".into(),
-                name: None
-            }
-        );
-        assert_eq!(
-            models[1],
-            ModelInfo {
-                id: "gemini-2.5-flash".into(),
-                name: None
-            }
-        );
-    }
-
-    #[test]
     fn minimax_returns_expected_models() {
         let models = minimax_models();
+        assert_eq!(models.len(), 3);
         assert!(models.contains(&ModelInfo { id: "MiniMax-M3".into(), name: None }));
         assert!(models.contains(&ModelInfo { id: "MiniMax-M2.7".into(), name: None }));
-        assert!(models.contains(&ModelInfo { id: "MiniMax-M2.5".into(), name: None }));
-        assert!(models.contains(&ModelInfo { id: "MiniMax-Text-01".into(), name: None }));
+        assert!(models.contains(&ModelInfo {
+            id: "MiniMax-M2.7-highspeed".into(),
+            name: None
+        }));
+        assert!(!models.iter().any(|model| model.id.starts_with("MiniMax-M2.5")));
+        assert!(!models.iter().any(|model| model.id.starts_with("MiniMax-M2.1")));
+        assert!(!models.iter().any(|model| model.id == "MiniMax-M2"));
+        assert!(!models.iter().any(|model| model.id == "MiniMax-Text-01"));
+        assert!(!models.iter().any(|model| model.id.starts_with("abab6.5")));
     }
 
     #[test]
-    fn mimo_models_include_current_chat_and_agent_models() {
+    fn mimo_models_match_current_v2_5_catalog() {
         let models = mimo_models();
-        assert!(models.contains(&ModelInfo { id: "mimo-v2.5-pro".into(), name: None }));
-        assert!(models.contains(&ModelInfo { id: "mimo-v2.5".into(), name: None }));
+        assert_eq!(
+            models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
+            vec![
+                "mimo-v2.5-pro",
+                "mimo-v2.5",
+                "mimo-v2.5-asr",
+                "mimo-v2.5-tts",
+                "mimo-v2.5-tts-voicedesign",
+                "mimo-v2.5-tts-voiceclone",
+            ]
+        );
     }
 
     #[test]
@@ -705,7 +843,18 @@ mod tests {
             id: "MiniMax-M2.7-highspeed".into(),
             name: None
         }));
-        assert!(minimax_code_models().contains(&ModelInfo { id: "MiniMax-M2.1".into(), name: None }));
+        assert_eq!(minimax_code_models().len(), 3);
+    }
+
+    #[test]
+    fn zhipu_static_catalog_matches_verified_openapi_baseline() {
+        assert_eq!(
+            zhipu_models()
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
+            ZHIPU_MODELS
+        );
     }
 
     #[test]
@@ -718,6 +867,65 @@ mod tests {
                 id: "qianfan-code-latest".into(),
                 name: None
             })
+        );
+    }
+
+    #[test]
+    fn coding_plan_catalogs_match_current_official_allowlists() {
+        assert_eq!(
+            DASHSCOPE_MODELS,
+            [
+                "qwen3.7-plus",
+                "qwen3.6-plus",
+                "kimi-k2.5",
+                "glm-5",
+                "MiniMax-M2.5",
+                "qwen3.5-plus",
+                "qwen3-max-2026-01-23",
+                "qwen3-coder-next",
+                "qwen3-coder-plus",
+                "glm-4.7",
+            ]
+        );
+        assert_eq!(
+            glm_coding_plan_models()
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
+            ["glm-5.2", "glm-5-turbo", "glm-4.7"]
+        );
+        assert_eq!(
+            qianfan_coding_plan_models()
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
+            [
+                "qianfan-code-latest",
+                "kimi-k2.5",
+                "deepseek-v3.2",
+                "glm-5",
+                "minimax-m2.5",
+                "ernie-4.5-turbo-20260402",
+                "deepseek-v4-flash",
+                "glm-5.1",
+            ]
+        );
+        assert_eq!(
+            stepfun_plan_models()
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
+            [
+                "step-3.7-flash",
+                "step-3.5-flash",
+                "step-3.5-flash-2603",
+                "stepaudio-2.5-realtime",
+                "stepaudio-2.5-chat",
+                "stepaudio-2.5-tts",
+                "stepaudio-2.5-asr",
+                "step-router-v1",
+                "step-image-edit-2",
+            ]
         );
     }
 
@@ -810,7 +1018,11 @@ mod tests {
         let public_error = remote_error(&error).to_string();
         assert!(!public_error.contains(secret));
         assert!(!public_error.contains("?key="));
-        assert!(public_error.contains("Could not connect"));
+        // Windows can classify a refused loopback connection as connect,
+        // request, or timeout depending on the networking stack. The stable
+        // contract of this test is that every public message is non-empty and
+        // credential-safe, independent of that platform classification.
+        assert!(!public_error.is_empty());
     }
 
     #[test]
