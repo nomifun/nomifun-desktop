@@ -430,6 +430,8 @@ export type I18nKey =
   | 'browser.state.pressure.critical'
   | 'browser.state.pressure.normal'
   | 'browser.state.pressure.pressured'
+  | 'browser.tabs.lifecycle'
+  | 'browser.tabs.settings'
   | 'browser.tree.closeConversationAria'
   | 'browser.tree.closeLaneAria'
   | 'browser.tree.crashed'

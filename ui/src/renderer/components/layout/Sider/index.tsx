@@ -12,10 +12,7 @@ import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
-import {
-  isBrowserCapabilityUnavailable,
-  useBrowserOverview,
-} from '@renderer/pages/browser/useBrowserInventory';
+import { useBrowserOverview } from '@renderer/pages/browser/useBrowserInventory';
 import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
 import {
   SiderAssetLibraryEntry,
@@ -66,14 +63,9 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const { pathname, search, hash } = location;
   const {
     overview: browserOverview,
-    unavailable: browserUnavailable,
     transient: browserOverviewTransient,
     retry: retryBrowserOverview,
   } = useBrowserOverview();
-  const browserCapabilityUnavailable = isBrowserCapabilityUnavailable(
-    browserOverview,
-    browserUnavailable
-  );
 
   const navigate = useNavigate();
   const { logout, status } = useAuth();
@@ -309,11 +301,9 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
       <div className='shrink-0 mt-auto pt-5px flex flex-col gap-1px border-t border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-b-0'>
         {/* 设置 — section label; the enclosing border-t already separates this region when collapsed */}
         <SiderSectionHeader label={t('common.siderSection.settings')} collapsed={collapsed} collapsedRule={false} />
-        {/* Browser management — lifecycle/visibility control for managed Chromium,
-            a settings-adjacent surface pinned directly above model management. */}
-        {!browserCapabilityUnavailable &&
-          browserOverview?.supported !== false &&
-          browserOverview?.enabled !== false && (
+        {/* Unified Browser management — keep the entry reachable when Browser Use is
+            disabled so the user can open Settings and turn it back on. */}
+        {(isDesktopShell() || browserOverview?.supported !== false) && (
           <SiderBrowserEntry
             isMobile={isMobile}
             isActive={pathname === '/browser'}

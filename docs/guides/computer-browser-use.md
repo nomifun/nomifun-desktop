@@ -30,11 +30,11 @@ headless web/server build.
 
 ## Enabling And Disabling Capabilities
 
-### Desktop Settings
+### Desktop Management Surfaces
 
-The desktop app exposes both toggles under System Settings:
+The desktop app exposes two capability-management surfaces:
 
-- **Browser Use** (`/settings/browser-use`)
+- **Browser management → Settings** (`/browser?tab=settings`; legacy `/settings/browser-use` redirects here)
 - **Computer Use** (`/settings/computer-use`)
 
 Current desktop builds default both capability toggles to **on** when the
@@ -45,7 +45,7 @@ Settings also provides:
 - browser source: a system Chrome/Edge executable or the managed source;
 - presentation: the global default is **Silent** (`headless`), which runs
   ordinary Primary work with Chromium `--headless=new`. The installation owner
-  may choose **Visible window** (`external`) here or on `/browser`; the backend
+  may choose **Visible window** (`external`) in the Settings tab; the backend
   applies a confirmed change immediately and persists it;
 - resource policy: Automatic, Resource saving, or High concurrency. Aggregate
   capacity scales with concurrent tasks and machine pressure instead of using a
@@ -55,14 +55,15 @@ Settings also provides:
   Lane, tab, and queue budgets. Shared-Host task memory is an estimate; the
   structural limits are hard boundaries.
 
-The sidebar **Browser** page (`/browser`) lists running and queued Lanes and
-shows status, capacity, queue, identity, owner, and lifecycle data. It can close
-a Lane, a conversation's Lanes, or all Lanes when authorized. For a running
-Primary Lane it also offers **Open browser in foreground** and **Run in
-background**. These change the current shared Primary Host without changing the
-global default. The installation owner can edit that default live from this
-page. The page still does not embed the page or provide page input, tab control,
-user takeover, or address navigation.
+The sidebar **Browser** page (`/browser`) now owns two tabs. **Lifecycle** lists
+running and queued Lanes and shows status, capacity, queue, identity, owner, and
+lifecycle data. It can close a Lane, a conversation's Lanes, or all Lanes when
+authorized. For a running Primary Lane it also offers **Open browser in
+foreground** and **Run in background**; these change the current shared Primary
+Host without changing the global default. **Settings** owns the Browser Use
+toggle, source, global visibility default, login identity, security, and resource
+policy. The page still does not embed web content or provide page input, tab
+control, user takeover, or address navigation.
 
 ### Per Session
 
@@ -227,7 +228,8 @@ The authenticated management endpoints are
 `POST /api/browser/lanes/{id}/background`; state-changing requests retain the
 normal CSRF protection. They are not exposed as Agent Browser actions.
 Installation owners manage the persistent default through
-`GET`/`PUT /api/browser/display-mode`, as used by Settings and `/browser`.
+`GET`/`PUT /api/browser/display-mode`, as used by the Browser management
+**Settings** tab.
 
 ## macOS Permissions
 

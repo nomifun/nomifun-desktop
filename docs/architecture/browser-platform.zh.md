@@ -116,11 +116,12 @@ Automatic 的正常 idle expiry 为 2 分钟，压力状态下 30 秒即可进�
 
 ## Browser 管理页面边界
 
-`/browser` 是状态与生命周期管理页面，不是浏览器执行表面。它只用于查看
-Lane/Host 状态、容量与队列、身份和 owner 信息，并关闭 Lane、conversation
-下的 Lane 或安装范围内的 Lane。安装 owner 还可实时修改全局 Primary 显示默认值
-和资源策略。对 running Primary Lane，其 owner 可以显式执行“前台打开”或“转到
-后台”，两者都不会改变全局默认值。
+`/browser` 是统一的浏览器管理页面，不是浏览器执行表面。“运行周期”Tab 用于查看
+Lane/Host 状态、容量与队列、身份和 owner 信息，并关闭 Lane、conversation 下的
+Lane 或安装范围内的 Lane。对 running Primary Lane，其 owner 可以显式执行“前台
+打开”或“转到后台”，两者都不会改变全局默认值。“设置”Tab 管理 Browser Use
+开关、来源、Primary 显示默认值、登录身份、安全和资源策略；旧
+`/settings/browser-use` 入口会跳转到该 Tab。
 
 该页面不嵌入图像流，不建立专用 Viewer WebSocket，也不提供用户接管、页面
 输入、tab 操作或地址导航入口。在全局 `headless` 默认值下，普通 Agent Browser
@@ -189,8 +190,8 @@ Lane 显式“前台打开”才会显示，`external` 下 Primary Host 已按�
 
 产品提供两个可信的应用级默认可见策略：`headless`（新安装默认，普通 Agent
 Browser Use 以 `--headless=new` 静默运行 Primary）与 `external`（安装 owner
-显式选择默认前台可见，Primary Host 以真实窗口启动）。安装 owner 可从 Browser
-Use 设置页或 `/browser` 修改；确认成功的更改会实时应用到 live Hub 并持久化，
+显式选择默认前台可见，Primary Host 以真实窗口启动）。安装 owner 可从
+`/browser?tab=settings` 修改；确认成功的更改会实时应用到 live Hub 并持久化，
 无需重启应用。普通 Agent action、lane 名称或工具 JSON 无权覆盖。无论选择哪一项，
 Anonymous、Authenticated Replica 与 Isolated Host 都继续按 Hub 策略 headless
 运行；对 running Primary 执行一次性前台/后台操作也不会改写该默认值。
