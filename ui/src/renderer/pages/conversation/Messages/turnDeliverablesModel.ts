@@ -42,6 +42,12 @@ export interface TurnDeliverableItem {
   absolutePath?: string;
   sizeBytes?: number;
   sha256?: string;
+  /** Present only when this item came from a committed artifact receipt. */
+  artifactId?: PersistedToolArtifact['id'];
+  /** Backend-verified artifact kind; never inferred from a filename or Markdown URL. */
+  artifactKind?: PersistedToolArtifact['kind'];
+  /** Backend-verified media type from the persisted artifact receipt. */
+  mimeType?: string;
   insertions?: number;
   deletions?: number;
   /** Unified diff text for the latest write, when a carrier supplied one. */
@@ -54,6 +60,28 @@ export interface TurnDeliverableItem {
   tier: TurnDeliverableTier;
   sources: TurnDeliverableSource[];
 }
+
+export type VerifiedImageDeliverableItem = TurnDeliverableItem & {
+  tier: 'receipt';
+  artifactId: PersistedToolArtifact['id'];
+  artifactKind: 'image';
+  mimeType: string;
+};
+
+/**
+ * The only admission path for the first-class generated-image UI. Extension
+ * sniffing and assistant-authored Markdown are intentionally excluded: both
+ * the artifact kind and MIME must come from a committed backend receipt.
+ */
+export const isVerifiedImageDeliverable = (
+  item: TurnDeliverableItem
+): item is VerifiedImageDeliverableItem =>
+  item.tier === 'receipt' &&
+  item.artifactKind === 'image' &&
+  typeof item.artifactId === 'string' &&
+  item.artifactId.length > 0 &&
+  typeof item.mimeType === 'string' &&
+  item.mimeType.toLowerCase().startsWith('image/');
 
 type DeliverableToolMessage = IMessageToolCall | IMessageAcpToolCall | IMessageToolGroup;
 
@@ -85,6 +113,48 @@ const isAbsolutePath = (value: string): boolean => value.startsWith('/') || /^[A
 
 const stripTrailingSlash = (value: string): string => value.replace(/\/+$/, '');
 
+const isWindowsAddress = (value: string): boolean =>
+  /^[A-Za-z]:[\\/]/.test(value.trim()) || /^(?:\\\\|\/\/)/.test(value.trim());
+
+/**
+ * A comparison-only address. Keep the canonical path itself untouched: it is
+ * the backend receipt's proof-bearing locator and may use UNC or extended-path
+ * syntax. POSIX addresses remain case-sensitive while Windows addresses use
+ * their native case-insensitive comparison semantics.
+ */
+const pathIdentityKey = (value: string): string => {
+  const windows = isWindowsAddress(value);
+  const comparable = normalizeSlashes(value);
+  return `${windows ? 'windows' : 'posix'}:${windows ? comparable.toLowerCase() : comparable}`;
+};
+
+const singleWorkspaceRoot = (
+  workspaceRoots: Array<string | null | undefined>
+): string | undefined => {
+  const roots = [
+    ...new Set(
+      workspaceRoots
+        .filter((root): root is string => Boolean(root?.trim()))
+        .map((root) => stripTrailingSlash(root.trim()))
+    ),
+  ];
+  return roots.length === 1 ? roots[0] : undefined;
+};
+
+const deliverableAddressKey = (
+  relativePath: string,
+  absolutePath: string | undefined,
+  identityPath: string | undefined,
+  workspaceRoots: Array<string | null | undefined>
+): string => {
+  const inferredRoot = absolutePath ? undefined : singleWorkspaceRoot(workspaceRoots);
+  const address =
+    absolutePath ??
+    identityPath ??
+    (inferredRoot ? `${inferredRoot}/${relativePath}` : relativePath);
+  return pathIdentityKey(address);
+};
+
 interface NormalizedDeliverablePath {
   relativePath: string;
   absolutePath?: string;
@@ -100,17 +170,25 @@ const normalizeDeliverablePath = (
   raw: string,
   workspaceRoots: Array<string | null | undefined>
 ): NormalizedDeliverablePath | undefined => {
-  const normalized = normalizeSlashes(raw);
+  const rawPath = raw.trim();
+  const pathUsesWindowsSemantics = isWindowsAddress(rawPath);
+  const normalized = normalizeSlashes(rawPath);
   if (!normalized || normalized === '/' || /^[A-Za-z]:\/?$/.test(normalized)) return undefined;
 
   if (isAbsolutePath(normalized)) {
     for (const root of workspaceRoots) {
       if (!root) continue;
-      const comparableRoot = stripTrailingSlash(normalizeSlashes(root));
+      const rawRoot = root.trim();
+      if (isWindowsAddress(rawRoot) !== pathUsesWindowsSemantics) continue;
+      const comparableRoot = stripTrailingSlash(normalizeSlashes(rawRoot));
       if (!comparableRoot) continue;
+      const prefixMatches = pathUsesWindowsSemantics
+        ? normalized.slice(0, comparableRoot.length).toLowerCase() ===
+          comparableRoot.toLowerCase()
+        : normalized.slice(0, comparableRoot.length) === comparableRoot;
       if (
         normalized.length > comparableRoot.length + 1 &&
-        normalized.slice(0, comparableRoot.length).toLowerCase() === comparableRoot.toLowerCase() &&
+        prefixMatches &&
         normalized[comparableRoot.length] === '/'
       ) {
         return { relativePath: normalized.slice(comparableRoot.length + 1), absolutePath: normalized };
@@ -192,6 +270,9 @@ interface DeliverableDraft {
   source: TurnDeliverableSource;
   sizeBytes?: number;
   sha256?: string;
+  artifactId?: PersistedToolArtifact['id'];
+  artifactKind?: PersistedToolArtifact['kind'];
+  mimeType?: string;
   insertions?: number;
   deletions?: number;
   diff?: string;
@@ -204,10 +285,16 @@ const draftFromArtifact = (
   sourceMessageIds: MessageId[]
 ): DeliverableDraft => ({
   path: artifact.relative_path || artifact.path,
-  ...(artifact.path ? { absolutePath: normalizeSlashes(artifact.path) } : {}),
+  // `artifact.path` is a backend-issued canonical filesystem address. Keep it
+  // byte-for-byte (apart from surrounding whitespace) for native actions:
+  // slash normalization corrupts UNC and Windows extended-length prefixes.
+  ...(artifact.path ? { absolutePath: artifact.path.trim() } : {}),
   tier: 'receipt',
   sizeBytes: artifact.size_bytes,
   sha256: artifact.sha256,
+  artifactId: artifact.id,
+  artifactKind: artifact.kind,
+  mimeType: artifact.mime_type,
   source: { carrier, ...(callId ? { callId } : {}), sourceMessageIds },
 });
 
@@ -342,9 +429,22 @@ const mergeDraft = (
   const normalized = normalizeDeliverablePath(draft.path, workspaceRoots);
   if (!normalized) return;
 
-  const key = (normalized.identityPath ?? normalized.relativePath).toLowerCase();
   const absolutePath = draft.absolutePath ?? normalized.absolutePath;
+  const addressKey = deliverableAddressKey(
+    normalized.relativePath,
+    absolutePath,
+    normalized.identityPath,
+    workspaceRoots
+  );
+  // A backend artifact id is the receipt identity. Path-based drafts live in
+  // a separate namespace and are reconciled only after all evidence is known,
+  // so a reported path can never become part of a receipt proof object.
+  const key =
+    draft.tier === 'receipt' && draft.artifactId
+      ? `receipt:${draft.artifactId}`
+      : `path:${addressKey}`;
   const existing = byPath.get(key);
+
   if (!existing) {
     byPath.set(key, {
       relativePath: normalized.relativePath,
@@ -352,6 +452,9 @@ const mergeDraft = (
       ...(absolutePath ? { absolutePath } : {}),
       ...(draft.sizeBytes !== undefined ? { sizeBytes: draft.sizeBytes } : {}),
       ...(draft.sha256 !== undefined ? { sha256: draft.sha256 } : {}),
+      ...(draft.artifactId !== undefined ? { artifactId: draft.artifactId } : {}),
+      ...(draft.artifactKind !== undefined ? { artifactKind: draft.artifactKind } : {}),
+      ...(draft.mimeType !== undefined ? { mimeType: draft.mimeType } : {}),
       ...(draft.insertions !== undefined ? { insertions: draft.insertions } : {}),
       ...(draft.deletions !== undefined ? { deletions: draft.deletions } : {}),
       ...(draft.diff !== undefined ? { diff: draft.diff } : {}),
@@ -362,18 +465,38 @@ const mergeDraft = (
     return;
   }
 
-  // Same file written again later in the turn: the final version wins, receipt
-  // evidence outranks reported evidence, and provenance accumulates.
+  // Receipt identity, locator, hash, MIME and size form one indivisible proof
+  // object. A later unverified write/report may contribute provenance or a
+  // diff, but it can never replace any proof-bearing field.
   existing.sources.push(draft.source);
-  if (absolutePath) existing.absolutePath = absolutePath;
   if (draft.insertions !== undefined) existing.insertions = draft.insertions;
   if (draft.deletions !== undefined) existing.deletions = draft.deletions;
   if (draft.diff !== undefined) existing.diff = draft.diff;
+
+  if (existing.tier === 'receipt') {
+    return;
+  }
+
   if (draft.tier === 'receipt') {
+    // Promote reported metadata to a receipt atomically. The canonical receipt
+    // address replaces (rather than mixes with) the reported draft address.
     existing.tier = 'receipt';
+    existing.relativePath = normalized.relativePath;
+    existing.fileName = getPathBasename(normalized.relativePath);
+    if (absolutePath) existing.absolutePath = absolutePath;
+    else delete existing.absolutePath;
     if (draft.sizeBytes !== undefined) existing.sizeBytes = draft.sizeBytes;
+    else delete existing.sizeBytes;
     if (draft.sha256 !== undefined) existing.sha256 = draft.sha256;
-  } else if (existing.tier !== 'receipt') {
+    else delete existing.sha256;
+    if (draft.artifactId !== undefined) existing.artifactId = draft.artifactId;
+    else delete existing.artifactId;
+    if (draft.artifactKind !== undefined) existing.artifactKind = draft.artifactKind;
+    else delete existing.artifactKind;
+    if (draft.mimeType !== undefined) existing.mimeType = draft.mimeType;
+    else delete existing.mimeType;
+  } else {
+    if (absolutePath) existing.absolutePath = absolutePath;
     if (draft.sizeBytes !== undefined) existing.sizeBytes = draft.sizeBytes;
     if (draft.sha256 !== undefined) existing.sha256 = draft.sha256;
   }
@@ -431,7 +554,42 @@ export function collectTurnDeliverables(
     const items = order
       .map((key) => byPath.get(key))
       .filter((item): item is TurnDeliverableItem => Boolean(item));
-    if (items.length) result.set(turnId, items);
+    const receiptsByAddress = new Map<string, TurnDeliverableItem[]>();
+    for (const item of items) {
+      if (item.tier !== 'receipt') continue;
+      const address = deliverableAddressKey(
+        item.relativePath,
+        item.absolutePath,
+        undefined,
+        workspaceRoots
+      );
+      const bucket = receiptsByAddress.get(address);
+      if (bucket) bucket.push(item);
+      else receiptsByAddress.set(address, [item]);
+    }
+
+    const reconciled: TurnDeliverableItem[] = [];
+    for (const item of items) {
+      if (item.tier === 'reported') {
+        const address = deliverableAddressKey(
+          item.relativePath,
+          item.absolutePath,
+          undefined,
+          workspaceRoots
+        );
+        const matchingReceipts = receiptsByAddress.get(address) ?? [];
+        if (matchingReceipts.length === 1) {
+          const receipt = matchingReceipts[0];
+          receipt.sources.push(...item.sources);
+          if (item.insertions !== undefined) receipt.insertions = item.insertions;
+          if (item.deletions !== undefined) receipt.deletions = item.deletions;
+          if (item.diff !== undefined) receipt.diff = item.diff;
+          continue;
+        }
+      }
+      reconciled.push(item);
+    }
+    if (reconciled.length) result.set(turnId, reconciled);
   }
 
   return result;

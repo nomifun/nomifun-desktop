@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use nomifun_ai_agent::{
     AgentStreamEvent,
-    artifact_store::{ArtifactKind, ArtifactStore, PersistedArtifact},
+    artifact_store::{
+        ArtifactKind, ArtifactRecoveryEnvelope, ArtifactRecoverySource, ArtifactStore,
+        PersistedArtifact,
+    },
     protocol::events::{
         AcpToolCallContentItem, FinishEventData, TextEventData, TurnStopReason,
         tool_call::{
@@ -17,7 +20,7 @@ use nomifun_common::{ConversationId, MessageId, now_ms};
 use nomifun_conversation::stream_relay::{RelayTerminal, StreamRelay};
 use nomifun_db::{
     IConversationRepository, SortOrder, SqliteConversationRepository, init_database_memory,
-    models::{ConversationRow, MessageRow},
+    models::ConversationRow,
 };
 use nomifun_realtime::BroadcastEventBus;
 use serde_json::{Value, json};
@@ -107,43 +110,28 @@ fn artifact_items(content: &Value) -> Vec<PersistedArtifact> {
         .collect()
 }
 
-async fn insert_turn_parent(
-    repo: &SqliteConversationRepository,
-    conversation_id: &str,
-    turn_id: &str,
-) {
-    repo.insert_message(&MessageRow {
-        id: 0,
-        message_id: turn_id.to_owned(),
-        conversation_id: conversation_id.to_owned(),
-        msg_id: Some(turn_id.to_owned()),
-        r#type: "system".to_owned(),
-        content: r#"{"kind":"turn_root"}"#.to_owned(),
-        position: Some("center".to_owned()),
-        status: Some("finish".to_owned()),
-        hidden: true,
-        created_at: now_ms(),
-    })
-    .await
-    .expect("insert logical root turn message");
-}
-
 #[tokio::test]
 async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished() {
     let (repo, _db, conversation_id, owner) = setup_repo().await;
     let workspace = TestWorkspace::new();
     let store = ArtifactStore::new(workspace.path());
-    let artifact = store
-        .persist_inline(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG)
-        .expect("persist verified image receipt");
 
     // A continuation/failover segment has a distinct wire id but still belongs
     // to the original user-visible turn.
     let root_turn_id = MessageId::new().into_string();
     let wire_segment_id = MessageId::new().into_string();
     assert_ne!(root_turn_id, wire_segment_id);
-    insert_turn_parent(&repo, &conversation_id, &root_turn_id).await;
-
+    let artifact = store
+        .persist_inline_and_existing_batch_recoverable(
+            [(ArtifactKind::Image, "image/png", ONE_PIXEL_PNG)],
+            std::iter::empty::<&Path>(),
+            &ArtifactRecoverySource {
+                conversation_id: conversation_id.clone(),
+                wire_msg_id: wire_segment_id.clone(),
+            },
+        )
+        .expect("persist verified image receipt");
+    let artifact = artifact.into_iter().next().expect("one image receipt");
     let bus = Arc::new(BroadcastEventBus::new(64));
     let mut live_rx = bus.subscribe_user();
     let (tx, _) = broadcast::channel(64);
@@ -188,7 +176,7 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
     // This is the intentionally sparse Completed frame synthesized at the
     // ordered ACP PromptResponse boundary. The relay must materialize it
     // against the active snapshot before its artifact 2PC commit.
-    tx.send(AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
+    let sparse_completion = AcpToolCallEventData {
         session_id: "session-imagegen".into(),
         update: AcpToolCallUpdateData {
             session_update: AcpToolCallSessionUpdateKind::ToolCallUpdate,
@@ -205,7 +193,20 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
             locations: None,
         },
         meta: None,
-    }))
+    };
+    store
+        .prepare_recovery_receipts(
+            std::slice::from_ref(&artifact),
+            &ArtifactRecoveryEnvelope {
+                conversation_id: conversation_id.clone(),
+                wire_msg_id: wire_segment_id.clone(),
+                event_kind: "acp_tool_call".to_owned(),
+                event_json: serde_json::to_string(&sparse_completion)
+                    .expect("serialize ACP recovery envelope"),
+            },
+        )
+        .expect("prepare ACP recovery envelope");
+    tx.send(AgentStreamEvent::AcpToolCall(sparse_completion))
     .expect("send sparse synthesized completion");
     tx.send(AgentStreamEvent::Text(TextEventData {
         content: "已生成。".into(),
@@ -219,6 +220,20 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
 
     let outcome = relay.consume(rx).await;
     assert_eq!(outcome.terminal, RelayTerminal::Finish);
+    assert_eq!(outcome.committed_artifact_count, 1);
+
+    let root = repo
+        .get_message(&conversation_id, &root_turn_id)
+        .await
+        .expect("load logical turn root")
+        .expect("relay persisted logical turn root");
+    assert_eq!(root.r#type, "turn_root");
+    assert_eq!(root.msg_id.as_deref(), Some(root_turn_id.as_str()));
+    assert!(root.hidden);
+    assert_eq!(
+        serde_json::from_str::<Value>(&root.content).expect("parse logical root")["kind"],
+        "turn_root"
+    );
 
     // Query the real SQLite repository, as the history endpoint does before
     // DTO normalization. There must be no provisional row left behind.
@@ -299,7 +314,6 @@ async fn sparse_acp_completion_commits_to_the_root_turn_and_hydrates_as_finished
 async fn enclosing_finish_closes_an_unfinished_acp_projection_in_real_history() {
     let (repo, _db, conversation_id, owner) = setup_repo().await;
     let root_turn_id = MessageId::new().into_string();
-    insert_turn_parent(&repo, &conversation_id, &root_turn_id).await;
     let wire_segment_id = MessageId::new().into_string();
     let bus = Arc::new(BroadcastEventBus::new(32));
     let (tx, _) = broadcast::channel(32);
@@ -363,7 +377,6 @@ async fn enclosing_finish_closes_an_unfinished_acp_projection_in_real_history() 
 async fn continuation_reused_call_ids_keep_distinct_wire_rows_with_one_root_owner() {
     let (repo, _db, conversation_id, owner) = setup_repo().await;
     let root_turn_id = MessageId::new().into_string();
-    insert_turn_parent(&repo, &conversation_id, &root_turn_id).await;
 
     for index in 0..2 {
         let wire_segment_id = MessageId::new().into_string();
@@ -445,6 +458,8 @@ async fn continuation_reused_call_ids_keep_distinct_wire_rows_with_one_root_owne
         .collect::<Vec<_>>();
     assert_eq!(text_rows.len(), 2);
     for row in text_rows {
+        assert_ne!(row.message_id, root_turn_id);
+        assert_eq!(row.msg_id.as_deref(), Some(row.message_id.as_str()));
         let content: Value = serde_json::from_str(&row.content).expect("parse assistant text row");
         assert_eq!(
             content["turn_id"], root_turn_id,

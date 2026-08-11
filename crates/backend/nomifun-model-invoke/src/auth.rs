@@ -84,6 +84,47 @@ pub struct AuthMaterial {
 }
 
 impl AuthMaterial {
+    /// Validate that this auth declaration can produce a request without
+    /// sending one.  Capability discovery uses this to distinguish a tagged
+    /// model from a completely configured model.
+    pub fn validate(&self) -> Result<(), InvokeError> {
+        match &self.scheme {
+            AuthScheme::MultiHeader(pairs) => {
+                for (header, field) in pairs {
+                    header_name(header)?;
+                    let value = self
+                        .credentials
+                        .get(field)
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            InvokeError::config(format!(
+                                "connection credentials missing field {field:?} required by auth header {header:?}"
+                            ))
+                        })?;
+                    header_value(value)?;
+                }
+                Ok(())
+            }
+            AuthScheme::HeaderKey(name) => {
+                header_name(name)?;
+                header_value(&self.primary_secret()?)?;
+                Ok(())
+            }
+            AuthScheme::Bearer | AuthScheme::TokenHeader => {
+                header_value(&self.primary_secret()?)?;
+                Ok(())
+            }
+            AuthScheme::QueryKey(param) => {
+                if param.trim().is_empty() {
+                    return Err(InvokeError::config("query-key auth requires a parameter name"));
+                }
+                self.primary_secret().map(|_| ())
+            }
+        }
+    }
+
     /// Every rotation-eligible secret, in stored order: the full
     /// `credentials["api_keys"]` array (each entry trimmed, blanks dropped),
     /// falling back to a bare `{"api_key": "..."}` shape when the array is
@@ -254,6 +295,38 @@ mod tests {
             let err = m.primary_secret().unwrap_err();
             assert_eq!(err.kind, InvokeErrorKind::Config, "credentials {empty}");
         }
+    }
+
+    #[test]
+    fn validate_distinguishes_complete_and_incomplete_auth_material() {
+        assert!(
+            material(AuthScheme::Bearer, json!({"api_keys": ["sk-ready"]}))
+                .validate()
+                .is_ok()
+        );
+        assert_eq!(
+            material(AuthScheme::Bearer, json!({})).validate().unwrap_err().kind,
+            InvokeErrorKind::Config
+        );
+
+        let multi = AuthScheme::parse("volc_voice").unwrap();
+        let incomplete = material(
+            multi.clone(),
+            json!({"app_key": "app", "access_key": "access"}),
+        );
+        assert!(incomplete.validate().unwrap_err().message.contains("resource_id"));
+        assert!(
+            material(
+                multi,
+                json!({
+                    "app_key": "app",
+                    "access_key": "access",
+                    "resource_id": "resource"
+                }),
+            )
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]
