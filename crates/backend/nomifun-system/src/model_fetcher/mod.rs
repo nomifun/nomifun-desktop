@@ -2,9 +2,11 @@ mod fetchers;
 mod url_fixer;
 
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use nomifun_api_types::{
     BedrockConfig, FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse,
+    FetchedModelProfile, ModelInfo, derive_tasks_and_traits,
 };
 use nomifun_common::{AppError, ProviderId, decrypt_string};
 use nomifun_db::IProviderRepository;
@@ -102,10 +104,7 @@ impl ModelFetchService {
         let config = config.with_primary_api_key()?;
         let http_client = self.http_client();
         match fetchers::fetch_for_platform(&http_client, &config).await {
-            Ok(models) => Ok(FetchModelsResponse {
-                models,
-                fixed_base_url: None,
-            }),
+            Ok(models) => Ok(fetch_models_response(&config.platform, models, None)),
             Err(err)
                 if try_fix
                     && supports_url_fix(&config.platform)
@@ -113,6 +112,10 @@ impl ModelFetchService {
             {
                 url_fixer::try_fix_url(&http_client, &config)
                     .await
+                    .map(|mut response| {
+                        response.model_profiles = model_profiles(&config.platform, &response.models);
+                        response
+                    })
                     .map_err(|_| err)
             }
             Err(err) => Err(err),
@@ -148,6 +151,25 @@ impl ModelFetchService {
             bedrock_config,
         })
     }
+}
+
+fn model_profiles(platform: &str, models: &[ModelInfo]) -> HashMap<String, FetchedModelProfile> {
+    models
+        .iter()
+        .map(|model| {
+            let (tasks, traits) = derive_tasks_and_traits(platform, &model.id);
+            (model.id.clone(), FetchedModelProfile { tasks, traits })
+        })
+        .collect()
+}
+
+fn fetch_models_response(
+    platform: &str,
+    models: Vec<ModelInfo>,
+    fixed_base_url: Option<String>,
+) -> FetchModelsResponse {
+    let model_profiles = model_profiles(platform, &models);
+    FetchModelsResponse { models, model_profiles, fixed_base_url }
 }
 
 impl FetchConfig {
@@ -350,13 +372,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_models_vertex_ai_returns_hardcoded() {
+    async fn fetch_models_vertex_ai_rejects_the_legacy_mixed_protocol_preset() {
         let (svc, db) = setup().await;
         let id = create_provider(&db, "vertex-ai", "https://unused", "fake-key").await;
         let req = FetchModelsRequest { try_fix: false };
-        let resp = svc.fetch_models(&id, &req).await.unwrap();
-        assert_eq!(resp.models.len(), 2);
-        assert!(resp.fixed_base_url.is_none());
+        let err = svc.fetch_models(&id, &req).await.unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
     }
 
     #[tokio::test]
@@ -372,13 +393,7 @@ mod tests {
                     name: None,
                 })
         );
-        assert!(
-            resp.models
-                .contains(&nomifun_api_types::ModelInfo {
-                    id: "MiniMax-Text-01".into(),
-                    name: None,
-                })
-        );
+        assert!(!resp.models.iter().any(|model| model.id == "MiniMax-Text-01"));
     }
 
     #[tokio::test]
@@ -451,13 +466,7 @@ mod tests {
                     name: None,
                 })
         );
-        assert!(
-            resp.models
-                .contains(&nomifun_api_types::ModelInfo {
-                    id: "MiniMax-Text-01".into(),
-                    name: None,
-                })
-        );
+        assert!(!resp.models.iter().any(|model| model.id == "MiniMax-Text-01"));
         assert!(resp.fixed_base_url.is_none());
     }
 

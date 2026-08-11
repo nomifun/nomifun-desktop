@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { MODEL_PLATFORMS, getPlatformByValue } from './modelPlatforms';
+import { MODEL_PLATFORMS, getPlatformByValue, getSupportedTasksForPlatform } from './modelPlatforms';
 
 const platform = (value: string) => {
   const found = getPlatformByValue(value);
@@ -79,5 +79,29 @@ describe('MODEL_PLATFORMS coding plan presets', () => {
 
     expect(byValue.get('Qianfan')?.platform).toBe('qianfan');
     expect(byValue.get('Qianfan')?.base_url).toBe('https://qianfan.baidubce.com/v2');
+  });
+
+  test('uses current provider roots instead of retired product hosts', () => {
+    expect(platform('PPIO').base_url).toBe('https://api.ppio.com/openai/v1');
+    expect(platform('Ctyun').base_url).toBe('https://wishub-x6.ctyun.cn/v1');
+
+    expect(platform('Hunyuan').platform).toBe('hunyuan');
+    expect(platform('Hunyuan').base_url).toBe('https://tokenhub.tencentmaas.com/v1');
+    expect(platform('Hunyuan-Global').platform).toBe('hunyuan-global');
+    expect(platform('Hunyuan-Global').base_url).toBe('https://tokenhub-intl.tencentmaas.com/v1');
+  });
+
+  test('exposes only modalities backed by a verified runtime route', () => {
+    expect(getSupportedTasksForPlatform({ platform: 'openai' }).includes('rerank')).toBe(false);
+    expect(getSupportedTasksForPlatform({ platform: 'mimo' })).toEqual([
+      'chat',
+      'speech_synthesis',
+      'speech_recognition',
+    ]);
+    expect(getSupportedTasksForPlatform({ platform: 'xai' }).includes('video_generation')).toBe(true);
+    expect(getSupportedTasksForPlatform({ platform: 'siliconflow' }).includes('rerank')).toBe(true);
+    expect(getSupportedTasksForPlatform({ platform: 'zhipu' }).includes('video_generation')).toBe(true);
+    expect(getSupportedTasksForPlatform({ platform: 'anthropic' })).toEqual(['chat']);
+    expect(getSupportedTasksForPlatform({ platform: 'future-provider' })).toEqual(['chat']);
   });
 });

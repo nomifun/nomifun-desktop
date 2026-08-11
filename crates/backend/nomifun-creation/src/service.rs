@@ -1079,7 +1079,9 @@ impl CreationService {
                 mime: Some(TEXT_MIME.to_string()),
             }],
             // Defensive: no creation capability maps to these result shapes.
-            TaskResult::Transcript { .. } | TaskResult::Embeddings(_) => {
+            TaskResult::Transcript { .. }
+            | TaskResult::Embeddings(_)
+            | TaskResult::Reranked(_) => {
                 return ExecOutcome::Failed(CreationError::new(
                     "invalid_artifact",
                     "unexpected result type from the invoke layer for a creation task",
@@ -3270,17 +3272,21 @@ mod http_e2e_tests {
                 .unwrap();
         }
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
+        // Both provider calls and artifact downloads target loopback WireMock;
+        // neither may inherit a developer-machine HTTP proxy.
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let invoke = Arc::new(ModelInvokeService::new(
             Arc::new(SqliteProviderRepository::new(pool.clone())),
             Arc::new(SqliteProviderModelRepository::new(pool.clone())),
             Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
             TEST_KEY,
-            reqwest::Client::new(),
+            http.clone(),
             AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
         ));
         let sink = Arc::new(CountingSink { count: AtomicUsize::new(0), persisted: std::sync::Mutex::new(Vec::new()) });
         let svc = CreationService::builder(repo)
             .with_invoke(invoke)
+            .with_http(http)
             .with_asset_source(Arc::new(NoInputs))
             .with_asset_sink(sink.clone())
             .with_poll_interval(Duration::from_millis(10))
@@ -3317,7 +3323,7 @@ mod http_e2e_tests {
         let server = MockServer::start().await;
         let encoded = base64::engine::general_purpose::STANDARD.encode(valid_png());
         Mock::given(method("POST"))
-            .and(path("/v1/images/generations"))
+            .and(path("/images/generations"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": encoded}]})))
             .mount(&server)
             .await;
@@ -3336,7 +3342,7 @@ mod http_e2e_tests {
         let server = MockServer::start().await;
         let encoded = base64::engine::general_purpose::STANDARD.encode(valid_png());
         Mock::given(method("POST"))
-            .and(path("/v1/images/generations"))
+            .and(path("/images/generations"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(json!({"data": [{"b64_json": encoded}]})),
@@ -3363,7 +3369,7 @@ mod http_e2e_tests {
     async fn openai_images_rejects_empty_artifact_url() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/images/generations"))
+            .and(path("/images/generations"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"url": "  "}]})))
             .mount(&server)
             .await;
@@ -3381,7 +3387,7 @@ mod http_e2e_tests {
         let server = MockServer::start().await;
         let artifact_url = format!("{}/artifact.png", server.uri());
         Mock::given(method("POST"))
-            .and(path("/v1/images/generations"))
+            .and(path("/images/generations"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"url": artifact_url}]})))
             .mount(&server)
             .await;
@@ -3408,7 +3414,7 @@ mod http_e2e_tests {
         let server = MockServer::start().await;
         let artifact_url = format!("{}/artifact.png", server.uri());
         Mock::given(method("POST"))
-            .and(path("/v1/images/generations"))
+            .and(path("/images/generations"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"url": artifact_url}]})))
             .mount(&server)
             .await;
@@ -3435,7 +3441,7 @@ mod http_e2e_tests {
         let server = MockServer::start().await;
         let artifact_url = format!("{}/artifact.png", server.uri());
         Mock::given(method("POST"))
-            .and(path("/v1/images/generations"))
+            .and(path("/images/generations"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"url": artifact_url}]})))
             .mount(&server)
             .await;
@@ -3461,7 +3467,7 @@ mod http_e2e_tests {
     async fn openai_images_propagates_provider_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/images/generations"))
+            .and(path("/images/generations"))
             .respond_with(ResponseTemplate::new(401).set_body_string("bad key"))
             .mount(&server)
             .await;
@@ -3479,17 +3485,17 @@ mod http_e2e_tests {
     async fn openai_video_submit_poll_content_end_to_end() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/videos"))
+            .and(path("/videos"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "vid_1", "status": "queued"})))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/v1/videos/vid_1"))
+            .and(path("/videos/vid_1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "vid_1", "status": "completed"})))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/v1/videos/vid_1/content"))
+            .and(path("/videos/vid_1/content"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "video/mp4")
@@ -3523,13 +3529,13 @@ mod http_e2e_tests {
         // is mounted, so a content fetch would 404 the poll chain.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/videos"))
+            .and(path("/videos"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "v1", "status": "queued"})))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/v1/videos/v1"))
+            .and(path("/videos/v1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "v1", "status": "failed", "error": {"message": "moderation blocked"}
             })))
@@ -3564,7 +3570,7 @@ mod http_e2e_tests {
     async fn openai_chat_text_end_to_end() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "choices": [{"message": {"role": "assistant", "content": "hello from the model"}}]
             })))
@@ -3626,10 +3632,11 @@ mod http_e2e_tests {
     #[tokio::test]
     async fn tts_end_to_end_produces_audio_artifact() {
         // Tts is now routable: capability "tts" maps to SpeechSynthesis →
-        // openai.audio_speech → POST /v1/audio/speech returning audio bytes.
+        // The test provider base is an origin-only preset, so the task path is
+        // appended verbatim rather than silently injecting `/v1`.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/audio/speech"))
+            .and(path("/audio/speech"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "audio/mpeg")

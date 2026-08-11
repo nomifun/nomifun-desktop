@@ -20,4 +20,5 @@ export { default as PDFViewer } from './PDFViewer';
 export { default as ExcelViewer } from './ExcelViewer';
 export { default as OfficeDocViewer } from './OfficeDocViewer';
 export { default as ImageViewer } from './ImageViewer';
+export { default as MiniAppViewer } from './MiniAppViewer';
 export { default as URLViewer } from './URLViewer';
