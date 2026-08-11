@@ -70,8 +70,9 @@ impl ModelInvokeService {
     ///    non-empty declared → UnsupportedTask; declared empty (unseeded) →
     ///    fall back to `derive_tasks_and_traits(platform, model)`, still
     ///    absent → UnsupportedTask.
-    /// 4. protocol = row.protocol (non-empty) ?? `platform_route(platform,
-    ///    task).protocol`; role = row.connection_role ?? route role.
+    /// 4. Route gate: `(platform, task)` must have a verified built-in route;
+    ///    absence -> UnsupportedTask. Then protocol = row.protocol (non-empty)
+    ///    ?? route protocol; role = row.connection_role ?? route role.
     /// 5. Connection: no role → the provider row IS the "default" connection
     ///    (bedrock guarded off; first comma/newline-separated key; scheme per
     ///    [`default_connection_scheme`]); role → `provider_connections` row
@@ -144,8 +145,19 @@ impl ModelInvokeService {
             }
         }
 
-        // -- 4. Protocol + connection role: row override ?? route table -----
-        let route = platform_route(&provider.platform, task);
+        // -- 4. Strict route gate + row overrides ---------------------------
+        // A preset with no verified provider/task route must never inherit an
+        // OpenAI URL merely because a model row declares that task. Apply the
+        // gate in probe mode as well, so probes and real invocations agree.
+        let route = platform_route(&provider.platform, task).ok_or_else(|| {
+            InvokeError::new(
+                InvokeErrorKind::UnsupportedTask,
+                format!(
+                    "provider platform {:?} has no verified route for task {task:?}",
+                    provider.platform
+                ),
+            )
+        })?;
         let row_protocol = row
             .as_ref()
             .and_then(|r| r.protocol.as_deref())
@@ -572,6 +584,47 @@ mod tests {
         assert_eq!(call.model_params, json!({}));
     }
 
+    #[tokio::test]
+    async fn known_preset_does_not_fall_back_to_openai_for_unverified_task() {
+        let (svc, pool) = setup(full_registry()).await;
+        let pid = seed_provider(&pool, "minimax", true).await;
+        seed_model(&pool, &pid, "image-01", r#"["image_generation"]"#, None, true).await;
+        let err = svc
+            .resolve(&mref(&pid, "image-01"), ModelTask::ImageGeneration, image_request(), true)
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
+        assert!(err.message.contains("minimax"), "message: {}", err.message);
+        assert!(err.message.contains("no verified route"), "message: {}", err.message);
+    }
+
+    #[tokio::test]
+    async fn row_protocol_override_cannot_bypass_provider_task_gate() {
+        let (svc, pool) = setup(full_registry()).await;
+        let pid = seed_provider(&pool, "deepgram", true).await;
+        seed_model(&pool, &pid, "mystery-chat", r#"["chat"]"#, Some("openai.chat_text"), true).await;
+        let err = svc
+            .resolve(&mref(&pid, "mystery-chat"), ModelTask::Chat, chat_request(), true)
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
+        assert!(err.message.contains("deepgram"), "message: {}", err.message);
+    }
+
+    #[tokio::test]
+    async fn custom_gateway_keeps_the_explicit_openai_compatible_escape_hatch() {
+        let (svc, pool) = setup(full_registry()).await;
+        let pid = seed_provider(&pool, "custom", true).await;
+        seed_model(&pool, &pid, "custom-image", r#"["image_generation"]"#, None, true).await;
+        let (_, adapter) = svc
+            .resolve(&mref(&pid, "custom-image"), ModelTask::ImageGeneration, image_request(), true)
+            .await
+            .unwrap();
+        assert_eq!(adapter.id(), "openai.images");
+    }
+
     // -- steps 4-6: protocol, connection, params, adapter -------------------
 
     #[tokio::test]
@@ -784,7 +837,7 @@ mod tests {
         assert_eq!(call.model_params, json!({}));
     }
 
-    // -- default connection auth overrides + bedrock guard ------------------
+    // -- default connection auth overrides + strict unsupported presets -----
 
     #[tokio::test]
     async fn gemini_default_connection_uses_goog_api_key_header() {
@@ -813,7 +866,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bedrock_default_connection_is_rejected_as_config() {
+    async fn bedrock_is_rejected_before_openai_fallback_or_connection_setup() {
         let (svc, pool) = setup(full_registry()).await;
         let pid = seed_provider(&pool, "bedrock", true).await;
         seed_model(&pool, &pid, "claude-x", r#"["chat"]"#, None, true).await;
@@ -822,9 +875,9 @@ mod tests {
             .await
             .map(|_| ())
             .unwrap_err();
-        assert_eq!(err.kind, InvokeErrorKind::Config);
+        assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
         assert!(
-            err.message.contains("bedrock is not supported by the invoke layer yet"),
+            err.message.contains("no verified route"),
             "message: {}",
             err.message
         );

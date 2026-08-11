@@ -13,6 +13,7 @@
  */
 
 import { resolveBackendAssetUrl } from '@/renderer/utils/platform';
+import type { ModelTask } from '@/common/config/storage';
 
 const buildLogoAssetUrl = (path: string): string => {
   return resolveBackendAssetUrl(`/api/assets/logos/${path}`) ?? `/api/assets/logos/${path}`;
@@ -26,6 +27,7 @@ export type PlatformType =
   | 'gemini'
   | 'gemini-vertex-ai'
   | 'anthropic'
+  | 'openai'
   | 'custom'
   | 'new-api'
   | 'bedrock'
@@ -50,9 +52,18 @@ export type PlatformType =
   | 'qianfan'
   | 'qianfan-coding-plan'
   | 'hunyuan'
+  | 'hunyuan-global'
   | 'lingyi'
   | 'stepfun'
   | 'stepfun-plan'
+  | 'novita'
+  | 'openrouter'
+  | 'xai'
+  | 'poe'
+  | 'ppio'
+  | 'modelscope'
+  | 'infiniai'
+  | 'ctyun'
   | (string & {});
 
 /**
@@ -105,19 +116,12 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     platform: 'gemini',
     base_url: 'https://generativelanguage.googleapis.com',
   },
-  {
-    name: 'Gemini (Vertex AI)',
-    value: 'gemini-vertex-ai',
-    logo: buildLogoAssetUrl('ai-major/gemini.svg'),
-    platform: 'gemini-vertex-ai',
-  },
-
   // 预设供应商（按字母顺序排列）
   {
     name: 'OpenAI',
     value: 'OpenAI',
     logo: buildLogoAssetUrl('ai-major/openai.svg'),
-    platform: 'custom',
+    platform: 'openai',
     base_url: 'https://api.openai.com/v1',
   },
   {
@@ -128,11 +132,10 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     base_url: 'https://api.anthropic.com',
   },
   {
-    name: 'AWS Bedrock',
+    name: 'AWS Bedrock (Anthropic Claude)',
     value: 'AWS-Bedrock',
     logo: buildLogoAssetUrl('ai-cloud/bedrock.svg'),
     platform: 'bedrock',
-    i18nKey: 'settings.platformBedrock',
   },
   {
     name: 'DeepSeek',
@@ -177,14 +180,14 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     base_url: 'https://api.minimaxi.com/v1',
   },
   {
-    name: 'MiniMax Code',
+    name: 'MiniMax (International)',
     value: 'MiniMax-Code',
     logo: buildLogoAssetUrl('ai-china/minimax.png'),
     platform: 'minimax-code',
     base_url: 'https://api.minimax.io/v1',
   },
   {
-    name: 'MiniMax Token / Coding Plan',
+    name: 'MiniMax Token Plan (China)',
     value: 'MiniMax-Coding-Plan',
     logo: buildLogoAssetUrl('ai-china/minimax.png'),
     platform: 'minimax-coding-plan',
@@ -194,14 +197,14 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     name: 'Novita',
     value: 'Novita',
     logo: buildLogoAssetUrl('ai-cloud/novita.svg'),
-    platform: 'custom',
+    platform: 'novita',
     base_url: 'https://api.novita.ai/openai/v1',
   },
   {
     name: 'OpenRouter',
     value: 'OpenRouter',
     logo: buildLogoAssetUrl('ai-cloud/openrouter.svg'),
-    platform: 'custom',
+    platform: 'openrouter',
     base_url: 'https://openrouter.ai/api/v1',
   },
   {
@@ -264,7 +267,7 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     name: 'xAI',
     value: 'xAI',
     logo: buildLogoAssetUrl('ai-major/xai.svg'),
-    platform: 'custom',
+    platform: 'xai',
     base_url: 'https://api.x.ai/v1',
   },
   {
@@ -303,11 +306,18 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     base_url: 'https://qianfan.baidubce.com/v2/coding',
   },
   {
-    name: 'Hunyuan',
+    name: 'Tencent TokenHub (China)',
     value: 'Hunyuan',
     logo: buildLogoAssetUrl('ai-china/tencent.svg'),
     platform: 'hunyuan',
-    base_url: 'https://api.hunyuan.cloud.tencent.com/v1',
+    base_url: 'https://tokenhub.tencentmaas.com/v1',
+  },
+  {
+    name: 'Tencent TokenHub (Global)',
+    value: 'Hunyuan-Global',
+    logo: buildLogoAssetUrl('ai-china/tencent.svg'),
+    platform: 'hunyuan-global',
+    base_url: 'https://tokenhub-intl.tencentmaas.com/v1',
   },
   {
     name: 'Lingyi',
@@ -320,36 +330,36 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     name: 'Poe',
     value: 'Poe',
     logo: buildLogoAssetUrl('ai-cloud/poe.svg'),
-    platform: 'custom',
+    platform: 'poe',
     base_url: 'https://api.poe.com/v1',
   },
   {
     name: 'PPIO',
     value: 'PPIO',
     logo: buildLogoAssetUrl('ai-cloud/ppio.svg'),
-    platform: 'custom',
-    base_url: 'https://api.ppinfra.com/v3/openai',
+    platform: 'ppio',
+    base_url: 'https://api.ppio.com/openai/v1',
   },
   {
     name: 'ModelScope',
     value: 'ModelScope',
     logo: buildLogoAssetUrl('ai-cloud/modelscope.svg'),
-    platform: 'custom',
+    platform: 'modelscope',
     base_url: 'https://api-inference.modelscope.cn/v1',
   },
   {
     name: 'InfiniAI',
     value: 'InfiniAI',
     logo: buildLogoAssetUrl('ai-cloud/infiniai.svg'),
-    platform: 'custom',
+    platform: 'infiniai',
     base_url: 'https://cloud.infini-ai.com/maas/v1',
   },
   {
     name: 'Ctyun',
     value: 'Ctyun',
     logo: buildLogoAssetUrl('ai-cloud/ctyun.svg'),
-    platform: 'custom',
-    base_url: 'https://wishub-x1.ctyun.cn/v1',
+    platform: 'ctyun',
+    base_url: 'https://wishub-x6.ctyun.cn/v1',
   },
   {
     name: 'StepFun',
@@ -397,6 +407,97 @@ export const detectNewApiProtocol = (modelName: string): string => {
  */
 export const getPlatformByValue = (value: string): PlatformConfig | undefined => {
   return MODEL_PLATFORMS.find((p) => p.value === value);
+};
+
+const CHAT_ONLY: readonly ModelTask[] = ['chat'];
+const OPENAI_NATIVE_TASKS: readonly ModelTask[] = [
+  'chat',
+  'image_generation',
+  'image_edit',
+  'video_generation',
+  'speech_synthesis',
+  'speech_recognition',
+  'embedding',
+];
+const USER_DEFINED_TASKS: readonly ModelTask[] = [
+  ...OPENAI_NATIVE_TASKS,
+  'rerank',
+];
+
+/**
+ * Tasks that the shipped runtime can actually route for each preset today.
+ * This is deliberately stricter than a vendor's marketing capability list:
+ * a modality is exposed only after its endpoint, auth and response protocol
+ * have a concrete adapter. Custom/New API remain escape hatches.
+ */
+const SUPPORTED_TASKS_BY_PLATFORM: Readonly<Record<string, readonly ModelTask[]>> = {
+  custom: USER_DEFINED_TASKS,
+  'new-api': USER_DEFINED_TASKS,
+  openai: OPENAI_NATIVE_TASKS,
+  anthropic: CHAT_ONLY,
+  bedrock: CHAT_ONLY,
+  gemini: ['chat', 'image_generation', 'image_edit'],
+  'gemini-vertex-ai': CHAT_ONLY,
+  deepseek: CHAT_ONLY,
+  mimo: ['chat', 'speech_synthesis', 'speech_recognition'],
+  'mimo-token-plan-cn': CHAT_ONLY,
+  'mimo-token-plan-sgp': CHAT_ONLY,
+  'mimo-token-plan-ams': CHAT_ONLY,
+  minimax: ['chat', 'speech_synthesis'],
+  'minimax-code': CHAT_ONLY,
+  'minimax-coding-plan': CHAT_ONLY,
+  novita: ['chat', 'embedding'],
+  openrouter: ['chat', 'embedding'],
+  dashscope: ['chat', 'image_generation', 'embedding'],
+  'dashscope-coding': CHAT_ONLY,
+  siliconflow: [
+    'chat',
+    'image_generation',
+    'image_edit',
+    'video_generation',
+    'speech_recognition',
+    'embedding',
+    'rerank',
+  ],
+  zhipu: ['chat', 'image_generation', 'video_generation', 'speech_recognition', 'embedding', 'rerank'],
+  'glm-coding-plan': CHAT_ONLY,
+  'moonshot-cn': CHAT_ONLY,
+  'moonshot-global': CHAT_ONLY,
+  xai: [
+    'chat',
+    'image_generation',
+    'image_edit',
+    'video_generation',
+    'speech_synthesis',
+    'speech_recognition',
+  ],
+  ark: ['chat', 'image_generation', 'video_generation', 'speech_synthesis', 'speech_recognition'],
+  'ark-coding-plan': CHAT_ONLY,
+  'ark-agent-plan': CHAT_ONLY,
+  qianfan: ['chat', 'embedding', 'rerank'],
+  'qianfan-coding-plan': CHAT_ONLY,
+  hunyuan: ['chat', 'embedding'],
+  'hunyuan-global': ['chat', 'embedding'],
+  lingyi: CHAT_ONLY,
+  poe: CHAT_ONLY,
+  ppio: ['chat', 'embedding', 'rerank'],
+  modelscope: CHAT_ONLY,
+  infiniai: ['chat', 'embedding'],
+  ctyun: ['chat', 'image_generation', 'embedding', 'rerank'],
+  stepfun: ['chat', 'image_generation', 'image_edit', 'speech_recognition'],
+  'stepfun-plan': ['chat', 'image_generation', 'image_edit'],
+};
+
+export const getSupportedTasksForPlatform = (
+  provider: Pick<PlatformConfig, 'platform'> | { platform?: string | null }
+): ModelTask[] => {
+  const platform = provider.platform?.trim();
+  // Old hand-created rows can lack a platform marker and intentionally retain
+  // the user-defined gateway escape hatch. A non-empty but unknown preset is
+  // conservative: chat may still be handled by the agent engine, while no
+  // unverified non-chat modality is advertised.
+  if (!platform) return [...USER_DEFINED_TASKS];
+  return [...(SUPPORTED_TASKS_BY_PLATFORM[platform] ?? CHAT_ONLY)];
 };
 
 export const getProviderLogo = ({

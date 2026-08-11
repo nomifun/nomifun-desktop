@@ -16,6 +16,13 @@ import {
 import { classifyPreviewError, type PreviewErrorKind } from '@/renderer/utils/previewError';
 import { useCallback, useState } from 'react';
 
+/**
+ * Text types whose previews may be truncated when the file is huge.
+ *
+ * `miniapp` is deliberately NOT a member: a mini-app is executable HTML, and a
+ * truncated app is a broken app (the iframe would render half a document). The
+ * whole file is always read, whatever the size caps say.
+ */
 const LARGE_TEXT_PREVIEW_TYPES = new Set<PreviewContentType>(['code', 'markdown', 'html', 'diff']);
 
 const normalizeLargeTextPreview = (
@@ -115,6 +122,10 @@ export const usePreviewLauncher = () => {
         workspace,
         language,
         truncated: false,
+        // The preview panel is mounted outside ConversationProvider; stamp the
+        // owning conversation so viewers that need it (the mini-app publish
+        // action) can read it back off the tab metadata.
+        conversation_id: conversationContext?.conversation_id,
       };
 
       // 1. 乐观预览：如果有回退内容（如 Diff 中提取的内容），立即显示 / Optimistic preview: Show fallback content immediately if available
@@ -203,7 +214,7 @@ export const usePreviewLauncher = () => {
         setLoading(false);
       }
     },
-    [workspace, openPreview]
+    [workspace, openPreview, conversationContext?.conversation_id]
   );
 
   return { launchPreview, loading, errorKind, canPreview: !!openPreview };

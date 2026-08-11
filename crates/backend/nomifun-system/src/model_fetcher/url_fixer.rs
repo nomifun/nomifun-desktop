@@ -49,6 +49,7 @@ pub(crate) async fn try_fix_url(
             debug!(fixed_url = %fixed_url, "URL auto-fix succeeded");
             return Ok(FetchModelsResponse {
                 models,
+                model_profiles: Default::default(),
                 fixed_base_url: Some(fixed_url),
             });
         }

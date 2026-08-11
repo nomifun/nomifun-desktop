@@ -144,7 +144,7 @@ The companion you talk to every day quietly becomes the partner who *gets* you.
 Connect a compatible XiaoZhi ESP32 robot directly to NomiFun over your LAN. The
 robot supplies the microphone, speaker, display, servos, and device-side MCP
 tools, while NomiFun supplies the companion's persona, models, memory, ASR, TTS,
-sessions, and tool orchestration. Setup is built into each companion's **Remote
+sessions, and tool coordination. Setup is built into each companion's **Remote
 control → Robot connection** page: copy its OTA address, enter the six-digit
 activation code shown by the robot, and bind the device to that companion.
 

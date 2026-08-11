@@ -59,7 +59,7 @@ fn params_str<'a>(params: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 
 /// Resolve the endpoint + request shape for a (provider, task).
 pub fn resolve_dispatch_target(
-    _platform: &str,
+    platform: &str,
     base_url: &str,
     is_full_url: bool,
     task: ModelTask,
@@ -80,12 +80,27 @@ pub fn resolve_dispatch_target(
         // 2. base_url is already the complete endpoint.
         trimmed.to_string()
     } else {
-        // 3. Convention. Normalize to a single `/v1` version root (mirrors
-        // nomifun-creation's `openai_versioned_base`): a base is tolerated with
-        // or without a trailing `/v1`, and StepFun's `.../step_plan/v1` collapses
-        // to itself. All OpenAI-compatible task endpoints live under `/v1`.
-        let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
-        format!("{root}/v1{conv_path}")
+        // 3. Convention. Preset provider roots already include their official
+        // API version (`/v1`, `/v2`, `/v3`, `/v4`, ...), so append the task
+        // path verbatim. Rewriting every provider to `/v1` corrupts valid
+        // roots such as Zhipu `/v4`, Ark `/v3` and Qianfan `/v2`.
+        //
+        // Custom/OpenAI-gateway roots are the only compatibility escape hatch:
+        // tolerate an origin without an explicit version by adding `/v1`.
+        let is_unversioned_gateway = matches!(platform, "custom" | "new-api")
+            && !trimmed
+                .rsplit('/')
+                .next()
+                .is_some_and(|segment| {
+                    segment.len() > 1
+                        && segment.starts_with('v')
+                        && segment[1..].chars().all(|c| c.is_ascii_digit())
+                });
+        if is_unversioned_gateway {
+            format!("{trimmed}/v1{conv_path}")
+        } else {
+            format!("{trimmed}{conv_path}")
+        }
     };
 
     // request_shape override.
@@ -136,6 +151,31 @@ mod tests {
     fn chat_convention() {
         let t = resolve_dispatch_target("openai", "https://api.openai.com/v1", false, ModelTask::Chat, &NONE);
         assert_eq!(t.url, "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn preset_provider_version_roots_are_never_rewritten_to_v1() {
+        let cases = [
+            ("zhipu", "https://open.bigmodel.cn/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4/images/generations"),
+            ("ark", "https://ark.cn-beijing.volces.com/api/v3", "https://ark.cn-beijing.volces.com/api/v3/images/generations"),
+            ("qianfan", "https://qianfan.baidubce.com/v2", "https://qianfan.baidubce.com/v2/images/generations"),
+        ];
+        for (platform, base, expected) in cases {
+            let target = resolve_dispatch_target(platform, base, false, ModelTask::ImageGeneration, &NONE);
+            assert_eq!(target.url, expected, "{platform}");
+        }
+    }
+
+    #[test]
+    fn unversioned_custom_gateway_gets_v1_compatibility_root() {
+        let target = resolve_dispatch_target(
+            "custom",
+            "https://gateway.example.com",
+            false,
+            ModelTask::Chat,
+            &NONE,
+        );
+        assert_eq!(target.url, "https://gateway.example.com/v1/chat/completions");
     }
 
     #[test]

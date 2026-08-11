@@ -5,7 +5,42 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-No unreleased changes yet.
+- **New feature (小程序 / mini-apps).** A conversation could always generate a web
+  page, but the page died with the workspace: to use it again you had to dig up the
+  session or ask for it a second time. 小程序 closes that loop, and it does so without
+  inventing a second kind of conversation. The session start page gains a 创建小程序
+  capability: pick it, describe what you want, and you get an **ordinary** Nomi
+  conversation — in the session list, in your history, deletable like any other —
+  pinned by a builder prompt to exactly one artifact, a self-contained `miniapp.html`
+  in its workspace. While the agent writes it the right-hand preview renders that
+  file live in a sandboxed frame; walk away and nothing is stored anywhere. When it
+  is good, 发布为小程序 from that preview asks the only question that matters: 发布为新
+  的小程序, or 替换已有小程序 — and replacing means picking the target from your own
+  library, never a silent guess (the conversation's own app is merely the default
+  selection). From then on the app has **two storage layers**, and the difference is
+  the point: the document the app actually serves is a published snapshot, while a
+  conversation edits a working copy under `{work_dir}/miniapps/{id}/miniapp.html`. So
+  "the AI changed it" and "the app changed" are two separate events — a broken
+  half-finished edit cannot reach the tool you are relying on, and 发布 refuses a body
+  that was still being written or that does not look like an HTML document at all.
+  Whenever the working copy is ahead, the library card, the right-rail quick panel and
+  the runner all say 有未发布改动, and the runner offers 发布, which promotes the copy and
+  reloads the frame. The library lives at `/mini-apps` and the runner at
+  `/mini-apps/:id` — a single column: the published app, full page, plus a toolbar
+  (发布 / 继续迭代 / 刷新 / 在浏览器中打开 / 重命名 / 删除). 继续迭代, from a library card or
+  from that toolbar, materialises the working copy, asks the backend where it is, and
+  opens **a new ordinary conversation** whose first message names the app, its id and
+  the absolute path of its single source file. Nothing binds the two: the app outlives
+  every conversation that ever edited it, those conversations outlive the app, and
+  deleting a mini-app takes its snapshot and its own directory and nothing else. New:
+  **导入小程序** adopts an H5 app you wrote yourself — validation reports 13 named rules
+  with a concrete fix for each, wraps a bare fragment into a document for you, and
+  offers 用会话改造 when the app needs a real rewrite. The runner and the preview share
+  one sandbox policy, and the serve route is deliberately authentication-exempt — an
+  iframe subresource load carries no trust header, so behind auth neither surface could
+  render at all; the guard is the unguessable UUIDv7, the same bet the workshop's public
+  file route already makes. New HTTP routes and DTOs mean the UI/API contract version
+  moved **16 → 18**.
 
 ## v0.5.0 - 2026-08-08
 

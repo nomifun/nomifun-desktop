@@ -23,6 +23,7 @@ import {
   NEW_API_PROTOCOL_OPTIONS,
   detectNewApiProtocol,
   getPlatformByValue,
+  getSupportedTasksForPlatform,
   isCustomOption,
   isGeminiPlatform,
   isNewApiPlatform,
@@ -256,6 +257,7 @@ const AddPlatformModal = ModalHOC<{
   const base_url = Form.useWatch('base_url', form);
   const api_key = Form.useWatch('api_key', form);
   const modelValue = Form.useWatch('model', form);
+  const selectedTask = Form.useWatch('model_modality', form) as ModelTask | undefined;
   const bedrockAuthMethod = Form.useWatch('bedrockAuthMethod', form);
   const _bedrockRegion = Form.useWatch('bedrockRegion', form);
 
@@ -297,9 +299,14 @@ const AddPlatformModal = ModalHOC<{
     }
   }, [modelValue, isNewApi]);
 
+  const supportedTasks = useMemo(() => getSupportedTasksForPlatform({ platform }), [platform]);
   const taskOptions = useMemo(
-    () => MODEL_TASK_ORDER.map((v) => ({ label: t(`settings.modelTask.${v}`), value: v })),
-    [t]
+    () =>
+      MODEL_TASK_ORDER.filter((v) => supportedTasks.includes(v)).map((v) => ({
+        label: t(`settings.modelTask.${v}`),
+        value: v,
+      })),
+    [supportedTasks, t]
   );
 
   // 计算实际使用的 base_url（优先使用用户输入，否则使用平台预设）
@@ -312,6 +319,15 @@ const AddPlatformModal = ModalHOC<{
   // For Bedrock, don't pass bedrock_config to avoid auto-refresh on input changes
   // We'll build it dynamically in onFocus
   const modelListState = useModeModeList(platform, actualBaseUrl, api_key, true, undefined);
+  const filteredModelOptions = useMemo(() => {
+    const models = modelListState.data?.models ?? [];
+    if (!selectedTask) return [];
+    return models.filter(
+      (item) =>
+        item.tasks.includes(selectedTask) ||
+        (item.tasks.length === 0 && (selectedTask === 'chat' || isCustom || isNewApi))
+    );
+  }, [modelListState.data?.models, selectedTask, isCustom, isNewApi]);
 
   // 协议检测 Hook / Protocol detection hook
   // 启用检测的条件：
@@ -546,6 +562,7 @@ const AddPlatformModal = ModalHOC<{
                 const plat = MODEL_PLATFORMS.find((p) => p.value === value);
                 if (plat) {
                   form.setFieldValue('model', '');
+                  form.setFieldValue('model_modality', undefined);
                   setTasks([]);
                   setVisionInput(false);
                   // 预填模型供应商名称：预设平台用其展示名，自定义裸选项留空待用户填写。
@@ -825,7 +842,27 @@ const AddPlatformModal = ModalHOC<{
             <Input placeholder='default' />
           </Form.Item>
 
-          {/* 模型选择 / Model Selection */}
+          {/* 模态选择（第二层）/ Modality Selection (second level) */}
+          <Form.Item
+            label={t('settings.modelModality')}
+            field={'model_modality'}
+            required
+            rules={[{ required: true }]}
+            extra={<span className='text-11px text-t-secondary'>{t('settings.modelModalityTip')}</span>}
+          >
+            <Select
+              options={taskOptions}
+              placeholder={t('settings.modelModality')}
+              onChange={(value: ModelTask) => {
+                form.setFieldValue('model', '');
+                setTasks(value ? [value] : []);
+                setVisionInput(false);
+              }}
+              triggerProps={{ getPopupContainer: () => document.body }}
+            />
+          </Form.Item>
+
+          {/* 模型选择（第三层）/ Model Selection (third level) */}
           <Form.Item
             label={t('settings.modelName')}
             field={'model'}
@@ -841,12 +878,18 @@ const AddPlatformModal = ModalHOC<{
             }
           >
             <Select
+              disabled={!selectedTask}
               loading={!isFullUrl && modelListState.isLoading}
               showSearch
               allowCreate
-              onChange={() => {
-                setTasks([]);
-                setVisionInput(false);
+              onChange={(value: string) => {
+                const profile = modelListState.data?.models.find((item) => item.value === value);
+                const discoveredTasks = profile?.tasks ?? [];
+                const verifiedTasks = discoveredTasks.filter((task) => supportedTasks.includes(task));
+                setTasks(
+                  selectedTask && verifiedTasks.includes(selectedTask) ? verifiedTasks : selectedTask ? [selectedTask] : []
+                );
+                setVisionInput(profile?.traits.includes('vision_input') ?? false);
               }}
               suffixIcon={
                 isFullUrl ? undefined : (
@@ -896,10 +939,22 @@ const AddPlatformModal = ModalHOC<{
                           });
                           const models =
                             res.models.map((v) => {
+                              const id = typeof v === 'string' ? v : v.id;
+                              const profile = res.model_profiles?.[id];
                               if (typeof v === 'string') {
-                                return { label: v, value: v };
+                                return {
+                                  label: v,
+                                  value: v,
+                                  tasks: profile?.tasks ?? [],
+                                  traits: profile?.traits ?? [],
+                                };
                               } else {
-                                return { label: v.name || v.id, value: v.id };
+                                return {
+                                  label: v.name || v.id,
+                                  value: v.id,
+                                  tasks: profile?.tasks ?? [],
+                                  traits: profile?.traits ?? [],
+                                };
                               }
                             }) || [];
                           // Update the model list state manually
@@ -922,27 +977,7 @@ const AddPlatformModal = ModalHOC<{
                   />
                 )
               }
-              options={isFullUrl ? [] : modelListState.data?.models || []}
-            />
-          </Form.Item>
-
-          {/* 模态能力 / Model modality */}
-          <Form.Item
-            label={t('settings.modelModality')}
-            field={'model_modality'}
-            extra={<span className='text-11px text-t-secondary'>{t('settings.modelModalityTip')}</span>}
-          >
-            <Select
-              mode='multiple'
-              value={tasks}
-              onChange={(value: ModelTask[]) => {
-                const next = value ?? [];
-                setTasks(next);
-                if (!next.includes('chat')) setVisionInput(false);
-              }}
-              options={taskOptions}
-              placeholder={t('settings.modelModality')}
-              triggerProps={{ getPopupContainer: () => document.body }}
+              options={isFullUrl ? [] : filteredModelOptions}
             />
           </Form.Item>
 

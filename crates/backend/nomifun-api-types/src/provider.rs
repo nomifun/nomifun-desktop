@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use nomifun_common::ProtocolType;
 
+use crate::{ModelTask, ModelTrait};
+
 /// Model capability type discriminant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -284,10 +286,26 @@ pub struct ModelInfo {
     pub name: Option<String>,
 }
 
+/// Capability metadata for a fetched model. The model-list endpoint remains
+/// live/authoritative for membership, while this profile lets the UI present
+/// the safe `provider -> modality -> model` flow instead of asking users to
+/// guess a modality after selecting an arbitrary model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FetchedModelProfile {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<ModelTask>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub traits: Vec<ModelTrait>,
+}
+
 /// Response for `POST /api/providers/:id/models`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FetchModelsResponse {
     pub models: Vec<ModelInfo>,
+    /// Profiles keyed by exact model id. Kept separate from `models` so older
+    /// clients that only understand `{id,name}` entries remain compatible.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_profiles: HashMap<String, FetchedModelProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixed_base_url: Option<String>,
 }
@@ -898,6 +916,7 @@ mod tests {
                     name: None,
                 },
             ],
+            model_profiles: HashMap::new(),
             fixed_base_url: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -912,10 +931,15 @@ mod tests {
                 id: "gpt-4".into(),
                 name: None,
             }],
+            model_profiles: HashMap::from([(
+                "gpt-4".into(),
+                FetchedModelProfile { tasks: vec![ModelTask::Chat], traits: vec![] },
+            )]),
             fixed_base_url: Some("https://api.openai.com/v1".into()),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["fixed_base_url"], "https://api.openai.com/v1");
+        assert_eq!(json["model_profiles"]["gpt-4"]["tasks"], json!(["chat"]));
     }
 
     // -- DetectProtocolRequest --
