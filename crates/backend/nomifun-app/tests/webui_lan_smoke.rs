@@ -511,3 +511,169 @@ async fn webui_browser_login_contract_accepts_generated_credentials() {
         "successful login should return a session token"
     );
 }
+
+// ── Startup LAN auto-restore ──────────────────────────────────────────
+//
+// The desktop panel switch persists `webui.desktop.enabled` in
+// `client_preferences`; the Rust startup tail is its only reader. These tests
+// drive `DesktopServer::restore_lan_if_requested` — the exact step
+// `start_with_outcome` runs at the end of startup — against a real backend.
+// A real process restart is deliberately NOT attempted: the data directory
+// holds an exclusive lock, so re-entering startup in-process would make the
+// test flaky for reasons unrelated to the restore decision.
+
+/// Seed one `client_preferences` row through a SECOND pool on the same
+/// `<data-dir>/nomifun-backend.db` (WAL allows the extra connection), exactly
+/// like the credential-persistence test above. This is how the frontend's
+/// `configService.set(...)` write looks on disk.
+async fn seed_client_preference(data_dir: &Path, key: &str, value: &str) {
+    let db_path = data_dir.join("nomifun-backend.db");
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path.display()))
+        .await
+        .expect("open backend db");
+    sqlx::query(
+        "INSERT INTO client_preferences (key, value, updated_at) VALUES (?, ?, 0) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(&pool)
+    .await
+    .expect("seed client preference");
+    pool.close().await;
+}
+
+/// Give the installation owner a password hash, i.e. "the user has enabled
+/// WebUI at least once and a credential exists". `has_users()` counts non-empty
+/// hashes, so the exact hash value is irrelevant to the restore decision.
+async fn seed_admin_password_hash(data_dir: &Path) {
+    let db_path = data_dir.join("nomifun-backend.db");
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path.display()))
+        .await
+        .expect("open backend db");
+    let affected = sqlx::query(
+        "UPDATE users SET password_hash = '$argon2id$fixture' \
+         WHERE user_id = (SELECT owner_user_id FROM installation_identity \
+                          WHERE singleton_key = 'installation')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed admin password hash")
+    .rows_affected();
+    assert_eq!(affected, 1, "should have provisioned the installation owner");
+    pool.close().await;
+}
+
+fn spa_dir_with_shell(tmp: &Path) -> std::path::PathBuf {
+    let spa_dir = tmp.join("spa");
+    std::fs::create_dir_all(&spa_dir).unwrap();
+    std::fs::write(
+        spa_dir.join("index.html"),
+        "<!doctype html><title>Nomi restore</title>",
+    )
+    .unwrap();
+    spa_dir
+}
+
+/// The bug: `webui.desktop.enabled` had no reader, so a desktop that was left
+/// with remote access ON came back loopback-only after every restart and phones
+/// / robots found a closed port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webui_lan_is_restored_when_the_persisted_switch_is_on() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let spa_dir = spa_dir_with_shell(tmp.path());
+    let cli = isolated_cli(tmp.path());
+    let merged_path = std::env::var("PATH").unwrap_or_default();
+
+    let (server, _keep) =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+            .await
+            .expect("DesktopServer::start failed");
+    // Nothing was persisted at this point, so startup itself must have left LAN off.
+    assert!(
+        !server.status().running,
+        "a fresh install must not expose the LAN listener"
+    );
+
+    seed_admin_password_hash(tmp.path()).await;
+    seed_client_preference(tmp.path(), "webui.desktop.enabled", "true").await;
+
+    let outcome = server.restore_lan_if_requested().await;
+    let status = server.status();
+    let running = status.running;
+    let port = status.port;
+    server.stop_lan().await;
+
+    assert_eq!(
+        outcome,
+        nomifun_app::LanRestoreOutcome::Restored,
+        "persisted switch ON must re-open LAN serving: {:?}",
+        status.error
+    );
+    assert!(running, "LAN listener should be serving after restore");
+    assert!(port > 0, "a restored listener must report its real port");
+}
+
+/// A user who turned remote access OFF (or never turned it on) must never find
+/// their machine on the network after a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webui_lan_stays_off_without_a_positive_persisted_request() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let spa_dir = spa_dir_with_shell(tmp.path());
+    let cli = isolated_cli(tmp.path());
+    let merged_path = std::env::var("PATH").unwrap_or_default();
+
+    let (server, _keep) =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+            .await
+            .expect("DesktopServer::start failed");
+    seed_admin_password_hash(tmp.path()).await;
+
+    // Key absent entirely (never toggled).
+    assert_eq!(
+        server.restore_lan_if_requested().await,
+        nomifun_app::LanRestoreOutcome::NotRequested
+    );
+    assert!(!server.status().running);
+
+    // Explicitly disabled by the user.
+    seed_client_preference(tmp.path(), "webui.desktop.enabled", "false").await;
+    assert_eq!(
+        server.restore_lan_if_requested().await,
+        nomifun_app::LanRestoreOutcome::NotRequested
+    );
+    assert!(!server.status().running, "an OFF switch must stay off");
+}
+
+/// Safety gate: a stored "on" plus no admin credential must NOT bind 0.0.0.0 —
+/// the first visitor on the network could otherwise claim the empty-password
+/// admin through `/api/auth/setup`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webui_lan_restore_refuses_to_expose_an_installation_without_a_credential() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let spa_dir = spa_dir_with_shell(tmp.path());
+    let cli = isolated_cli(tmp.path());
+    let merged_path = std::env::var("PATH").unwrap_or_default();
+
+    let (server, _keep) =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+            .await
+            .expect("DesktopServer::start failed");
+    // Deliberately NO password hash seeded here.
+    seed_client_preference(tmp.path(), "webui.desktop.enabled", "true").await;
+
+    let outcome = server.restore_lan_if_requested().await;
+    let running = server.status().running;
+    if running {
+        server.stop_lan().await;
+    }
+
+    assert_eq!(
+        outcome,
+        nomifun_app::LanRestoreOutcome::BlockedWithoutCredential
+    );
+    assert!(
+        !running,
+        "an installation with no admin password must never be auto-exposed"
+    );
+}
