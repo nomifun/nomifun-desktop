@@ -351,10 +351,22 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: IProvider): Pr
                       });
                       const models =
                         res.models.map((v) => {
+                          const id = typeof v === 'string' ? v : v.id;
+                          const profile = res.model_profiles?.[id];
                           if (typeof v === 'string') {
-                            return { label: v, value: v };
+                            return {
+                              label: v,
+                              value: v,
+                              tasks: profile?.tasks ?? [],
+                              traits: profile?.traits ?? [],
+                            };
                           } else {
-                            return { label: v.name || v.id, value: v.id };
+                            return {
+                              label: v.name || v.id,
+                              value: v.id,
+                              tasks: profile?.tasks ?? [],
+                              traits: profile?.traits ?? [],
+                            };
                           }
                         }) || [];
                       // Update the model list state manually
