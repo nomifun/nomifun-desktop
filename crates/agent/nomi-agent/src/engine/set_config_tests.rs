@@ -542,6 +542,76 @@ struct ConstantErrorTool {
 
 struct DiagnosticImageErrorTool;
 
+struct SuccessfulImageTool;
+
+#[derive(Default)]
+struct DeliveredMediaOutput;
+
+impl OutputSink for DeliveredMediaOutput {
+    fn emit_text_delta(&self, _: &str, _: &str) {}
+    fn emit_thinking(&self, _: &str, _: &str) {}
+    fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
+    fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+    fn emit_tool_result_with_images_and_artifact_identity(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: bool,
+        _: &str,
+        _: &[nomi_types::tool::ToolImage],
+    ) -> ToolMediaDelivery {
+        ToolMediaDelivery::Delivered {
+            context: "Verified artifact receipt: nomifun-artifacts/image.png".to_owned(),
+        }
+    }
+    fn emit_stream_start(&self, _: &str) {}
+    fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
+    fn emit_error(&self, _: &str) {}
+    fn emit_info(&self, _: &str) {}
+}
+
+struct StrictImageThenStopProvider {
+    requests: Mutex<Vec<LlmRequest>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for StrictImageThenStopProvider {
+    async fn stream(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.requests.lock().unwrap().push(request.clone());
+        let turn = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        if turn == 0 {
+            tx.send(LlmEvent::ToolUse {
+                id: "image-call".to_owned(),
+                name: "image_gen".to_owned(),
+                input: serde_json::json!({"prompt": "fox"}),
+                extra: None,
+            })
+            .await
+            .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: nomi_types::message::StopReason::ToolUse,
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
+        } else {
+            tx.send(LlmEvent::Done {
+                stop_reason: nomi_types::message::StopReason::EndTurn,
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
+        }
+        Ok(rx)
+    }
+}
+
 struct RequiredKbIdTool {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -708,6 +778,40 @@ impl Tool for DiagnosticImageErrorTool {
                 data: "ZGlhZ25vc3RpYw==".to_owned(),
             },
         ])
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for SuccessfulImageTool {
+    fn name(&self) -> &str {
+        "image_gen"
+    }
+
+    fn description(&self) -> &str {
+        "test image generator"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Exec
+    }
+
+    fn requires_explicit_route(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, _input: Value) -> ToolResult {
+        ToolResult::text("generated").with_images(vec![nomi_types::tool::ToolImage {
+            media_type: "image/png".to_owned(),
+            data: "aW1hZ2UtYnl0ZXM=".to_owned(),
+        }])
     }
 }
 
@@ -988,6 +1092,7 @@ fn make_engine(model: &str) -> super::AgentEngine {
         system_resource_inbox: None,
         process_supervisor: None,
         editable_turn: None,
+        host_context: Default::default(),
     }
 }
 
@@ -1259,11 +1364,21 @@ fn rewind_last_turn_truncates_to_marker() {
     // 既有历史：U0, A0
     engine.messages.push(Message::now(Role::User, vec![ContentBlock::Text { text: "u0".into() }]));
     engine.messages.push(Message::now(Role::Assistant, vec![ContentBlock::Text { text: "a0".into() }]));
+    let prior_host_context = std::collections::BTreeMap::from([(
+        "nomifun.image_generation.route".to_owned(),
+        "native".to_owned(),
+    )]);
+    engine.host_context = prior_host_context.clone();
     // 标记最后一个 turn 起始 = 当前长度(2)，再 push U1（被中断的 turn）
     engine.editable_turn = Some(EditableTurnCheckpoint {
         source_message_id: "message-u1".into(),
         start_len: engine.messages.len(),
+        prior_host_context: prior_host_context.clone(),
     });
+    engine.host_context.insert(
+        "nomifun.image_generation.route".to_owned(),
+        "explicit_external".to_owned(),
+    );
     engine.messages.push(Message::now(Role::User, vec![ContentBlock::Text { text: "u1".into() }]));
     assert_eq!(engine.messages.len(), 3);
 
@@ -1271,6 +1386,7 @@ fn rewind_last_turn_truncates_to_marker() {
     assert!(engine.rewind_last_turn("message-u1"));
     assert_eq!(engine.messages.len(), 2); // U1 被回退
     assert!(engine.editable_turn.is_none()); // 锚点被消费
+    assert_eq!(engine.host_context, prior_host_context);
 
     // 再次回退无锚点 → false
     assert!(!engine.rewind_last_turn("message-u1"));
@@ -1283,6 +1399,7 @@ fn rewind_last_turn_rejects_stale_marker() {
     engine.editable_turn = Some(EditableTurnCheckpoint {
         source_message_id: "message-stale".into(),
         start_len: 5,
+        prior_host_context: Default::default(),
     });
     assert!(!engine.rewind_last_turn("message-stale"));
 }
@@ -1329,6 +1446,7 @@ async fn continuation_passes_keep_the_root_user_checkpoint() {
         Some(EditableTurnCheckpoint {
             source_message_id: "message-root".into(),
             start_len: 0,
+            prior_host_context: Default::default(),
         })
     );
 
@@ -1364,10 +1482,84 @@ async fn continuation_passes_keep_the_root_user_checkpoint() {
         Some(EditableTurnCheckpoint {
             source_message_id: "message-next".into(),
             start_len: next_root_start,
+            prior_host_context: Default::default(),
         })
     );
     assert!(!engine.can_rewind_last_turn("message-root"));
     assert!(engine.can_rewind_last_turn("message-next"));
+}
+
+#[tokio::test]
+async fn turn_tool_allowlist_is_exact_and_does_not_leak_to_the_next_turn() {
+    let provider = Arc::new(RecordingProvider::successful());
+    let mut engine = make_engine("turn-tool-route");
+    engine.provider = provider.clone();
+    assert!(engine.tools.register(Box::new(SuccessfulImageTool)));
+    assert!(engine.tools.register(Box::new(ConstantResultTool {
+        name: "browser",
+        polling: false,
+        category: ToolCategory::Exec,
+        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        steer_on_call: None,
+    })));
+
+    let image_only = std::collections::HashSet::from(["image_gen".to_owned()]);
+    engine
+        .execute_turn_with_content_for_source_and_tool_allowlist(
+            vec![ContentBlock::Text {
+                text: "generate an image".into(),
+            }],
+            "wire-image",
+            "message-image",
+            Some(&image_only),
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_turn_with_content_for_source(
+            vec![ContentBlock::Text {
+                text: "open a website".into(),
+            }],
+            "wire-normal",
+            "message-normal",
+        )
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    let first_names = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(first_names, vec!["image_gen"]);
+    let second_names = requests[1]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(second_names, std::collections::HashSet::from(["browser"]));
+}
+
+#[test]
+fn deterministic_host_turn_is_persisted_with_a_rewind_checkpoint() {
+    let mut engine = make_engine("host-turn");
+    engine
+        .record_host_text_turn("generate a fox", "configure an image model", "message-host")
+        .unwrap();
+
+    assert_eq!(engine.messages.len(), 2);
+    assert_eq!(engine.messages[0].role, Role::User);
+    assert_eq!(engine.messages[1].role, Role::Assistant);
+    assert_eq!(
+        engine.editable_turn,
+        Some(EditableTurnCheckpoint {
+            source_message_id: "message-host".into(),
+            start_len: 0,
+            prior_host_context: Default::default(),
+        })
+    );
+    assert!(engine.can_rewind_last_turn("message-host"));
 }
 
 fn make_engine_with_compat(
@@ -2160,6 +2352,49 @@ async fn failed_tool_diagnostic_images_are_not_replayed_to_the_provider() {
     };
     assert!(*is_error);
     assert!(images.is_empty());
+}
+
+#[tokio::test]
+async fn delivered_image_bytes_are_replaced_by_receipt_context_without_a_redundant_model_pass() {
+    let mut engine = make_engine("delivered-image");
+    let provider = Arc::new(StrictImageThenStopProvider {
+        requests: Mutex::new(Vec::new()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    engine.provider = provider.clone();
+    engine.output = Arc::new(DeliveredMediaOutput);
+    engine.tools.register(Box::new(SuccessfulImageTool));
+    let allowlist = std::collections::HashSet::from(["image_gen".to_owned()]);
+
+    engine
+        .execute_turn_with_content_for_source_and_tool_allowlist(
+            vec![ContentBlock::Text {
+                text: "generate a fox".to_owned(),
+            }],
+            "m-delivered-image",
+            "root-delivered-image",
+            Some(&allowlist),
+        )
+        .await
+        .expect("verified image delivery should return directly to the host commit gate");
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "a paid artifact result must not depend on a redundant text-only provider pass"
+    );
+    assert_eq!(requests[0].tools.len(), 1);
+    drop(requests);
+
+    let ContentBlock::ToolResult {
+        content, images, ..
+    } = &engine.messages[2].content[0]
+    else {
+        panic!("session history should retain the compact tool result");
+    };
+    assert!(content.contains("Verified artifact receipt"));
+    assert!(images.is_empty(), "base64 image bytes must never persist in session history");
 }
 
 #[tokio::test]

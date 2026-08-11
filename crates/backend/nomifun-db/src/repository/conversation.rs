@@ -900,7 +900,7 @@ pub trait IConversationRepository: Send + Sync {
     }
 
     /// Complete LOCAL-calendar-day index of a conversation's visible messages,
-    /// newest day first. Hidden engine rows and the two synthetic message types
+    /// newest day first. Hidden engine rows and synthetic protocol message types
     /// are excluded, so a bucket's `message_count` is exactly what
     /// [`Self::get_messages_for_local_day`] returns for that day.
     ///

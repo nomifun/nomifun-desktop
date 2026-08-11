@@ -66,20 +66,35 @@ pub fn classified_preparation_failure(
     }
 }
 
-/// Map a terminal relay outcome (+ the final assistant text) to the
+/// Whether a terminal relay outcome has a durable result that can satisfy the
+/// accepted turn. A committed artifact batch is first-class output: native
+/// image turns intentionally suppress provider prose until the host has
+/// verified and atomically committed the image receipts.
+pub fn turn_succeeded(
+    terminal: &RelayTerminal,
+    final_text: Option<&str>,
+    committed_artifact_count: usize,
+) -> bool {
+    matches!(terminal, RelayTerminal::Finish)
+        && (final_text.is_some_and(|text| !text.trim().is_empty())
+            || committed_artifact_count > 0)
+}
+
+/// Map a terminal relay outcome plus its durable output evidence to the
 /// structured receipt error columns.
 ///
 /// `None` means success. `Some((code, retryable))` is a failure with a stable
-/// machine-readable code. `Finish` with an empty/whitespace final text is the
-/// previously silent `result_ok = false` asymmetry and now yields
-/// `empty_final_text` (not retryable).
+/// machine-readable code. `Finish` without either non-empty final text or a
+/// committed artifact remains `empty_final_text` (not retryable). Provisional
+/// tool output and uncommitted artifact receipts must never be counted here.
 pub fn map_turn_failure(
     terminal: &RelayTerminal,
     final_text: Option<&str>,
+    committed_artifact_count: usize,
 ) -> Option<(String, bool)> {
     match terminal {
         RelayTerminal::Finish => {
-            if final_text.is_some_and(|text| !text.trim().is_empty()) {
+            if turn_succeeded(terminal, final_text, committed_artifact_count) {
                 None
             } else {
                 Some((EMPTY_FINAL_TEXT.to_owned(), false))
@@ -109,13 +124,22 @@ mod tests {
 
     #[test]
     fn finish_with_text_is_success() {
-        assert_eq!(map_turn_failure(&RelayTerminal::Finish, Some("ok")), None);
+        assert_eq!(
+            map_turn_failure(&RelayTerminal::Finish, Some("ok"), 0),
+            None
+        );
+    }
+
+    #[test]
+    fn finish_with_committed_artifact_is_success_without_text() {
+        assert!(turn_succeeded(&RelayTerminal::Finish, None, 1));
+        assert_eq!(map_turn_failure(&RelayTerminal::Finish, None, 1), None);
     }
 
     #[test]
     fn finish_with_empty_text_is_empty_final_text_not_retryable() {
         assert_eq!(
-            map_turn_failure(&RelayTerminal::Finish, Some("  ")),
+            map_turn_failure(&RelayTerminal::Finish, Some("  "), 0),
             Some(("empty_final_text".into(), false))
         );
     }
@@ -123,7 +147,7 @@ mod tests {
     #[test]
     fn finish_without_text_is_empty_final_text_not_retryable() {
         assert_eq!(
-            map_turn_failure(&RelayTerminal::Finish, None),
+            map_turn_failure(&RelayTerminal::Finish, None, 0),
             Some(("empty_final_text".into(), false))
         );
     }
@@ -131,7 +155,7 @@ mod tests {
     #[test]
     fn channel_closed_is_retryable() {
         assert_eq!(
-            map_turn_failure(&RelayTerminal::ChannelClosed, None),
+            map_turn_failure(&RelayTerminal::ChannelClosed, None, 0),
             Some(("channel_closed".into(), true))
         );
     }
@@ -143,7 +167,7 @@ mod tests {
             retryable: Some(true),
         };
         assert_eq!(
-            map_turn_failure(&t, None),
+            map_turn_failure(&t, None, 0),
             Some(("user_llm_provider_rate_limited".into(), true))
         );
     }
@@ -155,7 +179,7 @@ mod tests {
             retryable: None,
         };
         assert_eq!(
-            map_turn_failure(&t, None),
+            map_turn_failure(&t, None, 0),
             Some(("unknown_upstream_error".into(), false))
         );
     }
@@ -167,7 +191,7 @@ mod tests {
             retryable: Some(false),
         };
         assert_eq!(
-            map_turn_failure(&t, Some("partial output")),
+            map_turn_failure(&t, Some("partial output"), 1),
             Some(("nomifun_stream_broken".into(), false))
         );
     }
