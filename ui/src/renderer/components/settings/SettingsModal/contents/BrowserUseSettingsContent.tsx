@@ -30,9 +30,14 @@ import { Alert, Button, Collapse, InputNumber, Message, Modal, Radio, Switch } f
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import PreferenceRow from './SystemModalContent/PreferenceRow';
+import BasePreferenceRow from './SystemModalContent/PreferenceRow';
 
 const RadioGroup = Radio.Group;
+const PreferenceRow: React.FC<
+  Omit<React.ComponentProps<typeof BasePreferenceRow>, 'compact'>
+> = (props) => (
+  <BasePreferenceRow {...props} compact />
+);
 
 type BrowserSource = 'managed' | 'system';
 type BrowserDisplayModeStatus = 'loading' | 'ready' | 'unavailable' | 'error';
@@ -240,9 +245,9 @@ export function startBrowserLoginPromotionPoll({
 // ---------------------------------------------------------------------------
 // Navigation-surviving promotion watch.
 //
-// The queued login branch starts this watch and immediately navigates to
-// /browser; /settings/browser-use is a routed page, so the settings component
-// unmounts before the poll's first 2s tick. The watch therefore lives at
+// The queued login branch starts this watch and immediately switches the unified
+// /browser page from Settings to Lifecycle, destroying the settings pane before
+// the poll's first 2s tick. The watch therefore lives at
 // module level: component lifecycles never own or cancel it. It ends only by
 // its own terminal states (opened / failed / timeout), an explicit
 // close-login cancel, or auth loss — so the queued toast's promise ("we'll
@@ -725,8 +730,8 @@ const BrowserUseSettingsContent: React.FC = () => {
   }, [canManagePrimaryIdentity]);
 
   // The queued promotion watch is intentionally NOT cancelled on unmount:
-  // starting it is immediately followed by navigate('/browser'), which
-  // unmounts this routed page. The module-level singleton keeps the promise
+  // starting it is immediately followed by navigate('/browser'), which switches
+  // to Lifecycle and unmounts this settings pane. The module-level singleton keeps the promise
   // made by the queued toast; it ends via its own terminal states,
   // close-login, or auth loss.
   const watchQueuedLoginPromotion = useCallback((laneId: string | undefined) => {
@@ -1092,19 +1097,22 @@ const BrowserUseSettingsContent: React.FC = () => {
     : null;
 
   return (
-    <div className='flex flex-col h-full w-full'>
-      <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
-        <div className='space-y-16px'>
-          <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
-            <div className='text-13px font-600 text-t-secondary'>{t('settings.browserUseSection')}</div>
-            {/*
-              Separator recipe used by every panel in this file. `divide-y` emits only a width and
-              this project ships no border reset, so the style stays `none` unless `divide-solid` is
-              present. `divide-solid` styles all four sides, so `divide-x-0` is needed to stop the
-              unset left/right widths falling back to the CSS initial `medium` (~3px). The old
-              `divide-border-2` emitted nothing at all: there is no theme colour named `border`.
-            */}
-            <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
+    <div className='flex flex-col h-full min-h-0 w-full overflow-hidden'>
+      <NomiScrollArea className='flex-1 min-h-0 pb-8px scrollbar-hide'>
+        <div className='space-y-10px'>
+          <section className='space-y-6px'>
+            <h2 className='m-0 px-2px text-13px font-600 text-t-secondary'>
+              {t('settings.browserUseSection')}
+            </h2>
+            <div className='box-border px-12px md:px-16px py-12px bg-2 rd-12px border border-solid border-[var(--color-border-2)]'>
+              {/*
+                Separator recipe used by every panel in this file. `divide-y` emits only a width and
+                this project ships no border reset, so the style stays `none` unless `divide-solid` is
+                present. `divide-solid` styles all four sides, so `divide-x-0` is needed to stop the
+                unset left/right widths falling back to the CSS initial `medium` (~3px). The old
+                `divide-border-2` emitted nothing at all: there is no theme colour named `border`.
+              */}
+              <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
               <PreferenceRow label={t('settings.browserUse')} description={t('settings.browserUseDesc')}>
                 <Switch checked={browserUse} onChange={handleBrowserUseChange} />
               </PreferenceRow>
@@ -1206,15 +1214,17 @@ const BrowserUseSettingsContent: React.FC = () => {
               >
                 <Switch checked={visualFallback} disabled={!browserUse} onChange={handleVisualFallbackChange} />
               </PreferenceRow>
+              </div>
             </div>
-          </div>
+          </section>
 
           {canManageBrowserSettings && (
-            <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
-              <div className='text-13px font-600 text-t-secondary'>
+            <section className='space-y-6px'>
+              <h2 className='m-0 px-2px text-13px font-600 text-t-secondary'>
                 {t('settings.browserResourcePolicySection')}
-              </div>
-              <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
+              </h2>
+              <div className='box-border px-12px md:px-16px py-12px bg-2 rd-12px border border-solid border-[var(--color-border-2)] space-y-8px'>
+                <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
                 <PreferenceRow
                   label={t('settings.browserResourcePolicy')}
                   description={t('settings.browserResourcePolicyDesc')}
@@ -1440,8 +1450,9 @@ const BrowserUseSettingsContent: React.FC = () => {
                     </Button>
                   </div>
                 </Collapse.Item>
-              </Collapse>
-            </div>
+                </Collapse>
+              </div>
+            </section>
           )}
 
           <Alert type='warning' showIcon content={t('settings.browserUseRiskHint')} />

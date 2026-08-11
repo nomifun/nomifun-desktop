@@ -261,13 +261,16 @@ operation must not be reported as a clean shutdown.
 
 ## Browser management page boundary
 
-`/browser` shows management-safe Lane/Host state, capacity and queue pressure,
-identity and owner information, concurrency policy, and lifecycle state. It can
-close a Lane, the current user's Lanes for a conversation, or—when authorized—
-all Lanes for the installation. The installation owner can also change the
-global Primary display default and resource policy live. For a running Primary
-Lane, its owner may make the current managed Host visible in the foreground or
-return it to headless background operation without changing the global default.
+`/browser` is the unified browser-management surface, not a page-execution
+surface. Its **Lifecycle** tab shows management-safe Lane/Host state, capacity
+and queue pressure, identity and owner information, concurrency policy, and
+lifecycle state. It can close a Lane, the current user's Lanes for a
+conversation, or—when authorized—all Lanes for the installation. For a running
+Primary Lane, its owner may make the current managed Host visible in the
+foreground or return it to headless background operation without changing the
+global default. Its **Settings** tab owns the Browser Use toggle, source, global
+Primary display default, login identity, security, and resource policy. The
+legacy `/settings/browser-use` route redirects to that tab.
 
 The page does not display browser pixels, mirror a page, navigate, accept page
 input, operate tabs, broker a control handoff, or attach a client to Chromium.
@@ -366,8 +369,8 @@ from the removed `silent=false` setting—and a missing or malformed version-2
 mode converges once to `headless`. A preference-store read failure uses
 `headless` fail-safe without writing migration state.
 
-The installation owner may subsequently select either value from Browser Use
-Settings or `/browser`; a confirmed change is applied live and persisted.
+The installation owner may subsequently select either value from
+`/browser?tab=settings`; a confirmed change is applied live and persisted.
 Ordinary Agent action JSON, Lane names, and tool parameters cannot override it.
 Anonymous/Crawl, Authenticated Replica, and Isolated Hosts remain headless
 under Hub policy unless a separate trusted flow explicitly requires otherwise.
