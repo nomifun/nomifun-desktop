@@ -28,20 +28,31 @@ export interface MiniAppQuickStartOptions {
   files?: string[];
 }
 
-/** Conversation title: the builder marker plus a short quote of the request. */
+/**
+ * Conversation title: a short quote of the request.
+ *
+ * Sliced by code point, not by UTF-16 unit: cutting an emoji in half leaves a
+ * lone surrogate, which the backend's JSON decoder rejects — so a request that
+ * merely happened to have an emoji at that offset would fail to create at all.
+ */
 export const miniAppConversationNameSnippet = (prompt: string): string =>
-  prompt.trim().slice(0, MINI_APP_NAME_SNIPPET_LENGTH);
+  Array.from(prompt.trim()).slice(0, MINI_APP_NAME_SNIPPET_LENGTH).join('');
 
 /**
- * Launch a mini-app builder conversation from the start page.
+ * Launch a mini-app builder conversation from the start page (spec D17).
  *
  * A thin wrapper over {@link useNomiQuickStart} — engine is pinned to Nomi per
  * spec D4, so the only difference is the create call's `extra`: the builder
  * instructions ride `extra.system_prompt` (the Nomi engine's `custom` prompt
  * section, which the backend neither strips nor regenerates, so reopening the
  * session keeps the behavior) and the `miniapp` marker lets the conversation
- * surface turn on auto-preview and the solidify toolbar. Everything else
- * (create → history refresh → initial-message handoff → navigate) is shared.
+ * surface turn on auto-preview and the publish toolbar. Everything else
+ * (create → history refresh → initial-message handoff → navigate to
+ * `/conversation/:id`) is shared, error reporting included.
+ *
+ * No mini-app row is created here: it is an ORDINARY conversation in an ORDINARY
+ * workspace, and the `miniapps` row appears only when the user publishes from the
+ * preview panel.
  */
 export const useMiniAppQuickStart = () => {
   const { t } = useTranslation();

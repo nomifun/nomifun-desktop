@@ -7,30 +7,36 @@
 /**
  * MiniAppRunnerPage (`/mini-apps/:id`) — the full-page mini-app runtime.
  *
- * This is the landing surface of the left "Mini-Apps" tab: opening a card here
- * must be a self-contained way to USE the app, never a detour through the
- * conversation that built it. The runtime itself lives in {@link MiniAppFrame}
- * (serve URL + sandbox + load watchdog) so this page and the right-side quick
- * panel cannot drift apart; what stays here is the chrome — back, reload,
- * rename, delete, and a clearly secondary way back to the source conversation
- * for *further editing*.
+ * ONE column (spec D18): {@link MiniAppFrame} fills the body, and the toolbar
+ * carries everything else. The frame is shared with the right-rail quick panel so
+ * the two runtimes cannot drift (serve URL + sandbox + load watchdog).
  *
- * Metadata (name, icon, source conversation) comes from the authenticated detail
- * call, which is also what distinguishes "deleted" from "failed to load".
+ * What the frame shows is always the PUBLISHED snapshot, while a conversation
+ * edits the working copy on disk — so "the AI changed it" and "the app changed"
+ * are two events, and this page has to make the gap legible: while a working copy
+ * is newer than the snapshot the toolbar carries 「发布」 and one sentence saying
+ * why. Without that users report 改了不生效.
  *
- * Design spec: docs/specs/2026-08-09-miniapps.zh.md
+ * 「继续迭代」 leaves for an ORDINARY conversation ({@link useMiniAppIterate}):
+ * this page hosts no chat of its own, which is exactly why it is a single column
+ * again.
+ *
+ * Design spec: docs/specs/2026-08-10-miniapps-v3-unified-conversations.zh.md
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Result, Spin } from '@arco-design/web-react';
-import { ApplicationOne, ArrowLeft, Delete, EditTwo, Refresh } from '@icon-park/react';
+import { ApplicationOne, ArrowLeft, Browser, Delete, EditTwo, MagicWand, Refresh, Upload } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IApiMiniApp } from '@/common/adapter/ipcBridge';
 import { parseMiniAppId } from '@/common/types/ids';
 import type { MiniAppId } from '@/common/types/ids';
+import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 import MiniAppFrame from './MiniAppFrame';
+import { resolveMiniAppServeUrl } from './contract';
+import { useMiniAppIterate } from './useMiniAppIterate';
 import { useMiniAppMutations } from './useMiniAppMutations';
 
 const TOOLBAR_ACTION_CLASS = [
@@ -75,6 +81,7 @@ const MiniAppRunnerPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { id: rawId } = useParams<{ id: string }>();
+  const [message, messageHolder] = useArcoMessage();
 
   // A malformed path segment is a not-found, not a crash.
   const miniAppId = useMemo<MiniAppId | null>(() => {
@@ -91,6 +98,7 @@ const MiniAppRunnerPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   /** Bumping this remounts the iframe, which is the only honest "reload". */
   const [reloadToken, setReloadToken] = useState(0);
+  const [publishing, setPublishing] = useState(false);
 
   const load = useCallback(async () => {
     if (!miniAppId) {
@@ -124,6 +132,52 @@ const MiniAppRunnerPage: React.FC = () => {
   }, [load]);
 
   const goBack = useCallback(() => navigate('/mini-apps'), [navigate]);
+
+  /**
+   * 「刷新」 — remount the iframe AND re-read the record.
+   *
+   * Reloading the frame alone was the trap: the user iterated in another
+   * conversation, came back, and the one control they reached for reloaded an
+   * iframe that still serves the old snapshot — reinforcing 改了不生效. Refresh has
+   * to be able to surface the publish state, not just repaint.
+   */
+  const refresh = useCallback(() => {
+    setReloadToken((token) => token + 1);
+    void load();
+  }, [load]);
+
+  const openInBrowser = useCallback(() => {
+    if (!miniAppId) return;
+    void ipcBridge.shell.openExternal.invoke(resolveMiniAppServeUrl(miniAppId));
+  }, [miniAppId]);
+
+  // ─── Iterate + publish ──────────────────────────────────────────────────────
+
+  const { iterate, starting: iterating } = useMiniAppIterate();
+  const startIterating = useCallback(() => {
+    if (app) void iterate(app);
+  }, [app, iterate]);
+
+  const publishingRef = useRef(false);
+  const publish = useCallback(async () => {
+    if (!miniAppId || publishingRef.current) return;
+    publishingRef.current = true;
+    setPublishing(true);
+    try {
+      const published = await ipcBridge.miniapps.publish.invoke({ miniapp_id: miniAppId });
+      setApp(published);
+      // The served document just changed underneath a live iframe, so the frame
+      // has to remount or the user would still be looking at the old app.
+      setReloadToken((token) => token + 1);
+      message.success(t('miniApps.publish.success'));
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      message.error(t('miniApps.publish.failed', { message: detail }));
+    } finally {
+      publishingRef.current = false;
+      setPublishing(false);
+    }
+  }, [miniAppId, message, t]);
 
   // ─── Rename + delete (shared with the library grid) ─────────────────────────
 
@@ -188,6 +242,7 @@ const MiniAppRunnerPage: React.FC = () => {
   return (
     <div className='size-full flex flex-col overflow-hidden bg-[var(--color-bg-1)]'>
       {mutationsNode}
+      {messageHolder}
 
       {/* Toolbar */}
       <div className='shrink-0 flex items-center gap-10px px-16px h-52px bg-[var(--color-bg-2)] border-b border-b-solid border-b-[var(--color-border-2)]'>
@@ -208,12 +263,33 @@ const MiniAppRunnerPage: React.FC = () => {
 
         <span className='min-w-0 truncate text-15px font-700 text-[var(--color-text-1)]'>{app.name}</span>
 
-        <div className='ml-auto flex items-center gap-4px'>
-          <ToolbarAction
-            label={t('miniApps.actions.refresh')}
-            onRun={() => setReloadToken((token) => token + 1)}
+        <div className='ml-auto flex items-center gap-6px'>
+          {app.has_unpublished_changes && (
+            <Button
+              size='mini'
+              type='primary'
+              loading={publishing}
+              icon={<Upload theme='outline' size='14' strokeWidth={3} />}
+              onClick={() => void publish()}
+            >
+              {t('miniApps.publish.action')}
+            </Button>
+          )}
+          {/* Labelled, not another 32px glyph: it is the only control here that
+              leaves the page, and the only non-obvious one. */}
+          <Button
+            size='mini'
+            loading={iterating}
+            icon={<MagicWand theme='outline' size='14' strokeWidth={3} />}
+            onClick={startIterating}
           >
+            {t('miniApps.iterate.toggle')}
+          </Button>
+          <ToolbarAction label={t('miniApps.actions.refresh')} onRun={refresh}>
             <Refresh theme='outline' size={16} strokeWidth={3} />
+          </ToolbarAction>
+          <ToolbarAction label={t('miniApps.actions.openInBrowser')} onRun={openInBrowser}>
+            <Browser theme='outline' size={16} strokeWidth={3} />
           </ToolbarAction>
           <ToolbarAction label={t('miniApps.actions.rename')} onRun={openRename}>
             <EditTwo theme='outline' size={16} strokeWidth={3} />
@@ -224,8 +300,24 @@ const MiniAppRunnerPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Runtime — shared with the right-side quick panel; reload = remount. */}
-      <div className='relative flex-1 min-h-0 w-full bg-[var(--color-bg-1)]'>
+      {/* One line about where the user's change is, or is not, yet. */}
+      {app.has_unpublished_changes && (
+        <div
+          role='status'
+          className='shrink-0 flex items-center gap-8px px-16px py-6px bg-[rgba(var(--warning-6),0.08)] border-b border-b-solid border-b-[var(--color-border-2)]'
+        >
+          <span className='shrink-0 text-12px font-600 text-warning-6'>{t('miniApps.publish.pending')}</span>
+          <span className='min-w-0 text-12px leading-18px text-[var(--color-text-2)]'>
+            {t('miniApps.publish.explain')}
+          </span>
+        </div>
+      )}
+
+      {/* Body — the published snapshot, filling the page. A flex child that may
+          shrink AND has a resolved height: a percentage-height iframe under an
+          auto-height ancestor collapses to 0px, which looks exactly like the
+          blank render this layout exists to avoid. */}
+      <div className='relative flex-1 min-h-0 w-full overflow-hidden bg-[var(--color-bg-1)]'>
         <MiniAppFrame miniAppId={miniAppId} name={app.name} reloadToken={reloadToken} />
       </div>
     </div>

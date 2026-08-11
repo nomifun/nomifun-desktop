@@ -11,6 +11,7 @@ const listSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8')
 const runnerSource = readFileSync(new URL('./RunnerPage.tsx', import.meta.url), 'utf8');
 const mutationsSource = readFileSync(new URL('./useMiniAppMutations.tsx', import.meta.url), 'utf8');
 const frameSource = readFileSync(new URL('./MiniAppFrame.tsx', import.meta.url), 'utf8');
+const iterateSource = readFileSync(new URL('./useMiniAppIterate.ts', import.meta.url), 'utf8');
 const relativeTimeSource = readFileSync(new URL('./relativeTime.ts', import.meta.url), 'utf8');
 
 describe('mini-app pages structure', () => {
@@ -53,6 +54,14 @@ describe('mini-app pages structure', () => {
     expect(relativeTimeSource.includes("t('miniApps.time.justNow')")).toBe(true);
     expect(listSource.includes('workshop.time.')).toBe(false);
     expect(relativeTimeSource.includes('workshop.time.')).toBe(false);
+  });
+
+  test('a library card carries iterate beside rename and delete', () => {
+    expect(listSource.includes('onIterate')).toBe(true);
+    expect(listSource.includes("key: 'iterate'")).toBe(true);
+    expect(listSource.includes('const { iterate } = useMiniAppIterate()')).toBe(true);
+    // The card body navigates on click, so every hover action stops the bubble.
+    expect(listSource.includes('onClick={(e) => e.stopPropagation()}')).toBe(true);
   });
 
   test('a library card shows an explicit "use it" control, without double-firing', () => {
@@ -104,11 +113,10 @@ describe('mini-app pages structure', () => {
     // No second iframe: the runner and the quick panel must not be able to drift.
     expect(runnerSource.includes('<iframe')).toBe(false);
     expect(runnerSource.includes('MINI_APP_IFRAME_SANDBOX')).toBe(false);
-    expect(
-      /<MiniAppFrame\s+miniAppId=\{miniAppId\}\s+name=\{app\.name\}\s+reloadToken=\{reloadToken\}\s*\/>/.test(
-        runnerSource
-      )
-    ).toBe(true);
+    expect(runnerSource.includes('<MiniAppFrame')).toBe(true);
+    expect(runnerSource.includes('miniAppId={miniAppId}')).toBe(true);
+    expect(runnerSource.includes('name={app.name}')).toBe(true);
+    expect(runnerSource.includes('reloadToken={reloadToken}')).toBe(true);
   });
 
   test('the runner tells a deleted mini-app apart from a failed load', () => {
@@ -121,20 +129,119 @@ describe('mini-app pages structure', () => {
     expect(runnerSource.includes('setReloadToken((token) => token + 1)')).toBe(true);
     expect(runnerSource.includes("navigate('/mini-apps')")).toBe(true);
     expect(runnerSource.includes("t('miniApps.runner.notFound')")).toBe(true);
+    // Back / refresh / rename / delete / open-in-browser, plus the two labelled
+    // verbs asserted below.
+    expect(runnerSource.includes("t('miniApps.actions.back')")).toBe(true);
+    expect(runnerSource.includes("t('miniApps.actions.refresh')")).toBe(true);
+    expect(runnerSource.includes("t('miniApps.actions.rename')")).toBe(true);
+    expect(runnerSource.includes("t('miniApps.actions.delete')")).toBe(true);
+    expect(runnerSource.includes("t('miniApps.actions.openInBrowser')")).toBe(true);
+    expect(runnerSource.includes('ipcBridge.shell.openExternal.invoke(resolveMiniAppServeUrl(miniAppId))')).toBe(true);
+    // Refresh has to re-read the record too, or a user who iterated elsewhere
+    // reloads an iframe that still serves the old snapshot and reports 改了不生效.
+    expect(/const refresh = useCallback\(\(\) => \{[\s\S]{0,200}void load\(\)/.test(runnerSource)).toBe(true);
   });
 
-  test('the runner never navigates to a source conversation', () => {
-    // A mini-app outlives the conversation that produced it, so a jump into that
-    // conversation is a link that rots — and navigating to `/conversation/:id`
-    // from outside the session shell errored outright. Iteration happens in the
-    // mini-app's own session instead, which this page hosts.
+  test('the runner is ONE column: no aside, no split, no chat (spec D18)', () => {
+    // The body is a single flex child that may shrink and has a resolved height:
+    // a percentage-height iframe under an auto-height ancestor collapses to 0px,
+    // which looks exactly like the blank render this layout exists to avoid.
+    expect(runnerSource.includes('relative flex-1 min-h-0 w-full overflow-hidden')).toBe(true);
+    // Every trace of the deleted split and of the panel that lived in it.
+    expect(runnerSource.includes('ContentAside')).toBe(false);
+    // Pattern rather than the literal name, so the repo-wide zero-leftover grep
+    // for the deleted panel does not hit this assertion.
+    expect(/MiniApp[Ii]teration/.test(runnerSource)).toBe(false);
+    expect(runnerSource.includes('closeOnEscape')).toBe(false);
+    expect(runnerSource.includes('bodyClassName')).toBe(false);
+    expect(runnerSource.includes('useResizableSplit')).toBe(false);
+    expect(runnerSource.includes('storageKey')).toBe(false);
+    expect(runnerSource.includes('MINI_APP_FRAME_MIN_WIDTH_PX')).toBe(false);
+    // No chat, so no conversation module graph and no per-thread subscription.
+    expect(runnerSource.includes('turnCompleted')).toBe(false);
+    expect(runnerSource.includes('pages/conversation')).toBe(false);
+    // And no reason left to know about the viewport.
+    expect(runnerSource.includes('isMobile')).toBe(false);
+    // The runner is reached by a plain card click; nothing arms a panel any more.
+    expect(runnerSource.includes('useSearchParams')).toBe(false);
+    expect(runnerSource.includes("'iterate'")).toBe(false);
+  });
+
+  test('「继续迭代」 lives on both surfaces and goes through ONE shared hook', () => {
+    for (const source of [runnerSource, listSource]) {
+      expect(source.includes("t('miniApps.iterate.toggle')")).toBe(true);
+      expect(source.includes('useMiniAppIterate')).toBe(true);
+      // Neither page re-implements the two steps, so they cannot tell the model
+      // different things.
+      expect(source.includes('provisionWorkspace')).toBe(false);
+      expect(source.includes('buildMiniAppIterateMessage')).toBe(false);
+    }
+  });
+
+  test('the iterate hook provisions the working copy, then launches an ORDINARY conversation', () => {
+    // Order matters: the absolute path has to exist before it can be written into
+    // the first message (spec D19).
+    expect(iterateSource.includes('ipcBridge.miniapps.provisionWorkspace.invoke(')).toBe(true);
+    expect(/provisionWorkspace[\s\S]{0,600}useNomiQuickStart|useNomiQuickStart[\s\S]{0,600}provisionWorkspace/.test(iterateSource)).toBe(true);
+    expect(iterateSource.includes('workspace?.source_path?.trim()')).toBe(true);
+    expect(iterateSource.includes('buildMiniAppIterateMessage(')).toBe(true);
+    expect(iterateSource.includes('buildMiniAppIterateConversationName(')).toBe(true);
+    // The shared launcher owns create → history refresh → first-turn handoff →
+    // navigate to `/conversation/:id`, so this hook adds none of it.
+    expect(iterateSource.includes('useNomiQuickStart')).toBe(true);
+    expect(iterateSource.includes('ipcBridge.conversation.create')).toBe(false);
+    expect(iterateSource.includes('sessionStorage')).toBe(false);
+    expect(iterateSource.includes('navigate(')).toBe(false);
+    // Ordinary in every sense: no marker, no mini-app id, no workspace override.
+    expect(iterateSource.includes('miniapp_id:')).toBe(true); // the provision call's only argument
+    expect(iterateSource.includes('MINI_APP_EXTRA_FLAG')).toBe(false);
+    expect(iterateSource.includes('extra:')).toBe(false);
+    expect(iterateSource.includes('workspace:')).toBe(false);
+    // A synchronous guard, not just the reported flag: two clicks in one tick
+    // would otherwise open two conversations for one app.
+    expect(iterateSource.includes('startingRef.current')).toBe(true);
+  });
+
+  test('publishing is what changes the running app, and says so', () => {
+    expect(runnerSource.includes('app.has_unpublished_changes')).toBe(true);
+    expect(runnerSource.includes('ipcBridge.miniapps.publish.invoke({ miniapp_id: miniAppId })')).toBe(true);
+    expect(runnerSource.includes("t('miniApps.publish.action')")).toBe(true);
+    // One short sentence about published-vs-working, or users report 改了不生效.
+    expect(runnerSource.includes("t('miniApps.publish.explain')")).toBe(true);
+    // A publish changed the served document under a live iframe: adopt the record
+    // AND remount the frame.
+    expect(runnerSource.includes('setApp(published)')).toBe(true);
+    expect(/setApp\(published\);[\s\S]{0,400}setReloadToken/.test(runnerSource)).toBe(true);
+  });
+
+  test('nothing in the library graph knows about draft rows any more', () => {
+    // Spec D17: 「创建小程序」 creates a conversation, not a row, so there is no
+    // placeholder document to store and no byte count to recognise it by.
+    const contractSource = readFileSync(new URL('./contract.ts', import.meta.url), 'utf8');
+    const quickStartSource = readFileSync(
+      new URL('../../hooks/agent/useMiniAppQuickStart.ts', import.meta.url),
+      'utf8'
+    );
+    for (const source of [contractSource, runnerSource, listSource, quickStartSource]) {
+      expect(source.includes('MINI_APP_DRAFT_PLACEHOLDER_HTML')).toBe(false);
+      expect(source.includes('MINI_APP_DRAFT_PLACEHOLDER_BYTES')).toBe(false);
+      expect(source.includes('miniApps.draft.')).toBe(false);
+    }
+    expect(quickStartSource.includes('ipcBridge.miniapps.create')).toBe(false);
+  });
+
+  test('the runner hosts no conversation of its own', () => {
+    // A mini-app outlives every conversation that touched it, so this page owns
+    // no thread and links to none. 「继续迭代」 launches one through the shared hook,
+    // which is also where the whole `pages/conversation/**` module graph stays.
     expect(runnerSource.includes('/conversation/')).toBe(false);
     expect(runnerSource.includes('openSource')).toBe(false);
     expect(runnerSource.includes('LinkOne')).toBe(false);
+    expect(runnerSource.includes('conversation_id')).toBe(false);
   });
 
   test('neither page reaches for retired collaboration vocabulary', () => {
-    for (const source of [listSource, runnerSource, mutationsSource, frameSource]) {
+    for (const source of [listSource, runnerSource, mutationsSource, frameSource, iterateSource]) {
       expect(/orchestr/i.test(source)).toBe(false);
       expect(/sub[-_ ]?agent/i.test(source)).toBe(false);
       expect(/\bfleet\b/i.test(source)).toBe(false);

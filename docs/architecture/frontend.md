@@ -69,8 +69,8 @@ The source of truth is
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
 | `/nomi` | Companion configuration. |
 | `/knowledge`, `/knowledge/:id` | Knowledge base list/detail. |
-| `/mini-apps` | Mini-app library — the solidified single-file web tools, as a card grid. |
-| `/mini-apps/:id` | Mini-app runner — full-page sandboxed iframe served straight from the backend. |
+| `/mini-apps` | Mini-app library — the published single-file web tools, as a card grid. |
+| `/mini-apps/:id` | Mini-app runner — a single column: the PUBLISHED snapshot in a sandboxed iframe served straight from the backend, plus a toolbar (publish / 「继续迭代」 / refresh / open in browser / rename / delete). No conversation UI is mounted here; 「继续迭代」 provisions the working copy and navigates to an ordinary `/conversation/:id`, so the `pages/conversation/**` module graph never enters this route. |
 | `/settings/system` and related settings subroutes | System settings page and sub-sections. |
 
 Legacy settings paths such as `/settings/model`, `/settings/agent`,

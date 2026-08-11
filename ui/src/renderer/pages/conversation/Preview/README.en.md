@@ -58,7 +58,7 @@ docs or examples.
 
 `conversation_id` exists because the panel is mounted OUTSIDE
 `ConversationProvider`: openers stamp the owning conversation so viewers that
-need session identity (the mini-app solidify action) can read it back.
+need session identity (the mini-app publish action) can read it back.
 
 The `miniapp` content type renders the mini-app conversation's single
 self-contained `miniapp.html` (`viewers/MiniAppViewer.tsx`). It is matched by
