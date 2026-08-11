@@ -6607,6 +6607,7 @@ dependencies = [
 name = "nomifun-miniapp"
 version = "0.5.1"
 dependencies = [
+ "async-trait",
  "axum",
  "nomifun-api-types",
  "nomifun-auth",
@@ -6614,7 +6615,10 @@ dependencies = [
  "nomifun-db",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

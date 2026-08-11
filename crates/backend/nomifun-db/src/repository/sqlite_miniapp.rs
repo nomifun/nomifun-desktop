@@ -9,7 +9,8 @@ use crate::repository::miniapp::{CreateMiniAppParams, IMiniAppRepository, Update
 /// `RETURNING`) shares. `html` itself is never listed: `html_size` is a stored
 /// column this repository maintains, so a list never reads a single body byte.
 const METADATA_COLUMNS: &str = "id, miniapp_id, user_id, name, description, icon, \
-     source_conversation_id, html_size, created_at, updated_at";
+     source_conversation_id, html_size, published_at, \
+     created_at, updated_at";
 
 /// SQLite-backed [`IMiniAppRepository`]. Every query except the serve-path
 /// document read is owner-scoped: the `user_id` predicate makes a cross-owner id
@@ -111,6 +112,7 @@ impl IMiniAppRepository for SqliteMiniAppRepository {
                 icon = CASE WHEN ? THEN ? ELSE icon END, \
                 html = COALESCE(?, html), \
                 html_size = COALESCE(?, html_size), \
+                published_at = COALESCE(?, published_at), \
                 updated_at = ? \
              WHERE user_id = ? AND miniapp_id = ? \
              RETURNING {METADATA_COLUMNS}"
@@ -121,6 +123,7 @@ impl IMiniAppRepository for SqliteMiniAppRepository {
         .bind(params.icon.flatten())
         .bind(params.html)
         .bind(params.html.map(|html| html.len() as i64))
+        .bind(params.published_at)
         .bind(nomifun_common::now_ms())
         .bind(user_id)
         .bind(id.as_str())
@@ -140,5 +143,24 @@ impl IMiniAppRepository for SqliteMiniAppRepository {
             return Err(DbError::NotFound("miniapp".into()));
         }
         Ok(())
+    }
+
+    async fn mark_published_at(
+        &self,
+        user_id: &str,
+        id: &MiniAppId,
+        published_at: i64,
+    ) -> Result<MiniAppRow, DbError> {
+        let row = sqlx::query_as::<_, MiniAppRow>(&format!(
+            "UPDATE miniapps SET published_at = ? \
+             WHERE user_id = ? AND miniapp_id = ? \
+             RETURNING {METADATA_COLUMNS}"
+        ))
+        .bind(published_at)
+        .bind(user_id)
+        .bind(id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.ok_or_else(|| DbError::NotFound("miniapp".into()))
     }
 }

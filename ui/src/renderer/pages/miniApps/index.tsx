@@ -15,22 +15,36 @@
  * that built it is ever required.
  *
  * Rename and delete live here (hover actions) and on the runner; the read-only
- * right-side quick panel deliberately has neither. Creation does not live here
- * either: it starts as a conversation, so both the header CTA and the empty state
- * hand off to the start page with mini-app mode pre-armed.
+ * right-side quick panel deliberately has neither. 「继续迭代」 is a hover action too,
+ * and it is the same one the runner toolbar carries — it provisions the working
+ * copy and leaves for an ordinary conversation ({@link useMiniAppIterate}).
+ * Creation does not live here either: it starts as a conversation, so both the
+ * header CTA and the empty state hand off to the start page with mini-app mode
+ * pre-armed.
  *
- * Design spec: docs/specs/2026-08-09-miniapps.zh.md
+ * IMPORT does live here, as the secondary action beside both create buttons: an
+ * app the user already wrote needs no conversation at all, so it must not be
+ * routed through the composer. The whole flow (source picking, validation report,
+ * the 「用会话改造」 fallback for a blocked report) is
+ * {@link MiniAppImportDialog}'s; this page only owns the entry points and the
+ * reload afterwards.
+ *
+ * Design spec: docs/specs/2026-08-09-miniapps.zh.md, and
+ * docs/specs/2026-08-10-miniapps-v3-unified-conversations.zh.md (D19/D20) for
+ * iterating and publishing.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Result, Spin } from '@arco-design/web-react';
-import { ApplicationOne, Delete, EditTwo, Plus, Right, Search } from '@icon-park/react';
+import { ApplicationOne, Delete, EditTwo, MagicWand, Plus, Right, Search, Upload } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { IApiMiniApp } from '@/common/adapter/ipcBridge';
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { HUB_PAGE_TITLE_CLASS } from '@/renderer/components/layout/HubPageShell';
+import MiniAppImportDialog from './MiniAppImportDialog';
 import { formatMiniAppRelativeTime } from './relativeTime';
+import { useMiniAppIterate } from './useMiniAppIterate';
 import { useMiniAppMutations } from './useMiniAppMutations';
 
 /** Start page with mini-app composer mode pre-armed (HashRouter query). */
@@ -53,11 +67,12 @@ const CARD_OPEN_BUTTON_CLASS = [
 interface MiniAppCardProps {
   app: IApiMiniApp;
   onOpen: (app: IApiMiniApp) => void;
+  onIterate: (app: IApiMiniApp) => void;
   onRename: (app: IApiMiniApp) => void;
   onDelete: (app: IApiMiniApp) => void;
 }
 
-const MiniAppCard: React.FC<MiniAppCardProps> = ({ app, onOpen, onRename, onDelete }) => {
+const MiniAppCard: React.FC<MiniAppCardProps> = ({ app, onOpen, onIterate, onRename, onDelete }) => {
   const { t } = useTranslation();
   const icon = app.icon?.trim();
 
@@ -84,8 +99,24 @@ const MiniAppCard: React.FC<MiniAppCardProps> = ({ app, onOpen, onRename, onDele
       </span>
 
       <div className='flex min-w-0 flex-1 flex-col gap-4px'>
-        <div className='truncate text-15px font-600 leading-[1.35] text-[var(--color-text-1)]'>
-          {app.name}
+        <div className='flex min-w-0 items-center gap-6px'>
+          <span className='truncate text-15px font-600 leading-[1.35] text-[var(--color-text-1)]'>
+            {app.name}
+          </span>
+          {/* The one fact the grid could not tell before: this card is showing an
+              older document than the one the user's last iteration produced. The
+              「更新于」 stamp cannot say it — publishing and renaming move
+              `updated_at`, an agent editing the working copy moves nothing — so
+              without this the surface users open first looks identical whether or
+              not their work is sitting unpublished. */}
+          {app.has_unpublished_changes && (
+            <span
+              className='shrink-0 rounded-full px-6px py-1px text-10px font-600 leading-16px text-warning-6 bg-[rgba(var(--warning-6),0.12)]'
+              title={t('miniApps.publish.explain')}
+            >
+              {t('miniApps.publish.pending')}
+            </span>
+          )}
         </div>
         {app.description.trim() !== '' && (
           <div className='line-clamp-2 text-12px leading-17px text-[var(--color-text-3)]'>
@@ -123,6 +154,12 @@ const MiniAppCard: React.FC<MiniAppCardProps> = ({ app, onOpen, onRename, onDele
       >
         {(
           [
+            {
+              key: 'iterate',
+              icon: <MagicWand theme='outline' size={14} strokeWidth={3} />,
+              label: t('miniApps.iterate.toggle'),
+              run: () => onIterate(app),
+            },
             {
               key: 'rename',
               icon: <EditTwo theme='outline' size={14} strokeWidth={3} />,
@@ -180,6 +217,7 @@ const MiniAppsListPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [importing, setImporting] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -204,6 +242,9 @@ const MiniAppsListPage: React.FC = () => {
     void refresh();
   }, [refresh]);
   const mutations = useMiniAppMutations({ onRenamed: reload, onDeleted: reload });
+  // 「继续迭代」 leaves this page for an ordinary conversation, so the grid needs no
+  // follow-up state — the hook navigates and raises its own errors.
+  const { iterate } = useMiniAppIterate();
 
   const displayed = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -217,7 +258,17 @@ const MiniAppsListPage: React.FC = () => {
     (app: IApiMiniApp) => navigate(`/mini-apps/${app.miniapp_id}`),
     [navigate]
   );
+  const iterateApp = useCallback((app: IApiMiniApp) => void iterate(app), [iterate]);
   const goCreate = useCallback(() => navigate(CREATE_ROUTE), [navigate]);
+  const openImport = useCallback(() => setImporting(true), []);
+  const closeImport = useCallback(() => setImporting(false), []);
+  // Stay on the library rather than jumping into the freshly imported app: the
+  // new card lands in the grid the user is already looking at, and the toast the
+  // dialog raised survives (a navigation would unmount its message holder).
+  const onImported = useCallback(() => {
+    setImporting(false);
+    void refresh();
+  }, [refresh]);
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
@@ -229,6 +280,7 @@ const MiniAppsListPage: React.FC = () => {
       ].join(' ')}
     >
       {mutations.node}
+      <MiniAppImportDialog visible={importing} onCancel={closeImport} onImported={onImported} />
       <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-16px'>
         {/* Header */}
         <div className='flex w-full flex-wrap items-start justify-between gap-x-20px gap-y-12px'>
@@ -250,6 +302,12 @@ const MiniAppsListPage: React.FC = () => {
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
               </div>
+              <Button className='shrink-0' onClick={openImport}>
+                <span className='inline-flex items-center gap-6px'>
+                  <Upload theme='outline' size='15' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
+                  {t('miniApps.import.entry')}
+                </span>
+              </Button>
               <Button type='primary' className='shrink-0' onClick={goCreate}>
                 <span className='inline-flex items-center gap-6px'>
                   <Plus theme='outline' size='15' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
@@ -285,12 +343,21 @@ const MiniAppsListPage: React.FC = () => {
                 {t('miniApps.empty.description')}
               </span>
             </div>
-            <Button type='primary' onClick={goCreate}>
-              <span className='inline-flex items-center gap-6px'>
-                <Plus theme='outline' size='15' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
-                {t('miniApps.empty.cta')}
-              </span>
-            </Button>
+            <div className='flex flex-wrap items-center justify-center gap-10px'>
+              <Button type='primary' onClick={goCreate}>
+                <span className='inline-flex items-center gap-6px'>
+                  <Plus theme='outline' size='15' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
+                  {t('miniApps.empty.cta')}
+                </span>
+              </Button>
+              {/* Second way in: an app the user already wrote never needs the AI. */}
+              <Button onClick={openImport}>
+                <span className='inline-flex items-center gap-6px'>
+                  <Upload theme='outline' size='15' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
+                  {t('miniApps.import.entry')}
+                </span>
+              </Button>
+            </div>
           </div>
         ) : (
           <>
@@ -303,6 +370,7 @@ const MiniAppsListPage: React.FC = () => {
                   key={app.miniapp_id}
                   app={app}
                   onOpen={openApp}
+                  onIterate={iterateApp}
                   onRename={mutations.openRename}
                   onDelete={mutations.confirmDelete}
                 />

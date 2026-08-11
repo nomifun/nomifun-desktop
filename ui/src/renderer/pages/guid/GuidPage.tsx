@@ -89,7 +89,8 @@ const GuidPage: React.FC = () => {
 
   // --- Mini-app mode ---
   // When active the composer sends through `useMiniAppQuickStart` instead of the
-  // regular launch branches: engine pinned to Nomi, builder prompt injected.
+  // regular launch branches: engine pinned to Nomi, builder prompt injected, and
+  // the landing is `/conversation/:id` like every other launch.
   const [miniAppMode, setMiniAppMode] = useState(false);
   const miniAppQuickStart = useMiniAppQuickStart();
   // Synchronous double-submit guard (mirrors `useGuidSend`'s `sendingRef`):

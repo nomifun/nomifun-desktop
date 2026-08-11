@@ -76,7 +76,7 @@
 | [`nomifun-companion`](../../crates/backend/nomifun-companion/) | 桌面伙伴状态、形象 / 图片资源、记忆 / 人格数据、伙伴公开图片服务，以及伙伴绑定令牌集成。 |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | 知识库、来源摄取、绑定库挂载状态，以及作用域只读的知识 MCP 服务器。 |
 | [`nomifun-workshop`](../../crates/backend/nomifun-workshop/) | 创意工坊域：无限画布的 AI 视觉创作工作区。持有画布 + 资产（索引行在 `nomifun-db`，画布正文与资产二进制落盘），提供 `/api/workshop/*` 路由面。 |
-| [`nomifun-miniapp`](../../crates/backend/nomifun-miniapp/) | 小程序域：用户固化的 AI 生成单文件网页小工具。持有 `miniapps` 表（HTML 内联入库）、属主隔离的 `/api/miniapps` CRUD 路由面，以及供 iframe 渲染的免认证 `GET /api/miniapps/{id}/serve` 路由。 |
+| [`nomifun-miniapp`](../../crates/backend/nomifun-miniapp/) | 小程序域：单文件网页小工具，可由 AI 生成，也可从用户自己写的页面导入。持有两层存储 —— `miniapps` 表里内联的 HTML 是**已发布快照**，由免认证的 `GET /api/miniapps/{id}/serve` 路由供 iframe 渲染；`{work_dir}/miniapps/{id}/miniapp.html` 是**工作副本**，由当下正在改这个小程序的会话就地写入，只经 `POST .../publish` 提升回快照。同时持有属主隔离的 `/api/miniapps` CRUD 路由面、`validate`/`import` 导入对，以及 `POST /api/miniapps/{id}/workspace`（幂等物化工作副本并返回其绝对路径）。本 crate **不认识会话**：既不依赖 `nomifun-conversation`，也不创建任何会话 —— 小程序相关会话就是客户端新建的普通会话。 |
 | [`nomifun-creation`](../../crates/backend/nomifun-creation/) | 生成引擎：工坊画布生成节点背后的异步任务队列。供应商无关的状态机（`queued → running → succeeded/failed/canceled`），按供应商并发上限 + 全局上限、取消与启动对账；模型执行委托 `nomifun-model-invoke`，产物字节交给 `AssetSink`。 |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | 客服独立域：面向 IM 渠道陌生人的独立服务域，与伙伴 / 会话体系不共享概念——对话是本域自己的聚合，回复由一次性引擎会话产出，工具注册表固定为只读三件套。 |
 | [`nomifun-public`](../../crates/backend/nomifun-public/) | 由伙伴令牌鉴权的公开对外入口：`/mcp`、`/mcp-agent` 与 `/v1`。 |

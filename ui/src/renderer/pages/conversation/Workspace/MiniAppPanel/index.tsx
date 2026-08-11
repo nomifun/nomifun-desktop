@@ -119,7 +119,22 @@ const MiniAppQuickCard: React.FC<{ app: IApiMiniApp; onOpen: (app: IApiMiniApp) 
       </span>
 
       <div className='flex min-w-0 flex-1 flex-col gap-3px'>
-        <div className='truncate text-13px font-600 leading-[1.35] text-[var(--color-text-1)]'>{app.name}</div>
+        <div className='flex min-w-0 items-center gap-5px'>
+          <span className='truncate text-13px font-600 leading-[1.35] text-[var(--color-text-1)]'>{app.name}</span>
+          {/* Read-only is the right rule for this rail's destructive actions, but
+              "the app you are about to run is out of date" is not one of them: the
+              quick panel would otherwise run a stale document with nothing on
+              screen saying a newer working copy exists. The fix is on the runner,
+              which 全屏打开 reaches. */}
+          {app.has_unpublished_changes && (
+            <span
+              className='shrink-0 rounded-full px-5px py-1px text-10px font-600 leading-14px text-warning-6 bg-[rgba(var(--warning-6),0.12)]'
+              title={t('miniApps.publish.explain')}
+            >
+              {t('miniApps.publish.pending')}
+            </span>
+          )}
+        </div>
         {app.description.trim() !== '' && (
           <div className='line-clamp-2 text-11px leading-16px text-[var(--color-text-3)]'>{app.description}</div>
         )}

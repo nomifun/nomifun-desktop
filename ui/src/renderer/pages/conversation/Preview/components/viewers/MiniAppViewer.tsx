@@ -6,7 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { IApiMiniApp } from '@/common/adapter/ipcBridge';
-import type { ConversationId } from '@/common/types/ids';
+import type { ConversationId, MiniAppId } from '@/common/types/ids';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { MINI_APP_IFRAME_SANDBOX } from '@renderer/pages/miniApps/contract';
@@ -19,7 +19,7 @@ import {
   PREVIEW_TOOLBAR_BTN_CLASS,
 } from '../PreviewPanel/PreviewToolbar';
 import { usePreviewToolbarExtras } from '../../context/PreviewToolbarExtrasContext';
-import MiniAppSolidifyModal, { type MiniAppSolidifyResult } from './MiniAppSolidifyModal';
+import MiniAppSolidifyModal, { type MiniAppPublishResult } from './MiniAppSolidifyModal';
 
 /**
  * How long `content` must hold still before the running document is swapped.
@@ -40,17 +40,26 @@ interface MiniAppViewerProps {
   conversation_id?: ConversationId;
 }
 
-/** Pending solidify request: the HTML snapshot plus this conversation's prior save. */
-interface SolidifyRequest {
+/**
+ * Pending publish request: the HTML snapshot plus the library it may replace into.
+ *
+ * The whole library rides along, not just this conversation's own row: 「替换已有
+ * 小程序」 lets the user pick the target (spec D20), and `defaultTargetId` is only
+ * which one is selected first.
+ */
+interface PublishRequest {
   html: string;
-  existing: IApiMiniApp | null;
+  apps: IApiMiniApp[];
+  defaultTargetId: MiniAppId | null;
 }
 
 /**
  * 小程序预览器 / Mini-app viewer.
  *
  * Renders the conversation's single self-contained `miniapp.html` in a sandboxed
- * iframe. Unlike the generic {@link HTMLRenderer} it deliberately drops both the
+ * iframe, and owns the one way that document reaches the library: 「发布为小程序」,
+ * which offers either a new app or an explicit replacement of one the user picks
+ * (spec D20). Unlike the generic {@link HTMLRenderer} it deliberately drops both the
  * typing animation (a live app must not type itself in) and the relative-resource
  * inlining pass (spec D1: a mini-app inlines its own CSS/JS and may only reach
  * out to CDNs). The rendered document lags `content` by a quiet period so an
@@ -62,7 +71,7 @@ const MiniAppViewer: React.FC<MiniAppViewerProps> = ({ content, file_path, works
   const { t } = useTranslation();
   const [messageApi, messageContextHolder] = useArcoMessage();
   const [refreshKey, setRefreshKey] = useState(0);
-  const [solidifyRequest, setSolidifyRequest] = useState<SolidifyRequest | null>(null);
+  const [publishRequest, setPublishRequest] = useState<PublishRequest | null>(null);
   /** The body currently mounted in the iframe — advanced only when `content` settles. */
   const [doc, setDoc] = useState(content);
   // Latest body, readable without making the toolbar callbacks change identity
@@ -72,7 +81,7 @@ const MiniAppViewer: React.FC<MiniAppViewerProps> = ({ content, file_path, works
   contentRef.current = content;
   // Ref rather than state: an in-flight guard must not re-render (and re-publish)
   // the toolbar it is reachable from.
-  const preparingSolidifyRef = useRef(false);
+  const preparingPublishRef = useRef(false);
   const toolbarExtrasContext = usePreviewToolbarExtras();
   const usePortalToolbar = Boolean(toolbarExtrasContext);
 
@@ -95,9 +104,9 @@ const MiniAppViewer: React.FC<MiniAppViewerProps> = ({ content, file_path, works
     setRefreshKey((prev) => prev + 1);
   }, []);
 
-  const handleSolidify = useCallback(async () => {
-    if (preparingSolidifyRef.current) return;
-    preparingSolidifyRef.current = true;
+  const handlePublish = useCallback(async () => {
+    if (preparingPublishRef.current) return;
+    preparingPublishRef.current = true;
     try {
       // Read the file rather than trusting the rendered tab: the agent may have
       // rewritten it between the last poll and this click.
@@ -108,26 +117,27 @@ const MiniAppViewer: React.FC<MiniAppViewerProps> = ({ content, file_path, works
         messageApi.error(t('miniApps.preview.readError'));
         return;
       }
-      let existing: IApiMiniApp | null = null;
-      if (conversation_id) {
-        const saved = await ipcBridge.miniapps.list.invoke();
-        existing = saved.find((item) => item.source_conversation_id === conversation_id) ?? null;
-      }
-      setSolidifyRequest({ html, existing });
+      // The library is fetched HERE rather than inside the dialog so a failure to
+      // read it costs a toast instead of an open modal with an empty picker.
+      const apps = await ipcBridge.miniapps.list.invoke();
+      const defaultTargetId = conversation_id
+        ? (apps.find((item) => item.source_conversation_id === conversation_id)?.miniapp_id ?? null)
+        : null;
+      setPublishRequest({ html, apps, defaultTargetId });
     } catch (error) {
-      console.error('[MiniAppViewer] Failed to prepare solidify:', error);
+      console.error('[MiniAppViewer] Failed to prepare the publish dialog:', error);
       messageApi.error(t('miniApps.preview.readError'));
     } finally {
-      preparingSolidifyRef.current = false;
+      preparingPublishRef.current = false;
     }
   }, [file_path, workspace, conversation_id, messageApi, t]);
 
   const handleSaved = useCallback(
-    (result: MiniAppSolidifyResult) => {
-      setSolidifyRequest(null);
+    (result: MiniAppPublishResult) => {
+      setPublishRequest(null);
       messageApi.success(
-        result.mode === 'update'
-          ? t('miniApps.save.updateSuccess', { name: result.name })
+        result.mode === 'replace'
+          ? t('miniApps.save.replaceSuccess', { name: result.name })
           : t('miniApps.save.success')
       );
     },
@@ -138,8 +148,8 @@ const MiniAppViewer: React.FC<MiniAppViewerProps> = ({ content, file_path, works
     messageApi.error(t('miniApps.save.error'));
   }, [messageApi, t]);
 
-  // Toolbar slot (mirrors PDFViewer): label on the left, refresh + solidify on
-  // the right, wearing the shared PreviewToolbar button tokens.
+  // Toolbar slot (mirrors PDFViewer): label on the left, refresh + publish on the
+  // right, wearing the shared PreviewToolbar button tokens.
   useEffect(() => {
     if (!usePortalToolbar || !toolbarExtrasContext) return;
     toolbarExtrasContext.setExtras({
@@ -163,18 +173,18 @@ const MiniAppViewer: React.FC<MiniAppViewerProps> = ({ content, file_path, works
           <button
             type='button'
             className={`${PREVIEW_TOOLBAR_BTN_CLASS} ${PREVIEW_TOOLBAR_BTN_ACTIVE_CLASS}`}
-            onClick={() => void handleSolidify()}
-            title={t('miniApps.preview.solidify')}
-            data-testid='miniapp-preview-solidify'
+            onClick={() => void handlePublish()}
+            title={t('miniApps.preview.publish')}
+            data-testid='miniapp-preview-publish'
           >
             <SaveOne theme='outline' size={12} fill='currentColor' />
-            <span>{t('miniApps.preview.solidify')}</span>
+            <span>{t('miniApps.preview.publish')}</span>
           </button>
         </div>
       ),
     });
     return () => toolbarExtrasContext.setExtras(null);
-  }, [usePortalToolbar, toolbarExtrasContext, t, handleRefresh, handleSolidify]);
+  }, [usePortalToolbar, toolbarExtrasContext, t, handleRefresh, handlePublish]);
 
   return (
     <div className='h-full w-full overflow-hidden bg-white relative'>
@@ -188,12 +198,13 @@ const MiniAppViewer: React.FC<MiniAppViewerProps> = ({ content, file_path, works
         sandbox={MINI_APP_IFRAME_SANDBOX}
       />
       <MiniAppSolidifyModal
-        visible={solidifyRequest !== null}
-        html={solidifyRequest?.html ?? ''}
-        existing={solidifyRequest?.existing ?? null}
+        visible={publishRequest !== null}
+        html={publishRequest?.html ?? ''}
+        apps={publishRequest?.apps ?? []}
+        defaultTargetId={publishRequest?.defaultTargetId ?? null}
         conversation_id={conversation_id}
         defaultName={conversation?.name ?? ''}
-        onCancel={() => setSolidifyRequest(null)}
+        onCancel={() => setPublishRequest(null)}
         onSaved={handleSaved}
         onError={handleSaveError}
       />

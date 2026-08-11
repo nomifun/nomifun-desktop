@@ -5,15 +5,30 @@
  */
 
 /**
- * Mini-app contract shared by the start page (creation), the conversation
- * preview panel (live rendering + solidify), and the /mini-apps library pages.
+ * Mini-app contract shared by the `/mini-apps` pages and the conversation preview
+ * panel.
  *
- * A mini-app conversation is a normal Nomi conversation whose `extra` carries
- * `miniapp: true` plus a builder system prompt. The one and only artifact is a
- * single self-contained HTML document at {@link MINI_APP_FILE_NAME} in the
- * conversation workspace root. Design spec: docs/specs/2026-08-09-miniapps.zh.md
+ * Every mini-app conversation is an ORDINARY conversation in an ordinary
+ * workspace (spec D16), so everything the model needs to know rides client-side
+ * text from this module. There are two such texts and they are not
+ * interchangeable:
+ *
+ *  - **Creating** (start page 创建小程序, and the import dialog's 「用会话改造」 exit)
+ *    injects {@link MINI_APP_BUILDER_SYSTEM_PROMPT} as `extra.system_prompt` plus
+ *    the {@link MINI_APP_EXTRA_FLAG} marker. The artifact is
+ *    {@link MINI_APP_FILE_NAME} in the conversation's own workspace root, and the
+ *    preview panel's 「发布为新的小程序」 is how it reaches the library.
+ *  - **Iterating** (「继续迭代」 on a library card or the runner toolbar) provisions
+ *    the app's working copy first and writes its ABSOLUTE path into the first
+ *    message — {@link buildMiniAppIterateMessage}. That conversation gets no
+ *    marker and no builder prompt: its artifact lives outside its workspace, so
+ *    both would describe a file that is not there.
+ *
+ * Design specs: docs/specs/2026-08-09-miniapps.zh.md (v1),
+ * docs/specs/2026-08-10-miniapps-v3-unified-conversations.zh.md (v3)
  */
 
+import type { TFunction } from 'i18next';
 import { getBaseUrl } from '@/common/adapter/httpBridge';
 import type { MiniAppId } from '@/common/types/ids';
 
@@ -46,6 +61,37 @@ export const MINI_APP_BUILDER_SYSTEM_PROMPT = `[NomiFun 小程序构建模式]
 /** Max characters of the user's request quoted into the conversation name. */
 export const MINI_APP_NAME_SNIPPET_LENGTH = 16;
 
+/** Everything 「继续迭代」 has to tell the model about the app it is about to change. */
+export interface MiniAppIterateTarget {
+  name: string;
+  miniAppId: MiniAppId;
+  /** Absolute `source_path` straight from `POST /api/miniapps/{id}/workspace`. */
+  sourcePath: string;
+}
+
+/**
+ * First message of an iteration conversation (spec D19).
+ *
+ * The conversation is ordinary and its workspace has nothing to do with the app,
+ * so this message is the ONLY thing that locates the source — hence the absolute
+ * path, and hence "read the whole file first" (the model would otherwise rewrite
+ * a document it never saw). It is user-visible content, not a system prompt, so
+ * it goes through i18n.
+ *
+ * Composed here rather than at the two call sites (library card, runner toolbar)
+ * so the two can never drift into telling the model different things.
+ */
+export const buildMiniAppIterateMessage = (target: MiniAppIterateTarget, t: TFunction): string =>
+  t('miniApps.iterate.firstMessage', {
+    name: target.name,
+    id: target.miniAppId,
+    path: target.sourcePath,
+  });
+
+/** Title of an iteration conversation, so the session list says which app it is. */
+export const buildMiniAppIterateConversationName = (name: string, t: TFunction): string =>
+  t('miniApps.iterate.conversationName', { name });
+
 /**
  * True when a conversation was launched through the start page's
  * "create mini-app" capability. Tolerant of the loose `extra` bag shape.
@@ -56,7 +102,7 @@ export function isMiniAppConversation(extra: unknown): boolean {
 }
 
 /**
- * Absolute URL the runner/preview iframes load a solidified mini-app from.
+ * Absolute URL the runner/preview iframes load a published mini-app from.
  * The backend route is intentionally unauthenticated (iframe subresource
  * loads carry no trust header) and embed-whitelisted.
  */

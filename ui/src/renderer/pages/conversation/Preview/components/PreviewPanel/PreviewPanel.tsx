@@ -634,8 +634,8 @@ const PreviewPanel: React.FC = () => {
       // URL 预览模式 / URL preview mode
       return <URLViewer url={content} title={metadata?.title} />;
     } else if (content_type === 'miniapp') {
-      // 小程序：沙箱 iframe 实时渲染 + 固化工具栏
-      // Mini-app: sandboxed live render with the solidify toolbar
+      // 小程序：沙箱 iframe 实时渲染 + 「发布为小程序」工具栏
+      // Mini-app: sandboxed live render with the publish toolbar
       return (
         <MiniAppViewer
           content={content}

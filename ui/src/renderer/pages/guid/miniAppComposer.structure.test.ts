@@ -25,9 +25,22 @@ describe('mini-app composer entry wiring', () => {
     expect(entryStrip.includes('styles.entryButtonActive')).toBe(true);
     expect(entryStrip.includes('styles.entryDismiss')).toBe(true);
     // IconPark: plain named import, never aliased or namespaced.
-    expect(entryStrip.includes("import { ApplicationOne, EveryUser, Lightning, Robot } from '@icon-park/react'")).toBe(
-      true
-    );
+    expect(
+      entryStrip.includes("import { ApplicationOne, EveryUser, Lightning, Robot } from '@icon-park/react'")
+    ).toBe(true);
+  });
+
+  test('the entry strip is a strip and nothing else', () => {
+    // The workspace-transfer notice is gone with the workspace redirection it
+    // described (spec D16): a mini-app conversation is an ordinary conversation in
+    // an ordinary workspace, so there is nothing left to warn about — and the
+    // staged directory is honoured again rather than silently dropped.
+    // Patterns rather than literals: the repo-wide zero-leftover grep scans this
+    // file's own lines too.
+    expect(/workspace[N]otice/.test(entryStrip)).toBe(false);
+    expect(/guid-miniapp-workspace-[n]otice/.test(entryStrip)).toBe(false);
+    expect(entryStrip.includes('miniAppWorkspaceDirStaged')).toBe(false);
+    expect(guidPage.includes('miniAppWorkspaceDirStaged')).toBe(false);
   });
 
   test('GuidPage owns the mode, swaps the placeholder, and routes the send', () => {
@@ -44,20 +57,31 @@ describe('mini-app composer entry wiring', () => {
     expect(guidPage.includes('onSend={send.sendMessageHandler}')).toBe(false);
     expect(guidPage.includes('miniAppQuickStart\n      .start({')).toBe(true);
     expect(guidPage.includes('setMiniAppMode(false);')).toBe(true);
+
+    // The launch lands on `/conversation/:id` like every other one, so the start
+    // page has no reason to warm the mini-app runner chunk.
+    expect(guidPage.includes("import('@renderer/pages/miniApps/RunnerPage')")).toBe(false);
   });
 
   test('the send is guarded, carries the staged inputs, and resets the composer', () => {
     // A synchronous ref guard, not just the `loading` state: two gestures in one
-    // tick would otherwise create two conversations.
+    // tick would otherwise create two mini-apps.
     expect(guidPage.includes('const miniAppSendingRef = useRef(false)')).toBe(true);
     expect(guidPage.includes('|| miniAppSendingRef.current) return')).toBe(true);
     expect(guidPage.includes('miniAppSendingRef.current = true')).toBe(true);
     expect(guidPage.includes('miniAppSendingRef.current = false')).toBe(true);
 
-    // The picker GuidPage owns, plus the staged workspace + attachments.
+    // Every staged composer input travels: the picker GuidPage owns, the workspace
+    // directory the user chose, and the attachments. Dropping any of them would
+    // look honoured and then be silently discarded.
     expect(guidPage.includes('model: modelSelection.current_model')).toBe(true);
-    expect(guidPage.includes('dir: guidInput.dir')).toBe(true);
     expect(guidPage.includes('files: guidInput.files')).toBe(true);
+    expect(
+      guidPage.includes(
+        '        prompt,\n        model: modelSelection.current_model,\n        dir: guidInput.dir,\n        files: guidInput.files,\n      })'
+      )
+    ).toBe(true);
+    expect(quickStart.includes('dir?: string')).toBe(true);
 
     // Same teardown as the normal path.
     expect(guidPage.includes('guidInput.setFiles([]);')).toBe(true);
@@ -84,24 +108,38 @@ describe('mini-app composer entry wiring', () => {
     expect(guidPage.includes('miniAppQueryHandledRef')).toBe(false);
   });
 
-  test('the mini-app quick start is a thin wrapper over the Nomi one', () => {
+  test('the mini-app launch is ONE ordinary Nomi conversation (spec D17)', () => {
+    // A thin wrapper over the shared launcher: same create → history refresh →
+    // first-turn handoff → `/conversation/:id`, only `extra` differs.
     expect(quickStart.includes('useNomiQuickStart')).toBe(true);
     expect(quickStart.includes('startNomi({')).toBe(true);
+    expect(quickStart.includes('MINI_APP_BUILDER_SYSTEM_PROMPT')).toBe(true);
     expect(quickStart.includes('system_prompt: MINI_APP_BUILDER_SYSTEM_PROMPT')).toBe(true);
+    // The marker is what turns on auto-preview of `miniapp.html` in the
+    // conversation workspace and the publish toolbar on it.
     expect(quickStart.includes('[MINI_APP_EXTRA_FLAG]: true')).toBe(true);
-    expect(quickStart.includes("t('miniApps.composer.conversationName'")).toBe(true);
     expect(quickStart.includes('MINI_APP_NAME_SNIPPET_LENGTH')).toBe(true);
-    // Write-only marker: nothing ever read `miniapp_file`.
-    expect(quickStart.includes('MINI_APP_EXTRA_FILE')).toBe(false);
-    // The create / sessionStorage / navigate sequence lives in ONE place.
-    expect(quickStart.includes('ipcBridge.conversation.create')).toBe(false);
+    // The staged directory becomes an ordinary custom workspace, or none at all.
+    expect(quickStart.includes("workspace: dir || ''")).toBe(true);
+    expect(quickStart.includes('custom_workspace: Boolean(dir)')).toBe(true);
+
+    // No mini-app row exists until the user publishes, so this hook writes none,
+    // provisions nothing, and has no draft to clean up.
+    expect(quickStart.includes('ipcBridge.miniapps.')).toBe(false);
+    expect(quickStart.includes('provisionWorkspace')).toBe(false);
+    expect(quickStart.includes('discardDraft')).toBe(false);
+    expect(quickStart.includes('miniapp_id')).toBe(false);
+    // Nor does it re-implement the launch: no second copy of the handoff payload,
+    // no navigation of its own, no model write-back.
+    expect(quickStart.includes('ipcBridge.conversation.')).toBe(false);
+    expect(quickStart.includes('persistInitialMessageDelivery')).toBe(false);
     expect(quickStart.includes('sessionStorage')).toBe(false);
-    expect(quickStart.includes('useNavigate')).toBe(false);
+    expect(quickStart.includes('navigate(')).toBe(false);
     // Stable return object so callers can depend on `.start` alone.
     expect(quickStart.includes('useMemo(() => ({ start, canStart })')).toBe(true);
   });
 
-  test('the shared Nomi quick start owns the handoff protocol and the model override', () => {
+  test('the shared Nomi quick start still owns the ordinary handoff and model override', () => {
     expect(nomiQuickStart.includes("type: 'nomi'")).toBe(true);
     expect(nomiQuickStart.includes('const effectiveModel = model ?? current_model')).toBe(true);
     expect(nomiQuickStart.includes('...extra,')).toBe(true);
