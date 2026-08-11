@@ -360,6 +360,10 @@ pub struct RelayOutcome {
     /// post-processing UI state. This may differ from the turn's primary msg_id
     /// when the turn starts with thinking/tool output before final text.
     pub final_text_msg_id: Option<String>,
+    /// Number of locally verified artifacts whose complete turn batch crossed
+    /// the durable repository commit barrier. Provisional receipts and
+    /// partially/ambiguously committed batches never increment this value.
+    pub committed_artifact_count: usize,
 }
 
 fn turn_writeback_status_label(status: nomifun_knowledge::TurnWritebackStatus) -> &'static str {
@@ -1800,6 +1804,10 @@ pub struct StreamRelay {
     /// Stable identity of the user-visible logical turn. This remains fixed
     /// across model failover and system continuations.
     root_turn_id: String,
+    /// Set only after the structural root row is known durable. The service
+    /// may run the public preflight before starting billable agent work; the
+    /// relay repeats the check defensively when callers omit that preflight.
+    turn_root_ready: AtomicBool,
     /// Identity of the current provider wire segment within `root_turn_id`.
     ///
     /// This is only a transport/stream identity. Durable child messages and
@@ -1930,6 +1938,7 @@ impl StreamRelay {
         Self {
             conversation_id,
             root_turn_id,
+            turn_root_ready: AtomicBool::new(false),
             msg_id,
             user_id,
             repo,
@@ -1966,7 +1975,145 @@ impl StreamRelay {
 
     pub fn with_root_turn_id(mut self, turn_id: impl Into<String>) -> Self {
         self.root_turn_id = turn_id.into();
+        self.turn_root_ready.store(false, Ordering::Release);
         self
+    }
+
+    /// Persist the hidden structural owner of every root-scoped child row.
+    ///
+    /// Call this before starting provider work. SQLite enforces that any
+    /// `msg_id` which differs from a child's `message_id` already exists, so a
+    /// tool/status/artifact event cannot safely race the first visible text
+    /// segment. The root is deliberately hidden and terminal-looking: it is an
+    /// immutable relationship anchor, not a user-visible lifecycle message.
+    ///
+    /// This method is idempotent for the same relay and reconciles a concurrent
+    /// insert. It also accepts a pre-upgrade turn whose first visible text or
+    /// thinking row already owns the root id; new turns never create that
+    /// representation.
+    pub async fn ensure_turn_root_persisted(&self) -> Result<(), DbError> {
+        if self.turn_root_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let expected = MessageRow {
+            id: 0,
+            message_id: self.root_turn_id.clone(),
+            conversation_id: self.conversation_id.clone(),
+            msg_id: Some(self.root_turn_id.clone()),
+            r#type: "turn_root".to_owned(),
+            content: json!({ "kind": "turn_root" }).to_string(),
+            position: Some("center".to_owned()),
+            status: Some("finish".to_owned()),
+            hidden: true,
+            created_at: now_ms(),
+        };
+
+        let insert_error = match self.repo.insert_message(&expected).await {
+            Ok(()) => {
+                self.turn_root_ready.store(true, Ordering::Release);
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+
+        match self
+            .repo
+            .get_message(&self.conversation_id, &self.root_turn_id)
+            .await
+        {
+            Ok(Some(existing)) if self.is_compatible_turn_root(&existing) => {
+                self.turn_root_ready.store(true, Ordering::Release);
+                Ok(())
+            }
+            Ok(Some(existing)) => Err(DbError::Conflict(format!(
+                "logical turn root '{}' conflicts with an existing {} message owned by {:?}",
+                self.root_turn_id, existing.r#type, existing.msg_id
+            ))),
+            Ok(None) => Err(insert_error),
+            Err(reconcile_error) => Err(DbError::Conflict(format!(
+                "logical turn root '{}' insert failed ({insert_error}) and its durable state could not be reconciled ({reconcile_error})",
+                self.root_turn_id
+            ))),
+        }
+    }
+
+    /// Convert a failed pre-send root preflight directly into the relay's
+    /// terminal contract. This deliberately does not retry the database and
+    /// does not wait on an agent receiver: provider work has not started, and
+    /// no child row may be persisted without its structural owner.
+    pub fn into_turn_root_failure_outcome(self, root_error: DbError) -> RelayOutcome {
+        error!(
+            error = %ErrorChain(&root_error),
+            conversation_id = %self.conversation_id,
+            root_turn_id = %self.root_turn_id,
+            "Refusing to start or consume an agent stream without a durable logical turn root"
+        );
+        let event = AgentStreamEvent::Error(
+            nomifun_ai_agent::protocol::events::ErrorEventData::legacy(
+                "The assistant turn could not be initialized in conversation history",
+                Some(AgentErrorCode::NomifunStateInconsistent),
+            ),
+        );
+        let terminal = Self::terminal_from_event(&event);
+        let terminal_claimed = self
+            .cancellation
+            .as_ref()
+            .map(AgentTurnCancellation::try_claim_terminal_surface)
+            .unwrap_or(true);
+        if terminal_claimed {
+            self.forward_to_websocket(&event);
+            if let Some(cancellation) = self.cancellation.as_ref() {
+                cancellation.mark_terminal_observed();
+            }
+        }
+        RelayOutcome {
+            terminal,
+            ..RelayOutcome::default()
+        }
+    }
+
+    fn is_compatible_turn_root(&self, row: &MessageRow) -> bool {
+        if row.message_id != self.root_turn_id
+            || row.conversation_id != self.conversation_id
+            || row.msg_id.as_deref() != Some(self.root_turn_id.as_str())
+        {
+            return false;
+        }
+
+        let content = serde_json::from_str::<Value>(&row.content).ok();
+        let canonical = matches!(row.r#type.as_str(), "turn_root" | "system")
+            && row.position.as_deref() == Some("center")
+            && row.status.as_deref() == Some("finish")
+            && row.hidden
+            && content
+                .as_ref()
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str)
+                == Some("turn_root");
+        if canonical {
+            return true;
+        }
+
+        // Before structural roots existed, the first visible segment reused
+        // the logical root id. Accept only the two representations the old
+        // relay could create, with their exact assistant-side ownership.
+        if row.position.as_deref() != Some("left") {
+            return false;
+        }
+        match (row.r#type.as_str(), content.as_ref()) {
+            ("text", Some(content)) => {
+                content.get("turn_id").and_then(Value::as_str)
+                    == Some(self.root_turn_id.as_str())
+                    && content.get("content").is_some_and(Value::is_string)
+            }
+            ("thinking", Some(content)) => {
+                !row.hidden
+                    && content.get("content").is_some_and(Value::is_string)
+                    && content.get("status").and_then(Value::as_str) == Some("done")
+            }
+            _ => false,
+        }
     }
 
     /// Wire the process-wide runtime state so this relay accumulates each turn's
@@ -2082,6 +2229,16 @@ impl StreamRelay {
         if !cancellation.try_claim_terminal_surface() {
             return false;
         }
+        if let Err(error) = self.ensure_turn_root_persisted().await {
+            error!(
+                error = %ErrorChain(&error),
+                conversation_id = %self.conversation_id,
+                root_turn_id = %self.root_turn_id,
+                "Could not persist the logical turn root before surfacing a terminal error"
+            );
+            cancellation.mark_terminal_observed();
+            return false;
+        }
         if cancellation.is_cancelled() {
             self.forward_to_websocket(&Self::cancelled_finish_event());
             cancellation.mark_terminal_observed();
@@ -2123,6 +2280,9 @@ impl StreamRelay {
     ) -> RelayOutcome {
         let started_at = now_ms();
         info!("StreamRelay started");
+        if let Err(root_error) = self.ensure_turn_root_persisted().await {
+            return self.into_turn_root_failure_outcome(root_error);
+        }
         let _artifact_recovery_lease_handoff = ArtifactRecoveryLeaseHandoff::new(
             self.artifact_workspace.as_ref(),
             self.conv_id(),
@@ -2157,7 +2317,6 @@ impl StreamRelay {
         > = HashMap::new();
         let mut active_plan_ids: HashSet<String> = HashSet::new();
         let mut active_agent_status: Option<nomifun_ai_agent::protocol::events::AgentStatusEventData> = None;
-        let mut used_primary_segment_msg_id = false;
         let mut first_agent_event_logged = false;
         let mut first_visible_output_logged = false;
         let mut fatal_tracking_error: Option<String> = None;
@@ -2167,6 +2326,7 @@ impl StreamRelay {
         // switching to faults that produced NO visible output (no duplicate
         // text, no duplicate tool side effect / billing).
         let mut emitted_response = false;
+        let mut committed_artifact_count = 0usize;
         let mut send_error_done = send_error_rx.is_none();
 
         loop {
@@ -2347,7 +2507,7 @@ impl StreamRelay {
                             }
 
                             let segment = active_thinking.get_or_insert_with(|| ThinkingSegmentState {
-                                id: Self::mint_segment_msg_id(&mut used_primary_segment_msg_id, &self.msg_id),
+                                id: ConversationService::mint_msg_id(),
                                 buffer: String::new(),
                                 started_at: now_ms(),
                                 completed_duration_ms: None,
@@ -2375,7 +2535,7 @@ impl StreamRelay {
                             }
 
                             let segment = active_text.get_or_insert_with(|| TextSegmentState {
-                                id: Self::mint_segment_msg_id(&mut used_primary_segment_msg_id, &self.msg_id),
+                                id: ConversationService::mint_msg_id(),
                                 buffer: String::new(),
                                 created_at: now_ms(),
                                 record_created: false,
@@ -2549,7 +2709,8 @@ impl StreamRelay {
                                     .await;
 
                                 match commit_result {
-                                    Ok(()) => {
+                                    Ok(durable_artifact_count) => {
+                                        committed_artifact_count = durable_artifact_count;
                                         // The transaction is now the linearization
                                         // point for artifact success. Publish every
                                         // receipt-bearing Completed frame only after
@@ -2718,6 +2879,7 @@ impl StreamRelay {
                                     emitted_response,
                                     suppress_error,
                                     &terminal_message_id,
+                                    committed_artifact_count,
                                 )
                                 .await;
                             // Publish the terminal only after all lifecycle
@@ -3536,6 +3698,7 @@ impl StreamRelay {
                                 // suppressible provider failure.
                                 false,
                                 &terminal_message_id,
+                                0,
                             )
                             .await;
                         if terminal_claimed {
@@ -3655,15 +3818,6 @@ impl StreamRelay {
         self.forward_to_websocket(&Self::cancelled_finish_event());
         cancellation.mark_terminal_observed();
         true
-    }
-
-    fn mint_segment_msg_id(used_primary: &mut bool, primary_msg_id: &str) -> String {
-        if !*used_primary {
-            *used_primary = true;
-            primary_msg_id.to_owned()
-        } else {
-            ConversationService::mint_msg_id()
-        }
     }
 
     /// The canonical Conversation ID used by repository calls and events.
@@ -3912,6 +4066,7 @@ impl StreamRelay {
         emitted_response: bool,
         suppress_error: bool,
         terminal_message_id: &str,
+        committed_artifact_count: usize,
     ) -> RelayOutcome {
         let mut outcome = RelayOutcome {
             system_responses: Vec::new(),
@@ -3924,6 +4079,7 @@ impl StreamRelay {
             suppressed_error: None,
             final_text: None,
             final_text_msg_id: None,
+            committed_artifact_count,
         };
         let cancelled = Self::is_cancelled_finish(event);
         let status = if matches!(event, AgentStreamEvent::Error(_)) || cancelled {
@@ -4029,11 +4185,12 @@ impl StreamRelay {
                     // the active segment and must not rewrite earlier narration.
                 }
             } else if !hidden {
+                let message_id = ConversationService::mint_msg_id();
                 let row = MessageRow {
                     id: 0,
-                    message_id: self.msg_id.clone(),
+                    message_id: message_id.clone(),
                     conversation_id: self.conversation_id.clone(),
-                    msg_id: Some(self.msg_id.clone()),
+                    msg_id: Some(message_id),
                     r#type: "text".into(),
                     content: json!({
                         "content": final_text,
@@ -4108,7 +4265,11 @@ impl StreamRelay {
         data: &nomifun_ai_agent::protocol::events::AgentStatusEventData,
     ) -> bool {
         let id = self.agent_status_message_id().await;
-        let content = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_owned());
+        let mut content_value = serde_json::to_value(data).unwrap_or_else(|_| json!({}));
+        if let Some(object) = content_value.as_object_mut() {
+            object.insert("turn_id".to_owned(), json!(self.root_turn_id));
+        }
+        let content = content_value.to_string();
         let status = match data.status.as_str() {
             "prepared" => "finish",
             "error" => "error",
@@ -4291,6 +4452,7 @@ impl StreamRelay {
                 "content": segment.buffer,
                 "status": "done",
                 "duration_ms": duration_ms,
+                "turn_id": &self.root_turn_id,
             })
             .to_string(),
             position: Some("left".into()),
@@ -5426,7 +5588,15 @@ impl StreamRelay {
             String,
             nomifun_ai_agent::protocol::events::tool_call::AcpToolCallEventData,
         >,
-    ) -> Result<(), ArtifactCommitFailure> {
+    ) -> Result<usize, ArtifactCommitFailure> {
+        let committed_artifact_count = generic
+            .values()
+            .map(|data| data.artifacts.len())
+            .sum::<usize>()
+            + acp
+                .values()
+                .map(|data| Self::acp_artifact_receipts(data).len())
+                .sum::<usize>();
         let has_local_receipts = generic.values().any(|data| !data.artifacts.is_empty())
             || acp.values().any(|data| {
                 data.update.content.as_ref().is_some_and(|items| {
@@ -5566,7 +5736,7 @@ impl StreamRelay {
             Ok(committed)
                 if Self::returned_artifact_batch_is_exact(&committed, &commits, self.conv_id(), &self.root_turn_id) =>
             {
-                return Ok(());
+                return Ok(committed_artifact_count);
             }
             Ok(_) => nomifun_db::DbError::Conflict(
                 "artifact commit returned an incomplete or mismatched durable batch".to_owned(),
@@ -5586,7 +5756,7 @@ impl StreamRelay {
                 error = %ErrorChain(&commit_error),
                 "Artifact COMMIT acknowledgement was inconsistent, but every exact row is durable"
             );
-            return Ok(());
+            return Ok(committed_artifact_count);
         }
         Err(ArtifactCommitFailure::after_reconciliation(
             commit_error,
@@ -7384,6 +7554,164 @@ mod tests {
     // ── run() async tests ─────────────────────────────────────────
 
     #[tokio::test]
+    async fn turn_root_preflight_precedes_children_and_visible_segments_use_distinct_ids() {
+        use nomifun_ai_agent::protocol::events::AgentStatusEventData;
+
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(32));
+        let (tx, _) = broadcast::channel(32);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus,
+            None,
+        )
+        .with_root_turn_id(TEST_TURN_A);
+
+        relay
+            .ensure_turn_root_persisted()
+            .await
+            .expect("preflight persists the logical root");
+        relay
+            .ensure_turn_root_persisted()
+            .await
+            .expect("same-relay preflight is idempotent");
+
+        let rx = tx.subscribe();
+        tx.send(AgentStreamEvent::AgentStatus(AgentStatusEventData {
+            backend: "nomi".into(),
+            status: "preparing".into(),
+            agent_name: Some("Nomi".into()),
+            session_id: None,
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "ready".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default()))
+            .unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert_eq!(outcome.terminal, RelayTerminal::Finish);
+        assert_eq!(outcome.committed_artifact_count, 0);
+
+        let rows = repo.inserts.lock().unwrap().clone();
+        let root_index = rows
+            .iter()
+            .position(|row| row.message_id == TEST_TURN_A)
+            .expect("logical root row");
+        let root = &rows[root_index];
+        assert_eq!(root.r#type, "turn_root");
+        assert_eq!(root.msg_id.as_deref(), Some(TEST_TURN_A));
+        assert!(root.hidden);
+        assert_eq!(
+            serde_json::from_str::<Value>(&root.content).unwrap()["kind"],
+            "turn_root"
+        );
+
+        let status_index = rows
+            .iter()
+            .position(|row| row.r#type == "agent_status")
+            .expect("agent status child row");
+        assert!(root_index < status_index);
+        assert_eq!(rows[status_index].msg_id.as_deref(), Some(TEST_TURN_A));
+
+        let text = rows
+            .iter()
+            .find(|row| row.r#type == "text")
+            .expect("visible text segment");
+        assert_ne!(text.message_id, TEST_TURN_A);
+        assert_ne!(text.message_id, TEST_ASSISTANT_MESSAGE_ID);
+        assert_eq!(text.msg_id.as_deref(), Some(text.message_id.as_str()));
+        assert_eq!(
+            outcome.final_text_msg_id.as_deref(),
+            Some(text.message_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_root_preflight_accepts_a_legacy_visible_root_but_rejects_wrong_ownership() {
+        let conversation_id = test_conversation_id();
+        let repo = Arc::new(RecordingRepo::new());
+        repo.inserts.lock().unwrap().push(MessageRow {
+            id: 0,
+            message_id: TEST_TURN_A.to_owned(),
+            conversation_id: conversation_id.clone(),
+            msg_id: Some(TEST_TURN_A.to_owned()),
+            r#type: "text".to_owned(),
+            content: json!({ "content": "legacy", "turn_id": TEST_TURN_A }).to_string(),
+            position: Some("left".to_owned()),
+            status: Some("finish".to_owned()),
+            hidden: false,
+            created_at: now_ms(),
+        });
+        let relay = StreamRelay::new(
+            conversation_id,
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            Arc::new(TestUserEventBus::new(8)),
+            None,
+        )
+        .with_root_turn_id(TEST_TURN_A);
+        relay
+            .ensure_turn_root_persisted()
+            .await
+            .expect("pre-upgrade text root remains a valid owner");
+        assert_eq!(
+            repo.inserts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|row| row.message_id == TEST_TURN_A)
+                .count(),
+            1
+        );
+
+        let wrong_repo = Arc::new(RecordingRepo::new());
+        wrong_repo.inserts.lock().unwrap().push(MessageRow {
+            id: 0,
+            message_id: TEST_TURN_B.to_owned(),
+            conversation_id: test_conversation_id(),
+            msg_id: Some(TEST_TURN_B.to_owned()),
+            r#type: "text".to_owned(),
+            content: json!({ "content": "user-owned collision" }).to_string(),
+            position: Some("right".to_owned()),
+            status: Some("finish".to_owned()),
+            hidden: false,
+            created_at: now_ms(),
+        });
+        let wrong_bus = Arc::new(TestUserEventBus::new(8));
+        let mut wrong_events = wrong_bus.subscribe();
+        let conflict_relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            wrong_repo.clone(),
+            wrong_bus,
+            None,
+        )
+        .with_root_turn_id(TEST_TURN_B);
+        let conflict = conflict_relay
+        .ensure_turn_root_persisted()
+        .await
+        .expect_err("a right-side message cannot become an assistant turn root");
+        assert!(matches!(conflict, DbError::Conflict(_)));
+        let outcome = conflict_relay.into_turn_root_failure_outcome(conflict);
+        assert_eq!(
+            outcome.terminal.code(),
+            Some(AgentErrorCode::NomifunStateInconsistent)
+        );
+        assert_eq!(wrong_repo.inserts.lock().unwrap().len(), 1);
+        let event = wrong_events.try_recv().expect("preflight failure terminal event");
+        assert_eq!(event.data["type"], "error");
+        assert_eq!(event.data["turn_id"], TEST_TURN_B);
+    }
+
+    #[tokio::test]
     async fn run_text_then_finish_persists_message() {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
@@ -7423,7 +7751,9 @@ mod tests {
         assert_eq!(inserts.len(), 1);
         let msg = &inserts[0];
         assert_eq!(msg.conversation_id, conversation_id);
-        assert_eq!(msg.message_id, TEST_ASSISTANT_MESSAGE_ID);
+        assert_ne!(msg.message_id, TEST_ASSISTANT_MESSAGE_ID);
+        assert_eq!(msg.msg_id.as_deref(), Some(msg.message_id.as_str()));
+        assert_eq!(outcome.final_text_msg_id.as_deref(), Some(msg.message_id.as_str()));
         assert_eq!(msg.r#type, "text");
         assert_eq!(msg.status.as_deref(), Some("finish"));
 
@@ -7498,9 +7828,13 @@ mod tests {
         let outcome = relay.consume(rx).await;
 
         assert_eq!(outcome.terminal, RelayTerminal::Finish);
-        assert_eq!(outcome.final_text_msg_id.as_deref(), Some(TEST_ASSISTANT_MESSAGE_ID));
         let inserts = repo.take_inserts();
         assert_eq!(inserts.len(), 1, "the failed work insert must be retried as the terminal row");
+        assert_eq!(
+            outcome.final_text_msg_id.as_deref(),
+            Some(inserts[0].message_id.as_str())
+        );
+        assert_ne!(inserts[0].message_id, TEST_ASSISTANT_MESSAGE_ID);
         assert_eq!(inserts[0].status.as_deref(), Some("finish"));
         let content: Value = serde_json::from_str(&inserts[0].content).unwrap();
         assert_eq!(content["content"], "x".repeat(FLUSH_INTERVAL as usize));
@@ -7536,15 +7870,15 @@ mod tests {
 
         let outcome = relay.consume(rx).await;
 
-        assert_eq!(
-            outcome.final_text_msg_id.as_deref(),
-            Some(TEST_ASSISTANT_MESSAGE_ID)
-        );
         let inserts = repo.take_inserts();
         assert_eq!(
             inserts.len(),
             1,
             "a committed-but-unacknowledged insert must be reconciled, not duplicated"
+        );
+        assert_eq!(
+            outcome.final_text_msg_id.as_deref(),
+            Some(inserts[0].message_id.as_str())
         );
         let updates = repo.take_updates();
         assert_eq!(updates.len(), 2);
@@ -7682,13 +8016,16 @@ mod tests {
 
         let outcome = relay.consume(rx).await;
 
-        assert_eq!(outcome.final_text_msg_id.as_deref(), Some(TEST_ASSISTANT_MESSAGE_ID));
         let inserts = repo.take_inserts();
         assert_eq!(inserts.len(), 1, "the work row must not be inserted a second time");
+        assert_eq!(
+            outcome.final_text_msg_id.as_deref(),
+            Some(inserts[0].message_id.as_str())
+        );
         assert_eq!(inserts[0].status.as_deref(), Some("work"));
         let updates = repo.take_updates();
         assert_eq!(updates.len(), 1, "terminal finalization should retry exactly once");
-        assert_eq!(updates[0].0, TEST_ASSISTANT_MESSAGE_ID);
+        assert_eq!(updates[0].0, inserts[0].message_id);
         assert_eq!(
             updates[0].1.status.as_ref().and_then(|status| status.as_deref()),
             Some("finish")
@@ -8396,7 +8733,8 @@ mod tests {
         tx.send(AgentStreamEvent::Error(ErrorEventData::legacy("later provider error", None)))
             .unwrap();
 
-        relay.consume(rx).await;
+        let outcome = relay.consume(rx).await;
+        assert_eq!(outcome.committed_artifact_count, 0);
 
         let source_id = repo
             .take_inserts()
@@ -8509,7 +8847,7 @@ mod tests {
         let inserts = repo.take_inserts();
         let text_msgs: Vec<_> = inserts.iter().filter(|msg| msg.r#type == "text").collect();
         assert_eq!(text_msgs.len(), 2, "text should split across tool boundaries");
-        assert_eq!(text_msgs[0].message_id, TEST_ASSISTANT_MESSAGE_ID);
+        assert_ne!(text_msgs[0].message_id, TEST_ASSISTANT_MESSAGE_ID);
         assert_ne!(text_msgs[0].message_id, text_msgs[1].message_id);
 
         let mut text_event_msg_ids = Vec::new();
@@ -8519,7 +8857,8 @@ mod tests {
             }
         }
         assert_eq!(text_event_msg_ids.len(), 2);
-        assert_eq!(text_event_msg_ids[0], TEST_ASSISTANT_MESSAGE_ID);
+        assert_eq!(text_event_msg_ids[0], text_msgs[0].message_id);
+        assert_eq!(text_event_msg_ids[1], text_msgs[1].message_id);
         assert_ne!(text_event_msg_ids[0], text_event_msg_ids[1]);
     }
 
@@ -8708,6 +9047,7 @@ mod tests {
 
         let outcome = relay.consume(rx).await;
         assert!(outcome.terminal.is_error());
+        assert_eq!(outcome.committed_artifact_count, 0);
         // A tool action already ran this turn → NOT pre-response → never failed over.
         assert!(
             outcome.emitted_response,
@@ -9156,7 +9496,8 @@ mod tests {
         .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
 
-        relay.consume(rx).await;
+        let outcome = relay.consume(rx).await;
+        assert_eq!(outcome.committed_artifact_count, 1);
 
         let row = repo
             .take_inserts()
@@ -9249,6 +9590,7 @@ mod tests {
             outcome.terminal.code(),
             Some(AgentErrorCode::NomifunStateInconsistent)
         );
+        assert_eq!(outcome.committed_artifact_count, 0);
 
         let row = repo
             .take_inserts()
@@ -9385,6 +9727,7 @@ mod tests {
         let outcome = relay.consume(rx).await;
 
         assert_eq!(outcome.terminal, RelayTerminal::Finish);
+        assert_eq!(outcome.committed_artifact_count, 1);
         assert_eq!(repo.artifact_commit_attempts(), 1);
         assert!(
             artifact_path.is_file(),
@@ -9454,6 +9797,7 @@ mod tests {
             outcome.terminal.code(),
             Some(AgentErrorCode::NomifunStateInconsistent)
         );
+        assert_eq!(outcome.committed_artifact_count, 0);
         assert!(
             artifact_path.is_file(),
             "query-unknown COMMIT ownership must retain the snapshot for recovery"
@@ -9510,6 +9854,7 @@ mod tests {
             outcome.terminal.code(),
             Some(AgentErrorCode::NomifunStateInconsistent)
         );
+        assert_eq!(outcome.committed_artifact_count, 0);
         assert!(
             paths.iter().all(|path| path.is_file()),
             "partial durable ownership must retain the entire batch for recovery"
@@ -10588,7 +10933,8 @@ mod tests {
         let inserts = repo.take_inserts();
         let thinking_msgs: Vec<_> = inserts.iter().filter(|msg| msg.r#type == "thinking").collect();
         assert_eq!(thinking_msgs.len(), 2, "thinking should split across tool boundaries");
-        assert_eq!(thinking_msgs[0].msg_id.as_deref(), Some(TEST_ASSISTANT_MESSAGE_ID));
+        assert_ne!(thinking_msgs[0].message_id, TEST_ASSISTANT_MESSAGE_ID);
+        assert_eq!(thinking_msgs[0].msg_id.as_deref(), Some(thinking_msgs[0].message_id.as_str()));
         assert_ne!(thinking_msgs[0].msg_id, thinking_msgs[1].msg_id);
 
         let mut done_msg_ids = Vec::new();
@@ -10598,7 +10944,8 @@ mod tests {
             }
         }
         assert_eq!(done_msg_ids.len(), 2);
-        assert_eq!(done_msg_ids[0], TEST_ASSISTANT_MESSAGE_ID);
+        assert_eq!(done_msg_ids[0], thinking_msgs[0].message_id);
+        assert_eq!(done_msg_ids[1], thinking_msgs[1].message_id);
         assert_ne!(done_msg_ids[0], done_msg_ids[1]);
     }
 
@@ -10641,7 +10988,8 @@ mod tests {
 
         assert_eq!(thinking_msgs.len(), 1);
         assert_eq!(text_msgs.len(), 1);
-        assert_eq!(thinking_msgs[0].message_id, TEST_ASSISTANT_MESSAGE_ID);
+        assert_ne!(thinking_msgs[0].message_id, TEST_ASSISTANT_MESSAGE_ID);
+        assert_ne!(text_msgs[0].message_id, TEST_ASSISTANT_MESSAGE_ID);
         assert_ne!(thinking_msgs[0].message_id, text_msgs[0].message_id);
 
         let mut text_msg_ids = Vec::new();
@@ -10658,7 +11006,7 @@ mod tests {
             }
         }
 
-        assert_eq!(thinking_done_ids, vec![TEST_ASSISTANT_MESSAGE_ID.to_string()]);
+        assert_eq!(thinking_done_ids, vec![thinking_msgs[0].message_id.clone()]);
         assert_eq!(text_msg_ids.len(), 1);
         assert_ne!(text_msg_ids[0], TEST_ASSISTANT_MESSAGE_ID);
         assert_eq!(
@@ -11469,10 +11817,12 @@ mod tests {
 
         let inserts = repo.take_inserts();
         assert_eq!(inserts.len(), 1);
+        let text_message_id = &inserts[0].message_id;
+        assert_ne!(text_message_id, TEST_ASSISTANT_MESSAGE_ID);
         let updates = repo.take_updates();
         let final_update = updates
             .iter()
-            .find(|(id, update)| id == TEST_ASSISTANT_MESSAGE_ID && update.content.is_some())
+            .find(|(id, update)| id == text_message_id && update.content.is_some())
             .expect("expected cleaned final text update");
         let content: serde_json::Value = serde_json::from_str(final_update.1.content.as_deref().unwrap()).unwrap();
         assert_eq!(content["content"].as_str().map(str::trim), Some("Hello"));
@@ -12779,7 +13129,11 @@ mod tests {
         }
 
         fn take_inserts(&self) -> Vec<MessageRow> {
-            std::mem::take(&mut self.inserts.lock().unwrap())
+            let mut inserts = self.inserts.lock().unwrap();
+            std::mem::take(&mut *inserts)
+                .into_iter()
+                .filter(|row| !(matches!(row.r#type.as_str(), "turn_root" | "system") && row.hidden))
+                .collect()
         }
 
         #[allow(dead_code)]
@@ -12887,35 +13241,41 @@ mod tests {
                 .cloned())
         }
         async fn insert_message(&self, row: &MessageRow) -> Result<(), DbError> {
-            self.message_insert_attempts
-                .fetch_add(1, AtomicOrdering::SeqCst);
-            while self.block_message_inserts.load(AtomicOrdering::SeqCst) {
-                let notified = self.message_insert_notify.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if !self.block_message_inserts.load(AtomicOrdering::SeqCst) {
-                    break;
+            let structural_turn_root = matches!(row.r#type.as_str(), "turn_root" | "system")
+                && row.hidden
+                && row.msg_id.as_deref() == Some(row.message_id.as_str());
+            if !structural_turn_root {
+                self.message_insert_attempts
+                    .fetch_add(1, AtomicOrdering::SeqCst);
+                while self.block_message_inserts.load(AtomicOrdering::SeqCst) {
+                    let notified = self.message_insert_notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if !self.block_message_inserts.load(AtomicOrdering::SeqCst) {
+                        break;
+                    }
+                    notified.await;
                 }
-                notified.await;
+                if self
+                    .commit_next_message_insert_then_error
+                    .swap(false, AtomicOrdering::SeqCst)
+                {
+                    self.inserts.lock().unwrap().push(row.clone());
+                    return Err(DbError::Init(
+                        "injected committed-but-unacknowledged message insert".to_owned(),
+                    ));
+                }
+                if self.fail_message_inserts.load(AtomicOrdering::SeqCst) {
+                    return Err(DbError::Conflict("injected message insert failure".to_owned()));
+                }
+                if self.fail_next_message_insert.swap(false, AtomicOrdering::SeqCst) {
+                    return Err(DbError::Conflict("injected message insert failure".to_owned()));
+                }
             }
-            if self
-                .commit_next_message_insert_then_error
-                .swap(false, AtomicOrdering::SeqCst)
-            {
-                self.inserts.lock().unwrap().push(row.clone());
-                return Err(DbError::Init(
-                    "injected committed-but-unacknowledged message insert".to_owned(),
-                ));
-            }
-            if self.fail_message_inserts.load(AtomicOrdering::SeqCst) {
-                return Err(DbError::Conflict("injected message insert failure".to_owned()));
-            }
-            if self.fail_next_message_insert.swap(false, AtomicOrdering::SeqCst) {
-                return Err(DbError::Conflict("injected message insert failure".to_owned()));
-            }
-            if self
-                .reject_duplicate_message_inserts
-                .load(AtomicOrdering::SeqCst)
+            if (structural_turn_root
+                || self
+                    .reject_duplicate_message_inserts
+                    .load(AtomicOrdering::SeqCst))
                 && self
                     .inserts
                     .lock()
