@@ -30,6 +30,8 @@ export type EntityKind =
   | 'preset'
   | 'preset-tag'
   | 'message'
+  | 'crawl-job'
+  | 'crawl-task'
   | 'cron-job'
   | 'cron-job-run'
   | 'execution-template'
@@ -83,6 +85,8 @@ export type AgentId = EntityId<'agent'>;
 export type PresetId = EntityId<'preset'>;
 export type PresetTagId = EntityId<'preset-tag'>;
 export type MessageId = EntityId<'message'>;
+export type CrawlJobId = EntityId<'crawl-job'>;
+export type CrawlTaskId = EntityId<'crawl-task'>;
 export type CronJobId = EntityId<'cron-job'>;
 export type CronJobRunId = EntityId<'cron-job-run'>;
 export type ExecutionTemplateId = EntityId<'execution-template'>;
@@ -187,6 +191,9 @@ export const parsePresetId = (value: unknown): PresetId => parseEntityId('preset
 export const parsePresetTagId = (value: unknown): PresetTagId =>
   parseEntityId('preset-tag', value);
 export const parseMessageId = (value: unknown): MessageId => parseEntityId('message', value);
+export const parseCrawlJobId = (value: unknown): CrawlJobId => parseEntityId('crawl-job', value);
+export const parseCrawlTaskId = (value: unknown): CrawlTaskId =>
+  parseEntityId('crawl-task', value);
 export const parseCronJobId = (value: unknown): CronJobId => parseEntityId('cron-job', value);
 export const parseCronJobRunId = (value: unknown): CronJobRunId =>
   parseEntityId('cron-job-run', value);

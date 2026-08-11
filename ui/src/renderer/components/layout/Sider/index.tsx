@@ -25,6 +25,7 @@ import {
   SiderConversationEntry,
   SiderCustomerServiceEntry,
   SiderKnowledgeEntry,
+  SiderCrawlEntry,
   SiderMcpEntry,
   SiderMiniAppsEntry,
   SiderModelHubEntry,
@@ -118,6 +119,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleScheduledClick = () => navTo('/scheduled');
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
+  const handleCrawlClick = () => navTo('/crawl');
   const handleAssetLibraryClick = () => navTo('/assets');
   const handleNomiClick = () => navTo('/nomi');
   const handleWorkshopClick = () => navTo('/workshop');
@@ -240,6 +242,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleKnowledgeClick}
+            />
+            {/* Crawler — feeds the knowledge base, so it sits next to it */}
+            <SiderCrawlEntry
+              isMobile={isMobile}
+              isActive={pathname.startsWith('/crawl')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleCrawlClick}
             />
             {/* Asset library — unified management of creative-workshop assets */}
             <SiderAssetLibraryEntry

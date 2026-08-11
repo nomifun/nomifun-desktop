@@ -1567,6 +1567,9 @@ pub struct AppServices {
     /// the `/api/knowledge/*` routes and the `ConversationService`, which
     /// mounts bound bases into session workspaces at task start.
     pub knowledge_service: Arc<nomifun_knowledge::KnowledgeService>,
+    /// Crawl job platform. Owns the durable URL frontier and worker pools;
+    /// writes results through `knowledge_service`.
+    pub crawl_service: Arc<nomifun_crawl::CrawlService>,
     /// The process-wide browser authority. Browser-capable hosts inject one
     /// Hub at the composition root; routes and every agent transport reuse it.
     /// `None` is an explicit unsupported/degraded state and never triggers a
@@ -2513,6 +2516,17 @@ impl AppServices {
             encryption_key,
             workspace: data_dir.clone(),
         }));
+
+        // Crawl platform: shares the knowledge service so crawled pages travel
+        // the same write policy (inbox review) as agent write-back.
+        let crawl_service = Arc::new(nomifun_crawl::CrawlService::new(
+            database.pool().clone(),
+            knowledge_service.clone(),
+            Arc::new(nomifun_crawl::service::RealtimeEvents::new(
+                event_bus.clone(),
+                authoritative_user_id.clone(),
+            )),
+        ));
         // Recover profiles left by an interrupted earlier browser runtime
         // before constructing any Host authority. If ownership/termination
         // cannot be proven, Browser functionality remains degraded for this
@@ -3102,6 +3116,7 @@ impl AppServices {
             creation_service,
             model_invoke_service,
             knowledge_service,
+            crawl_service,
             #[cfg(feature = "browser-use")]
             browser_session_hub: None,
             browser_platform_shutdown,

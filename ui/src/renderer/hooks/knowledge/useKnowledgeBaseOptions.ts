@@ -11,9 +11,11 @@ import type { KnowledgeBaseId } from '@/common/types/ids';
 export interface KnowledgeBaseOption {
   value: KnowledgeBaseId;
   label: string;
+  /** On-disk root, shown as a secondary line where two bases share a name. */
+  rootPath: string;
 }
 
-/** Knowledge-base multi-select options (shared knowledge catalog). */
+/** Knowledge-base select options (shared knowledge catalog). */
 export const useKnowledgeBaseOptions = () => {
   const [options, setOptions] = useState<KnowledgeBaseOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -22,7 +24,13 @@ export const useKnowledgeBaseOptions = () => {
     setLoading(true);
     try {
       const bases = (await ipcBridge.knowledge.listBases.invoke()) ?? [];
-      setOptions(bases.map((base) => ({ value: base.knowledge_base_id, label: base.name })));
+      setOptions(
+        bases.map((base) => ({
+          value: base.knowledge_base_id,
+          label: base.name,
+          rootPath: base.root_path,
+        }))
+      );
     } catch {
       setOptions([]);
     } finally {

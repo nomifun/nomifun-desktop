@@ -18,6 +18,7 @@ import codex from './codex.json';
 import tools from './tools.json';
 import google from './google.json';
 import cron from './cron.json';
+import crawl from './crawl.json';
 import requirements from './requirements.json';
 import idmm from './idmm.json';
 import starOffice from './starOffice.json';
@@ -60,6 +61,7 @@ export default {
   tools,
   google,
   cron,
+  crawl,
   requirements,
   idmm,
   starOffice,

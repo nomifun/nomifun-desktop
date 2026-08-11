@@ -264,6 +264,14 @@ define_entity_id!(
     RequirementId
 );
 define_entity_id!(
+    /// Globally unique crawl-job identifier.
+    CrawlJobId
+);
+define_entity_id!(
+    /// Globally unique crawl-task (one frontier URL) identifier.
+    CrawlTaskId
+);
+define_entity_id!(
     /// Globally unique receipt identifier for a durable tool artifact.
     ///
     /// This identifies a tool-output receipt embedded in a message and is

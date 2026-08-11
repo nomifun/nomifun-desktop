@@ -85,6 +85,7 @@ pub struct ModuleStates {
     pub requirement: RequirementRouterState,
     pub idmm: IdmmRouterState,
     pub knowledge: KnowledgeRouterState,
+    pub crawl: nomifun_crawl::CrawlRouterState,
     pub companion: CompanionRouterState,
     /// 客服独立域 (customer-service domain).
     pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
@@ -577,6 +578,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         requirement: requirement_state,
         idmm: idmm_state,
         knowledge: KnowledgeRouterState::new(services.knowledge_service.clone()),
+        crawl: nomifun_crawl::CrawlRouterState::new(services.crawl_service.clone()),
         companion: companion_state,
         customer_service: nomifun_customer_service::CustomerServiceRouterState {
             service: services.customer_service_service.clone(),

@@ -33,7 +33,7 @@ import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import CsChannelBotsSection from './CsChannelBotsSection';
 import styles from './CsAgentDetailPage.module.css';
 import { useCsAgent } from './useCsAgents';
-import { useKnowledgeBaseOptions } from './useKnowledgeBaseOptions';
+import { useKnowledgeBaseOptions } from '@/renderer/hooks/knowledge/useKnowledgeBaseOptions';
 
 /** One titled card section on the detail page. */
 const Section: React.FC<{ title: string; extra?: React.ReactNode; children: React.ReactNode }> = ({ title, extra, children }) => (

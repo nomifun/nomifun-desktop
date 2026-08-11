@@ -1,0 +1,68 @@
+{
+  "title": "爬虫",
+  "empty": "还没有爬取作业。",
+  "created": "爬取作业已创建。",
+  "confirmDelete": "删除该作业及其全部待抓 URL？",
+  "requeued": "已重新入队 {{count}} 个失败任务。",
+  "progressDetail": "完成 {{done}} · 失败 {{failed}} · 待抓 {{pending}}",
+  "error": {
+    "noSeeds": "至少填一个种子 URL。"
+  },
+  "column": {
+    "name": "作业",
+    "status": "状态",
+    "progress": "进度",
+    "actions": "操作",
+    "url": "URL",
+    "depth": "深度",
+    "httpStatus": "HTTP",
+    "error": "错误"
+  },
+  "action": {
+    "create": "新建作业",
+    "start": "启动",
+    "cancel": "停止",
+    "tasks": "URL 列表",
+    "retryFailed": "重试失败",
+    "delete": "删除"
+  },
+  "status": {
+    "draft": "草稿",
+    "running": "运行中",
+    "paused": "已暂停",
+    "done": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消"
+  },
+  "taskStatus": {
+    "pending": "待抓",
+    "in_progress": "抓取中",
+    "done": "完成",
+    "failed": "失败",
+    "skipped": "已跳过"
+  },
+  "renderMode": {
+    "auto": "自动（HTTP）",
+    "http": "仅 HTTP",
+    "browser": "浏览器渲染（暂未开放）"
+  },
+  "field": {
+    "name": "名称",
+    "namePlaceholder": "产品文档抓取",
+    "seeds": "种子 URL（每行一个）",
+    "maxDepth": "最大深度",
+    "maxUrls": "URL 上限",
+    "concurrency": "并发数",
+    "perHostConcurrency": "单站点并发",
+    "delayMs": "请求间隔（毫秒）",
+    "renderMode": "渲染模式",
+    "sameSite": "只抓种子所在站点",
+    "sameSiteHint": "关闭后爬虫会跟进任意域名的链接。",
+    "respectRobots": "遵守 robots.txt",
+    "respectRobotsHint": "关闭后将忽略站点运营方的抓取规则。",
+    "knowledgeBase": "产出知识库",
+    "knowledgeBasePlaceholder": "选择知识库",
+    "knowledgeBaseHint": "留空则只记录抓取结果，不保存页面内容。",
+    "knowledgeBaseEmpty": "还没有知识库，请先在「知识库」页新建一个。"
+  }
+}

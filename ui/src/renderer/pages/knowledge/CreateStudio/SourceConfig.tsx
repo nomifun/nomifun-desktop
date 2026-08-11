@@ -18,7 +18,7 @@
  */
 import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Input, Message, Switch } from '@arco-design/web-react';
+import { Button, Input, InputNumber, Message, Switch } from '@arco-design/web-react';
 import { Close, FolderOpen, Info } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { isDesktopShell } from '@renderer/utils/platform';
@@ -26,7 +26,8 @@ import type { StudioSourceType } from './sourceTypes';
 
 // ─── Value Shape ────────────────────────────────────────────────────────────
 
-export type UrlMode = 'snapshot' | 'live';
+/** `site` hands the source to the crawler; the other two stay one-shot. */
+export type UrlMode = 'snapshot' | 'live' | 'site';
 
 export interface UrlEntry {
   url: string;
@@ -40,9 +41,20 @@ export interface SourceConfigValue {
   urlMode?: UrlMode;
   urlEntries?: UrlEntry[];
   browserRender?: boolean;
+  /** web · site */
+  siteSeed?: string;
+  siteMaxDepth?: number;
+  siteMaxUrls?: number;
+  siteSameSite?: boolean;
   /** import */
   importPath?: string;
 }
+
+/** Deliberately below the crawler's own defaults (3 / 10000): the wizard
+ *  starts the job right after creating the base, so a mis-scoped seed should
+ *  cost a couple of hundred pages, not ten thousand. */
+export const SITE_DEFAULT_MAX_DEPTH = 2;
+export const SITE_DEFAULT_MAX_URLS = 200;
 
 // ─── Props ──────────────────────────────────────────────────────────────────
 
@@ -55,6 +67,12 @@ export interface SourceConfigProps {
 // ─── Max URL entries ────────────────────────────────────────────────────────
 
 const MAX_URLS = 16;
+
+const URL_MODES: { key: UrlMode; labelKey: string; label: string }[] = [
+  { key: 'snapshot', labelKey: 'knowledge.studio.webSnapshot', label: '快照（创建时抓取存档）' },
+  { key: 'live', labelKey: 'knowledge.studio.webRealtime', label: '实时（运行时现查）' },
+  { key: 'site', labelKey: 'knowledge.studio.webSite', label: '站点抓取（跟进链接）' },
+];
 
 const sourcePanelClass =
   'knowledge-source-panel space-y-12px rounded-16px bg-[var(--color-bg-2)] p-14px shadow-[0_10px_30px_rgba(15,23,42,0.035)]';
@@ -208,30 +226,92 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
             {t('knowledge.studio.webCrawlMode', { defaultValue: '抓取模式' })}
           </label>
           <div className={segmentGroupClass}>
-            <button
-              type='button'
-              className={`${segmentButtonBaseClass} ${urlMode === 'snapshot' ? segmentButtonActiveClass : segmentButtonIdleClass}`}
-              onClick={() => update({ urlMode: 'snapshot' })}
-            >
-              {t('knowledge.studio.webSnapshot', { defaultValue: '快照（创建时抓取存档）' })}
-            </button>
-            <button
-              type='button'
-              className={`${segmentButtonBaseClass} ${urlMode === 'live' ? segmentButtonActiveClass : segmentButtonIdleClass}`}
-              onClick={() => update({ urlMode: 'live' })}
-            >
-              {t('knowledge.studio.webRealtime', { defaultValue: '实时（运行时现查）' })}
-            </button>
+            {URL_MODES.map((mode) => (
+              <button
+                key={mode.key}
+                type='button'
+                className={`${segmentButtonBaseClass} ${urlMode === mode.key ? segmentButtonActiveClass : segmentButtonIdleClass}`}
+                onClick={() => update({ urlMode: mode.key })}
+              >
+                {t(mode.labelKey, { defaultValue: mode.label })}
+              </button>
+            ))}
           </div>
           <div className='mt-6px text-11px text-[var(--color-text-3)]'>
             {t('knowledge.studio.webModeHint', {
               defaultValue:
-                '快照：现在就抓取并存为本地文档，之后可随时刷新。实时：不抓取，会话运行时把这些网址作为实时来源查询。',
+                '快照：现在就抓取并存为本地文档，之后可随时刷新。实时：不抓取，会话运行时把这些网址作为实时来源查询。站点抓取：从种子出发跟进链接，交给爬虫后台跑。',
             })}
           </div>
         </div>
 
+        {/* Site crawl config */}
+        {urlMode === 'site' && (
+          <>
+            <div>
+              <label className={sourceLabelClass}>
+                {t('knowledge.studio.webSeedUrl', { defaultValue: '种子网址' })}
+              </label>
+              <Input
+                className={sourceInputClass}
+                placeholder='https://example.com/docs'
+                value={value.siteSeed ?? ''}
+                onChange={(v) => update({ siteSeed: v })}
+              />
+            </div>
+
+            <div className='flex gap-12px'>
+              <div className='flex-1'>
+                <label className={sourceLabelClass}>
+                  {t('knowledge.studio.webMaxDepth', { defaultValue: '跟进深度' })}
+                </label>
+                <InputNumber
+                  className={`${sourceInputClass} w-full`}
+                  min={0}
+                  max={10}
+                  value={value.siteMaxDepth ?? SITE_DEFAULT_MAX_DEPTH}
+                  onChange={(v) => update({ siteMaxDepth: typeof v === 'number' ? v : undefined })}
+                />
+              </div>
+              <div className='flex-1'>
+                <label className={sourceLabelClass}>
+                  {t('knowledge.studio.webMaxUrls', { defaultValue: '页数上限' })}
+                </label>
+                <InputNumber
+                  className={`${sourceInputClass} w-full`}
+                  min={1}
+                  max={10000}
+                  value={value.siteMaxUrls ?? SITE_DEFAULT_MAX_URLS}
+                  onChange={(v) => update({ siteMaxUrls: typeof v === 'number' ? v : undefined })}
+                />
+              </div>
+            </div>
+
+            <div className='flex items-center gap-10px'>
+              <Switch
+                size='small'
+                checked={value.siteSameSite ?? true}
+                onChange={(checked) => update({ siteSameSite: checked })}
+              />
+              <span className='text-12px text-[var(--color-text-2)]'>
+                {t('knowledge.studio.webSameSiteLabel', { defaultValue: '只抓同一站点' })}
+              </span>
+            </div>
+
+            <div className={sourceNoteClass}>
+              <Info theme='outline' size='14' className='mt-2px flex-none text-[var(--color-text-3)]' />
+              <div>
+                {t('knowledge.studio.webSiteNote', {
+                  defaultValue:
+                    '创建后爬虫会在后台开跑，抓到的页面直接写入这个新库的 crawl/ 目录，进度在「爬虫」页查看。关掉「只抓同一站点」会放行外链，请谨慎。',
+                })}
+              </div>
+            </div>
+          </>
+        )}
+
         {/* URL list */}
+        {urlMode !== 'site' && (
         <div>
           <label className={sourceLabelClass}>
             {t('knowledge.studio.webUrlList', { defaultValue: '网址列表' })}
@@ -273,6 +353,7 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
             </button>
           )}
         </div>
+        )}
 
         {/* Browser render switch */}
         <div className='flex items-center gap-10px'>
