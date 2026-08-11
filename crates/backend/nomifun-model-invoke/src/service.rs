@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 use nomifun_api_types::ModelTask;
 use serde_json::json;
 
-use crate::adapter::AdapterRegistry;
+use crate::adapter::{AdapterRegistry, ProtocolAdapter};
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::types::{
     AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle, ModelRef,
     TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
 };
+use crate::ResolvedCall;
 
 /// Ceiling on one modality probe (resolution + submit), matching the legacy
 /// `provider_health` modality probe.
@@ -51,6 +52,32 @@ pub struct ProbeReport {
     pub message: Option<String>,
 }
 
+/// Opaque state captured from the exact catalog resolution used for a submit.
+///
+/// Its fields intentionally remain crate-private: the resolved call includes
+/// decrypted authentication material. Callers can only hand the context back
+/// to this service for stable polling and artifact materialization.
+pub struct InvocationContext {
+    pub(crate) call: ResolvedCall,
+    pub(crate) adapter: Arc<dyn ProtocolAdapter>,
+    pub(crate) artifact_origin: reqwest::Url,
+}
+
+impl InvocationContext {
+    fn from_resolved(
+        call: ResolvedCall,
+        adapter: Arc<dyn ProtocolAdapter>,
+    ) -> Result<Self, InvokeError> {
+        call.connection.auth.validate()?;
+        let artifact_origin = validated_artifact_origin(&call)?;
+        Ok(Self {
+            call,
+            adapter,
+            artifact_origin,
+        })
+    }
+}
+
 /// The unified multimodal model invocation service.
 pub struct ModelInvokeService {
     pub(crate) provider_repo: Arc<dyn nomifun_db::IProviderRepository>,
@@ -82,13 +109,52 @@ impl ModelInvokeService {
         &self.provider_repo
     }
 
+    /// Resolve and validate a catalog model locally without making an upstream
+    /// request.  This is the capability-discovery counterpart to [`Self::invoke`]:
+    /// it shares the exact provider/model/task/adapter/connection resolver, then
+    /// validates the resulting URL and auth material while keeping decrypted
+    /// credentials inside the service boundary.
+    pub async fn validate(&self, m: &ModelRef, task: ModelTask) -> Result<(), InvokeError> {
+        self.resolve_validated_call(m, task).await.map(|_| ())
+    }
+
+    /// Internal form of [`Self::validate`] retained for trusted invoke-layer
+    /// consumers such as artifact materialization.  The call (and therefore
+    /// decrypted auth) never crosses the crate's public API.
+    pub(crate) async fn resolve_validated_call(
+        &self,
+        m: &ModelRef,
+        task: ModelTask,
+    ) -> Result<ResolvedCall, InvokeError> {
+        let request = probe_request(task, &json!({}));
+        let (call, _adapter) = self.resolve(m, task, request, true).await?;
+        validated_artifact_origin(&call)?;
+        call.connection.auth.validate()?;
+        Ok(call)
+    }
+
     /// Execute one task invocation: full resolution (task-membership gate
     /// enforced) then the adapter's submit. A [`TaskOutcome::Pending`] hands
     /// back a [`JobHandle`] the caller later feeds to [`Self::poll`].
     pub async fn invoke(&self, m: &ModelRef, req: TaskRequest) -> Result<TaskOutcome, InvokeError> {
+        self.invoke_with_context(m, req)
+            .await
+            .map(|(outcome, _context)| outcome)
+    }
+
+    /// Submit and return opaque state from that exact resolution. This avoids
+    /// re-reading a mutable catalog after an accepted/billable generation when
+    /// the caller later polls or materializes its assets.
+    pub async fn invoke_with_context(
+        &self,
+        m: &ModelRef,
+        req: TaskRequest,
+    ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
         let task = req.task();
         let (call, adapter) = self.resolve(m, task, req, true).await?;
-        adapter.submit(&self.http, &call).await
+        let context = InvocationContext::from_resolved(call, adapter)?;
+        let outcome = context.adapter.submit(&self.http, &context.call).await?;
+        Ok((outcome, context))
     }
 
     /// Poll a pending job. Resolution runs with `enforce_task_membership =
@@ -109,6 +175,40 @@ impl ModelInvokeService {
         let (call, _route_adapter) = self.resolve(m, task, req, false).await?;
         let adapter = self.registry.get(&job.adapter_id, task)?;
         adapter.poll(&self.http, &call, job).await
+    }
+
+    /// Poll with the immutable resolved call and adapter captured by
+    /// [`Self::invoke_with_context`]. Catalog edits made after submit cannot
+    /// invalidate or reroute the already-accepted job.
+    pub async fn poll_with_context(
+        &self,
+        context: &InvocationContext,
+        req: TaskRequest,
+        job: &JobHandle,
+    ) -> Result<TaskOutcome, InvokeError> {
+        let task = req.task();
+        if task != context.call.task {
+            return Err(InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                format!(
+                    "poll request task {task:?} does not match submitted task {:?}",
+                    context.call.task
+                ),
+            ));
+        }
+        if job.adapter_id != context.adapter.id() {
+            return Err(InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                format!(
+                    "job adapter {:?} does not match submitted adapter {:?}",
+                    job.adapter_id,
+                    context.adapter.id()
+                ),
+            ));
+        }
+        let mut call = context.call.clone();
+        call.request = req;
+        context.adapter.poll(&self.http, &call, job).await
     }
 
     /// Health-probe `(model, task)` with the smallest valid request (a port of
@@ -184,6 +284,31 @@ impl ModelInvokeService {
         };
         Ok(report)
     }
+}
+
+fn validated_artifact_origin(call: &ResolvedCall) -> Result<reqwest::Url, InvokeError> {
+    let target = call.dispatch_target();
+    let mut url = reqwest::Url::parse(&target.url).map_err(|error| {
+        InvokeError::config(format!("resolved endpoint is not a valid URL: {error}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(InvokeError::config(format!(
+            "resolved endpoint uses unsupported scheme {:?}",
+            url.scheme()
+        )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(InvokeError::config(
+            "resolved endpoint must not contain embedded credentials",
+        ));
+    }
+    // Retain only the origin needed for same-origin/private-network policy;
+    // endpoint paths, query parameters and fragments never cross this opaque
+    // context boundary or appear in materialization errors.
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
 }
 
 /// The smallest valid [`TaskRequest`] for a probe, overlaying known catalog
@@ -272,7 +397,7 @@ mod tests {
         CreateProviderParams, IProviderConnectionRepository, IProviderModelRepository,
         IProviderRepository, NewProviderModel, SqliteProviderConnectionRepository,
         SqliteProviderModelRepository, SqliteProviderRepository, SqlitePool,
-        UpsertProviderConnectionParams, init_database_memory,
+        UpdateProviderParams, UpsertProviderConnectionParams, init_database_memory,
     };
     use serde_json::json;
     use wiremock::matchers::{body_partial_json, header, method, path};
@@ -411,6 +536,64 @@ mod tests {
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 1);
         assert!(matches!(&assets[0].data, ProducedData::Bytes(b) if b == b"hi"));
+    }
+
+    #[tokio::test]
+    async fn invocation_context_survives_catalog_disable_for_materialization() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data": [{"b64_json": "aGk="}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
+        let model = mref(&pid, "gpt-image-1");
+        let (outcome, context) = svc
+            .invoke_with_context(&model, image_request("a fox"))
+            .await
+            .unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = outcome else {
+            panic!("expected Done(Assets)")
+        };
+
+        SqliteProviderRepository::new(pool.clone())
+            .update(
+                &pid,
+                UpdateProviderParams {
+                    enabled: Some(false),
+                    ..UpdateProviderParams::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let stale_error = svc
+            .materialize_assets_for_model(
+                &model,
+                ModelTask::ImageGeneration,
+                assets.clone(),
+                crate::MaterializeLimits::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(stale_error.kind, InvokeErrorKind::Config);
+
+        let materialized = svc
+            .materialize_assets_for_invocation(
+                &context,
+                assets,
+                crate::MaterializeLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(materialized[0].bytes, b"hi");
     }
 
     #[tokio::test]
@@ -682,6 +865,61 @@ mod tests {
         let TaskOutcome::Pending(handle) = out else { panic!("expected Pending") };
         assert_eq!(handle.remote_id, "v1");
         assert_eq!(handle.adapter_id, "openai.videos");
+    }
+
+    #[tokio::test]
+    async fn invocation_context_polls_after_catalog_disable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id": "v1", "status": "queued"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/videos/v1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": "v1", "status": "in_progress"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+        let model = mref(&pid, "sora-2");
+        let (submitted, context) = svc
+            .invoke_with_context(&model, video_request())
+            .await
+            .unwrap();
+        let TaskOutcome::Pending(job) = submitted else {
+            panic!("expected Pending")
+        };
+        SqliteProviderRepository::new(pool.clone())
+            .update(
+                &pid,
+                UpdateProviderParams {
+                    enabled: Some(false),
+                    ..UpdateProviderParams::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let legacy_error = svc
+            .poll(&model, video_request(), &job)
+            .await
+            .unwrap_err();
+        assert_eq!(legacy_error.kind, InvokeErrorKind::Config);
+        let polled = svc
+            .poll_with_context(&context, video_request(), &job)
+            .await
+            .unwrap();
+        assert!(matches!(polled, TaskOutcome::Pending(_)));
     }
 
     #[tokio::test]

@@ -36,13 +36,19 @@ use crate::adapter::ProtocolAdapter;
 use crate::adapters::has_endpoint_override;
 use crate::call::{ResolvedCall, ResolvedConnection};
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{decode_b64, encode_b64, error_from_response, post_json};
+use crate::transport::{
+    ImageResponseBudget, MAX_IMAGE_RESPONSE_IMAGES, encode_b64, error_from_response,
+    inline_image_response_body_limit, post_json, read_json_capped, validate_image_request_count,
+};
 use crate::types::{
     ChatTextRequest, InputAsset, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
 };
 
 /// Generous per-call ceiling: image generation is often multi-second.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+/// Text responses share the HTTP helper but do not need the inline-image body
+/// allowance. Keep them bounded independently.
+const MAX_TEXT_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The Gemini `:generateContent` URL for a model. Gemini uses a
 /// `/v1beta/models` scheme rather than `/v1`; a trailing `/v1beta` on the
@@ -76,12 +82,13 @@ async fn post_generate_content(
     call: &ResolvedCall,
     url: &str,
     body: &Value,
+    max_response_bytes: u64,
 ) -> Result<Value, InvokeError> {
     let resp = post_json(http, url, REQUEST_TIMEOUT, &call.connection.auth, body).await?;
     if !resp.status().is_success() {
         return Err(error_from_response(resp).await);
     }
-    resp.json().await.map_err(|e| InvokeError::parse(format!("invalid gemini JSON: {e}")))
+    read_json_capped(resp, max_response_bytes, "gemini").await
 }
 
 /// The "model returned nothing" error: a `promptFeedback.blockReason` is a
@@ -115,9 +122,24 @@ impl ProtocolAdapter for GeminiGenerateContentAdapter {
     }
 
     async fn submit(&self, http: &reqwest::Client, call: &ResolvedCall) -> Result<TaskOutcome, InvokeError> {
-        let (prompt, count, inputs): (&str, u32, &[InputAsset]) = match &call.request {
-            TaskRequest::ImageGeneration(req) => (&req.prompt, req.count, &[]),
-            TaskRequest::ImageEdit(req) => (&req.prompt, req.count, &req.inputs),
+        let (prompt, count, size, inputs, quality, extra):
+            (&str, u32, Option<&str>, &[InputAsset], Option<&str>, &Value) = match &call.request {
+            TaskRequest::ImageGeneration(req) => (
+                &req.prompt,
+                req.count,
+                req.size.as_deref(),
+                &[],
+                req.quality.as_deref(),
+                &req.extra,
+            ),
+            TaskRequest::ImageEdit(req) => (
+                &req.prompt,
+                req.count,
+                req.size.as_deref(),
+                &req.inputs,
+                None,
+                &req.extra,
+            ),
             other => {
                 return Err(InvokeError::new(
                     InvokeErrorKind::UnsupportedTask,
@@ -125,6 +147,7 @@ impl ProtocolAdapter for GeminiGenerateContentAdapter {
                 ));
             }
         };
+        let expected_images = validate_gemini_image_request(count, size, quality, extra)?;
         // One URL for the whole call (the count>1 loop reuses it): an
         // explicit `params.endpoint` override wins over convention.
         let url = call_url(call);
@@ -132,13 +155,49 @@ impl ProtocolAdapter for GeminiGenerateContentAdapter {
 
         // Gemini has no `n` parameter: count > 1 loops the request
         // sequentially, aggregating assets; any failure fails the call.
-        let mut assets = Vec::new();
-        for _ in 0..count.max(1) {
-            let value = post_generate_content(http, call, &url, &body).await?;
-            assets.extend(parse_gemini_assets(&value)?);
+        let mut assets = Vec::with_capacity(expected_images);
+        let mut budget = ImageResponseBudget::new(expected_images)?;
+        for _ in 0..expected_images {
+            let value = post_generate_content(
+                http,
+                call,
+                &url,
+                &body,
+                inline_image_response_body_limit(1),
+            )
+            .await?;
+            assets.extend(parse_gemini_assets_with_budget(&value, &mut budget, 1)?);
         }
         Ok(TaskOutcome::Done(TaskResult::Assets(assets)))
     }
+}
+
+fn validate_gemini_image_request(
+    count: u32,
+    size: Option<&str>,
+    quality: Option<&str>,
+    extra: &Value,
+) -> Result<usize, InvokeError> {
+    let count = validate_image_request_count(count)?;
+    if size.is_some() {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "gemini.generate_content does not support the size parameter",
+        ));
+    }
+    if quality.is_some() {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "gemini.generate_content does not support the quality parameter",
+        ));
+    }
+    if extra.get("seed").is_some_and(|seed| !seed.is_null()) {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "gemini.generate_content does not support the seed parameter",
+        ));
+    }
+    Ok(count)
 }
 
 /// Build the image `:generateContent` body: prompt text part + each input as
@@ -161,21 +220,52 @@ pub(crate) fn build_generate_content_body(prompt: &str, inputs: &[InputAsset]) -
 /// artifacts. Accepts both camelCase (`inlineData`/`mimeType`) and snake_case
 /// (`inline_data`/`mime_type`) shapes. Pure — unit tested.
 pub(crate) fn parse_gemini_assets(value: &Value) -> Result<Vec<ProducedAsset>, InvokeError> {
+    let mut budget = ImageResponseBudget::new(MAX_IMAGE_RESPONSE_IMAGES)?;
+    parse_gemini_assets_with_budget(value, &mut budget, MAX_IMAGE_RESPONSE_IMAGES)
+}
+
+fn parse_gemini_assets_with_budget(
+    value: &Value,
+    budget: &mut ImageResponseBudget,
+    max_images_in_response: usize,
+) -> Result<Vec<ProducedAsset>, InvokeError> {
     let candidates = value
         .get("candidates")
         .and_then(|v| v.as_array())
         .ok_or_else(|| InvokeError::parse("gemini response missing 'candidates'"))?;
 
-    let mut out = Vec::new();
+    let mut inline_parts = Vec::new();
     for cand in candidates {
         let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) else {
             continue;
         };
         for part in parts {
             let Some(inline) = part.get("inlineData").or_else(|| part.get("inline_data")) else { continue };
-            let Some(data) = inline.get("data").and_then(|v| v.as_str()) else { continue };
-            let bytes =
-                decode_b64(data).ok_or_else(|| InvokeError::parse("gemini inlineData is not valid base64"))?;
+            if inline.get("data").and_then(|v| v.as_str()).is_some() {
+                inline_parts.push(inline);
+            }
+        }
+    }
+
+    if inline_parts.len() > max_images_in_response {
+        return Err(InvokeError::new(
+            InvokeErrorKind::ProviderError,
+            format!(
+                "gemini response returned {} images, exceeding the per-response limit of {max_images_in_response}",
+                inline_parts.len()
+            ),
+        ));
+    }
+    // Count every image-bearing part before allocating any decoded image.
+    budget.ensure_additional_count(inline_parts.len(), "gemini response")?;
+
+    let mut out = Vec::with_capacity(inline_parts.len());
+    for (index, inline) in inline_parts.into_iter().enumerate() {
+            let data = inline
+                .get("data")
+                .and_then(|v| v.as_str())
+                .expect("collected inline data string");
+            let bytes = budget.decode_base64(data, &format!("gemini inlineData[{index}].data"))?;
             let mime = inline
                 .get("mimeType")
                 .or_else(|| inline.get("mime_type"))
@@ -183,7 +273,6 @@ pub(crate) fn parse_gemini_assets(value: &Value) -> Result<Vec<ProducedAsset>, I
                 .unwrap_or("image/png")
                 .to_string();
             out.push(ProducedAsset { data: ProducedData::Bytes(bytes), mime: Some(mime) });
-        }
     }
 
     if out.is_empty() {
@@ -214,7 +303,14 @@ impl ProtocolAdapter for GeminiGenerateTextAdapter {
         };
         let url = call_url(call);
         let body = build_generate_text_body(req);
-        let value = post_generate_content(http, call, &url, &body).await?;
+        let value = post_generate_content(
+            http,
+            call,
+            &url,
+            &body,
+            MAX_TEXT_RESPONSE_BYTES,
+        )
+        .await?;
         Ok(TaskOutcome::Done(TaskResult::Text(parse_gemini_text(&value)?)))
     }
 }
@@ -376,6 +472,17 @@ mod tests {
     }
 
     #[test]
+    fn image_contract_response_limits_reject_more_than_eight_images_before_base64_decode() {
+        let parts = (0..=MAX_IMAGE_RESPONSE_IMAGES)
+            .map(|_| json!({"inlineData": {"mimeType": "image/png", "data": "invalid"}}))
+            .collect::<Vec<_>>();
+        let value = json!({"candidates": [{"content": {"parts": parts}}]});
+        let error = parse_gemini_assets(&value).unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        assert!(error.message.contains("returned 9 images"), "{}", error.message);
+    }
+
+    #[test]
     fn parse_text_concatenates_parts() {
         let v = json!({
             "candidates": [{ "content": { "parts": [
@@ -480,6 +587,58 @@ mod tests {
         let out = GeminiGenerateContentAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 2, "count=2 must aggregate one asset per request");
+    }
+
+    #[tokio::test]
+    async fn image_contract_response_limits_reject_multiple_images_from_one_loop_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1beta/models/gemini-2.5-flash-image:generateContent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "candidates": [{"content": {"parts": [
+                    {"inlineData": {"mimeType": "image/png", "data": "aGk="}},
+                    {"inlineData": {"mimeType": "image/png", "data": "aGk="}}
+                ]}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let call = gemini_call(&server.uri(), false, "gemini-2.5-flash-image", gen_request(1));
+        let error = GeminiGenerateContentAdapter
+            .submit(&reqwest::Client::new(), &call)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        assert!(error.message.contains("per-response limit of 1"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn image_contract_gemini_rejects_unsupported_quality_and_seed_before_network() {
+        for (size, quality, extra, parameter) in [
+            (Some("1024x1024"), None, json!({}), "size"),
+            (None, Some("high"), json!({}), "quality"),
+            (None, None, json!({"seed": 42}), "seed"),
+        ] {
+            let request = TaskRequest::ImageGeneration(ImageGenRequest {
+                prompt: "a fox".into(),
+                count: 1,
+                size: size.map(str::to_string),
+                quality: quality.map(str::to_string),
+                extra,
+            });
+            let call = gemini_call(
+                "http://127.0.0.1:9",
+                false,
+                "gemini-2.5-flash-image",
+                request,
+            );
+            let error = GeminiGenerateContentAdapter
+                .submit(&reqwest::Client::new(), &call)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+            assert!(error.message.contains(parameter), "{}", error.message);
+        }
     }
 
     #[tokio::test]

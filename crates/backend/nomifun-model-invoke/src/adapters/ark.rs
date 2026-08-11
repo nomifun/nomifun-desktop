@@ -32,13 +32,16 @@ use serde_json::{Value, json};
 use crate::adapter::ProtocolAdapter;
 use crate::call::{ResolvedCall, ResolvedConnection};
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{encode_b64, error_from_response, get_request, post_json};
+use crate::transport::{
+    encode_b64, error_from_response, get_request, inline_image_response_body_limit, post_json,
+    read_json_capped, validate_image_request_count,
+};
 use crate::types::{
     JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, VideoGenRequest,
 };
 
 use super::has_endpoint_override;
-use super::openai_images::parse_images_response;
+use super::openai_images::parse_images_response_limited;
 
 /// Generous ceiling for image generation / video-task submission.
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -83,6 +86,7 @@ impl ProtocolAdapter for ArkImagesAdapter {
                 format!("ark.images cannot serve task {:?}", call.request.task()),
             ));
         };
+        let expected_images = validate_ark_image_request(req)?;
         // Ark does not follow the `/v1` convention, so the URL is composed
         // here — but an explicit per-model `endpoint` override still wins
         // (resolved by the single dispatch authority).
@@ -111,10 +115,35 @@ impl ProtocolAdapter for ArkImagesAdapter {
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid ark images JSON: {e}")))?;
-        Ok(TaskOutcome::Done(TaskResult::Assets(parse_images_response(&value)?)))
+        let value: Value = read_json_capped(
+            resp,
+            inline_image_response_body_limit(expected_images),
+            "ark images",
+        )
+        .await?;
+        Ok(TaskOutcome::Done(TaskResult::Assets(
+            parse_images_response_limited(&value, expected_images)?,
+        )))
     }
+}
+
+fn validate_ark_image_request(
+    request: &crate::types::ImageGenRequest,
+) -> Result<usize, InvokeError> {
+    let count = validate_image_request_count(request.count)?;
+    if count != 1 {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "ark.images does not support count greater than 1",
+        ));
+    }
+    if request.quality.is_some() {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "ark.images does not support the quality parameter",
+        ));
+    }
+    Ok(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +476,50 @@ mod tests {
         let out = ArkImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert!(matches!(&assets[0].data, ProducedData::Url(u) if u == "https://cdn/x.png"));
+    }
+
+    #[tokio::test]
+    async fn image_contract_response_limits_reject_more_results_than_requested() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+                {"url": "https://cdn/a.png"},
+                {"url": "https://cdn/b.png"}
+            ]})))
+            .mount(&server)
+            .await;
+
+        let call = ark_call(&server.uri(), "doubao-seedream", image_request(None, json!({})));
+        let error = ArkImagesAdapter
+            .submit(&reqwest::Client::new(), &call)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        assert!(error.message.contains("returned 2 images"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn image_contract_ark_rejects_unsupported_count_and_quality_before_network() {
+        for (count, quality, parameter) in [
+            (2, None, "count"),
+            (1, Some("high"), "quality"),
+        ] {
+            let request = TaskRequest::ImageGeneration(ImageGenRequest {
+                prompt: "a fox".into(),
+                count,
+                size: None,
+                quality: quality.map(str::to_string),
+                extra: json!({}),
+            });
+            let call = ark_call("http://127.0.0.1:9", "doubao-seedream", request);
+            let error = ArkImagesAdapter
+                .submit(&reqwest::Client::new(), &call)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+            assert!(error.message.contains(parameter), "{}", error.message);
+        }
     }
 
     #[tokio::test]

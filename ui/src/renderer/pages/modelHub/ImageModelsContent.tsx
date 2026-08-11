@@ -13,6 +13,7 @@ const ImageModelsContent: React.FC = () => (
     capability='image_generation'
     titleKey='settings.modelHub.creation.imageTitle'
     subtitleKey='settings.modelHub.creation.imageSubtitle'
+    defaultModelPreferenceKey='models.default.imageGeneration'
   />
 );
 

@@ -560,6 +560,10 @@ pub struct AgentEngine {
     /// provider retries from moving the boundary into the middle of one
     /// logical user turn. Compaction and context clearing invalidate it.
     editable_turn: Option<EditableTurnCheckpoint>,
+    /// Opaque host-owned routing state. Mirrored into `Session.host_context`
+    /// when durable sessions are enabled, but retained in memory for direct or
+    /// test engines too.
+    host_context: BTreeMap<String, String>,
 }
 
 impl AgentEngine {
@@ -624,6 +628,7 @@ impl AgentEngine {
             system_resource_inbox: None,
             process_supervisor: None,
             editable_turn: None,
+            host_context: BTreeMap::new(),
         }
     }
 
@@ -663,6 +668,7 @@ impl AgentEngine {
                 !checkpoint.source_message_id.is_empty()
                     && checkpoint.start_len <= session.messages.len()
             });
+        let host_context = session.host_context.clone();
 
         Self {
             provider,
@@ -701,6 +707,7 @@ impl AgentEngine {
             system_resource_inbox: None,
             process_supervisor: None,
             editable_turn,
+            host_context,
         }
     }
 
@@ -749,6 +756,13 @@ impl AgentEngine {
         &self.provider
     }
 
+    /// Model selected for this live session. Hosts may snapshot this together
+    /// with [`Self::provider`] for an isolated, side-effect-free classification
+    /// request that must not enter the durable conversation transcript.
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+
     /// Get a reference to the resolved compat settings
     pub fn compat(&self) -> &nomi_config::compat::ProviderCompat {
         &self.compat
@@ -785,6 +799,7 @@ impl AgentEngine {
         if let Some(mgr) = &self.session_manager {
             let session = mgr.create(provider_name, &self.model, cwd, session_id)?;
             tracing::info!(target: "nomi_agent", session_id = %session.id, provider = %provider_name, model = %self.model, "session started");
+            self.host_context.clear();
             self.current_session = Some(session);
         }
         Ok(())
@@ -793,6 +808,25 @@ impl AgentEngine {
     /// Get the current session ID (if sessions are enabled and initialized)
     pub fn current_session_id(&self) -> Option<String> {
         self.current_session.as_ref().map(|s| s.id.clone())
+    }
+
+    /// Read opaque host-owned state restored with the current session.
+    pub fn host_context_value(&self, key: &str) -> Option<String> {
+        self.host_context.get(key).cloned()
+    }
+
+    /// Persist or clear opaque host-owned routing state without exposing it to
+    /// the model transcript.
+    pub fn set_host_context_value(&mut self, key: &str, value: Option<&str>) {
+        match value {
+            Some(value) => {
+                self.host_context.insert(key.to_owned(), value.to_owned());
+            }
+            None => {
+                self.host_context.remove(key);
+            }
+        }
+        self.save_session();
     }
 
     /// Current context occupancy: the last request's prompt token count
@@ -896,6 +930,15 @@ impl AgentEngine {
     /// the flag when processing `PlanModeTransition` context modifiers.
     pub fn set_plan_active_flag(&mut self, flag: Arc<AtomicBool>) {
         self.plan_active_flag = Some(flag);
+    }
+
+    /// Whether execution is currently constrained to plan-mode tools.
+    ///
+    /// This is deliberately read-only: host routers need to avoid creating an
+    /// execution/artifact obligation that the plan-mode tool policy cannot
+    /// possibly satisfy, while transitions remain owned by the plan tools.
+    pub fn is_plan_mode_active(&self) -> bool {
+        self.plan_state.is_active
     }
 
     /// Default thinking budget when "enabled" is requested without a specific budget.
@@ -1063,6 +1106,31 @@ impl AgentEngine {
         msg_id: &str,
         source_message_id: &str,
     ) -> Result<AgentResult, AgentError> {
+        self.execute_turn_with_content_for_source_and_tool_allowlist(
+            user_content,
+            msg_id,
+            source_message_id,
+            None,
+        )
+        .await
+    }
+
+    /// Execute one durable root-user turn while restricting the exact tools
+    /// advertised to the provider for every model pass in that turn.
+    ///
+    /// `None` preserves the normal session tool surface. `Some` is a strict,
+    /// request-scoped allow-list; it neither mutates the registry nor persists
+    /// into a later turn. Hosts use this for intent routes whose security and
+    /// cost policy permits only a dedicated native tool (for example ordinary
+    /// image generation). Dispatch remains fail-closed because the provider
+    /// request's tool definitions are also the execution authority.
+    pub async fn execute_turn_with_content_for_source_and_tool_allowlist(
+        &mut self,
+        user_content: Vec<ContentBlock>,
+        msg_id: &str,
+        source_message_id: &str,
+        tool_allowlist: Option<&HashSet<String>>,
+    ) -> Result<AgentResult, AgentError> {
         let first_new_message = self.messages.len();
         let session_id = self
             .current_session
@@ -1084,6 +1152,7 @@ impl AgentEngine {
                     user_content,
                     msg_id,
                     source_message_id,
+                    tool_allowlist,
                     &mut efficiency,
                     &mut safe_messages,
                     &mut turn_started,
@@ -1119,6 +1188,43 @@ impl AgentEngine {
         result
     }
 
+    /// Persist a deterministic host response as a normal text exchange without
+    /// making a provider request. The host is responsible for publishing the
+    /// corresponding stream events. This keeps engine/session history aligned
+    /// when a capability route must fail fast before model execution (for
+    /// example, image generation with no configured image model).
+    pub fn record_host_text_turn(
+        &mut self,
+        user_text: impl Into<String>,
+        assistant_text: impl Into<String>,
+        source_message_id: &str,
+    ) -> Result<(), AgentError> {
+        let user_text = user_text.into();
+        let assistant_text = assistant_text.into();
+        if user_text.trim().is_empty() || assistant_text.trim().is_empty() {
+            return Err(AgentError::ApiError(
+                "host text turns require non-empty user and assistant text".to_owned(),
+            ));
+        }
+        self.editable_turn = Some(EditableTurnCheckpoint {
+            source_message_id: source_message_id.to_owned(),
+            start_len: self.messages.len(),
+            prior_host_context: self.host_context.clone(),
+        });
+        self.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text { text: user_text }],
+        ));
+        self.messages.push(Message::now(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: assistant_text,
+            }],
+        ));
+        self.save_session();
+        Ok(())
+    }
+
     /// Return metadata for all registered slash commands.
     pub fn slash_command_list(&self) -> Vec<(String, String)> {
         self.commands
@@ -1133,6 +1239,7 @@ impl AgentEngine {
         user_content: Vec<ContentBlock>,
         msg_id: &str,
         source_message_id: &str,
+        tool_allowlist: Option<&HashSet<String>>,
         efficiency: &mut ToolEfficiencyStats,
         safe_messages: &mut Vec<Message>,
         turn_started: &mut bool,
@@ -1191,6 +1298,7 @@ impl AgentEngine {
             self.editable_turn = Some(EditableTurnCheckpoint {
                 source_message_id: source_message_id.to_owned(),
                 start_len: self.messages.len(),
+                prior_host_context: self.host_context.clone(),
             });
         }
         self.messages.push(Message::now(Role::User, user_content));
@@ -1201,6 +1309,7 @@ impl AgentEngine {
 
         let mut turn: usize = 0;
         let mut tool_retry_tracker = ToolRetryTracker::default();
+        let mut routed_tool_calls_seen = 0usize;
         loop {
             // Hard safety net: an unconfigured (`None`) max_turns still gets a
             // bounded cap so a runaway tool-call loop cannot run forever. A
@@ -1237,15 +1346,29 @@ impl AgentEngine {
             self.run_compaction().await?;
 
             // Build tool list: filter based on plan mode state
-            let tools = if self.plan_state.is_active {
+            let route_allows = |tool: &dyn nomi_tools::Tool| {
+                tool_allowlist.as_ref().map_or_else(
+                    || !tool.requires_explicit_route(),
+                    |allowed| allowed.contains(tool.name()),
+                )
+            };
+            let tools = if tool_allowlist.is_some() && routed_tool_calls_seen > 0 {
+                // A strict route has already executed its single authorized
+                // capability. The follow-up provider pass receives only the
+                // compact verified result context, never another billable tool
+                // schema it could try to invoke again.
+                Vec::new()
+            } else if self.plan_state.is_active {
                 // Plan mode: only Info-category tools (excluding EnterPlanMode)
                 self.tools.to_tool_defs_filtered(|t| {
-                    t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
+                    t.category() == ToolCategory::Info
+                        && t.name() != "EnterPlanMode"
+                        && route_allows(t)
                 })
             } else {
                 // Normal mode: all tools except ExitPlanMode
                 self.tools
-                    .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
+                    .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode" && route_allows(t))
             };
             // This exact request is the authority for what the provider may
             // call. Registry membership is broader (for example, plan mode
@@ -1685,6 +1808,21 @@ impl AgentEngine {
 
             self.compact_state.last_input_tokens = effective_watermark;
 
+            // A strict host-routed turn advertises a dedicated capability, not
+            // an open-ended tool loop. One schema call can already request a
+            // batch (for example image_gen.count); reject parallel or later
+            // repeat calls before dispatch so a weak model cannot multiply
+            // billable work and then leave the artifact ledger unrecoverable.
+            if tool_allowlist.is_some() && !tool_calls.is_empty() {
+                if routed_tool_calls_seen.saturating_add(tool_calls.len()) > 1 {
+                    return Err(AgentError::ApiError(
+                        "strictly routed turns permit exactly one tool call; use the tool's batch parameters instead of retrying or issuing parallel calls"
+                            .to_owned(),
+                    ));
+                }
+                routed_tool_calls_seen += tool_calls.len();
+            }
+
             // Cache break detection
             let cache_stats = CacheStats {
                 input_tokens: turn_usage.input_tokens,
@@ -1828,6 +1966,8 @@ impl AgentEngine {
             // the user-facing sink cannot persist the media, convert the tool
             // result into an error and remove the undeliverable in-memory image
             // so the model is forced to retry instead of claiming completion.
+            let mut artifact_delivery_failed = false;
+            let mut artifact_delivery_succeeded = false;
             for result in &mut outcome.results {
                 if let ContentBlock::ToolResult {
                     tool_use_id,
@@ -1903,17 +2043,17 @@ impl AgentEngine {
                                 }
                                 content.push_str(&context);
                             }
-                            // Non-image artifacts are represented to the model by
-                            // their verified filesystem locators. Provider image
-                            // adapters must never receive audio/PDF/resource bytes
-                            // mislabeled as visual input.
-                            images.retain(|artifact| {
-                                artifact
-                                    .media_type
-                                    .trim()
-                                    .to_ascii_lowercase()
-                                    .starts_with("image/")
-                            });
+                            // The sink has already persisted and verified these
+                            // bytes and appended compact receipt/locator context.
+                            // Never serialize the base64 payload into session
+                            // history or resend it to the chat provider: that can
+                            // multiply memory/token cost and make a successful
+                            // generation fail only because the next text pass
+                            // cannot accept a 40 MiB visual attachment.
+                            images.clear();
+                            if crate::output::artifact_contract(artifact_identity).is_some() {
+                                artifact_delivery_succeeded = true;
+                            }
                         }
                         crate::output::ToolMediaDelivery::Failed { error } => {
                             *is_error = true;
@@ -1924,6 +2064,9 @@ impl AgentEngine {
                             content.push_str("Artifact delivery failed: ");
                             content.push_str(&error);
                         }
+                    }
+                    if *is_error && crate::output::artifact_contract(artifact_identity).is_some() {
+                        artifact_delivery_failed = true;
                     }
                 }
             }
@@ -1991,6 +2134,7 @@ impl AgentEngine {
             } else {
                 Vec::new()
             };
+            let had_steering = !steered.is_empty();
             if !steered.is_empty() {
                 self.stagnation_guard.reset();
                 tool_retry_tracker.clear();
@@ -2033,6 +2177,27 @@ impl AgentEngine {
             // Save session after each turn
             *safe_messages = self.messages.clone();
             self.save_session();
+            if artifact_delivery_failed {
+                return Err(AgentError::ApiError(
+                    "artifact-producing tool failed; refusing another tool attempt in the same accepted turn"
+                        .to_owned(),
+                ));
+            }
+            if tool_allowlist.is_some() && artifact_delivery_succeeded && !had_steering {
+                // A strict artifact route has no useful second model pass: its
+                // authoritative user-facing result is the host-verified card,
+                // and the routed schema is already closed after one call. End
+                // the engine phase now so the manager can persist/reverify the
+                // pending bytes immediately. This avoids a redundant provider
+                // request turning a paid successful generation into a failed
+                // turn before durable delivery.
+                return Ok(AgentResult {
+                    text: String::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: self.total_usage.clone(),
+                    turns: turn + 1,
+                });
+            }
             if stagnation_action == crate::loop_guard::StagnationAction::Abort {
                 return Err(AgentError::Stagnation(
                     crate::loop_guard::STAGNATION_ABORT.to_string(),
@@ -2284,6 +2449,7 @@ impl AgentEngine {
             session.total_usage = self.total_usage.clone();
             session.activated_deferred_tools = self.tools.session_deferred_tool_identities();
             session.editable_turn = self.editable_turn.clone();
+            session.host_context = self.host_context.clone();
             session.updated_at = chrono::Utc::now();
             if let Err(e) = mgr.save(session) {
                 self.output
@@ -2328,6 +2494,7 @@ impl AgentEngine {
     pub fn clear_context(&mut self) {
         self.messages.clear();
         self.editable_turn = None;
+        self.host_context.clear();
         self.compact_state = CompactState::new();
         self.total_usage = TokenUsage::default();
         self.save_session();
@@ -2365,6 +2532,7 @@ impl AgentEngine {
             return false;
         }
         self.messages.truncate(checkpoint.start_len);
+        self.host_context = checkpoint.prior_host_context;
         self.editable_turn = None;
         self.save_session();
         true

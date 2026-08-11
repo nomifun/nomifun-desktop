@@ -4,28 +4,158 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import classNames from 'classnames';
 import { Button, Tag } from '@arco-design/web-react';
 import { LinkCloud, MagicWand, Pic, VideoTwo } from '@icon-park/react';
+import { configService } from '@/common/config/configService';
+import type { ConfigKeyMap } from '@/common/config/configKeys';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
+import { NomiSettingList, NomiSettingRow } from '@/renderer/components/base/NomiSettingLayout';
+import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
+import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import {
   type CreationCapability,
   filterCreationModels,
   groupCreationModelsByProvider,
   useCreationModels,
 } from './creationModels';
+import { SerializedLatestWriteQueue } from './serializedLatestWriteQueue';
 
 export interface CreationModelsPanelProps {
   /** The one generation capability this section lists. */
   capability: CreationCapability;
   titleKey: I18nKey;
   subtitleKey: I18nKey;
+  /** Optional install-wide default owned by this model task. */
+  defaultModelPreferenceKey?: 'models.default.imageGeneration';
 }
+
+type ImageGenerationDefaultModel = NonNullable<
+  ConfigKeyMap['models.default.imageGeneration']
+>;
+
+interface ImageGenerationDefaultControlProps {
+  preferenceKey: 'models.default.imageGeneration';
+}
+
+/**
+ * The native Agent image tool's optional install-wide default. Candidate
+ * membership is resolved for the exact `image_generation` task: an edit-only
+ * model shown elsewhere in this section is not silently promoted to a generator.
+ * Stale saved references stay visible in the shared selector until the user
+ * explicitly replaces or clears them.
+ */
+const ImageGenerationDefaultControl: React.FC<ImageGenerationDefaultControlProps> = ({
+  preferenceKey,
+}) => {
+  const { t } = useTranslation();
+  const [message, messageContext] = useArcoMessage({ maxCount: 1 });
+  const { groups, isLoading } = useModelsForTask('image_generation');
+  const [defaultModel, setDefaultModel] = useState<ImageGenerationDefaultModel | null>(
+    () => configService.get(preferenceKey) ?? null
+  );
+  const [isSavingDefault, setIsSavingDefault] = useState(false);
+  const writeQueueRef = useRef(new SerializedLatestWriteQueue());
+
+  useEffect(() => {
+    let active = true;
+    const sync = () => {
+      if (active && !writeQueueRef.current.hasPending) {
+        setDefaultModel(configService.get(preferenceKey) ?? null);
+      }
+    };
+    const unsubscribe = configService.subscribe(preferenceKey, (value) => {
+      if (active && !writeQueueRef.current.hasPending) {
+        setDefaultModel((value as ImageGenerationDefaultModel | undefined) ?? null);
+      }
+    });
+    void configService.whenReady().then(sync);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [preferenceKey]);
+
+  const persistDefault = useCallback(
+    async (next: ImageGenerationDefaultModel | null) => {
+      setDefaultModel(next);
+      setIsSavingDefault(true);
+
+      const queue = writeQueueRef.current;
+      const { done } = queue.enqueue(
+        () =>
+          next
+            ? configService.set(preferenceKey, next)
+            : configService.remove(preferenceKey),
+        {
+          onLatestError: async (error, generation) => {
+            await configService.reload();
+            if (!queue.isLatest(generation)) return;
+            setDefaultModel(configService.get(preferenceKey) ?? null);
+            console.error('[CreationModels] Failed to save the default image model:', error);
+            message.error(t('settings.modelHub.creation.defaultSaveFailed'));
+          },
+          onLatestSettled: (generation) => {
+            if (queue.isLatest(generation)) setIsSavingDefault(false);
+          },
+        }
+      );
+      await done;
+    },
+    [message, preferenceKey, t]
+  );
+
+  const hasCandidates = groups.some((group) => group.models.length > 0);
+  const noCandidates = !isLoading && !hasCandidates;
+  const description = isLoading
+    ? t('settings.modelHub.creation.defaultLoading')
+    : noCandidates
+      ? t('settings.modelHub.creation.defaultNoModels')
+      : defaultModel
+        ? t('settings.modelHub.creation.defaultHint')
+        : t('settings.modelHub.creation.defaultUnset');
+
+  return (
+    <div className='mb-14px'>
+      {messageContext}
+      <NomiSettingList>
+        <NomiSettingRow
+          title={t('settings.modelHub.creation.defaultTitle')}
+          description={description}
+          controls={
+            <div className='flex min-w-0 flex-wrap items-center justify-end gap-8px'>
+              <TaskModelSelect
+                task='image_generation'
+                size='small'
+                disabled={noCandidates || isSavingDefault}
+                value={defaultModel}
+                emptyHint={t('settings.modelHub.creation.defaultNoModels')}
+                onChange={({ provider_id, model }) =>
+                  void persistDefault({ provider_id, model })
+                }
+              />
+              {defaultModel && (
+                <Button
+                  size='mini'
+                  disabled={isSavingDefault}
+                  onClick={() => void persistDefault(null)}
+                >
+                  {t('settings.modelHub.creation.defaultClear')}
+                </Button>
+              )}
+            </div>
+          }
+        />
+      </NomiSettingList>
+    </div>
+  );
+};
 
 /** Per-capability visual language (chip icon + accent), consistent light/dark. */
 const CAP_META: Record<CreationCapability, { icon: React.ReactNode; color: string }> = {
@@ -58,6 +188,7 @@ const CreationModelsPanel: React.FC<CreationModelsPanelProps> = ({
   capability,
   titleKey,
   subtitleKey,
+  defaultModelPreferenceKey,
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -104,6 +235,10 @@ const CreationModelsPanel: React.FC<CreationModelsPanelProps> = ({
           </Button>
         </div>
       </div>
+
+      {defaultModelPreferenceKey && (
+        <ImageGenerationDefaultControl preferenceKey={defaultModelPreferenceKey} />
+      )}
 
       {/* Content */}
       <NomiScrollArea className='flex-1 min-h-0' disableOverflow>
