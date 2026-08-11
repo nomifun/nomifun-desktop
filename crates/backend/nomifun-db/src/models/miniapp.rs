@@ -20,10 +20,17 @@ pub struct MiniAppRow {
     pub description: String,
     /// Optional emoji or very short label.
     pub icon: Option<String>,
-    /// The conversation this app was solidified from, when there was one.
+    /// The conversation this app was solidified from, when there was one. Pure
+    /// provenance: it drives no navigation, and the conversation it names may
+    /// have been deleted since (the reference is SetNull).
     pub source_conversation_id: Option<String>,
     /// Byte length of the stored HTML document.
     pub html_size: i64,
+    /// When the stored document (the published snapshot) was last written from
+    /// the on-disk working copy. `None` for rows solidified before publishing
+    /// became an explicit act, and for apps whose working copy was never
+    /// materialized. Never inferred from `updated_at`, which a rename moves.
+    pub published_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }

@@ -33,8 +33,8 @@ export interface PreviewMetadata {
    * 打开该预览的会话。预览面板挂在 ConversationProvider 之外，因此需要打开方
    * （`usePreviewLauncher` / 自动预览钩子）把会话身份随元数据带进来。
    * Owning conversation. The panel is mounted OUTSIDE `ConversationProvider`,
-   * so openers stamp the identity here for viewers that need it (mini-app
-   * solidify looks up prior saves by `source_conversation_id`).
+   * so openers stamp the identity here for viewers that need it (the mini-app
+   * publish action looks up prior publishes by `source_conversation_id`).
    */
   conversation_id?: ConversationId;
 }

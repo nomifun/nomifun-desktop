@@ -41,6 +41,17 @@ pub trait IMiniAppRepository: Send + Sync {
 
     /// Delete an owned app. `DbError::NotFound` if absent or not owned.
     async fn delete(&self, user_id: &str, id: &MiniAppId) -> Result<(), DbError>;
+
+    /// Record when the stored snapshot became current, without touching
+    /// `updated_at` or the body. Used when the working copy is materialized from
+    /// the snapshot: the two are byte-identical at that instant, so the app has
+    /// no unpublished changes and the timestamp must say so.
+    async fn mark_published_at(
+        &self,
+        user_id: &str,
+        id: &MiniAppId,
+        published_at: i64,
+    ) -> Result<MiniAppRow, DbError>;
 }
 
 /// Parameters for creating an app. `html` is the complete self-contained
@@ -62,4 +73,8 @@ pub struct UpdateMiniAppParams<'a> {
     pub description: Option<&'a str>,
     pub icon: Option<Option<&'a str>>,
     pub html: Option<&'a str>,
+    /// When the supplied `html` became the published snapshot. Set by the
+    /// publish path together with `html` so one statement writes the body, its
+    /// size and its publish instant.
+    pub published_at: Option<i64>,
 }

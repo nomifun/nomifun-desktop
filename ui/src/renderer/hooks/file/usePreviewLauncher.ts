@@ -123,8 +123,8 @@ export const usePreviewLauncher = () => {
         language,
         truncated: false,
         // The preview panel is mounted outside ConversationProvider; stamp the
-        // owning conversation so viewers that need it (mini-app solidify) can
-        // read it back off the tab metadata.
+        // owning conversation so viewers that need it (the mini-app publish
+        // action) can read it back off the tab metadata.
         conversation_id: conversationContext?.conversation_id,
       };
 

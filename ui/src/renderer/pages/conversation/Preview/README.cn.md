@@ -54,7 +54,7 @@ metadata 使用 snake_case（`file_name`、`file_path`），因为 stream / IPC 
 就是这个形状。不要在新文档或示例中继续使用旧的 `fileName` / `filePath`。
 
 `conversation_id` 的存在是因为预览面板挂在 `ConversationProvider` 之外：由打开方
-把会话身份写进 metadata，需要会话身份的 viewer（小程序「固化」）再读回来。
+把会话身份写进 metadata，需要会话身份的 viewer（小程序「发布为小程序」）再读回来。
 
 `miniapp` 内容类型渲染小程序会话唯一的自包含 `miniapp.html`
 （`viewers/MiniAppViewer.tsx`）。它按精确文件名识别（不按扩展名：`.html` 仍是

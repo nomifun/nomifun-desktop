@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import type { TFunction } from 'i18next';
 import { parseMiniAppId } from '@/common/types/ids';
 import {
   MINI_APP_BUILDER_SYSTEM_PROMPT,
@@ -12,11 +13,19 @@ import {
   MINI_APP_FILE_NAME,
   MINI_APP_IFRAME_SANDBOX,
   MINI_APP_NAME_SNIPPET_LENGTH,
+  buildMiniAppIterateConversationName,
+  buildMiniAppIterateMessage,
   isMiniAppConversation,
   resolveMiniAppServeUrl,
 } from './contract';
+import zhMiniApps from '@/renderer/services/i18n/locales/zh-CN/miniApps.json';
+import enMiniApps from '@/renderer/services/i18n/locales/en-US/miniApps.json';
 
 const MINI_APP_ID = parseMiniAppId('0198f3b2-4c1a-7c3d-8e9f-0a1b2c3d4e5f');
+
+/** Records the key and params instead of translating, so the call site is pinned. */
+const recordingT = ((key: string, params?: Record<string, unknown>) =>
+  `${key}::${JSON.stringify(params ?? {})}`) as unknown as TFunction;
 
 describe('mini-app contract', () => {
   test('pins the single-artifact file name and the one extra marker key', () => {
@@ -67,5 +76,41 @@ describe('mini-app contract', () => {
     expect(MINI_APP_IFRAME_SANDBOX).toBe('allow-scripts allow-forms allow-popups allow-modals');
     // `allow-scripts` + `allow-same-origin` together void the sandbox entirely.
     expect(MINI_APP_IFRAME_SANDBOX.includes('allow-same-origin')).toBe(false);
+  });
+
+  test('the iteration first message is i18n and carries name, id and absolute path', () => {
+    // A user-visible message, so it goes through i18n rather than a hardcoded
+    // string — and every field the model needs to locate the file rides with it.
+    const message = buildMiniAppIterateMessage(
+      { name: '番茄钟', miniAppId: MINI_APP_ID, sourcePath: `/home/u/miniapps/${MINI_APP_ID}/${MINI_APP_FILE_NAME}` },
+      recordingT
+    );
+    expect(message.startsWith('miniApps.iterate.firstMessage::')).toBe(true);
+    expect(message.includes('"name":"番茄钟"')).toBe(true);
+    expect(message.includes(`"id":"${MINI_APP_ID}"`)).toBe(true);
+    expect(message.includes(`"path":"/home/u/miniapps/${MINI_APP_ID}/${MINI_APP_FILE_NAME}"`)).toBe(true);
+
+    expect(buildMiniAppIterateConversationName('番茄钟', recordingT)).toBe(
+      'miniApps.iterate.conversationName::{"name":"番茄钟"}'
+    );
+  });
+
+  test('both locales state the four rules the iteration message exists to state', () => {
+    for (const copy of [zhMiniApps.iterate.firstMessage, enMiniApps.iterate.firstMessage]) {
+      // Interpolations the builder supplies, all three used.
+      expect(copy.includes('{{name}}')).toBe(true);
+      expect(copy.includes('{{id}}')).toBe(true);
+      expect(copy.includes('{{path}}')).toBe(true);
+      // The single artifact is named by path, never by filename alone: the
+      // conversation's own workspace has nothing to do with the mini-app.
+      expect(copy.includes(MINI_APP_FILE_NAME)).toBe(false);
+    }
+    // Read it all before changing it / one file only / publish is the user's act.
+    expect(zhMiniApps.iterate.firstMessage.includes('完整读一遍')).toBe(true);
+    expect(zhMiniApps.iterate.firstMessage.includes('只改这一个文件')).toBe(true);
+    expect(zhMiniApps.iterate.firstMessage.includes('发布')).toBe(true);
+    expect(enMiniApps.iterate.firstMessage.includes('Read all of')).toBe(true);
+    expect(enMiniApps.iterate.firstMessage.includes('only this one file')).toBe(true);
+    expect(enMiniApps.iterate.firstMessage.includes('publish')).toBe(true);
   });
 });
