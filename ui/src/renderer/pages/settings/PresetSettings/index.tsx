@@ -85,6 +85,8 @@ const PresetSettings: React.FC = () => {
     activePreset,
     isExtensionPreset,
     loadPresets,
+    loadError: presetsLoadError,
+    isLoading: presetsLoading,
     localeKey,
   } = usePresetList();
 
@@ -278,7 +280,11 @@ const PresetSettings: React.FC = () => {
           </div>
         </Tabs.TabPane>
         <Tabs.TabPane key='market' title={t('settings.presetsPage.marketTab', { defaultValue: 'Preset Market' })}>
-          <PresetPackageMarketSettings onImported={loadPresets} />
+          <PresetPackageMarketSettings
+            onImported={loadPresets}
+            presets={presets}
+            addedStateLoading={presetsLoading || Boolean(presetsLoadError)}
+          />
         </Tabs.TabPane>
       </Tabs>
     </HubPageShell>

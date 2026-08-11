@@ -12,15 +12,18 @@ export const useMcpServers = () => {
   const [mcpServers, setMcpServers] = useState<IMcpServer[]>([]);
   const [extensionMcpServers, setExtensionMcpServers] = useState<ExtensionMcpServerContribution[]>([]);
   const [isMcpServersLoading, setIsMcpServersLoading] = useState(true);
+  const [mcpServersLoadFailed, setMcpServersLoadFailed] = useState(false);
 
   useEffect(() => {
     void ensureBackendMcpCatalog()
       .then(({ allServers }) => {
         setMcpServers(allServers);
+        setMcpServersLoadFailed(false);
       })
       .catch((error) => {
         console.error('[useMcpServers] Failed to load MCP catalog:', error);
         setMcpServers([]);
+        setMcpServersLoadFailed(true);
       })
       .finally(() => {
         setIsMcpServersLoading(false);
@@ -61,6 +64,7 @@ export const useMcpServers = () => {
   return {
     mcpServers,
     isMcpServersLoading,
+    mcpServersLoadFailed,
     allMcpServers: [...mcpServers, ...extensionMcpServers],
     extensionMcpServers,
     setMcpServers,

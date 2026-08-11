@@ -48,11 +48,13 @@ describe('SkillMarketCard visual hierarchy', () => {
 
   test('locks each add action while its asynchronous request is pending', () => {
     expect(panelSource.includes('const pendingAddIdsRef = useRef<Set<string>>(new Set())')).toBe(true);
-    expect(panelSource.includes('if (pendingAddIdsRef.current.has(item.id)) return')).toBe(true);
+    expect(panelSource.includes('addedStateLoading || isAdded?.(item) || pendingAddIdsRef.current.has(item.id)')).toBe(true);
     expect(panelSource.includes('await onAdd(item)')).toBe(true);
     expect(panelSource.includes('finished.delete(item.id)')).toBe(true);
     expect(panelSource.includes("console.error('Market add callback failed:'")).toBe(true);
     expect(source.includes('loading={adding}')).toBe(true);
-    expect(source.includes('disabled={adding}')).toBe(true);
+    expect(source.includes('disabled={adding || added || addedStateLoading}')).toBe(true);
+    expect(source.includes("t('common.added'" )).toBe(true);
+    expect(panelSource.includes('addedStateLoading || isAdded?.(item)')).toBe(true);
   });
 });

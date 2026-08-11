@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildSkillMarketInstallPrompt,
   filterSkillMarketItems,
+  isSkillMarketItemInstalled,
   normalizeSkillMarketErrors,
   normalizeSkillMarketItem,
   normalizeSkillMarketItems,
@@ -94,6 +95,12 @@ describe('skill market helpers', () => {
   test('keeps cached market items when a sync returns no valid entries', () => {
     expect(resolveMarketSyncItems([item], [])).toEqual([item]);
     expect(resolveMarketSyncItems([], [item])).toEqual([item]);
+  });
+
+  test('recognizes installed skills by canonical slug or display name', () => {
+    expect(isSkillMarketItemInstalled(item, ['demo'])).toBe(true);
+    expect(isSkillMarketItemInstalled({ ...item, name: 'Demo Skill' }, ['demo-skill'])).toBe(true);
+    expect(isSkillMarketItemInstalled(item, ['another-skill'])).toBe(false);
   });
 
   test('selects the first configured source that has items when the active source is empty', () => {

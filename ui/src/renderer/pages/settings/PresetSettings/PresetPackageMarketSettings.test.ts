@@ -1,7 +1,21 @@
 import { describe, expect, test } from 'bun:test';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
 import { parsePresetId } from '@/common/types/ids';
-import { buildPresetFromMarketPackage, classifyPresetPackageAddError } from './PresetPackageMarketSettings';
+import type { Preset } from '@/common/types/agent/presetTypes';
+import {
+  buildPresetFromMarketPackage,
+  classifyPresetPackageAddError,
+  getOrCreatePresetMarketId,
+  isPresetMarketItemInstalled,
+} from './PresetPackageMarketSettings';
+
+const memoryStorage = () => {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  };
+};
 
 describe('preset package market import payload', () => {
   test('keeps real package skills and applies expert package defaults', () => {
@@ -54,6 +68,39 @@ describe('preset package market import payload', () => {
       { skill_name: '中文技能', required: false },
       { skill_name: 'skill with space', required: false },
     ]);
+  });
+});
+
+describe('preset package installed state', () => {
+  const marketItem = {
+    id: 'skillhub_packages:tech-test-automation',
+    name: 'Test Automation',
+    description: 'Testing workflow package',
+  };
+
+  test('reuses a stable preset id and only reports added while that preset exists', () => {
+    const storage = memoryStorage();
+    const presetId = getOrCreatePresetMarketId(marketItem.id, storage);
+    expect(getOrCreatePresetMarketId(marketItem.id, storage)).toBe(presetId);
+
+    const installed = {
+      preset_id: presetId,
+      source: 'user',
+      name: 'Renamed after install',
+      description: 'Changed by the user',
+    } as Preset;
+    expect(isPresetMarketItemInstalled(marketItem, [installed], storage)).toBe(true);
+    expect(isPresetMarketItemInstalled(marketItem, [], storage)).toBe(false);
+  });
+
+  test('recognizes packages installed before stable ids were recorded', () => {
+    const legacy = {
+      preset_id: parsePresetId('0190f5fe-7c00-7a00-8000-000000000232'),
+      source: 'user',
+      name: marketItem.name,
+      description: marketItem.description,
+    } as Preset;
+    expect(isPresetMarketItemInstalled(marketItem, [legacy], memoryStorage())).toBe(true);
   });
 });
 

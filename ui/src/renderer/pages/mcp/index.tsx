@@ -24,7 +24,14 @@ const McpPage: React.FC = () => {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const [mcpMessage, mcpMessageContext] = useArcoMessage({ maxCount: 10 });
-  const { mcpServers, extensionMcpServers, saveMcpServers, setMcpServers } = useMcpServers();
+  const {
+    mcpServers,
+    extensionMcpServers,
+    isMcpServersLoading,
+    mcpServersLoadFailed,
+    saveMcpServers,
+    setMcpServers,
+  } = useMcpServers();
   const tabParam = searchParams.get('tab');
   const activeTab: McpTab = isMcpTab(tabParam) ? tabParam : 'servers';
 
@@ -62,7 +69,11 @@ const McpPage: React.FC = () => {
           />
         </Tabs.TabPane>
         <Tabs.TabPane key='market' title={t('settings.mcpPage.mcpMarketTab', { defaultValue: 'MCP Market' })}>
-          <McpMarketSettings saveMcpServers={saveMcpServers} />
+          <McpMarketSettings
+            saveMcpServers={saveMcpServers}
+            mcpServers={mcpServers}
+            addedStateLoading={isMcpServersLoading || mcpServersLoadFailed}
+          />
         </Tabs.TabPane>
         <Tabs.TabPane key='plugins' title={t('settings.mcpPage.installedPluginsTab', { defaultValue: 'Installed Plugins' })}>
           <PluginSettingsPanel section='installed' />
