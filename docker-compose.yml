@@ -20,8 +20,9 @@ services:
         #   APT_MIRROR=http://mirrors.aliyun.com \
         #   CARGO_REGISTRY_MIRROR=https://rsproxy.cn/index/ docker compose build
         BUN_IMAGE: ${BUN_IMAGE:-oven/bun:1}
-        RUST_IMAGE: ${RUST_IMAGE:-rust:1-slim-bookworm}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-debian:bookworm-slim}
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
+        RUST_IMAGE: ${RUST_IMAGE:-rust:1-slim-trixie}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-debian:trixie-slim}
         BUN_REGISTRY: ${BUN_REGISTRY:-}
         APT_MIRROR: ${APT_MIRROR:-}
         CARGO_REGISTRY_MIRROR: ${CARGO_REGISTRY_MIRROR:-}

@@ -9,9 +9,93 @@ use axum::response::Response;
 use nomifun_api_types::is_preview_capability;
 
 const CONTENT_SECURITY_POLICY: HeaderName = HeaderName::from_static("content-security-policy");
-const OFFICE_FRAME_ANCESTORS: &str =
-    "frame-ancestors 'self' tauri: http://tauri.localhost https://tauri.localhost";
 
+/// Every origin the NomiFun SPA is itself served from, as a `frame-ancestors`
+/// source list. One definition answers "may our own app embed this response?"
+/// for both the office preview proxy and the mini-app runner.
+///
+/// `'self'` covers WebUI, where the SPA and the API share an origin (including
+/// behind a reverse proxy); the `tauri:` scheme source and the two
+/// `tauri.localhost` origins cover the packaged desktop webview.
+///
+/// A debug build additionally trusts the pinned Vite dev origin, because
+/// `tauri dev` points the webview at `devUrl` — `http://localhost:5173`
+/// ([`apps/desktop/tauri.conf.json`], pinned by `server.port` in
+/// `ui/vite.config.ts`) — which matches none of the sources above. Omitting it
+/// does not fail loudly: the browser fetches the document, gets its 200, then
+/// refuses to display it, so the panel is simply blank. Release builds never
+/// load the SPA from a dev server, so the extra sources are compiled out
+/// instead of shipped.
+///
+/// A macro rather than a `const` because `concat!` cannot take a constant, and
+/// both policies below must be `&'static str` for `HeaderValue::from_static`.
+#[cfg(not(debug_assertions))]
+macro_rules! app_frame_ancestor_sources {
+    () => {
+        "'self' tauri: http://tauri.localhost https://tauri.localhost"
+    };
+}
+#[cfg(debug_assertions)]
+macro_rules! app_frame_ancestor_sources {
+    () => {
+        concat!(
+            "'self' tauri: http://tauri.localhost https://tauri.localhost",
+            " http://localhost:5173 http://127.0.0.1:5173"
+        )
+    };
+}
+
+const OFFICE_FRAME_ANCESTORS: &str = concat!("frame-ancestors ", app_frame_ancestor_sources!());
+
+/// The response policy for a served mini-app document.
+///
+/// Two directives, both load-bearing:
+///
+/// * `sandbox` WITHOUT `allow-same-origin` — the document is AI-generated and
+///   must never run with the deployment's own origin authority. In WebUI mode it
+///   is served from the very origin that holds the session cookie and the API, so
+///   a same-origin script could read them; the CSP `sandbox` directive forces an
+///   opaque origin even then, which is exactly why it is set here and not left to
+///   the embedding iframe's `sandbox` attribute (a document reached directly, or
+///   framed by markup we do not control, would otherwise be unsandboxed). The
+///   four allowances are what an interactive single-file tool needs: its inline
+///   script, forms, `window.open`, and `alert`/`confirm`.
+/// * `frame-ancestors` — the same source list the office preview proxy uses
+///   ([`OFFICE_FRAME_ANCESTORS`], asserted below), replacing the
+///   `X-Frame-Options: DENY` this route must not carry: only the origins our own
+///   SPA runs from may embed the runner.
+const MINIAPP_SERVE_POLICY: &str = concat!(
+    "sandbox allow-scripts allow-forms allow-popups allow-modals; frame-ancestors ",
+    app_frame_ancestor_sources!()
+);
+
+/// `GET /api/miniapps/{miniapp_id}/serve` — the document channel the preview and
+/// runner iframes load. Exactly `/serve`, and nothing below it: the trailing
+/// `None` keeps a longer path from inheriting the exemption, so every other
+/// mini-app route (the metadata CRUD surface) stays frame-denied.
+fn is_miniapp_serve_path(path: &str) -> bool {
+    let mut segments = path.trim_start_matches('/').split('/');
+    match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some("api"), Some("miniapps"), Some(_miniapp_id), Some("serve")) => {
+            segments.next().is_none()
+        }
+        _ => false,
+    }
+}
+
+/// Routes whose responses may be framed with no policy of their own:
+/// `/api/extensions/{name}/assets/**`, because an extension renders its own
+/// settings UI inside an iframe in the app.
+///
+/// The mini-app serve channel is also framable, but it is NOT listed here — it
+/// gets a policy instead of an exemption ([`MINIAPP_SERVE_POLICY`], applied via
+/// [`is_miniapp_serve_path`]), because "may be framed" there means "by us only,
+/// and sandboxed".
 fn allows_embedding(path: &str) -> bool {
     let mut segments = path.trim_start_matches('/').split('/');
     matches!(
@@ -86,12 +170,28 @@ fn apply_office_frame_policy(headers: &mut HeaderMap) {
     }
 }
 
+/// Replace whatever the serve handler produced with exactly one policy: the
+/// document's isolation must not depend on a second CSP field intersecting the
+/// way we hope, and the handler deliberately sets none (this middleware is the
+/// single source of truth, as for the office proxy).
+fn apply_miniapp_serve_policy(headers: &mut HeaderMap) {
+    headers.remove(X_FRAME_OPTIONS);
+    headers.remove(&CONTENT_SECURITY_POLICY);
+    headers.insert(
+        CONTENT_SECURITY_POLICY.clone(),
+        HeaderValue::from_static(MINIAPP_SERVE_POLICY),
+    );
+}
+
 /// Middleware that adds security response headers to every response.
 ///
 /// Headers set:
 /// - `X-Frame-Options: DENY` — prevent clickjacking on non-embeddable routes
 /// - Office capability proxy routes replace XFO with a narrow frame-ancestors
 ///   policy that permits same-origin WebUI and the Tauri application origins
+/// - The mini-app serve route replaces XFO with the same narrow frame-ancestors
+///   list plus a `sandbox` directive, so the AI-generated document runs on an
+///   opaque origin ([`MINIAPP_SERVE_POLICY`])
 /// - `X-Content-Type-Options: nosniff` — prevent MIME sniffing
 /// - `X-XSS-Protection: 1; mode=block` — enable XSS filter
 /// - `Referrer-Policy: strict-origin-when-cross-origin` — limit referrer leakage
@@ -111,6 +211,8 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
 
     if is_office_preview_capability_path(&path) {
         apply_office_frame_policy(headers);
+    } else if is_miniapp_serve_path(&path) {
+        apply_miniapp_serve_policy(headers);
     } else if !allows_embedding(&path) {
         headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     }
@@ -265,6 +367,132 @@ mod tests {
 
         assert!(response.headers().get("x-frame-options").is_none());
         assert_eq!(response.headers().get("x-content-type-options").unwrap(), "nosniff");
+    }
+
+    #[tokio::test]
+    async fn miniapp_serve_route_is_sandboxed_and_framable_only_by_us() {
+        const MINI_APP_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+        let app = Router::new()
+            .route("/api/miniapps/{miniapp_id}/serve", get(|| async { "<h1/>" }))
+            .layer(middleware::from_fn(security_headers_middleware));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/miniapps/{MINI_APP_ID}/serve"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.headers().get(X_FRAME_OPTIONS).is_none(),
+            "the runner/preview iframe cannot load a frame-denied document"
+        );
+        let policies: Vec<&str> = response
+            .headers()
+            .get_all(&CONTENT_SECURITY_POLICY)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            policies.len(),
+            1,
+            "exactly one policy field, so isolation never depends on an intersection: {policies:?}"
+        );
+        let policy = policies[0];
+        // No allow-same-origin: the generated document must not run with the
+        // deployment's origin authority, which in WebUI mode is the session's.
+        assert!(policy.contains("sandbox allow-scripts allow-forms allow-popups allow-modals"));
+        assert!(!policy.contains("allow-same-origin"));
+        assert!(policy.contains(OFFICE_FRAME_ANCESTORS));
+        assert!(!policy.contains('*'));
+        assert_eq!(response.headers().get("x-content-type-options").unwrap(), "nosniff");
+    }
+
+    /// Both policies must keep deriving their ancestor list from the one shared
+    /// source list, so an origin added for one surface is never missing on the other.
+    #[test]
+    fn miniapp_serve_policy_reuses_the_office_ancestor_list() {
+        assert!(
+            MINIAPP_SERVE_POLICY.ends_with(OFFICE_FRAME_ANCESTORS),
+            "{MINIAPP_SERVE_POLICY}"
+        );
+    }
+
+    /// Regression: the runner iframe loads the serve route cross-origin from the
+    /// Vite dev server under `tauri dev`. When that origin is absent from
+    /// `frame-ancestors` the request still succeeds with 200 and the browser then
+    /// refuses to render the frame, so the failure looks like an empty panel with
+    /// a healthy server log. Debug builds must therefore trust `devUrl`.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_debug_build_lets_the_vite_dev_origin_frame_a_miniapp() {
+        for origin in ["http://localhost:5173", "http://127.0.0.1:5173"] {
+            assert!(MINIAPP_SERVE_POLICY.contains(origin), "{origin} missing: {MINIAPP_SERVE_POLICY}");
+            assert!(OFFICE_FRAME_ANCESTORS.contains(origin), "{origin} missing: {OFFICE_FRAME_ANCESTORS}");
+        }
+    }
+
+    #[tokio::test]
+    async fn miniapp_serve_route_policy_replaces_any_handler_policy() {
+        let app = Router::new()
+            .route("/api/miniapps/{miniapp_id}/serve", get(upstream_csp_response))
+            .layer(middleware::from_fn(security_headers_middleware));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/miniapps/0190f5fe-7c00-7a00-8000-000000000001/serve")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let policies: Vec<&str> = response
+            .headers()
+            .get_all(&CONTENT_SECURITY_POLICY)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(policies, vec![MINIAPP_SERVE_POLICY]);
+    }
+
+    #[tokio::test]
+    async fn miniapp_management_routes_remain_frame_denied() {
+        const MINI_APP_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+        for uri in [
+            "/api/miniapps".to_string(),
+            format!("/api/miniapps/{MINI_APP_ID}"),
+            // Nothing below `/serve` inherits the exemption.
+            format!("/api/miniapps/{MINI_APP_ID}/serve/index.html"),
+            format!("/api/miniapps/{MINI_APP_ID}/serve/"),
+        ] {
+            let app = Router::new()
+                .fallback(get(|| async { "ok" }))
+                .layer(middleware::from_fn(security_headers_middleware));
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                response.headers().get(X_FRAME_OPTIONS).unwrap(),
+                "DENY",
+                "{uri} must stay frame-denied"
+            );
+            assert!(
+                response.headers().get(&CONTENT_SECURITY_POLICY).is_none(),
+                "{uri} is not a document channel and must carry no sandbox policy"
+            );
+        }
     }
 
     #[tokio::test]

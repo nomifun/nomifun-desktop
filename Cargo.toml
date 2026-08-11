@@ -40,6 +40,7 @@ nomifun-terminal = { path = "crates/backend/nomifun-terminal" }
 nomifun-preset = { path = "crates/backend/nomifun-preset" }
 nomifun-customer-service = { path = "crates/backend/nomifun-customer-service" }
 nomifun-workshop = { path = "crates/backend/nomifun-workshop" }
+nomifun-miniapp = { path = "crates/backend/nomifun-miniapp" }
 nomifun-creation = { path = "crates/backend/nomifun-creation" }
 nomifun-app = { path = "crates/backend/nomifun-app" }
 nomifun-robot = { path = "crates/backend/nomifun-robot" }

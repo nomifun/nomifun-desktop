@@ -4016,6 +4016,17 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(conversation_id)
         .execute(&mut *tx)
         .await?;
+        // A mini-app is a finished artifact, not a child of its build log: it
+        // keeps running from the stored HTML alone. Forget the provenance link and
+        // keep the app.
+        sqlx::query(
+            "UPDATE miniapps \
+             SET source_conversation_id = NULL \
+             WHERE source_conversation_id = ?",
+        )
+        .bind(conversation_id)
+        .execute(&mut *tx)
+        .await?;
         let requirement_delete_detail = format!(
             "Conversation {conversation_id} was deleted while this requirement could be executing; the outcome is ambiguous and automatic execution was not restarted."
         );
