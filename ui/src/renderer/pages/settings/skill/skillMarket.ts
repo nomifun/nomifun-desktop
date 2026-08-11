@@ -29,6 +29,30 @@ const MARKET_SOURCE_URLS: Record<SkillMarketSource, string> = {
 export const marketSourceLabel = (source: SkillMarketSource): string => MARKET_SOURCE_LABELS[source];
 export const marketSourceUrl = (source: SkillMarketSource): string => MARKET_SOURCE_URLS[source];
 
+const normalizeInstalledResourceName = (value: string): string =>
+  value
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[\s_]+/g, '-');
+
+/**
+ * Market display names are not always the installed SKILL.md name. Use both
+ * the display name and the canonical trailing slug so returning from the Nomi
+ * install draft reliably turns the action into “Added”.
+ */
+export const isSkillMarketItemInstalled = (
+  item: Pick<ISkillMarketItem, 'id' | 'name'>,
+  installedSkillNames: Iterable<string>
+): boolean => {
+  const idSlug = item.id.split(':').slice(1).join(':').split('/').filter(Boolean).at(-1) ?? '';
+  const candidates = new Set(
+    [item.name, idSlug]
+      .map(normalizeInstalledResourceName)
+      .filter(Boolean)
+  );
+  return Array.from(installedSkillNames).some((name) => candidates.has(normalizeInstalledResourceName(name)));
+};
+
 const MAX_NAME_LENGTH = 96;
 const MAX_DESCRIPTION_LENGTH = 220;
 const MAX_COMMAND_LENGTH = 320;

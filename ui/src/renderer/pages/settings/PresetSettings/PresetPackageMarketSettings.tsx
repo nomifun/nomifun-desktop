@@ -1,7 +1,7 @@
 import { ipcBridge } from '@/common';
 import type { ISkillMarketItem, ISkillMarketPackageResponse } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import type { CreatePresetRequest } from '@/common/types/agent/presetTypes';
+import type { CreatePresetRequest, Preset } from '@/common/types/agent/presetTypes';
 import { parsePresetId, type PresetId } from '@/common/types/ids';
 import { resolveLocaleKey, uuidv7 } from '@/common/utils';
 import { Message } from '@arco-design/web-react';
@@ -12,6 +12,78 @@ import { PRESET_MARKET_SOURCES } from '@/renderer/pages/settings/skill/skillMark
 
 type PresetPackageMarketSettingsProps = {
   onImported: () => void | Promise<void>;
+  presets: Preset[];
+  addedStateLoading?: boolean;
+};
+
+const PRESET_MARKET_ID_STORAGE_KEY = 'nomifun.presetMarket.itemPresetIds.v1';
+
+type KeyValueStorage = Pick<Storage, 'getItem' | 'setItem'>;
+
+const marketPresetStorage = (): KeyValueStorage | null => {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage;
+  } catch {
+    return null;
+  }
+};
+
+export const readPresetMarketIds = (storage: KeyValueStorage | null): Record<string, PresetId> => {
+  if (!storage) return {};
+  try {
+    const parsed = JSON.parse(storage.getItem(PRESET_MARKET_ID_STORAGE_KEY) || '{}') as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).flatMap(([itemId, value]) => {
+        try {
+          return [[itemId, parsePresetId(value)]];
+        } catch {
+          return [];
+        }
+      })
+    );
+  } catch {
+    return {};
+  }
+};
+
+export const getOrCreatePresetMarketId = (
+  itemId: string,
+  storage: KeyValueStorage | null = marketPresetStorage()
+): PresetId => {
+  const ids = readPresetMarketIds(storage);
+  const existing = ids[itemId];
+  if (existing) return existing;
+  const presetId = parsePresetId(uuidv7());
+  try {
+    storage?.setItem(PRESET_MARKET_ID_STORAGE_KEY, JSON.stringify({ ...ids, [itemId]: presetId }));
+  } catch {
+    // The stable ID is an extra duplicate guard; installed-content matching
+    // below still protects the UI when browser storage is unavailable.
+  }
+  return presetId;
+};
+
+const normalizePackageText = (value: string | undefined): string => (value ?? '').trim().toLocaleLowerCase();
+
+export const isPresetMarketItemInstalled = (
+  item: Pick<ISkillMarketItem, 'id' | 'name' | 'description'>,
+  presets: readonly Preset[],
+  storage: KeyValueStorage | null = marketPresetStorage()
+): boolean => {
+  const mappedPresetId = readPresetMarketIds(storage)[item.id];
+  if (mappedPresetId && presets.some((preset) => preset.preset_id === mappedPresetId)) return true;
+
+  // Compatibility for expert packages installed before stable market IDs
+  // were recorded. Pair name and description to avoid blocking an unrelated
+  // user preset that merely has the same title.
+  const itemName = normalizePackageText(item.name);
+  const itemDescription = normalizePackageText(item.description);
+  return presets.some(
+    (preset) =>
+      preset.source === 'user' &&
+      normalizePackageText(preset.name) === itemName &&
+      normalizePackageText(preset.description) === itemDescription
+  );
 };
 
 const PACKAGE_METADATA_FIELDS = new Set([
@@ -84,11 +156,18 @@ export const buildPresetFromMarketPackage = (
   included_skills: packageSkillBindings(resolved.skill_slugs, skillBindingSource),
 });
 
-const PresetPackageMarketSettings: React.FC<PresetPackageMarketSettingsProps> = ({ onImported }) => {
+const PresetPackageMarketSettings: React.FC<PresetPackageMarketSettingsProps> = ({
+  onImported,
+  presets,
+  addedStateLoading = false,
+}) => {
   const { t, i18n } = useTranslation();
 
   const handleAdd = useCallback(
     async (item: ISkillMarketItem) => {
+      // Reserve the durable market→preset identity before the network step so
+      // two app windows cannot mint separate preset IDs for the same package.
+      const presetId = getOrCreatePresetMarketId(item.id);
       try {
         const installedPackage = await ipcBridge.fs.installSkillMarketPackage.invoke({
           source: item.source,
@@ -112,7 +191,6 @@ const PresetPackageMarketSettings: React.FC<PresetPackageMarketSettingsProps> = 
           return;
         }
 
-        const presetId = parsePresetId(uuidv7());
         const preset = buildPresetFromMarketPackage(
           { ...installedPackage.package, skill_slugs: installedPackage.installed_skill_names },
           resolveLocaleKey(i18n.language),
@@ -181,6 +259,11 @@ const PresetPackageMarketSettings: React.FC<PresetPackageMarketSettingsProps> = 
     [i18n.language, onImported, t]
   );
 
+  const isAdded = useCallback(
+    (item: ISkillMarketItem) => isPresetMarketItemInstalled(item, presets),
+    [presets]
+  );
+
   return (
     <MarketSettingsPanel
       title={t('settings.presetMarket.title', { defaultValue: 'Preset Market' })}
@@ -194,6 +277,8 @@ const PresetPackageMarketSettings: React.FC<PresetPackageMarketSettingsProps> = 
       searchPlaceholder={t('settings.presetMarket.searchPlaceholder', { defaultValue: 'Search expert packages...' })}
       emptyText={t('settings.presetMarket.empty', { defaultValue: 'Refresh to load expert packages.' })}
       onAdd={handleAdd}
+      isAdded={isAdded}
+      addedStateLoading={addedStateLoading}
       testIdPrefix='preset-market'
     />
   );

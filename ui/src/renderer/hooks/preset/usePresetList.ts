@@ -21,7 +21,7 @@ export const usePresetList = () => {
   const { i18n } = useTranslation();
   const [activePresetId, setActivePresetId] = useState<PresetReference | null>(null);
   const localeKey = resolveLocaleKey(i18n.language);
-  const { data: catalog = [], mutate } = useSWR<Preset[]>(
+  const { data: catalog = [], error: loadError, isLoading, mutate } = useSWR<Preset[]>(
     PRESET_CATALOG_SWR_KEY,
     fetchPresetCatalog,
   );
@@ -51,6 +51,8 @@ export const usePresetList = () => {
     activePreset,
     isExtensionPreset,
     loadPresets,
+    loadError,
+    isLoading,
     localeKey,
   };
 };

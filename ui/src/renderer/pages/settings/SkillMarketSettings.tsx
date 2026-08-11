@@ -3,6 +3,7 @@
  * MarketSettingsPanel to the skill ranking sources: "Add" hands a reviewed,
  * never auto-sent installation draft to Nomi via the quick-start flow.
  */
+import { ipcBridge } from '@/common';
 import type { ISkillMarketItem } from '@/common/adapter/ipcBridge';
 import { resolveLocaleKey } from '@/common/utils';
 import { useNomiQuickStart } from '@/renderer/hooks/agent/useNomiQuickStart';
@@ -11,18 +12,69 @@ import { ENHANCED_TOOLS_PAGE_STACK_CLASS } from './enhancedToolsLayout';
 import {
   buildSkillMarketConversationName,
   buildSkillMarketInstallPrompt,
+  isSkillMarketItemInstalled,
   SKILL_MARKET_SOURCES,
 } from './skill/skillMarket';
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 const CACHE_KEY = 'nomifun.skillMarket.rankings.v4';
 const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v4';
 
-const SkillMarketSettings: React.FC = () => {
+type SkillMarketSettingsProps = {
+  active?: boolean;
+};
+
+const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true }) => {
   const { t, i18n } = useTranslation();
   const localeKey = resolveLocaleKey(i18n.language);
   const { start } = useNomiQuickStart();
+  const [installedSkillNames, setInstalledSkillNames] = useState<Set<string>>(new Set());
+  const [installedStateLoading, setInstalledStateLoading] = useState(true);
+  const [installedStateAvailable, setInstalledStateAvailable] = useState(false);
+
+  useEffect(() => {
+    if (!active) return;
+    let disposed = false;
+    setInstalledStateLoading(true);
+    setInstalledStateAvailable(false);
+    void Promise.allSettled([
+      ipcBridge.fs.listAvailableSkills.invoke(),
+      ipcBridge.fs.detectAndCountExternalSkills.invoke(),
+    ])
+      .then(([availableResult, externalResult]) => {
+        const names = new Set<string>();
+        if (availableResult.status === 'fulfilled') {
+          for (const skill of availableResult.value) names.add(skill.name);
+        } else {
+          console.error('Failed to load Nomi skills for the market:', availableResult.reason);
+        }
+        if (externalResult.status === 'fulfilled') {
+          for (const source of externalResult.value) {
+            for (const skill of source.skills) names.add(skill.name);
+          }
+        } else {
+          console.error('Failed to load external Agent skills for the market:', externalResult.reason);
+        }
+        if (!disposed) {
+          setInstalledSkillNames(names);
+          setInstalledStateAvailable(
+            availableResult.status === 'fulfilled' || externalResult.status === 'fulfilled'
+          );
+        }
+      })
+      .finally(() => {
+        if (!disposed) setInstalledStateLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [active]);
+
+  const isAdded = useCallback(
+    (item: ISkillMarketItem) => isSkillMarketItemInstalled(item, installedSkillNames),
+    [installedSkillNames]
+  );
 
   const handleAdd = useCallback(
     async (item: ISkillMarketItem) => {
@@ -50,6 +102,8 @@ const SkillMarketSettings: React.FC = () => {
           searchPlaceholder={t('settings.skillsMarket.searchPlaceholder', { defaultValue: '搜索当前市场技能...' })}
           emptyText={t('settings.skillsMarket.empty', { defaultValue: '正在准备榜单，点击刷新可重新采集。' })}
           onAdd={handleAdd}
+          isAdded={isAdded}
+          addedStateLoading={installedStateLoading || !installedStateAvailable}
           enableTagFilter
           testIdPrefix='skill-market'
           text={{
