@@ -14,7 +14,6 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import zhSettings from '@/renderer/services/i18n/locales/zh-CN/settings.json';
 import ModelDefinitionEditor from './ModelDefinitionEditor';
 import {
-  applyCatalogSuggestion,
   emptyCapabilityDraft,
   type ModelDefinitionDraft,
   type ModelProtocolManifest,
@@ -105,7 +104,8 @@ const render = (
   value: ModelDefinitionDraft,
   manifestMap: ModelProtocolManifestMap = manifests,
   providerAuthScheme = 'bearer',
-  validationErrors: CapabilityValidationResult['errors'] = []
+  validationErrors: CapabilityValidationResult['errors'] = [],
+  editorProps: Partial<React.ComponentProps<typeof ModelDefinitionEditor>> = {},
 ): string =>
   renderToStaticMarkup(
     <I18nextProvider i18n={testI18n}>
@@ -116,12 +116,13 @@ const render = (
         providerAuthScheme={providerAuthScheme}
         manifests={manifestMap}
         validationErrors={validationErrors}
+        {...editorProps}
       />
     </I18nextProvider>
   );
 
 describe('unified model definition editor rendering and interactions', () => {
-  test('puts the model identity first while preserving all nine tasks on an existing model', () => {
+  test('keeps all nine capabilities intact when editing an existing model', () => {
     const definition: ModelDefinitionDraft = {
       model: 'user-entered/model-not-in-catalog',
       capabilities: MODEL_TASK_ORDER.map((task) => ({
@@ -129,7 +130,9 @@ describe('unified model definition editor rendering and interactions', () => {
         protocol: `stepfun.${task}`,
       })),
     };
-    const html = render(definition);
+    const html = render(definition, manifests, 'bearer', [], {
+      modelReadOnly: true,
+    });
 
     for (const task of MODEL_TASK_ORDER) {
       expect(html.includes(`data-capability-card="${task}"`)).toBe(true);
@@ -137,8 +140,9 @@ describe('unified model definition editor rendering and interactions', () => {
     expect((html.match(/data-capability-card=/g) ?? []).length).toBe(9);
     expect((html.match(/data-remove-model-task=/g) ?? []).length).toBe(9);
     expect(html.includes('value="user-entered/model-not-in-catalog"')).toBe(true);
-    expect(html.indexOf('模型 ID')).toBeLessThan(html.indexOf('支持的任务'));
-    expect(html.indexOf('模型 ID')).toBeLessThan(html.indexOf('data-capability-card="chat"'));
+    expect(html.includes('data-readonly-model-id="true"')).toBe(true);
+    expect(html.includes('data-primary-model-task-picker')).toBe(false);
+    expect(html.includes('data-unified-model-input')).toBe(false);
     const chatHeader = html.slice(
       html.indexOf('data-capability-card-header="chat"'),
       html.indexOf('data-capability-details="chat"')
@@ -149,6 +153,65 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('https://api.stepfun.com/v1')).toBe(true);
     expect(html.includes('data-endpoint-field="content_endpoint"')).toBe(true);
     expect(html.includes('/v1/videos/{id}/content')).toBe(true);
+  });
+
+  test('puts the model type before one unified catalog and free-text model input', () => {
+    const html = render({ model: '', capabilities: [] }, manifests, 'bearer', [], {
+      catalogSuggestions: [
+        {
+          value: 'chat-model',
+          label: 'Chat model',
+          tasks: ['chat'],
+          traits: [],
+        },
+        {
+          value: 'image-model',
+          label: 'Image model',
+          tasks: ['image_generation'],
+          traits: [],
+        },
+      ],
+    });
+
+    expect(html.indexOf('data-primary-model-task-picker')).toBeLessThan(
+      html.indexOf('data-unified-model-input')
+    );
+    expect(html.includes('data-model-catalog-picker')).toBe(false);
+    expect(html.includes('disabled=""')).toBe(true);
+    expect(html.includes('请先选择模型类型')).toBe(true);
+  });
+
+  test('only exposes catalog models compatible with the selected primary type', () => {
+    const html = render(
+      { model: '', capabilities: [emptyCapabilityDraft('image_generation')] },
+      manifests,
+      'bearer',
+      [],
+      {
+        catalogSuggestions: [
+          {
+            value: 'chat-model',
+            label: 'Chat model',
+            tasks: ['chat'],
+            traits: [],
+          },
+          {
+            value: 'image-model',
+            label: 'Image model',
+            tasks: ['image_generation'],
+            traits: [],
+          },
+          {
+            value: 'taskless-model',
+            label: 'Taskless model',
+            tasks: [],
+            traits: [],
+          },
+        ],
+      }
+    );
+
+    expect(html.includes('data-filtered-catalog-count="1"')).toBe(true);
   });
 
   test('keeps ready capability details collapsed behind accessible advanced controls', () => {
@@ -243,25 +306,6 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('SDK')).toBe(true);
     expect(html.includes('data-effective-base-url=')).toBe(false);
     expect(html.includes('data-endpoint-field=')).toBe(false);
-  });
-
-  test('catalog selection replaces the old model draft with the suggested task cards', () => {
-    const initial: ModelDefinitionDraft = {
-      model: 'manual/model',
-      capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'stepfun.chat' }],
-    };
-    const afterCatalog = applyCatalogSuggestion(initial, {
-      model: 'catalog/model',
-      tasks: ['chat', 'speech_synthesis', 'speech_recognition'],
-      traits: ['audio_output'],
-    });
-    const html = render(afterCatalog);
-
-    expect((html.match(/data-capability-card=/g) ?? []).length).toBe(3);
-    expect(html.includes('data-capability-card="chat"')).toBe(true);
-    expect(html.includes('data-capability-card="speech_synthesis"')).toBe(true);
-    expect(html.includes('data-capability-card="speech_recognition"')).toBe(true);
-    expect(html.includes('value="catalog/model"')).toBe(true);
   });
 
   test('keeps a generic registered protocol selectable and shows compatibility and auth warnings', () => {

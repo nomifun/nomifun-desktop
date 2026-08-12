@@ -193,7 +193,7 @@ async fn fetch_xai(
     api_key: &str,
 ) -> Result<Vec<ModelInfo>, AppError> {
     let base = ensure_v1_path(base_url);
-    let mut models = Vec::new();
+    let mut models: Vec<ModelInfo> = Vec::new();
     for (path, task) in [
         ("language-models", ModelTask::Chat),
         ("image-generation-models", ModelTask::ImageGeneration),
@@ -213,7 +213,11 @@ async fn fetch_xai(
             .await
             .map_err(|_| AppError::BadGateway(format!("xAI {path} response was not valid JSON")))?;
         for item in body.models {
-            if !models.iter().any(|known: &ModelInfo| known.id == item.id) {
+            if let Some(model) = models.iter_mut().find(|known| known.id == item.id) {
+                if !model.tasks.contains(&task) {
+                    model.tasks.push(task);
+                }
+            } else {
                 models.push(ModelInfo {
                     id: item.id,
                     name: None,
@@ -996,7 +1000,11 @@ mod tests {
         let models = fetch_xai(&no_proxy_client(), &server.uri(), "xai-key")
             .await
             .unwrap();
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
+        assert_eq!(
+            models.iter().find(|model| model.id == "shared-model").unwrap().tasks,
+            vec![ModelTask::Chat, ModelTask::ImageGeneration]
+        );
+        let ids = models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>();
         assert_eq!(
             ids,
             [

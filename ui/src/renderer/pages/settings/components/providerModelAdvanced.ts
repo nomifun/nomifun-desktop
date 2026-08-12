@@ -6,7 +6,7 @@
 
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
-import { MODEL_TASK_ORDER, MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
+import { MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
 import type {
   ModelProtocolManifestResponse,
   ProtocolDescriptor,
@@ -187,27 +187,46 @@ const CATALOG_TRAITS_BY_TASK: Readonly<Record<ModelTask, readonly ModelTrait[]>>
   rerank: [],
 };
 
+/** AutoComplete option clicks are committed by onSelect, never by the preceding onChange. */
+export const resolveModelInputChange = (model: string, option?: unknown): string | undefined =>
+  option === undefined ? model : undefined;
+
+/** Directory entries without an explicit task are never treated as universal. */
+export const catalogSuggestionsForTask = <T extends { tasks: readonly ModelTask[] }>(
+  suggestions: readonly T[],
+  task: ModelTask | undefined
+): T[] => (task ? suggestions.filter((suggestion) => suggestion.tasks.includes(task)) : []);
+
 /**
- * Select one catalog model by replacing the previous model's task drafts with
- * clean drafts derived from that model's catalog profile. Catalog traits are
- * global in the current DTO, so each task receives only traits meaningful for
- * that exact task.
+ * A catalog choice fills only the type the user selected first. Other catalog
+ * tasks remain available through the explicit "add another task" flow.
  */
-export const applyCatalogSuggestion = (
+export const applyCatalogSuggestionForTask = (
   _definition: ModelDefinitionDraft,
-  suggestion: CatalogCapabilitySuggestion
-): ModelDefinitionDraft => {
-  const tasks = MODEL_TASK_ORDER.filter((task) => suggestion.tasks.includes(task));
-  return {
-    model: suggestion.model,
-    capabilities: tasks.map((task) => ({
+  suggestion: CatalogCapabilitySuggestion,
+  task: ModelTask
+): ModelDefinitionDraft => ({
+  model: suggestion.model,
+  capabilities: [
+    {
       ...emptyCapabilityDraft(task),
-      traits: MODEL_TRAIT_ORDER.filter(
-        (trait) => suggestion.traits.includes(trait) && CATALOG_TRAITS_BY_TASK[task].includes(trait)
-      ),
-    })),
-  };
-};
+      traits: suggestion.tasks.includes(task)
+        ? MODEL_TRAIT_ORDER.filter(
+            (trait) => suggestion.traits.includes(trait) && CATALOG_TRAITS_BY_TASK[task].includes(trait)
+          )
+        : [],
+    },
+  ],
+});
+
+/** Switching an existing primary type starts a clean task draft without leaking transport overrides. */
+export const changePrimaryModelTask = (
+  definition: ModelDefinitionDraft,
+  task: ModelTask
+): ModelDefinitionDraft => ({
+  model: definition.capabilities.length === 0 ? definition.model : '',
+  capabilities: [emptyCapabilityDraft(task)],
+});
 
 /** Fill only blank fields from the backend's provider × task recommendation. */
 export const reconcileCapabilityRecommendations = (
