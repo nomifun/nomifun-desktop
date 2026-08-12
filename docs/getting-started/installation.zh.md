@@ -190,8 +190,8 @@ nomifun-web \
 [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
 它是一个**无 GUI**镜像：在 `debian:bookworm-slim` 上的 SPA + `nomifun-web` +
 `bun`。仓库也附带一份多阶段 `Dockerfile` 与一份 `docker-compose.yml`，
-用于从源码本地构建。下面示例使用已发布的 `v0.3.4` tag；后续有新版本时，
-可按 Docker Hub 页面替换。
+用于从源码本地构建。下面示例使用 Docker Hub 发布的稳定滚动标签 `latest`。
+如需可复现部署，请固定明确版本或镜像 digest。
 
 ### 使用官方镜像快速上手
 
@@ -201,7 +201,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8787:8787 \
   -v nomifun-data:/data \
-  nomifun/nomifun-web:v0.3.4
+  nomifun/nomifun-web:latest
 # 然后访问 http://<server-ip>:8787
 ```
 
@@ -215,7 +215,7 @@ docker run -d \
   -v nomifun-data:/data \
   -e NOMIFUN_ADMIN_USERNAME=admin \
   -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
-  nomifun/nomifun-web:v0.3.4
+  nomifun/nomifun-web:latest
 ```
 
 ### 用 Compose 从源码本地构建

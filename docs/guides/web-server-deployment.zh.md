@@ -103,7 +103,8 @@ nomifun-web --host 0.0.0.0 --port 8787 \
 [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
 当你想在没有源码 checkout 的机器上部署时，直接使用它。仓库也附带一个多阶段
 `Dockerfile` 和一个 `docker-compose.yml`，用于从源码本地构建。下面示例使用
-已发布的 `v0.3.4` tag；后续有新版本时，可按 Docker Hub 页面替换。镜像会：
+Docker Hub 发布的稳定滚动标签 `latest`；如需可复现部署，请固定明确版本或镜像
+digest。镜像会：
 
 1. 用 Bun 构建 SPA。
 2. 从 workspace 编译 `nomifun-web`。
@@ -120,7 +121,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8787:8787 \
   -v nomifun-data:/data \
-  nomifun/nomifun-web:v0.3.4
+  nomifun/nomifun-web:latest
 # 然后打开 http://<server-ip>:8787 并创建首位管理员
 ```
 
@@ -134,7 +135,7 @@ docker run -d \
   -v nomifun-data:/data \
   -e NOMIFUN_ADMIN_USERNAME=admin \
   -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
-  nomifun/nomifun-web:v0.3.4
+  nomifun/nomifun-web:latest
 ```
 
 ### 用 Compose 从源码本地构建

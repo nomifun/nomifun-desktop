@@ -58,28 +58,47 @@
 
 ## NomiFun open-source product family
 
-NomiFun is now three related open-source products. **Desktop is the local AI and
-data hub**; Mobile and the Xiaozhi robot connect to capabilities that you
-explicitly enable on Desktop.
+NomiFun is now three related open-source products. **Desktop is the local AI,
+data, model, Agent, task, and tool hub**; Mobile and the Xiaozhi robot connect to
+capabilities that you explicitly enable on Desktop. Desktop also hosts Agent
+Mini Apps, so an app created by an Agent can keep using the same local runtime
+and governed capabilities instead of becoming an isolated demo.
 
 | Project | Role | Start here |
 |---|---|---|
-| **[NomiFun Desktop](https://github.com/nomifun/nomifun-desktop)** (this repository) | Local AI workstation, model/Agent/Skill runtime, data store, WebUI, REST and MCP service hub | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [WebUI remote access](docs/guides/webui-remote-access.md) |
-| [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | Android / iOS / H5 client for sessions, tasks, requirements, companions and model administration | Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
-| [NomiFun Xiaozhi Yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side interaction | [Xiaozhi robot integration guide](docs/guides/xiaozhi-robot.md) |
+| **[NomiFun Desktop](https://github.com/nomifun/nomifun-desktop)** (this repository) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Mini Apps, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Desktop docs](https://www.nomifun.com/docs/) · [WebUI remote access](docs/guides/webui-remote-access.md) |
+| [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Mobile docs](https://github.com/nomifun/nomifun-mobile#readme) · Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
+| [NomiFun Xiaozhi Yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side multimodal interaction | [Xiaozhi docs](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop integration guide](docs/guides/xiaozhi-robot.md) |
 
 ### Connect the three projects
 
 1. Run Desktop, configure the models/companions you need, and keep all data on
    that machine.
 2. For Mobile, open **Remote & Open → WebUI access**, start the listener, and
-   scan the short-lived QR code from the Mobile app. Desktop remains the server;
-   the phone is the client.
+   scan the short-lived, one-time QR code from the Mobile app. On a LAN, Mobile
+   connects directly to Desktop with **no NomiFun cloud relay**. Desktop remains
+   the authority and server; the phone is an authenticated client, so model
+   credentials and the durable data set do not need to be copied to the phone.
 3. For Xiaozhi, build and flash the Yuntai firmware, then follow the companion
    **Remote control → Robot connection** flow in Desktop to bind the device.
 
 Only enable remote interfaces on networks you trust. The Desktop guides above
 document authentication, LAN exposure, and deployment boundaries.
+
+### One local hub, many interaction surfaces
+
+This is not three unrelated clients that happen to share a logo. Desktop owns
+the durable state and executes models, Agents, requirements, tools, knowledge,
+companion memory, and Skills. Mobile is a direct LAN control surface; Xiaozhi is
+a voice-and-motion hardware surface; Mini Apps are interactive software surfaces
+created and hosted by the same Desktop installation. The result is one governed
+capability graph with multiple ways to reach it, rather than separate clouds,
+accounts, credentials, and copies of user data.
+
+Read [the NomiFun product ecosystem architecture](docs/architecture/product-ecosystem.md)
+for the trust boundaries, communication model, differentiators, and product
+innovation timeline. Simplified Chinese:
+[`product-ecosystem.zh.md`](docs/architecture/product-ecosystem.zh.md).
 
 ---
 
@@ -175,6 +194,14 @@ sessions, and tool coordination. Setup is built into each companion's **Remote
 control → Robot connection** page: copy its OTA address, enter the six-digit
 activation code shown by the robot, and bind the device to that companion.
 
+### 🧩 Agent Mini Apps — turn a conversation into a reusable tool
+
+Create a Mini App in a normal Agent conversation, preview it, and publish it
+into the local Mini Apps library. Published snapshots and editable working
+copies are managed by Desktop; subsequent iteration remains a normal auditable
+conversation instead of a hidden second chat system. A Mini App can therefore
+become a durable interface to the same local Agents, data, and governed tools.
+
 ### 🧠 Agent collaboration
 
 Start from a normal Agent conversation. When the task deserves parallel work, the same Agent capability can delegate parts of it and expose a live execution graph.
@@ -268,11 +295,16 @@ NomiFun does not lock you into a single model vendor. Pick providers by region, 
 
 Run agent CLIs inside in-app PTY sessions (or the standalone `nomi` CLI). NomiFun injects native capabilities — knowledge search, requirement completion, and lifecycle hooks — into known CLIs through their *own* native config, so you keep full fidelity and OAuth.
 
-### 📱 WebUI remote control — scan, and you're in
+### 📱 NomiFun Mobile — direct to your Desktop
 
 > Guide: [`docs/guides/webui-remote-access.md`](docs/guides/webui-remote-access.md)
+> · App: [nomifun-mobile](https://github.com/nomifun/nomifun-mobile)
 
-No social platform required. One-tap **QR pairing** connects your phone or tablet to your computer over the LAN (one-time token, realtime over WebSocket) so you can drive your workstation remotely from the couch.
+No social platform or NomiFun cloud relay is required on a LAN. One-tap **QR
+pairing** gives the phone a short-lived, one-time login credential and connects
+it directly to the authenticated listener inside Desktop. Mobile then uses the
+same sessions, tasks, requirements, companions, models, and tools in real time;
+Desktop remains the data and execution authority.
 
 ### ⚙️ Config once, use anywhere
 
@@ -291,6 +323,11 @@ Bind a companion to any of these and drive it from where you already chat:
 ## 🏗️ Architecture
 
 One React frontend, one Rust backend, **two host modes** — and the same backend runs in-process in both.
+
+At the product-family level, Desktop is also the hub for Mobile, Xiaozhi, Mini
+Apps, and companion IM channels. See
+[`docs/architecture/product-ecosystem.md`](docs/architecture/product-ecosystem.md)
+for the full communication, security, and innovation model.
 
 | | `nomifun-desktop` | `nomifun-web` |
 |---|---|---|
@@ -358,8 +395,8 @@ bun run build:ui && bun run serve:web
 
 The official image is published on Docker Hub:
 [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
-The examples below use the published `v0.3.4` tag; replace it with a newer
-Docker Hub tag when one is available.
+The examples below use `latest`, the stable rolling tag published on Docker
+Hub. For reproducible deployments, pin an explicit version or image digest.
 
 ```bash
 # Pull and run the official image.
@@ -368,7 +405,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8787:8787 \
   -v nomifun-data:/data \
-  nomifun/nomifun-web:v0.3.4
+  nomifun/nomifun-web:latest
 # then open http://<server-ip>:8787 and create the first admin
 ```
 
@@ -383,7 +420,7 @@ docker run -d \
   -v nomifun-data:/data \
   -e NOMIFUN_ADMIN_USERNAME=admin \
   -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
-  nomifun/nomifun-web:v0.3.4
+  nomifun/nomifun-web:latest
 ```
 
 Compose can use the same official image:
@@ -391,7 +428,7 @@ Compose can use the same official image:
 ```yaml
 services:
   nomifun:
-    image: nomifun/nomifun-web:v0.3.4
+    image: nomifun/nomifun-web:latest
     restart: unless-stopped
     ports:
       - "8787:8787"
@@ -414,7 +451,7 @@ docker compose up -d --build
 # then open http://<server-ip>:8787  —  pair with the bundled Caddyfile for TLS
 
 # Fast path when ui/dist and target/release/nomifun-web are already built:
-bun run docker:prebuilt -- --tag nomifun/nomifun-web:v0.3.4 --build-missing --sudo
+bun run docker:prebuilt -- --tag nomifun/nomifun-web:latest --build-missing --sudo
 ```
 
 See [`docs/getting-started/installation.md`](docs/getting-started/installation.md) and [`docs/guides/web-server-deployment.md`](docs/guides/web-server-deployment.md) for details.
@@ -617,13 +654,15 @@ Projects and products we appreciate:
 
 ## 📬 Contact & community
 
-We'd love to hear from you. The fastest way to reach us is GitHub; the social channels below are all official.
+The following contact information is shared across the NomiFun open-source
+product family. For reproducible bugs and feature requests, GitHub Issues is the
+preferred channel.
 
 | Channel | Where |
 |---|---|
 | 🌐 **Website** | [www.nomifun.com](https://www.nomifun.com) |
-| 🐙 **GitHub** | [nomifun/nomifun-desktop](https://github.com/nomifun/nomifun-desktop) · [Issues](https://github.com/nomifun/nomifun-desktop/issues) · [Releases](https://github.com/nomifun/nomifun-desktop/releases) |
-| ✉️ **Email** | `hello@nomifun.com` <sub>(provisional — being finalized)</sub> |
+| 🐙 **Issues** | [github.com/nomifun/nomifun-desktop/issues](https://github.com/nomifun/nomifun-desktop/issues) |
+| ✉️ **Email** | [535526063@qq.com](mailto:535526063@qq.com) |
 | 📕 **小红书 / RED** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
 | 📺 **Bilibili** | [NomiFun](https://b23.tv/0UhgKDh) · [demo video](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |
 | 🎵 **抖音 / Douyin** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) |
@@ -636,7 +675,7 @@ We'd love to hear from you. The fastest way to reach us is GitHub; the social ch
 <div align="center">
 <table>
   <tr>
-    <td align="center"><img src="docs/images/contact/wechat-group-qr.jpg" alt="WeChat group QR" width="220"><br/><sub><b>WeChat group / 微信群</b></sub></td>
+    <td align="center"><img src="docs/assets/nomifun-wechat-group.jpg" alt="NomiFun WeChat group QR" width="220"><br/><sub><b>NomiFun WeChat group / NomiFun 微信交流群</b></sub></td>
     <td align="center"><img src="docs/images/contact/qq-group-qr.png" alt="QQ group QR" width="220"><br/><sub><b>QQ group / QQ 群</b></sub></td>
   </tr>
 </table>
