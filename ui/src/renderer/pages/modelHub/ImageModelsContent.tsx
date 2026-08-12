@@ -15,6 +15,7 @@ const ImageModelsContent: React.FC = () => (
     icon={<Pic theme='outline' size='18' strokeWidth={3} />}
     titleKey='settings.modelHub.creation.imageTitle'
     subtitleKey='settings.modelHub.creation.imageSubtitle'
+    defaultModelPreferenceKey='models.default.imageGeneration'
   />
 );
 

@@ -23,7 +23,8 @@ use nomifun_api_types::{
 };
 use nomifun_common::{AgentType, AppError, ExecutionAuthority};
 use nomifun_db::{
-    IClientPreferenceRepository, IMcpServerRepository, IRemoteAgentRepository, ISettingsRepository,
+    IClientPreferenceRepository, IMcpServerRepository, IProviderModelRepository,
+    IProviderRepository, IRemoteAgentRepository, ISettingsRepository,
 };
 use nomifun_model_invoke::{ModelInvokeService, ModelRef};
 
@@ -112,8 +113,20 @@ pub struct AgentFactoryDeps {
     pub skill_manager: Arc<AcpSkillManager>,
     pub remote_agent_repo: Arc<dyn IRemoteAgentRepository>,
     /// Single task-capability and connection resolver used by every Nomi Chat
-    /// build. The factory never reads provider/model rows independently.
+    /// build and by native image generation.
     pub model_invoke: Arc<ModelInvokeService>,
+    /// Read-only catalog membership used to enumerate native image-generation
+    /// candidates. Chat configuration still resolves exclusively through
+    /// `model_invoke`.
+    pub provider_repo: Arc<dyn IProviderRepository>,
+    /// Read-only model membership paired with `provider_repo` for native image
+    /// discovery. Protocol, connection, credential and task validation remain
+    /// owned by `model_invoke`.
+    pub provider_model_repo: Arc<dyn IProviderModelRepository>,
+    /// Native image generation uses the same process-wide invoke service as
+    /// chat when this capability is enabled. `None` is reserved for
+    /// lightweight tests and standalone hosts that must not expose the tool.
+    pub model_invoke_service: Option<Arc<ModelInvokeService>>,
     pub encryption_key: [u8; 32],
     pub agent_registry: Arc<AgentRegistry>,
     pub acp_agent_service: Arc<AcpSessionSyncService>,

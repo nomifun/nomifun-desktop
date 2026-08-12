@@ -56,7 +56,9 @@ describe('modality panel', () => {
     expect(panel.includes('useProvidersQuery()')).toBe(true);
     expect(panel.includes('buildModalityGroups(providers')).toBe(true);
     expect(panel.includes('providerModel.list')).toBe(false);
-    expect(panel.includes('useModelsForTask')).toBe(false);
+    // The management list reads the complete provider tree so disabled rows
+    // remain visible. Only the default image picker asks for runnable models.
+    expect(panel.includes("useModelsForTask('image_generation')")).toBe(true);
     expect(panel.includes('modelDisabled')).toBe(true);
   });
 

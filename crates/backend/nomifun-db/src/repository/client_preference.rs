@@ -6,7 +6,7 @@ const COLLABORATION_MODELS_KEY: &str = "nomi.collaborationModels";
 const NOMI_DEFAULT_MODEL_KEY: &str = "nomi.defaultModel";
 const KNOWLEDGE_AUTOGEN_MODEL_KEY: &str = "knowledge.autogenModel";
 pub const KNOWLEDGE_RETRIEVAL_KEY: &str = "knowledge.retrieval";
-const IMAGE_GENERATION_MODEL_KEY: &str = "tools.imageGenerationModel";
+const IMAGE_GENERATION_DEFAULT_MODEL_KEY: &str = "models.default.imageGeneration";
 const SPEECH_TO_TEXT_KEY: &str = "tools.speechToText";
 const TEXT_TO_SPEECH_KEY: &str = "tools.textToSpeech";
 
@@ -62,6 +62,7 @@ enum ProviderPreferenceKind {
     ModelFailover,
     CollaborationModels,
     RequiredModelObject,
+    CanonicalModelObject,
     OptionalObjectProviderId,
     KnowledgeRetrieval,
 }
@@ -72,11 +73,14 @@ fn provider_preference_kind(key: &str) -> Option<ProviderPreferenceKind> {
         COLLABORATION_MODELS_KEY => Some(ProviderPreferenceKind::CollaborationModels),
         NOMI_DEFAULT_MODEL_KEY
         | KNOWLEDGE_AUTOGEN_MODEL_KEY
-        | IMAGE_GENERATION_MODEL_KEY
         // TTS has no enabled switch: `provider_id` and `model` are both required,
         // so a Provider deletion drops the whole key ("no global default") rather
         // than leaving a half-broken reference behind.
         | TEXT_TO_SPEECH_KEY => Some(ProviderPreferenceKind::RequiredModelObject),
+        // Unlike the older model objects, the image default has a deliberately
+        // closed canonical shape. Tool-era fields such as `switch` must never be
+        // retained under the model-owned key.
+        IMAGE_GENERATION_DEFAULT_MODEL_KEY => Some(ProviderPreferenceKind::CanonicalModelObject),
         SPEECH_TO_TEXT_KEY => Some(ProviderPreferenceKind::OptionalObjectProviderId),
         KNOWLEDGE_RETRIEVAL_KEY => Some(ProviderPreferenceKind::KnowledgeRetrieval),
         _ if is_channel_default_model_key(key) => {
@@ -314,6 +318,7 @@ fn parse_json_provider_preference(
 ) -> Result<NormalizedProviderPreference, DbError> {
     let parsed = parse_json(key, value)?;
     let mut provider_ids = Vec::new();
+    let mut canonical_value = None;
 
     match kind {
         ProviderPreferenceKind::ModelFailover => {
@@ -354,6 +359,20 @@ fn parse_json_provider_preference(
                 "provider_id",
             )?);
         }
+        ProviderPreferenceKind::CanonicalModelObject => {
+            let object = require_object(key, "$", &parsed)?;
+            reject_legacy_provider_id_field(key, "$", object)?;
+            require_model_field(key, "$", object)?;
+            let provider_id = required_provider_field(key, "$", object, "provider_id")?;
+            let model = object
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .expect("validated model field");
+            canonical_value = Some(
+                serde_json::json!({"provider_id": provider_id, "model": model}).to_string(),
+            );
+            provider_ids.push(provider_id);
+        }
         ProviderPreferenceKind::OptionalObjectProviderId => {
             let object = require_object(key, "$", &parsed)?;
             if let Some(provider_id) =
@@ -370,7 +389,7 @@ fn parse_json_provider_preference(
     provider_ids.sort();
     provider_ids.dedup();
     Ok(NormalizedProviderPreference {
-        value: parsed.to_string(),
+        value: canonical_value.unwrap_or_else(|| parsed.to_string()),
         provider_ids,
     })
 }
@@ -427,7 +446,8 @@ pub(crate) fn provider_preference_delete_action(
             });
             Ok(ProviderPreferenceDeleteAction::Update(parsed.to_string()))
         }
-        ProviderPreferenceKind::RequiredModelObject => {
+        ProviderPreferenceKind::RequiredModelObject
+        | ProviderPreferenceKind::CanonicalModelObject => {
             Ok(ProviderPreferenceDeleteAction::Delete)
         }
         ProviderPreferenceKind::OptionalObjectProviderId => {
@@ -506,7 +526,7 @@ mod provider_reference_tests {
                 2,
             ),
             (
-                IMAGE_GENERATION_MODEL_KEY,
+                IMAGE_GENERATION_DEFAULT_MODEL_KEY,
                 serde_json::json!({"provider_id": PROVIDER_A, "model": "a"}).to_string(),
                 1,
             ),
@@ -553,7 +573,7 @@ mod provider_reference_tests {
                 KNOWLEDGE_RETRIEVAL_KEY,
                 r#"{"embedding":{"mode":"remote","provider_id":"prov_legacy","model":"e"},"rerank":{"mode":"local"}}"#,
             ),
-            (IMAGE_GENERATION_MODEL_KEY, r#"[]"#),
+            (IMAGE_GENERATION_DEFAULT_MODEL_KEY, r#"[]"#),
             (SPEECH_TO_TEXT_KEY, r#"{"provider_id":42}"#),
             (
                 "channels.telegram.defaultModel",
@@ -571,7 +591,7 @@ mod provider_reference_tests {
     fn registry_rejects_legacy_id_for_default_model_objects() {
         for key in [
             NOMI_DEFAULT_MODEL_KEY,
-            IMAGE_GENERATION_MODEL_KEY,
+            IMAGE_GENERATION_DEFAULT_MODEL_KEY,
             "channels.telegram.defaultModel",
         ] {
             let value = serde_json::json!({
@@ -585,6 +605,26 @@ mod provider_reference_tests {
                 "{key} returned an unexpected error: {error}"
             );
         }
+    }
+
+    #[test]
+    fn image_generation_default_is_normalized_to_its_closed_shape() {
+        let normalized = normalize_provider_preference(
+            IMAGE_GENERATION_DEFAULT_MODEL_KEY,
+            &serde_json::json!({
+                "provider_id": PROVIDER_A,
+                "model": "image-model",
+                "switch": false,
+                "unexpected": "discarded"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&normalized.value).unwrap(),
+            serde_json::json!({"provider_id": PROVIDER_A, "model": "image-model"})
+        );
     }
 
     #[test]

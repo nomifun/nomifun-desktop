@@ -11,7 +11,7 @@ use base64::Engine as _;
 use nomifun_api_types::ModelTask;
 use serde_json::json;
 
-use crate::adapter::AdapterRegistry;
+use crate::adapter::{AdapterRegistry, ProtocolAdapter};
 use crate::adapters::default_realtime_adapters;
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::realtime::{
@@ -21,6 +21,7 @@ use crate::types::{
     AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle, ModelRef,
     RerankRequest, TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
 };
+use crate::ResolvedCall;
 
 /// Ceiling on one modality probe (resolution + submit).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -110,6 +111,32 @@ pub struct ProbeReport {
     pub message: Option<String>,
 }
 
+/// Opaque state captured from the exact catalog resolution used for a submit.
+///
+/// Its fields intentionally remain crate-private: the resolved call includes
+/// decrypted authentication material. Callers can only hand the context back
+/// to this service for stable polling and artifact materialization.
+pub struct InvocationContext {
+    pub(crate) call: ResolvedCall,
+    pub(crate) adapter: Arc<dyn ProtocolAdapter>,
+    pub(crate) artifact_origin: reqwest::Url,
+}
+
+impl InvocationContext {
+    fn from_resolved(
+        call: ResolvedCall,
+        adapter: Arc<dyn ProtocolAdapter>,
+    ) -> Result<Self, InvokeError> {
+        call.connection.auth.validate()?;
+        let artifact_origin = validated_artifact_origin(&call)?;
+        Ok(Self {
+            call,
+            adapter,
+            artifact_origin,
+        })
+    }
+}
+
 /// The unified multimodal model invocation service.
 pub struct ModelInvokeService {
     pub(crate) provider_repo: Arc<dyn nomifun_db::IProviderRepository>,
@@ -172,18 +199,67 @@ impl ModelInvokeService {
         &self.provider_model_capability_repo
     }
 
+    /// Resolve and validate a catalog model locally without making an upstream
+    /// request.  This is the capability-discovery counterpart to [`Self::invoke`]:
+    /// it shares the exact provider/model/task/adapter/connection resolver, then
+    /// validates the resulting URL and auth material while keeping decrypted
+    /// credentials inside the service boundary.
+    pub async fn validate(&self, m: &ModelRef, task: ModelTask) -> Result<(), InvokeError> {
+        self.resolve_validated_call(m, task).await.map(|_| ())
+    }
+
+    /// Internal form of [`Self::validate`] retained for trusted invoke-layer
+    /// consumers such as artifact materialization.  The call (and therefore
+    /// decrypted auth) never crosses the crate's public API.
+    pub(crate) async fn resolve_validated_call(
+        &self,
+        m: &ModelRef,
+        task: ModelTask,
+    ) -> Result<ResolvedCall, InvokeError> {
+        let request = probe_request(task, &json!({})).ok_or_else(|| {
+            InvokeError::new(
+                InvokeErrorKind::UnsupportedTask,
+                format!("task {task:?} has no one-shot validation request"),
+            )
+        })?;
+        let (call, _adapter) = self.resolve(m, task, request).await?;
+        validated_artifact_origin(&call)?;
+        call.connection.auth.validate()?;
+        Ok(call)
+    }
+
     /// Execute one task invocation: exact task-capability resolution followed
     /// by the selected protocol adapter. A [`TaskOutcome::Pending`] hands
     /// back a [`JobHandle`] the caller later feeds to [`Self::poll`].
     pub async fn invoke(&self, m: &ModelRef, req: TaskRequest) -> Result<TaskOutcome, InvokeError> {
+        self.invoke_with_context(m, req)
+            .await
+            .map(|(outcome, _context)| outcome)
+    }
+
+    /// Submit and return opaque state from that exact resolution. This avoids
+    /// re-reading a mutable catalog after an accepted/billable generation when
+    /// the caller later polls or materializes its assets.
+    pub async fn invoke_with_context(
+        &self,
+        m: &ModelRef,
+        req: TaskRequest,
+    ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
         let task = req.task();
         let (call, adapter) = self.resolve(m, task, req).await?;
-        let redactor = call.connection.auth.secret_redactor();
-        let outcome = adapter
-            .submit(&self.http, &call)
+        let context = InvocationContext::from_resolved(call, adapter)?;
+        let redactor = context.call.connection.auth.secret_redactor();
+        let outcome = context
+            .adapter
+            .submit(&self.http, &context.call)
             .await
             .map_err(|error| error.redacted(&redactor))?;
-        bind_pending_job(&call.protocol, call.config_revision, outcome)
+        let outcome = bind_pending_job(
+            &context.call.protocol,
+            context.call.config_revision,
+            outcome,
+        )?;
+        Ok((outcome, context))
     }
 
     /// Open a live, bidirectional model session through the dedicated
@@ -221,6 +297,47 @@ impl ModelInvokeService {
         validate_job_resume(&call.protocol, call.config_revision, job)?;
         let redactor = call.connection.auth.secret_redactor();
         let outcome = adapter
+            .poll(&self.http, &call, job)
+            .await
+            .map_err(|error| error.redacted(&redactor))?;
+        bind_pending_job(&call.protocol, call.config_revision, outcome)
+    }
+
+    /// Poll with the immutable resolved call and adapter captured by
+    /// [`Self::invoke_with_context`]. Catalog edits made after submit cannot
+    /// invalidate or reroute the already-accepted job.
+    pub async fn poll_with_context(
+        &self,
+        context: &InvocationContext,
+        req: TaskRequest,
+        job: &JobHandle,
+    ) -> Result<TaskOutcome, InvokeError> {
+        let task = req.task();
+        if task != context.call.task {
+            return Err(InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                format!(
+                    "poll request task {task:?} does not match submitted task {:?}",
+                    context.call.task
+                ),
+            ));
+        }
+        if job.adapter_id != context.adapter.id() {
+            return Err(InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                format!(
+                    "job adapter {:?} does not match submitted adapter {:?}",
+                    job.adapter_id,
+                    context.adapter.id()
+                ),
+            ));
+        }
+        let mut call = context.call.clone();
+        call.request = req;
+        validate_job_resume(&call.protocol, call.config_revision, job)?;
+        let redactor = call.connection.auth.secret_redactor();
+        let outcome = context
+            .adapter
             .poll(&self.http, &call, job)
             .await
             .map_err(|error| error.redacted(&redactor))?;
@@ -367,6 +484,31 @@ impl ModelInvokeService {
     }
 }
 
+fn validated_artifact_origin(call: &ResolvedCall) -> Result<reqwest::Url, InvokeError> {
+    let endpoint = call.endpoint_url()?;
+    let mut url = reqwest::Url::parse(&endpoint).map_err(|error| {
+        InvokeError::config(format!("resolved endpoint is not a valid URL: {error}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(InvokeError::config(format!(
+            "resolved endpoint uses unsupported scheme {:?}",
+            url.scheme()
+        )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(InvokeError::config(
+            "resolved endpoint must not contain embedded credentials",
+        ));
+    }
+    // Retain only the origin needed for same-origin/private-network policy;
+    // endpoint paths, query parameters and fragments never cross this opaque
+    // context boundary or appear in materialization errors.
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
 /// The smallest valid [`TaskRequest`] for a probe, overlaying known catalog
 /// params (image size/quality + steps/cfg_scale/text_mode passthrough, TTS
 /// voice) without introducing a second transport configuration source.
@@ -457,7 +599,109 @@ fn probe_request(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use nomifun_api_types::ModelTask;
+    use nomifun_common::encrypt_string;
+    use nomifun_db::{
+        CreateProviderParams, IProviderConnectionRepository, IProviderModelRepository,
+        IProviderRepository, NewProviderModel, NewProviderModelCapability,
+        SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
+        SqliteProviderModelRepository, SqliteProviderRepository, SqlitePool,
+        UpdateProviderParams, UpsertProviderConnectionParams, init_database_memory,
+    };
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     use super::*;
+    use crate::{
+        AdapterRegistry, ProducedData, ProtocolEndpointPurpose, TaskResult, default_adapters,
+        preset_protocol_recommendation, protocol_task_descriptor,
+    };
+
+    const TEST_KEY: [u8; 32] = [0x42; 32];
+
+    struct CapabilitySeed {
+        task: String,
+        protocol: &'static str,
+        connection_role: &'static str,
+        endpoint: Option<String>,
+        poll_endpoint: Option<String>,
+        content_endpoint: Option<String>,
+        realtime_endpoint: Option<String>,
+    }
+
+    fn capability_seed(platform: &str, task: ModelTask) -> CapabilitySeed {
+        let route = preset_protocol_recommendation(platform, task)
+            .unwrap_or_else(|| panic!("test platform {platform:?} has no route for {task:?}"));
+        let descriptor = protocol_task_descriptor(route.protocol, task)
+            .unwrap_or_else(|| panic!("missing descriptor for {} {task:?}", route.protocol));
+        let endpoint = |purpose| {
+            descriptor
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.purpose == purpose)
+                .map(|endpoint| endpoint.default_value.clone())
+        };
+        CapabilitySeed {
+            task: serde_json::to_value(task)
+                .expect("task serializes")
+                .as_str()
+                .expect("task is a string")
+                .to_owned(),
+            protocol: route.protocol,
+            connection_role: route.connection_role.unwrap_or("default"),
+            endpoint: endpoint(ProtocolEndpointPurpose::Submit),
+            poll_endpoint: endpoint(ProtocolEndpointPurpose::Poll),
+            content_endpoint: endpoint(ProtocolEndpointPurpose::Content),
+            realtime_endpoint: endpoint(ProtocolEndpointPurpose::Session),
+        }
+    }
+
+    fn capability_input<'a>(
+        seed: &'a CapabilitySeed,
+        provider_params: &'a str,
+    ) -> NewProviderModelCapability<'a> {
+        NewProviderModelCapability {
+            task: &seed.task,
+            traits: "[]",
+            protocol: seed.protocol,
+            connection_role: seed.connection_role,
+            base_url_override: None,
+            endpoint: seed.endpoint.as_deref(),
+            poll_endpoint: seed.poll_endpoint.as_deref(),
+            content_endpoint: seed.content_endpoint.as_deref(),
+            realtime_endpoint: seed.realtime_endpoint.as_deref(),
+            allow_cross_origin_credentials: false,
+            provider_params,
+            context_limit: None,
+        }
+    }
+
+    async fn setup() -> (ModelInvokeService, SqlitePool) {
+        let database = init_database_memory().await.expect("database");
+        let pool = database.pool().clone();
+        let service = ModelInvokeService::new(
+            Arc::new(SqliteProviderRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelCapabilityRepository::new(pool.clone())),
+            Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
+            TEST_KEY,
+            reqwest::Client::new(),
+            AdapterRegistry::new(default_adapters()),
+        );
+        (service, pool)
+    }
+
+    async fn provider_revision(pool: &SqlitePool, provider_id: &str) -> i64 {
+        SqliteProviderRepository::new(pool.clone())
+            .find_by_id(provider_id)
+            .await
+            .expect("provider lookup")
+            .expect("provider exists")
+            .config_revision
+    }
 
     #[test]
     fn probe_assets_have_expected_container_signatures() {
@@ -476,6 +720,229 @@ mod tests {
         }
     }
 
+    /// Seed an enabled openai-platform provider whose base_url is the mock
+    /// server (key decrypts to `sk-test` → `Authorization: Bearer sk-test`).
+    async fn seed_provider(pool: &SqlitePool, base_url: &str) -> String {
+        let base_url = format!("{}/v1", base_url.trim_end_matches('/'));
+        seed_provider_on(pool, "openai", &base_url).await
+    }
+
+    /// Platform-aware provider seeder (same key material as [`seed_provider`]).
+    async fn seed_provider_on(pool: &SqlitePool, platform: &str, base_url: &str) -> String {
+        let repo = SqliteProviderRepository::new(pool.clone());
+        let encrypted = encrypt_string(r#"{"api_keys":["sk-test"]}"#, &TEST_KEY).unwrap();
+        let seed = capability_seed(platform, ModelTask::ImageGeneration);
+        let capabilities = [capability_input(&seed, "{}")];
+        repo.create(
+            CreateProviderParams {
+                provider_id: None,
+                platform,
+                name: "Wiremock Provider",
+                base_url,
+                auth_scheme: "bearer",
+                credentials_encrypted: &encrypted,
+                enabled: true,
+                bedrock_config: None,
+                sort_order: None,
+            },
+            &NewProviderModel {
+                model: "__test_seed__",
+                enabled: false,
+                sort_order: i64::MAX,
+                description: None,
+                capabilities: &capabilities,
+            },
+            &[],
+        )
+        .await
+        .unwrap()
+        .0
+        .provider_id
+    }
+
+    async fn seed_model(
+        pool: &SqlitePool,
+        provider_id: &str,
+        model: &str,
+        tasks: &str,
+        params: &str,
+        enabled: bool,
+    ) {
+        let provider = SqliteProviderRepository::new(pool.clone())
+            .find_by_id(provider_id)
+            .await
+            .unwrap()
+            .expect("provider exists");
+        let tasks: Vec<ModelTask> = serde_json::from_str(tasks).expect("valid task list");
+        let seeds: Vec<_> = tasks
+            .into_iter()
+            .map(|task| capability_seed(&provider.platform, task))
+            .collect();
+        let capabilities: Vec<_> = seeds
+            .iter()
+            .map(|seed| capability_input(seed, params))
+            .collect();
+        let repo = SqliteProviderModelRepository::new(pool.clone());
+        repo.save(
+            provider_id,
+            provider.config_revision,
+            &NewProviderModel {
+                model,
+                enabled,
+                sort_order: 0,
+                description: None,
+                capabilities: &capabilities,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn mref(provider_id: &str, model: &str) -> ModelRef {
+        ModelRef { provider_id: provider_id.into(), model: model.into() }
+    }
+
+    fn image_request(prompt: &str) -> TaskRequest {
+        TaskRequest::ImageGeneration(ImageGenRequest {
+            prompt: prompt.into(),
+            count: 1,
+            size: None,
+            quality: None,
+            extra: json!({}),
+        })
+    }
+
+    fn video_request() -> TaskRequest {
+        TaskRequest::VideoGeneration(VideoGenRequest {
+            prompt: "a wave".into(),
+            seconds: None,
+            size: None,
+            inputs: vec![],
+            extra: json!({}),
+        })
+    }
+
+    // -- invoke --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invoke_image_generation_end_to_end() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .and(header("authorization", "Bearer sk-test"))
+            .and(body_partial_json(json!({"model": "gpt-image-1", "prompt": "a fox", "n": 1})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": "aGk="}]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
+
+        let out = svc.invoke(&mref(&pid, "gpt-image-1"), image_request("a fox")).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
+        assert_eq!(assets.len(), 1);
+        assert!(matches!(&assets[0].data, ProducedData::Bytes(b) if b == b"hi"));
+    }
+
+    #[tokio::test]
+    async fn invocation_context_survives_catalog_disable_for_materialization() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data": [{"b64_json": "aGk="}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
+        let model = mref(&pid, "gpt-image-1");
+        let (outcome, context) = svc
+            .invoke_with_context(&model, image_request("a fox"))
+            .await
+            .unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = outcome else {
+            panic!("expected Done(Assets)")
+        };
+
+        SqliteProviderRepository::new(pool.clone())
+            .update(
+                &pid,
+                provider_revision(&pool, &pid).await,
+                UpdateProviderParams {
+                    enabled: Some(false),
+                    ..UpdateProviderParams::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let stale_error = svc
+            .materialize_assets_for_model(
+                &model,
+                ModelTask::ImageGeneration,
+                assets.clone(),
+                crate::MaterializeLimits::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(stale_error.kind, InvokeErrorKind::Config);
+
+        let materialized = svc
+            .materialize_assets_for_invocation(
+                &context,
+                assets,
+                crate::MaterializeLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(materialized[0].bytes, b"hi");
+    }
+
+    #[tokio::test]
+    async fn invoke_task_mismatch_is_unsupported_task_without_network() {
+        let server = MockServer::start().await;
+        // No mock mounted: any request reaching the server would 404 — but the
+        // gate must reject before the wire.
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-4o", r#"["chat"]"#, "{}", true).await;
+
+        let err = svc.invoke(&mref(&pid, "gpt-4o"), image_request("a fox")).await.unwrap_err();
+        assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
+        assert!(server.received_requests().await.unwrap().is_empty(), "gate must fire before the wire");
+    }
+
+    // -- probe ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn probe_multipart_task_upstream_400_is_unhealthy() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                json!({"error": {"message": "file is required", "type": "invalid_request_error"}}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "whisper-1", r#"["speech_recognition"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "whisper-1"), ModelTask::SpeechRecognition).await.unwrap();
+        assert!(!report.healthy);
+        assert!(report.message.as_deref().is_some_and(|message| message.contains("400")));
+    }
+
     #[test]
     fn async_resume_rejects_a_protocol_changed_after_submit() {
         let error = validate_job_resume("xai.video_jobs", 9, &job("openai.videos", 9))
@@ -489,5 +956,415 @@ mod tests {
             .unwrap_err();
         assert!(error.message.contains("configuration revision"));
         validate_job_resume("openai.videos", 10, &job("openai.videos", 10)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_image_edit_upstream_400_is_unhealthy_and_reaches_the_wire() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                json!({"error": {"message": "image is invalid", "type": "invalid_request_error"}}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_edit"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageEdit).await.unwrap();
+        assert!(!report.healthy);
+        assert!(report.message.as_deref().is_some_and(|message| message.contains("400")));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "the edit probe must actually reach the wire");
+    }
+
+    #[tokio::test]
+    async fn probe_tts_voice_400_is_unhealthy_and_reaches_the_wire() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": {
+                    "message": "The voice_id (alloy) does not exist or you do not have access to it.",
+                    "type": "voice_id_invalid"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "step-tts-mini", r#"["speech_synthesis"]"#, "{}", true).await;
+
+        let report =
+            svc.probe(&mref(&pid, "step-tts-mini"), ModelTask::SpeechSynthesis).await.unwrap();
+        assert!(!report.healthy);
+        assert!(report.message.as_deref().is_some_and(|message| message.contains("400")));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "the tts probe must actually reach the wire");
+    }
+
+    #[tokio::test]
+    async fn probe_image_edit_unreachable_endpoint_is_unhealthy() {
+        // A dead endpoint must NOT be classified healthy: the local/transport
+        // failure has no http_status, so the tolerance arm does not fire.
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, "http://127.0.0.1:1").await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_edit"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageEdit).await.unwrap();
+        assert!(!report.healthy, "a connection-refused probe must be unhealthy");
+        assert!(report.message.is_some());
+    }
+
+    #[tokio::test]
+    async fn probe_500_is_unhealthy_with_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
+        assert!(!report.healthy);
+        let message = report.message.expect("unhealthy probe carries a message");
+        assert!(message.contains("500"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn probe_400_on_json_task_stays_unhealthy() {
+        // The reachable-only tolerance covers only the placeholder-bearing tasks
+        // (ImageEdit / SpeechRecognition stub file, SpeechSynthesis voice id); a
+        // 400 on a plain JSON task like image generation is a real failure.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                json!({"error": {"message": "prompt rejected", "type": "invalid_request_error"}}),
+            ))
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
+        assert!(!report.healthy);
+        assert!(report.message.unwrap().contains("400"));
+    }
+
+    #[tokio::test]
+    async fn probe_video_pending_is_healthy_and_never_polls() {
+        // An async-accepted submit is healthy on its own; the probe must not
+        // follow up with poll or content requests.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "v1", "status": "queued"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "sora-2"), ModelTask::VideoGeneration).await.unwrap();
+        assert!(report.healthy, "message: {:?}", report.message);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "probe must stop at submit: no poll, no content download");
+    }
+
+    #[tokio::test]
+    async fn probe_overlays_catalog_params_like_minimal_json_body() {
+        // minimal_json_body mirror: catalog params (size/quality directly,
+        // steps via the whitelisted extra passthrough) ride the minimal
+        // "health check" request so providers requiring them validate.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .and(body_partial_json(json!({
+                "prompt": "health check",
+                "n": 1,
+                "size": "512x512",
+                "quality": "high",
+                "steps": 20,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": "aGk="}]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(
+            &pool,
+            &pid,
+            "gpt-image-1",
+            r#"["image_generation"]"#,
+            r#"{"size": "512x512", "quality": "high", "steps": 20}"#,
+            true,
+        )
+        .await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
+        assert!(report.healthy, "message: {:?}", report.message);
+    }
+
+    #[tokio::test]
+    async fn probe_disabled_model_is_unhealthy_with_model_disabled_message() {
+        // Pinned T2 decision: resolve(enforce=false) still rejects disabled
+        // rows, so probing a disabled model reports unhealthy — it does not
+        // silently probe past the operator's kill switch.
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, "https://unused.example").await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", false).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
+        assert!(!report.healthy);
+        let message = report.message.expect("unhealthy probe carries a message");
+        assert!(message.contains("model disabled"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn probe_chat_reports_unsupported_one_shot_request() {
+        let (svc, _pool) = setup().await;
+        let report = svc.probe(&mref("any", "gpt-4o"), ModelTask::Chat).await.unwrap();
+        assert!(!report.healthy);
+        assert!(report.message.as_deref().is_some_and(|message| message.contains("one-shot")));
+    }
+
+    // -- poll ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn poll_rides_job_adapter_id_and_hits_status_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/videos/v1"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "v1", "status": "in_progress"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+
+        let job = JobHandle {
+            adapter_id: "openai.videos".into(),
+            config_revision: provider_revision(&pool, &pid).await,
+            remote_id: "v1".into(),
+            poll_state: json!({}),
+        };
+        let out = svc.poll(&mref(&pid, "sora-2"), video_request(), &job).await.unwrap();
+        let TaskOutcome::Pending(handle) = out else { panic!("expected Pending") };
+        assert_eq!(handle.remote_id, "v1");
+        assert_eq!(handle.adapter_id, "openai.videos");
+    }
+
+    #[tokio::test]
+    async fn invocation_context_polls_after_catalog_disable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id": "v1", "status": "queued"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/videos/v1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": "v1", "status": "in_progress"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+        let model = mref(&pid, "sora-2");
+        let (submitted, context) = svc
+            .invoke_with_context(&model, video_request())
+            .await
+            .unwrap();
+        let TaskOutcome::Pending(job) = submitted else {
+            panic!("expected Pending")
+        };
+        SqliteProviderRepository::new(pool.clone())
+            .update(
+                &pid,
+                provider_revision(&pool, &pid).await,
+                UpdateProviderParams {
+                    enabled: Some(false),
+                    ..UpdateProviderParams::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let legacy_error = svc
+            .poll(&model, video_request(), &job)
+            .await
+            .unwrap_err();
+        assert_eq!(legacy_error.kind, InvokeErrorKind::Config);
+        let polled = svc
+            .poll_with_context(&context, video_request(), &job)
+            .await
+            .unwrap();
+        assert!(matches!(polled, TaskOutcome::Pending(_)));
+    }
+
+    #[tokio::test]
+    async fn poll_requires_the_same_task_capability() {
+        let server = MockServer::start().await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "sora-2", r#"["chat"]"#, "{}", true).await;
+
+        let job = JobHandle {
+            adapter_id: "openai.videos".into(),
+            config_revision: provider_revision(&pool, &pid).await,
+            remote_id: "v1".into(),
+            poll_state: json!({}),
+        };
+        let error = svc.poll(&mref(&pid, "sora-2"), video_request(), &job).await.unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::UnsupportedTask);
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_rejects_a_job_protocol_that_differs_from_the_capability() {
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, "https://unused.example").await;
+        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+
+        let job = JobHandle {
+            adapter_id: "ghost.videos".into(),
+            config_revision: provider_revision(&pool, &pid).await,
+            remote_id: "v1".into(),
+            poll_state: json!({}),
+        };
+        let err = svc.poll(&mref(&pid, "sora-2"), video_request(), &job).await.unwrap_err();
+        assert_eq!(err.kind, InvokeErrorKind::Config);
+        assert!(err.message.contains("protocol"), "message: {}", err.message);
+    }
+
+    // -- multi-connection profiles (the P1 architecture's acceptance test) ----
+
+    fn asr_request() -> TaskRequest {
+        TaskRequest::SpeechRecognition(AsrRequest {
+            audio: InputAsset { id: None, role: "audio".into(), bytes: b"RIFFdata".to_vec(), mime: "audio/wav".into() },
+            language: None,
+            prompt: None,
+            extra: json!({}),
+        })
+    }
+
+    #[tokio::test]
+    async fn volc_asr_rides_voice_connection_not_default_end_to_end() {
+        // THE multi-connection acceptance test: one provider, two domains, two
+        // credential sets. The Ark default connection points at wiremock A;
+        // the "voice" connection profile points at wiremock B with its own
+        // volc_voice credentials. SpeechRecognition must ride B exclusively —
+        // wiremock A never sees a single request.
+        let ark_server = MockServer::start().await; // A — default connection
+        let voice_server = MockServer::start().await; // B — "voice" profile
+
+        Mock::given(method("POST"))
+            .and(path("/api/v3/auc/bigmodel/submit"))
+            .and(header("X-Api-App-Key", "voice-app"))
+            .and(header("X-Api-Access-Key", "voice-ak"))
+            .and(header("X-Api-Resource-Id", "volc.bigasr.auc"))
+            .respond_with(ResponseTemplate::new(200).insert_header("X-Api-Status-Code", "20000000"))
+            .expect(1)
+            .mount(&voice_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/auc/bigmodel/query"))
+            .and(header("X-Api-App-Key", "voice-app"))
+            .and(header("X-Api-Access-Key", "voice-ak"))
+            .and(header("X-Api-Resource-Id", "volc.bigasr.auc"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("X-Api-Status-Code", "20000000")
+                    .set_body_json(json!({"result": {"text": "hello volc"}})),
+            )
+            .expect(1)
+            .mount(&voice_server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider_on(&pool, "ark", &ark_server.uri()).await;
+        let conn_repo = SqliteProviderConnectionRepository::new(pool.clone());
+        let creds = r#"{"app_key":"voice-app","access_key":"voice-ak","resource_id":"volc.bigasr.auc"}"#;
+        conn_repo
+            .upsert(
+                &pid,
+                provider_revision(&pool, &pid).await,
+                &UpsertProviderConnectionParams {
+                    role: "voice",
+                    label: Some("Voice"),
+                    base_url: &voice_server.uri(),
+                    auth_scheme: "volc_voice",
+                    credentials_encrypted: &encrypt_string(creds, &TEST_KEY).unwrap(),
+                    extra: "{}",
+                },
+            )
+            .await
+            .unwrap();
+        seed_model(&pool, &pid, "bigmodel-asr", r#"["speech_recognition"]"#, "{}", true).await;
+
+        // 1) invoke → submit hits wiremock B and returns the pending handle.
+        let out = svc.invoke(&mref(&pid, "bigmodel-asr"), asr_request()).await.unwrap();
+        let TaskOutcome::Pending(handle) = out else { panic!("expected Pending from volc submit") };
+        assert_eq!(handle.adapter_id, "volc.asr_file");
+        assert_eq!(handle.poll_state, json!({}));
+
+        // 2) poll with that handle → query hits B, same X-Api-Request-Id value
+        //    as the submit, and yields the transcript.
+        let out = svc.poll(&mref(&pid, "bigmodel-asr"), asr_request(), &handle).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Transcript { text, model, .. }) = out else {
+            panic!("expected Done(Transcript)")
+        };
+        assert_eq!(text, "hello volc");
+        assert_eq!(model.as_deref(), Some("bigmodel-asr"));
+
+        let voice_requests = voice_server.received_requests().await.unwrap();
+        assert_eq!(voice_requests.len(), 2, "submit + query, both on the voice domain");
+        let ids: Vec<&str> = voice_requests
+            .iter()
+            .map(|r| r.headers.get("X-Api-Request-Id").expect("request id header").to_str().unwrap())
+            .collect();
+        assert_eq!(ids[0], handle.remote_id, "submit carries the client-generated id");
+        assert_eq!(ids[0], ids[1], "query reuses the submit request id verbatim");
+
+        // 3) Delete the voice profile → the same call is now MissingConnection.
+        let error = conn_repo.delete(&pid, "voice").await.unwrap_err();
+        assert!(error.to_string().contains("still referenced"));
+
+        // 4) Per-task connection isolation: the default (Ark) connection was
+        //    never touched by any of the above.
+        assert!(
+            ark_server.received_requests().await.unwrap().is_empty(),
+            "voice traffic must never leak onto the default Ark connection"
+        );
     }
 }

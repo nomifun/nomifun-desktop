@@ -58,4 +58,18 @@ describe('capability hub navigation', () => {
     expect(routerSource.includes('LegacyExtensionsRedirect')).toBe(true);
     expect(routerSource.includes("path='/extensions'")).toBe(true);
   });
+
+  test('keeps unified Browser settings reachable when Browser Use is disabled', () => {
+    const siderSource = readSource(new URL('./index.tsx', import.meta.url));
+    const routerSource = readSource(new URL('../Router.tsx', import.meta.url));
+
+    expect(siderSource.includes('SiderBrowserEntry')).toBe(true);
+    expect(siderSource.includes('isDesktopShell() || browserOverview?.supported !== false')).toBe(true);
+    expect(siderSource.includes('browserOverview?.enabled !== false')).toBe(false);
+    expect(
+      routerSource.includes(
+        "path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />}"
+      )
+    ).toBe(true);
+  });
 });

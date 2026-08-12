@@ -19,6 +19,7 @@ pub mod call;
 pub mod error;
 pub mod manifest;
 pub mod realtime;
+pub mod materialize;
 pub mod resolve;
 pub mod routes_table;
 pub mod service;
@@ -47,13 +48,14 @@ pub use manifest::{
     try_default_protocol_registry, validate_endpoint_template,
     expand_protocol_endpoint_template, validate_provider_params_for_protocol,
 };
+pub use materialize::{MaterializeLimits, MaterializedAsset};
 pub use realtime::{
     RealtimeAdapterRegistry, RealtimeClientCommand, RealtimeProtocolAdapter, RealtimeSendError,
     RealtimeServerEvent, RealtimeSession, RealtimeSessionConfig, RealtimeSessionLimits,
     RealtimeTurnDetection, ResolvedRealtimeCall,
 };
 pub use routes_table::{TaskRoute, preset_protocol_recommendation};
-pub use service::{ModelInvokeService, ProbeReport};
+pub use service::{InvocationContext, ModelInvokeService, ProbeReport};
 pub use transport::{
     MAX_ARTIFACT_BYTES, decode_b64, encode_b64, error_from_response, net_err, read_body_capped,
 };

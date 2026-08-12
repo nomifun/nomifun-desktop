@@ -18,7 +18,7 @@ const MAX_CONNECTIONS: u32 = 5;
 /// SQLite busy timeout in milliseconds.
 const BUSY_TIMEOUT_MS: u64 = 5000;
 
-/// Migration 31 intentionally drops every legacy provider credential instead
+/// Migration 32 intentionally drops every legacy provider credential instead
 /// of retaining a second wire/storage format. SQLite must overwrite deleted
 /// cells and rebuild the file once when upgrading an existing pre-31 schema so
 /// ciphertext and the former plaintext Bedrock fields do not remain in free
@@ -423,7 +423,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
     run_migrations_with_retry(&mut conn).await?;
     // Always truncate committed migration WAL frames. Besides keeping startup
     // deterministic, this retries the only safety-critical step if a previous
-    // post-031 startup was interrupted after the schema commit.
+    // post-032 startup was interrupted after the schema commit.
     truncate_wal(&mut conn).await?;
     if must_purge_legacy_provider_credentials {
         securely_rebuild_after_legacy_provider_credential_drop(&mut conn).await?;

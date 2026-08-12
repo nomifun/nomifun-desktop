@@ -12,6 +12,7 @@ pub mod capability;
 pub mod cc_switch;
 pub mod factory;
 pub(crate) mod idle_scanner;
+pub mod image_generation;
 pub mod knowledge_completer;
 pub mod knowledge_retrieval;
 pub mod knowledge_writeback;

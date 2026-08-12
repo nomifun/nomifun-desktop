@@ -4810,24 +4810,33 @@ async fn update_extra_replaces_json() {
 }
 
 #[tokio::test]
-async fn get_messages_excludes_legacy_cron_and_skill_suggest_rows() {
+async fn get_messages_excludes_synthetic_protocol_rows() {
     let (repo, _db) = setup().await;
     let mut conv = make_conversation("message-filter");
     conv.conversation_id = repo.create(&conv).await.unwrap();
 
     repo.insert_message(&make_message(&conv.conversation_id, "visible")).await.unwrap();
 
-    for ty in ["cron_trigger", "skill_suggest"] {
+    let mut turn_root_id = None;
+    for ty in ["cron_trigger", "skill_suggest", "turn_root"] {
+        let message_id = MessageId::new().into_string();
+        if ty == "turn_root" {
+            turn_root_id = Some(message_id.clone());
+        }
         repo.insert_message(&MessageRow {
             id: 0,
-            message_id: MessageId::new().into_string(),
+            message_id,
             conversation_id: conv.conversation_id.clone(),
             msg_id: None,
             r#type: ty.into(),
-            content: "{}".into(),
+            content: if ty == "turn_root" {
+                r#"{"kind":"turn_root"}"#.into()
+            } else {
+                "{}".into()
+            },
             position: Some("center".into()),
             status: Some("finish".into()),
-            hidden: false,
+            hidden: ty == "turn_root",
             created_at: 2000,
         })
         .await
@@ -4838,6 +4847,24 @@ async fn get_messages_excludes_legacy_cron_and_skill_suggest_rows() {
     assert_eq!(rows.total, 1);
     assert_eq!(rows.items.len(), 1);
     assert_eq!(rows.items[0].r#type, "text");
+    assert!(
+        repo.get_message(&conv.conversation_id, turn_root_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .is_some(),
+        "exact internal lookup must retain the structural root"
+    );
+
+    let keyset = repo
+        .get_messages_keyset(&conv.conversation_id, None, 50)
+        .await
+        .unwrap();
+    assert_eq!(keyset.total, 0, "keyset windows intentionally omit a full count");
+    assert_eq!(keyset.items.len(), 1);
+
+    let search = repo.search_messages(USER_ID, "turn_root", 1, 50).await.unwrap();
+    assert_eq!(search.total, 0);
+    assert!(search.items.is_empty());
 }
 
 #[tokio::test]

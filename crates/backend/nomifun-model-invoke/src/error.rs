@@ -54,12 +54,19 @@ pub struct InvokeError {
     pub message: String,
     pub http_status: Option<u16>,
     pub retry_after_ms: Option<u64>,
+    pub(crate) catalog_failure: bool,
 }
 
 impl InvokeError {
     /// Build an error of `kind` with no HTTP status / retry hint.
     pub fn new(kind: InvokeErrorKind, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into(), http_status: None, retry_after_ms: None }
+        Self {
+            kind,
+            message: message.into(),
+            http_status: None,
+            retry_after_ms: None,
+            catalog_failure: false,
+        }
     }
 
     /// A [`InvokeErrorKind::ProviderError`] carrying the upstream HTTP status.
@@ -67,9 +74,32 @@ impl InvokeError {
         Self { http_status: Some(status), ..Self::new(InvokeErrorKind::ProviderError, message) }
     }
 
+    /// Attach an upstream HTTP status while preserving the caller's semantic
+    /// error kind. Protocol-specific handshakes use this for status-aware
+    /// classification without exposing internal error bookkeeping fields.
+    pub fn with_http_status(mut self, status: u16) -> Self {
+        self.http_status = Some(status);
+        self
+    }
+
     /// A local-configuration error ([`InvokeErrorKind::Config`]).
     pub fn config(msg: impl Into<String>) -> Self {
         Self::new(InvokeErrorKind::Config, msg)
+    }
+
+    /// A local catalog/repository read failure. It remains `Config` for legacy
+    /// invoke callers, while capability discovery can distinguish an internal
+    /// database fault from a genuinely incomplete candidate configuration.
+    pub(crate) fn catalog(msg: impl Into<String>) -> Self {
+        Self {
+            catalog_failure: true,
+            ..Self::config(msg)
+        }
+    }
+
+    /// Whether this error originated from a failed catalog/repository read.
+    pub fn is_catalog_failure(&self) -> bool {
+        self.catalog_failure
     }
 
     /// Classify a reqwest transport error: timeout → [`InvokeErrorKind::Timeout`],
@@ -178,6 +208,14 @@ mod tests {
         assert_eq!(e.message, "denied");
         assert_eq!(e.http_status, None);
         assert_eq!(e.retry_after_ms, None);
+        assert!(!e.is_catalog_failure());
+    }
+
+    #[test]
+    fn catalog_failure_marker_is_typed_but_keeps_legacy_config_kind() {
+        let error = InvokeError::catalog("database unavailable");
+        assert_eq!(error.kind, InvokeErrorKind::Config);
+        assert!(error.is_catalog_failure());
     }
 
     #[test]

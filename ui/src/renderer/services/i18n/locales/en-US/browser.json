@@ -7,9 +7,13 @@
   "actions": {
     "busy": "Another browser management change is still in progress. Wait for it to finish and try again."
   },
+  "tabs": {
+    "lifecycle": "Lifecycle",
+    "settings": "Settings"
+  },
   "page": {
     "title": "Browser management",
-    "description": "Monitor lifecycle, capacity, queues, and identity for Agent browser lanes. Routine browsing stays headless until you explicitly open a running Primary lane.",
+    "description": "Manage Agent browser lifecycle, identity, security, and resource settings in one place.",
     "runningCount": "{{count}} running",
     "queuedCount": "{{count}} queued",
     "pressure": "{{state}} pressure",

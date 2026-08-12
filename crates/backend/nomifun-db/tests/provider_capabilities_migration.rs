@@ -67,7 +67,7 @@ async fn seed_model(
 }
 
 #[tokio::test]
-async fn migration_31_materializes_only_verified_task_capabilities() {
+async fn migration_32_materializes_only_verified_task_capabilities() {
     const DASH: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const UNKNOWN: &str = "0190f5fe-7c00-7a00-8abc-012345678902";
     const PPIO: &str = "0190f5fe-7c00-7a00-8abc-012345678903";
@@ -163,7 +163,7 @@ async fn migration_31_materializes_only_verified_task_capabilities() {
     )
     .await;
 
-    apply_through(&mut connection, 31).await;
+    apply_through(&mut connection, 32).await;
 
     let migrated_revision: i64 =
         sqlx::query_scalar("SELECT config_revision FROM providers WHERE provider_id = ?")
@@ -317,7 +317,7 @@ async fn migration_31_materializes_only_verified_task_capabilities() {
 }
 
 #[tokio::test]
-async fn migration_31_materializes_explicit_default_auth_schemes() {
+async fn migration_32_materializes_explicit_default_auth_schemes() {
     let fixtures = [
         (
             "0190f5fe-7c00-7a00-8abc-012345678910",
@@ -354,7 +354,7 @@ async fn migration_31_materializes_explicit_default_auth_schemes() {
     .await
     .unwrap();
 
-    apply_through(&mut connection, 31).await;
+    apply_through(&mut connection, 32).await;
 
     for (provider_id, _, expected) in fixtures {
         let actual: (String, String) = sqlx::query_as(
@@ -391,7 +391,7 @@ async fn migration_31_materializes_explicit_default_auth_schemes() {
 }
 
 #[tokio::test]
-async fn migration_31_preserves_full_urls_and_only_matching_task_health() {
+async fn migration_32_preserves_full_urls_and_only_matching_task_health() {
     const DEFAULT_FULL: &str = "0190f5fe-7c00-7a00-8abc-012345678920";
     const ARK: &str = "0190f5fe-7c00-7a00-8abc-012345678921";
     const VOICE_CONNECTION: &str = "0190f5fe-7c00-7a00-8abc-012345678922";
@@ -473,7 +473,7 @@ async fn migration_31_preserves_full_urls_and_only_matching_task_health() {
     .await
     .unwrap();
 
-    apply_through(&mut connection, 31).await;
+    apply_through(&mut connection, 32).await;
 
     let default_route: (String, String, String, Option<i64>) = sqlx::query_as(
         "SELECT p.base_url, c.endpoint, c.health, c.health_checked_at \
@@ -527,7 +527,7 @@ async fn migration_31_preserves_full_urls_and_only_matching_task_health() {
 }
 
 #[tokio::test]
-async fn migration_31_canonicalizes_only_retired_chat_protocol_aliases() {
+async fn migration_32_canonicalizes_only_retired_chat_protocol_aliases() {
     const OPENAI: &str = "0190f5fe-7c00-7a00-8abc-012345678930";
     const GEMINI: &str = "0190f5fe-7c00-7a00-8abc-012345678931";
     const NEW_API: &str = "0190f5fe-7c00-7a00-8abc-012345678932";
@@ -594,7 +594,7 @@ async fn migration_31_canonicalizes_only_retired_chat_protocol_aliases() {
     .await
     .unwrap();
 
-    apply_through(&mut connection, 31).await;
+    apply_through(&mut connection, 32).await;
 
     let openai_rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT model, protocol FROM provider_model_capabilities \
@@ -641,7 +641,7 @@ async fn migration_31_canonicalizes_only_retired_chat_protocol_aliases() {
 }
 
 #[tokio::test]
-async fn migration_31_filters_incompatible_legacy_protocols_per_task() {
+async fn migration_32_filters_incompatible_legacy_protocols_per_task() {
     const PROVIDER: &str = "0190f5fe-7c00-7a00-8abc-012345678940";
     let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
     apply_through(&mut connection, 30).await;
@@ -669,7 +669,7 @@ async fn migration_31_filters_incompatible_legacy_protocols_per_task() {
     .await
     .unwrap();
 
-    apply_through(&mut connection, 31).await;
+    apply_through(&mut connection, 32).await;
 
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT task, protocol FROM provider_model_capabilities \
@@ -690,7 +690,7 @@ async fn migration_31_filters_incompatible_legacy_protocols_per_task() {
 }
 
 #[tokio::test]
-async fn migration_31_reclassifies_stepfun_realtime_without_name_wildcards() {
+async fn migration_32_reclassifies_stepfun_realtime_without_name_wildcards() {
     const STEP: &str = "0190f5fe-7c00-7a00-8abc-012345678904";
     const ZHIPU: &str = "0190f5fe-7c00-7a00-8abc-012345678905";
     let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
@@ -736,7 +736,7 @@ async fn migration_31_reclassifies_stepfun_realtime_without_name_wildcards() {
     .execute(&mut connection)
     .await
     .unwrap();
-    apply_through(&mut connection, 31).await;
+    apply_through(&mut connection, 32).await;
     let tasks: Vec<(String, String)> = sqlx::query_as(
         "SELECT model, task FROM provider_model_capabilities WHERE provider_id = ? ORDER BY model",
     )

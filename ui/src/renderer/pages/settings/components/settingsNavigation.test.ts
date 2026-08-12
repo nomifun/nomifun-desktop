@@ -14,14 +14,15 @@ describe('settings navigation', () => {
     const siderSource = readSource(new URL('./SettingsSider.tsx', import.meta.url));
     const pageWrapperSource = readSource(new URL('./SettingsPageWrapper.tsx', import.meta.url));
 
-    for (const id of ['system', 'execution-engines', 'browser-use', 'computer-use', 'about']) {
+    for (const id of ['system', 'execution-engines', 'computer-use', 'about']) {
       expect(siderSource.includes(`'${id}'`)).toBe(true);
       expect(pageWrapperSource.includes(`id: '${id}'`)).toBe(true);
     }
 
+    expect(siderSource.includes("'browser-use'")).toBe(false);
+    expect(pageWrapperSource.includes("id: 'browser-use'")).toBe(false);
     expect(siderSource.indexOf("'system'")).toBeLessThan(siderSource.indexOf("'execution-engines'"));
-    expect(siderSource.indexOf("'execution-engines'")).toBeLessThan(siderSource.indexOf("'browser-use'"));
-    expect(siderSource.indexOf("'browser-use'")).toBeLessThan(siderSource.indexOf("'computer-use'"));
+    expect(siderSource.indexOf("'execution-engines'")).toBeLessThan(siderSource.indexOf("'computer-use'"));
     expect(siderSource.indexOf("'computer-use'")).toBeLessThan(siderSource.indexOf("'about'"));
   });
 
@@ -40,7 +41,11 @@ describe('settings navigation', () => {
     expect(routerSource.includes("to='/models?section=agents'")).toBe(false);
     expect(engineTabsSource.includes("key='runtime'")).toBe(true);
     expect(engineTabsSource.includes('<AgentRuntimeSettingsContent />')).toBe(true);
-    expect(routerSource.includes("path='/settings/browser-use' element={<Navigate to='/settings/system'")).toBe(false);
+    expect(
+      routerSource.includes(
+        "path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />}"
+      )
+    ).toBe(true);
     expect(routerSource.includes("path='/settings/computer-use' element={<Navigate to='/settings/system'")).toBe(false);
   });
 });

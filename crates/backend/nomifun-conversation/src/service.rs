@@ -6055,6 +6055,17 @@ impl ConversationService {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Message {message_id} not found")))?;
 
+        // `turn_root` is an internal relationship anchor, not a public chat
+        // message. Internal repository callers need exact access for
+        // idempotent root preflight/reconciliation, but exposing it through
+        // the public message endpoint would fail enum projection and surface
+        // a misleading 500. Keep the boundary intentionally opaque.
+        if row.r#type == "turn_root" {
+            return Err(AppError::NotFound(format!(
+                "Message {message_id} not found"
+            )));
+        }
+
         let content_bytes = row.content.len();
         let mut responses = self
             .project_history_artifact_integrity(
@@ -8846,6 +8857,11 @@ impl ConversationService {
                 Option<String>,
                 Option<(String, bool)>,
             )> = None;
+            // A logical turn can span provider failover or system
+            // continuations. Preserve only evidence that crossed the relay's
+            // atomic artifact commit barrier; provisional tool output never
+            // contributes to delivery success.
+            let mut committed_artifact_count = 0usize;
             // Phase 3 (review #1/#5): resolve the effective failover config ONCE
             // (it does not change mid-turn). Used to build the relay's error
             // suppressor so a pre-response provider fault that WILL be failed over
@@ -8936,31 +8952,50 @@ impl ConversationService {
                     }
                 }
 
-                let rx = agent.subscribe();
-                let send_agent = agent.clone();
-                let conv_id_send = conv_id.clone();
-                let send_cancellation = turn_token.clone();
                 // Phase 3: keep a copy of this turn's send so a pre-response
                 // provider fault can resend the SAME content to the next model.
                 let resend_payload = current_send.clone();
-                let (send_error_tx, send_error_rx) = oneshot::channel();
-                // 1. Send the message to the agent and concurrently run the relay to stream events.
-                tokio::spawn(async move {
-                    if send_cancellation.is_cancelled() {
-                        let _ = send_error_tx.send(Ok(()));
-                        return;
-                    }
-                    let send_result = send_agent.send_message(current_send).await;
-                    if let Err(e) = send_result.as_ref() {
-                        error!(conversation_id = %conv_id_send, error = %ErrorChain(e), "Agent send_message failed");
-                    }
-                    // Explicit success matters: a dropped sender now denotes
-                    // panic/abort and is converted by StreamRelay into a
-                    // terminal Error instead of waiting forever.
-                    let _ = send_error_tx.send(send_result);
-                });
-                // 2. Wait for the agent to process the message and complete the turn, while the relay streams events in real time.
-                let outcome = relay.consume_with_send_error(rx, send_error_rx).await;
+                // The hidden structural root is a prerequisite for every
+                // root-scoped status/tool/artifact row. Establish it before
+                // provider work starts so a database failure cannot race (or
+                // bill) a native image generation that can never be committed.
+                let root_ready = relay.ensure_turn_root_persisted().await;
+                let outcome = if let Err(root_error) = root_ready {
+                    error!(
+                        conversation_id = %conv_id,
+                        root_turn_id = %stable_turn_id,
+                        error = %ErrorChain(&root_error),
+                        "Logical turn root preflight failed before agent send"
+                    );
+                    // Do not retry the preflight inside `consume`: a transient
+                    // second-attempt success would leave this receiver waiting
+                    // forever because provider work was deliberately not
+                    // started. Surface one terminal failure directly.
+                    relay.into_turn_root_failure_outcome(root_error)
+                } else {
+                    let rx = agent.subscribe();
+                    let send_agent = agent.clone();
+                    let conv_id_send = conv_id.clone();
+                    let send_cancellation = turn_token.clone();
+                    let (send_error_tx, send_error_rx) = oneshot::channel();
+                    // Send the message and concurrently relay its event stream.
+                    tokio::spawn(async move {
+                        if send_cancellation.is_cancelled() {
+                            let _ = send_error_tx.send(Ok(()));
+                            return;
+                        }
+                        let send_result = send_agent.send_message(current_send).await;
+                        if let Err(e) = send_result.as_ref() {
+                            error!(conversation_id = %conv_id_send, error = %ErrorChain(e), "Agent send_message failed");
+                        }
+                        // Explicit success matters: a dropped sender denotes
+                        // panic/abort and becomes a terminal Error.
+                        let _ = send_error_tx.send(send_result);
+                    });
+                    relay.consume_with_send_error(rx, send_error_rx).await
+                };
+                committed_artifact_count = committed_artifact_count
+                    .saturating_add(outcome.committed_artifact_count);
 
                 if turn_token.is_cancelled() || outcome.stop_reason == Some(TurnStopReason::Cancelled) {
                     durable_completion = Some((
@@ -8992,7 +9027,11 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some("Agent event stream integrity was lost".to_owned()),
-                        relay_error_code::map_turn_failure(&outcome.terminal, None),
+                        relay_error_code::map_turn_failure(
+                            &outcome.terminal,
+                            None,
+                            committed_artifact_count,
+                        ),
                     ));
                     final_turn_writeback = None;
                     break;
@@ -9172,11 +9211,11 @@ impl ConversationService {
                         .await;
                 }
 
-                let result_ok = matches!(outcome.terminal, RelayTerminal::Finish)
-                    && outcome
-                        .final_text
-                        .as_deref()
-                        .is_some_and(|text| !text.trim().is_empty());
+                let result_ok = relay_error_code::turn_succeeded(
+                    &outcome.terminal,
+                    outcome.final_text.as_deref(),
+                    committed_artifact_count,
+                );
                 durable_completion = Some((
                     result_ok,
                     outcome.final_text.clone(),
@@ -9185,6 +9224,7 @@ impl ConversationService {
                     relay_error_code::map_turn_failure(
                         &outcome.terminal,
                         outcome.final_text.as_deref(),
+                        committed_artifact_count,
                     ),
                 ));
 

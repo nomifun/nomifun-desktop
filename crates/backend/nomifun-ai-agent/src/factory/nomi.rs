@@ -19,6 +19,9 @@ use tracing::{debug, info, warn};
 use crate::runtime_handle::AgentRuntimeHandle;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
+use crate::image_generation::{
+    CatalogImageGenerationToolDiscovery, ImageGenerationToolDiscovery, image_generation_prompt,
+};
 use crate::manager::nomi::{
     NomiAgentManager, NomiHostWiring, NomiSummonWiring, sanitize_session_messages,
 };
@@ -260,6 +263,39 @@ pub(super) async fn build(
     }
     let has_platform_gateway = overrides.gateway_mcp_config.is_some();
 
+    // Build a retained local discovery authority from the authoritative
+    // catalog. The manager reruns this resolver before every admitted turn (no
+    // health probe / generation request), so provider, model, connection,
+    // credential, task-tag and default changes do not require runtime teardown.
+    // An incomplete candidate never leaks an unusable provider schema, and
+    // restricted principals retain their model-only ceiling.
+    let image_generation_discovery: Option<Arc<dyn ImageGenerationToolDiscovery>> =
+        if platform_gateway_entitled {
+            deps.model_invoke_service.as_ref().map(|invoke| {
+                Arc::new(CatalogImageGenerationToolDiscovery::new(
+                    deps.client_prefs.clone(),
+                    invoke.clone(),
+                )) as Arc<dyn ImageGenerationToolDiscovery>
+            })
+        } else {
+            None
+        };
+    let (image_generation_tool, image_generation_discovery_failed) =
+        match image_generation_discovery.as_ref() {
+            Some(discovery) => match discovery.discover_tool().await {
+                Ok(tool) => (tool, false),
+                Err(error) => {
+                    warn!(
+                        conversation_id = %ctx.conversation_id,
+                        error = %error,
+                        "image_gen: catalog discovery failed closed"
+                    );
+                    (None, true)
+                }
+            },
+            None => (None, false),
+        };
+
     let (mut extra_mcp_servers, loopback_capability_leases) =
         resolve_mcp_servers(&overrides, &ctx.conversation_id);
     if is_instance_owner && let Some(repo) = deps.mcp_server_repo.as_ref() {
@@ -336,6 +372,26 @@ pub(super) async fn build(
         overrides.delegation_policy,
     );
 
+    let app_language = read_app_language(deps.settings_repo.as_ref()).await;
+
+    // The prompt is policy, not capability authority: registration below is
+    // still conditional on a ready catalog snapshot. It tells weaker chat
+    // models that ordinary image requests have exactly one native route and
+    // that Browser/Computer/shell/third-party sites are reserved for an
+    // explicit user request. The manager additionally enforces that route at
+    // the advertised-tool and artifact-receipt boundaries.
+    let image_policy = if platform_gateway_entitled {
+        image_generation_prompt(None)
+    } else {
+        "This restricted Agent session is not entitled to native image generation. Do not use Browser, web search, or a third-party generator as a substitute, and do not claim that an image was generated. Tell the user to retry in a full local session or ask the session owner to enable the native capability.".to_owned()
+    };
+    overrides.system_prompt = Some(match overrides.system_prompt.take() {
+        Some(existing) if !existing.trim().is_empty() => {
+            format!("{existing}\n\n{image_policy}")
+        }
+        _ => image_policy,
+    });
+
     // Every native Nomi session — regular desktop chat, companion, IM
     // Channel Agent — must think AND reply in the
     // app's UI language, not a hardcoded one. The persona prompt no longer forces
@@ -345,14 +401,11 @@ pub(super) async fn build(
     // per build → switching the language takes effect on the next new session.
     // External ACP/openclaw agents own their own prompts (built elsewhere) and
     // are intentionally unaffected.
-    {
-        let lang = read_app_language(deps.settings_repo.as_ref()).await;
-        let directive = output_language_directive(&lang);
-        overrides.system_prompt = Some(match overrides.system_prompt.take() {
-            Some(existing) => format!("{existing}\n\n{directive}"),
-            None => directive.to_owned(),
-        });
-    }
+    let directive = output_language_directive(&app_language);
+    overrides.system_prompt = Some(match overrides.system_prompt.take() {
+        Some(existing) => format!("{existing}\n\n{directive}"),
+        None => directive.to_owned(),
+    });
 
     if !extra_mcp_servers.is_empty() {
         info!(
@@ -754,6 +807,11 @@ pub(super) async fn build(
         browser_lane_binding,
         ssh_backend: ssh_session.as_ref().map(|s| Arc::clone(&s.backend)),
         ssh_lease: ssh_session.map(|s| s.lease),
+        image_generation_tool,
+        image_generation_discovery,
+        image_generation_entitled: platform_gateway_entitled,
+        image_generation_discovery_failed,
+        image_generation_response_in_chinese: app_language == "zh-CN",
     };
     let agent = NomiAgentManager::new_with_host_wiring(
         ctx.conversation_id,
@@ -1612,6 +1670,7 @@ mod tests {
             owner_token: None,
             activated_deferred_tools: Vec::new(),
             editable_turn: None,
+            host_context: Default::default(),
         };
 
         assert!(retarget_resumed_session(
@@ -1669,7 +1728,9 @@ mod tests {
             editable_turn: Some(EditableTurnCheckpoint {
                 source_message_id: "message-root".into(),
                 start_len: 2,
+                prior_host_context: Default::default(),
             }),
+            host_context: Default::default(),
         };
 
         let repair = sanitize_resumed_session(&mut session, false);
