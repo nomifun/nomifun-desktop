@@ -5953,6 +5953,7 @@ dependencies = [
  "dirs 6.0.0",
  "ed25519-dalek 2.2.0",
  "flate2",
+ "fs2",
  "futures",
  "futures-util",
  "getrandom 0.2.17",

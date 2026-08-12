@@ -5,24 +5,19 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Empty, Message, Modal, Spin } from '@arco-design/web-react';
+import { Alert, Button, Empty, Message, Modal, Spin, Tabs } from '@arco-design/web-react';
 import { WebPage } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { ipcBridge } from '@/common';
-import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import { createBrowserDisplayModeController } from '@/common/browser/browserDisplayModeController';
 import {
   resolveBrowserOverviewCapabilities,
-  type BrowserDisplayMode,
   type IBrowserLane,
 } from '@/common/browser/browserTypes';
+import BrowserUseSettingsContent from '@/renderer/components/settings/SettingsModal/contents/BrowserUseSettingsContent';
 import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import BrowserInventoryTree from './BrowserInventoryTree';
-import BrowserDisplayModeControl, {
-  type BrowserDisplayModeControlStatus,
-} from './BrowserDisplayModeControl';
 import BrowserLaneDetails from './BrowserLaneDetails';
 import BrowserPageHeader from './BrowserPageHeader';
 import {
@@ -53,11 +48,10 @@ import {
 import { useBrowserInventory } from './useBrowserInventory';
 import BrowserHostDiagnostics from './BrowserHostDiagnostics';
 
-const displayModeErrorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
+type BrowserManagementTab = 'lifecycle' | 'settings';
 
-const displayModeEndpointUnavailable = (error: unknown): boolean =>
-  isBackendHttpError(error) && (error.status === 404 || error.status === 501);
+export const resolveBrowserManagementTab = (value: string | null): BrowserManagementTab =>
+  value === 'settings' ? 'settings' : 'lifecycle';
 
 const BrowserPage: React.FC = () => {
   const { t, i18n } = useTranslation();
@@ -71,23 +65,12 @@ const BrowserPage: React.FC = () => {
   const [changingVisibilityLaneId, setChangingVisibilityLaneId] = useState<string | null>(null);
   const [busyConversationId, setBusyConversationId] = useState<string | null>(null);
   const [closingAll, setClosingAll] = useState(false);
-  const [displayMode, setDisplayMode] = useState<BrowserDisplayMode>('headless');
-  const [displayModeStatus, setDisplayModeStatus] =
-    useState<BrowserDisplayModeControlStatus>('loading');
-  const [displayModeSaving, setDisplayModeSaving] = useState(false);
-  const [displayModeError, setDisplayModeError] = useState<string | null>(null);
   const mutationGateRef = useRef(createBrowserManagementMutationGate());
-  const displayModeControllerRef = useRef(
-    createBrowserDisplayModeController({
-      get: () => ipcBridge.browserSession.displayMode.get.invoke(),
-      put: (next) =>
-        ipcBridge.browserSession.displayMode.put.invoke({ display_mode: next }),
-    })
-  );
 
   const installationWideCloseCopy = browserInstallationWideCloseCopy(
     i18n.resolvedLanguage ?? i18n.language
   );
+  const activeTab = resolveBrowserManagementTab(searchParams.get('tab'));
   const requestedConversationId = searchParams.get('conversation_id');
   const currentConversationId = useMemo(
     () =>
@@ -136,8 +119,7 @@ const BrowserPage: React.FC = () => {
   const localCounts = useMemo(() => browserLaneCounts(lanes), [lanes]);
   const runningCount = overview?.running_lanes ?? localCounts.running;
   const queuedCount = overview?.queued_lanes ?? localCounts.queued;
-  const { canCloseAll, canManageBrowserSettings } =
-    resolveBrowserOverviewCapabilities(overview);
+  const { canCloseAll } = resolveBrowserOverviewCapabilities(overview);
   const managedHostCount =
     overview?.managed_host_count ?? overview?.hosts?.length ?? 0;
   const pendingCleanupCount = overview?.pending_cleanup_count ?? 0;
@@ -154,8 +136,7 @@ const BrowserPage: React.FC = () => {
     busyLaneId != null ||
     busyConversationId != null ||
     changingVisibilityLaneId != null ||
-    closingAll ||
-    displayModeSaving;
+    closingAll;
   const runManagementMutation = useCallback(
     async (operation: () => Promise<void>): Promise<void> => {
       await mutationGateRef.current.run(operation, () =>
@@ -178,43 +159,19 @@ const BrowserPage: React.FC = () => {
     }
   }, [groups, lanes, currentConversationId, selectedLaneId]);
 
-  const loadDisplayMode = useCallback(async () => {
-    if (!canManageBrowserSettings) return;
-    setDisplayModeStatus('loading');
-    setDisplayModeError(null);
-    const result = await displayModeControllerRef.current.load();
-    if (result.kind === 'applied') {
-      setDisplayMode(result.displayMode);
-      setDisplayModeStatus('ready');
-    } else if (result.kind === 'error') {
-      setDisplayModeStatus(
-        displayModeEndpointUnavailable(result.error) ? 'unavailable' : 'error'
-      );
-      setDisplayModeError(
-        displayModeEndpointUnavailable(result.error)
-          ? null
-          : displayModeErrorMessage(result.error)
-      );
-    }
-  }, [canManageBrowserSettings]);
-
-  useEffect(() => {
-    if (canManageBrowserSettings) {
-      void loadDisplayMode();
-    }
-  }, [canManageBrowserSettings, loadDisplayMode]);
-
-  useEffect(
-    () => () => displayModeControllerRef.current.dispose(),
-    []
-  );
-
   const refreshAll = useCallback(async () => {
-    await Promise.all([
-      refresh(),
-      canManageBrowserSettings ? loadDisplayMode() : Promise.resolve(),
-    ]);
-  }, [canManageBrowserSettings, loadDisplayMode, refresh]);
+    await refresh();
+  }, [refresh]);
+
+  const handleTabChange = useCallback(
+    (key: string) => {
+      const next = new URLSearchParams(searchParams);
+      if (key === 'settings') next.set('tab', 'settings');
+      else next.delete('tab');
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
 
   const handleSelectLane = useCallback(
     (lane: IBrowserLane) => {
@@ -225,76 +182,6 @@ const BrowserPage: React.FC = () => {
       }
     },
     [searchParams, setSearchParams]
-  );
-
-  const handleDisplayModeChange = useCallback(
-    async (next: BrowserDisplayMode) => {
-      if (
-        !canManageBrowserSettings ||
-        displayModeStatus !== 'ready' ||
-        managementMutationBusy ||
-        mutationGateRef.current.isBusy() ||
-        next === displayMode
-      ) {
-        return;
-      }
-      await runManagementMutation(async () => {
-        setDisplayModeSaving(true);
-        setDisplayModeError(null);
-        try {
-          const result = await displayModeControllerRef.current.save(next);
-          if (result.kind === 'applied') {
-            setDisplayMode(result.displayMode);
-            setDisplayModeStatus('ready');
-            Message.success(t('browser.displayMode.saved'));
-            if (result.verificationError) {
-              Message.error(
-                t('browser.displayMode.refreshFailed', {
-                  error: displayModeErrorMessage(result.verificationError),
-                })
-              );
-            }
-          } else if (result.kind === 'rejected') {
-            const message = result.nonPersistent
-              ? displayModeErrorMessage(result.error)
-              : result.unconfirmed
-                ? t('browser.displayMode.unconfirmed')
-                : displayModeErrorMessage(result.error);
-            setDisplayMode(result.displayMode);
-            setDisplayModeStatus('ready');
-            setDisplayModeError(message);
-            Message.error(t('browser.displayMode.saveFailed', { error: message }));
-          } else if (result.kind === 'unknown') {
-            const message = displayModeErrorMessage(result.error);
-            setDisplayModeStatus('error');
-            setDisplayModeError(message);
-            Message.error(t('browser.displayMode.saveFailed', { error: message }));
-          }
-          if (result.kind === 'applied' || result.kind === 'rejected') {
-            try {
-              await refresh();
-            } catch (refreshError) {
-              Message.error(
-                t('browser.displayMode.refreshFailed', {
-                  error: displayModeErrorMessage(refreshError),
-                })
-              );
-            }
-          }
-        } finally {
-          setDisplayModeSaving(false);
-        }
-      });
-    },
-    [
-      canManageBrowserSettings,
-      displayMode,
-      displayModeStatus,
-      managementMutationBusy,
-      refresh,
-      runManagementMutation,
-      t,
-    ]
   );
 
   const confirmDanger = useCallback((request: BrowserConfirmationRequest) => {
@@ -484,7 +371,7 @@ const BrowserPage: React.FC = () => {
   const capabilityUnavailable = overview?.supported === false || overview?.enabled === false;
 
   return (
-    <div className='size-full min-h-0 flex flex-col p-16px box-border bg-2'>
+    <div className='size-full min-h-0 flex flex-col p-12px box-border bg-2 overflow-hidden'>
       <BrowserPageHeader
         runningCount={runningCount}
         queuedCount={queuedCount}
@@ -493,132 +380,139 @@ const BrowserPage: React.FC = () => {
         closingAll={closingAll}
         hasManagedResources={hasManagedResources}
         controlsDisabled={managementMutationBusy}
+        showLifecycleControls={activeTab === 'lifecycle'}
         canCloseAll={canCloseAll}
         closeAllLabel={installationWideCloseCopy.button}
         onRefresh={() => void refreshAll()}
         onCloseAll={handleCloseAll}
       />
 
-      {error && (
-        <Alert
-          type='warning'
-          showIcon
-          className='mb-12px shrink-0'
-          content={t('browser.page.inventoryUnavailable', { error })}
-          action={
-            <Button size='mini' onClick={() => void refreshAll()}>
-              {t('browser.page.retry')}
-            </Button>
-          }
-        />
-      )}
-
-      {canManageBrowserSettings && !capabilityUnavailable && (
-        <BrowserDisplayModeControl
-          displayMode={displayMode}
-          status={displayModeStatus}
-          saving={displayModeSaving}
-          disabled={managementMutationBusy && !displayModeSaving}
-          error={displayModeError}
-          onChange={(next) => void handleDisplayModeChange(next)}
-        />
-      )}
-
-      {overview && !capabilityUnavailable && <BrowserHostDiagnostics overview={overview} />}
-
-      {capabilityUnavailable ? (
-        <div className='flex-1 min-h-0 flex items-center justify-center bg-1 rd-12px border border-solid border-[var(--color-border-2)]'>
-          <Empty
-            icon={<WebPage theme='outline' size='42' />}
-            description={t('browser.page.capabilityUnavailable')}
-          />
-        </div>
-      ) : loading ? (
-        <div className='flex-1 min-h-0 flex items-center justify-center'>
-          <Spin tip={t('browser.page.loading')} />
-        </div>
-      ) : hasResidualResources ? (
-        <div className='flex-1 min-h-0 flex items-center justify-center bg-1 rd-12px border border-solid border-[var(--color-border-2)] p-20px'>
-          <Alert
-            type='warning'
-            showIcon
-            content={t(
-              canCloseAll
-                ? 'browser.page.residualResources'
-                : 'browser.page.residualResourcesUser',
-              {
-                hosts: managedHostCount,
-                cleanups: pendingCleanupCount,
-              }
-            )}
-          />
-        </div>
-      ) : lanes.length === 0 ? (
-        <div className='flex-1 min-h-0 flex items-center justify-center bg-1 rd-12px border border-solid border-[var(--color-border-2)]'>
-          <Empty
-            icon={<WebPage theme='outline' size='42' />}
-            description={t('browser.page.empty')}
-          />
-        </div>
-      ) : (
-        <div
-          className={
-            layout?.isMobile
-              ? 'flex-1 min-h-0 flex flex-col gap-12px overflow-y-auto'
-              : 'flex-1 min-h-0 grid grid-cols-[320px_minmax(0,1fr)] gap-12px'
-          }
-        >
-          <aside
-            className={
-              layout?.isMobile
-                ? 'shrink-0 rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] bg-[color:color-mix(in_srgb,var(--color-bg-1)_76%,transparent)] p-8px'
-                : 'min-h-0 overflow-y-auto rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] bg-[color:color-mix(in_srgb,var(--color-bg-1)_76%,transparent)] p-8px pr-6px shadow-[0_6px_20px_rgba(15,23,42,0.025)]'
-            }
-            aria-label={t('browser.page.inventoryAria')}
-          >
-            <BrowserInventoryTree
-              groups={groups}
-              selectedLaneId={selectedLaneId}
-              currentConversationId={currentConversationId}
-              busyLaneId={busyLaneId}
-              busyConversationId={busyConversationId}
-              managementDisabled={managementMutationBusy}
-              onSelectLane={handleSelectLane}
-              onCloseLane={handleCloseLane}
-              onCloseConversation={handleCloseConversation}
-            />
-          </aside>
-          <main className={layout?.isMobile ? 'min-h-0' : 'min-h-0 overflow-y-auto pr-2px'}>
-            {selectedLane ? (
-              <BrowserLaneDetails
-                lane={selectedLane}
-                closing={busyLaneId === selectedLane.lane_id || closingAll}
-                visibilityChanging={
-                  changingVisibilityLaneId === selectedLane.lane_id
+      <Tabs
+        activeTab={activeTab}
+        onChange={handleTabChange}
+        type='line'
+        lazyload
+        destroyOnHide
+        className='flex flex-col flex-1 min-h-0 [&>.arco-tabs-header]:shrink-0 [&>.arco-tabs-content]:flex-1 [&>.arco-tabs-content]:min-h-0 [&>.arco-tabs-content]:overflow-hidden [&>.arco-tabs-content]:pt-8px [&>.arco-tabs-content>.arco-tabs-content-inner]:h-full [&>.arco-tabs-content>.arco-tabs-content-inner]:min-h-0 [&_.arco-tabs-pane]:h-full [&_.arco-tabs-pane]:min-h-0'
+      >
+        <Tabs.TabPane key='lifecycle' title={t('browser.tabs.lifecycle')}>
+          <div className='size-full min-h-0 flex flex-col'>
+            {error && (
+              <Alert
+                type='warning'
+                showIcon
+                className='mb-12px shrink-0'
+                content={t('browser.page.inventoryUnavailable', { error })}
+                action={
+                  <Button size='mini' onClick={() => void refreshAll()}>
+                    {t('browser.page.retry')}
+                  </Button>
                 }
-                actionsDisabled={
-                  busyConversationId != null ||
-                  displayModeSaving ||
-                  (changingVisibilityLaneId != null &&
-                    changingVisibilityLaneId !== selectedLane.lane_id) ||
-                  (busyLaneId != null && busyLaneId !== selectedLane.lane_id)
-                }
-                hostHeadful={selectedLaneHost?.headful}
-                canChangeVisibility={
-                  selectedLaneHost?.headful === true
-                    ? canBackgroundBrowserLane(selectedLane)
-                    : canForegroundBrowserLane(selectedLane)
-                }
-                onClose={handleCloseLane}
-                onForeground={handleForegroundLane}
-                onBackground={handleBackgroundLane}
               />
-            ) : (
-              <Empty description={t('browser.page.selectLane')} />
             )}
-          </main>
-        </div>
-      )}
+
+            {overview && !capabilityUnavailable && <BrowserHostDiagnostics overview={overview} />}
+
+            {capabilityUnavailable ? (
+              <div className='flex-1 min-h-0 flex items-center justify-center bg-1 rd-12px border border-solid border-[var(--color-border-2)]'>
+                <Empty
+                  icon={<WebPage theme='outline' size='42' />}
+                  description={t('browser.page.capabilityUnavailable')}
+                />
+              </div>
+            ) : loading ? (
+              <div className='flex-1 min-h-0 flex items-center justify-center'>
+                <Spin tip={t('browser.page.loading')} />
+              </div>
+            ) : hasResidualResources ? (
+              <div className='flex-1 min-h-0 flex items-center justify-center bg-1 rd-12px border border-solid border-[var(--color-border-2)] p-20px'>
+                <Alert
+                  type='warning'
+                  showIcon
+                  content={t(
+                    canCloseAll
+                      ? 'browser.page.residualResources'
+                      : 'browser.page.residualResourcesUser',
+                    {
+                      hosts: managedHostCount,
+                      cleanups: pendingCleanupCount,
+                    }
+                  )}
+                />
+              </div>
+            ) : lanes.length === 0 ? (
+              <div className='flex-1 min-h-0 flex items-center justify-center bg-1 rd-12px border border-solid border-[var(--color-border-2)]'>
+                <Empty
+                  icon={<WebPage theme='outline' size='42' />}
+                  description={t('browser.page.empty')}
+                />
+              </div>
+            ) : (
+              <div
+                className={
+                  layout?.isMobile
+                    ? 'flex-1 min-h-0 flex flex-col gap-12px overflow-y-auto'
+                    : 'flex-1 min-h-0 grid grid-cols-[320px_minmax(0,1fr)] gap-12px'
+                }
+              >
+                <aside
+                  className={
+                    layout?.isMobile
+                      ? 'shrink-0 rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] bg-[color:color-mix(in_srgb,var(--color-bg-1)_76%,transparent)] p-8px'
+                      : 'min-h-0 overflow-y-auto rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] bg-[color:color-mix(in_srgb,var(--color-bg-1)_76%,transparent)] p-8px pr-6px shadow-[0_6px_20px_rgba(15,23,42,0.025)]'
+                  }
+                  aria-label={t('browser.page.inventoryAria')}
+                >
+                  <BrowserInventoryTree
+                    groups={groups}
+                    selectedLaneId={selectedLaneId}
+                    currentConversationId={currentConversationId}
+                    busyLaneId={busyLaneId}
+                    busyConversationId={busyConversationId}
+                    managementDisabled={managementMutationBusy}
+                    onSelectLane={handleSelectLane}
+                    onCloseLane={handleCloseLane}
+                    onCloseConversation={handleCloseConversation}
+                  />
+                </aside>
+                <main className={layout?.isMobile ? 'min-h-0' : 'min-h-0 overflow-y-auto pr-2px'}>
+                  {selectedLane ? (
+                    <BrowserLaneDetails
+                      lane={selectedLane}
+                      closing={busyLaneId === selectedLane.lane_id || closingAll}
+                      visibilityChanging={
+                        changingVisibilityLaneId === selectedLane.lane_id
+                      }
+                      actionsDisabled={
+                        busyConversationId != null ||
+                        (changingVisibilityLaneId != null &&
+                          changingVisibilityLaneId !== selectedLane.lane_id) ||
+                        (busyLaneId != null && busyLaneId !== selectedLane.lane_id)
+                      }
+                      hostHeadful={selectedLaneHost?.headful}
+                      canChangeVisibility={
+                        selectedLaneHost?.headful === true
+                          ? canBackgroundBrowserLane(selectedLane)
+                          : canForegroundBrowserLane(selectedLane)
+                      }
+                      onClose={handleCloseLane}
+                      onForeground={handleForegroundLane}
+                      onBackground={handleBackgroundLane}
+                    />
+                  ) : (
+                    <Empty description={t('browser.page.selectLane')} />
+                  )}
+                </main>
+              </div>
+            )}
+          </div>
+        </Tabs.TabPane>
+        <Tabs.TabPane key='settings' title={t('browser.tabs.settings')}>
+          <div className='size-full min-h-0 max-w-1024px mx-auto overflow-hidden'>
+            <BrowserUseSettingsContent />
+          </div>
+        </Tabs.TabPane>
+      </Tabs>
     </div>
   );
 };

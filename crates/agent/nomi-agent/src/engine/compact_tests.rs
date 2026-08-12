@@ -135,6 +135,7 @@ fn make_compact_engine_with_output(
         system_resource_inbox: None,
         process_supervisor: None,
         editable_turn: None,
+        host_context: Default::default(),
     }
 }
 
@@ -418,6 +419,7 @@ fn abort_current_turn_redacts_an_image_before_any_assistant_response() {
     engine.editable_turn = Some(EditableTurnCheckpoint {
         source_message_id: "message-image".into(),
         start_len: 0,
+        prior_host_context: Default::default(),
     });
 
     engine.abort_current_turn("Canceled by user");

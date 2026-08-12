@@ -53,7 +53,10 @@ export type ConfigKeyMap = {
   // generators (autogen / description.generate / description.polish). Empty
   // value = let the backend fall back to its own default completer model.
   'knowledge.autogenModel': { provider_id: ProviderId; model: string } | undefined;
-  'tools.imageGenerationModel': { provider_id: ProviderId; model: string; switch?: boolean };
+  // Install-wide default for the native image-generation task. Missing means
+  // the backend may choose from the available image models (for example by
+  // round-robin); there is no separate tool enable switch.
+  'models.default.imageGeneration': { provider_id: ProviderId; model: string } | undefined;
   'tools.speechToText': SpeechToTextConfig | undefined;
   // Install-wide speech-synthesis default. Registered backend-side as a REQUIRED
   // Provider reference (nomifun-db client_preference), so an absent key — not a

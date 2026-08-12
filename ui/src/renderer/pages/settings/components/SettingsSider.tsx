@@ -6,7 +6,6 @@ import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSe
 import {
   Computer,
   Cpu,
-  Earth,
   Info,
   Puzzle,
   Server,
@@ -25,7 +24,6 @@ export const BUILTIN_TAB_IDS = [
   'system',
   'execution-engines',
   'ssh-hosts',
-  'browser-use',
   'computer-use',
   'about',
 ] as const;
@@ -76,12 +74,6 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
         path: 'ssh-hosts',
       },
       system: { id: 'system', label: t('settings.system'), icon: <System />, path: 'system' },
-      'browser-use': {
-        id: 'browser-use',
-        label: t('settings.browserUseNav'),
-        icon: <Earth />,
-        path: 'browser-use',
-      },
       'computer-use': {
         id: 'computer-use',
         label: t('settings.computerUseNav'),

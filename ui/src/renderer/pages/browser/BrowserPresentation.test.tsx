@@ -12,7 +12,6 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { IBrowserLane, IBrowserOverview } from '@/common/browser/browserTypes';
 import enBrowser from '../../services/i18n/locales/en-US/browser.json';
-import BrowserDisplayModeControl from './BrowserDisplayModeControl';
 import BrowserHostDiagnostics from './BrowserHostDiagnostics';
 import BrowserInventoryTree from './BrowserInventoryTree';
 import BrowserLaneDetails from './BrowserLaneDetails';
@@ -20,6 +19,13 @@ import BrowserPageHeader from './BrowserPageHeader';
 import type { BrowserConversationGroup } from './browserInventoryModel';
 
 const browserPageSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
+const browserSettingsSource = readFileSync(
+  new URL(
+    '../../components/settings/SettingsModal/contents/BrowserUseSettingsContent.tsx',
+    import.meta.url
+  ),
+  'utf8'
+);
 const inventoryTreeSource = readFileSync(
   new URL('./BrowserInventoryTree.tsx', import.meta.url),
   'utf8'
@@ -337,6 +343,29 @@ describe('Browser management presentation', () => {
     expect(deniedHtml.includes('1 running')).toBe(true);
   });
 
+  test('keeps lifecycle actions out of the Settings tab header', () => {
+    const html = renderBrowser(
+      <BrowserPageHeader
+        runningCount={1}
+        queuedCount={2}
+        refreshing={false}
+        closingAll={false}
+        hasManagedResources
+        showLifecycleControls={false}
+        canCloseAll
+        closeAllLabel='Close lifecycle resources'
+        onRefresh={() => undefined}
+        onCloseAll={() => undefined}
+      />
+    );
+
+    expect(html.includes('Browser management')).toBe(true);
+    expect(html.includes('1 running')).toBe(false);
+    expect(html.includes('2 queued')).toBe(false);
+    expect(html.includes('Refresh')).toBe(false);
+    expect(html.includes('Close lifecycle resources')).toBe(false);
+  });
+
   test('keeps close-all enabled for a zero-lane managed Host or pending cleanup', () => {
     const html = renderBrowser(
       <BrowserPageHeader
@@ -366,33 +395,42 @@ describe('Browser management presentation', () => {
     expect(browserPageSource.includes('canCloseAll={canCloseAll}')).toBe(true);
   });
 
-  test('uses the live owner policy API without restoring an embedded viewer seam', () => {
-    expect(browserPageSource.includes('ipcBridge.browserSession.displayMode.get.invoke()')).toBe(true);
-    expect(browserPageSource.includes('ipcBridge.browserSession.displayMode.put.invoke')).toBe(true);
-    expect(browserPageSource.includes('<BrowserDisplayModeControl')).toBe(true);
-    expect(
-      browserPageSource.includes(
-        '{canManageBrowserSettings && !capabilityUnavailable && ('
-      )
-    ).toBe(true);
-    expect(browserPageSource.includes('onInventoryRefresh=')).toBe(false);
+  test('combines lifecycle and settings without duplicating the live display-mode control', () => {
+    expect(browserPageSource.includes("<Tabs.TabPane key='lifecycle'")).toBe(true);
+    expect(browserPageSource.includes("<Tabs.TabPane key='settings'")).toBe(true);
+    expect(browserPageSource.includes('<BrowserUseSettingsContent />')).toBe(true);
+    expect(browserPageSource.includes('ipcBridge.browserSession.displayMode.get.invoke()')).toBe(false);
+    expect(browserPageSource.includes('ipcBridge.browserSession.displayMode.put.invoke')).toBe(false);
+    expect(browserSettingsSource.includes('ipcBridge.browserSession.displayMode.get.invoke()')).toBe(true);
+    expect(browserSettingsSource.includes('ipcBridge.browserSession.displayMode.put.invoke')).toBe(true);
     expect(browserPageSource.includes('EmbeddedBrowserViewer')).toBe(false);
   });
 
-  test('presents silent headless as the adjustable global default', () => {
-    const html = renderBrowser(
-      <BrowserDisplayModeControl
-        displayMode='headless'
-        status='ready'
-        saving={false}
-        onChange={() => undefined}
-      />
-    );
-
-    expect(html.includes('Global browser visibility default')).toBe(true);
-    expect(html.includes('Routine Browser search and knowledge lookup')).toBe(true);
-    expect(html.includes('Silent headless (default)')).toBe(true);
-    expect(html.includes('Visible window')).toBe(true);
+  test('keeps the compact Settings tab independently scrollable', () => {
+    expect(browserPageSource.includes('[&>.arco-tabs-content]:overflow-hidden')).toBe(true);
+    expect(
+      browserPageSource.includes("max-w-1024px mx-auto overflow-hidden")
+    ).toBe(true);
+    expect(
+      browserSettingsSource.includes(
+        "<NomiScrollArea className='flex-1 min-h-0 pb-8px scrollbar-hide'>"
+      )
+    ).toBe(true);
+    expect(browserSettingsSource.includes('disableOverflow')).toBe(false);
+    expect(browserSettingsSource.includes('<BasePreferenceRow {...props} compact />')).toBe(true);
+    expect(browserSettingsSource.includes("className='space-y-10px'")).toBe(true);
+    expect(browserSettingsSource.includes('md:px-[32px]')).toBe(false);
+    expect(browserSettingsSource.match(/<section className='space-y-6px'>/g)).toHaveLength(2);
+    expect(
+      browserSettingsSource.match(
+        /<h2 className='m-0 px-2px text-13px font-600 text-t-secondary'>/g
+      )
+    ).toHaveLength(2);
+    expect(
+      browserSettingsSource.match(
+        /border border-solid border-\[var\(--color-border-2\)\]/g
+      )
+    ).toHaveLength(2);
   });
 
   test('keeps lane management visible when the lane reports an error', () => {
@@ -517,7 +555,8 @@ describe('Browser management presentation', () => {
     expect(laneDetailsSource.includes('Take control')).toBe(false);
     expect(laneDetailsSource.includes('onInput')).toBe(false);
     expect(browserPageSource.includes('EmbeddedBrowserViewer')).toBe(false);
-    expect(browserPageSource.includes('displayMode.put.invoke')).toBe(true);
+    expect(browserPageSource.includes('displayMode.put.invoke')).toBe(false);
+    expect(browserSettingsSource.includes('displayMode.put.invoke')).toBe(true);
     expect(browserPageSource.includes('viewerToken')).toBe(false);
   });
 
@@ -576,9 +615,7 @@ describe('Browser management presentation', () => {
     expect(browserPageSource.includes('managementDisabled={managementMutationBusy}')).toBe(
       true
     );
-    expect(
-      browserPageSource.includes('disabled={managementMutationBusy && !displayModeSaving}')
-    ).toBe(true);
+    expect(browserPageSource.includes('controlsDisabled={managementMutationBusy}')).toBe(true);
     expect(inventoryTreeSource.includes('disabled={managementDisabled}')).toBe(true);
   });
 

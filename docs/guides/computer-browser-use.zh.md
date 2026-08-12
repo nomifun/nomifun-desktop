@@ -16,11 +16,11 @@ NomiFun agent 内置/接入两项可选的系统级能力：
 
 ## 启用与关闭方式
 
-### 1. 桌面端系统设置（推荐）
+### 1. 桌面端管理入口（推荐）
 
-桌面应用在系统设置中提供两个页面：
+桌面应用提供两个能力管理入口：
 
-- **Browser Use**（`/settings/browser-use`）
+- **浏览器管理 → 设置**（`/browser?tab=settings`；旧 `/settings/browser-use` 会自动跳转）
 - **Computer Use**（`/settings/computer-use`）
 
 当前桌面构建默认把两个能力开关设为开启；关闭任一开关会持久化到用户偏好，
@@ -29,17 +29,17 @@ NomiFun agent 内置/接入两项可选的系统级能力：
 - **浏览器来源**：系统 Chrome/Edge 可执行文件或 managed source；
 - **显示模式**：应用级默认可见策略。"后台静默"（新安装默认）让普通 Primary
   Agent 任务以 Chromium `--headless=new` 静默运行；"前台可见"是用户显式选择的
-  默认前台策略，Primary Host 以真实窗口启动。安装 owner 可在此处或 `/browser`
-  修改；后端会立即应用并持久化已确认的更改。普通 Agent/模型无权覆盖该偏好；
+  默认前台策略，Primary Host 以真实窗口启动。安装 owner 可在“设置”Tab 修改；
+  后端会立即应用并持久化已确认的更改。普通 Agent/模型无权覆盖该偏好；
 - **资源策略**：Automatic、Resource saving 或 High concurrency。总容量随并发任务数量与机器压力弹性伸缩，不使用安装级固定 RSS 总上限；
 - 高级资源限制（仅在需要诊断或精细调优时修改）：机器级弹性内存压力比例，以及单任务的归因内存、操作、Lane、标签页和队列预算。共享 Host 的单任务内存属于估算值，结构配额则是硬边界。
 
-右侧边栏的 **Browser** 页面（`/browser`）只展示 running/queued Lane 的状态、
-容量、队列、身份、owner 与生命周期，并在权限允许时关闭单个 Lane、某个
-conversation 的 Lane 或全部 Lane。对 running Primary Lane，它还提供“前台打开”，
-以及“转到后台”；它们只改变当前共享 Primary Host，不会修改全局默认值。安装
-owner 也可在该页面实时修改默认值。该页面仍不嵌入页面，也不提供页面输入、tab
-控制、用户接管或地址导航。
+右侧边栏的 **浏览器** 页面（`/browser`）统一承载两个 Tab。“运行周期”展示
+running/queued Lane 的状态、容量、队列、身份、owner 与生命周期，并在权限允许时
+关闭单个 Lane、某个 conversation 的 Lane 或全部 Lane；对 running Primary Lane，
+它还提供“前台打开”和“转到后台”，两者只改变当前共享 Primary Host，不修改全局
+默认值。“设置”承载 Browser Use 开关、来源、显示默认值、登录身份、安全和资源
+策略。该页面仍不嵌入网页，也不提供页面输入、tab 控制、用户接管或地址导航。
 
 ### 2. 会话级
 
@@ -168,8 +168,8 @@ Lane 的活动 URL，但旧 target/frame/ref 已失效；应刷新库存并 fres
 
 对应的认证管理接口为 `POST /api/browser/lanes/{id}/foreground` 和
 `POST /api/browser/lanes/{id}/background`；改变状态的请求继续使用现有 CSRF
-防护。它们不是 Agent 可调用的 Browser action。安装 owner 通过设置页和
-`/browser` 使用的 `GET`/`PUT /api/browser/display-mode` 管理持久默认值。
+防护。它们不是 Agent 可调用的 Browser action。安装 owner 通过浏览器管理的
+“设置”Tab 使用 `GET`/`PUT /api/browser/display-mode` 管理持久默认值。
 
 ## macOS 权限
 

@@ -230,7 +230,7 @@ fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> InvokeError 
                 429 => InvokeErrorKind::RateLimited,
                 _ => InvokeErrorKind::ProviderError,
             };
-            InvokeError { kind, message, http_status: Some(status), retry_after_ms: None }
+            InvokeError::new(kind, message).with_http_status(status)
         }
         Error::Io(io) if io.kind() == std::io::ErrorKind::TimedOut => {
             InvokeError::new(InvokeErrorKind::Timeout, format!("StepFun realtime I/O timed out: {io}"))

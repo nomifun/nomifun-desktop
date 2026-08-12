@@ -30,7 +30,7 @@ use crate::manifest::{
 const MAX_RESOLUTION_ATTEMPTS: usize = 3;
 
 fn catalog_err(what: &str, error: nomifun_db::DbError) -> InvokeError {
-    InvokeError::config(format!("{what}: {error}"))
+    InvokeError::catalog(format!("{what}: {error}"))
 }
 
 fn task_key(task: ModelTask) -> String {

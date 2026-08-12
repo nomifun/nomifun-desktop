@@ -18,6 +18,7 @@ interface BrowserPageHeaderProps {
   closingAll: boolean;
   hasManagedResources: boolean;
   controlsDisabled?: boolean;
+  showLifecycleControls?: boolean;
   canCloseAll: boolean;
   closeAllLabel?: string;
   onRefresh: () => void;
@@ -32,6 +33,7 @@ const BrowserPageHeader: React.FC<BrowserPageHeaderProps> = ({
   closingAll,
   hasManagedResources,
   controlsDisabled = false,
+  showLifecycleControls = true,
   canCloseAll,
   closeAllLabel,
   onRefresh,
@@ -52,8 +54,8 @@ const BrowserPageHeader: React.FC<BrowserPageHeaderProps> = ({
   })();
 
   return (
-    <header className='shrink-0 flex flex-wrap items-center gap-10px mb-12px'>
-      <div className='size-34px rd-9px bg-primary-1 text-primary-6 flex items-center justify-center'>
+    <header className='shrink-0 flex flex-wrap items-center gap-8px mb-8px'>
+      <div className='size-32px rd-8px bg-primary-1 text-primary-6 flex items-center justify-center'>
         <WebPage theme='outline' size='18' />
       </div>
       <div className='min-w-0 flex-1'>
@@ -62,33 +64,37 @@ const BrowserPageHeader: React.FC<BrowserPageHeaderProps> = ({
           {t('browser.page.description')}
         </div>
       </div>
-      <Tag color='green'>{t('browser.page.runningCount', { count: runningCount })}</Tag>
-      <Tag color='orange'>{t('browser.page.queuedCount', { count: queuedCount })}</Tag>
-      {pressureState && pressureState !== 'normal' && (
-        <Tag color={pressureState === 'critical' ? 'red' : 'orange'}>
-          {t('browser.page.pressure', { state: pressureStateLabel })}
-        </Tag>
-      )}
-      <Button
-        type='outline'
-        loading={refreshing}
-        disabled={controlsDisabled}
-        icon={<Refresh theme='outline' size='14' />}
-        onClick={onRefresh}
-      >
-        {t('browser.page.refresh')}
-      </Button>
-      {canCloseAll === true && (
-        <Button
-          status='danger'
-          type='outline'
-          disabled={!hasManagedResources || controlsDisabled}
-          loading={closingAll}
-          icon={<Delete theme='outline' size='14' />}
-          onClick={onCloseAll}
-        >
-          {closeAllLabel ?? t('browser.page.closeAll')}
-        </Button>
+      {showLifecycleControls && (
+        <>
+          <Tag color='green'>{t('browser.page.runningCount', { count: runningCount })}</Tag>
+          <Tag color='orange'>{t('browser.page.queuedCount', { count: queuedCount })}</Tag>
+          {pressureState && pressureState !== 'normal' && (
+            <Tag color={pressureState === 'critical' ? 'red' : 'orange'}>
+              {t('browser.page.pressure', { state: pressureStateLabel })}
+            </Tag>
+          )}
+          <Button
+            type='outline'
+            loading={refreshing}
+            disabled={controlsDisabled}
+            icon={<Refresh theme='outline' size='14' />}
+            onClick={onRefresh}
+          >
+            {t('browser.page.refresh')}
+          </Button>
+          {canCloseAll === true && (
+            <Button
+              status='danger'
+              type='outline'
+              disabled={!hasManagedResources || controlsDisabled}
+              loading={closingAll}
+              icon={<Delete theme='outline' size='14' />}
+              onClick={onCloseAll}
+            >
+              {closeAllLabel ?? t('browser.page.closeAll')}
+            </Button>
+          )}
+        </>
       )}
     </header>
   );
