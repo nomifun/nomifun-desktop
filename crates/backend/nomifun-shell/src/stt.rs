@@ -153,12 +153,11 @@ mod tests {
     #[test]
     fn invoke_errors_map_to_stt_semantics() {
         // Anything carrying an upstream HTTP status is a RequestFailed (502).
-        let upstream = InvokeError {
-            kind: InvokeErrorKind::InvalidParams,
-            message: "provider returned 400 Bad Request: nope".into(),
-            http_status: Some(400),
-            retry_after_ms: None,
-        };
+        let upstream = InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "provider returned 400 Bad Request: nope",
+        )
+        .with_http_status(400);
         assert!(matches!(stt_error_from_invoke(upstream), SttError::RequestFailed(_)));
 
         // Transport failures never reached a status but are still upstream-ish.

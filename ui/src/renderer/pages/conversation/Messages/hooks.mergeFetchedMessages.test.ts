@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import { parseConversationId, parseCronJobId, parseMessageId, type MessageId } from '@/common/types/ids';
 import type { TMessage } from '@/common/chat/chatLib';
+import { createStoredMessageMapper } from '@/common/adapter/storedMessageMapper';
 import {
   composeMessageForTest,
   mergeFetchedMessagesForConversation,
@@ -60,6 +61,65 @@ const baseMessage = (overrides: MessageOverrides): TMessage =>
   }) as TMessage;
 
 describe('mergeFetchedMessagesForConversation', () => {
+  test('hydrates distinct thinking and agent-status rows into one owning turn disclosure', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const turnId = messageId('persisted-process-root');
+    const statusMessageId = durableMessageId('persisted-agent-status');
+    const thinkingMessageId = durableMessageId('persisted-thinking');
+    let renderSequence = 0;
+    const mapStored = createStoredMessageMapper(() => `persisted-process-${++renderSequence}`);
+
+    const status = mapStored({
+      message_id: statusMessageId,
+      conversation_id: conversationId,
+      msg_id: turnId,
+      type: 'agent_status',
+      content: { backend: 'nomi', status: 'prepared', turn_id: turnId },
+      position: 'left',
+      status: 'finish',
+      hidden: false,
+      created_at: 1_000,
+    });
+    const thinking = mapStored({
+      message_id: thinkingMessageId,
+      conversation_id: conversationId,
+      msg_id: thinkingMessageId,
+      type: 'thinking',
+      content: {
+        content: 'Inspecting the requested composition',
+        status: 'done',
+        duration_ms: 250,
+        turn_id: turnId,
+      },
+      position: 'left',
+      status: 'finish',
+      hidden: false,
+      created_at: 1_250,
+    });
+
+    expect(status.message_id).not.toBe(turnId);
+    expect(thinking.message_id).not.toBe(turnId);
+    expect(status.turn_id).toBe(turnId);
+    expect(thinking.turn_id).toBe(turnId);
+
+    const assigned = assignTurnIdsFromUserRequests([
+      { id: status.id, role: 'process', turnId: status.turn_id, createdAt: status.created_at ?? 0 },
+      {
+        id: thinking.id,
+        role: 'process_content',
+        turnId: thinking.turn_id,
+        createdAt: thinking.created_at ?? 0,
+      },
+    ]);
+    const disclosures = buildTurnDisclosureItems(assigned, { tailClosed: true }).filter(
+      (entry) => entry.type === 'turn_disclosure'
+    );
+
+    expect(disclosures).toHaveLength(1);
+    expect(disclosures[0]?.turnId).toBe(turnId);
+    expect(disclosures[0]?.processItemIds).toEqual([status.id, thinking.id]);
+  });
+
   test('keeps a late ACP image completion before the final answer and produces one disclosure', () => {
     const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
     const userId = messageId('image-user');

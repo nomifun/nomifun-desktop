@@ -473,7 +473,13 @@ mod tests {
             ),
         );
 
-        let events = session_notification_to_events_with_store(&notif, Some(&store));
+        let mut state = AcpArtifactDeliveryState::default();
+        state.begin_turn("sess-1");
+        let events = session_notification_to_events_with_delivery_state(
+            &notif,
+            Some(&store),
+            &mut state,
+        );
         let json = serde_json::to_value(&events[0]).unwrap();
         assert_eq!(json["data"]["update"]["status"], "completed");
         assert_eq!(json["data"]["update"]["content"][0]["type"], "artifact");
@@ -1277,13 +1283,14 @@ mod tests {
     }
 
     #[test]
-    fn acp_agent_message_artifact_failure_is_classified_as_local_integrity() {
+    fn acp_agent_message_binary_is_rejected_before_artifact_persistence() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
         let workspace = tempfile::tempdir().unwrap();
         let store = crate::artifact_store::ArtifactStore::new(workspace.path());
         let notification = SessionNotification::new(
             "sess-agent-media-error",
             SessionUpdate::AgentMessageChunk(ContentChunk::new(SdkContentBlock::Image(
-                ImageContent::new("bm90IGFuIGltYWdl", "image/png"),
+                ImageContent::new(PNG, "image/png"),
             ))),
         );
 
@@ -1295,6 +1302,39 @@ mod tests {
         assert_eq!(
             json["data"]["message"],
             "Nomifun could not verify the requested artifact delivery"
+        );
+        assert!(
+            !workspace.path().join("nomifun-artifacts").exists(),
+            "fail-closed assistant chunks must not publish bytes without a typed receipt"
+        );
+    }
+
+    #[test]
+    fn acp_unsolicited_tool_artifact_is_rejected_before_persistence() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let store = crate::artifact_store::ArtifactStore::new(workspace.path());
+        let notification = SessionNotification::new(
+            "sess-no-active-turn",
+            SessionUpdate::ToolCall(
+                SdkToolCall::new("tool-image", "Generate image")
+                    .status(SdkToolCallStatus::Completed)
+                    .content(vec![ToolCallContent::from(SdkContentBlock::Image(
+                        ImageContent::new(PNG, "image/png"),
+                    ))]),
+            ),
+        );
+
+        let events = session_notification_to_events_with_store(&notification, Some(&store));
+        let json = serde_json::to_value(&events[0]).unwrap();
+        assert_eq!(json["data"]["update"]["status"], "failed");
+        assert_eq!(
+            json["data"]["update"]["content"][0]["type"],
+            "artifact_error"
+        );
+        assert!(
+            !workspace.path().join("nomifun-artifacts").exists(),
+            "an unsolicited artifact must be rejected before bytes or a journal are published"
         );
     }
 
@@ -1635,14 +1675,15 @@ mod tests {
             Some(&store),
             &mut state,
         );
-        let artifact_dir = workspace.path().join("nomifun-artifacts");
-        let receipt_path = std::fs::read_dir(&artifact_dir)
+        let receipt_path = store
+            .recovery_records()
             .unwrap()
+            .into_iter()
             .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        std::fs::remove_file(receipt_path).unwrap();
+            .map(|record| std::path::PathBuf::from(record.receipt.path))
+            .expect("the inline artifact receipt must have a recovery record");
+        std::fs::remove_file(&receipt_path).unwrap();
+        assert!(!receipt_path.exists());
 
         let error = state
             .seal_turn_with_store("sess-deleted-in-progress", Some(&store), true)
@@ -2362,6 +2403,8 @@ mod tests {
         std::fs::write(&report_path, "# Report\n").unwrap();
         let report_uri = url::Url::from_file_path(&report_path).unwrap().to_string();
         let store = crate::artifact_store::ArtifactStore::new(workspace.path());
+        let mut state = AcpArtifactDeliveryState::default();
+        state.begin_turn("sess-1");
 
         let valid = SessionNotification::new(
             "sess-1",
@@ -2373,7 +2416,11 @@ mod tests {
                     ))]),
             ),
         );
-        let events = session_notification_to_events_with_store(&valid, Some(&store));
+        let events = session_notification_to_events_with_delivery_state(
+            &valid,
+            Some(&store),
+            &mut state,
+        );
         let json = serde_json::to_value(&events[0]).unwrap();
         assert_eq!(json["data"]["update"]["status"], "completed");
         assert_eq!(json["data"]["update"]["content"][0]["type"], "artifact");
@@ -2397,7 +2444,12 @@ mod tests {
                     ))]),
             ),
         );
-        let invalid_events = session_notification_to_events_with_store(&invalid, Some(&store));
+        state.begin_turn("sess-1");
+        let invalid_events = session_notification_to_events_with_delivery_state(
+            &invalid,
+            Some(&store),
+            &mut state,
+        );
         let invalid_json = serde_json::to_value(&invalid_events[0]).unwrap();
         assert_eq!(invalid_json["data"]["update"]["status"], "failed");
         assert_eq!(invalid_json["data"]["update"]["content"][0]["type"], "artifact_error");

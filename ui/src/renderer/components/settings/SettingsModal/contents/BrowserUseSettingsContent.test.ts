@@ -750,8 +750,8 @@ describe('Browser Use settings contract', () => {
   test('wires the queued promotion watch through the navigation-surviving singleton', () => {
     const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
 
-    // The queued branch navigates to /browser immediately, which unmounts the
-    // routed settings page (/settings/browser-use). The watch must therefore
+    // The queued branch navigates to /browser immediately, which switches the
+    // unified page to Lifecycle and destroys the Settings pane. The watch must therefore
     // live outside the component: e027cef5 stored the stop handle in
     // loginPromotionStopRef and cancelled it from the unmount effect, killing
     // the poll before its first 2s tick ever ran.
@@ -973,9 +973,9 @@ describe('browser login promotion watch singleton', () => {
     restoreWindow();
   });
 
-  test('keeps polling across the settings-page unmount and still notifies + foregrounds on promotion', async () => {
+  test('keeps polling across the Settings-pane unmount and still notifies + foregrounds on promotion', async () => {
     // Real flow: the queued branch begins the watch and immediately calls
-    // navigate('/browser'), unmounting the routed /settings/browser-use page.
+    // navigate('/browser'), switching to Lifecycle and destroying the Settings pane.
     // Under e027cef5 the stop handle lived in a component ref and the unmount
     // effect cancelled the poll before its first 2s tick, so the promised
     // promotion notification never arrived. The watch is now module-level:

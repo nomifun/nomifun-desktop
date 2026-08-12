@@ -7,9 +7,13 @@
   "actions": {
     "busy": "另一个浏览器管理操作仍在进行中。请等待它完成后重试。"
   },
+  "tabs": {
+    "lifecycle": "运行周期",
+    "settings": "设置"
+  },
   "page": {
     "title": "浏览器管理",
-    "description": "管理 Agent 浏览器通道的生命周期、容量、队列与身份状态。日常浏览默认无头静默运行，只有显式操作时才前台打开运行中的主身份通道。",
+    "description": "统一管理 Agent 浏览器的运行周期、身份、安全与资源设置。",
     "runningCount": "{{count}} 个运行中",
     "queuedCount": "{{count}} 个排队中",
     "pressure": "{{state}}负载",

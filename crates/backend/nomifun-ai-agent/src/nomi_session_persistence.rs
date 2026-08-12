@@ -385,6 +385,7 @@ mod tests {
         target.editable_turn = Some(EditableTurnCheckpoint {
             source_message_id: "target-message".to_owned(),
             start_len: 0,
+            prior_host_context: Default::default(),
         });
         manager.save(&target).expect("save target checkpoint");
         let mut sibling = manager
@@ -399,6 +400,7 @@ mod tests {
         let sibling_checkpoint = EditableTurnCheckpoint {
             source_message_id: "sibling-message".to_owned(),
             start_len: 0,
+            prior_host_context: Default::default(),
         };
         sibling.editable_turn = Some(sibling_checkpoint.clone());
         manager.save(&sibling).expect("save sibling checkpoint");

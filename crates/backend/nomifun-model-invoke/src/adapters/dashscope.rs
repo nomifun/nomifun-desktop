@@ -33,7 +33,11 @@ use crate::adapter::ProtocolAdapter;
 use crate::call::{ResolvedCall, resolve_endpoint};
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::manifest::expand_protocol_endpoint_template;
-use crate::transport::{error_from_response, get_request, send_with_rotation};
+use crate::transport::{
+    ImageResponseBudget, MAX_IMAGE_METADATA_RESPONSE_BYTES, MAX_IMAGE_RESPONSE_IMAGES,
+    error_from_response, get_request, read_json_capped, send_with_rotation,
+    validate_image_request_count,
+};
 use crate::types::{
     JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
 };
@@ -78,6 +82,7 @@ impl ProtocolAdapter for DashScopeImagesAdapter {
                 format!("dashscope.images cannot serve task {:?}", call.request.task()),
             ));
         };
+        validate_dashscope_image_request(req)?;
         let url = call.endpoint_url()?;
 
         // input/parameters wrapper (NOT the OpenAI flat shape).
@@ -104,10 +109,12 @@ impl ProtocolAdapter for DashScopeImagesAdapter {
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value = resp
-            .json()
-            .await
-            .map_err(|e| InvokeError::response_json("invalid dashscope submit JSON", &e))?;
+        let value: Value = read_json_capped(
+            resp,
+            MAX_IMAGE_METADATA_RESPONSE_BYTES,
+            "dashscope submit",
+        )
+        .await?;
         let id = value
             .get("output")
             .and_then(|o| o.get("task_id"))
@@ -128,6 +135,15 @@ impl ProtocolAdapter for DashScopeImagesAdapter {
         call: &ResolvedCall,
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
+        let expected_images = match &call.request {
+            TaskRequest::ImageGeneration(request) => validate_dashscope_image_request(request)?,
+            other => {
+                return Err(InvokeError::new(
+                    InvokeErrorKind::UnsupportedTask,
+                    format!("dashscope.images cannot poll task {:?}", other.task()),
+                ));
+            }
+        };
         // Platform-unified poller `/api/v1/tasks/{id}` — shared by every
         // DashScope product, independently supplied from the submit endpoint.
         let poll_template = call
@@ -152,12 +168,14 @@ impl ProtocolAdapter for DashScopeImagesAdapter {
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value = resp
-            .json()
-            .await
-            .map_err(|e| InvokeError::response_json("invalid dashscope task JSON", &e))?;
+        let value: Value = read_json_capped(
+            resp,
+            MAX_IMAGE_METADATA_RESPONSE_BYTES,
+            "dashscope task",
+        )
+        .await?;
 
-        match parse_task_status(&value)? {
+        match parse_task_status_limited(&value, expected_images)? {
             DashScopeTaskState::Pending => Ok(TaskOutcome::Pending(JobHandle {
                 adapter_id: IMAGES_ADAPTER_ID.into(),
                 config_revision: call.config_revision,
@@ -171,6 +189,25 @@ impl ProtocolAdapter for DashScopeImagesAdapter {
             ))),
         }
     }
+}
+
+fn validate_dashscope_image_request(
+    request: &crate::types::ImageGenRequest,
+) -> Result<usize, InvokeError> {
+    let count = validate_image_request_count(request.count)?;
+    if request.quality.is_some() {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "dashscope.images does not support the quality parameter",
+        ));
+    }
+    if request.extra.get("seed").is_some_and(|seed| !seed.is_null()) {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "dashscope.images does not support the seed parameter",
+        ));
+    }
+    Ok(count)
 }
 
 /// The distilled state of a DashScope task.
@@ -189,11 +226,18 @@ pub(crate) enum DashScopeTaskState {
 /// `output.code` | the status itself. Unknown/absent statuses keep waiting.
 /// Pure — unit tested.
 pub(crate) fn parse_task_status(value: &Value) -> Result<DashScopeTaskState, InvokeError> {
+    parse_task_status_limited(value, MAX_IMAGE_RESPONSE_IMAGES)
+}
+
+fn parse_task_status_limited(
+    value: &Value,
+    max_images: usize,
+) -> Result<DashScopeTaskState, InvokeError> {
     let output = value.get("output").unwrap_or(&Value::Null);
     let status = output.get("task_status").and_then(|v| v.as_str()).unwrap_or("").to_ascii_uppercase();
     match status.as_str() {
         "SUCCEEDED" => {
-            let urls: Vec<String> = output
+            let urls: Vec<&str> = output
                 .get("results")
                 .and_then(|r| r.as_array())
                 .map(|items| {
@@ -201,14 +245,20 @@ pub(crate) fn parse_task_status(value: &Value) -> Result<DashScopeTaskState, Inv
                         .iter()
                         .filter_map(|item| item.get("url").and_then(|u| u.as_str()))
                         .filter(|s| !s.is_empty())
-                        .map(str::to_string)
                         .collect()
                 })
                 .unwrap_or_default();
             if urls.is_empty() {
                 return Err(InvokeError::parse("dashscope task SUCCEEDED but missing output.results[].url"));
             }
-            Ok(DashScopeTaskState::Done(urls))
+            let mut budget = ImageResponseBudget::new(max_images)?;
+            budget.ensure_additional_count(urls.len(), "dashscope task")?;
+            let mut accepted = Vec::with_capacity(urls.len());
+            for url in urls {
+                budget.accept_url("dashscope task")?;
+                accepted.push(url.to_string());
+            }
+            Ok(DashScopeTaskState::Done(accepted))
         }
         "FAILED" | "CANCELED" | "CANCELLED" => {
             let msg = output
@@ -423,6 +473,17 @@ mod tests {
     }
 
     #[test]
+    fn image_contract_response_limits_reject_more_than_eight_result_urls() {
+        let results = (0..=MAX_IMAGE_RESPONSE_IMAGES)
+            .map(|index| json!({"url": format!("https://cdn/{index}.png")}))
+            .collect::<Vec<_>>();
+        let value = json!({"output": {"task_status": "SUCCEEDED", "results": results}});
+        let error = parse_task_status(&value).unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        assert!(error.message.contains("returned 9 images"), "{}", error.message);
+    }
+
+    #[test]
     fn embeddings_output_parses_and_reorders_by_text_index() {
         let v = json!({"output": {"embeddings": [
             {"text_index": 1, "embedding": [3.0, 4.0]},
@@ -489,6 +550,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_contract_dashscope_rejects_unsupported_quality_and_seed_before_network() {
+        for (quality, extra, parameter) in [
+            (Some("high"), json!({}), "quality"),
+            (None, json!({"seed": 42}), "seed"),
+        ] {
+            let request = TaskRequest::ImageGeneration(ImageGenRequest {
+                prompt: "a fox".into(),
+                count: 1,
+                size: None,
+                quality: quality.map(str::to_string),
+                extra,
+            });
+            let call = image_call("http://127.0.0.1:9", "wanx-v1", request);
+            let error = DashScopeImagesAdapter
+                .submit(&reqwest::Client::new(), &call)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+            assert!(error.message.contains(parameter), "{}", error.message);
+        }
+    }
+
+    #[tokio::test]
     async fn images_poll_pending_then_succeeded_yields_url_assets() {
         let server = MockServer::start().await;
         // First poll: still running.
@@ -525,6 +609,32 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert!(matches!(&assets[0].data, ProducedData::Url(u) if u == "https://cdn/a.png"));
         assert_eq!(assets[0].mime, None, "URL asset mime is unknown until fetched");
+    }
+
+    #[tokio::test]
+    async fn image_contract_response_limits_reject_more_results_than_requested() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/tasks/task-many"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "results": [
+                        {"url": "https://cdn/a.png"},
+                        {"url": "https://cdn/b.png"}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let call = image_call(&server.uri(), "wanx-v1", image_request(None, 1));
+        let error = DashScopeImagesAdapter
+            .poll(&reqwest::Client::new(), &call, &job("task-many"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        assert!(error.message.contains("returned 2 images"), "{}", error.message);
     }
 
     #[tokio::test]

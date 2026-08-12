@@ -404,6 +404,26 @@ impl ToolRegistry {
         inserted_names
     }
 
+    /// Remove one live route without weakening its persistent registration
+    /// policy. A trusted host may later re-register the same name when a
+    /// process-owned capability becomes available again, while a name excluded
+    /// by [`Self::retain_named`] remains excluded.
+    pub fn unregister(&mut self, name: &str) -> bool {
+        let original_len = self.tools.len();
+        self.tools.retain(|tool| tool.name() != name);
+        if self.tools.len() == original_len {
+            return false;
+        }
+        self.input_contracts.remove(name);
+        let retained_names = self
+            .tools
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect::<BTreeSet<_>>();
+        self.deferred_state.retain_definitions(&retained_names);
+        true
+    }
+
     fn registration_policy_allows(&self, name: &str) -> bool {
         if self.registration_policy.allows(name) {
             return true;
@@ -2255,6 +2275,18 @@ mod tests {
             result.is_none(),
             "looking up an unregistered name should return None"
         );
+    }
+
+    #[test]
+    fn unregister_preserves_the_persistent_registration_policy() {
+        let mut registry = ToolRegistry::new();
+        assert!(registry.register(make_tool("refreshable", "first generation")));
+        registry.retain_named(&["refreshable".to_owned()]);
+
+        assert!(registry.unregister("refreshable"));
+        assert!(registry.get("refreshable").is_none());
+        assert!(registry.register(make_tool("refreshable", "second generation")));
+        assert!(!registry.register(make_tool("outside-policy", "must remain denied")));
     }
 
     #[test]

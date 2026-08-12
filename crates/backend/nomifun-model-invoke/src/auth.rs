@@ -246,6 +246,13 @@ impl AuthMaterial {
         }
     }
 
+    /// Validate that this auth declaration can produce a request without
+    /// sending one. Capability discovery and artifact materialization share
+    /// the strict credential schema used by connection management.
+    pub fn validate(&self) -> Result<(), InvokeError> {
+        self.validate_credentials()
+    }
+
     /// Every rotation-eligible secret, in stored order, from the sole
     /// `credentials["api_keys"]` array.
     pub fn secrets(&self) -> Vec<String> {
@@ -477,6 +484,39 @@ mod tests {
             assert!(m.secrets().is_empty(), "credentials {empty}");
         }
     }
+
+    #[test]
+    fn validate_distinguishes_complete_and_incomplete_auth_material() {
+        assert!(
+            material(AuthScheme::Bearer, json!({"api_keys": ["sk-ready"]}))
+                .validate()
+                .is_ok()
+        );
+        assert_eq!(
+            material(AuthScheme::Bearer, json!({})).validate().unwrap_err().kind,
+            InvokeErrorKind::Config
+        );
+
+        let multi = AuthScheme::parse("volc_voice").unwrap();
+        let incomplete = material(
+            multi.clone(),
+            json!({"app_key": "app", "access_key": "access"}),
+        );
+        assert!(incomplete.validate().unwrap_err().message.contains("resource_id"));
+        assert!(
+            material(
+                multi,
+                json!({
+                    "app_key": "app",
+                    "access_key": "access",
+                    "resource_id": "resource"
+                }),
+            )
+            .validate()
+            .is_ok()
+        );
+    }
+
 
     #[test]
     fn rotation_eligibility_covers_array_key_schemes_only() {

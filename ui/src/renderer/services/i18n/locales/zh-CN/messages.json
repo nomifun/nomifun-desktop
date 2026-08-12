@@ -85,10 +85,17 @@
   "fileChangesCount": "{{count}} 个文件变更",
   "turnDeliverables": {
     "title": "已生成 {{count}} 个文件",
+    "imagesTitle": "已生成 {{count}} 张图片",
+    "mixedTitle": "已生成 {{count}} 个结果",
     "showMore": "再显示 {{count}} 个文件",
     "showLess": "收起",
+    "showMoreImages": "再显示 {{count}} 张图片",
+    "showLessImages": "收起更多图片",
     "verified": "完整性已校验(SHA-256)",
     "open": "打开",
+    "openImage": "打开图片",
+    "saveImage": "保存图片",
+    "copyImagePath": "复制图片路径",
     "reveal": "在文件夹中显示",
     "viewDiff": "查看改动"
   },

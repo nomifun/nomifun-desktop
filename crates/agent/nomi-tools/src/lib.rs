@@ -254,6 +254,14 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether the host must opt this tool into the exact current-turn route.
+    /// Costly or security-sensitive capabilities use this to remain registered
+    /// and discoverable to host policy without leaking into the ordinary model
+    /// tool surface.
+    fn requires_explicit_route(&self) -> bool {
+        false
+    }
+
     /// Human-readable description of what the tool will do with the given input
     fn describe(&self, input: &Value) -> String {
         format!(
