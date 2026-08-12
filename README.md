@@ -56,6 +56,33 @@
 
 ---
 
+## NomiFun open-source product family
+
+NomiFun is now three related open-source products. **Desktop is the local AI and
+data hub**; Mobile and the Xiaozhi robot connect to capabilities that you
+explicitly enable on Desktop.
+
+| Project | Role | Start here |
+|---|---|---|
+| **[NomiFun Desktop](https://github.com/nomifun/nomifun-desktop)** (this repository) | Local AI workstation, model/Agent/Skill runtime, data store, WebUI, REST and MCP service hub | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [WebUI remote access](docs/guides/webui-remote-access.md) |
+| [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | Android / iOS / H5 client for sessions, tasks, requirements, companions and model administration | Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
+| [NomiFun Xiaozhi Yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side interaction | [Xiaozhi robot integration guide](docs/guides/xiaozhi-robot.md) |
+
+### Connect the three projects
+
+1. Run Desktop, configure the models/companions you need, and keep all data on
+   that machine.
+2. For Mobile, open **Remote & Open → WebUI access**, start the listener, and
+   scan the short-lived QR code from the Mobile app. Desktop remains the server;
+   the phone is the client.
+3. For Xiaozhi, build and flash the Yuntai firmware, then follow the companion
+   **Remote control → Robot connection** flow in Desktop to bind the device.
+
+Only enable remote interfaces on networks you trust. The Desktop guides above
+document authentication, LAN exposure, and deployment boundaries.
+
+---
+
 ## ✨ Why NomiFun
 
 |  | |
