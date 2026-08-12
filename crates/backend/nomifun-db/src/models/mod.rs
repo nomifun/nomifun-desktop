@@ -68,7 +68,9 @@ pub use miniapp::{MiniAppDocumentRow, MiniAppRow};
 pub use oauth_token::OAuthTokenRow;
 pub use provider::Provider;
 pub use provider_connection::{ProviderConnectionRow, UpsertProviderConnectionParams};
-pub use provider_model::{NewProviderModel, ProviderModelRow, ProviderModelUpdate};
+pub use provider_model::{
+    NewProviderModel, NewProviderModelCapability, ProviderModelCapabilityRow, ProviderModelRow,
+};
 pub use preset::*;
 pub use remote_agent::RemoteAgentRow;
 pub use requirement::{NewRequirementRow, RequirementRow, RequirementRowUpdate, RequirementTagRow};

@@ -2,14 +2,12 @@
 //! from `nomifun-creation/src/adapters/openai_video.rs`).
 //!
 //! - submit → `POST` the dispatch target (conventionally `{base}/v1/videos`;
-//!   a `params.endpoint` override IS honored here — that was a known P0 gap).
+//!   the selected capability supplies the collection endpoint).
 //!   Multipart: model/prompt/seconds/size + optional `input_reference` for
 //!   i2v. Returns a remote job `{id,status}` → [`TaskOutcome::Pending`].
-//! - poll → `GET {video_base}/{id}` where `video_base` is the submit URL with
-//!   any query string stripped; on a completed status, fetch the bytes from
-//!   `GET {video_base}/{id}/content` → [`TaskOutcome::Done`]; on a failed
-//!   status → [`InvokeErrorKind::JobFailed`] (a terminal remote state, not a
-//!   transient transport error).
+//! - poll/content → the capability's explicit `poll_endpoint` and
+//!   `content_endpoint` templates. Job ids are percent-encoded before template
+//!   expansion; no path is derived from the submit endpoint.
 
 use std::time::Duration;
 
@@ -19,14 +17,17 @@ use reqwest::multipart::{Form, Part};
 use serde_json::{Value, json};
 
 use crate::adapter::ProtocolAdapter;
-use crate::call::ResolvedCall;
+use crate::call::{ResolvedCall, resolve_endpoint};
 use crate::error::{InvokeError, InvokeErrorKind};
+use crate::manifest::expand_protocol_endpoint_template;
 use crate::transport::{
     MAX_ARTIFACT_BYTES, error_from_response, get_request, post_multipart, read_body_capped,
 };
 use crate::types::{
     JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, VideoGenRequest,
 };
+
+use super::scalar_request_fields;
 
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -55,17 +56,19 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
                 format!("openai.videos cannot serve task {:?}", call.request.task()),
             ));
         };
-        let url = call.dispatch_target().url;
+        let url = call.endpoint_url()?;
 
         let resp = post_multipart(http, &url, SUBMIT_TIMEOUT, &call.connection.auth, || {
-            build_submit_form(&call.model, req)
+            build_submit_form(&call.model, &call.model_params, req)
         })
         .await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid videos JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid videos JSON", &e))?;
         let id = value
             .get("id")
             .and_then(|v| v.as_str())
@@ -73,6 +76,7 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
             .ok_or_else(|| InvokeError::parse("videos submit response missing 'id'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: ADAPTER_ID.into(),
+            config_revision: call.config_revision,
             remote_id: id.to_string(),
             poll_state: json!({}),
         }))
@@ -84,24 +88,26 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
         call: &ResolvedCall,
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
-        let base = video_base(call);
-        let status_url = format!("{base}/{}", job.remote_id);
+        let status_url = job_endpoint(call, "poll_endpoint", &job.remote_id)?;
         let resp = get_request(http, &status_url, POLL_TIMEOUT, &call.connection.auth).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid videos status JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid videos status JSON", &e))?;
 
         match parse_video_status(&value) {
             VideoStatus::Pending => Ok(TaskOutcome::Pending(JobHandle {
                 adapter_id: ADAPTER_ID.into(),
+                config_revision: call.config_revision,
                 remote_id: job.remote_id.clone(),
                 poll_state: json!({}),
             })),
             VideoStatus::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::JobFailed, msg)),
             VideoStatus::Completed => {
-                let content_url = format!("{base}/{}/content", job.remote_id);
+                let content_url = job_endpoint(call, "content_endpoint", &job.remote_id)?;
                 let resp = get_request(http, &content_url, CONTENT_TIMEOUT, &call.connection.auth).await?;
                 if !resp.status().is_success() {
                     return Err(error_from_response(resp).await);
@@ -123,14 +129,43 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
     }
 }
 
+fn job_endpoint(call: &ResolvedCall, field: &str, id: &str) -> Result<String, InvokeError> {
+    let template = call
+        .model_params
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| InvokeError::config(format!("openai.videos requires an injected {field}")))?;
+    let endpoint = expand_protocol_endpoint_template(
+        &call.protocol,
+        call.task,
+        field,
+        template,
+        id,
+    )?;
+    call.credentialed_http_url(&resolve_endpoint(&call.connection.base_url, &endpoint), field)
+}
+
 /// Build the multipart submit form from the typed request.
-fn build_submit_form(model: &str, req: &VideoGenRequest) -> Result<Form, InvokeError> {
-    let mut form = Form::new().text("model", model.to_string()).text("prompt", req.prompt.clone());
+fn build_submit_form(
+    model: &str,
+    model_params: &Value,
+    req: &VideoGenRequest,
+) -> Result<Form, InvokeError> {
+    let mut fields = scalar_request_fields(model_params, &req.extra)?;
+    fields.remove("input_reference");
+    fields.insert("model".into(), model.to_string());
+    fields.insert("prompt".into(), req.prompt.clone());
     if let Some(seconds) = req.seconds {
-        form = form.text("seconds", seconds.to_string());
+        fields.insert("seconds".into(), seconds.to_string());
     }
     if let Some(size) = &req.size {
-        form = form.text("size", size.clone());
+        fields.insert("size".into(), size.clone());
+    }
+    let mut form = Form::new();
+    for (key, value) in fields {
+        form = form.text(key, value);
     }
     // i2v reference frame — the first reference/first_frame input.
     if let Some(reference) = req
@@ -148,16 +183,6 @@ fn build_submit_form(model: &str, req: &VideoGenRequest) -> Result<Form, InvokeE
         form = form.part("input_reference", part);
     }
     Ok(form)
-}
-
-/// The videos collection URL for this call: the dispatch-target URL with any
-/// query string stripped (the `/{id}` and `/{id}/content` sub-paths cannot
-/// carry a query segment in the middle). This is what makes a
-/// `params.endpoint` override effective for video, submit and poll alike.
-fn video_base(call: &ResolvedCall) -> String {
-    let url = call.dispatch_target().url;
-    let no_query = url.split('?').next().unwrap_or(url.as_str());
-    no_query.trim_end_matches('/').to_string()
 }
 
 /// The distilled state of a video job.
@@ -193,8 +218,16 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
+    use crate::adapters::test_support::call_with_endpoint;
     use crate::types::InputAsset;
+
+    fn call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        let base_url = format!("{}/v1", base_url.trim_end_matches('/'));
+        let mut call = call_with_endpoint(&base_url, model, "openai.videos", "/videos", request);
+        call.model_params["poll_endpoint"] = Value::String("/videos/{id}".into());
+        call.model_params["content_endpoint"] = Value::String("/videos/{id}/content".into());
+        call
+    }
 
     // -- ported pure-parser fixtures ---------------------------------------
 
@@ -238,7 +271,7 @@ mod tests {
     }
 
     fn job(remote_id: &str) -> JobHandle {
-        JobHandle { adapter_id: ADAPTER_ID.into(), remote_id: remote_id.into(), poll_state: json!({}) }
+        JobHandle { adapter_id: ADAPTER_ID.into(), config_revision: 1, remote_id: remote_id.into(), poll_state: json!({}) }
     }
 
     #[tokio::test]
@@ -364,8 +397,16 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut call = call(&server.uri(), "sora-2", video_request(vec![]));
-        call.model_params = json!({"endpoint": "/custom/video-jobs"});
+        let mut call = call_with_endpoint(
+            &server.uri(),
+            "sora-2",
+            "openai.videos",
+            "/custom/video-jobs",
+            video_request(vec![]),
+        );
+        call.model_params["poll_endpoint"] = Value::String("/custom/video-jobs/{id}".into());
+        call.model_params["content_endpoint"] =
+            Value::String("/custom/video-jobs/{id}/content".into());
         let http = reqwest::Client::new();
 
         let out = OpenAiVideosAdapter.submit(&http, &call).await.unwrap();

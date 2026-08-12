@@ -328,6 +328,19 @@ pub enum StreamOutcome {
     FailedPartial(ProviderError),
 }
 
+impl StreamOutcome {
+    pub(crate) fn redacted(
+        self,
+        redactor: &nomifun_net::secret_redaction::SecretRedactor,
+    ) -> Self {
+        match self {
+            Self::Ok => Self::Ok,
+            Self::FailedEmpty(error) => Self::FailedEmpty(error.redacted(redactor)),
+            Self::FailedPartial(error) => Self::FailedPartial(error.redacted(redactor)),
+        }
+    }
+}
+
 /// Find the earliest SSE event-block boundary (the blank line separating
 /// events) in `buf`, returning its byte offset and delimiter length.
 ///
@@ -353,6 +366,27 @@ pub async fn process_sse_stream(
     response: reqwest::Response,
     tx: &mpsc::Sender<LlmEvent>,
 ) -> StreamOutcome {
+    process_sse_stream_inner(response, tx, None).await
+}
+
+/// Vertex access tokens are resolved at runtime and therefore are not present
+/// in the static provider wrapper's credential set. This variant scrubs those
+/// dynamic credentials from both protocol error events and terminal outcomes.
+pub async fn process_sse_stream_redacted(
+    response: reqwest::Response,
+    tx: &mpsc::Sender<LlmEvent>,
+    redactor: &nomifun_net::secret_redaction::SecretRedactor,
+) -> StreamOutcome {
+    process_sse_stream_inner(response, tx, Some(redactor))
+        .await
+        .redacted(redactor)
+}
+
+async fn process_sse_stream_inner(
+    response: reqwest::Response,
+    tx: &mpsc::Sender<LlmEvent>,
+    redactor: Option<&nomifun_net::secret_redaction::SecretRedactor>,
+) -> StreamOutcome {
     use futures::StreamExt;
 
     let mut state = StreamState::new();
@@ -365,7 +399,7 @@ pub async fn process_sse_stream(
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
-                let err = ProviderError::Connection(e.to_string());
+                let err = ProviderError::from(e);
                 return if emitted_content {
                     StreamOutcome::FailedPartial(err)
                 } else {
@@ -390,9 +424,17 @@ pub async fn process_sse_stream(
                 if let Some(event_type) = line.strip_prefix("event: ") {
                     current_event_type = event_type.to_string();
                 } else if let Some(data) = line.strip_prefix("data: ") {
-                    tracing::debug!(target: "nomi_providers", chunk = %data, "sse chunk received");
+                    // Never log upstream event payloads: error events may echo
+                    // credentials and ordinary events contain private content.
+                    tracing::debug!(target: "nomi_providers", "sse event received");
                     let events = parse_sse_data(&current_event_type, data, &mut state);
                     for event in events {
+                        let event = match (event, redactor) {
+                            (LlmEvent::Error(message), Some(redactor)) => {
+                                LlmEvent::Error(redactor.redact(&message))
+                            }
+                            (event, _) => event,
+                        };
                         if matches!(
                             event,
                             LlmEvent::TextDelta(_)

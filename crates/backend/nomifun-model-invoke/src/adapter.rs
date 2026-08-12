@@ -3,7 +3,7 @@
 //! [`AdapterRegistry`] strictly by `(protocol, task)` — model-name/platform
 //! `if` routing is banned here (that lives only in the catalog seeding layer).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use nomifun_api_types::ModelTask;
@@ -34,13 +34,28 @@ pub trait ProtocolAdapter: Send + Sync {
 
 /// Immutable protocol → adapter table, keyed by [`ProtocolAdapter::id`].
 pub struct AdapterRegistry {
-    map: HashMap<&'static str, Arc<dyn ProtocolAdapter>>,
+    map: BTreeMap<&'static str, Arc<dyn ProtocolAdapter>>,
 }
 
 impl AdapterRegistry {
     /// Build the registry from the assembled adapter set (key = `adapter.id()`).
     pub fn new(adapters: Vec<Arc<dyn ProtocolAdapter>>) -> Self {
-        Self { map: adapters.into_iter().map(|a| (a.id(), a)).collect() }
+        Self::try_new(adapters).unwrap_or_else(|error| panic!("invalid protocol adapter registry: {error}"))
+    }
+
+    /// Fallible registry construction used by assembly/tests. Duplicate ids
+    /// are rejected instead of silently replacing the first implementation.
+    pub fn try_new(adapters: Vec<Arc<dyn ProtocolAdapter>>) -> Result<Self, InvokeError> {
+        let mut map = BTreeMap::new();
+        for adapter in adapters {
+            let id = adapter.id();
+            if map.insert(id, adapter).is_some() {
+                return Err(InvokeError::config(format!(
+                    "duplicate protocol adapter id {id:?}"
+                )));
+            }
+        }
+        Ok(Self { map })
     }
 
     /// Look up the adapter for `(protocol, task)`.
@@ -69,6 +84,19 @@ impl AdapterRegistry {
     pub fn contains(&self, protocol: &str) -> bool {
         self.map.contains_key(protocol)
     }
+
+    /// Stable, lexicographically ordered registry enumeration.
+    pub fn protocol_ids(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
+        self.map.keys().copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -78,38 +106,42 @@ mod tests {
     use super::*;
     use crate::auth::{AuthMaterial, AuthScheme};
     use crate::call::ResolvedConnection;
-    use crate::types::{ChatTextRequest, TaskRequest, TaskResult};
+    use crate::types::{EmbedRequest, TaskRequest, TaskResult};
 
     struct FakeAdapter;
 
     #[async_trait::async_trait]
     impl ProtocolAdapter for FakeAdapter {
         fn id(&self) -> &'static str {
-            "fake.chat"
+            "fake.embeddings"
         }
         fn supports(&self, task: ModelTask) -> bool {
-            task == ModelTask::Chat
+            task == ModelTask::Embedding
         }
         async fn submit(&self, _http: &reqwest::Client, _call: &ResolvedCall) -> Result<TaskOutcome, InvokeError> {
-            Ok(TaskOutcome::Done(TaskResult::Text("ok".into())))
+            Ok(TaskOutcome::Done(TaskResult::Embeddings(vec![vec![1.0]])))
         }
     }
 
     fn call() -> ResolvedCall {
         ResolvedCall {
             provider_id: "p".into(),
+            config_revision: 1,
             platform: "openai".into(),
             model: "m".into(),
-            task: ModelTask::Chat,
+            task: ModelTask::Embedding,
+            protocol: "fake.embeddings".into(),
             connection: ResolvedConnection {
                 role: "default".into(),
                 base_url: "https://x.test".into(),
-                is_full_url: false,
                 auth: AuthMaterial { scheme: AuthScheme::Bearer, credentials: json!({"api_keys": ["sk"]}) },
                 extra: json!({}),
             },
             model_params: json!({}),
-            request: TaskRequest::ChatText(ChatTextRequest { prompt: "hi".into(), system: None, extra: json!({}) }),
+            request: TaskRequest::Embedding(EmbedRequest {
+                inputs: vec!["hi".into()],
+                extra: json!({}),
+            }),
         }
     }
 
@@ -119,8 +151,8 @@ mod tests {
 
     #[test]
     fn get_returns_registered_supporting_adapter() {
-        let adapter = registry().get("fake.chat", ModelTask::Chat).expect("registered + supported");
-        assert_eq!(adapter.id(), "fake.chat");
+        let adapter = registry().get("fake.embeddings", ModelTask::Embedding).expect("registered + supported");
+        assert_eq!(adapter.id(), "fake.embeddings");
     }
 
     #[test]
@@ -133,14 +165,31 @@ mod tests {
 
     #[test]
     fn get_registered_but_unsupported_task_is_no_adapter() {
-        let err = registry().get("fake.chat", ModelTask::Embedding).map(|a| a.id()).unwrap_err();
+        let err = registry().get("fake.embeddings", ModelTask::SpeechSynthesis).map(|a| a.id()).unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::NoAdapter);
+    }
+
+    #[test]
+    fn duplicate_protocol_ids_are_rejected() {
+        let error = AdapterRegistry::try_new(vec![Arc::new(FakeAdapter), Arc::new(FakeAdapter)])
+            .err()
+            .expect("duplicate must fail registry construction");
+        assert_eq!(error.kind, InvokeErrorKind::Config);
+        assert!(error.message.contains("fake.embeddings"));
+    }
+
+    #[test]
+    fn registry_enumeration_is_stable() {
+        let registry = registry();
+        assert_eq!(registry.protocol_ids().collect::<Vec<_>>(), vec!["fake.embeddings"]);
+        assert_eq!(registry.len(), 1);
+        assert!(!registry.is_empty());
     }
 
     #[tokio::test]
     async fn default_poll_is_not_pollable() {
-        let adapter = registry().get("fake.chat", ModelTask::Chat).unwrap();
-        let job = JobHandle { adapter_id: "fake.chat".into(), remote_id: "r".into(), poll_state: json!({}) };
+        let adapter = registry().get("fake.embeddings", ModelTask::Embedding).unwrap();
+        let job = JobHandle { adapter_id: "fake.embeddings".into(), config_revision: 1, remote_id: "r".into(), poll_state: json!({}) };
         let err = adapter.poll(&reqwest::Client::new(), &call(), &job).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::NotPollable);
     }

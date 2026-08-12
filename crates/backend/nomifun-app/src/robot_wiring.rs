@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
 use nomifun_api_types::{
     AgentErrorOwnership, CreateConversationRequest, SendMessageRequest, SessionMcpServer,
     SessionMcpTransport, UpdateConversationRequest,
@@ -17,7 +18,7 @@ use nomifun_common::{AgentType, ProviderWithModel};
 use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_ai_agent::protocol::events::AgentStreamEvent;
 use nomifun_conversation::ConversationService;
-use nomifun_db::{IClientPreferenceRepository, IProviderModelRepository, IProviderRepository};
+use nomifun_db::IClientPreferenceRepository;
 use nomifun_robot::endpoint::{EndpointAdvertiser, LanAdvertiser, LanEndpointSnapshot};
 use nomifun_robot::mcp_proxy::{MCP_PROXY_SERVER_NAME, RobotMcpProxyServer};
 use nomifun_robot::registry::RobotRegistry;
@@ -26,11 +27,66 @@ use nomifun_robot::status::RobotStatusRegistry;
 use nomifun_robot::tool_registry::RobotToolRegistry;
 use nomifun_robot::vad::VadTuning;
 use nomifun_robot::wiring::{
-    CompanionSlotReader, PreferenceReader, ProviderCredentials, ProviderRowReader, RobotSpeech,
+    CompanionSlotReader, PreferenceReader, RobotSpeech, VisionCompletionExecutor,
+    VisionCompletionRequest,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
+
+const ROBOT_VISION_MAX_TOKENS: u32 = 512;
+
+/// Production bridge from the robot's one-shot image request to the shared
+/// Agent Chat resolver. Protocol, endpoint and auth come exclusively from the
+/// selected model's persisted Chat capability.
+struct AgentRobotVisionExecutor {
+    model_invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
+    workspace: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl VisionCompletionExecutor for AgentRobotVisionExecutor {
+    async fn complete(&self, request: VisionCompletionRequest) -> anyhow::Result<String> {
+        let config = nomifun_ai_agent::resolve_provider_config(
+            self.model_invoke.as_ref(),
+            &request.provider_id,
+            &request.model,
+            &self.workspace,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("视觉模型配置不可用: {error}"))?;
+        let prompt = if request.question.trim().is_empty() {
+            "描述这张图片。"
+        } else {
+            request.question.trim()
+        };
+        let data = base64::engine::general_purpose::STANDARD.encode(request.jpeg);
+        let message = nomifun_ai_agent::nomi_types::message::Message::new(
+            nomifun_ai_agent::nomi_types::message::Role::User,
+            vec![
+                nomifun_ai_agent::nomi_types::message::ContentBlock::Image {
+                    media_type: "image/jpeg".to_owned(),
+                    data,
+                },
+                nomifun_ai_agent::nomi_types::message::ContentBlock::Text {
+                    text: prompt.to_owned(),
+                },
+            ],
+        );
+        let answer = nomifun_ai_agent::one_shot_completion(
+            &config,
+            "你在为一台物理机器人看图。用一到两句中文口语描述你看到的内容，直接回答问题。",
+            vec![message],
+            ROBOT_VISION_MAX_TOKENS,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("视觉模型调用失败: {error}"))?;
+        if answer.trim().is_empty() {
+            anyhow::bail!("视觉模型没有返回内容");
+        }
+        Ok(answer)
+    }
+}
 
 /// Everything the host holds for the robot gateway.
 ///
@@ -65,10 +121,7 @@ impl RobotServices {
         user_events: Arc<dyn nomifun_realtime::UserEventSink>,
         invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
         companions: Arc<nomifun_companion::CompanionService>,
-        provider_repo: Arc<dyn IProviderRepository>,
-        provider_model_repo: Arc<dyn IProviderModelRepository>,
         preference_repo: Arc<dyn IClientPreferenceRepository>,
-        encryption_key: [u8; 32],
     ) -> anyhow::Result<Self> {
         let registry = Arc::new(RobotRegistry::load(data_dir).await?);
         let status = Arc::new(RobotStatusRegistry::new(
@@ -88,17 +141,17 @@ impl RobotServices {
 
         let slots = Arc::new(AppCompanionSlots {
             companions,
-            provider_model_repo,
+            model_invoke: invoke.clone(),
         });
         let speech: Arc<dyn SpeechServices> = Arc::new(RobotSpeech::new(
-            invoke,
+            invoke.clone(),
             slots,
             Arc::new(AppPreferences {
                 repo: preference_repo,
             }),
-            Arc::new(AppProviderRows {
-                repo: provider_repo,
-                encryption_key,
+            Arc::new(AgentRobotVisionExecutor {
+                model_invoke: invoke,
+                workspace: data_dir.to_path_buf(),
             }),
         ));
 
@@ -153,7 +206,7 @@ impl RobotServices {
 /// to the next utterance rather than the next boot.
 struct AppCompanionSlots {
     companions: Arc<nomifun_companion::CompanionService>,
-    provider_model_repo: Arc<dyn IProviderModelRepository>,
+    model_invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
 }
 
 impl AppCompanionSlots {
@@ -172,11 +225,21 @@ impl AppCompanionSlots {
 
     /// Whether a catalog row carries the vision-input trait.
     async fn model_sees_images(&self, provider_id: &str, model: &str) -> bool {
-        let Ok(Some(row)) = self.provider_model_repo.get(provider_id, model).await else {
-            return false;
-        };
-        serde_json::from_str::<Vec<nomifun_api_types::ModelTrait>>(&row.traits)
-            .is_ok_and(|traits| traits.contains(&nomifun_api_types::ModelTrait::VisionInput))
+        self
+            .model_invoke
+            .resolve_task_config(
+                &nomifun_model_invoke::ModelRef {
+                    provider_id: provider_id.to_owned(),
+                    model: model.to_owned(),
+                },
+                nomifun_api_types::ModelTask::Chat,
+            )
+            .await
+            .is_ok_and(|resolved| {
+                resolved
+                    .traits
+                    .contains(&nomifun_api_types::ModelTrait::VisionInput)
+            })
     }
 }
 
@@ -195,7 +258,10 @@ impl CompanionSlotReader for AppCompanionSlots {
     async fn vision_slot(&self, companion_id: &str) -> Option<(String, String)> {
         let profile = self.profile(companion_id).await?;
         if let Some(vision) = profile.vision_model {
-            return Some((vision.provider_id, vision.model));
+            return self
+                .model_sees_images(&vision.provider_id, &vision.model)
+                .await
+                .then_some((vision.provider_id, vision.model));
         }
         // No dedicated slot: the main chat model may still be able to look, and
         // the catalog is the authority on that. Guessing from the model name is
@@ -218,42 +284,6 @@ impl PreferenceReader for AppPreferences {
         let rows = self.repo.get_by_keys(&[key]).await.ok()?;
         let row = rows.into_iter().find(|row| row.key == key)?;
         serde_json::from_str(&row.value).ok()
-    }
-}
-
-/// Provider rows, decrypted for the one direct (non-invoke) call the robot
-/// makes: one-shot vision.
-struct AppProviderRows {
-    repo: Arc<dyn IProviderRepository>,
-    encryption_key: [u8; 32],
-}
-
-#[async_trait::async_trait]
-impl ProviderRowReader for AppProviderRows {
-    async fn credentials(&self, provider_id: &str) -> Option<ProviderCredentials> {
-        let provider = self.repo.find_by_id(provider_id).await.ok()??;
-        if !provider.enabled {
-            tracing::warn!(provider_id, "robot: vision provider is disabled");
-            return None;
-        }
-        let decrypted =
-            nomifun_common::decrypt_string(&provider.api_key_encrypted, &self.encryption_key)
-                .inspect_err(|error| {
-                    tracing::warn!(provider_id, %error, "robot: provider key decrypt failed");
-                })
-                .ok()?;
-        // Stored keys are a comma/newline separated rotation list; the invoke
-        // layer takes the first non-empty entry and so does this.
-        let api_key = decrypted
-            .split([',', '\n'])
-            .map(str::trim)
-            .find(|key| !key.is_empty())?
-            .to_owned();
-        Some(ProviderCredentials {
-            api_key,
-            base_url: provider.base_url,
-            platform: provider.platform,
-        })
     }
 }
 

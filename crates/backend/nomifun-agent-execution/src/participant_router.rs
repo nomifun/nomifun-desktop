@@ -8,14 +8,14 @@
 //!
 //! Scoring is two-phase:
 //! 1. **Hard filters** — if a member cannot satisfy a non-negotiable task
-//!    requirement (vision modality, tool use) it is *excluded* entirely
+//!    requirement (vision modality, tool use, native web search) it is *excluded* entirely
 //!    ([`score_participant`] returns `None`).
 //! 2. **Soft score** — surviving members accumulate a `f64` score from
 //!    capability hits (strength match, reasoning tier, cost tier, modality
 //!    coverage). Higher is better.
 //!
 //! A member with `capability == None` is treated as a baseline agent:
-//! no extra modalities (no vision), no tool use, `reasoning == "medium"`,
+//! no extra modalities (no vision), no tool use or native web search, `reasoning == "medium"`,
 //! `cost_tier`/`speed_tier == "standard"`, and no declared strengths.
 
 use nomifun_api_types::{ExecutionParticipant, ExecutionStepProfile, ParticipantCapability};
@@ -40,6 +40,7 @@ fn baseline_profile() -> ParticipantCapability {
         strengths: Vec::new(),
         modalities: Vec::new(),
         tools: false,
+        web_search: false,
         reasoning: "medium".to_string(),
         cost_tier: "standard".to_string(),
         speed_tier: "standard".to_string(),
@@ -52,6 +53,7 @@ fn baseline_profile() -> ParticipantCapability {
 /// - `profile.needs_vision` but the member's modalities do not contain
 ///   `"vision"`.
 /// - `profile.kind == "tool"` but the member does not support tools.
+/// - `profile.needs_web_search` but the member has no native web-search capability.
 ///
 /// Otherwise returns `Some((score, rationale))` where `rationale` is a
 /// non-empty Chinese phrase listing the factors that contributed.
@@ -80,6 +82,9 @@ pub(crate) fn score_participant(member: &ExecutionParticipant, profile: &Executi
         return None;
     }
     if profile.kind == "tool" && !cap.tools {
+        return None;
+    }
+    if profile.needs_web_search && !cap.web_search {
         return None;
     }
 
@@ -211,6 +216,7 @@ mod tests {
             strengths: strengths.iter().map(|s| s.to_string()).collect(),
             modalities: modalities.iter().map(|s| s.to_string()).collect(),
             tools,
+            web_search: false,
             reasoning: reasoning.to_string(),
             cost_tier: cost_tier.to_string(),
             speed_tier: "standard".to_string(),
@@ -226,6 +232,7 @@ mod tests {
         ExecutionStepProfile {
             kind: kind.to_string(),
             needs_vision,
+            needs_web_search: false,
             needs_long_context: false,
             needs_high_reasoning,
             bulk,
@@ -261,6 +268,19 @@ mod tests {
         let p = profile("tool", false, false, false);
         assert!(score_participant(&no_tools, &p).is_none());
         assert!(score_participant(&with_tools, &p).is_some());
+    }
+
+    #[test]
+    fn native_web_search_requirement_is_a_hard_filter() {
+        let without_search = member_with(Some(cap(&[], &[], true, "high", "standard")));
+        let mut with_search_capability = cap(&[], &[], false, "low", "standard");
+        with_search_capability.web_search = true;
+        let with_search = member_with(Some(with_search_capability));
+        let mut p = profile("research", false, false, false);
+        p.needs_web_search = true;
+
+        assert!(score_participant(&without_search, &p).is_none());
+        assert!(score_participant(&with_search, &p).is_some());
     }
 
     #[test]

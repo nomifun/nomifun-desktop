@@ -1,26 +1,9 @@
-//! `gemini.generate_content` / `gemini.generate_text` — Google Gemini
-//! `:generateContent` (ported from
-//! `nomifun-creation/src/adapters/{gemini_image.rs, gemini_text.rs}`).
+//! `gemini.generate_content` — Google Gemini native image generation/editing.
 //!
-//! Both adapters `POST {root}/v1beta/models/{model}:generateContent` (a
-//! trailing `/v1beta` on the configured base is tolerated; `is_full_url`
-//! bases are used verbatim; an explicit `params.endpoint` override wins over
-//! both, routed through [`crate::call::ResolvedCall::dispatch_target`]). Auth
-//! is applied declaratively via
-//! [`crate::auth::AuthMaterial::apply`] — the resolver rewrites gemini
-//! default connections to `header_key:x-goog-api-key`, so no header is
-//! hardcoded here.
-//!
-//! - [`GeminiGenerateContentAdapter`] (`"gemini.generate_content"`) serves
-//!   ImageGeneration + ImageEdit: prompt (+ input images as `inline_data`)
-//!   with `generationConfig.responseModalities: ["TEXT","IMAGE"]`. Gemini has
-//!   no `n` parameter, so `count > 1` loops the request sequentially and
-//!   aggregates the produced assets (any failure fails the whole call).
-//! - [`GeminiGenerateTextAdapter`] (`"gemini.generate_text"`) serves Chat:
-//!   prompt as the sole text part, optional `system` → `systemInstruction`,
-//!   `extra.max_tokens` → `generationConfig.maxOutputTokens`; the reply is the
-//!   concatenation of `candidates[].content.parts[].text` →
-//!   [`TaskResult::Text`].
+//! The adapter posts the exact capability endpoint, normally
+//! `{root}/v1beta/models/{model}:generateContent`. Chat is intentionally absent:
+//! `gemini.generate_text` is an Agent protocol executed by `nomi-providers`,
+//! not a one-shot model-invoke request.
 //!
 //! Response parsing tolerates both camelCase (`inlineData`/`mimeType`) and
 //! snake_case (`inline_data`/`mime_type`). An empty result surfaces
@@ -33,42 +16,17 @@ use nomifun_api_types::ModelTask;
 use serde_json::{Value, json};
 
 use crate::adapter::ProtocolAdapter;
-use crate::adapters::has_endpoint_override;
-use crate::call::{ResolvedCall, ResolvedConnection};
+use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::transport::{decode_b64, encode_b64, error_from_response, post_json};
 use crate::types::{
-    ChatTextRequest, InputAsset, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
+    InputAsset, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
 };
+
+use super::json_request_body;
 
 /// Generous per-call ceiling: image generation is often multi-second.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
-
-/// The Gemini `:generateContent` URL for a model. Gemini uses a
-/// `/v1beta/models` scheme rather than `/v1`; a trailing `/v1beta` on the
-/// configured base is tolerated (stripped then re-added) so both
-/// `https://host` and `https://host/v1beta` resolve identically. A
-/// full-url connection base is already the complete endpoint.
-fn generate_content_url(conn: &ResolvedConnection, model: &str) -> String {
-    let base = conn.base_url.trim().trim_end_matches('/');
-    if conn.is_full_url {
-        return base.to_string();
-    }
-    let root = base.strip_suffix("/v1beta").unwrap_or(base);
-    format!("{root}/v1beta/models/{model}:generateContent")
-}
-
-/// The `:generateContent` URL for this call: an explicit `params.endpoint`
-/// override wins (resolved verbatim by the single dispatch authority);
-/// otherwise the conventional `/v1beta/models/{model}` path via
-/// [`generate_content_url`].
-fn call_url(call: &ResolvedCall) -> String {
-    if has_endpoint_override(&call.model_params) {
-        call.dispatch_target().url
-    } else {
-        generate_content_url(&call.connection, &call.model)
-    }
-}
 
 /// Fire one `:generateContent` request and return the parsed response JSON.
 async fn post_generate_content(
@@ -81,7 +39,9 @@ async fn post_generate_content(
     if !resp.status().is_success() {
         return Err(error_from_response(resp).await);
     }
-    resp.json().await.map_err(|e| InvokeError::parse(format!("invalid gemini JSON: {e}")))
+    resp.json()
+        .await
+        .map_err(|e| InvokeError::response_json("invalid gemini JSON", &e))
 }
 
 /// The "model returned nothing" error: a `promptFeedback.blockReason` is a
@@ -115,9 +75,9 @@ impl ProtocolAdapter for GeminiGenerateContentAdapter {
     }
 
     async fn submit(&self, http: &reqwest::Client, call: &ResolvedCall) -> Result<TaskOutcome, InvokeError> {
-        let (prompt, count, inputs): (&str, u32, &[InputAsset]) = match &call.request {
-            TaskRequest::ImageGeneration(req) => (&req.prompt, req.count, &[]),
-            TaskRequest::ImageEdit(req) => (&req.prompt, req.count, &req.inputs),
+        let (prompt, count, inputs, extra): (&str, u32, &[InputAsset], &Value) = match &call.request {
+            TaskRequest::ImageGeneration(req) => (&req.prompt, req.count, &[], &req.extra),
+            TaskRequest::ImageEdit(req) => (&req.prompt, req.count, &req.inputs, &req.extra),
             other => {
                 return Err(InvokeError::new(
                     InvokeErrorKind::UnsupportedTask,
@@ -125,10 +85,13 @@ impl ProtocolAdapter for GeminiGenerateContentAdapter {
                 ));
             }
         };
-        // One URL for the whole call (the count>1 loop reuses it): an
-        // explicit `params.endpoint` override wins over convention.
-        let url = call_url(call);
-        let body = build_generate_content_body(prompt, inputs);
+        // One capability-supplied URL serves the whole count>1 loop.
+        let url = call.endpoint_url()?;
+        let body = json_request_body(
+            &call.model_params,
+            extra,
+            build_generate_content_body(prompt, inputs),
+        )?;
 
         // Gemini has no `n` parameter: count > 1 loops the request
         // sequentially, aggregating assets; any failure fails the call.
@@ -192,76 +155,6 @@ pub(crate) fn parse_gemini_assets(value: &Value) -> Result<Vec<ProducedAsset>, I
     Ok(out)
 }
 
-/// `gemini.generate_text` — synchronous single-turn text chat.
-pub struct GeminiGenerateTextAdapter;
-
-#[async_trait]
-impl ProtocolAdapter for GeminiGenerateTextAdapter {
-    fn id(&self) -> &'static str {
-        "gemini.generate_text"
-    }
-
-    fn supports(&self, task: ModelTask) -> bool {
-        task == ModelTask::Chat
-    }
-
-    async fn submit(&self, http: &reqwest::Client, call: &ResolvedCall) -> Result<TaskOutcome, InvokeError> {
-        let TaskRequest::ChatText(req) = &call.request else {
-            return Err(InvokeError::new(
-                InvokeErrorKind::UnsupportedTask,
-                format!("gemini.generate_text cannot serve task {:?}", call.request.task()),
-            ));
-        };
-        let url = call_url(call);
-        let body = build_generate_text_body(req);
-        let value = post_generate_content(http, call, &url, &body).await?;
-        Ok(TaskOutcome::Done(TaskResult::Text(parse_gemini_text(&value)?)))
-    }
-}
-
-/// Build the text `:generateContent` body. Pure — unit tested.
-///
-/// - The prompt is the sole text part (this path carries no multimodal inputs).
-/// - A non-blank `system` (trimmed) → `systemInstruction`.
-/// - `extra.max_tokens` (number) → `generationConfig.maxOutputTokens`, else omitted.
-pub(crate) fn build_generate_text_body(req: &ChatTextRequest) -> Value {
-    let mut body = json!({ "contents": [{ "parts": [{"text": req.prompt}] }] });
-    if let Some(system) = req.system.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
-    }
-    if let Some(max) = req.extra.get("max_tokens").and_then(|v| v.as_u64()) {
-        body["generationConfig"] = json!({ "maxOutputTokens": max });
-    }
-    body
-}
-
-/// Concatenate `candidates[].content.parts[].text`. Surfaces a
-/// `promptFeedback.blockReason` when the model returned no text. Pure —
-/// unit tested.
-pub(crate) fn parse_gemini_text(value: &Value) -> Result<String, InvokeError> {
-    let candidates = value
-        .get("candidates")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| InvokeError::parse("gemini response missing 'candidates'"))?;
-
-    let mut out = String::new();
-    for cand in candidates {
-        let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) else {
-            continue;
-        };
-        for part in parts {
-            if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                out.push_str(t);
-            }
-        }
-    }
-
-    if out.trim().is_empty() {
-        return Err(no_output_error(value, "text"));
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use wiremock::matchers::{body_partial_json, header, method, path};
@@ -269,30 +162,48 @@ mod tests {
 
     use super::*;
     use crate::auth::{AuthMaterial, AuthScheme};
+    use crate::call::ResolvedConnection;
     use crate::types::{ImageEditRequest, ImageGenRequest};
 
     /// A gemini [`ResolvedCall`] as the resolver produces it: platform
     /// `gemini`, default connection rewritten to `header_key:x-goog-api-key`.
-    fn gemini_call(base_url: &str, is_full_url: bool, model: &str, request: TaskRequest) -> ResolvedCall {
+    fn gemini_call(
+        base_url: &str,
+        model: &str,
+        protocol: &str,
+        endpoint: &str,
+        request: TaskRequest,
+    ) -> ResolvedCall {
         let task = request.task();
         ResolvedCall {
             provider_id: "018f0000-0000-7000-8000-0000000000aa".into(),
+            config_revision: 1,
             platform: "gemini".into(),
             model: model.into(),
             task,
+            protocol: protocol.into(),
             connection: ResolvedConnection {
                 role: "default".into(),
                 base_url: base_url.into(),
-                is_full_url,
                 auth: AuthMaterial {
                     scheme: AuthScheme::HeaderKey("x-goog-api-key".into()),
                     credentials: json!({"api_keys": ["g-key"]}),
                 },
                 extra: json!({}),
             },
-            model_params: json!({}),
+            model_params: json!({"endpoint": endpoint}),
             request,
         }
+    }
+
+    fn content_call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        gemini_call(
+            base_url,
+            model,
+            "gemini.generate_content",
+            "/v1beta/models/{model}:generateContent",
+            request,
+        )
     }
 
     fn gen_request(count: u32) -> TaskRequest {
@@ -303,33 +214,6 @@ mod tests {
             quality: None,
             extra: json!({}),
         })
-    }
-
-    // -- URL composition (ported gemini_generate_url fixtures) ---------------
-
-    #[test]
-    fn url_composed_from_root_and_tolerates_trailing_v1beta() {
-        let conn = |base: &str, full: bool| ResolvedConnection {
-            role: "default".into(),
-            base_url: base.into(),
-            is_full_url: full,
-            auth: AuthMaterial { scheme: AuthScheme::Bearer, credentials: json!({}) },
-            extra: json!({}),
-        };
-        assert_eq!(
-            generate_content_url(&conn("https://generativelanguage.googleapis.com", false), "gemini-2.5-flash-image"),
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent"
-        );
-        // trailing /v1beta (and trailing slash) tolerated
-        assert_eq!(
-            generate_content_url(&conn("https://host/v1beta/", false), "m"),
-            "https://host/v1beta/models/m:generateContent"
-        );
-        // full-url base used verbatim
-        assert_eq!(
-            generate_content_url(&conn("https://proxy.example/custom:generateContent", true), "m"),
-            "https://proxy.example/custom:generateContent"
-        );
     }
 
     // -- ported pure-parser fixtures -----------------------------------------
@@ -376,51 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_text_concatenates_parts() {
-        let v = json!({
-            "candidates": [{ "content": { "parts": [
-                {"text": "gemini says "},
-                {"text": "hi"}
-            ]}}]
-        });
-        assert_eq!(parse_gemini_text(&v).unwrap(), "gemini says hi");
-    }
-
-    #[test]
-    fn parse_no_text_surfaces_block_reason() {
-        let v = json!({"candidates": [], "promptFeedback": {"blockReason": "SAFETY"}});
-        let err = parse_gemini_text(&v).unwrap_err();
-        assert_eq!(err.kind, InvokeErrorKind::ContentPolicy);
-        assert!(err.message.contains("SAFETY"), "{}", err.message);
-        assert_eq!(parse_gemini_text(&json!({})).unwrap_err().kind, InvokeErrorKind::ParseError);
-    }
-
-    // -- pure body-builder fixtures (ported from gemini_text) ----------------
-
-    #[test]
-    fn text_body_prompt_only_has_no_config() {
-        let req = ChatTextRequest { prompt: "greet me".into(), system: None, extra: json!({}) };
-        let body = build_generate_text_body(&req);
-        let parts = body["contents"][0]["parts"].as_array().unwrap();
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0]["text"], "greet me");
-        assert!(body.get("systemInstruction").is_none());
-        assert!(body.get("generationConfig").is_none());
-    }
-
-    #[test]
-    fn text_body_carries_system_and_max_tokens() {
-        let req = ChatTextRequest {
-            prompt: "p".into(),
-            system: Some(" sys ".into()),
-            extra: json!({"max_tokens": 64}),
-        };
-        let body = build_generate_text_body(&req);
-        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "sys");
-        assert_eq!(body["generationConfig"]["maxOutputTokens"], 64);
-    }
-
-    #[test]
     fn content_body_attaches_inputs_as_inline_data() {
         let inputs = vec![InputAsset { id: None, role: "image".into(), bytes: b"hi".to_vec(), mime: "image/png".into() }];
         let body = build_generate_content_body("p", &inputs);
@@ -454,7 +293,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = gemini_call(&server.uri(), false, "gemini-2.5-flash-image", gen_request(1));
+        let call = content_call(&server.uri(), "gemini-2.5-flash-image", gen_request(1));
         let out = GeminiGenerateContentAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 1);
@@ -476,7 +315,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = gemini_call(&server.uri(), false, "gemini-2.5-flash-image", gen_request(2));
+        let call = content_call(&server.uri(), "gemini-2.5-flash-image", gen_request(2));
         let out = GeminiGenerateContentAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 2, "count=2 must aggregate one asset per request");
@@ -484,9 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_content_params_endpoint_override_wins() {
-        // Whole-branch review Finding 1: params.endpoint (dispatch rule 1)
-        // must win over the /v1beta convention. The custom path is the only
-        // mounted mock; count=2 proves the loop rides the override too.
+        // The custom capability endpoint is reused by every iteration.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/custom/gemini"))
@@ -500,29 +337,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut call = gemini_call(&server.uri(), false, "gemini-2.5-flash-image", gen_request(2));
-        call.model_params = json!({"endpoint": "/custom/gemini"});
+        let call = gemini_call(
+            &server.uri(),
+            "gemini-2.5-flash-image",
+            "gemini.generate_content",
+            "/custom/gemini",
+            gen_request(2),
+        );
         let out = GeminiGenerateContentAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         assert!(matches!(out, TaskOutcome::Done(TaskResult::Assets(a)) if a.len() == 2));
-    }
-
-    #[tokio::test]
-    async fn generate_text_params_endpoint_override_wins() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/custom/gemini-text"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "candidates": [{"content": {"parts": [{"text": "custom hi"}]}}]
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let request = TaskRequest::ChatText(ChatTextRequest { prompt: "hi".into(), system: None, extra: json!({}) });
-        let mut call = gemini_call(&server.uri(), false, "gemini-2.5-flash", request);
-        call.model_params = json!({"endpoint": "/custom/gemini-text"});
-        let out = GeminiGenerateTextAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
-        assert!(matches!(out, TaskOutcome::Done(TaskResult::Text(t)) if t == "custom hi"));
     }
 
     #[tokio::test]
@@ -552,7 +375,7 @@ mod tests {
             inputs: vec![InputAsset { id: None, role: "image".into(), bytes: b"hi".to_vec(), mime: "image/png".into() }],
             extra: json!({}),
         });
-        let call = gemini_call(&server.uri(), false, "gemini-2.5-flash-image", request);
+        let call = content_call(&server.uri(), "gemini-2.5-flash-image", request);
         let out = GeminiGenerateContentAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         assert!(matches!(out, TaskOutcome::Done(TaskResult::Assets(a)) if a.len() == 1));
     }
@@ -569,38 +392,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = gemini_call(&server.uri(), false, "gemini-2.5-flash-image", gen_request(1));
+        let call = content_call(&server.uri(), "gemini-2.5-flash-image", gen_request(1));
         let err = GeminiGenerateContentAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::ContentPolicy);
         assert!(err.message.contains("SAFETY"), "message: {}", err.message);
-    }
-
-    #[tokio::test]
-    async fn generate_text_posts_body_and_returns_text() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1beta/models/gemini-2.5-flash:generateContent"))
-            .and(header("x-goog-api-key", "g-key"))
-            .and(body_partial_json(json!({
-                "contents": [{"parts": [{"text": "say hi"}]}],
-                "systemInstruction": {"parts": [{"text": "be terse"}]},
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "candidates": [{"content": {"parts": [{"text": "hello from gemini"}]}}]
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let request = TaskRequest::ChatText(ChatTextRequest {
-            prompt: "say hi".into(),
-            system: Some("be terse".into()),
-            extra: json!({}),
-        });
-        let call = gemini_call(&server.uri(), false, "gemini-2.5-flash", request);
-        let out = GeminiGenerateTextAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
-        let TaskOutcome::Done(TaskResult::Text(text)) = out else { panic!("expected Done(Text)") };
-        assert_eq!(text, "hello from gemini");
     }
 
     #[tokio::test]
@@ -611,14 +406,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = gemini_call(&server.uri(), false, "gemini-2.5-flash-image", gen_request(1));
+        let call = content_call(&server.uri(), "gemini-2.5-flash-image", gen_request(1));
         let err = GeminiGenerateContentAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::Auth);
         assert_eq!(err.http_status, Some(401));
 
-        let request = TaskRequest::ChatText(ChatTextRequest { prompt: "hi".into(), system: None, extra: json!({}) });
-        let call = gemini_call(&server.uri(), false, "gemini-2.5-flash", request);
-        let err = GeminiGenerateTextAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
-        assert_eq!(err.kind, InvokeErrorKind::Auth);
     }
 }

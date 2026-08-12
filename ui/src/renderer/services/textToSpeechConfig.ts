@@ -27,7 +27,7 @@ export const getTextToSpeechConfig = (): TextToSpeechConfig | undefined =>
 export const saveTextToSpeechConfig = async (config: TextToSpeechConfig | null): Promise<void> => {
   try {
     if (config == null) {
-      await configService.set(TEXT_TO_SPEECH_CONFIG_KEY, undefined);
+      await configService.remove(TEXT_TO_SPEECH_CONFIG_KEY);
       return;
     }
     await configService.set(TEXT_TO_SPEECH_CONFIG_KEY, config);

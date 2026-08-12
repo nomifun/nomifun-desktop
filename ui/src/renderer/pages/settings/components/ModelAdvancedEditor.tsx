@@ -4,198 +4,171 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Input, Popover, Select, Tooltip } from '@arco-design/web-react';
+import { Button, Tooltip } from '@arco-design/web-react';
 import { SettingTwo } from '@icon-park/react';
 import type { ProviderId } from '@/common/types/ids';
+import type { ProviderModelCapabilityResponse } from '@/common/types/provider/providerModel';
+import { ipcBridge } from '@/common';
+import NomiModal from '@/renderer/components/base/NomiModal';
+import ModelDefinitionEditor from './ModelDefinitionEditor';
 import {
-  MODEL_PROTOCOL_OPTIONS,
-  REQUEST_SHAPE_OPTIONS,
-  mergeModelParams,
-  splitModelParams,
+  capabilityDraftFromResponse,
+  capabilityInputsFromDefinition,
+  validateModelDefinition,
+  type ModelDefinitionDraft,
+  type ProviderModelCapabilityInput,
 } from './providerModelAdvanced';
+import useModelProtocolManifests from './useModelProtocolManifests';
 import { useProviderConnections } from './useProviderConnections';
 
 export interface ModelAdvancedPatch {
-  protocol: string | null;
-  connection_role: string | null;
-  params: Record<string, unknown>;
+  capabilities: ProviderModelCapabilityInput[];
 }
 
-/**
- * Per-model "高级" popover: invoke `protocol` override, `connection_role`
- * binding and `params` (quick fields endpoint/request_shape + raw JSON for
- * the rest, merged on save). Saves through `providerModel.update` via the
- * parent's onSave.
- */
+/** Existing-model editor backed by the same full capability form as both add flows. */
 const ModelAdvancedEditor: React.FC<{
   providerId: ProviderId;
-  protocol?: string;
-  connectionRole?: string;
-  params: unknown;
+  preset: string;
+  providerBaseUrl: string;
+  providerAuthScheme: string;
+  model: string;
+  capabilities: ProviderModelCapabilityResponse[];
   onSave: (patch: ModelAdvancedPatch) => Promise<void>;
-}> = ({ providerId, protocol, connectionRole, params, onSave }) => {
+}> = ({ providerId, preset, providerBaseUrl, providerAuthScheme, model, capabilities, onSave }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [draftProtocol, setDraftProtocol] = useState('');
-  const [draftRole, setDraftRole] = useState('');
-  const [draftEndpoint, setDraftEndpoint] = useState('');
-  const [draftShape, setDraftShape] = useState('');
-  const [draftRestJson, setDraftRestJson] = useState('');
-  const [jsonError, setJsonError] = useState(false);
+  const [definition, setDefinition] = useState<ModelDefinitionDraft>(() => ({
+    model,
+    capabilities: capabilities.map(capabilityDraftFromResponse),
+  }));
+  const selectedTasks = useMemo(
+    () => definition.capabilities.map((capability) => capability.task),
+    [definition.capabilities]
+  );
+  const manifests = useModelProtocolManifests(preset, selectedTasks, undefined, providerBaseUrl);
+  const connectionState = useProviderConnections(providerId, open);
+  const validation = useMemo(
+    () =>
+      validateModelDefinition(
+        definition,
+        manifests.manifests,
+        providerBaseUrl,
+        [],
+        manifests.loadingTasks,
+        connectionState.connections.map((connection) => connection.role),
+        providerAuthScheme,
+        Object.fromEntries(
+          connectionState.connections.map((connection) => [connection.role, connection.auth_scheme])
+        ),
+        connectionState.connections
+      ),
+    [
+      connectionState.connections,
+      definition,
+      manifests.loadingTasks,
+      manifests.manifests,
+      providerBaseUrl,
+      providerAuthScheme,
+    ]
+  );
 
-  // Roles come from the provider's connection profiles; fetched only once the
-  // popover opens (SWR dedupes with the connections section).
-  const { connections } = useProviderConnections(providerId, open);
-
-  const split = splitModelParams(params);
-  const hasOverrides =
-    Boolean(protocol) || Boolean(connectionRole) || Boolean(split.endpoint || split.requestShape || split.restJson);
-
-  const handleVisibleChange = (visible: boolean) => {
-    if (visible) {
-      const next = splitModelParams(params);
-      setDraftProtocol(protocol ?? '');
-      setDraftRole(connectionRole ?? '');
-      setDraftEndpoint(next.endpoint);
-      setDraftShape(next.requestShape);
-      setDraftRestJson(next.restJson);
-      setJsonError(false);
-    }
-    setOpen(visible);
+  const resetDraft = () => {
+    setDefinition({ model, capabilities: capabilities.map(capabilityDraftFromResponse) });
   };
 
-  const protocolOptions = [
-    { label: t('settings.modelAdvanced.protocolAuto', { defaultValue: '自动（按任务路由）' }), value: '' },
-    ...MODEL_PROTOCOL_OPTIONS.map((value) => ({ label: value, value })),
-  ];
-
-  const roleOptions = [
-    { label: t('settings.modelAdvanced.connectionDefault', { defaultValue: '默认连接' }), value: '' },
-    ...connections.map((c) => ({ label: c.label ? `${c.role} · ${c.label}` : c.role, value: c.role })),
-    // Keep a stored role visible even if its connection profile is gone.
-    ...(connectionRole && !connections.some((c) => c.role === connectionRole)
-      ? [{ label: connectionRole, value: connectionRole }]
-      : []),
-  ];
-
-  const shapeOptions = [
-    { label: t('settings.modelAdvanced.requestShapeAuto', { defaultValue: '自动' }), value: '' },
-    ...REQUEST_SHAPE_OPTIONS.map((value) => ({ label: value, value })),
-  ];
+  const handleOpen = () => {
+    resetDraft();
+    setOpen(true);
+  };
 
   const handleSave = async () => {
-    const merged = mergeModelParams(draftRestJson, draftEndpoint, draftShape);
-    if (!merged.ok) {
-      setJsonError(true);
-      return;
-    }
-    setJsonError(false);
+    const nextCapabilities = capabilityInputsFromDefinition(definition);
+    if (!validation.valid || !nextCapabilities) return;
     setSaving(true);
     try {
-      await onSave({
-        protocol: draftProtocol.trim() || null,
-        connection_role: draftRole.trim() || null,
-        params: merged.params,
-      });
+      await onSave({ capabilities: nextCapabilities });
       setOpen(false);
     } catch {
-      // Parent owns the toast; keep the editor open for retry.
+      // The parent owns the persistence toast. Keep the editor open for retry.
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <Popover
-      trigger='click'
-      position='bl'
-      popupVisible={open}
-      onVisibleChange={handleVisibleChange}
-      content={
-        <div className='flex flex-col gap-8px w-320px' onClick={(e) => e.stopPropagation()}>
-          <div className='text-12px text-t-secondary'>
-            {t('settings.modelAdvanced.title', { defaultValue: '高级设置' })}
-          </div>
-
-          <div className='text-11px text-t-tertiary'>
-            {t('settings.modelAdvanced.protocol', { defaultValue: '调用协议（protocol）' })}
-          </div>
-          <Select
-            value={draftProtocol}
-            onChange={(v: string) => setDraftProtocol(v ?? '')}
-            options={protocolOptions}
-            allowCreate
-            showSearch
-            triggerProps={{ getPopupContainer: () => document.body }}
-          />
-
-          <div className='text-11px text-t-tertiary'>
-            {t('settings.modelAdvanced.connectionRole', { defaultValue: '连接档案（connection_role）' })}
-          </div>
-          <Select
-            value={draftRole}
-            onChange={(v: string) => setDraftRole(v ?? '')}
-            options={roleOptions}
-            triggerProps={{ getPopupContainer: () => document.body }}
-          />
-
-          <div className='text-11px text-t-tertiary'>
-            {t('settings.modelAdvanced.endpoint', { defaultValue: '端点路径（endpoint）' })}
-          </div>
-          <Input value={draftEndpoint} onChange={setDraftEndpoint} placeholder='/v1/images/generations' />
-
-          <div className='text-11px text-t-tertiary'>
-            {t('settings.modelAdvanced.requestShape', { defaultValue: '请求格式（request_shape）' })}
-          </div>
-          <Select
-            value={draftShape}
-            onChange={(v: string) => setDraftShape(v ?? '')}
-            options={shapeOptions}
-            triggerProps={{ getPopupContainer: () => document.body }}
-          />
-
-          <div className='text-11px text-t-tertiary'>
-            {t('settings.modelAdvanced.paramsJson', { defaultValue: '其余参数（JSON）' })}
-          </div>
-          <Input.TextArea
-            value={draftRestJson}
-            onChange={setDraftRestJson}
-            placeholder={t('settings.modelAdvanced.paramsJsonPlaceholder', {
-              defaultValue: '{ "size": "1024x1024" }',
-            })}
-            autoSize={{ minRows: 2, maxRows: 8 }}
-          />
-          {jsonError && (
-            <div className='text-11px leading-4 text-danger-6'>
-              {t('settings.modelAdvanced.invalidParamsJson', {
-                defaultValue: '参数 JSON 无效，需为 JSON 对象',
-              })}
-            </div>
-          )}
-
-          <div className='flex items-center justify-end gap-8px'>
-            <Button size='mini' onClick={() => setOpen(false)} disabled={saving}>
-              {t('common.cancel', { defaultValue: '取消' })}
+    <>
+      <NomiModal
+        visible={open}
+        onCancel={() => {
+          if (!saving) setOpen(false);
+        }}
+        unmountOnExit
+        maskClosable={!saving}
+        escToExit={!saving}
+        header={{ title: t('settings.editModelCapabilities'), showClose: true }}
+        style={{ width: 760, maxWidth: '94vw', maxHeight: '92vh' }}
+        contentStyle={{
+          background: 'var(--dialog-fill-0)',
+          borderRadius: 16,
+          padding: '20px 24px',
+          overflow: 'auto',
+          maxHeight: 'calc(92vh - 160px)',
+        }}
+        footer={
+          <div className='flex justify-end gap-10px mt-10px'>
+            <Button
+              disabled={saving}
+              className='px-20px min-w-80px'
+              style={{ borderRadius: 8 }}
+              onClick={() => setOpen(false)}
+            >
+              {t('common.cancel')}
             </Button>
-            <Button size='mini' type='primary' loading={saving} onClick={handleSave}>
-              {t('common.save', { defaultValue: '保存' })}
+            <Button
+              type='primary'
+              loading={saving}
+              disabled={!validation.valid}
+              className='px-20px min-w-80px'
+              style={{ borderRadius: 8 }}
+              onClick={() => void handleSave()}
+            >
+              {t('common.save')}
             </Button>
           </div>
+        }
+      >
+        <div className='pt-16px'>
+          <ModelDefinitionEditor
+            value={definition}
+            onChange={setDefinition}
+            providerBaseUrl={providerBaseUrl}
+            providerAuthScheme={providerAuthScheme}
+            manifests={manifests.manifests}
+            manifestLoadingTasks={manifests.loadingTasks}
+            manifestErrorTasks={manifests.errorTasks}
+            validationErrors={validation.errors}
+            validationPending={connectionState.isLoading}
+            modelReadOnly
+            connections={connectionState.connections}
+            onCreateConnection={async (connection) => {
+              await ipcBridge.providerConnection.save.invoke({ provider_id: providerId, connection });
+              await connectionState.mutate();
+            }}
+          />
         </div>
-      }
-    >
-      <Tooltip content={t('settings.modelAdvanced.trigger', { defaultValue: '高级' })}>
+      </NomiModal>
+      <Tooltip content={t('settings.editModelCapabilities', { defaultValue: '编辑模态、协议与地址' })}>
         <Button
           size='mini'
-          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${hasOverrides ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
+          className='model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 text-t-secondary hover:text-t-primary'
           icon={<SettingTwo theme='outline' size='14' />}
-          onClick={(e) => e.stopPropagation()}
+          onClick={handleOpen}
         />
       </Tooltip>
-    </Popover>
+    </>
   );
 };
 

@@ -58,12 +58,15 @@ const EXPECTED_ORDER = [
   hub.sectionModels,
   hub.groupCapability,
   hub.sectionChat,
+  hub.sectionRealtime,
   hub.sectionAsr,
   hub.sectionTts,
   hub.sectionVision,
   hub.sectionImage,
+  hub.sectionImageEdit,
   hub.sectionVideo,
   hub.sectionEmbedding,
+  hub.sectionRerank,
   hub.groupAdvanced,
   hub.sectionFree,
   hub.sectionFailover,
@@ -91,16 +94,19 @@ describe('model hub sidebar renders', () => {
 
   test('the sidebar owns exactly one tab per capability', () => {
     const html = render('/models');
-    const tabIds = [...html.matchAll(/id="model-hub-tab-([a-z]+)"/g)].map((m) => m[1]);
+    const tabIds = [...html.matchAll(/id="model-hub-tab-([a-z-]+)"/g)].map((m) => m[1]);
     expect(tabIds).toEqual([
       'models',
       'chat',
+      'realtime',
       'asr',
       'tts',
       'vision',
       'image',
+      'image-edit',
       'video',
       'embedding',
+      'rerank',
       'free',
       'failover',
     ]);

@@ -1347,6 +1347,14 @@ mod tests {
     use crate::init_database_memory;
     use crate::models::CronJobRunRow;
 
+    fn encrypted_bearer_credentials() -> String {
+        nomifun_common::encrypt_string(
+            r#"{"api_keys":["test-only"]}"#,
+            &[0x42; 32],
+        )
+        .expect("typed test credentials should encrypt")
+    }
+
     const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const OTHER_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678902";
     const MISSING_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678903";
@@ -1424,15 +1432,17 @@ mod tests {
     }
 
     async fn insert_provider(db: &crate::Database, provider_id: &str) {
+        let credentials_encrypted = encrypted_bearer_credentials();
         sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+                provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
                 created_at, updated_at\
-             ) VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', \
+             ) VALUES (?, 'openai', ?, 'https://example.invalid', 'bearer', ?, \
                         1, 1, 1)",
         )
         .bind(provider_id)
         .bind(provider_id)
+        .bind(credentials_encrypted)
         .execute(db.pool())
         .await
         .unwrap();
@@ -1975,16 +1985,18 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
+        let credentials_encrypted = encrypted_bearer_credentials();
         sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+                provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
                 created_at, updated_at\
              ) VALUES (\
                 ?1, 'openai', 'Provider Test', 'https://example.invalid', \
-                'encrypted', 1, 0, 0\
+                'bearer', ?2, 1, 0, 0\
              )",
         )
         .bind(PROVIDER_ID)
+        .bind(credentials_encrypted)
         .execute(db.pool())
         .await
         .unwrap();

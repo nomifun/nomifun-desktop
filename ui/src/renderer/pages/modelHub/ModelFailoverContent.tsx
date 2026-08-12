@@ -12,7 +12,7 @@ import { ipcBridge } from '@/common';
 import type { IModelFailoverCandidate, IModelFailoverConfig } from '@/common/adapter/ipcBridge';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
-import TaskModelSelect, { type TaskModelSelection } from '@/renderer/components/agent/TaskModelSelect';
+import TaskModelSelect, { type TaskModelSelection } from '@/renderer/components/model/TaskModelSelect';
 import { buildModelFailoverConfigForSave } from './modelFailoverQueue';
 import type { ProviderId } from '@/common/types/ids';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
@@ -21,7 +21,6 @@ const DEFAULT_CONFIG: IModelFailoverConfig = {
   enabled: false,
   queue: [],
   max_switches: 4,
-  stamp_unhealthy: true,
 };
 
 /**
@@ -39,8 +38,8 @@ const ModelFailoverContent: React.FC = () => {
   const [config, setConfig] = useState<IModelFailoverConfig>(DEFAULT_CONFIG);
   const [saving, setSaving] = useState(false);
 
-  // Pending "add candidate" selection — one unified chat-capable model pick
-  // (task='chat' catalog resolve; the queue previously listed ALL models of a
+  // Pending "add candidate" selection: one model with an exact Chat capability.
+  // The queue previously listed all models of a
   // provider unfiltered, this is its first-time task filtering).
   const [draft, setDraft] = useState<TaskModelSelection | null>(null);
 
@@ -73,7 +72,7 @@ const ModelFailoverContent: React.FC = () => {
 
   const addCandidate = () => {
     if (!draft) return;
-    const next: IModelFailoverCandidate = { provider_id: draft.providerId, model: draft.model };
+    const next: IModelFailoverCandidate = { provider_id: draft.provider_id, model: draft.model };
     const dup = config.queue.some((q) => q.provider_id === next.provider_id && q.model === next.model);
     if (dup) {
       message.warning(t('modelFailover.duplicate'));
@@ -86,7 +85,7 @@ const ModelFailoverContent: React.FC = () => {
   const save = async () => {
     setSaving(true);
     try {
-      const saveResult = buildModelFailoverConfigForSave(config, draft?.providerId, draft?.model);
+      const saveResult = buildModelFailoverConfigForSave(config, draft?.provider_id, draft?.model);
       const saved = await ipcBridge.agentModelFailover.updateSettings.invoke(saveResult.config);
       setConfig({ ...DEFAULT_CONFIG, ...saved, queue: saved.queue ?? [] });
       if (saveResult.hasCompleteDraft) {
@@ -168,7 +167,7 @@ const ModelFailoverContent: React.FC = () => {
             <TaskModelSelect
               task='chat'
               value={draft}
-              onSelect={setDraft}
+              onChange={setDraft}
               placeholder={t('modelFailover.selectModel')}
             />
           </div>
@@ -197,17 +196,6 @@ const ModelFailoverContent: React.FC = () => {
           value={config.max_switches}
           onChange={(v) => setConfig((c) => ({ ...c, max_switches: typeof v === 'number' ? v : c.max_switches }))}
           style={{ width: 160 }}
-        />
-      </div>
-
-      <div className='flex items-center justify-between'>
-        <div className='flex flex-col'>
-          <span className='text-t-secondary text-13px'>{t('modelFailover.stampUnhealthy')}</span>
-          <span className='text-t-tertiary text-12px leading-18px'>{t('modelFailover.stampUnhealthyHint')}</span>
-        </div>
-        <Switch
-          checked={config.stamp_unhealthy}
-          onChange={(v: boolean) => setConfig((c) => ({ ...c, stamp_unhealthy: v }))}
         />
       </div>
 

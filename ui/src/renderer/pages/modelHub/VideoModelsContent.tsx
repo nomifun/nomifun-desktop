@@ -5,12 +5,13 @@
  */
 
 import React from 'react';
-import CreationModelsPanel from './CreationModelsPanel';
+import { VideoTwo } from '@icon-park/react';
+import ModalityModelsPanel from './ModalityModelsPanel';
 
-/** 视频生成区：能出视频的模型（video_generation 投影）。 */
 const VideoModelsContent: React.FC = () => (
-  <CreationModelsPanel
-    capability='video_generation'
+  <ModalityModelsPanel
+    modality='video'
+    icon={<VideoTwo theme='outline' size='18' strokeWidth={3} />}
     titleKey='settings.modelHub.creation.videoTitle'
     subtitleKey='settings.modelHub.creation.videoSubtitle'
   />

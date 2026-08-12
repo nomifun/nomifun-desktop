@@ -55,7 +55,7 @@ use nomifun_realtime::WsHandlerState;
 use nomifun_requirement::RequirementRouterState;
 use nomifun_shell::ShellRouterState;
 use nomifun_system::{
-    ClientPrefService, ConnectionTestRouterState, ConnectionTestService, ModelFetchService, ProtocolDetectionService,
+    ClientPrefService, ConnectionTestRouterState, ConnectionTestService, ModelFetchService,
     ProviderService, SettingsService, SystemRouterState, VersionCheckService,
 };
 use nomifun_terminal::TerminalRouterState;
@@ -525,14 +525,8 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     let (channel_state, channel_components) = build_channel_state(services, ext_state.registry.clone()).await;
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: channel state built");
 
-    let pool = services.database.pool().clone();
-    let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
-    let encryption_key = services.encryption_key;
     let agent_service = AgentService::new(
         services.agent_registry.clone(),
-        provider_repo,
-        services.provider_model_repo.clone(),
-        encryption_key,
         services.data_dir.clone(),
         services.model_invoke_service.clone(),
     );
@@ -619,7 +613,9 @@ pub fn build_preset_state(services: &AppServices, extension_registry: ExtensionR
     let provider_repo: Arc<dyn IProviderRepository> =
         Arc::new(SqliteProviderRepository::new(pool.clone()));
     let provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository> =
-        Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool));
+        Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone()));
+    let provider_model_capability_repo: Arc<dyn nomifun_db::IProviderModelCapabilityRepository> =
+        Arc::new(nomifun_db::SqliteProviderModelCapabilityRepository::new(pool));
     let builtin = Arc::new(BuiltinPresetRegistry::load());
     let service = Arc::new(PresetService::new(
         repo,
@@ -628,6 +624,7 @@ pub fn build_preset_state(services: &AppServices, extension_registry: ExtensionR
         agent_repo,
         provider_repo,
         provider_model_repo,
+        provider_model_capability_repo,
         builtin,
         extension_registry,
         services.data_dir.clone(),
@@ -640,6 +637,13 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
     let encryption_key = services.encryption_key;
     let pool = services.database.pool().clone();
     let provider_repo = Arc::new(SqliteProviderRepository::new(pool.clone()));
+    let provider_model_repo = services.provider_model_repo.clone();
+    let capability_repo = Arc::new(
+        nomifun_db::SqliteProviderModelCapabilityRepository::new(pool.clone()),
+    );
+    let connection_repo = Arc::new(
+        nomifun_db::SqliteProviderConnectionRepository::new(pool.clone()),
+    );
 
     // Cross-subsystem provider-deletion guard: aggregate every hard binding
     // (companion, public Agent, active Agent Execution) and strip soft
@@ -663,25 +667,26 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(pool.clone()))),
         provider_service: ProviderService::new(
             provider_repo.clone(),
-            Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone())),
+            provider_model_repo.clone(),
+            capability_repo.clone(),
+            connection_repo.clone(),
             encryption_key,
         )
         .with_deletion_coordinator(deletion_coordinator),
         provider_connection_service: nomifun_system::ProviderConnectionService::new(
-            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(pool.clone())),
+            connection_repo.clone(),
             provider_repo.clone(),
+            capability_repo.clone(),
             encryption_key,
         ),
-        model_fetch_service: ModelFetchService::new_dynamic(provider_repo, encryption_key),
-        model_profile_service: nomifun_system::ModelProfileService::new(
-            services.provider_model_repo.clone(),
-        ),
+        model_fetch_service: ModelFetchService::new_dynamic(provider_repo.clone(), encryption_key),
         provider_model_service: nomifun_system::ProviderModelService::new(
-            services.provider_model_repo.clone(),
-            Arc::new(SqliteProviderRepository::new(pool.clone())),
+            provider_model_repo,
+            capability_repo,
+            provider_repo,
+            connection_repo,
         ),
         managed_model_service: Some(services.managed_model_service.clone()),
-        protocol_detection_service: ProtocolDetectionService::new_dynamic(),
         version_check_service: VersionCheckService::new_dynamic(env!("CARGO_PKG_VERSION").to_owned()),
         data_dir: services.data_dir.clone(),
         work_dir: services.work_dir.clone(),
@@ -723,6 +728,7 @@ pub fn build_conversation_state(
     conversation_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
         Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
+        services.provider_model_capability_repo.clone(),
         Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
     );
     // Drop the conversation's knowledge binding when the conversation goes away.
@@ -1084,6 +1090,7 @@ pub async fn build_channel_state(
     conversation_svc.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
         Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
+        services.provider_model_capability_repo.clone(),
         Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
     );
     if let Some(hook) = services.runtime_registry_delete_hook.clone() {
@@ -1285,6 +1292,7 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
     conv_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(pool.clone())),
         Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone())),
+        services.provider_model_capability_repo.clone(),
         Arc::new(SqliteClientPreferenceRepository::new(pool.clone())),
     );
 
@@ -1416,11 +1424,12 @@ pub fn build_agent_execution_engine(
         template_repository,
         provider_repository,
         provider_model_repository,
+        provider_model_capability_repository: services.provider_model_capability_repo.clone(),
         preset_service,
         realtime: services.ws_manager.clone(),
         conversation,
         runtime_registry: services.agent_runtime_registry.clone(),
-        encryption_key: services.encryption_key,
+        model_invoke: services.model_invoke_service.clone(),
         workspace_root: services.work_dir.clone(),
     }));
     {
@@ -1437,8 +1446,7 @@ pub fn build_agent_execution_engine(
 /// Build the `IdmmRouterState` (the IDMM supervisor manager + service). Shares
 /// the caller's `ConversationService` / conversation repo / terminal driver so
 /// IDMM supervises the same live sessions AutoWork + the UI drive. Constructs a
-/// fresh provider repo from the pool, while reusing the process-wide persistent
-/// data-encryption key from [`AppServices`].
+/// the process-wide model invoke resolver from [`AppServices`].
 pub fn build_idmm_state(
     services: &AppServices,
     conv_service: ConversationService,
@@ -1446,16 +1454,12 @@ pub fn build_idmm_state(
     terminal_driver: Arc<dyn nomifun_terminal::TerminalDriver>,
 ) -> IdmmRouterState {
     let pool = services.database.pool().clone();
-    let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool.clone()));
     let records: Arc<dyn IIdmmInterventionRepository> = Arc::new(SqliteIdmmInterventionRepository::new(pool));
-    let encryption_key = services.encryption_key;
 
     // The sidecar's one-shot completions run against a backup provider; use the
     // data dir as the (unused-for-supervision) workspace root.
     let completer: Arc<dyn nomifun_idmm::Completer> = Arc::new(nomifun_idmm::LiveCompleter {
-        provider_repo,
-        provider_model_repo: services.provider_model_repo.clone(),
-        encryption_key,
+        model_invoke: services.model_invoke_service.clone(),
         workspace: services.data_dir.clone(),
     });
     let sidecar = Arc::new(nomifun_idmm::SidecarClient::new(completer));
@@ -1560,6 +1564,7 @@ pub fn build_companion_state(
     conv_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
         Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
+        services.provider_model_capability_repo.clone(),
         Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
     );
     if let Some(hook) = services.runtime_registry_delete_hook.clone() {
@@ -2035,6 +2040,7 @@ pub fn build_cron_state(
     conv_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
         Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
+        services.provider_model_capability_repo.clone(),
         Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
     );
 
@@ -2122,7 +2128,13 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
     let client_pref_repo = Arc::new(SqliteClientPreferenceRepository::new(pool.clone()));
     let client_pref_service = ClientPrefService::new(client_pref_repo);
     let provider_repo = Arc::new(SqliteProviderRepository::new(pool.clone()));
-    let provider_model_repo = Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool));
+    let provider_model_repo = Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone()));
+    let capability_repo = Arc::new(
+        nomifun_db::SqliteProviderModelCapabilityRepository::new(pool.clone()),
+    );
+    let connection_repo = Arc::new(
+        nomifun_db::SqliteProviderConnectionRepository::new(pool),
+    );
 
     ShellRouterState {
         shell_service: Arc::new(nomifun_shell::ShellService::new(Arc::new(
@@ -2135,6 +2147,8 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
         provider_service: Some(ProviderService::new(
             provider_repo,
             provider_model_repo,
+            capability_repo,
+            connection_repo,
             services.encryption_key,
         )),
         // The process-wide invoke singleton (assembled in AppServices next to

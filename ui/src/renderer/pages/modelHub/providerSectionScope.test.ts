@@ -26,7 +26,8 @@ describe('providers & keys section scope', () => {
     // editor) and the per-role connection profiles.
     expect(provider.includes('AddPlatformModal')).toBe(true);
     expect(provider.includes('ProviderConnectionsSection')).toBe(true);
-    // The tasks/traits editor stays HERE and nowhere else.
-    expect(provider.includes('ModelModalityEditor')).toBe(true);
+    // The canonical capability editor and task-scoped rows stay here.
+    expect(provider.includes('ModelAdvancedEditor')).toBe(true);
+    expect(provider.includes('row.capabilities')).toBe(true);
   });
 });

@@ -88,8 +88,13 @@ async fn create_provider(
     name: &str,
     base_url: &str,
     api_key: &str,
-    models: &[&str],
+    model: &str,
 ) -> String {
+    let (auth_scheme, protocol) = match platform {
+        "deepgram" => ("token", "deepgram.listen"),
+        "stepfun" | "stepfun-plan" => ("bearer", "stepfun.asr_sse"),
+        _ => ("bearer", "openai.audio_transcriptions"),
+    };
     let req = json_with_token(
         "POST",
         "/api/providers",
@@ -97,9 +102,17 @@ async fn create_provider(
             "platform": platform,
             "name": name,
             "base_url": base_url,
+            "auth_scheme": auth_scheme,
             "api_key": api_key,
-            "models": models,
-            "enabled": true
+            "enabled": true,
+            "initial_model": {
+                "model": model,
+                "capabilities": [{
+                    "task": "speech_recognition",
+                    "protocol": protocol,
+                    "connection_role": "default"
+                }]
+            }
         }),
         token,
         csrf,
@@ -302,7 +315,7 @@ async fn st3_stt_disabled() {
         &mut app,
         &token,
         &csrf,
-        json!({ "enabled": false, "provider": "openai" }),
+        json!({ "enabled": false }),
     )
     .await;
 
@@ -338,25 +351,13 @@ async fn st4_stt_config_not_set() {
     assert_eq!(json["code"], "STT_DISABLED");
 }
 
-// ST-5: OpenAI not configured (empty-key legacy shell, no provider selected)
+// ST-5: enabled STT without catalog coordinates is not configured.
 #[tokio::test]
-async fn st5_openai_not_configured() {
+async fn st5_stt_not_configured() {
     let (mut app, services) = build_app_with_noop_opener().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    // An empty-key embedded shell is "nothing configured", not a retired
-    // legacy credential: the NOT_CONFIGURED 400 family must keep firing.
-    set_stt_config(
-        &mut app,
-        &token,
-        &csrf,
-        json!({
-            "enabled": true,
-            "provider": "openai",
-            "openai": { "api_key": "", "model": "whisper-1" }
-        }),
-    )
-    .await;
+    set_stt_config(&mut app, &token, &csrf, json!({ "enabled": true })).await;
 
     let (content_type, body) = MultipartBuilder::new()
         .add_file("file", "test.wav", "audio/wav", b"fake audio data")
@@ -368,75 +369,7 @@ async fn st5_openai_not_configured() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let json = body_json(resp).await;
-    assert_eq!(json["code"], "STT_OPENAI_NOT_CONFIGURED");
-}
-
-// ST-6: Deepgram not configured (empty-key legacy shell, no provider selected)
-#[tokio::test]
-async fn st6_deepgram_not_configured() {
-    let (mut app, services) = build_app_with_noop_opener().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    set_stt_config(
-        &mut app,
-        &token,
-        &csrf,
-        json!({
-            "enabled": true,
-            "provider": "deepgram",
-            "deepgram": { "api_key": "", "model": "nova-2" }
-        }),
-    )
-    .await;
-
-    let (content_type, body) = MultipartBuilder::new()
-        .add_file("file", "test.wav", "audio/wav", b"fake audio data")
-        .add_text("fileName", "test.wav")
-        .add_text("mimeType", "audio/wav")
-        .build();
-
-    let req = multipart_request("/api/stt", &content_type, body, &token, &csrf);
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let json = body_json(resp).await;
-    assert_eq!(json["code"], "STT_DEEPGRAM_NOT_CONFIGURED");
-}
-
-// ST-legacy: an embedded config CARRYING a credential (pre-catalog shape) is
-// retired — 500 STT_UNKNOWN with re-selection guidance, never silent execution.
-#[tokio::test]
-async fn st_legacy_embedded_credential_config_is_rejected() {
-    let (mut app, services) = build_app_with_noop_opener().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    set_stt_config(
-        &mut app,
-        &token,
-        &csrf,
-        json!({
-            "enabled": true,
-            "provider": "openai",
-            "openai": { "api_key": "sk-legacy-key", "model": "whisper-1" }
-        }),
-    )
-    .await;
-
-    let (content_type, body) = MultipartBuilder::new()
-        .add_file("file", "test.wav", "audio/wav", b"fake audio data")
-        .add_text("fileName", "test.wav")
-        .add_text("mimeType", "audio/wav")
-        .build();
-
-    let req = multipart_request("/api/stt", &content_type, body, &token, &csrf);
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let json = body_json(resp).await;
-    assert_eq!(json["code"], "STT_UNKNOWN");
-    assert!(
-        json["error"].as_str().unwrap().contains("no longer supported"),
-        "error: {}",
-        json["error"]
-    );
+    assert_eq!(json["code"], "STT_NOT_CONFIGURED");
 }
 
 // ST-7: STT third-party API failure (catalog provider, upstream 401)
@@ -459,7 +392,7 @@ async fn st7_stt_api_failure() {
         "Failing Speech Provider",
         &mock_server.uri(),
         "sk-fake-key",
-        &["whisper-1"],
+        "whisper-1",
     )
     .await;
     set_stt_config(
@@ -468,7 +401,6 @@ async fn st7_stt_api_failure() {
         &csrf,
         json!({
             "enabled": true,
-            "provider": "openai",
             "provider_id": provider_id,
             "model": "whisper-1"
         }),
@@ -498,7 +430,7 @@ async fn st8_multipart_missing_filename() {
         &mut app,
         &token,
         &csrf,
-        json!({ "enabled": true, "provider": "openai", "openai": { "api_key": "sk-test", "model": "whisper-1" } }),
+        json!({ "enabled": true }),
     )
     .await;
 
@@ -524,7 +456,7 @@ async fn st9_multipart_missing_file() {
         &mut app,
         &token,
         &csrf,
-        json!({ "enabled": true, "provider": "openai", "openai": { "api_key": "sk-test", "model": "whisper-1" } }),
+        json!({ "enabled": true }),
     )
     .await;
 
@@ -565,7 +497,7 @@ async fn st1_openai_transcription_success() {
         "Speech Provider",
         &mock_server.uri(),
         "sk-test-key",
-        &["whisper-1"],
+        "whisper-1",
     )
     .await;
     set_stt_config(
@@ -574,7 +506,6 @@ async fn st1_openai_transcription_success() {
         &csrf,
         json!({
             "enabled": true,
-            "provider": "openai",
             "provider_id": provider_id,
             "model": "whisper-1"
         }),
@@ -597,9 +528,8 @@ async fn st1_openai_transcription_success() {
     assert_eq!(json["data"]["provider"], "openai");
 }
 
-// ST-2: Deepgram transcription success (catalog provider on the deepgram
-// platform; the invoke layer routes to /v1/listen with Token auth — the
-// stored `provider` enum plays no part in execution)
+// ST-2: Deepgram transcription success. The saved capability explicitly
+// selects `deepgram.listen`, whose connection uses Token auth.
 #[tokio::test]
 async fn st2_deepgram_transcription_success() {
     let mock_server = MockServer::start().await;
@@ -636,7 +566,7 @@ async fn st2_deepgram_transcription_success() {
         "Deepgram",
         &mock_server.uri(),
         "dg-test-key",
-        &["nova-2"],
+        "nova-2",
     )
     .await;
     set_stt_config(
@@ -645,7 +575,6 @@ async fn st2_deepgram_transcription_success() {
         &csrf,
         json!({
             "enabled": true,
-            "provider": "deepgram",
             "provider_id": provider_id,
             "model": "nova-2"
         }),
@@ -687,7 +616,7 @@ async fn st11_configured_provider_is_resolved_by_id() {
         "Speech Provider",
         &mock_server.uri(),
         "sk-from-provider",
-        &["whisper-1"],
+        "whisper-1",
     )
     .await;
     set_stt_config(
@@ -696,7 +625,6 @@ async fn st11_configured_provider_is_resolved_by_id() {
         &csrf,
         json!({
             "enabled": true,
-            "provider": "openai",
             "provider_id": provider_id,
             "model": "whisper-1",
             "language": "en"
@@ -719,16 +647,21 @@ async fn st11_configured_provider_is_resolved_by_id() {
 }
 
 #[tokio::test]
-async fn st12_stepfun_provider_uses_single_version_prefix_and_required_form_fields() {
+async fn st12_stepfun_provider_uses_native_asr_sse_protocol() {
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1/audio/transcriptions"))
+        .and(path("/v1/audio/asr/sse"))
         .and(header("Authorization", "Bearer sk-stepfun-provider"))
-        .and(body_string_contains("name=\"model\""))
-        .and(body_string_contains("step-asr"))
-        .and(body_string_contains("name=\"response_format\""))
-        .and(body_string_contains("json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "text": "阶跃端到端转写成功" })))
+        .and(header("Accept", "text/event-stream"))
+        .and(body_string_contains("stepaudio-2.5-asr"))
+        .and(body_string_contains("audio"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"type\":\"transcript.text.done\",\"text\":\"阶跃端到端转写成功\"}\n\n",
+                ),
+        )
         .expect(1)
         .mount(&mock_server)
         .await;
@@ -739,11 +672,11 @@ async fn st12_stepfun_provider_uses_single_version_prefix_and_required_form_fiel
         &mut app,
         &token,
         &csrf,
-        "custom",
+        "stepfun",
         "StepFun",
         &format!("{}/v1", mock_server.uri()),
         "sk-stepfun-provider",
-        &["step-asr"],
+        "stepaudio-2.5-asr",
     )
     .await;
     set_stt_config(
@@ -752,9 +685,8 @@ async fn st12_stepfun_provider_uses_single_version_prefix_and_required_form_fiel
         &csrf,
         json!({
             "enabled": true,
-            "provider": "openai",
             "provider_id": provider_id,
-            "model": "step-asr"
+            "model": "stepaudio-2.5-asr"
         }),
     )
     .await;
@@ -770,7 +702,7 @@ async fn st12_stepfun_provider_uses_single_version_prefix_and_required_form_fiel
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["data"]["text"], "阶跃端到端转写成功");
-    assert_eq!(body["data"]["model"], "step-asr");
+    assert_eq!(body["data"]["model"], "stepaudio-2.5-asr");
 }
 
 // ST-10: languageHint passed through (catalog provider; the hint must reach
@@ -797,7 +729,7 @@ async fn st10_language_hint_passed() {
         "Speech Provider",
         &mock_server.uri(),
         "sk-test-key",
-        &["whisper-1"],
+        "whisper-1",
     )
     .await;
     set_stt_config(
@@ -806,7 +738,6 @@ async fn st10_language_hint_passed() {
         &csrf,
         json!({
             "enabled": true,
-            "provider": "openai",
             "provider_id": provider_id,
             "model": "whisper-1"
         }),
@@ -896,7 +827,7 @@ async fn st_multipart_missing_mimetype() {
         &mut app,
         &token,
         &csrf,
-        json!({ "enabled": true, "provider": "openai", "openai": { "api_key": "sk-test", "model": "whisper-1" } }),
+        json!({ "enabled": true }),
     )
     .await;
 

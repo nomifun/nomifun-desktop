@@ -9,11 +9,61 @@ import { parseProviderId } from '@/common/types/ids';
 import {
   fromProviderResponse,
   toCreateProviderRequest,
+  toUpdateProviderRequest,
   type ProviderResponse,
+  type UpdateProviderRequest,
 } from './providerApi';
-import type { ProviderModelResponse } from './providerModel';
+import type { ProviderModelInput, ProviderModelResponse } from './providerModel';
 
 const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000002';
+
+const initialModel: ProviderModelInput = {
+  model: 'gpt-4o',
+  enabled: true,
+  sort_order: 0,
+  capabilities: [
+    {
+      task: 'chat',
+      traits: ['vision_input'],
+      protocol: 'openai.chat_text',
+      connection_role: 'default',
+      allow_cross_origin_credentials: false,
+      provider_params: {},
+      context_limit: 128_000,
+    },
+  ],
+};
+
+const modelResponse = (): ProviderModelResponse => ({
+  provider_id: PROVIDER_ID,
+  model: initialModel.model,
+  enabled: initialModel.enabled ?? true,
+  sort_order: 0,
+  capabilities: initialModel.capabilities.map((capability) => ({
+    ...capability,
+    traits: capability.traits ?? [],
+    allow_cross_origin_credentials: capability.allow_cross_origin_credentials ?? false,
+    provider_params: capability.provider_params ?? {},
+    created_at: 1,
+    updated_at: 1,
+  })),
+  created_at: 1,
+  updated_at: 1,
+});
+
+const response = (provider_id: string): ProviderResponse => ({
+  provider_id,
+  platform: 'openai',
+  name: 'OpenAI',
+  base_url: 'https://api.openai.com',
+  auth_scheme: 'bearer',
+  has_credentials: true,
+  models: [modelResponse()],
+  enabled: true,
+  sort_order: 0,
+  created_at: 1,
+  updated_at: 1,
+});
 
 const expectThrow = (action: () => unknown) => {
   try {
@@ -24,29 +74,28 @@ const expectThrow = (action: () => unknown) => {
   throw new Error('Expected action to throw');
 };
 
-const response = (provider_id: string): ProviderResponse => ({
-  provider_id,
-  platform: 'openai',
-  name: 'OpenAI',
-  base_url: 'https://api.openai.com',
-  api_key: 'sk-test',
-  models: ['gpt-4o'],
-  enabled: true,
-  model_context_limits: { 'gpt-4o': 128_000 },
-  is_full_url: false,
-  sort_order: 0,
-  created_at: 1,
-  updated_at: 1,
-});
-
 describe('provider wire contract', () => {
-  test('maps provider_id responses to the internal id field', () => {
+  test('maps provider_id and preserves the complete nested capability graph', () => {
     const provider = fromProviderResponse(response(PROVIDER_ID));
-
     expect(provider.id).toBe(parseProviderId(PROVIDER_ID));
-    expect(provider.model_context_limits).toEqual({ 'gpt-4o': 128_000 });
-    expect(Object.prototype.hasOwnProperty.call(provider, 'provider_id')).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(provider, 'context_limit')).toBe(false);
+    expect(provider.models[0].model).toBe('gpt-4o');
+    expect(provider.models[0].capabilities[0]).toMatchObject({
+      task: 'chat',
+      protocol: 'openai.chat_text',
+      context_limit: 128_000,
+    });
+    expect(Object.keys(provider).sort()).toEqual([
+      'auth_scheme',
+      'base_url',
+      'bedrock_config',
+      'enabled',
+      'has_credentials',
+      'id',
+      'models',
+      'name',
+      'platform',
+      'sort_order',
+    ]);
   });
 
   test('rejects non-canonical provider ids at the wire boundary', () => {
@@ -54,39 +103,44 @@ describe('provider wire contract', () => {
     expectThrow(() => fromProviderResponse(response(PROVIDER_ID.toUpperCase())));
   });
 
-  test('renames the internal create id to provider_id without sending id', () => {
+  test('creates provider and first complete model atomically in one request', () => {
     const request = toCreateProviderRequest({
-      ...fromProviderResponse(response(PROVIDER_ID)),
       id: parseProviderId(PROVIDER_ID),
+      platform: 'openai',
+      name: 'OpenAI',
+      base_url: 'https://api.openai.com',
+      auth_scheme: 'bearer',
+      credentials: { api_keys: ['sk-test'] },
+      enabled: true,
+      initial_model: initialModel,
     });
-
     expect(request.provider_id).toBe(parseProviderId(PROVIDER_ID));
-    expect(request.model_context_limits).toEqual({ 'gpt-4o': 128_000 });
+    expect(request.credentials).toEqual({ api_keys: ['sk-test'] });
+    expect(request.initial_model).toEqual(initialModel);
     expect(Object.prototype.hasOwnProperty.call(request, 'id')).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(request, 'context_limit')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(request, 'models')).toBe(false);
   });
 
-  test('passes models_detail through to the renderer model as-is', () => {
-    const modelsDetail: ProviderModelResponse[] = [
-      {
-        provider_id: PROVIDER_ID,
-        model: 'gpt-4o',
-        enabled: true,
-        sort_order: 0,
-        tasks: ['chat'],
-        traits: ['vision_input'],
-        params: null,
-        source: 'inferred',
-        created_at: 1,
-        updated_at: 1,
-      },
-    ];
-    const withDetail = fromProviderResponse({ ...response(PROVIDER_ID), models_detail: modelsDetail });
-    expect(withDetail.models_detail).toEqual(modelsDetail);
+  test('provider updates strip immutable platform and response-only fields', () => {
+    const request = toUpdateProviderRequest({
+      platform: 'other-provider',
+      name: 'Renamed provider',
+      models: [modelResponse()],
+      enabled: false,
+    } as unknown as UpdateProviderRequest);
 
-    // Empty models_detail is skipped on the wire; the renderer model mirrors
-    // that by keeping the field undefined instead of inventing [].
-    const withoutDetail = fromProviderResponse(response(PROVIDER_ID));
-    expect(withoutDetail.models_detail).toBeUndefined();
+    expect(request).toEqual({
+      name: 'Renamed provider',
+      enabled: false,
+    });
+    expect(Object.prototype.hasOwnProperty.call(request, 'platform')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(request, 'models')).toBe(false);
+  });
+
+  test('provider update keeps credentials omitted or forwards one typed replacement', () => {
+    expect(toUpdateProviderRequest({ name: 'Keep existing' })).toEqual({ name: 'Keep existing' });
+    expect(
+      toUpdateProviderRequest({ credentials: { api_keys: ['replacement'] } })
+    ).toEqual({ credentials: { api_keys: ['replacement'] } });
   });
 });

@@ -1,289 +1,568 @@
-//! Black-box integration tests for the row-level model catalog routes
-//! (`/api/provider-models*`). Exercises create -> list/filter -> update ->
-//! delete over HTTP via `oneshot`, including projection consistency with
-//! `GET /api/providers`.
+//! Black-box tests for the single provider-model full-save surface.
+
+mod common;
 
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::json;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use nomifun_api_types::{ModelTask, ModelTrait};
 use nomifun_db::{
-    SqliteClientPreferenceRepository, SqliteProviderModelRepository, SqliteProviderRepository,
-    SqliteSettingsRepository, init_database_memory,
+    SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
+    SqliteProviderModelRepository, SqliteProviderRepository, init_database_memory,
 };
-use nomifun_system::{
-    ClientPrefService, ModelFetchService, ModelProfileService, ProtocolDetectionService,
-    ProviderService, SettingsService, SystemRouterState, VersionCheckService, system_routes,
+use nomifun_model_invoke::{
+    AdapterRegistry, ModelInvokeService, ModelRef, default_adapters,
 };
+use nomifun_system::{SystemRouterState, VersionCheckService, system_routes};
 
 const TEST_KEY: [u8; 32] = [0x42; 32];
 
 fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
-    let provider_repo = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-    let http_client = reqwest::Client::new();
-    SystemRouterState {
-        settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(db.pool().clone()))),
-        client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()))),
-        provider_service: ProviderService::new(
-            provider_repo.clone(),
-            Arc::new(SqliteProviderModelRepository::new(db.pool().clone())),
-            TEST_KEY,
-        ),
-        provider_connection_service: nomifun_system::ProviderConnectionService::new(
-            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(db.pool().clone())),
-            provider_repo.clone(),
-            TEST_KEY,
-        ),
-        model_fetch_service: ModelFetchService::new(provider_repo.clone(), TEST_KEY, http_client.clone()),
-        model_profile_service: ModelProfileService::new(Arc::new(SqliteProviderModelRepository::new(db.pool().clone()))),
-        provider_model_service: nomifun_system::ProviderModelService::new(
-            Arc::new(SqliteProviderModelRepository::new(db.pool().clone())),
-            provider_repo.clone(),
-        ),
-        managed_model_service: None,
-        protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
-        version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),
-        data_dir: std::env::temp_dir(),
-        work_dir: std::env::temp_dir(),
-        work_dir_is_cli_override: false,
+    let http = reqwest::Client::new();
+    common::build_system_state(
+        db,
+        TEST_KEY,
+        http.clone(),
+        VersionCheckService::new(http, "0.1.0".into()),
+        None,
+        std::env::temp_dir(),
+        std::env::temp_dir(),
+        false,
+    )
+}
+
+fn build_invoke(db: &nomifun_db::Database) -> ModelInvokeService {
+    ModelInvokeService::new(
+        Arc::new(SqliteProviderRepository::new(db.pool().clone())),
+        Arc::new(SqliteProviderModelRepository::new(db.pool().clone())),
+        Arc::new(SqliteProviderModelCapabilityRepository::new(
+            db.pool().clone(),
+        )),
+        Arc::new(SqliteProviderConnectionRepository::new(db.pool().clone())),
+        TEST_KEY,
+        reqwest::Client::new(),
+        AdapterRegistry::new(default_adapters()),
+    )
+}
+
+fn request(method: &str, uri: &str, body: Option<Value>) -> Request<Body> {
+    let builder = Request::builder().method(method).uri(uri);
+    match body {
+        Some(body) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
     }
 }
 
-async fn body_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+async fn body_json(response: axum::response::Response) -> Value {
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
 }
 
-fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap()
+fn chat_capability() -> Value {
+    json!({
+        "task": "chat",
+        "traits": ["streaming"],
+        "protocol": "openai.chat_text",
+        "connection_role": "default",
+        "provider_params": {}
+    })
 }
 
-fn get_request(uri: &str) -> Request<Body> {
-    Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
-}
-
-/// Create a provider on the given platform with no models; return its id.
 async fn create_provider(db: &nomifun_db::Database, platform: &str, name: &str) -> String {
-    let resp = system_routes(build_state(db))
-        .oneshot(json_request(
+    let response = system_routes(build_state(db))
+        .oneshot(request(
             "POST",
             "/api/providers",
-            json!({
+            Some(json!({
                 "platform": platform,
                 "name": name,
                 "base_url": "https://api.example.test/v1",
-                "api_key": "sk-test",
-                "models": []
-            }),
+                "auth_scheme": "bearer",
+                "credentials": {"api_keys": ["sk-test"]},
+                "initial_model": {
+                    "model": "seed-chat",
+                    "capabilities": [chat_capability()]
+                },
+                "connections": []
+            })),
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let v = body_json(resp).await;
-    v["data"]["provider_id"].as_str().unwrap().to_string()
+    assert_eq!(response.status(), StatusCode::CREATED);
+    body_json(response).await["data"]["provider_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 #[tokio::test]
-async fn create_list_update_delete_provider_model() {
+async fn duplicate_traits_fail_at_save_and_unique_traits_resolve_unchanged() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Trait contract").await;
+    let model = "trait-contract-model";
+    let save = |traits: Value| {
+        json!({
+            "provider_id": provider_id.clone(),
+            "model": {
+                "model": model,
+                "capabilities": [{
+                    "task": "chat",
+                    "traits": traits,
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default",
+                    "provider_params": {}
+                }]
+            }
+        })
+    };
+
+    let duplicate = system_routes(build_state(&db))
+        .oneshot(request(
+            "PUT",
+            "/api/provider-models",
+            Some(save(json!(["streaming", "streaming"]))),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+
+    let valid = system_routes(build_state(&db))
+        .oneshot(request(
+            "PUT",
+            "/api/provider-models",
+            Some(save(json!(["streaming", "function_calling"]))),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(valid.status(), StatusCode::OK);
+
+    let resolved = build_invoke(&db)
+        .resolve_task_config(
+            &ModelRef {
+                provider_id,
+                model: model.to_owned(),
+            },
+            ModelTask::Chat,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved.traits,
+        vec![ModelTrait::Streaming, ModelTrait::FunctionCalling]
+    );
+}
+
+#[tokio::test]
+async fn full_save_list_update_and_query_delete_roundtrip() {
     let db = init_database_memory().await.unwrap();
     let provider_id = create_provider(&db, "stepfun", "StepFun").await;
+    let model = "future-user-model-2026-08-11";
 
-    // Create with no explicit tasks: heuristic seeds speech_recognition,
-    // source=inferred, 201 Created (mirrors POST /api/providers).
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models",
-            json!({ "provider_id": provider_id, "model": "step-asr" }),
+    let save = json!({
+        "provider_id": provider_id.clone(),
+        "model": {
+            "model": model,
+            "description": "user-entered model absent from the catalog",
+            "capabilities": [
+                {
+                    "task": "speech_recognition",
+                    "protocol": "stepfun.asr_sse",
+                    "connection_role": "default",
+                    "endpoint": "/audio/asr/sse",
+                    "provider_params": {}
+                },
+                {
+                    "task": "speech_synthesis",
+                    "protocol": "stepfun.audio_speech",
+                    "connection_role": "default",
+                    "endpoint": "/audio/speech",
+                    "provider_params": {"voice": "default"}
+                }
+            ]
+        }
+    });
+    let response = system_routes(build_state(&db))
+        .oneshot(request("PUT", "/api/provider-models", Some(save.clone())))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = body_json(response).await;
+    assert_eq!(saved["data"]["model"], model);
+    assert_eq!(saved["data"]["capabilities"].as_array().unwrap().len(), 2);
+
+    // Saving does not depend on a model-catalog hit. Both exact task rows must
+    // immediately resolve through the same runtime authority used by probes
+    // and real media calls.
+    let invoke = build_invoke(&db);
+    let model_ref = ModelRef {
+        provider_id: provider_id.clone(),
+        model: model.to_owned(),
+    };
+    let asr = invoke
+        .resolve_task_config(&model_ref, ModelTask::SpeechRecognition)
+        .await
+        .unwrap();
+    assert_eq!(asr.protocol, "stepfun.asr_sse");
+    assert_eq!(asr.transport.endpoint.as_deref(), Some("/audio/asr/sse"));
+    let tts = invoke
+        .resolve_task_config(&model_ref, ModelTask::SpeechSynthesis)
+        .await
+        .unwrap();
+    assert_eq!(tts.protocol, "stepfun.audio_speech");
+    assert_eq!(tts.transport.endpoint.as_deref(), Some("/audio/speech"));
+    assert_eq!(tts.provider_params["voice"], "default");
+
+    let response = system_routes(build_state(&db))
+        .oneshot(request(
+            "GET",
+            &format!("/api/provider-models?provider_id={provider_id}"),
+            None,
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let v = body_json(resp).await;
-    assert_eq!(v["data"]["model"], "step-asr");
-    assert_eq!(v["data"]["tasks"], json!(["speech_recognition"]));
-    assert_eq!(v["data"]["source"], "inferred");
-    assert_eq!(v["data"]["enabled"], true);
-    assert_eq!(v["data"]["sort_order"], 0);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["data"].as_array().unwrap().len(), 2);
 
-    // The row is immediately part of the provider projection.
-    let resp = system_routes(build_state(&db)).oneshot(get_request("/api/providers")).await.unwrap();
-    let v = body_json(resp).await;
-    let provider = &v["data"].as_array().unwrap()[0];
-    assert_eq!(provider["models"], json!(["step-asr"]));
-
-    // Partial update: description only; tasks/source untouched. Explicit null
-    // for context_limit is a no-op clear on an already-NULL column.
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models/update",
-            json!({
-                "provider_id": provider_id,
-                "model": "step-asr",
-                "description": "speech to text",
-                "context_limit": null
-            }),
-        ))
+    let updated = json!({
+        "provider_id": provider_id.clone(),
+        "model": {
+            "model": model,
+            "enabled": true,
+            "description": "updated by user",
+            "capabilities": [{
+                "task": "speech_synthesis",
+                "protocol": "stepfun.audio_speech",
+                "connection_role": "default",
+                "endpoint": "/audio/speech",
+                "provider_params": {"voice": "updated"}
+            }]
+        }
+    });
+    let response = system_routes(build_state(&db))
+        .oneshot(request("PUT", "/api/provider-models", Some(updated)))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let v = body_json(resp).await;
-    assert_eq!(v["data"]["description"], "speech to text");
-    assert_eq!(v["data"]["tasks"], json!(["speech_recognition"]));
-    assert_eq!(v["data"]["source"], "inferred");
-    assert!(v["data"].get("context_limit").is_none());
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated = body_json(response).await;
+    assert_eq!(updated["data"]["enabled"], true);
+    assert_eq!(updated["data"]["description"], "updated by user");
+    assert_eq!(updated["data"]["capabilities"].as_array().unwrap().len(), 1);
+    assert_eq!(updated["data"]["capabilities"][0]["task"], "speech_synthesis");
 
-    // Tasks update flips source to user.
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models/update",
-            json!({ "provider_id": provider_id, "model": "step-asr", "tasks": ["chat"] }),
-        ))
-        .await
-        .unwrap();
-    let v = body_json(resp).await;
-    assert_eq!(v["data"]["tasks"], json!(["chat"]));
-    assert_eq!(v["data"]["source"], "user");
-
-    // Delete; the provider projection loses the model.
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models/delete",
-            json!({ "provider_id": provider_id, "model": "step-asr" }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let resp = system_routes(build_state(&db)).oneshot(get_request("/api/providers")).await.unwrap();
-    let v = body_json(resp).await;
-    let provider = &v["data"].as_array().unwrap()[0];
-    assert_eq!(provider["models"], json!([]));
-
-    let resp = system_routes(build_state(&db)).oneshot(get_request("/api/provider-models")).await.unwrap();
-    let v = body_json(resp).await;
-    assert!(v["data"].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn list_filters_by_provider_id_query() {
-    let db = init_database_memory().await.unwrap();
-    let openai_id = create_provider(&db, "openai", "OpenAI").await;
-    let deepseek_id = create_provider(&db, "deepseek", "DeepSeek").await;
-
-    for (provider_id, model) in [(&openai_id, "gpt-4o"), (&deepseek_id, "deepseek-chat")] {
-        let resp = system_routes(build_state(&db))
-            .oneshot(json_request(
-                "POST",
-                "/api/provider-models",
-                json!({ "provider_id": provider_id, "model": model }),
-            ))
+    // PUT is an atomic full replacement: omitted ASR is gone, retained TTS is
+    // updated, and a rejected replacement cannot disturb either fact.
+    assert!(
+        invoke
+            .resolve_task_config(&model_ref, ModelTask::SpeechRecognition)
             .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-    }
-
-    // Unfiltered: both rows.
-    let resp = system_routes(build_state(&db)).oneshot(get_request("/api/provider-models")).await.unwrap();
-    let v = body_json(resp).await;
-    assert_eq!(v["data"].as_array().unwrap().len(), 2);
-
-    // Filtered: only the requested provider's row.
-    let resp = system_routes(build_state(&db))
-        .oneshot(get_request(&format!("/api/provider-models?provider_id={openai_id}")))
+            .is_err()
+    );
+    let retained_tts = invoke
+        .resolve_task_config(&model_ref, ModelTask::SpeechSynthesis)
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let v = body_json(resp).await;
-    let rows = v["data"].as_array().unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["model"], "gpt-4o");
-    assert_eq!(rows[0]["provider_id"], openai_id.as_str());
+    assert_eq!(retained_tts.provider_params["voice"], "updated");
+
+    let invalid_replacement = json!({
+        "provider_id": provider_id.clone(),
+        "model": {
+            "model": model,
+            "description": "must roll back",
+            "capabilities": [
+                {
+                    "task": "speech_synthesis",
+                    "protocol": "stepfun.audio_speech",
+                    "connection_role": "default",
+                    "provider_params": {}
+                },
+                {
+                    "task": "speech_synthesis",
+                    "protocol": "stepfun.audio_speech",
+                    "connection_role": "default",
+                    "provider_params": {}
+                }
+            ]
+        }
+    });
+    let response = system_routes(build_state(&db))
+        .oneshot(request(
+            "PUT",
+            "/api/provider-models",
+            Some(invalid_replacement),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let after_rejection = system_routes(build_state(&db))
+        .oneshot(request(
+            "GET",
+            &format!("/api/provider-models?provider_id={provider_id}"),
+            None,
+        ))
+        .await
+        .unwrap();
+    let after_rejection = body_json(after_rejection).await;
+    let persisted = after_rejection["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["model"] == model)
+        .unwrap();
+    assert_eq!(persisted["description"], "updated by user");
+    assert_eq!(persisted["capabilities"].as_array().unwrap().len(), 1);
+    assert_eq!(persisted["capabilities"][0]["task"], "speech_synthesis");
+
+    let response = system_routes(build_state(&db))
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/provider-models?provider_id={provider_id}&model={model}"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let providers = system_routes(build_state(&db))
+        .oneshot(request("GET", "/api/providers", None))
+        .await
+        .unwrap();
+    let providers = body_json(providers).await;
+    assert_eq!(providers["data"][0]["models"].as_array().unwrap().len(), 1);
+
+    let old_create = system_routes(build_state(&db))
+        .oneshot(request("POST", "/api/provider-models", Some(json!({}))))
+        .await
+        .unwrap();
+    assert_eq!(old_create.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]
-async fn error_paths_conflict_and_not_found() {
+async fn base_url_override_origin_contract_matches_runtime_resolution() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "stepfun", "StepFun origin contract").await;
+    let invoke = build_invoke(&db);
+
+    let save = |model: &str, capability: Value| {
+        json!({
+            "provider_id": provider_id.clone(),
+            "model": {"model": model, "capabilities": [capability]}
+        })
+    };
+
+    let http_same = save(
+        "http-origin",
+        json!({
+            "task":"chat",
+            "protocol":"openai.chat_text",
+            "connection_role":"default",
+            "base_url_override":"https://api.example.test/v2",
+            "endpoint":"chat/completions",
+            "provider_params":{}
+        }),
+    );
+    let response = system_routes(build_state(&db))
+        .oneshot(request("PUT", "/api/provider-models", Some(http_same)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let resolved = invoke
+        .resolve_task_config(
+            &ModelRef {
+                provider_id: provider_id.clone(),
+                model: "http-origin".into(),
+            },
+            ModelTask::Chat,
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.connection.base_url, "https://api.example.test/v2");
+
+    let http_cross = save(
+        "http-origin",
+        json!({
+            "task":"chat",
+            "protocol":"openai.chat_text",
+            "connection_role":"default",
+            "base_url_override":"https://gateway.example.test/v1",
+            "provider_params":{}
+        }),
+    );
+    let response = system_routes(build_state(&db))
+        .oneshot(request("PUT", "/api/provider-models", Some(http_cross)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let websocket_cross = save(
+        "realtime-origin",
+        json!({
+            "task":"realtime_conversation",
+            "protocol":"stepfun.realtime_s2s",
+            "connection_role":"default",
+            "base_url_override":"wss://realtime.example.test/v1",
+            "realtime_endpoint":"realtime?model={model}",
+            "provider_params":{}
+        }),
+    );
+    let response = system_routes(build_state(&db))
+        .oneshot(request(
+            "PUT",
+            "/api/provider-models",
+            Some(websocket_cross.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let mut websocket_allowed = websocket_cross;
+    websocket_allowed["model"]["capabilities"][0]["allow_cross_origin_credentials"] =
+        json!(true);
+    let response = system_routes(build_state(&db))
+        .oneshot(request(
+            "PUT",
+            "/api/provider-models",
+            Some(websocket_allowed),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let resolved = invoke
+        .resolve_task_config(
+            &ModelRef {
+                provider_id,
+                model: "realtime-origin".into(),
+            },
+            ModelTask::RealtimeConversation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.connection.base_url, "wss://realtime.example.test/v1");
+}
+
+#[tokio::test]
+async fn full_save_rejects_unencodable_provider_params_before_persistence() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "openai", "OpenAI").await;
+    let model = "multipart-complex-must-not-save";
+    let response = system_routes(build_state(&db))
+        .oneshot(request(
+            "PUT",
+            "/api/provider-models",
+            Some(json!({
+                "provider_id": provider_id.clone(),
+                "model": {
+                    "model": model,
+                    "capabilities": [{
+                        "task": "image_edit",
+                        "protocol": "openai.images",
+                        "connection_role": "default",
+                        "endpoint": "/images/edits",
+                        "provider_params": {"future":{"nested":true}}
+                    }]
+                }
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error = body_json(response).await;
+    assert!(
+        error.to_string().contains("cannot losslessly encode"),
+        "unexpected error: {error}"
+    );
+
+    let listed = system_routes(build_state(&db))
+        .oneshot(request(
+            "GET",
+            &format!("/api/provider-models?provider_id={provider_id}"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(body_json(listed).await["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["model"] != model));
+}
+
+#[tokio::test]
+async fn list_filters_by_provider_id() {
+    let db = init_database_memory().await.unwrap();
+    let first = create_provider(&db, "openai", "One").await;
+    let second = create_provider(&db, "openai", "Two").await;
+
+    let all = system_routes(build_state(&db))
+        .oneshot(request("GET", "/api/provider-models", None))
+        .await
+        .unwrap();
+    assert_eq!(body_json(all).await["data"].as_array().unwrap().len(), 2);
+
+    let filtered = system_routes(build_state(&db))
+        .oneshot(request(
+            "GET",
+            &format!("/api/provider-models?provider_id={first}"),
+            None,
+        ))
+        .await
+        .unwrap();
+    let filtered = body_json(filtered).await;
+    assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["data"][0]["provider_id"], first);
+    assert_ne!(filtered["data"][0]["provider_id"], second);
+}
+
+#[tokio::test]
+async fn invalid_capability_graph_and_missing_delete_are_rejected() {
     let db = init_database_memory().await.unwrap();
     let provider_id = create_provider(&db, "openai", "OpenAI").await;
 
-    // Explicit-tasks create → source=user.
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models",
-            json!({ "provider_id": provider_id, "model": "gpt-4o", "tasks": ["chat"] }),
-        ))
+    let duplicate = json!({
+        "provider_id": provider_id,
+        "model": {
+            "model": "duplicate",
+            "capabilities": [chat_capability(), chat_capability()]
+        }
+    });
+    let response = system_routes(build_state(&db))
+        .oneshot(request("PUT", "/api/provider-models", Some(duplicate)))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let v = body_json(resp).await;
-    assert_eq!(v["data"]["source"], "user");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // Duplicate create → 409.
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models",
-            json!({ "provider_id": provider_id, "model": "gpt-4o" }),
-        ))
+    let missing_role = json!({
+        "provider_id": provider_id,
+        "model": {
+            "model": "voice",
+            "capabilities": [{
+                "task": "speech_synthesis",
+                "protocol": "openai.audio_speech",
+                "connection_role": "voice",
+                "provider_params": {}
+            }]
+        }
+    });
+    let response = system_routes(build_state(&db))
+        .oneshot(request("PUT", "/api/provider-models", Some(missing_role)))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // Create under a missing provider → 404.
-    let ghost = nomifun_common::ProviderId::new().into_string();
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models",
-            json!({ "provider_id": ghost, "model": "gpt-4o" }),
+    let response = system_routes(build_state(&db))
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/provider-models?provider_id={provider_id}&model=missing"),
+            None,
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-    // Update of a missing row → 404.
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models/update",
-            json!({ "provider_id": provider_id, "model": "ghost", "enabled": false }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-    // Delete of a missing row → 404.
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models/delete",
-            json!({ "provider_id": provider_id, "model": "ghost" }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-    // Unknown body field → 400 (deny_unknown_fields).
-    let resp = system_routes(build_state(&db))
-        .oneshot(json_request(
-            "POST",
-            "/api/provider-models",
-            json!({ "provider_id": provider_id, "model": "gpt-4o-mini", "bogus": 1 }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

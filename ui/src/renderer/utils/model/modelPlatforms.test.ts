@@ -5,103 +5,47 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { MODEL_PLATFORMS, getPlatformByValue, getSupportedTasksForPlatform } from './modelPlatforms';
+import { getPlatformByValue, getProviderLogo, isCustomOption, MODEL_PLATFORMS } from './modelPlatforms';
 
-const platform = (value: string) => {
+const preset = (value: string) => {
   const found = getPlatformByValue(value);
-  if (!found) throw new Error(`Missing model platform: ${value}`);
+  if (!found) throw new Error(`Missing model platform preset: ${value}`);
   return found;
 };
 
-describe('MODEL_PLATFORMS coding plan presets', () => {
-  test('exposes Doubao/Ark as both ordinary API and Coding Plan choices', () => {
-    expect(platform('Ark').name.includes('Doubao')).toBe(true);
-    expect(platform('Ark').platform).toBe('ark');
+describe('model platform display presets', () => {
+  test('uses unique preset ids even when multiple products share a runtime family', () => {
+    expect(new Set(MODEL_PLATFORMS.map((item) => item.value)).size).toBe(MODEL_PLATFORMS.length);
 
-    const coding = platform('Ark-Coding-Plan');
-    expect(coding.name.includes('Coding Plan')).toBe(true);
-    expect(coding.platform).toBe('ark-coding-plan');
-    expect(coding.base_url).toBe('https://ark.cn-beijing.volces.com/api/coding/v3');
-
-    const agent = platform('Ark-Agent-Plan');
-    expect(agent.name.includes('Agent Plan')).toBe(true);
-    expect(agent.platform).toBe('ark-agent-plan');
-    // Agent Plan has its OWN endpoint: /api/plan/v3 (OpenAI-compat) — distinct
-    // from Coding Plan's /api/coding/v3 and from pay-as-you-go /api/v3.
-    // The quota is determined by the endpoint + key; the wrong path fails auth
-    // or bills the wrong plan.
-    expect(agent.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan/v3');
+    expect(preset('SiliconFlow-CN').platform).toBe('siliconflow');
+    expect(preset('SiliconFlow').platform).toBe('siliconflow');
+    expect(preset('Ark').platform).toBe('ark');
+    expect(preset('Ark-Coding-Plan').platform).toBe('ark-coding-plan');
+    expect(preset('Ark-Agent-Plan').platform).toBe('ark-agent-plan');
+    expect(preset('StepFun').platform).toBe('stepfun');
+    expect(preset('StepFun-Plan').platform).toBe('stepfun-plan');
   });
 
-  test('uses dedicated platform keys for domestic coding plan endpoints', () => {
-    expect(platform('MiMo').platform).toBe('mimo');
-    expect(platform('MiMo').base_url).toBe('https://api.xiaomimimo.com/v1');
-
-    expect(platform('MiMo-Token-Plan-CN').platform).toBe('mimo-token-plan-cn');
-    expect(platform('MiMo-Token-Plan-CN').base_url).toBe('https://token-plan-cn.xiaomimimo.com/v1');
-
-    expect(platform('MiMo-Token-Plan-SGP').platform).toBe('mimo-token-plan-sgp');
-    expect(platform('MiMo-Token-Plan-SGP').base_url).toBe('https://token-plan-sgp.xiaomimimo.com/v1');
-
-    expect(platform('MiMo-Token-Plan-AMS').platform).toBe('mimo-token-plan-ams');
-    expect(platform('MiMo-Token-Plan-AMS').base_url).toBe('https://token-plan-ams.xiaomimimo.com/v1');
-
-    expect(platform('MiniMax-Code').platform).toBe('minimax-code');
-    expect(platform('MiniMax-Code').base_url).toBe('https://api.minimax.io/v1');
-
-    expect(platform('MiniMax-Coding-Plan').platform).toBe('minimax-coding-plan');
-    expect(platform('MiniMax-Coding-Plan').base_url).toBe('https://api.minimaxi.com/v1');
-
-    expect(platform('StepFun-Plan').platform).toBe('stepfun-plan');
-    expect(platform('StepFun-Plan').base_url).toBe('https://api.stepfun.com/step_plan/v1');
-
-    expect(platform('Dashscope-Coding').platform).toBe('dashscope-coding');
-    expect(platform('Dashscope-Coding').base_url).toBe('https://coding.dashscope.aliyuncs.com/v1');
-
-    expect(platform('GLM-Coding-Plan').platform).toBe('glm-coding-plan');
-    expect(platform('GLM-Coding-Plan').base_url).toBe('https://open.bigmodel.cn/api/coding/paas/v4');
-
-    expect(platform('Qianfan-Coding-Plan').platform).toBe('qianfan-coding-plan');
-    expect(platform('Qianfan-Coding-Plan').base_url).toBe('https://qianfan.baidubce.com/v2/coding');
+  test('contains display metadata only', () => {
+    const allowedKeys = ['i18nKey', 'logo', 'name', 'platform', 'value'];
+    for (const item of MODEL_PLATFORMS) {
+      expect(Object.keys(item).sort().every((key) => allowedKeys.includes(key))).toBe(true);
+      expect(item.name.trim().length).toBeGreaterThan(0);
+      expect(item.value.trim().length).toBeGreaterThan(0);
+      expect(String(item.platform).trim().length).toBeGreaterThan(0);
+    }
   });
 
-  test('keeps ordinary API presets distinct from coding plan presets', () => {
-    const byValue = new Map(MODEL_PLATFORMS.map((item) => [item.value, item]));
-
-    expect(byValue.get('Dashscope')?.platform).toBe('dashscope');
-    expect(byValue.get('Dashscope')?.base_url).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1');
-
-    expect(byValue.get('MiniMax')?.platform).toBe('minimax');
-    expect(byValue.get('MiniMax')?.base_url).toBe('https://api.minimaxi.com/v1');
-
-    expect(byValue.get('Zhipu')?.platform).toBe('zhipu');
-    expect(byValue.get('Zhipu')?.base_url).toBe('https://open.bigmodel.cn/api/paas/v4');
-
-    expect(byValue.get('Qianfan')?.platform).toBe('qianfan');
-    expect(byValue.get('Qianfan')?.base_url).toBe('https://qianfan.baidubce.com/v2');
+  test('resolves logos from stable family or exact display name without endpoint inference', () => {
+    expect(getProviderLogo({ platform: 'stepfun' })).toBe(preset('StepFun').logo);
+    expect(getProviderLogo({ name: 'OpenAI' })).toBe(preset('OpenAI').logo);
+    expect(getProviderLogo({ name: 'openai' })).toBe(preset('OpenAI').logo);
+    expect(getProviderLogo({ name: 'Unknown provider' })).toBeNull();
   });
 
-  test('uses current provider roots instead of retired product hosts', () => {
-    expect(platform('PPIO').base_url).toBe('https://api.ppio.com/openai/v1');
-    expect(platform('Ctyun').base_url).toBe('https://wishub-x6.ctyun.cn/v1');
-
-    expect(platform('Hunyuan').platform).toBe('hunyuan');
-    expect(platform('Hunyuan').base_url).toBe('https://tokenhub.tencentmaas.com/v1');
-    expect(platform('Hunyuan-Global').platform).toBe('hunyuan-global');
-    expect(platform('Hunyuan-Global').base_url).toBe('https://tokenhub-intl.tencentmaas.com/v1');
-  });
-
-  test('exposes only modalities backed by a verified runtime route', () => {
-    expect(getSupportedTasksForPlatform({ platform: 'openai' }).includes('rerank')).toBe(false);
-    expect(getSupportedTasksForPlatform({ platform: 'mimo' })).toEqual([
-      'chat',
-      'speech_synthesis',
-      'speech_recognition',
-    ]);
-    expect(getSupportedTasksForPlatform({ platform: 'xai' }).includes('video_generation')).toBe(true);
-    expect(getSupportedTasksForPlatform({ platform: 'siliconflow' }).includes('rerank')).toBe(true);
-    expect(getSupportedTasksForPlatform({ platform: 'zhipu' }).includes('video_generation')).toBe(true);
-    expect(getSupportedTasksForPlatform({ platform: 'anthropic' })).toEqual(['chat']);
-    expect(getSupportedTasksForPlatform({ platform: 'future-provider' })).toEqual(['chat']);
+  test('recognizes only the explicit custom preset', () => {
+    expect(isCustomOption('custom')).toBe(true);
+    expect(isCustomOption('new-api')).toBe(false);
+    expect(isCustomOption('OpenAI')).toBe(false);
   });
 });

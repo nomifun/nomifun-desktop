@@ -756,8 +756,8 @@ async fn restore_rebuilds_technical_ids_and_preserves_registered_business_id_ref
     let provider_id = generate_id();
     sqlx::query(
         "INSERT INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, created_at, updated_at) \
-         VALUES (?, 'openai', 'restore provider', 'https://example.invalid', '', 1, 1)",
+         (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
+         VALUES (?, 'openai', 'restore provider', 'https://example.invalid', 'bearer', '', 1, 1)",
     )
     .bind(&provider_id)
     .execute(database.pool())

@@ -11,14 +11,15 @@ use nomifun_api_types::ModelTask;
 use serde_json::{Map, Value, json};
 
 use crate::adapter::ProtocolAdapter;
-use crate::call::{ResolvedCall, ResolvedConnection};
+use crate::call::{ResolvedCall, resolve_endpoint};
 use crate::error::{InvokeError, InvokeErrorKind};
+use crate::manifest::expand_protocol_endpoint_template;
 use crate::transport::{encode_b64, error_from_response, get_request, post_json};
 use crate::types::{
     JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, VideoGenRequest,
 };
 
-use super::has_endpoint_override;
+use super::json_request_body;
 
 const ADAPTER_ID: &str = "zhipu.video_jobs";
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -45,7 +46,7 @@ impl ProtocolAdapter for ZhipuVideoJobsAdapter {
         };
         let resp = post_json(
             http,
-            &submit_url(call),
+            &call.endpoint_url()?,
             SUBMIT_TIMEOUT,
             &call.connection.auth,
             &build_submit_body(call, req)?,
@@ -57,7 +58,7 @@ impl ProtocolAdapter for ZhipuVideoJobsAdapter {
         let value: Value = resp
             .json()
             .await
-            .map_err(|e| InvokeError::parse(format!("invalid Zhipu video submit JSON: {e}")))?;
+            .map_err(|e| InvokeError::response_json("invalid Zhipu video submit JSON", &e))?;
         if is_failed_status(&value) {
             return Err(InvokeError::new(InvokeErrorKind::JobFailed, failure_message(&value)));
         }
@@ -68,8 +69,9 @@ impl ProtocolAdapter for ZhipuVideoJobsAdapter {
             .ok_or_else(|| InvokeError::parse("Zhipu video submit response missing 'id'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: ADAPTER_ID.into(),
+            config_revision: call.config_revision,
             remote_id: id.into(),
-            poll_state: json!({"status_url": status_url(call, id)}),
+            poll_state: json!({}),
         }))
     }
 
@@ -79,13 +81,10 @@ impl ProtocolAdapter for ZhipuVideoJobsAdapter {
         call: &ResolvedCall,
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
-        let url = job
-            .poll_state
-            .get("status_url")
-            .and_then(Value::as_str)
-            .filter(|url| !url.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| status_url(call, &job.remote_id));
+        let url = call.credentialed_http_url(
+            &status_url(call, &job.remote_id)?,
+            "poll_endpoint",
+        )?;
         let resp = get_request(http, &url, POLL_TIMEOUT, &call.connection.auth).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
@@ -93,12 +92,13 @@ impl ProtocolAdapter for ZhipuVideoJobsAdapter {
         let value: Value = resp
             .json()
             .await
-            .map_err(|e| InvokeError::parse(format!("invalid Zhipu video status JSON: {e}")))?;
+            .map_err(|e| InvokeError::response_json("invalid Zhipu video status JSON", &e))?;
         match parse_status(&value)? {
             VideoState::Pending => Ok(TaskOutcome::Pending(JobHandle {
                 adapter_id: ADAPTER_ID.into(),
+                config_revision: call.config_revision,
                 remote_id: job.remote_id.clone(),
-                poll_state: json!({"status_url": url}),
+                poll_state: json!({}),
             })),
             VideoState::Failed(message) => Err(InvokeError::new(InvokeErrorKind::JobFailed, message)),
             VideoState::Done(urls) => Ok(TaskOutcome::Done(TaskResult::Assets(
@@ -113,49 +113,22 @@ impl ProtocolAdapter for ZhipuVideoJobsAdapter {
     }
 }
 
-fn submit_url(call: &ResolvedCall) -> String {
-    if has_endpoint_override(&call.model_params) || call.connection.is_full_url {
-        call.dispatch_target().url
-    } else {
-        api_url(&call.connection, "/videos/generations")
-    }
-}
-
-fn api_url(connection: &ResolvedConnection, path: &str) -> String {
-    format!("{}{}", connection.base_url.trim().trim_end_matches('/'), path)
-}
-
-fn status_url(call: &ResolvedCall, id: &str) -> String {
-    if let Some(template) = call
+fn status_url(call: &ResolvedCall, id: &str) -> Result<String, InvokeError> {
+    let template = call
         .model_params
         .get("poll_endpoint")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|endpoint| !endpoint.is_empty())
-    {
-        let endpoint = template.replace("{id}", id).replace("{task_id}", id);
-        if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-            return endpoint;
-        }
-        let base = call.connection.base_url.trim().trim_end_matches('/');
-        if endpoint.starts_with('/')
-            && let Ok(mut parsed) = reqwest::Url::parse(base)
-        {
-            parsed.set_path(&endpoint);
-            parsed.set_query(None);
-            parsed.set_fragment(None);
-            return parsed.to_string().trim_end_matches('/').to_string();
-        }
-        return format!("{base}/{}", endpoint.trim_start_matches('/'));
-    }
-
-    let base = call.connection.base_url.trim().trim_end_matches('/');
-    if call.connection.is_full_url
-        && let Some(root) = base.strip_suffix("/videos/generations")
-    {
-        return format!("{root}/async-result/{id}");
-    }
-    api_url(&call.connection, &format!("/async-result/{id}"))
+        .ok_or_else(|| InvokeError::config("zhipu.video_jobs requires an injected poll endpoint"))?;
+    let endpoint = expand_protocol_endpoint_template(
+        &call.protocol,
+        call.task,
+        "poll_endpoint",
+        template,
+        id,
+    )?;
+    Ok(resolve_endpoint(&call.connection.base_url, &endpoint))
 }
 
 fn merge_optional(body: &mut Map<String, Value>, model_params: &Value, extra: &Value) {
@@ -172,7 +145,6 @@ fn merge_optional(body: &mut Map<String, Value>, model_params: &Value, extra: &V
         "user_id",
     ];
     for source in [model_params, extra] {
-        let source = source.get("request_defaults").unwrap_or(source);
         for key in KEYS {
             if let Some(value) = source.get(*key) {
                 body.insert((*key).into(), value.clone());
@@ -221,7 +193,7 @@ fn build_submit_body(call: &ResolvedCall, req: &VideoGenRequest) -> Result<Value
             body.insert("image_url".into(), Value::Array(images));
         }
     }
-    Ok(Value::Object(body))
+    json_request_body(&call.model_params, &req.extra, Value::Object(body))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -285,8 +257,20 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
+    use crate::adapters::test_support::call_with_endpoint;
     use crate::types::InputAsset;
+
+    fn call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        let mut call = call_with_endpoint(
+            base_url,
+            model,
+            "zhipu.video_jobs",
+            "/videos/generations",
+            request,
+        );
+        call.model_params["poll_endpoint"] = Value::String("/async-result/{id}".into());
+        call
+    }
 
     fn test_http() -> reqwest::Client {
         reqwest::Client::builder().no_proxy().build().unwrap()
@@ -350,10 +334,7 @@ mod tests {
             panic!("expected pending job")
         };
         assert_eq!(job.remote_id, "job-1");
-        assert_eq!(
-            job.poll_state["status_url"],
-            format!("{}/api/paas/v4/async-result/job-1", server.uri())
-        );
+        assert_eq!(job.poll_state, json!({}));
 
         let TaskOutcome::Done(TaskResult::Assets(assets)) =
             ZhipuVideoJobsAdapter.poll(&http, &call, &job).await.unwrap()
@@ -362,6 +343,60 @@ mod tests {
         };
         assert!(matches!(&assets[0].data, ProducedData::Url(url) if url.ends_with("video.mp4")));
         assert_eq!(assets[0].mime.as_deref(), Some("video/mp4"));
+    }
+
+    #[tokio::test]
+    async fn poll_state_cannot_override_the_capability_poll_endpoint() {
+        let selected = MockServer::start().await;
+        let foreign = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/paas/v4/async-result/job-foreign"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "job-foreign",
+                "task_status": "SUCCESS",
+                "video_result": [{"url": "https://cdn.example/video.mp4"}]
+            })))
+            .expect(1)
+            .mount(&selected)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/job-foreign"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "job-foreign",
+                "task_status": "SUCCESS",
+                "video_result": [{"url": "https://cdn.example/video.mp4"}]
+            })))
+            .expect(0)
+            .mount(&foreign)
+            .await;
+
+        let request = TaskRequest::VideoGeneration(VideoGenRequest {
+            prompt: "waves".into(),
+            seconds: Some(5),
+            size: None,
+            inputs: vec![],
+            extra: json!({}),
+        });
+        let call = call(
+            &format!("{}/api/paas/v4", selected.uri()),
+            "cogvideox-3",
+            request,
+        );
+        let job = JobHandle {
+            adapter_id: ADAPTER_ID.into(),
+            config_revision: call.config_revision,
+            remote_id: "job-foreign".into(),
+            poll_state: json!({
+                "status_url": format!("{}/jobs/job-foreign", foreign.uri())
+            }),
+        };
+
+        let result = ZhipuVideoJobsAdapter
+            .poll(&test_http(), &call, &job)
+            .await
+            .unwrap();
+        assert!(matches!(result, TaskOutcome::Done(TaskResult::Assets(_))));
+        assert!(foreign.received_requests().await.unwrap().is_empty());
     }
 
     #[test]
@@ -389,8 +424,11 @@ mod tests {
             extra: json!({}),
         });
         let mut call = call("https://open.bigmodel.cn/api/paas/v4", "cogvideox-3", request);
-        call.model_params = json!({"poll_endpoint": "https://status.example/jobs/{task_id}"});
-        assert_eq!(status_url(&call, "job-9"), "https://status.example/jobs/job-9");
+        call.model_params = json!({
+            "endpoint": "/videos/generations",
+            "poll_endpoint": "https://status.example/jobs/{task_id}"
+        });
+        assert_eq!(status_url(&call, "job-9").unwrap(), "https://status.example/jobs/job-9");
     }
 
     #[test]

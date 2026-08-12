@@ -277,26 +277,20 @@ async fn build_app_completing_with_verdict() -> (axum::Router, AppServices) {
 /// binding even though the runtime implementation itself is mocked.
 async fn seed_mock_provider(services: &AppServices) -> String {
     let provider_id = ProviderId::new().into_string();
+    let credentials_encrypted = common::encrypted_bearer_credentials();
     nomifun_db::sqlx::query(
         "INSERT INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+         (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
           created_at, updated_at) \
          VALUES (?, 'openai', 'AutoWork IDMM mock', 'https://example.invalid', \
-                 'encrypted', 1, 1, 1)",
+                 'bearer', ?, 1, 1, 1)",
     )
     .bind(&provider_id)
+    .bind(&credentials_encrypted)
     .execute(services.database.pool())
     .await
     .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO provider_models \
-         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
-         VALUES (?, 'mock-model', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
-    )
-    .bind(&provider_id)
-    .execute(services.database.pool())
-    .await
-    .unwrap();
+    common::seed_openai_chat_model(services.database.pool(), &provider_id, "mock-model").await;
     provider_id
 }
 

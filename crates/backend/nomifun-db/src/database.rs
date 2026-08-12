@@ -18,6 +18,13 @@ const MAX_CONNECTIONS: u32 = 5;
 /// SQLite busy timeout in milliseconds.
 const BUSY_TIMEOUT_MS: u64 = 5000;
 
+/// Migration 31 intentionally drops every legacy provider credential instead
+/// of retaining a second wire/storage format. SQLite must overwrite deleted
+/// cells and rebuild the file once when upgrading an existing pre-31 schema so
+/// ciphertext and the former plaintext Bedrock fields do not remain in free
+/// pages or the WAL.
+const LEGACY_PROVIDER_CREDENTIAL_COLUMN: &str = "api_key_encrypted";
+
 static DB_MIGRATOR: Migrator = sqlx::migrate!();
 const V3_BASELINE_MIGRATION_VERSION: i64 = 1;
 
@@ -144,11 +151,10 @@ async fn validate_restorable_database_contract(pool: &SqlitePool) -> Result<(), 
     crate::id_schema_contract::validate_id_schema_contract(pool).await?;
     crate::id_schema_contract::validate_id_data_contract(pool).await?;
 
-    let identities =
-        sqlx::query("SELECT singleton_key, owner_user_id FROM installation_identity")
-            .fetch_all(pool)
-            .await
-            .map_err(DbError::Query)?;
+    let identities = sqlx::query("SELECT singleton_key, owner_user_id FROM installation_identity")
+        .fetch_all(pool)
+        .await
+        .map_err(DbError::Query)?;
     if identities.len() != 1 {
         return Err(DbError::Init(format!(
             "backup installation_identity must contain exactly one row, found {}",
@@ -217,10 +223,11 @@ pub async fn inspect_supported_migration_lineage(
         ));
     }
 
-    let rows = sqlx::query("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
-        .fetch_all(pool)
-        .await
-        .map_err(DbError::Query)?;
+    let rows =
+        sqlx::query("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await
+            .map_err(DbError::Query)?;
     if rows.is_empty() {
         return Err(DbError::Init(format!(
             "database migration lineage must begin with embedded migration {}",
@@ -298,10 +305,13 @@ pub async fn init_database_memory_with_owner(
     init_database_memory_inner(Some(owner_user_id.into_string())).await
 }
 
-async fn init_database_memory_inner(requested_owner_user_id: Option<String>) -> Result<Database, DbError> {
+async fn init_database_memory_inner(
+    requested_owner_user_id: Option<String>,
+) -> Result<Database, DbError> {
     let opts = SqliteConnectOptions::from_str("sqlite::memory:")
         .map_err(|e| DbError::Init(format!("Invalid memory connection string: {e}")))?
-        .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS));
+        .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+        .pragma("secure_delete", "ON");
 
     let pool = PoolOptions::<Sqlite>::new()
         .max_connections(1)
@@ -331,7 +341,10 @@ async fn try_init_file(path: &Path) -> Result<Database, DbError> {
             // Don't fail startup if flock isn't available (e.g. on some
             // network filesystems) - fall back to SQLite busy-timeout and
             // retry-on-conflict behavior below.
-            warn!("Could not acquire database startup lock {}: {e}", lock_path.display());
+            warn!(
+                "Could not acquire database startup lock {}: {e}",
+                lock_path.display()
+            );
             None
         }
     };
@@ -340,7 +353,8 @@ async fn try_init_file(path: &Path) -> Result<Database, DbError> {
         .filename(path)
         .create_if_missing(true)
         .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
-        .journal_mode(SqliteJournalMode::Wal);
+        .journal_mode(SqliteJournalMode::Wal)
+        .pragma("secure_delete", "ON");
 
     let pool = PoolOptions::<Sqlite>::new()
         .max_connections(MAX_CONNECTIONS)
@@ -395,8 +409,65 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
     // _sqlx_migrations.version`. The outer startup lock also covers connection
     // setup before migration execution.
     let mut conn = pool.acquire().await.map_err(DbError::Query)?;
+    let secure_delete: i64 = sqlx::query_scalar("PRAGMA secure_delete")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(DbError::Query)?;
+    if secure_delete != 1 {
+        return Err(DbError::Init(
+            "SQLite secure_delete must be enabled before database migrations".into(),
+        ));
+    }
+    let must_purge_legacy_provider_credentials =
+        has_legacy_provider_credential_column(&mut conn).await?;
     run_migrations_with_retry(&mut conn).await?;
+    // Always truncate committed migration WAL frames. Besides keeping startup
+    // deterministic, this retries the only safety-critical step if a previous
+    // post-031 startup was interrupted after the schema commit.
+    truncate_wal(&mut conn).await?;
+    if must_purge_legacy_provider_credentials {
+        securely_rebuild_after_legacy_provider_credential_drop(&mut conn).await?;
+    }
     validate_quick_check_on_connection(&mut conn).await
+}
+
+async fn has_legacy_provider_credential_column(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<bool, DbError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(\
+             SELECT 1 FROM pragma_table_info('providers') WHERE name = ?\
+         )",
+    )
+    .bind(LEGACY_PROVIDER_CREDENTIAL_COLUMN)
+    .fetch_one(conn)
+    .await
+    .map_err(DbError::Query)?;
+    Ok(exists)
+}
+
+async fn securely_rebuild_after_legacy_provider_credential_drop(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<(), DbError> {
+    // The migration transaction and its old WAL frames are committed and
+    // truncated at this point. Rebuild the main file, then truncate the WAL
+    // generated by VACUUM. The startup lock keeps another process from
+    // observing the database between these steps.
+    sqlx::query("VACUUM")
+        .execute(&mut *conn)
+        .await
+        .map_err(DbError::Query)?;
+    truncate_wal(conn).await?;
+    info!("Purged retired provider credential storage from SQLite free pages and WAL");
+    Ok(())
+}
+
+async fn truncate_wal(conn: &mut sqlx::SqliteConnection) -> Result<(), DbError> {
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(DbError::Query)?;
+    Ok(())
 }
 
 async fn validate_quick_check(pool: &SqlitePool) -> Result<(), DbError> {
@@ -444,9 +515,7 @@ async fn run_migrations_with_retry(conn: &mut sqlx::SqliteConnection) -> Result<
     loop {
         match DB_MIGRATOR.run(&mut *conn).await {
             Ok(()) => return Ok(()),
-            Err(e)
-                if !retried_unique_conflict && is_migrations_table_unique_conflict(&e) =>
-            {
+            Err(e) if !retried_unique_conflict && is_migrations_table_unique_conflict(&e) => {
                 retried_unique_conflict = true;
                 warn!(
                     "Concurrent migrator detected (UNIQUE conflict on _sqlx_migrations); retrying"
@@ -533,12 +602,11 @@ async fn ensure_installation_owner(
                 "installation owner ID is not canonical: {owner_user_id}: {error}"
             ))
         })?;
-        let owner_exists: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE user_id = ?")
-                .bind(&owner_user_id)
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(DbError::Query)?;
+        let owner_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE user_id = ?")
+            .bind(&owner_user_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(DbError::Query)?;
         if owner_exists != 1 {
             return Err(DbError::Init(format!(
                 "installation identity references missing owner user {owner_user_id}"
@@ -592,6 +660,150 @@ async fn ensure_installation_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Connection;
+    use sqlx::migrate::Migrate;
+
+    #[tokio::test]
+    async fn initialization_enables_secure_delete_on_every_database_connection() {
+        let database = init_database_memory().await.unwrap();
+        let secure_delete: i64 = sqlx::query_scalar("PRAGMA secure_delete")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(secure_delete, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_provider_credential_column_is_the_one_time_purge_boundary() {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .pragma("secure_delete", "ON");
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        assert!(
+            !has_legacy_provider_credential_column(&mut connection)
+                .await
+                .unwrap()
+        );
+        sqlx::query("CREATE TABLE providers (api_key_encrypted TEXT NOT NULL)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert!(
+            has_legacy_provider_credential_column(&mut connection)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn file_upgrade_drops_legacy_credentials_and_purges_their_pages() {
+        const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+        const CONNECTION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678902";
+        const DEFAULT_CIPHER: &str = "retired-default-cipher-unique";
+        const NAMED_CIPHER: &str = "retired-named-cipher-unique";
+        const BEDROCK_SECRET: &str = "retired-bedrock-secret-unique";
+        const CONNECTION_EXTRA_SECRET: &str = "retired-extra-secret-unique";
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.db");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .pragma("secure_delete", "ON");
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        connection.ensure_migrations_table().await.unwrap();
+        for migration in DB_MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= 30)
+        {
+            connection.apply(migration).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO providers \
+                (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+                 bedrock_config, is_full_url, sort_order, created_at, updated_at) \
+             VALUES (?, 'bedrock', 'Legacy Bedrock', '', ?, 1, ?, 0, 0, 1, 1)",
+        )
+        .bind(PROVIDER_ID)
+        .bind(DEFAULT_CIPHER)
+        .bind(format!(
+            r#"{{"auth_method":"accessKey","region":"us-east-1","access_key_id":"AKIA-OLD","secret_access_key":"{BEDROCK_SECRET}"}}"#,
+        ))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_connections \
+                (connection_id, provider_id, role, base_url, auth_scheme, \
+                 credentials_encrypted, is_full_url, extra, created_at, updated_at) \
+             VALUES (?, ?, 'voice', 'https://voice.example.test', 'bearer', ?, 0, ?, 1, 1)",
+        )
+        .bind(CONNECTION_ID)
+        .bind(PROVIDER_ID)
+        .bind(NAMED_CIPHER)
+        .bind(format!(r#"{{"api_key":"{CONNECTION_EXTRA_SECRET}"}}"#))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+
+        let database = init_database(&path).await.unwrap();
+        let provider: (String, String) = sqlx::query_as(
+            "SELECT credentials_encrypted, bedrock_config FROM providers WHERE provider_id = ?",
+        )
+        .bind(PROVIDER_ID)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(provider.0, "");
+        assert!(!provider.1.contains("access_key_id"));
+        assert!(!provider.1.contains("secret_access_key"));
+        let named_credentials: String = sqlx::query_scalar(
+            "SELECT credentials_encrypted FROM provider_connections WHERE connection_id = ?",
+        )
+        .bind(CONNECTION_ID)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(named_credentials, "");
+        let named_extra: String =
+            sqlx::query_scalar("SELECT extra FROM provider_connections WHERE connection_id = ?")
+                .bind(CONNECTION_ID)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(named_extra, "{}");
+        database.close().await;
+
+        for candidate in [
+            path.clone(),
+            PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            if !candidate.exists() {
+                continue;
+            }
+            let bytes = std::fs::read(&candidate).unwrap();
+            for retired in [
+                DEFAULT_CIPHER,
+                NAMED_CIPHER,
+                BEDROCK_SECRET,
+                CONNECTION_EXTRA_SECRET,
+            ] {
+                assert!(
+                    !bytes
+                        .windows(retired.len())
+                        .any(|window| window == retired.as_bytes()),
+                    "{} still contains retired credential material",
+                    candidate.display()
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn public_snapshot_includes_committed_wal_pages_and_refuses_overwrite() {
@@ -603,10 +815,10 @@ mod tests {
             "INSERT INTO client_preferences (key, value, updated_at) \
              VALUES ('snapshot_probe', 'committed', ?)",
         )
-            .bind(nomifun_common::now_ms())
-            .execute(database.pool())
-            .await
-            .unwrap();
+        .bind(nomifun_common::now_ms())
+        .execute(database.pool())
+        .await
+        .unwrap();
         database.snapshot_into(&snapshot).await.unwrap();
         let options = SqliteConnectOptions::new()
             .filename(&snapshot)
@@ -619,9 +831,9 @@ mod tests {
             .unwrap();
         let value: String =
             sqlx::query_scalar("SELECT value FROM client_preferences WHERE key = 'snapshot_probe'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(value, "committed");
         pool.close().await;
         assert!(database.snapshot_into(&snapshot).await.is_err());

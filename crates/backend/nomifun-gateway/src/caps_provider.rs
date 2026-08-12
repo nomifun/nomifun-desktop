@@ -40,7 +40,10 @@ async fn list(deps: Arc<GatewayDeps>, p: ListProvidersParams) -> Value {
                 "name": p.name,
                 "platform": p.platform,
                 "enabled": p.enabled,
-                "models": p.models.iter().take(MAX_MODELS_PER_PROVIDER).collect::<Vec<_>>(),
+                "models": p.models.iter().take(MAX_MODELS_PER_PROVIDER).map(|model| json!({
+                    "model": model.model,
+                    "capabilities": model.capabilities,
+                })).collect::<Vec<_>>(),
                 "model_count": p.models.len(),
                 "models_truncated": p.models.len() > MAX_MODELS_PER_PROVIDER,
             })

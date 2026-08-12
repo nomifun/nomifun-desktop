@@ -15,11 +15,11 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { useReactFlow } from '@xyflow/react';
+import { useEdges, useNodes, useReactFlow } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
 import { Info, MagicWand, Pause, Pic, Play, Refresh, Text, VideoTwo, Voice } from '@icon-park/react';
 import SegmentedTabs, { type SegmentedTabItem } from '@renderer/components/base/SegmentedTabs';
-import TaskModelSelect, { type TaskModelSelection } from '@renderer/components/agent/TaskModelSelect';
+import TaskModelSelect, { type TaskModelSelection } from '@renderer/components/model/TaskModelSelect';
 import { useCanvasNode } from '../canvas/CanvasNodeContext';
 import type { WorkshopFlowEdge, WorkshopFlowNode } from '../canvas/model';
 import type { WorkshopGeneratorMode, WorkshopGeneratorNodeData, WorkshopGeneratorStatus } from '../types';
@@ -33,6 +33,7 @@ import PromptField from './PromptField';
 import ParamControls from './ParamControls';
 import InputSummary from './InputSummary';
 import ResultView from './ResultView';
+import { imageGeneratorTaskForInputs } from './pipeline';
 import { parseCanvasId } from '@/common/types/ids';
 import type { WorkshopNodeId } from '@/common/types/ids';
 
@@ -78,7 +79,20 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
   const results = useMemo(() => data.resultAssetIds ?? [], [data.resultAssetIds]);
   const running = status === 'queued' || status === 'running';
 
-  const models = useGeneratorModels(mode);
+  const liveNodes = useNodes<WorkshopFlowNode>();
+  const liveEdges = useEdges<WorkshopFlowEdge>();
+  const imageTask = useMemo(
+    () =>
+      imageGeneratorTaskForInputs({
+        nodeId,
+        nodes: liveNodes,
+        edges: liveEdges,
+        mentions,
+        maskAssetId: data.maskAssetId,
+      }),
+    [data.maskAssetId, liveEdges, liveNodes, mentions, nodeId]
+  );
+  const models = useGeneratorModels(mode, imageTask);
   const effectiveModel = useMemo<ModelOption | null>(() => {
     const explicit = models.flat.find((m) => m.providerId === data.providerId && m.model === data.model);
     return explicit ?? models.flat[0] ?? null;
@@ -101,7 +115,7 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
   );
   const setTaskModel = useCallback(
     (selection: TaskModelSelection) =>
-      api.updateNodeData(id, { providerId: selection.providerId, model: selection.model }),
+      api.updateNodeData(id, { providerId: selection.provider_id, model: selection.model }),
     [api, id]
   );
   const setPrompt = useCallback((text: string) => api.updateNodeData(id, { prompt: text }), [api, id]);
@@ -230,18 +244,20 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
               value={
                 (data.providerId ?? effectiveModel?.providerId) && (data.model ?? effectiveModel?.model)
                   ? {
-                      providerId: (data.providerId ?? effectiveModel?.providerId)!,
+                      provider_id: (data.providerId ?? effectiveModel?.providerId)!,
                       model: (data.model ?? effectiveModel?.model)!,
+                      voice: null,
                     }
                   : null
               }
-              onSelect={setTaskModel}
+              onChange={setTaskModel}
               placeholder={t('workshopGeneration.model.placeholder', { defaultValue: '选择模型' })}
             />
           </div>
         ) : (
           <ModelPicker
             mode={mode}
+            imageTask={imageTask}
             providerId={data.providerId ?? effectiveModel?.providerId}
             model={data.model ?? effectiveModel?.model}
             onChange={setModel}

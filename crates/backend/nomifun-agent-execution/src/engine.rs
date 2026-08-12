@@ -134,6 +134,8 @@ pub(crate) struct AgentExecutionEngineDeps {
     pub(crate) template_repository: Arc<dyn IAgentExecutionTemplateRepository>,
     pub(crate) provider_repository: Arc<dyn IProviderRepository>,
     pub(crate) provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository>,
+    pub(crate) provider_model_capability_repository:
+        Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
     pub(crate) preset_service: Arc<PresetService>,
     pub(crate) planner: Arc<dyn PlanProducer>,
     pub(crate) attempt_runner: Arc<dyn AttemptRunner>,
@@ -150,6 +152,9 @@ impl AgentExecutionEngineDeps {
         template_repository: Arc<dyn IAgentExecutionTemplateRepository>,
         provider_repository: Arc<dyn IProviderRepository>,
         provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository>,
+        provider_model_capability_repository: Arc<
+            dyn nomifun_db::IProviderModelCapabilityRepository,
+        >,
         preset_service: Arc<PresetService>,
         planner: Arc<dyn PlanProducer>,
         attempt_runner: Arc<dyn AttemptRunner>,
@@ -162,6 +167,7 @@ impl AgentExecutionEngineDeps {
             template_repository,
             provider_repository,
             provider_model_repository,
+            provider_model_capability_repository,
             preset_service,
             planner,
             attempt_runner,
@@ -189,6 +195,7 @@ impl AgentExecutionEngine {
         let resolver = ParticipantResolver::new(
             deps.provider_repository.clone(),
             deps.provider_model_repository.clone(),
+            deps.provider_model_capability_repository.clone(),
             deps.preset_service.clone(),
         );
         let mut scheduler_deps = ExecutionSchedulerDeps::new(

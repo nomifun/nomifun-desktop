@@ -6,7 +6,13 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
-import { modelHealthOf, modelNamesOf } from './providerModels';
+import {
+  capabilityOf,
+  modelHealthOf,
+  modelNamesOf,
+  modelSupportsTask,
+  toProviderModelInput,
+} from './providerModels';
 
 const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000002';
 
@@ -15,50 +21,83 @@ const row = (model: string, extra?: Partial<ProviderModelResponse>): ProviderMod
   model,
   enabled: true,
   sort_order: 0,
-  tasks: ['chat'],
-  traits: [],
-  params: null,
-  source: 'inferred',
+  description: 'test model',
+  capabilities: [
+    {
+      task: 'chat',
+      traits: ['vision_input'],
+      protocol: 'openai.chat_text',
+      connection_role: 'default',
+      allow_cross_origin_credentials: false,
+      provider_params: {},
+      health: { status: 'healthy', latency: 120 },
+      health_checked_at: 42,
+      created_at: 1,
+      updated_at: 1,
+    },
+  ],
   created_at: 1,
   updated_at: 1,
   ...extra,
 });
 
-describe('modelHealthOf', () => {
-  test('reads health from the authoritative models_detail row', () => {
-    const provider = {
-      models_detail: [row('gpt-4o', { health: { status: 'healthy', latency: 120, last_check: 42 } })],
-    };
-    expect(modelHealthOf(provider, 'gpt-4o')).toEqual({ status: 'healthy', latency: 120, last_check: 42 });
-  });
-
-  test('never falls back to the legacy model_health map', () => {
-    const provider = {
-      models_detail: [row('gpt-4o')],
-      model_health: { 'gpt-4o': { status: 'unhealthy' as const } },
-    };
-    // Row exists but carries no health → undefined, even though the legacy map
-    // has an entry. The legacy map is write-frozen and must not be read here.
-    expect(modelHealthOf(provider, 'gpt-4o')).toBeUndefined();
-    // No row at all → undefined too.
-    expect(modelHealthOf(provider, 'missing-model')).toBeUndefined();
-    expect(modelHealthOf(undefined, 'gpt-4o')).toBeUndefined();
-    expect(modelHealthOf({}, 'gpt-4o')).toBeUndefined();
-  });
-});
-
-describe('modelNamesOf', () => {
-  test('prefers models_detail rows over the legacy models array', () => {
-    const provider = {
-      models: ['legacy-only'],
-      models_detail: [row('gpt-4o'), row('o4-mini')],
-    };
+describe('nested provider models', () => {
+  test('reads names and task-scoped capability health from the same model row', () => {
+    const provider = { models: [row('gpt-4o'), row('o4-mini')] };
     expect(modelNamesOf(provider)).toEqual(['gpt-4o', 'o4-mini']);
+    expect(capabilityOf(provider, 'gpt-4o', 'chat')?.protocol).toBe('openai.chat_text');
+    expect(modelHealthOf(provider, 'gpt-4o', 'chat')).toEqual({ status: 'healthy', latency: 120 });
+    expect(modelHealthOf(provider, 'gpt-4o', 'embedding')).toBeUndefined();
   });
 
-  test('falls back to legacy models when there are no rows', () => {
-    expect(modelNamesOf({ models: ['a', 'b'], models_detail: [] })).toEqual(['a', 'b']);
-    expect(modelNamesOf({ models: ['a'] })).toEqual(['a']);
-    expect(modelNamesOf({ models: undefined as unknown as string[] })).toEqual([]);
+  test('keeps image edit and generation, embedding and rerank independent', () => {
+    const image = row('image-model', {
+      capabilities: [
+        {
+          task: 'image_edit',
+          traits: [],
+          protocol: 'openai.images_edit',
+          connection_role: 'default',
+          allow_cross_origin_credentials: false,
+          provider_params: {},
+          created_at: 1,
+          updated_at: 1,
+        },
+      ],
+    });
+    expect(modelSupportsTask(image, 'image_edit')).toBe(true);
+    expect(modelSupportsTask(image, 'image_generation')).toBe(false);
+    expect(modelSupportsTask(image, 'rerank')).toBe(false);
+  });
+
+  test('requires every requested trait on the selected task capability', () => {
+    const model = row('multimodal');
+    expect(modelSupportsTask(model, 'chat', ['vision_input'])).toBe(true);
+    expect(modelSupportsTask(model, 'chat', ['vision_input', 'function_calling'])).toBe(false);
+  });
+
+  test('strips health and timestamps from full save input', () => {
+    expect(toProviderModelInput(row('gpt-4o'))).toEqual({
+      model: 'gpt-4o',
+      enabled: true,
+      description: 'test model',
+      sort_order: 0,
+      capabilities: [
+        {
+          task: 'chat',
+          traits: ['vision_input'],
+          protocol: 'openai.chat_text',
+          connection_role: 'default',
+          base_url_override: undefined,
+          endpoint: undefined,
+          poll_endpoint: undefined,
+          content_endpoint: undefined,
+          realtime_endpoint: undefined,
+          allow_cross_origin_credentials: false,
+          provider_params: {},
+          context_limit: undefined,
+        },
+      ],
+    });
   });
 });

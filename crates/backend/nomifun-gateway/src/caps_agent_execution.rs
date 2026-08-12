@@ -698,6 +698,7 @@ fn explicit_plan(
             profile: Some(ExecutionStepProfile {
                 kind: "general".to_owned(),
                 needs_vision: false,
+                needs_web_search: false,
                 needs_long_context: false,
                 needs_high_reasoning: false,
                 bulk: true,

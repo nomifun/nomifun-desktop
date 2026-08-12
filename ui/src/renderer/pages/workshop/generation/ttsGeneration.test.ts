@@ -8,7 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import type { ReactFlowInstance } from '@xyflow/react';
 import { parseAssetId, parseWorkshopNodeId, type AssetId } from '@/common/types/ids';
 import type { WorkshopFlowEdge, WorkshopFlowNode } from '../canvas/model';
-import { buildTaskParams, DEFAULT_TTS_PARAMS, readTtsParams, TTS_VOICES } from './genConstants';
+import { buildTaskParams, DEFAULT_TTS_PARAMS, readTtsParams } from './genConstants';
 import { buildRunPlan } from './pipeline';
 import { spawnResultNodes } from './spawn';
 import { generationModeForTask } from './useGenerationRun';
@@ -38,7 +38,7 @@ describe('workshop tts mode', () => {
     expect(readTtsParams({})).toEqual(DEFAULT_TTS_PARAMS);
     expect(readTtsParams({ voice: '  ' })).toEqual(DEFAULT_TTS_PARAMS);
     expect(readTtsParams({ voice: 'my-custom-voice' })).toEqual({ voice: 'my-custom-voice' });
-    expect((TTS_VOICES as readonly string[]).includes(DEFAULT_TTS_PARAMS.voice)).toBe(true);
+    expect(DEFAULT_TTS_PARAMS.voice).toBe('');
   });
 
   test('buildTaskParams sends exactly {prompt, voice} for tts', () => {

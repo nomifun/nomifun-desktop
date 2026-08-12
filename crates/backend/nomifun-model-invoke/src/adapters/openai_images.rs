@@ -26,6 +26,8 @@ use crate::types::{
     ImageEditRequest, ImageGenRequest, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
 };
 
+use super::{json_request_body, scalar_request_fields};
+
 /// Generous per-call ceiling: image generation is often multi-second.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -59,7 +61,7 @@ async fn submit_generations(
     call: &ResolvedCall,
     req: &ImageGenRequest,
 ) -> Result<TaskOutcome, InvokeError> {
-    let url = call.dispatch_target().url;
+    let url = call.endpoint_url()?;
     let mut body = json!({
         "model": call.model,
         "prompt": req.prompt,
@@ -72,20 +74,16 @@ async fn submit_generations(
     if let Some(quality) = &req.quality {
         body["quality"] = Value::String(quality.clone());
     }
-    // SD-style OpenAI-compatible gateways (e.g. SiliconFlow) require/accept
-    // these generation knobs in the JSON body; whitelisted passthrough from
-    // `extra` mirrors the legacy prober's minimal_json_body fidelity.
-    for key in ["steps", "cfg_scale", "text_mode"] {
-        if let Some(v) = req.extra.get(key) {
-            body[key] = v.clone();
-        }
-    }
+    let body = json_request_body(&call.model_params, &req.extra, body)?;
 
     let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
     if !resp.status().is_success() {
         return Err(error_from_response(resp).await);
     }
-    let value: Value = resp.json().await.map_err(|e| InvokeError::parse(format!("invalid images JSON: {e}")))?;
+    let value: Value = resp
+        .json()
+        .await
+        .map_err(|e| InvokeError::response_json("invalid images JSON", &e))?;
     Ok(TaskOutcome::Done(TaskResult::Assets(parse_images_response(&value)?)))
 }
 
@@ -94,7 +92,7 @@ async fn submit_edits(
     call: &ResolvedCall,
     req: &ImageEditRequest,
 ) -> Result<TaskOutcome, InvokeError> {
-    let url = call.dispatch_target().url;
+    let url = call.endpoint_url()?;
 
     let images: Vec<_> = req.inputs.iter().filter(|i| i.role != "mask").collect();
     if images.is_empty() {
@@ -106,15 +104,23 @@ async fn submit_edits(
     // Single image → `image`; multiple → `image[]` (gpt-image-1 multi-ref).
     let image_field = if images.len() == 1 { "image" } else { "image[]" };
 
+    let mut text_fields = scalar_request_fields(&call.model_params, &req.extra)?;
+    for binary_field in ["image", "image[]", "mask"] {
+        text_fields.remove(binary_field);
+    }
+    text_fields.insert("model".into(), call.model.clone());
+    text_fields.insert("prompt".into(), req.prompt.clone());
+    text_fields.insert("n".into(), req.count.to_string());
+    if let Some(size) = &req.size {
+        text_fields.insert("size".into(), size.clone());
+    }
+
     // Built per attempt: multipart forms cannot be cloned, and rotation may
     // need to resend.
     let build_form = || -> Result<Form, InvokeError> {
-        let mut form = Form::new()
-            .text("model", call.model.clone())
-            .text("prompt", req.prompt.clone())
-            .text("n", req.count.to_string());
-        if let Some(size) = &req.size {
-            form = form.text("size", size.clone());
+        let mut form = Form::new();
+        for (key, value) in &text_fields {
+            form = form.text(key.clone(), value.clone());
         }
         for (idx, input) in images.iter().enumerate() {
             let part = Part::bytes(input.bytes.clone())
@@ -137,7 +143,10 @@ async fn submit_edits(
     if !resp.status().is_success() {
         return Err(error_from_response(resp).await);
     }
-    let value: Value = resp.json().await.map_err(|e| InvokeError::parse(format!("invalid images JSON: {e}")))?;
+    let value: Value = resp
+        .json()
+        .await
+        .map_err(|e| InvokeError::response_json("invalid images JSON", &e))?;
     Ok(TaskOutcome::Done(TaskResult::Assets(parse_images_response(&value)?)))
 }
 
@@ -182,8 +191,21 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
+    use crate::adapters::test_support::call_with_endpoint;
     use crate::types::InputAsset;
+
+    fn image_call(base_url: &str, model: &str, endpoint: &str, request: TaskRequest) -> ResolvedCall {
+        let base_url = format!("{}/v1", base_url.trim_end_matches('/'));
+        call_with_endpoint(&base_url, model, "openai.images", endpoint, request)
+    }
+
+    fn generation_call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        image_call(base_url, model, "/images/generations", request)
+    }
+
+    fn edit_call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        image_call(base_url, model, "/images/edits", request)
+    }
 
     // -- ported pure-parser fixtures ---------------------------------------
 
@@ -265,7 +287,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = call(&server.uri(), "gpt-image-1", gen_request(Some("512x512"), Some("high")));
+        let call = generation_call(&server.uri(), "gpt-image-1", gen_request(Some("512x512"), Some("high")));
         let out = OpenAiImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 1);
@@ -282,7 +304,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = call(&server.uri(), "gpt-image-1", gen_request(None, None));
+        let call = generation_call(&server.uri(), "gpt-image-1", gen_request(None, None));
         OpenAiImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -318,7 +340,7 @@ mod tests {
             ],
             extra: json!({}),
         });
-        let call = call(&server.uri(), "gpt-image-1", request);
+        let call = edit_call(&server.uri(), "gpt-image-1", request);
         let out = OpenAiImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         assert!(matches!(out, TaskOutcome::Done(TaskResult::Assets(a)) if a.len() == 1));
     }
@@ -341,7 +363,7 @@ mod tests {
             inputs: vec![image_input("image", b"img-a", "image/png")],
             extra: json!({}),
         });
-        let call = call(&server.uri(), "gpt-image-1", request);
+        let call = edit_call(&server.uri(), "gpt-image-1", request);
         OpenAiImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -358,7 +380,7 @@ mod tests {
             inputs: vec![image_input("mask", b"mask-bytes", "image/png")],
             extra: json!({}),
         });
-        let call = call("http://127.0.0.1:9", "gpt-image-1", request);
+        let call = edit_call("http://127.0.0.1:9", "gpt-image-1", request);
         let err = OpenAiImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::InvalidParams);
     }
@@ -372,7 +394,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = call(&server.uri(), "gpt-image-1", gen_request(None, None));
+        let call = generation_call(&server.uri(), "gpt-image-1", gen_request(None, None));
         let err = OpenAiImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::Auth);
         assert_eq!(err.http_status, Some(401));

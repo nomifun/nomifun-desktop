@@ -44,7 +44,10 @@ pub struct AgentExecutionTemplateParticipant {
         deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
     )]
     pub provider_id: Option<String>,
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_optional_model_name")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_model_name"
+    )]
     pub model: Option<String>,
     pub role: Option<String>,
     pub capability: Option<ParticipantCapability>,
@@ -92,7 +95,10 @@ pub struct AgentExecutionTemplateParticipantInput {
         deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
     )]
     pub provider_id: Option<String>,
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_optional_model_name")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_model_name"
+    )]
     pub model: Option<String>,
     #[serde(default)]
     pub role: Option<String>,

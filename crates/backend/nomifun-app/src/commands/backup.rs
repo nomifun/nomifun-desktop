@@ -200,7 +200,7 @@ fn metadata_has_reparse_point(_metadata: &fs::Metadata) -> bool {
 
 async fn database_contains_encrypted_values(database: &nomifun_db::Database) -> Result<bool> {
     const PROBES: &[&str] = &[
-        "SELECT EXISTS(SELECT 1 FROM providers WHERE api_key_encrypted <> '' LIMIT 1)",
+        "SELECT EXISTS(SELECT 1 FROM providers WHERE credentials_encrypted <> '' LIMIT 1)",
         "SELECT EXISTS(SELECT 1 FROM channel_plugins WHERE config <> '' LIMIT 1)",
         "SELECT EXISTS(SELECT 1 FROM remote_agents WHERE auth_token IS NOT NULL OR device_public_key IS NOT NULL OR device_private_key IS NOT NULL OR device_token IS NOT NULL LIMIT 1)",
         "SELECT EXISTS(SELECT 1 FROM oauth_tokens WHERE access_token <> '' OR refresh_token IS NOT NULL LIMIT 1)",
@@ -846,12 +846,18 @@ mod tests {
         let database = nomifun_db::init_database(&source.join("nomifun-backend.db"))
             .await
             .unwrap();
+        let credentials_encrypted = nomifun_common::encrypt_string(
+            r#"{"api_keys":["test-only"]}"#,
+            &[0x42; 32],
+        )
+        .unwrap();
         nomifun_db::sqlx::query(
             "INSERT INTO providers \
-             (provider_id, platform, name, base_url, api_key_encrypted, enabled, created_at, updated_at) \
+             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, created_at, updated_at) \
              VALUES ('0190f5fe-7c00-7a00-8abc-012345678901', 'openai', 'encrypted', \
-                     'https://example.invalid', 'ciphertext', 1, 1, 1)",
+                     'https://example.invalid', 'bearer', ?, 1, 1, 1)",
         )
+        .bind(&credentials_encrypted)
         .execute(database.pool())
         .await
         .unwrap();

@@ -5,10 +5,10 @@
 //! succeeded/failed/canceled`, a per-provider concurrency gate + a global cap,
 //! synchronous and async (submit→poll) protocols, cancellation propagation,
 //! boot reconciliation, and handing produced bytes to an [`AssetSink`]. Model
-//! execution is delegated to the unified invocation layer
-//! ([`nomifun_model_invoke::ModelInvokeService`]): a capability + params map to
-//! a typed [`TaskRequest`], and provider/protocol resolution happens inside the
-//! invoke layer against the model catalog.
+//! Media execution is delegated to the unified invocation layer
+//! ([`nomifun_model_invoke::ModelInvokeService`]). Text creation is deliberately
+//! delegated through [`CreationTextExecutor`] to the same Agent Chat engine used
+//! by conversations; Chat is session/stream semantics, not a media protocol.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -26,11 +26,11 @@ use nomifun_db::{
     ListCreationTasksParams, UpdateCreationTaskParams,
 };
 use nomifun_model_invoke::{
-    ChatTextRequest, ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
+    ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
     MAX_ARTIFACT_BYTES, ModelInvokeService, ModelRef, ProducedAsset, ProducedData, TaskOutcome,
-    TaskRequest, TaskResult, TtsRequest, VideoGenRequest, error_from_response, net_err,
-    read_body_capped,
+    TaskRequest, TaskResult, TtsRequest, VideoGenRequest,
 };
+use nomifun_net::egress::{SafeHttpClient, SafeHttpError, SafeHttpErrorKind, redacted_url};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
@@ -55,6 +55,27 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 /// The MIME stamped on produced text artifacts (the bridge keys its text-asset
 /// special case off a `text/plain` prefix).
 const TEXT_MIME: &str = "text/plain; charset=utf-8";
+const DEFAULT_TEXT_MAX_TOKENS: u32 = 4096;
+
+/// Complete one-shot text request handed from the creation state machine to
+/// the application's Agent Chat execution bridge.
+#[derive(Debug, Clone)]
+pub struct CreationTextRequest {
+    pub provider_id: String,
+    pub model: String,
+    pub system: String,
+    pub prompt: String,
+    pub max_tokens: u32,
+}
+
+/// Chat execution seam for Workshop text nodes.
+///
+/// Implementations must resolve the selected model's explicit Chat capability;
+/// they must not infer a wire protocol from the provider platform.
+#[async_trait]
+pub trait CreationTextExecutor: Send + Sync {
+    async fn complete(&self, request: CreationTextRequest) -> Result<String, CreationError>;
+}
 
 // ---------------------------------------------------------------------------
 // Param helpers (ported verbatim from the retired adapters/mod.rs — the
@@ -149,6 +170,22 @@ fn param_seconds(params: &Value) -> Result<Option<u32>, CreationError> {
         })
 }
 
+fn param_text_max_tokens(params: &Value) -> Result<u32, CreationError> {
+    let Some(value) = params.get("max_tokens") else {
+        return Ok(DEFAULT_TEXT_MAX_TOKENS);
+    };
+    value
+        .as_u64()
+        .filter(|value| *value > 0)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            CreationError::new(
+                "invalid_params",
+                "params.max_tokens must be a positive 32-bit integer",
+            )
+        })
+}
+
 /// Map a creation capability + opaque params + loaded inputs onto the invoke
 /// layer's typed [`TaskRequest`]. The full params object rides along as
 /// `extra` so protocol-specific knobs (`max_tokens`, `steps`, …) stay
@@ -192,31 +229,26 @@ fn cap_to_task_request(
             format: param_str(params, "format"),
             extra: params.clone(),
         }),
-        MediaCapability::Text => TaskRequest::ChatText(ChatTextRequest {
-            prompt: param_prompt(params),
-            system: param_str(params, "system"),
-            extra: params.clone(),
-        }),
+        MediaCapability::Text => {
+            return Err(CreationError::config(
+                "text creation must execute through the Agent Chat executor",
+            ));
+        }
     })
 }
 
-/// The invoke protocol that owned a LEGACY (pre-JobHandle) persisted remote
-/// task id. The only async protocol before the invoke migration was the
-/// OpenAI-compatible `/videos` submit→poll — every other capability was
-/// synchronous and never persisted a remote id.
-fn legacy_default_adapter_for(_capability: MediaCapability) -> &'static str {
-    "openai.videos"
-}
-
-/// Parse a persisted `remote_task_id` column value into a [`JobHandle`]:
-/// current rows carry the serialized handle JSON; legacy rows carried the bare
-/// provider-side id, which is wrapped with the capability's legacy protocol.
-fn parse_job_handle(raw: &str, capability: MediaCapability) -> JobHandle {
-    serde_json::from_str::<JobHandle>(raw).unwrap_or_else(|_| JobHandle {
-        adapter_id: legacy_default_adapter_for(capability).to_string(),
-        remote_id: raw.to_string(),
-        poll_state: serde_json::json!({}),
-    })
+/// Decode the complete, protocol-owned handle stored for an async task.
+/// Invalid data is rejected instead of guessing an adapter from capability.
+fn parse_job_handle(raw: &str) -> Result<JobHandle, CreationError> {
+    let handle = serde_json::from_str::<JobHandle>(raw).map_err(|error| {
+        CreationError::config(format!("persisted remote task handle is invalid: {error}"))
+    })?;
+    if handle.adapter_id.trim().is_empty() || handle.remote_id.trim().is_empty() {
+        return Err(CreationError::config(
+            "persisted remote task handle must contain adapter_id, remote_id, and config_revision",
+        ));
+    }
+    Ok(handle)
 }
 
 /// Resolve the minimum artifact count promised by a task. Image quantities are
@@ -357,8 +389,7 @@ struct WorkerJob {
     inputs: Vec<CreationInput>,
     submitted_at: i64,
     /// Present only on a boot resume (skip submit, poll this remote job).
-    /// Carries the raw persisted column value: serialized [`JobHandle`] JSON,
-    /// or a legacy bare remote id (see [`parse_job_handle`]).
+    /// Carries the raw persisted column value: serialized [`JobHandle`] JSON.
     remote_task_id: Option<String>,
 }
 
@@ -376,7 +407,8 @@ pub struct CreationService {
     /// The unified model invocation layer (`None` in the bare skeleton —
     /// tasks then fail `config`).
     invoke: Option<Arc<ModelInvokeService>>,
-    http: reqwest::Client,
+    text_executor: Option<Arc<dyn CreationTextExecutor>>,
+    artifact_downloader: SafeHttpClient,
     asset_source: Option<Arc<dyn AssetSource>>,
     asset_sink: Option<Arc<dyn AssetSink>>,
     global_sem: Arc<Semaphore>,
@@ -392,7 +424,8 @@ pub struct CreationService {
 pub struct CreationServiceBuilder {
     repo: Arc<dyn ICreationTaskRepository>,
     invoke: Option<Arc<ModelInvokeService>>,
-    http: Option<reqwest::Client>,
+    text_executor: Option<Arc<dyn CreationTextExecutor>>,
+    artifact_downloader: Option<SafeHttpClient>,
     asset_source: Option<Arc<dyn AssetSource>>,
     asset_sink: Option<Arc<dyn AssetSink>>,
     per_provider_limit: usize,
@@ -409,8 +442,15 @@ impl CreationServiceBuilder {
         self
     }
 
-    pub fn with_http(mut self, http: reqwest::Client) -> Self {
-        self.http = Some(http);
+    /// Wire Workshop text nodes to the Agent Chat engine.
+    pub fn with_text_executor(mut self, executor: Arc<dyn CreationTextExecutor>) -> Self {
+        self.text_executor = Some(executor);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_artifact_downloader_for_tests(mut self, downloader: SafeHttpClient) -> Self {
+        self.artifact_downloader = Some(downloader);
         self
     }
 
@@ -440,7 +480,11 @@ impl CreationServiceBuilder {
         Arc::new(CreationService {
             repo: self.repo,
             invoke: self.invoke,
-            http: self.http.unwrap_or_default(),
+            text_executor: self.text_executor,
+            artifact_downloader: self.artifact_downloader.unwrap_or_else(|| {
+                SafeHttpClient::new(DOWNLOAD_TIMEOUT, MAX_ARTIFACT_BYTES as usize)
+                    .user_agent("NomiFun-Creation/1.0")
+            }),
             asset_source: self.asset_source,
             asset_sink: self.asset_sink,
             global_sem: Arc::new(Semaphore::new(self.global_limit)),
@@ -459,7 +503,8 @@ impl CreationService {
         CreationServiceBuilder {
             repo,
             invoke: None,
-            http: None,
+            text_executor: None,
+            artifact_downloader: None,
             asset_source: None,
             asset_sink: None,
             per_provider_limit: DEFAULT_PER_PROVIDER_LIMIT,
@@ -940,6 +985,47 @@ impl CreationService {
     }
 
     async fn execute(&self, job: &WorkerJob, token: &CancellationToken) -> ExecOutcome {
+        if job.capability == MediaCapability::Text {
+            if job.remote_task_id.is_some() {
+                return ExecOutcome::Failed(CreationError::config(
+                    "text creation cannot resume a media protocol job",
+                ));
+            }
+            let Some(executor) = self.text_executor.as_ref() else {
+                return ExecOutcome::Failed(CreationError::config(
+                    "no Agent Chat executor is wired into the creation engine",
+                ));
+            };
+            let max_tokens = match param_text_max_tokens(&job.params) {
+                Ok(max_tokens) => max_tokens,
+                Err(error) => return ExecOutcome::Failed(error),
+            };
+            let request = CreationTextRequest {
+                provider_id: job.provider_id.clone(),
+                model: job.model.clone(),
+                system: param_str(&job.params, "system").unwrap_or_default(),
+                prompt: param_prompt(&job.params),
+                max_tokens,
+            };
+            let completion = tokio::select! {
+                _ = token.cancelled() => return ExecOutcome::Canceled,
+                result = executor.complete(request) => result,
+            };
+            return match completion {
+                Ok(text) => {
+                    self.persist_assets_or_fail(
+                        job,
+                        vec![ProducedAsset {
+                            data: ProducedData::Bytes(text.into_bytes()),
+                            mime: Some(TEXT_MIME.to_string()),
+                        }],
+                    )
+                    .await
+                }
+                Err(error) => ExecOutcome::Failed(error),
+            };
+        }
+
         let Some(invoke) = self.invoke.clone() else {
             return ExecOutcome::Failed(CreationError::config(
                 "no invoke service wired into the creation engine",
@@ -961,7 +1047,10 @@ impl CreationService {
         let mref = ModelRef { provider_id: job.provider_id.clone(), model: job.model.clone() };
 
         if let Some(raw) = job.remote_task_id.as_deref() {
-            let handle = parse_job_handle(raw, job.capability);
+            let handle = match parse_job_handle(raw) {
+                Ok(handle) => handle,
+                Err(error) => return ExecOutcome::Failed(error),
+            };
             return self.poll_loop(job, &invoke, &mref, &req, handle, token).await;
         }
 
@@ -1072,22 +1161,23 @@ impl CreationService {
     async fn persist_or_fail(&self, job: &WorkerJob, result: TaskResult) -> ExecOutcome {
         let assets = match result {
             TaskResult::Assets(assets) => assets,
-            // Chat text rides the same artifact pipeline as text/plain bytes
-            // (the bridge keys its text special case off the MIME prefix).
-            TaskResult::Text(text) => vec![ProducedAsset {
-                data: ProducedData::Bytes(text.into_bytes()),
-                mime: Some(TEXT_MIME.to_string()),
-            }],
-            // Defensive: no creation capability maps to these result shapes.
-            TaskResult::Transcript { .. }
-            | TaskResult::Embeddings(_)
-            | TaskResult::Reranked(_) => {
+            // Defensive: no media creation capability maps to any other
+            // result shape. Text creation never enters ModelInvokeService.
+            _ => {
                 return ExecOutcome::Failed(CreationError::new(
                     "invalid_artifact",
                     "unexpected result type from the invoke layer for a creation task",
                 ));
             }
         };
+        self.persist_assets_or_fail(job, assets).await
+    }
+
+    async fn persist_assets_or_fail(
+        &self,
+        job: &WorkerJob,
+        assets: Vec<ProducedAsset>,
+    ) -> ExecOutcome {
         match self.persist_assets(job, assets).await {
             Ok(ids) => ExecOutcome::Succeeded(ids),
             Err(e) => ExecOutcome::Failed(e),
@@ -1278,28 +1368,40 @@ impl CreationService {
         if url.trim().is_empty() {
             return Err(CreationError::new("invalid_artifact", "provider returned an empty artifact URL"));
         }
-        let resp = self
-            .http
+        let response = self
+            .artifact_downloader
             .get(url.trim())
-            .timeout(DOWNLOAD_TIMEOUT)
-            .send()
             .await
-            .map_err(|e| CreationError::from(net_err(e)))?;
-        if !resp.status().is_success() {
-            // Any non-2xx on an artifact download is a provider failure (the
-            // legacy classification), regardless of the invoke layer's finer
-            // status buckets.
-            let e = error_from_response(resp).await;
-            let mut err = CreationError::provider_error(e.message);
-            err.http_status = e.http_status;
-            return Err(err);
+            .map_err(map_artifact_download_error)?;
+        if !response.status.is_success() {
+            // Any non-2xx on an artifact download is a provider failure,
+            // regardless of the invoke layer's finer status buckets.
+            let detail = String::from_utf8_lossy(&response.body);
+            let detail = detail.trim();
+            let message = if detail.is_empty() {
+                format!(
+                    "artifact download failed with HTTP {} from {}",
+                    response.status,
+                    redacted_url(&response.final_url)
+                )
+            } else {
+                format!(
+                    "artifact download failed with HTTP {} from {}: {}",
+                    response.status,
+                    redacted_url(&response.final_url),
+                    detail.chars().take(1024).collect::<String>()
+                )
+            };
+            return Err(
+                CreationError::provider_error(message).with_http_status(response.status.as_u16())
+            );
         }
-        let response_content_type = resp
-            .headers()
+        let response_content_type = response
+            .headers
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok());
         let declared_mime = reconcile_mime(mime_hint, response_content_type)?;
-        let bytes = read_body_capped(resp, MAX_ARTIFACT_BYTES).await.map_err(CreationError::from)?;
+        let bytes = response.body;
         let mime = validate_for_capability(&bytes, declared_mime.as_deref(), capability)?;
         Ok((bytes, mime))
     }
@@ -1403,6 +1505,23 @@ impl CreationService {
     }
 }
 
+fn map_artifact_download_error(error: SafeHttpError) -> CreationError {
+    match error.kind() {
+        SafeHttpErrorKind::InvalidUrl
+        | SafeHttpErrorKind::ForbiddenTarget
+        | SafeHttpErrorKind::InvalidRedirect
+        | SafeHttpErrorKind::TooManyRedirects
+        | SafeHttpErrorKind::BodyTooLarge => {
+            CreationError::new("invalid_artifact", error.to_string())
+        }
+        SafeHttpErrorKind::Timeout => CreationError::timeout(error.to_string()),
+        SafeHttpErrorKind::ClientBuild => CreationError::config(error.to_string()),
+        SafeHttpErrorKind::Dns
+        | SafeHttpErrorKind::Network
+        | SafeHttpErrorKind::BodyRead => CreationError::provider_error(error.to_string()),
+    }
+}
+
 
 /// Build the provenance object stamped onto every produced asset's `origin`.
 fn build_origin(job: &WorkerJob) -> Value {
@@ -1459,8 +1578,9 @@ mod tests {
     use super::*;
     use nomifun_api_types::ModelTask;
     use nomifun_db::{
-        CreationTaskRow, DbError, IProviderModelRepository, IProviderRepository, NewProviderModel,
-        SqliteCreationTaskRepository, SqliteProviderConnectionRepository,
+        CreationTaskRow, DbError, IProviderRepository, NewProviderModel,
+        NewProviderModelCapability, SqliteCreationTaskRepository,
+        SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
         SqliteProviderModelRepository, SqliteProviderRepository,
     };
     use nomifun_model_invoke::{AdapterRegistry, InvokeError, ProtocolAdapter, ResolvedCall};
@@ -1472,8 +1592,13 @@ mod tests {
     /// Every task the shared "test-model" row declares — the invoke layer's
     /// task-membership gate is exercised by dedicated invoke-layer tests; here
     /// the model is fully tagged so the state-machine tests stay focused.
-    const ALL_TEST_TASKS: &str =
-        r#"["image_generation","image_edit","video_generation","chat","speech_synthesis"]"#;
+    const ALL_TEST_TASKS: &[&str] = &[
+        "image_generation",
+        "image_edit",
+        "video_generation",
+        "chat",
+        "speech_synthesis",
+    ];
 
     fn valid_png() -> Vec<u8> {
         let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
@@ -1495,8 +1620,8 @@ mod tests {
     /// A configurable invoke-level protocol adapter: synchronous `Done`, or
     /// async `Pending` then a scripted number of `Pending` polls before a
     /// terminal outcome. Registered in a private [`AdapterRegistry`] under a
-    /// REAL protocol id (e.g. `"openai.images"`) so the production platform
-    /// routing table selects it for the seeded `openai` provider.
+    /// real protocol id (e.g. `"openai.images"`) also persisted on the seeded
+    /// model capability.
     struct MockAdapter {
         id: &'static str,
         supports: Vec<ModelTask>,
@@ -1542,7 +1667,12 @@ mod tests {
             ProducedAsset { data: ProducedData::Bytes(valid_png()), mime: Some("image/png".into()) }
         }
         fn pending_handle(&self) -> JobHandle {
-            JobHandle { adapter_id: self.id.into(), remote_id: "remote-123".into(), poll_state: json!({}) }
+            JobHandle {
+                adapter_id: self.id.into(),
+                remote_id: "remote-123".into(),
+                config_revision: 1,
+                poll_state: json!({}),
+            }
         }
     }
     #[async_trait]
@@ -1616,6 +1746,31 @@ mod tests {
 
     struct RecordingSink {
         count: AtomicUsize,
+    }
+
+    struct RecordingTextExecutor {
+        requests: Mutex<Vec<CreationTextRequest>>,
+        response: String,
+    }
+
+    impl RecordingTextExecutor {
+        fn new(response: &str) -> Arc<Self> {
+            Arc::new(Self {
+                requests: Mutex::new(Vec::new()),
+                response: response.to_owned(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl CreationTextExecutor for RecordingTextExecutor {
+        async fn complete(
+            &self,
+            request: CreationTextRequest,
+        ) -> Result<String, CreationError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(self.response.clone())
+        }
     }
 
     /// Transaction-aware sink used to make partial writes and cancellation
@@ -1933,62 +2088,64 @@ mod tests {
 
     // ---- harness ----
 
-    async fn seed_provider(pool: &nomifun_db::SqlitePool, platform: &str) -> String {
+    async fn seed_provider(
+        pool: &nomifun_db::SqlitePool,
+        platform: &str,
+        protocol: &str,
+    ) -> String {
         let repo = SqliteProviderRepository::new(pool.clone());
-        let encrypted = nomifun_common::encrypt_string("sk-test-key", &TEST_KEY).unwrap();
-        let row = repo
-            .create(nomifun_db::CreateProviderParams {
+        let encrypted = nomifun_common::encrypt_string(
+            r#"{"api_keys":["sk-test-key"]}"#,
+            &TEST_KEY,
+        )
+        .unwrap();
+        let capabilities = ALL_TEST_TASKS
+            .iter()
+            .map(|task| NewProviderModelCapability {
+                task,
+                traits: "[]",
+                protocol,
+                connection_role: "default",
+                provider_params: "{}",
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let initial_model = NewProviderModel {
+            model: "test-model",
+            enabled: true,
+            sort_order: 0,
+            description: None,
+            capabilities: &capabilities,
+        };
+        let (row, _) = repo
+            .create(
+                nomifun_db::CreateProviderParams {
                 provider_id: None,
                 platform,
                 name: "Test",
                 base_url: "https://api.test.com/v1",
-                api_key_encrypted: &encrypted,
-                models: "[]",
+                auth_scheme: "bearer",
+                credentials_encrypted: &encrypted,
                 enabled: true,
-                model_context_limits: None,
-                model_protocols: None,
-                model_descriptions: None,
-                model_enabled: None,
                 bedrock_config: None,
-                is_full_url: false,
                 sort_order: None,
-            })
+                },
+                &initial_model,
+                &[],
+            )
             .await
             .unwrap();
         row.provider_id
     }
 
-    /// Tag `model` on the provider with `tasks` so the invoke layer's
-    /// task-membership gate admits it.
-    async fn seed_model_tasks(pool: &nomifun_db::SqlitePool, provider_id: &str, model: &str, tasks: &str) {
-        let repo = SqliteProviderModelRepository::new(pool.clone());
-        repo.create(
-            provider_id,
-            &NewProviderModel {
-                model,
-                enabled: true,
-                sort_order: 0,
-                tasks,
-                traits: "[]",
-                protocol: None,
-                params: "{}",
-                context_limit: None,
-                description: None,
-                source: "user",
-                health: None,
-            },
-        )
-        .await
-        .unwrap();
-    }
-
     /// A [`ModelInvokeService`] over the shared pool with ONLY the given
-    /// protocol adapters registered (the platform route table then selects
-    /// them by their real protocol ids).
+    /// protocol adapters registered. The persisted task capability selects one
+    /// by its exact protocol id.
     fn invoke_over(pool: &nomifun_db::SqlitePool, adapters: Vec<Arc<dyn ProtocolAdapter>>) -> Arc<ModelInvokeService> {
         Arc::new(ModelInvokeService::new(
             Arc::new(SqliteProviderRepository::new(pool.clone())),
             Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelCapabilityRepository::new(pool.clone())),
             Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
             TEST_KEY,
             reqwest::Client::new(),
@@ -2000,24 +2157,26 @@ mod tests {
         svc: Arc<CreationService>,
         provider_id: String,
         sink: Arc<RecordingSink>,
+        text_executor: Arc<RecordingTextExecutor>,
         _db: nomifun_db::Database,
     }
 
     async fn harness(adapter: Arc<MockAdapter>, platform: &str) -> Harness {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
-        let provider_id = seed_provider(&pool, platform).await;
-        seed_model_tasks(&pool, &provider_id, "test-model", ALL_TEST_TASKS).await;
+        let provider_id = seed_provider(&pool, platform, adapter.id).await;
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
         let sink = Arc::new(RecordingSink { count: AtomicUsize::new(0) });
+        let text_executor = RecordingTextExecutor::new("generated text");
         let svc = CreationService::builder(repo)
             .with_invoke(invoke_over(&pool, vec![adapter as Arc<dyn ProtocolAdapter>]))
+            .with_text_executor(text_executor.clone())
             .with_asset_source(Arc::new(StaticSource))
             .with_asset_sink(sink.clone())
             .with_poll_interval(Duration::from_millis(10))
             .with_task_timeout(Duration::from_secs(30))
             .build();
-        Harness { svc, provider_id, sink, _db: db }
+        Harness { svc, provider_id, sink, text_executor, _db: db }
     }
 
     async fn harness_with_sink_and_repo(
@@ -2028,8 +2187,7 @@ mod tests {
     ) -> (Arc<CreationService>, String, nomifun_db::Database) {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
-        let provider_id = seed_provider(&pool, platform).await;
-        seed_model_tasks(&pool, &provider_id, "test-model", ALL_TEST_TASKS).await;
+        let provider_id = seed_provider(&pool, platform, adapter.id).await;
         let sqlite_repo: Arc<dyn ICreationTaskRepository> =
             Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
         let repo: Arc<dyn ICreationTaskRepository> = match success_commit_fault {
@@ -2129,6 +2287,36 @@ mod tests {
         WorkshopAssetId::parse(&done.result_asset_ids[0]).unwrap();
         assert!(done.finished_at.is_some());
         assert_eq!(h.sink.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn text_task_uses_agent_executor_and_never_media_adapter() {
+        let adapter = MockAdapter::with(
+            "must-not-run",
+            vec![ModelTask::Chat],
+            MockBehavior::SubmitError("media adapter must not execute Chat".into()),
+        );
+        let h = harness(adapter.clone(), "openai").await;
+        let mut task = new_task(&h.provider_id, "text");
+        task.params = json!({
+            "prompt": "draft a launch note",
+            "system": "be concise",
+            "max_tokens": 777
+        });
+
+        let created = h.svc.create_task(task).await.unwrap();
+        let done = wait_terminal(&h.svc, &created.creation_task_id).await;
+
+        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
+        assert_eq!(h.sink.count.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 0);
+        let requests = h.text_executor.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].provider_id, h.provider_id);
+        assert_eq!(requests[0].model, "test-model");
+        assert_eq!(requests[0].system, "be concise");
+        assert_eq!(requests[0].prompt, "draft a launch note");
+        assert_eq!(requests[0].max_tokens, 777);
     }
 
     #[tokio::test]
@@ -2339,8 +2527,7 @@ mod tests {
     async fn cancel_racing_remote_id_patch_cannot_resurrect_running_status() {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
-        let provider_id = seed_provider(&pool, "openai").await;
-        seed_model_tasks(&pool, &provider_id, "test-model", ALL_TEST_TASKS).await;
+        let provider_id = seed_provider(&pool, "openai", "openai.videos").await;
         let inner: Arc<dyn ICreationTaskRepository> =
             Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
         let gated = Arc::new(RemotePatchGateRepo {
@@ -2821,11 +3008,18 @@ mod tests {
             .unwrap();
 
         // (c) a running task WITH remote → resumed → succeeded
+        let resume_handle = serde_json::to_string(&JobHandle {
+            adapter_id: "openai.videos".into(),
+            remote_id: "remote-xyz".into(),
+            config_revision: 0,
+            poll_state: json!({}),
+        })
+        .unwrap();
         repo.update_task(
             &resume_id,
             UpdateCreationTaskParams {
                 status: Some("running"),
-                remote_task_id: Some(Some("remote-xyz")),
+                remote_task_id: Some(Some(&resume_handle)),
                 ..Default::default()
             },
         )
@@ -2877,11 +3071,18 @@ mod tests {
             })
             .await
             .unwrap();
+        let resume_handle = serde_json::to_string(&JobHandle {
+            adapter_id: "openai.videos".into(),
+            remote_id: "remote-old".into(),
+            config_revision: 0,
+            poll_state: json!({}),
+        })
+        .unwrap();
         repo.update_task(
             &old_resume_id,
             UpdateCreationTaskParams {
                 status: Some("running"),
-                remote_task_id: Some(Some("remote-old")),
+                remote_task_id: Some(Some(&resume_handle)),
                 ..Default::default()
             },
         )
@@ -2899,7 +3100,7 @@ mod tests {
     #[tokio::test]
     async fn bare_service_without_adapter_fails_config() {
         let db = nomifun_db::init_database_memory().await.unwrap();
-        let provider_id = seed_provider(db.pool(), "openai").await;
+        let provider_id = seed_provider(db.pool(), "openai", "openai.images").await;
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(db.pool().clone()));
         Box::leak(Box::new(db));
         let svc = CreationService::new(repo);
@@ -2998,7 +3199,7 @@ mod tests {
     // ---- capability → TaskRequest mapping ----
 
     #[test]
-    fn cap_to_task_request_maps_every_capability() {
+    fn cap_to_task_request_maps_every_media_capability() {
         let params = json!({
             "prompt": "a cat", "count": 2, "width": 512, "height": 512,
             "quality": "high", "seconds": 4, "voice": "alloy", "system": "be brief"
@@ -3055,13 +3256,11 @@ mod tests {
             }
             _ => panic!("tts must map to SpeechSynthesis"),
         }
-        match cap_to_task_request(MediaCapability::Text, &params, vec![]).unwrap() {
-            TaskRequest::ChatText(r) => {
-                assert_eq!(r.prompt, "a cat");
-                assert_eq!(r.system.as_deref(), Some("be brief"));
-            }
-            _ => panic!("text must map to ChatText"),
-        }
+        let Err(text_error) = cap_to_task_request(MediaCapability::Text, &params, vec![]) else {
+            panic!("text must never map to a media invocation request");
+        };
+        assert_eq!(text_error.kind, "config");
+        assert!(text_error.message.contains("Agent Chat"));
         let Err(err) = cap_to_task_request(MediaCapability::V2v, &params, vec![]) else {
             panic!("v2v must be rejected");
         };
@@ -3072,25 +3271,45 @@ mod tests {
         assert_eq!(err.kind, "invalid_params");
     }
 
-    // ---- JobHandle persistence compatibility ----
+    #[test]
+    fn text_max_tokens_is_strict_and_bounded() {
+        assert_eq!(param_text_max_tokens(&json!({})).unwrap(), DEFAULT_TEXT_MAX_TOKENS);
+        assert_eq!(param_text_max_tokens(&json!({"max_tokens": 8192})).unwrap(), 8192);
+        for invalid in [
+            json!({"max_tokens": 0}),
+            json!({"max_tokens": -1}),
+            json!({"max_tokens": "4096"}),
+            json!({"max_tokens": u64::from(u32::MAX) + 1}),
+        ] {
+            let error = param_text_max_tokens(&invalid).unwrap_err();
+            assert_eq!(error.kind, "invalid_params", "input={invalid}");
+        }
+    }
+
+    // ---- JobHandle persistence contract ----
 
     #[test]
-    fn parse_job_handle_accepts_json_and_legacy_bare_id() {
-        // Current format: serialized JobHandle JSON round-trips.
-        let handle = JobHandle { adapter_id: "openai.videos".into(), remote_id: "vid_1".into(), poll_state: json!({"k": 1}) };
+    fn parse_job_handle_requires_complete_json() {
+        let handle = JobHandle {
+            adapter_id: "openai.videos".into(),
+            remote_id: "vid_1".into(),
+            config_revision: 1,
+            poll_state: json!({"k": 1}),
+        };
         let raw = serde_json::to_string(&handle).unwrap();
-        let parsed = parse_job_handle(&raw, MediaCapability::T2v);
+        let parsed = parse_job_handle(&raw).unwrap();
         assert_eq!(parsed.adapter_id, "openai.videos");
         assert_eq!(parsed.remote_id, "vid_1");
+        assert_eq!(parsed.config_revision, 1);
         assert_eq!(parsed.poll_state, json!({"k": 1}));
 
-        // Legacy format: a bare provider-side id → wrapped with the
-        // capability's legacy protocol (openai.videos — the only async one).
-        for cap in [MediaCapability::T2v, MediaCapability::I2v, MediaCapability::V2v] {
-            let parsed = parse_job_handle("vid-legacy-42", cap);
-            assert_eq!(parsed.adapter_id, "openai.videos");
-            assert_eq!(parsed.remote_id, "vid-legacy-42");
-            assert_eq!(parsed.poll_state, json!({}));
+        for invalid in [
+            "vid-bare-id",
+            r#"{"adapter_id":"","remote_id":"vid_1"}"#,
+            r#"{"adapter_id":"openai.videos","remote_id":""}"#,
+        ] {
+            let error = parse_job_handle(invalid).unwrap_err();
+            assert_eq!(error.kind, "config", "input={invalid}");
         }
     }
 
@@ -3133,8 +3352,10 @@ mod http_e2e_tests {
     use super::*;
     use base64::Engine as _;
     use nomifun_db::{
-        IProviderModelRepository, IProviderRepository, NewProviderModel, SqliteCreationTaskRepository,
-        SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
+        IProviderModelRepository, IProviderRepository, NewProviderModel,
+        NewProviderModelCapability, SqliteCreationTaskRepository,
+        SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
+        SqliteProviderModelRepository, SqliteProviderRepository,
     };
     use nomifun_model_invoke::AdapterRegistry;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3218,58 +3439,84 @@ mod http_e2e_tests {
         let pool = db.pool().clone();
         // seed a provider row pointed at the mock server
         let prov_repo = SqliteProviderRepository::new(pool.clone());
-        let encrypted = nomifun_common::encrypt_string("sk-e2e", &TEST_KEY).unwrap();
-        let provider_id = prov_repo
-            .create(nomifun_db::CreateProviderParams {
+        let encrypted =
+            nomifun_common::encrypt_string(r#"{"api_keys":["sk-e2e"]}"#, &TEST_KEY)
+                .unwrap();
+        let image_capabilities = [
+            NewProviderModelCapability {
+                task: "image_generation",
+                traits: "[]",
+                protocol: "openai.images",
+                connection_role: "default",
+                provider_params: "{}",
+                ..Default::default()
+            },
+            NewProviderModelCapability {
+                task: "image_edit",
+                traits: "[]",
+                protocol: "openai.images",
+                connection_role: "default",
+                provider_params: "{}",
+                ..Default::default()
+            },
+        ];
+        let initial_model = NewProviderModel {
+            model: "gpt-image-1",
+            enabled: true,
+            sort_order: 0,
+            description: None,
+            capabilities: &image_capabilities,
+        };
+        let provider = prov_repo
+            .create(
+                nomifun_db::CreateProviderParams {
                 provider_id: None,
                 platform: "openai",
                 name: "Mock",
                 base_url,
-                api_key_encrypted: &encrypted,
-                models: "[]",
+                auth_scheme: "bearer",
+                credentials_encrypted: &encrypted,
                 enabled: true,
-                model_context_limits: None,
-                model_protocols: None,
-                model_descriptions: None,
-                model_enabled: None,
                 bedrock_config: None,
-                is_full_url: false,
                 sort_order: None,
-            })
+                },
+                &initial_model,
+                &[],
+            )
             .await
             .unwrap()
-            .provider_id;
-        // Tag every test model with the tasks it serves (the invoke layer's
-        // task-membership gate refuses untagged models). The gemini text model
-        // pins its protocol via the row-level override — the invoke routing
-        // table is platform-keyed, and this provider row is "openai".
+            .0;
+        let provider_id = provider.provider_id;
+        let mut config_revision = provider.config_revision;
+        // Save every remaining model with its complete task-scoped transport.
         let model_repo = SqliteProviderModelRepository::new(pool.clone());
-        for (model, tasks, protocol) in [
-            ("gpt-image-1", r#"["image_generation","image_edit"]"#, None),
-            ("sora-2", r#"["video_generation"]"#, None),
-            ("gpt-4o-mini", r#"["chat"]"#, None),
-            ("gemini-2.5-flash", r#"["chat"]"#, Some("gemini.generate_text")),
-            ("tts-1", r#"["speech_synthesis"]"#, None),
+        for (model, task, protocol) in [
+            ("sora-2", "video_generation", "openai.videos"),
+            ("tts-1", "speech_synthesis", "openai.audio_speech"),
         ] {
+            let capabilities = [NewProviderModelCapability {
+                task,
+                traits: "[]",
+                protocol,
+                connection_role: "default",
+                provider_params: "{}",
+                ..Default::default()
+            }];
             model_repo
-                .create(
+                .save(
                     &provider_id,
+                    config_revision,
                     &NewProviderModel {
                         model,
                         enabled: true,
                         sort_order: 0,
-                        tasks,
-                        traits: "[]",
-                        protocol,
-                        params: "{}",
-                        context_limit: None,
                         description: None,
-                        source: "user",
-                        health: None,
+                        capabilities: &capabilities,
                     },
                 )
                 .await
                 .unwrap();
+            config_revision += 1;
         }
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
         // Both provider calls and artifact downloads target loopback WireMock;
@@ -3278,6 +3525,7 @@ mod http_e2e_tests {
         let invoke = Arc::new(ModelInvokeService::new(
             Arc::new(SqliteProviderRepository::new(pool.clone())),
             Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelCapabilityRepository::new(pool.clone())),
             Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
             TEST_KEY,
             http.clone(),
@@ -3286,7 +3534,11 @@ mod http_e2e_tests {
         let sink = Arc::new(CountingSink { count: AtomicUsize::new(0), persisted: std::sync::Mutex::new(Vec::new()) });
         let svc = CreationService::builder(repo)
             .with_invoke(invoke)
-            .with_http(http)
+            .with_artifact_downloader_for_tests(
+                SafeHttpClient::new(DOWNLOAD_TIMEOUT, MAX_ARTIFACT_BYTES as usize)
+                    .allow_private_for_tests()
+                    .user_agent("NomiFun-Creation-Test/1.0"),
+            )
             .with_asset_source(Arc::new(NoInputs))
             .with_asset_sink(sink.clone())
             .with_poll_interval(Duration::from_millis(10))
@@ -3564,69 +3816,6 @@ mod http_e2e_tests {
         );
         assert!(done.result_asset_ids.is_empty());
         assert_eq!(sink.count.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn openai_chat_text_end_to_end() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "choices": [{"message": {"role": "assistant", "content": "hello from the model"}}]
-            })))
-            .mount(&server)
-            .await;
-
-        let (svc, provider_id, sink, _db) = build(&server.uri()).await;
-        let task = NewCreationTask {
-            canvas_id: None,
-            node_id: None,
-            provider_id: provider_id.clone(),
-            model: "gpt-4o-mini".into(),
-            capability: "text".into(),
-            params: json!({"prompt": "say hi"}),
-            inputs: vec![],
-        };
-        let created = svc.create_task(task).await.unwrap();
-        let done = wait_terminal(&svc, &created.creation_task_id).await;
-        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
-        assert_eq!(sink.count.load(Ordering::SeqCst), 1);
-        let persisted = sink.persisted.lock().unwrap();
-        assert_eq!(persisted.len(), 1);
-        assert!(persisted[0].0.starts_with("text/plain"), "mime={}", persisted[0].0);
-        assert_eq!(String::from_utf8_lossy(&persisted[0].1), "hello from the model");
-    }
-
-    #[tokio::test]
-    async fn gemini_text_end_to_end() {
-        let server = MockServer::start().await;
-        // The seeded provider_models row pins protocol "gemini.generate_text"
-        // (invoke routing is platform-keyed; this provider row is "openai").
-        Mock::given(method("POST"))
-            .and(path("/v1beta/models/gemini-2.5-flash:generateContent"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "candidates": [{"content": {"parts": [{"text": "gemini says "}, {"text": "hi"}]}}]
-            })))
-            .mount(&server)
-            .await;
-
-        let (svc, provider_id, sink, _db) = build(&server.uri()).await;
-        let task = NewCreationTask {
-            canvas_id: None,
-            node_id: None,
-            provider_id: provider_id.clone(),
-            model: "gemini-2.5-flash".into(),
-            capability: "text".into(),
-            params: json!({"prompt": "greet me"}),
-            inputs: vec![],
-        };
-        let created = svc.create_task(task).await.unwrap();
-        let done = wait_terminal(&svc, &created.creation_task_id).await;
-        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
-        let persisted = sink.persisted.lock().unwrap();
-        assert_eq!(persisted.len(), 1);
-        assert!(persisted[0].0.starts_with("text/plain"), "mime={}", persisted[0].0);
-        assert_eq!(String::from_utf8_lossy(&persisted[0].1), "gemini says hi");
     }
 
     #[tokio::test]

@@ -1,10 +1,8 @@
-//! The built-in platform routing table: `(platform, task)` -> protocol id +
-//! required connection role.
+//! Provider-preset recommendations for model configuration.
 //!
-//! A missing entry is intentional: presets are deny-by-default so a provider
-//! cannot silently inherit an unrelated OpenAI endpoint for an unverified
-//! modality. Only the user-defined gateway platforms retain the broad legacy
-//! OpenAI-compatible fallback.
+//! This table is deliberately not consulted by runtime dispatch. Runtime uses
+//! the protocol explicitly persisted on the provider-model task capability;
+//! these entries only prefill a new configuration and drive the manifest API.
 
 use nomifun_api_types::ModelTask;
 
@@ -26,6 +24,9 @@ fn openai_route(task: ModelTask) -> Option<TaskRoute> {
     use ModelTask::*;
     match task {
         Chat => route("openai.chat_text"),
+        // Persistent WebSocket sessions use the dedicated realtime registry;
+        // they must never be coerced into the one-shot OpenAI HTTP adapter.
+        RealtimeConversation => None,
         ImageGeneration | ImageEdit => route("openai.images"),
         VideoGeneration => route("openai.videos"),
         SpeechSynthesis => route("openai.audio_speech"),
@@ -36,27 +37,16 @@ fn openai_route(task: ModelTask) -> Option<TaskRoute> {
     }
 }
 
-fn user_defined_gateway_route(task: ModelTask) -> Option<TaskRoute> {
-    use ModelTask::*;
-    match task {
-        Rerank => route("generic.rerank"),
-        _ => openai_route(task),
-    }
-}
-
-/// Resolve the verified built-in route for `(platform, task)`.
+/// Return the verified configuration recommendation for `(platform, task)`.
 ///
-/// `None` means the preset has no adapter verified for this task. Callers must
-/// report that as [`nomifun_api_types::ModelTask`] unsupported instead of
-/// falling through to an OpenAI-shaped URL. `custom` and `new-api` are the
-/// deliberate escape hatches and preserve the broad legacy defaults.
-pub fn platform_route(platform: &str, task: ModelTask) -> Option<TaskRoute> {
+/// `None` means there is no safe default. In particular, `custom` and
+/// `new-api` intentionally have no recommendation: users must select and
+/// persist a protocol explicitly.
+pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option<TaskRoute> {
     use ModelTask::*;
 
     match (platform, task) {
-        // User-controlled OpenAI-compatible gateways deliberately keep the
-        // broad fallback, including the legacy rerank protocol id.
-        ("custom" | "new-api", task) => user_defined_gateway_route(task),
+        ("custom" | "new-api", _) => None,
 
         // OpenAI native endpoints. OpenAI does not expose rerank.
         ("openai", task) => openai_route(task),
@@ -65,8 +55,14 @@ pub fn platform_route(platform: &str, task: ModelTask) -> Option<TaskRoute> {
         ("gemini", ImageGeneration | ImageEdit) => route("gemini.generate_content"),
         ("gemini", Chat) => route("gemini.generate_text"),
 
-        // Deepgram's shipped adapter only implements prerecorded ASR.
+        // These Chat transports execute through the Nomi provider layer.
+        ("anthropic", Chat) => route("anthropic.messages"),
+        ("bedrock", Chat) => route("bedrock.anthropic_messages"),
+
+        // Deepgram's REST speech endpoints. Voice Agent WebSocket realtime is
+        // intentionally not routed until a dedicated session adapter ships.
         ("deepgram", SpeechRecognition) => route("deepgram.listen"),
+        ("deepgram", SpeechSynthesis) => route("deepgram.speak_rest"),
 
         // Volcano Ark multimodal adapters. Voice uses a distinct connection
         // because its domain and credentials differ from Ark's default API.
@@ -90,7 +86,8 @@ pub fn platform_route(platform: &str, task: ModelTask) -> Option<TaskRoute> {
         // MiMo audio models use specialized chat-completions serializers.
         ("mimo", SpeechRecognition) => route("mimo.chat_asr"),
         ("mimo", SpeechSynthesis) => route("mimo.chat_tts"),
-        // SiliconFlow media endpoints have native JSON and async schemas.
+        // SiliconFlow media endpoints have native JSON, raw-audio and async schemas.
+        ("siliconflow", SpeechSynthesis) => route("siliconflow.audio_speech"),
         ("siliconflow", ImageGeneration | ImageEdit) => route("siliconflow.images"),
         ("siliconflow", VideoGeneration) => route("siliconflow.video_jobs"),
         // xAI media APIs only resemble OpenAI by naming; their bodies and job
@@ -118,12 +115,16 @@ pub fn platform_route(platform: &str, task: ModelTask) -> Option<TaskRoute> {
             route("openai.embeddings")
         }
         ("siliconflow", SpeechRecognition) => route("openai.audio_transcriptions"),
-        ("stepfun", SpeechRecognition) => route("openai.audio_transcriptions"),
-        ("ctyun" | "zhipu" | "stepfun" | "stepfun-plan", ImageGeneration) => {
-            route("openai.images")
-        }
-        ("stepfun" | "stepfun-plan", ImageEdit) => route("openai.images"),
-        ("zhipu", SpeechRecognition) => route("openai.audio_transcriptions"),
+        ("stepfun" | "stepfun-plan", SpeechRecognition) => route("stepfun.asr_sse"),
+        ("stepfun" | "stepfun-plan", SpeechSynthesis) => route("stepfun.audio_speech"),
+        ("stepfun" | "stepfun-plan", ImageGeneration | ImageEdit) => route("stepfun.images"),
+        ("stepfun" | "stepfun-plan", RealtimeConversation) => route("stepfun.realtime_s2s"),
+        // CTYun documents an OpenAI-compatible image surface. Zhipu's
+        // similarly named endpoints do not accept the generic OpenAI image /
+        // transcription bodies (for example the generic serializer injects
+        // fields absent from Zhipu's schemas), so those combinations remain
+        // deny-by-default until native serializers ship.
+        ("ctyun", ImageGeneration) => route("openai.images"),
         ("ctyun" | "zhipu", Embedding) => route("openai.embeddings"),
         ("siliconflow" | "ppio" | "qianfan" | "ctyun" | "zhipu", Rerank) => {
             route("generic.rerank")
@@ -188,21 +189,25 @@ mod tests {
         route(protocol)
     }
 
+    fn platform_route(platform: &str, task: ModelTask) -> Option<TaskRoute> {
+        preset_protocol_recommendation(platform, task)
+    }
+
     #[test]
-    fn custom_gateways_preserve_the_broad_legacy_defaults() {
+    fn custom_gateways_have_no_implicit_protocol_defaults() {
         for platform in ["custom", "new-api"] {
-            let cases = [
-                (Chat, plain("openai.chat_text")),
-                (ImageGeneration, plain("openai.images")),
-                (ImageEdit, plain("openai.images")),
-                (VideoGeneration, plain("openai.videos")),
-                (SpeechSynthesis, plain("openai.audio_speech")),
-                (SpeechRecognition, plain("openai.audio_transcriptions")),
-                (Embedding, plain("openai.embeddings")),
-                (Rerank, plain("generic.rerank")),
-            ];
-            for (task, want) in cases {
-                assert_eq!(platform_route(platform, task), want, "({platform}, {task:?})");
+            for task in [
+                Chat,
+                RealtimeConversation,
+                ImageGeneration,
+                ImageEdit,
+                VideoGeneration,
+                SpeechSynthesis,
+                SpeechRecognition,
+                Embedding,
+                Rerank,
+            ] {
+                assert_eq!(platform_route(platform, task), None, "({platform}, {task:?})");
             }
         }
     }
@@ -232,8 +237,9 @@ mod tests {
     #[test]
     fn provider_specific_adapters_do_not_leak_openai_fallbacks() {
         assert_eq!(platform_route("deepgram", SpeechRecognition), plain("deepgram.listen"));
+        assert_eq!(platform_route("deepgram", SpeechSynthesis), plain("deepgram.speak_rest"));
         assert_eq!(platform_route("deepgram", Chat), None);
-        assert_eq!(platform_route("deepgram", SpeechSynthesis), None);
+        assert_eq!(platform_route("deepgram", RealtimeConversation), None);
 
         for platform in ["dashscope", "alibaba"] {
             assert_eq!(platform_route(platform, Chat), plain("openai.chat_text"));
@@ -300,7 +306,7 @@ mod tests {
             assert_eq!(platform_route(platform, Embedding), plain("openai.embeddings"), "{platform}");
         }
         assert_eq!(platform_route("siliconflow", SpeechRecognition), plain("openai.audio_transcriptions"));
-        assert_eq!(platform_route("siliconflow", SpeechSynthesis), None);
+        assert_eq!(platform_route("siliconflow", SpeechSynthesis), plain("siliconflow.audio_speech"));
         assert_eq!(platform_route("siliconflow", ImageGeneration), plain("siliconflow.images"));
         assert_eq!(platform_route("siliconflow", ImageEdit), plain("siliconflow.images"));
         assert_eq!(platform_route("siliconflow", VideoGeneration), plain("siliconflow.video_jobs"));
@@ -316,14 +322,19 @@ mod tests {
         assert_eq!(platform_route("xai", SpeechRecognition), plain("xai.stt"));
         assert_eq!(platform_route("xai", Embedding), None);
 
-        for platform in ["ctyun", "zhipu", "stepfun", "stepfun-plan"] {
-            assert_eq!(platform_route(platform, ImageGeneration), plain("openai.images"), "{platform}");
-        }
+        assert_eq!(platform_route("ctyun", ImageGeneration), plain("openai.images"));
+        assert_eq!(platform_route("zhipu", ImageGeneration), None);
         assert_eq!(platform_route("ctyun", ImageEdit), None);
         assert_eq!(platform_route("zhipu", ImageEdit), None);
         assert_eq!(platform_route("zhipu", VideoGeneration), plain("zhipu.video_jobs"));
-        assert_eq!(platform_route("stepfun", ImageEdit), plain("openai.images"));
-        assert_eq!(platform_route("stepfun-plan", ImageEdit), plain("openai.images"));
+        for platform in ["stepfun", "stepfun-plan"] {
+            assert_eq!(platform_route(platform, ImageGeneration), plain("stepfun.images"));
+            assert_eq!(platform_route(platform, ImageEdit), plain("stepfun.images"));
+            assert_eq!(
+                platform_route(platform, RealtimeConversation),
+                plain("stepfun.realtime_s2s")
+            );
+        }
         assert_eq!(platform_route("ctyun", Embedding), plain("openai.embeddings"));
         assert_eq!(platform_route("zhipu", Embedding), plain("openai.embeddings"));
         for platform in ["siliconflow", "ppio", "qianfan", "ctyun", "zhipu"] {
@@ -331,23 +342,24 @@ mod tests {
         }
         assert_eq!(platform_route("novita", Rerank), None);
         assert_eq!(platform_route("infiniai", Rerank), None);
-        assert_eq!(
-            platform_route("zhipu", SpeechRecognition),
-            plain("openai.audio_transcriptions")
-        );
-        assert_eq!(
-            platform_route("stepfun", SpeechRecognition),
-            plain("openai.audio_transcriptions")
-        );
-        assert_eq!(platform_route("stepfun", SpeechSynthesis), None);
-        assert_eq!(platform_route("stepfun-plan", SpeechRecognition), None);
+        assert_eq!(platform_route("zhipu", SpeechRecognition), None);
+        assert_eq!(platform_route("stepfun", SpeechRecognition), plain("stepfun.asr_sse"));
+        assert_eq!(platform_route("stepfun", SpeechSynthesis), plain("stepfun.audio_speech"));
+        assert_eq!(platform_route("stepfun-plan", SpeechSynthesis), plain("stepfun.audio_speech"));
+        assert_eq!(platform_route("stepfun-plan", SpeechRecognition), plain("stepfun.asr_sse"));
     }
 
     #[test]
     fn native_only_and_unknown_platforms_are_deny_by_default() {
-        for platform in ["anthropic", "bedrock", "gemini-vertex-ai", "vertex-ai", "", "typo-provider"] {
+        assert_eq!(platform_route("anthropic", Chat), plain("anthropic.messages"));
+        assert_eq!(
+            platform_route("bedrock", Chat),
+            plain("bedrock.anthropic_messages")
+        );
+        for platform in ["gemini-vertex-ai", "vertex-ai", "", "typo-provider"] {
             for task in [
                 Chat,
+                RealtimeConversation,
                 ImageGeneration,
                 ImageEdit,
                 VideoGeneration,

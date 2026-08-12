@@ -228,13 +228,19 @@ mod tests {
             "last_status": "running"
         });
         assert!(serde_json::from_value::<TerminalSessionResponse>(response).is_err());
-        assert!(serde_json::from_value::<TerminalOutputEvent>(json!({
-            "terminal_id": 42,
-            "data_b64": ""
-        })).is_err());
-        assert!(serde_json::from_value::<TerminalRemovedPayload>(json!({
-            "terminal_id": "term_0190f5fe-7c00-7a00-8000-000000000001"
-        })).is_err());
+        assert!(
+            serde_json::from_value::<TerminalOutputEvent>(json!({
+                "terminal_id": 42,
+                "data_b64": ""
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalRemovedPayload>(json!({
+                "terminal_id": "term_0190f5fe-7c00-7a00-8000-000000000001"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -255,19 +261,28 @@ mod tests {
             "last_status": "running"
         });
         assert!(serde_json::from_value::<TerminalSessionResponse>(response).is_err());
-        assert!(serde_json::from_value::<TerminalOutputEvent>(json!({
-            "terminal_id": terminal_id,
-            "id": legacy_id,
-            "data_b64": ""
-        })).is_err());
-        assert!(serde_json::from_value::<TerminalExitEvent>(json!({
-            "terminal_id": terminal_id,
-            "id": legacy_id
-        })).is_err());
-        assert!(serde_json::from_value::<TerminalRemovedPayload>(json!({
-            "terminal_id": terminal_id,
-            "id": legacy_id
-        })).is_err());
+        assert!(
+            serde_json::from_value::<TerminalOutputEvent>(json!({
+                "terminal_id": terminal_id,
+                "id": legacy_id,
+                "data_b64": ""
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalExitEvent>(json!({
+                "terminal_id": terminal_id,
+                "id": legacy_id
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalRemovedPayload>(json!({
+                "terminal_id": terminal_id,
+                "id": legacy_id
+            }))
+            .is_err()
+        );
     }
 
     #[test]

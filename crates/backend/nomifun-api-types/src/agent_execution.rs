@@ -123,6 +123,10 @@ pub struct ParticipantCapability {
     pub modalities: Vec<String>,
     #[serde(default)]
     pub tools: bool,
+    /// Model has a provider-native web-search capability. This is distinct
+    /// from generic function/tool calling and from input/output modalities.
+    #[serde(default)]
+    pub web_search: bool,
     pub reasoning: String,
     pub cost_tier: String,
     pub speed_tier: String,
@@ -143,9 +147,10 @@ impl ParticipantConstraints {
     /// and immutable execution snapshots. A participant cannot be allowed to
     /// exceed the aggregate's own scheduler parallelism ceiling.
     pub fn validate(&self) -> Result<(), String> {
-        if self.max_concurrency.is_some_and(|value| {
-            !(1..=MAX_AGENT_EXECUTION_PARALLELISM).contains(&value)
-        }) {
+        if self
+            .max_concurrency
+            .is_some_and(|value| !(1..=MAX_AGENT_EXECUTION_PARALLELISM).contains(&value))
+        {
             return Err(format!(
                 "participant max_concurrency must be between 1 and {}",
                 MAX_AGENT_EXECUTION_PARALLELISM
@@ -177,7 +182,10 @@ pub struct ExecutionParticipant {
         deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
     )]
     pub provider_id: Option<String>,
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_optional_model_name")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_model_name"
+    )]
     pub model: Option<String>,
     pub role: Option<String>,
     pub capability: Option<ParticipantCapability>,
@@ -327,7 +335,9 @@ pub enum LoopStopPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StepControlPolicy {
-    Verify { vote: VerificationPolicy },
+    Verify {
+        vote: VerificationPolicy,
+    },
     Judge {
         aggregation: JudgeAggregation,
         candidate_count: Option<usize>,
@@ -383,6 +393,9 @@ pub struct ExecutionStep {
 pub struct ExecutionStepProfile {
     pub kind: String,
     pub needs_vision: bool,
+    /// Hard routing requirement for provider-native model web search.
+    #[serde(default)]
+    pub needs_web_search: bool,
     pub needs_long_context: bool,
     pub needs_high_reasoning: bool,
     pub bulk: bool,
@@ -719,7 +732,11 @@ mod tests {
         });
         assert!(serde_json::from_value::<CreateAgentExecutionRequest>(valid).is_ok());
 
-        for invalid in ["1", "conversation-1", "0190f5fe-7c00-4a00-8000-000000000001"] {
+        for invalid in [
+            "1",
+            "conversation-1",
+            "0190f5fe-7c00-4a00-8000-000000000001",
+        ] {
             let value = serde_json::json!({
                 "goal": "ship",
                 "model_pool": { "mode": "automatic" },
@@ -910,8 +927,58 @@ mod tests {
         });
         assert!(matches!(
             serde_json::from_value::<StepControlPolicy>(value).unwrap(),
-            StepControlPolicy::Loop { max_iterations: 4, .. }
+            StepControlPolicy::Loop {
+                max_iterations: 4,
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn native_web_search_capability_and_requirement_are_explicit_wire_fields() {
+        let capability: ParticipantCapability = serde_json::from_value(serde_json::json!({
+            "strengths": [],
+            "modalities": [],
+            "tools": false,
+            "reasoning": "low",
+            "cost_tier": "standard",
+            "speed_tier": "standard"
+        }))
+        .unwrap();
+        assert!(!capability.web_search);
+
+        let profile: ExecutionStepProfile = serde_json::from_value(serde_json::json!({
+            "kind": "research",
+            "needs_vision": false,
+            "needs_long_context": false,
+            "needs_high_reasoning": false,
+            "bulk": false
+        }))
+        .unwrap();
+        assert!(!profile.needs_web_search);
+
+        let capability: ParticipantCapability = serde_json::from_value(serde_json::json!({
+            "strengths": [],
+            "modalities": [],
+            "tools": false,
+            "web_search": true,
+            "reasoning": "low",
+            "cost_tier": "standard",
+            "speed_tier": "standard"
+        }))
+        .unwrap();
+        assert!(capability.web_search);
+
+        let profile: ExecutionStepProfile = serde_json::from_value(serde_json::json!({
+            "kind": "research",
+            "needs_vision": false,
+            "needs_web_search": true,
+            "needs_long_context": false,
+            "needs_high_reasoning": false,
+            "bulk": false
+        }))
+        .unwrap();
+        assert!(profile.needs_web_search);
     }
 
     #[test]

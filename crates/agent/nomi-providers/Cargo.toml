@@ -1,6 +1,6 @@
 [package]
 name = "nomi-providers"
-description = "LLM provider implementations for Nomi (Anthropic, OpenAI, Bedrock, Vertex)"
+description = "LLM provider implementations for Nomi (Anthropic, OpenAI, Gemini, Bedrock, Vertex)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

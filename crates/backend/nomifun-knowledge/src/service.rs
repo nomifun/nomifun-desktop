@@ -12,14 +12,22 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use futures_util::{StreamExt, stream};
-use nomifun_api_types::{KnowledgeMountInfo, KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag, UpdateKnowledgeTagRequest};
+use nomifun_api_types::{
+    KnowledgeEmbeddingConfig, KnowledgeMountInfo, KnowledgeRerankConfig,
+    KnowledgeRetrievalConfig, KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode,
+    KnowledgeTag, ModelTask, UpdateKnowledgeTagRequest,
+};
 use nomifun_common::{
     AppError, CompanionId, ConversationId, KnowledgeBaseId,
     ProviderWithModel, TerminalId, TimestampMs, UuidV7Error, generate_id,
     now_ms,
 };
 use nomifun_db::models::{CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow};
-use nomifun_db::IKnowledgeRepository;
+use nomifun_db::{IClientPreferenceRepository, IKnowledgeRepository, KNOWLEDGE_RETRIEVAL_KEY};
+use nomifun_model_invoke::{
+    EmbedRequest, ModelInvokeService, ModelRef, RerankRequest, TaskOutcome, TaskRequest,
+    TaskResult,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{
@@ -55,6 +63,11 @@ const KNOWLEDGE_BLOCKING_INSPECTION_CONCURRENCY: usize = 32;
 const TURN_WRITEBACK_MAX_CANDIDATES: usize = 8;
 const TURN_WRITEBACK_MAX_CANDIDATE_CHARS: usize = 32_000;
 const TURN_WRITEBACK_MAX_TOTAL_CHARS: usize = 128_000;
+const REMOTE_RETRIEVAL_MAX_DOCUMENTS: usize = 128;
+const REMOTE_RETRIEVAL_MAX_DOCUMENT_CHARS: usize = 4_000;
+const REMOTE_RETRIEVAL_MAX_TOTAL_CHARS: usize = 256_000;
+const REMOTE_EMBEDDING_BATCH_SIZE: usize = 32;
+const REMOTE_RERANK_MAX_CANDIDATES: usize = 64;
 
 static ROOT_BLOCKING_INSPECTION_LOCKS:
     OnceLock<StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>> =
@@ -499,6 +512,25 @@ struct CachedDoc {
     bytes: usize,
 }
 
+/// One source document loaded from the filesystem cache. Candidate generation
+/// and result ordering share this value so a configured reranker receives the
+/// exact document that produced the public hit instead of re-reading mutable
+/// files between stages.
+#[derive(Clone, Debug)]
+struct RetrievalDocument {
+    kb_id: KnowledgeBaseId,
+    kb_name: String,
+    rel_path: String,
+    heading: String,
+    content: Arc<str>,
+}
+
+#[derive(Debug)]
+struct RetrievalCandidate {
+    hit: KnowledgeSearchHit,
+    content: Arc<str>,
+}
+
 /// mtime-keyed content cache backing `search_bases`. A pure read-through
 /// optimization: it avoids re-reading + UTF-8-decoding unchanged `.md` files on
 /// every query. Invalidation is per-file via mtime (write_file's atomic rename
@@ -572,6 +604,12 @@ pub struct KnowledgeService {
     /// re-sync live terminal workspaces (README/mounts) so binding changes
     /// take effect without a PTY relaunch. `(target_kind, canonical_key)`.
     binding_changed_hook: RwLock<Option<Arc<dyn Fn(&str, &str) + Send + Sync>>>,
+    /// Single persisted retrieval-policy source (`knowledge.retrieval`) plus
+    /// the shared exact-capability invocation service. Production wires both
+    /// together after construction; tests that exercise only local keyword
+    /// search need neither.
+    retrieval_preferences: RwLock<Option<Arc<dyn IClientPreferenceRepository>>>,
+    model_invoke: RwLock<Option<Arc<ModelInvokeService>>>,
 }
 
 /// One source entry's fetched-and-condensed body, ready to be slugged and
@@ -626,7 +664,117 @@ impl KnowledgeService {
             root_lock_identity_cache: Arc::new(StdMutex::new(HashMap::new())),
             extra_managed_roots: RwLock::new(Vec::new()),
             binding_changed_hook: RwLock::new(None),
+            retrieval_preferences: RwLock::new(None),
+            model_invoke: RwLock::new(None),
         }
+    }
+
+    /// Late-wire the one install-wide retrieval preference source and the
+    /// same model invocation service used by every other multimodal consumer.
+    pub fn set_retrieval_runtime(
+        &self,
+        preferences: Arc<dyn IClientPreferenceRepository>,
+        model_invoke: Arc<ModelInvokeService>,
+    ) {
+        self.set_retrieval_preferences(preferences);
+        self.set_model_invoke(model_invoke);
+    }
+
+    /// Wire the durable policy source independently for route-level tests and
+    /// embedders that intentionally expose local-only retrieval.
+    pub fn set_retrieval_preferences(
+        &self,
+        preferences: Arc<dyn IClientPreferenceRepository>,
+    ) {
+        *self
+            .retrieval_preferences
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(preferences);
+    }
+
+    /// Wire exact task invocation. Kept separate from preference storage so a
+    /// local-only installation does not need a dummy invocation graph.
+    pub fn set_model_invoke(&self, model_invoke: Arc<ModelInvokeService>) {
+        *self
+            .model_invoke
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(model_invoke);
+    }
+
+    /// Read the one persisted retrieval policy. An absent preference is the
+    /// explicit two-stage local default; malformed durable state is an error,
+    /// never reinterpreted as local.
+    pub async fn retrieval_config(&self) -> Result<KnowledgeRetrievalConfig, AppError> {
+        let preferences = self
+            .retrieval_preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(preferences) = preferences else {
+            return Ok(KnowledgeRetrievalConfig::default());
+        };
+        let rows = preferences
+            .get_by_keys(&[KNOWLEDGE_RETRIEVAL_KEY])
+            .await?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(KnowledgeRetrievalConfig::default());
+        };
+        serde_json::from_str(&row.value).map_err(|error| {
+            AppError::Internal(format!(
+                "stored {KNOWLEDGE_RETRIEVAL_KEY} preference is invalid: {error}"
+            ))
+        })
+    }
+
+    /// Validate every configured remote stage against the exact persisted
+    /// capability graph, then atomically replace the single preference row.
+    pub async fn update_retrieval_config(
+        &self,
+        config: KnowledgeRetrievalConfig,
+    ) -> Result<KnowledgeRetrievalConfig, AppError> {
+        let preferences = self
+            .retrieval_preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                AppError::Conflict("knowledge retrieval preferences are not wired".into())
+            })?;
+        let invoke = self
+            .model_invoke
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+
+        for (selection, task) in [
+            (config.embedding.remote_model(), ModelTask::Embedding),
+            (config.rerank.remote_model(), ModelTask::Rerank),
+        ] {
+            let Some((provider_id, model)) = selection else {
+                continue;
+            };
+            let invoke = invoke.as_ref().ok_or_else(|| {
+                AppError::Conflict("knowledge model invocation is not wired".into())
+            })?;
+            invoke
+                .resolve_task_config(
+                    &ModelRef {
+                        provider_id: provider_id.to_owned(),
+                        model: model.to_owned(),
+                    },
+                    task,
+                )
+                .await
+                .map_err(AppError::from)?;
+        }
+
+        let value = serde_json::to_string(&config).map_err(|error| {
+            AppError::Internal(format!("knowledge retrieval config serialize failed: {error}"))
+        })?;
+        preferences
+            .upsert_batch(&[(KNOWLEDGE_RETRIEVAL_KEY, value.as_str())])
+            .await?;
+        Ok(config)
     }
 
     /// Register an additional backend-managed workspace root (e.g. the
@@ -3167,8 +3315,16 @@ impl KnowledgeService {
         limit: usize,
     ) -> Result<Vec<KnowledgeSearchHit>, AppError> {
         let query = query.trim();
-        if query.is_empty() || kb_ids.is_empty() {
+        if query.is_empty() || kb_ids.is_empty() || limit == 0 {
             return Ok(Vec::new());
+        }
+        let config = self.retrieval_config().await?;
+        if matches!(config.rerank, KnowledgeRerankConfig::Remote { .. })
+            && limit > REMOTE_RERANK_MAX_CANDIDATES
+        {
+            return Err(AppError::BadRequest(format!(
+                "remote rerank supports at most {REMOTE_RERANK_MAX_CANDIDATES} results per search"
+            )));
         }
         let mut roots: Vec<(KnowledgeBaseId, String, PathBuf)> = Vec::new();
         for id in kb_ids {
@@ -3190,9 +3346,7 @@ impl KnowledgeService {
         if roots.is_empty() {
             return Ok(Vec::new());
         }
-        let query = query.to_owned();
-        let searches = roots.into_iter().map(|(kb_id, kb_name, root)| {
-            let query = query.clone();
+        let scans = roots.into_iter().map(|(kb_id, kb_name, root)| {
             let cache = Arc::clone(&self.search_cache);
             async move {
                 let lock_root = root.clone();
@@ -3200,26 +3354,248 @@ impl KnowledgeService {
                     &lock_root,
                     SEARCH_WALK_BUDGET,
                     Vec::new(),
-                    move || {
-                        search_one_knowledge_root(
-                            kb_id, kb_name, root, query, cache,
-                        )
-                    },
+                    move || load_one_knowledge_root(kb_id, kb_name, root, cache),
                 )
                 .await
             }
         });
-        let mut hits = stream::iter(searches)
+        let mut documents = stream::iter(scans)
             .buffer_unordered(LIST_BASES_CONCURRENCY)
             .collect::<Vec<_>>()
             .await
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+        documents.sort_by(|a, b| {
+            a.kb_id
+                .as_str()
+                .cmp(b.kb_id.as_str())
+                .then(a.rel_path.cmp(&b.rel_path))
+        });
 
-        hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.rel_path.cmp(&b.rel_path)));
-        hits.truncate(limit);
-        Ok(hits)
+        let candidate_limit = if matches!(config.rerank, KnowledgeRerankConfig::Remote { .. }) {
+            limit
+                .saturating_mul(4)
+                .max(limit)
+                .min(REMOTE_RERANK_MAX_CANDIDATES)
+        } else {
+            limit
+        };
+        let mut candidates = match &config.embedding {
+            KnowledgeEmbeddingConfig::Local {} => {
+                local_keyword_candidates(documents, query, candidate_limit)
+            }
+            KnowledgeEmbeddingConfig::Remote { provider_id, model } => {
+                self.remote_embedding_candidates(
+                    documents,
+                    query,
+                    candidate_limit,
+                    provider_id,
+                    model,
+                )
+                .await?
+            }
+        };
+
+        match &config.rerank {
+            KnowledgeRerankConfig::Local {} => {
+                candidates.truncate(limit);
+            }
+            KnowledgeRerankConfig::Remote { provider_id, model } => {
+                candidates = self
+                    .remote_rerank_candidates(candidates, query, limit, provider_id, model)
+                    .await?;
+            }
+        }
+        Ok(candidates.into_iter().map(|candidate| candidate.hit).collect())
+    }
+
+    async fn remote_embedding_candidates(
+        &self,
+        documents: Vec<RetrievalDocument>,
+        query: &str,
+        candidate_limit: usize,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<Vec<RetrievalCandidate>, AppError> {
+        if documents.is_empty() || candidate_limit == 0 {
+            return Ok(Vec::new());
+        }
+        if documents.len() > REMOTE_RETRIEVAL_MAX_DOCUMENTS {
+            return Err(AppError::BadRequest(format!(
+                "remote embedding search received {} documents; narrow the knowledge-base scope to at most {REMOTE_RETRIEVAL_MAX_DOCUMENTS} documents",
+                documents.len()
+            )));
+        }
+        let model_ref = ModelRef {
+            provider_id: provider_id.to_owned(),
+            model: model.to_owned(),
+        };
+        let mut bounded = Vec::new();
+        let mut total_chars = 0usize;
+        for document in documents {
+            let text = retrieval_document_text(&document);
+            let chars = text.chars().count();
+            if total_chars.saturating_add(chars) > REMOTE_RETRIEVAL_MAX_TOTAL_CHARS {
+                return Err(AppError::BadRequest(format!(
+                    "remote embedding search exceeds the {REMOTE_RETRIEVAL_MAX_TOTAL_CHARS}-character query-time document budget; narrow the knowledge-base scope"
+                )));
+            }
+            total_chars += chars;
+            bounded.push((document, text));
+        }
+        if bounded.is_empty() {
+            return Ok(Vec::new());
+        }
+        let invoke = self.retrieval_model_invoke()?;
+        let start_revision = invoke
+            .resolve_task_config(&model_ref, ModelTask::Embedding)
+            .await
+            .map_err(AppError::from)?
+            .config_revision;
+
+        let query_vectors = invoke_embedding_batch(&invoke, &model_ref, vec![query.to_owned()]).await?;
+        let query_vector = query_vectors.into_iter().next().ok_or_else(|| {
+            AppError::BadGateway("embedding provider returned no query vector".into())
+        })?;
+        validate_embedding_vector(&query_vector, None, "query")?;
+        let dimension = query_vector.len();
+
+        let mut candidates = Vec::with_capacity(bounded.len());
+        for batch in bounded.chunks(REMOTE_EMBEDDING_BATCH_SIZE) {
+            let inputs = batch.iter().map(|(_, text)| text.clone()).collect::<Vec<_>>();
+            let vectors = invoke_embedding_batch(&invoke, &model_ref, inputs).await?;
+            if vectors.len() != batch.len() {
+                return Err(AppError::BadGateway(format!(
+                    "embedding provider returned {} vectors for {} documents",
+                    vectors.len(),
+                    batch.len()
+                )));
+            }
+            for ((document, _), vector) in batch.iter().zip(vectors) {
+                validate_embedding_vector(&vector, Some(dimension), &document.rel_path)?;
+                let similarity = cosine_similarity(&query_vector, &vector).ok_or_else(|| {
+                    AppError::BadGateway(format!(
+                        "embedding provider returned an unusable vector for '{}'",
+                        document.rel_path
+                    ))
+                })?;
+                candidates.push(RetrievalCandidate {
+                    hit: KnowledgeSearchHit {
+                        kb_id: document.kb_id.clone(),
+                        kb_name: document.kb_name.clone(),
+                        rel_path: document.rel_path.clone(),
+                        heading: document.heading.clone(),
+                        snippet: best_snippet(
+                            &document.content,
+                            &query.to_lowercase(),
+                            &query_terms(&query.to_lowercase()),
+                        ),
+                        score: similarity_score(similarity),
+                    },
+                    content: Arc::clone(&document.content),
+                });
+            }
+        }
+        let end_revision = invoke
+            .resolve_task_config(&model_ref, ModelTask::Embedding)
+            .await
+            .map_err(AppError::from)?
+            .config_revision;
+        if end_revision != start_revision {
+            return Err(AppError::Conflict(format!(
+                "embedding provider configuration changed during retrieval (revision {start_revision} -> {end_revision}); retry the search"
+            )));
+        }
+        candidates.sort_by(|a, b| {
+            b.hit
+                .score
+                .cmp(&a.hit.score)
+                .then(a.hit.kb_id.as_str().cmp(b.hit.kb_id.as_str()))
+                .then(a.hit.rel_path.cmp(&b.hit.rel_path))
+        });
+        candidates.truncate(candidate_limit);
+        Ok(candidates)
+    }
+
+    async fn remote_rerank_candidates(
+        &self,
+        candidates: Vec<RetrievalCandidate>,
+        query: &str,
+        limit: usize,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<Vec<RetrievalCandidate>, AppError> {
+        if candidates.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let invoke = self.retrieval_model_invoke()?;
+        let expected = limit.min(candidates.len());
+        let top_n = u32::try_from(expected)
+            .map_err(|_| AppError::BadRequest("knowledge search limit is too large".into()))?;
+        let documents = candidates
+            .iter()
+            .map(retrieval_candidate_text)
+            .collect::<Vec<_>>();
+        let outcome = invoke
+            .invoke(
+                &ModelRef {
+                    provider_id: provider_id.to_owned(),
+                    model: model.to_owned(),
+                },
+                TaskRequest::Rerank(RerankRequest {
+                    query: query.to_owned(),
+                    documents,
+                    top_n: Some(top_n),
+                    extra: serde_json::json!({}),
+                }),
+            )
+            .await
+            .map_err(AppError::from)?;
+        let TaskOutcome::Done(TaskResult::Reranked(results)) = outcome else {
+            return Err(AppError::BadGateway(
+                "rerank provider did not return a completed rerank result".into(),
+            ));
+        };
+        if results.len() != expected {
+            return Err(AppError::BadGateway(format!(
+                "rerank provider returned {} results; expected {expected}",
+                results.len()
+            )));
+        }
+        let mut source = candidates.into_iter().map(Some).collect::<Vec<_>>();
+        let mut ordered = Vec::with_capacity(expected);
+        for result in results {
+            if !result.relevance_score.is_finite() {
+                return Err(AppError::BadGateway(
+                    "rerank provider returned a non-finite relevance score".into(),
+                ));
+            }
+            let Some(slot) = source.get_mut(result.index) else {
+                return Err(AppError::BadGateway(format!(
+                    "rerank provider returned out-of-range index {} for {} candidates",
+                    result.index,
+                    source.len()
+                )));
+            };
+            let Some(mut candidate) = slot.take() else {
+                return Err(AppError::BadGateway(format!(
+                    "rerank provider returned duplicate index {}",
+                    result.index
+                )));
+            };
+            candidate.hit.score = relevance_score(result.relevance_score);
+            ordered.push(candidate);
+        }
+        Ok(ordered)
+    }
+
+    fn retrieval_model_invoke(&self) -> Result<Arc<ModelInvokeService>, AppError> {
+        self.model_invoke
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| AppError::Conflict("knowledge model invocation is not wired".into()))
     }
 
     /// Empty the search content cache (forced refresh / test isolation).
@@ -3379,13 +3755,12 @@ impl KnowledgeService {
     }
 }
 
-fn search_one_knowledge_root(
+fn load_one_knowledge_root(
     kb_id: KnowledgeBaseId,
     kb_name: String,
     root: PathBuf,
-    query: String,
     cache: Arc<RwLock<SearchCacheInner>>,
-) -> Vec<KnowledgeSearchHit> {
+) -> Vec<RetrievalDocument> {
     if let Err(error) = validate_knowledge_root(&root) {
         tracing::warn!(
             knowledge_base_id = %kb_id,
@@ -3395,9 +3770,7 @@ fn search_one_knowledge_root(
         );
         return Vec::new();
     }
-    let query_lc = query.to_lowercase();
-    let terms = query_terms(&query_lc);
-    let mut hits = Vec::new();
+    let mut documents = Vec::new();
     for entry in vault_walker(&root) {
         if !entry.file_type().is_file() {
             continue;
@@ -3482,20 +3855,179 @@ fn search_one_knowledge_root(
                 }
                 (content, heading)
             };
-        if let Some((score, snippet)) =
-            score_md(&rel, &heading, &content, &query_lc, &terms)
-        {
-            hits.push(KnowledgeSearchHit {
-                kb_id: kb_id.clone(),
-                kb_name: kb_name.clone(),
-                rel_path: rel,
-                heading: heading.to_string(),
-                snippet,
-                score,
-            });
+        documents.push(RetrievalDocument {
+            kb_id: kb_id.clone(),
+            kb_name: kb_name.clone(),
+            rel_path: rel,
+            heading: heading.to_string(),
+            content,
+        });
+    }
+    documents
+}
+
+fn local_keyword_candidates(
+    documents: Vec<RetrievalDocument>,
+    query: &str,
+    limit: usize,
+) -> Vec<RetrievalCandidate> {
+    let query_lc = query.to_lowercase();
+    let terms = query_terms(&query_lc);
+    let mut candidates = documents
+        .into_iter()
+        .filter_map(|document| {
+            let (score, snippet) = score_md(
+                &document.rel_path,
+                &document.heading,
+                &document.content,
+                &query_lc,
+                &terms,
+            )?;
+            Some(RetrievalCandidate {
+                hit: KnowledgeSearchHit {
+                    kb_id: document.kb_id,
+                    kb_name: document.kb_name,
+                    rel_path: document.rel_path,
+                    heading: document.heading,
+                    snippet,
+                    score,
+                },
+                content: document.content,
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        b.hit
+            .score
+            .cmp(&a.hit.score)
+            .then(a.hit.kb_id.as_str().cmp(b.hit.kb_id.as_str()))
+            .then(a.hit.rel_path.cmp(&b.hit.rel_path))
+    });
+    candidates.truncate(limit);
+    candidates
+}
+
+fn retrieval_document_text(document: &RetrievalDocument) -> String {
+    let body = document
+        .content
+        .chars()
+        .take(REMOTE_RETRIEVAL_MAX_DOCUMENT_CHARS)
+        .collect::<String>();
+    format!(
+        "Knowledge base: {}\nPath: {}\nHeading: {}\n\n{}",
+        document.kb_name, document.rel_path, document.heading, body
+    )
+}
+
+fn retrieval_candidate_text(candidate: &RetrievalCandidate) -> String {
+    let body = candidate
+        .content
+        .chars()
+        .take(REMOTE_RETRIEVAL_MAX_DOCUMENT_CHARS)
+        .collect::<String>();
+    format!(
+        "Knowledge base: {}\nPath: {}\nHeading: {}\n\n{}",
+        candidate.hit.kb_name, candidate.hit.rel_path, candidate.hit.heading, body
+    )
+}
+
+async fn invoke_embedding_batch(
+    invoke: &ModelInvokeService,
+    model_ref: &ModelRef,
+    inputs: Vec<String>,
+) -> Result<Vec<Vec<f32>>, AppError> {
+    let expected = inputs.len();
+    let outcome = invoke
+        .invoke(
+            model_ref,
+            TaskRequest::Embedding(EmbedRequest {
+                inputs,
+                extra: serde_json::json!({}),
+            }),
+        )
+        .await
+        .map_err(AppError::from)?;
+    let TaskOutcome::Done(TaskResult::Embeddings(vectors)) = outcome else {
+        return Err(AppError::BadGateway(
+            "embedding provider did not return completed embedding vectors".into(),
+        ));
+    };
+    if vectors.len() != expected {
+        return Err(AppError::BadGateway(format!(
+            "embedding provider returned {} vectors for {expected} inputs",
+            vectors.len()
+        )));
+    }
+    Ok(vectors)
+}
+
+fn validate_embedding_vector(
+    vector: &[f32],
+    expected_dimension: Option<usize>,
+    label: &str,
+) -> Result<(), AppError> {
+    if vector.is_empty() {
+        return Err(AppError::BadGateway(format!(
+            "embedding provider returned an empty vector for '{label}'"
+        )));
+    }
+    if let Some(expected) = expected_dimension {
+        if vector.len() != expected {
+            return Err(AppError::BadGateway(format!(
+                "embedding provider returned dimension {} for '{label}'; expected {expected}",
+                vector.len()
+            )));
         }
     }
-    hits
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(AppError::BadGateway(format!(
+            "embedding provider returned a non-finite vector for '{label}'"
+        )));
+    }
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>();
+    if !norm.is_finite() || norm <= f64::EPSILON {
+        return Err(AppError::BadGateway(format!(
+            "embedding provider returned a zero-norm vector for '{label}'"
+        )));
+    }
+    Ok(())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0f64;
+    let mut left_norm = 0.0f64;
+    let mut right_norm = 0.0f64;
+    for (left, right) in left.iter().zip(right) {
+        let left = f64::from(*left);
+        let right = f64::from(*right);
+        if !left.is_finite() || !right.is_finite() {
+            return None;
+        }
+        dot += left * right;
+        left_norm += left * left;
+        right_norm += right * right;
+    }
+    let denominator = left_norm.sqrt() * right_norm.sqrt();
+    if !denominator.is_finite() || denominator <= f64::EPSILON {
+        return None;
+    }
+    let similarity = dot / denominator;
+    similarity.is_finite().then_some(similarity.clamp(-1.0, 1.0) as f32)
+}
+
+fn similarity_score(similarity: f32) -> u32 {
+    (((f64::from(similarity).clamp(-1.0, 1.0) + 1.0) * 500_000.0).round()) as u32
+}
+
+fn relevance_score(score: f32) -> u32 {
+    (f64::from(score).max(0.0).min(f64::from(u32::MAX) / 1_000_000.0) * 1_000_000.0)
+        .round() as u32
 }
 
 /// Conversation-delete hook: drop the conversation's knowledge binding so
@@ -6563,6 +7095,71 @@ mod tests {
     const TEST_KB_PENDING: &str = "0190f5fe-7c00-7a00-8000-000000000091";
     const TEST_KB_LIVE: &str = "0190f5fe-7c00-7a00-8000-000000000092";
     const TEST_KB_STAMPED: &str = "0190f5fe-7c00-7a00-8000-000000000093";
+
+    fn retrieval_document(index: usize, content: impl Into<Arc<str>>) -> RetrievalDocument {
+        RetrievalDocument {
+            kb_id: KnowledgeBaseId::new(),
+            kb_name: "docs".into(),
+            rel_path: format!("doc-{index}.md"),
+            heading: format!("Document {index}"),
+            content: content.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_embedding_rejects_document_count_before_any_invoke() {
+        let service = test_service();
+        let documents = (0..=REMOTE_RETRIEVAL_MAX_DOCUMENTS)
+            .map(|index| retrieval_document(index, "body"))
+            .collect();
+        let error = service
+            .remote_embedding_candidates(
+                documents,
+                "query",
+                10,
+                TEST_PROVIDER_ID_2,
+                "embedding-model",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, AppError::BadRequest(ref message) if message.contains("at most 128")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_embedding_rejects_total_summary_budget_before_any_invoke() {
+        let service = test_service();
+        let content = "x".repeat(REMOTE_RETRIEVAL_MAX_DOCUMENT_CHARS);
+        let documents = (0..65)
+            .map(|index| retrieval_document(index, Arc::<str>::from(content.clone())))
+            .collect();
+        let error = service
+            .remote_embedding_candidates(
+                documents,
+                "query",
+                10,
+                TEST_PROVIDER_ID_2,
+                "embedding-model",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, AppError::BadRequest(ref message) if message.contains("character query-time document budget")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn embedding_vector_validation_and_cosine_are_strict() {
+        assert!(validate_embedding_vector(&[], None, "empty").is_err());
+        assert!(validate_embedding_vector(&[0.0, 0.0], None, "zero").is_err());
+        assert!(validate_embedding_vector(&[1.0, f32::NAN], None, "nan").is_err());
+        assert!(validate_embedding_vector(&[1.0], Some(2), "short").is_err());
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]), Some(1.0));
+        assert_eq!(cosine_similarity(&[1.0], &[1.0, 0.0]), None);
+    }
 
     #[test]
     fn canonical_entity_target_id_accepts_bare_uuidv7_and_rejects_legacy_prefix() {

@@ -15,22 +15,23 @@ import React, { useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Down, MagicWand, Search } from '@icon-park/react';
-import type { GenMode, ModelOption } from './genTypes';
+import type { GenMode, ImageGeneratorTask, ModelOption } from './genTypes';
 import { useGeneratorModels } from './useGeneratorModels';
 import Floating from './Floating';
 import type { ProviderId } from '@/common/types/ids';
 
 export interface ModelPickerProps {
   mode: GenMode;
+  imageTask: ImageGeneratorTask;
   providerId?: ProviderId;
   model?: string;
   onChange: (opt: ModelOption) => void;
 }
 
-const ModelPicker: React.FC<ModelPickerProps> = ({ mode, providerId, model, onChange }) => {
+const ModelPicker: React.FC<ModelPickerProps> = ({ mode, imageTask, providerId, model, onChange }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { groups, flat, hasProviders } = useGeneratorModels(mode);
+  const { groups, flat, hasProviders } = useGeneratorModels(mode, imageTask);
 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -76,7 +77,8 @@ const ModelPicker: React.FC<ModelPickerProps> = ({ mode, providerId, model, onCh
 
   const goToModelHub = (): void => {
     setOpen(false);
-    navigate(`/models?section=${MODEL_HUB_SECTION[mode]}`);
+    const section = mode === 'image' && imageTask === 'image_edit' ? 'image-edit' : MODEL_HUB_SECTION[mode];
+    navigate(`/models?section=${section}`);
   };
 
   return (

@@ -1,26 +1,39 @@
 //! Contracts for reusable NomiFun presets and their execution snapshots.
 
-use std::collections::HashMap;
 use nomifun_common::KnowledgeBaseId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PresetSource { Builtin, User, Extension }
+pub enum PresetSource {
+    Builtin,
+    User,
+    Extension,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum PresetTarget { Conversation, ExecutionStep, Companion, Cron }
+pub enum PresetTarget {
+    Conversation,
+    ExecutionStep,
+    Companion,
+    Cron,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PresetTagDimension { Audience, Scenario }
+pub enum PresetTagDimension {
+    Audience,
+    Scenario,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentPreference {
     #[serde(deserialize_with = "crate::serde_util::deserialize_agent_id")]
     pub agent_id: String,
-    #[serde(default)] pub required: bool,
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// Provider-qualified model reference. `provider_id` and `model` are one fixed
@@ -35,7 +48,8 @@ pub struct ModelPreference {
     pub provider_id: Option<String>,
     #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
     pub model: String,
-    #[serde(default)] pub required: bool,
+    #[serde(default)]
+    pub required: bool,
 }
 
 impl<'de> Deserialize<'de> for ModelPreference {
@@ -72,26 +86,37 @@ impl<'de> Deserialize<'de> for ModelPreference {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillBinding {
     pub skill_name: String,
-    #[serde(default)] pub required: bool,
+    #[serde(default)]
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KnowledgeBaseBinding {
     pub knowledge_base_id: KnowledgeBaseId,
-    #[serde(default)] pub required: bool,
+    #[serde(default)]
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PresetKnowledgePolicy {
-    #[serde(default)] pub enabled: bool,
-    #[serde(default)] pub writeback: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub eagerness: Option<String>,
-    #[serde(default)] pub grounded: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub writeback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eagerness: Option<String>,
+    #[serde(default)]
+    pub grounded: bool,
 }
 
 impl Default for PresetKnowledgePolicy {
     fn default() -> Self {
-        Self { enabled: false, writeback: false, eagerness: None, grounded: false }
+        Self {
+            enabled: false,
+            writeback: false,
+            eagerness: None,
+            grounded: false,
+        }
     }
 }
 
@@ -101,28 +126,52 @@ pub struct PresetResponse {
     pub preset_id: String,
     pub revision: i64,
     pub source: PresetSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub source_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
     pub name: String,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")] pub name_i18n: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")] pub description_i18n: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub routing_description: Option<String>,
-    #[serde(default)] pub instructions: String,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")] pub instructions_i18n: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub avatar: Option<String>,
-    #[serde(default)] pub fallback_allowed: bool,
-    #[serde(default)] pub targets: Vec<PresetTarget>,
-    #[serde(default)] pub agent_preferences: Vec<AgentPreference>,
-    #[serde(default)] pub model_preferences: Vec<ModelPreference>,
-    #[serde(default)] pub included_skills: Vec<SkillBinding>,
-    #[serde(default)] pub excluded_auto_skills: Vec<String>,
-    #[serde(default)] pub knowledge_policy: PresetKnowledgePolicy,
-    #[serde(default)] pub knowledge_bases: Vec<KnowledgeBaseBinding>,
-    #[serde(default)] pub examples: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")] pub examples_i18n: HashMap<String, Vec<String>>,
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_uuidv7_vec")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub name_i18n: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub description_i18n: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_description: Option<String>,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub instructions_i18n: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub fallback_allowed: bool,
+    #[serde(default)]
+    pub targets: Vec<PresetTarget>,
+    #[serde(default)]
+    pub agent_preferences: Vec<AgentPreference>,
+    #[serde(default)]
+    pub model_preferences: Vec<ModelPreference>,
+    #[serde(default)]
+    pub included_skills: Vec<SkillBinding>,
+    #[serde(default)]
+    pub excluded_auto_skills: Vec<String>,
+    #[serde(default)]
+    pub knowledge_policy: PresetKnowledgePolicy,
+    #[serde(default)]
+    pub knowledge_bases: Vec<KnowledgeBaseBinding>,
+    #[serde(default)]
+    pub examples: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub examples_i18n: HashMap<String, Vec<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_uuidv7_vec"
+    )]
     pub audience_tag_ids: Vec<String>,
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_uuidv7_vec")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_uuidv7_vec"
+    )]
     pub scenario_tag_ids: Vec<String>,
     /// Readable catalog keys for in-process capability inference. They are
     /// derived from UUIDv7 bindings and never cross the public wire.
@@ -139,7 +188,8 @@ pub struct PresetResponse {
     )]
     pub preferred_agent_id: Option<String>,
     pub sort_order: i32,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub last_used_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,27 +201,50 @@ pub struct CreatePresetRequest {
     )]
     pub preset_id: Option<String>,
     pub name: String,
-    #[serde(default)] pub description: Option<String>,
-    #[serde(default)] pub routing_description: Option<String>,
-    #[serde(default)] pub instructions: String,
-    #[serde(default)] pub avatar: Option<String>,
-    #[serde(default)] pub fallback_allowed: bool,
-    #[serde(default)] pub targets: Vec<PresetTarget>,
-    #[serde(default)] pub agent_preferences: Vec<AgentPreference>,
-    #[serde(default)] pub model_preferences: Vec<ModelPreference>,
-    #[serde(default)] pub included_skills: Vec<SkillBinding>,
-    #[serde(default)] pub excluded_auto_skills: Vec<String>,
-    #[serde(default)] pub knowledge_policy: PresetKnowledgePolicy,
-    #[serde(default)] pub knowledge_bases: Vec<KnowledgeBaseBinding>,
-    #[serde(default)] pub examples: Vec<String>,
-    #[serde(default)] pub examples_i18n: HashMap<String, Vec<String>>,
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_uuidv7_vec")]
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub routing_description: Option<String>,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub fallback_allowed: bool,
+    #[serde(default)]
+    pub targets: Vec<PresetTarget>,
+    #[serde(default)]
+    pub agent_preferences: Vec<AgentPreference>,
+    #[serde(default)]
+    pub model_preferences: Vec<ModelPreference>,
+    #[serde(default)]
+    pub included_skills: Vec<SkillBinding>,
+    #[serde(default)]
+    pub excluded_auto_skills: Vec<String>,
+    #[serde(default)]
+    pub knowledge_policy: PresetKnowledgePolicy,
+    #[serde(default)]
+    pub knowledge_bases: Vec<KnowledgeBaseBinding>,
+    #[serde(default)]
+    pub examples: Vec<String>,
+    #[serde(default)]
+    pub examples_i18n: HashMap<String, Vec<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_uuidv7_vec"
+    )]
     pub audience_tag_ids: Vec<String>,
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_uuidv7_vec")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_uuidv7_vec"
+    )]
     pub scenario_tag_ids: Vec<String>,
-    #[serde(default)] pub name_i18n: HashMap<String, String>,
-    #[serde(default)] pub description_i18n: HashMap<String, String>,
-    #[serde(default)] pub instructions_i18n: HashMap<String, String>,
+    #[serde(default)]
+    pub name_i18n: HashMap<String, String>,
+    #[serde(default)]
+    pub description_i18n: HashMap<String, String>,
+    #[serde(default)]
+    pub instructions_i18n: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -192,9 +265,15 @@ pub struct UpdatePresetRequest {
     pub knowledge_bases: Option<Vec<KnowledgeBaseBinding>>,
     pub examples: Option<Vec<String>>,
     pub examples_i18n: Option<HashMap<String, Vec<String>>>,
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_optional_uuidv7_vec")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_uuidv7_vec"
+    )]
     pub audience_tag_ids: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_optional_uuidv7_vec")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_uuidv7_vec"
+    )]
     pub scenario_tag_ids: Option<Vec<String>>,
     pub name_i18n: Option<HashMap<String, String>>,
     pub description_i18n: Option<HashMap<String, String>>,
@@ -229,8 +308,10 @@ pub struct PresetOverrides {
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub instructions: Option<String>,
-    #[serde(default)] pub include_skills: Vec<String>,
-    #[serde(default)] pub exclude_skills: Vec<String>,
+    #[serde(default)]
+    pub include_skills: Vec<String>,
+    #[serde(default)]
+    pub exclude_skills: Vec<String>,
     pub knowledge_policy: Option<PresetKnowledgePolicy>,
     #[serde(default)]
     pub knowledge_base_ids: Option<Vec<KnowledgeBaseId>>,
@@ -292,8 +373,10 @@ impl<'de> Deserialize<'de> for PresetOverrides {
 #[serde(deny_unknown_fields)]
 pub struct ResolvePresetRequest {
     pub target: PresetTarget,
-    #[serde(default)] pub locale: Option<String>,
-    #[serde(default)] pub overrides: PresetOverrides,
+    #[serde(default)]
+    pub locale: Option<String>,
+    #[serde(default)]
+    pub overrides: PresetOverrides,
 }
 
 /// Persist this execution-time materialization with the target object. Later
@@ -305,23 +388,32 @@ pub struct ResolvedPresetSnapshot {
     pub preset_revision: i64,
     pub preset_name: String,
     pub target: PresetTarget,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub routing_description: Option<String>,
-    #[serde(default)] pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_description: Option<String>,
+    #[serde(default)]
+    pub instructions: String,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_util::deserialize_optional_agent_id"
     )]
     pub resolved_agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub resolved_agent_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub resolved_agent_backend: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub resolved_model: Option<ModelPreference>,
-    #[serde(default)] pub included_skills: Vec<String>,
-    #[serde(default)] pub excluded_auto_skills: Vec<String>,
-    #[serde(default)] pub knowledge_policy: PresetKnowledgePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_agent_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<ModelPreference>,
+    #[serde(default)]
+    pub included_skills: Vec<String>,
+    #[serde(default)]
+    pub excluded_auto_skills: Vec<String>,
+    #[serde(default)]
+    pub knowledge_policy: PresetKnowledgePolicy,
     #[serde(default)]
     pub knowledge_base_ids: Vec<KnowledgeBaseId>,
-    #[serde(default)] pub warnings: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,33 +424,46 @@ pub struct PresetTagResponse {
     pub key: String,
     pub dimension: PresetTagDimension,
     pub label: String,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")] pub label_i18n: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub label_i18n: HashMap<String, String>,
     pub sort_order: i32,
     pub builtin: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreatePresetTagRequest { pub dimension: PresetTagDimension, pub label: String }
+pub struct CreatePresetTagRequest {
+    pub dimension: PresetTagDimension,
+    pub label: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct UpdatePresetTagRequest { pub label: Option<String>, pub sort_order: Option<i32> }
+pub struct UpdatePresetTagRequest {
+    pub label: Option<String>,
+    pub sort_order: Option<i32>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImportPresetsRequest { pub presets: Vec<CreatePresetRequest> }
+pub struct ImportPresetsRequest {
+    pub presets: Vec<CreatePresetRequest>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ImportPresetsResult {
     pub imported: usize,
     pub skipped: usize,
     pub failed: usize,
-    #[serde(default)] pub errors: Vec<PresetImportError>,
+    #[serde(default)]
+    pub errors: Vec<PresetImportError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PresetImportError { pub preset_id: String, pub error: String }
+pub struct PresetImportError {
+    pub preset_id: String,
+    pub error: String,
+}
 
 #[cfg(test)]
 mod tests {
@@ -370,14 +475,24 @@ mod tests {
     const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
     #[test]
     fn provider_qualified_model_round_trips() {
-        let model = ModelPreference { provider_id: Some(PROVIDER_ID.into()), model: "gpt-5".into(), required: true };
+        let model = ModelPreference {
+            provider_id: Some(PROVIDER_ID.into()),
+            model: "gpt-5".into(),
+            required: true,
+        };
         let value = serde_json::to_value(&model).unwrap();
         assert_eq!(value["provider_id"], PROVIDER_ID);
-        assert_eq!(serde_json::from_value::<ModelPreference>(value).unwrap(), model);
+        assert_eq!(
+            serde_json::from_value::<ModelPreference>(value).unwrap(),
+            model
+        );
     }
     #[test]
     fn target_names_are_stable_snake_case() {
-        assert_eq!(serde_json::to_string(&PresetTarget::ExecutionStep).unwrap(), "\"execution_step\"");
+        assert_eq!(
+            serde_json::to_string(&PresetTarget::ExecutionStep).unwrap(),
+            "\"execution_step\""
+        );
     }
 
     #[test]
@@ -431,7 +546,11 @@ mod tests {
 
     #[test]
     fn preset_id_is_always_a_bare_uuid_v7() {
-        for id in [PRESET_ID, "word-creator", "preset_0190f5fe-7c00-7a00-8abc-012345678901"] {
+        for id in [
+            PRESET_ID,
+            "word-creator",
+            "preset_0190f5fe-7c00-7a00-8abc-012345678901",
+        ] {
             let raw = json!({
                 "preset_id": id,
                 "preset_revision": 1,
@@ -496,10 +615,12 @@ mod tests {
         let typed: &KnowledgeBaseId = &binding.knowledge_base_id;
         assert_eq!(typed, &id);
 
-        assert!(serde_json::from_value::<KnowledgeBaseBinding>(json!({
-            "knowledge_base_id": "kb_docs"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<KnowledgeBaseBinding>(json!({
+                "knowledge_base_id": "kb_docs"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -543,10 +664,7 @@ mod tests {
             assert_eq!(tag.preset_tag_id, PRESET_TAG_ID);
             assert_eq!(tag.key, key);
         }
-        for key in [
-            "Research",
-            "research/tag",
-        ] {
+        for key in ["Research", "research/tag"] {
             let raw = json!({
                 "preset_tag_id": PRESET_TAG_ID,
                 "key": key,
@@ -557,7 +675,10 @@ mod tests {
             });
             assert!(serde_json::from_value::<PresetTagResponse>(raw).is_err());
         }
-        for invalid_id in ["research", "preset_tag_0190f5fe-7c00-7a00-8000-000000000004"] {
+        for invalid_id in [
+            "research",
+            "preset_tag_0190f5fe-7c00-7a00-8000-000000000004",
+        ] {
             let raw = json!({
                 "preset_tag_id": invalid_id,
                 "key": "research",

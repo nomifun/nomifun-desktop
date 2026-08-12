@@ -7,7 +7,11 @@ use nomifun_api_types::{
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationSource, ConversationStatus, TimestampMs};
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::SkillResolver;
-use nomifun_db::{IProviderRepository, SqliteConversationRepository};
+use nomifun_db::{
+    IProviderModelRepository, IProviderRepository, NewProviderModel,
+    NewProviderModelCapability, SqliteConversationRepository,
+    SqliteProviderModelRepository,
+};
 use nomifun_realtime::UserEventSink;
 use serde_json::json;
 use std::path::PathBuf;
@@ -103,7 +107,74 @@ async fn setup_with_workspace_root(
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
     let provider_repo = nomifun_db::SqliteProviderRepository::new(db.pool().clone());
-    provider_repo.create(nomifun_db::CreateProviderParams { provider_id: Some("0190f5fe-7c00-7a00-8000-000000000001"), platform: "openai", name: "test", base_url: "https://example.invalid", api_key_encrypted: "", models: "[\"m1\",\"gpt-4o\",\"claude-sonnet-4-20250514\"]", enabled: true, model_context_limits: None, model_protocols: None, model_descriptions: None, model_enabled: None, bedrock_config: None, is_full_url: false, sort_order: Some(0) }).await.unwrap();
+    let chat = [NewProviderModelCapability {
+        task: "chat",
+        traits: "[]",
+        protocol: "openai.chat_text",
+        connection_role: "default",
+        provider_params: "{}",
+        ..Default::default()
+    }];
+    let initial_model = NewProviderModel {
+        model: "m1",
+        enabled: true,
+        sort_order: 0,
+        description: None,
+        capabilities: &chat,
+    };
+    let encrypted_credentials = nomifun_common::encrypt_string(
+        r#"{"api_keys":["test-only"]}"#,
+        &[0x42; 32],
+    )
+    .unwrap();
+    provider_repo
+        .create(
+            nomifun_db::CreateProviderParams {
+                provider_id: Some("0190f5fe-7c00-7a00-8000-000000000001"),
+                platform: "openai",
+                name: "test",
+                base_url: "https://example.invalid",
+                auth_scheme: "bearer",
+                credentials_encrypted: &encrypted_credentials,
+                enabled: true,
+                bedrock_config: None,
+                sort_order: Some(0),
+            },
+            &initial_model,
+            &[],
+        )
+        .await
+        .unwrap();
+    let model_repo = SqliteProviderModelRepository::new(db.pool().clone());
+    for (sort_order, model) in [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "claude-sonnet-4-20250514",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let config_revision = provider_repo
+            .find_by_id("0190f5fe-7c00-7a00-8000-000000000001")
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision;
+        model_repo
+            .save(
+                "0190f5fe-7c00-7a00-8000-000000000001",
+                config_revision,
+                &NewProviderModel {
+                    model,
+                    enabled: true,
+                    sort_order: sort_order as i64 + 1,
+                    description: None,
+                    capabilities: &chat,
+                },
+            )
+            .await
+            .unwrap();
+    }
     let broadcaster = Arc::new(TestBroadcaster::new());
     let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));

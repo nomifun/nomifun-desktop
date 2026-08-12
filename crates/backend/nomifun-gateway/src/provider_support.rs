@@ -7,6 +7,7 @@
 //! provider's first model → hard error with guidance.
 
 use nomifun_common::ProviderWithModel;
+use nomifun_api_types::ModelTask;
 use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
@@ -18,19 +19,44 @@ pub(crate) struct ProviderSummary {
     pub name: String,
     pub platform: String,
     pub enabled: bool,
-    /// Effective model ids: the provider's `provider_models` rows filtered by
-    /// their per-row `enabled` flag, in `sort_order` order.
-    pub models: Vec<String>,
+    /// Enabled model rows with their authoritative task capabilities, in
+    /// model `sort_order` order.
+    pub models: Vec<ProviderModelSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderModelSummary {
+    pub model: String,
+    pub capabilities: Vec<ModelTask>,
+}
+
+impl ProviderModelSummary {
+    fn supports(&self, task: ModelTask) -> bool {
+        self.capabilities.contains(&task)
+    }
 }
 
 pub(crate) fn summarize_provider(
     row: &nomifun_db::models::Provider,
     model_rows: &[nomifun_db::ProviderModelRow],
+    capability_rows: &[nomifun_db::ProviderModelCapabilityRow],
 ) -> ProviderSummary {
     let models = model_rows
         .iter()
         .filter(|model_row| model_row.provider_id == row.provider_id && model_row.enabled)
-        .map(|model_row| model_row.model.clone())
+        .map(|model_row| ProviderModelSummary {
+            model: model_row.model.clone(),
+            capabilities: capability_rows
+                .iter()
+                .filter(|capability| {
+                    capability.provider_id == model_row.provider_id
+                        && capability.model == model_row.model
+                })
+                .filter_map(|capability| {
+                    serde_json::from_value(serde_json::Value::String(capability.task.clone())).ok()
+                })
+                .collect(),
+        })
         .collect();
     ProviderSummary {
         provider_id: row.provider_id.clone(),
@@ -54,9 +80,14 @@ pub(crate) async fn load_provider_summaries(deps: &GatewayDeps) -> Result<Vec<Pr
         .list()
         .await
         .map_err(|e| json!({"error": format!("failed to list provider models: {e}")}))?;
+    let capability_rows = deps
+        .provider_model_capability_repo
+        .list()
+        .await
+        .map_err(|e| json!({"error": format!("failed to list provider model capabilities: {e}")}))?;
     Ok(rows
         .iter()
-        .map(|row| summarize_provider(row, &model_rows))
+        .map(|row| summarize_provider(row, &model_rows, &capability_rows))
         .collect())
 }
 
@@ -94,12 +125,27 @@ pub(crate) fn resolve_model_chain(
         }
         Ok(p)
     };
+    let require_chat_model = |provider: &ProviderSummary, model: &str| -> Result<(), String> {
+        if provider
+            .models
+            .iter()
+            .any(|candidate| candidate.model == model && candidate.supports(ModelTask::Chat))
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "model '{model}' is disabled, missing, or has no chat capability for provider '{}' ({})",
+                provider.name, provider.provider_id
+            ))
+        }
+    };
 
     if let Some(explicit) = explicit_model {
         explicit.validate()?;
         let pid = explicit.provider_id.as_str();
         let model = explicit.use_model.as_deref().unwrap_or(&explicit.model);
-        require_enabled(pid)?;
+        let provider = require_enabled(pid)?;
+        require_chat_model(provider, model)?;
         return Ok(ResolvedModel {
             provider_id: pid.to_owned(),
             model: model.to_owned(),
@@ -110,7 +156,13 @@ pub(crate) fn resolve_model_chain(
     if let Some((pid, model)) = companion_model
         && !pid.is_empty()
         && !model.is_empty()
-        && find(pid).map(|p| p.enabled).unwrap_or(false)
+        && find(pid).is_some_and(|provider| {
+            provider.enabled
+                && provider
+                    .models
+                    .iter()
+                    .any(|candidate| candidate.model == model && candidate.supports(ModelTask::Chat))
+        })
     {
         return Ok(ResolvedModel {
             provider_id: pid.to_owned(),
@@ -119,10 +171,19 @@ pub(crate) fn resolve_model_chain(
         });
     }
 
-    if let Some(p) = providers.iter().find(|p| p.enabled && !p.models.is_empty()) {
+    if let Some((p, model)) = providers.iter().find_map(|provider| {
+        if !provider.enabled {
+            return None;
+        }
+        provider
+            .models
+            .iter()
+            .find(|model| model.supports(ModelTask::Chat))
+            .map(|model| (provider, model))
+    }) {
         return Ok(ResolvedModel {
             provider_id: p.provider_id.clone(),
-            model: p.models[0].clone(),
+            model: model.model.clone(),
             source: "first_available_provider",
         });
     }
@@ -210,7 +271,13 @@ mod tests {
             name: format!("name-{id}"),
             platform: "openai".to_owned(),
             enabled,
-            models: models.iter().map(|m| m.to_string()).collect(),
+            models: models
+                .iter()
+                .map(|model| ProviderModelSummary {
+                    model: (*model).to_owned(),
+                    capabilities: vec![ModelTask::Chat],
+                })
+                .collect(),
         }
     }
 
@@ -228,11 +295,11 @@ mod tests {
             provider(PROVIDER_ID_1, true, &["m1"]),
             provider(PROVIDER_ID_2, true, &["m2"]),
         ];
-        let explicit = model(PROVIDER_ID_2, "custom-model");
+        let explicit = model(PROVIDER_ID_2, "m2");
         let r =
             resolve_model_chain(Some(&explicit), Some((PROVIDER_ID_1, "m1")), &providers).unwrap();
         assert_eq!(r.provider_id, PROVIDER_ID_2);
-        assert_eq!(r.model, "custom-model");
+        assert_eq!(r.model, "m2");
         assert_eq!(r.source, "explicit");
     }
 
@@ -327,11 +394,16 @@ mod tests {
             platform: "openai".into(),
             name: "P1".into(),
             base_url: String::new(),
-            api_key_encrypted: String::new(),
+            auth_scheme: "bearer".into(),
+            credentials_encrypted: nomifun_common::encrypt_string(
+                r#"{"api_keys":["test-only"]}"#,
+                &[0x42; 32],
+            )
+            .unwrap(),
             enabled: true,
             bedrock_config: None,
-            is_full_url: false,
             sort_order: 0,
+            config_revision: 1,
             created_at: 0,
             updated_at: 0,
         };
@@ -341,16 +413,7 @@ mod tests {
             model: model.into(),
             enabled,
             sort_order,
-            tasks: "[]".into(),
-            traits: "[]".into(),
-            protocol: None,
-            connection_role: None,
-            params: "{}".into(),
-            context_limit: None,
             description: None,
-            source: "inferred".into(),
-            health: None,
-            health_checked_at: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -359,7 +422,41 @@ mod tests {
             model_row("b", false, 1),
             model_row("c", true, 2),
         ];
-        let s = summarize_provider(&row, &rows);
-        assert_eq!(s.models, vec!["a".to_owned(), "c".to_owned()]);
+        let capability = |model: &str| nomifun_db::ProviderModelCapabilityRow {
+            id: 0,
+            provider_id: provider_id.clone(),
+            model: model.into(),
+            task: "chat".into(),
+            traits: "[]".into(),
+            protocol: "openai.chat_text".into(),
+            connection_role: "default".into(),
+            base_url_override: None,
+            endpoint: None,
+            poll_endpoint: None,
+            content_endpoint: None,
+            realtime_endpoint: None,
+            allow_cross_origin_credentials: false,
+            provider_params: "{}".into(),
+            context_limit: None,
+            health: None,
+            health_checked_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let capabilities = vec![capability("a"), capability("b"), capability("c")];
+        let s = summarize_provider(&row, &rows, &capabilities);
+        assert_eq!(
+            s.models.iter().map(|model| model.model.as_str()).collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+    }
+
+    #[test]
+    fn explicit_model_requires_chat_capability() {
+        let mut provider = provider(PROVIDER_ID_1, true, &["m1"]);
+        provider.models[0].capabilities = vec![ModelTask::SpeechSynthesis];
+        let err = resolve_model_chain(Some(&model(PROVIDER_ID_1, "m1")), None, &[provider])
+            .unwrap_err();
+        assert!(err.contains("no chat capability"), "{err}");
     }
 }

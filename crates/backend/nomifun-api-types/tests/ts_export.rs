@@ -1,20 +1,18 @@
-//! ts-rs contract generation for the P0 provider domain: a cargo test IS the
-//! generator (same pattern as `nomifun-ai-agent`'s protocol events / the
-//! `AgentExecutionEventKind` binding in `nomifun-common`). Each binding is
-//! rendered via `export_to_string` and written into
-//! `ui/src/common/protocolBindings/` only when its content changed, so a plain
-//! `cargo test -p nomifun-api-types` keeps the committed TypeScript in sync
-//! and CI fails loudly if a type cannot render.
-
 use std::path::Path;
 
 use ts_rs::{Config, TS};
 
 use nomifun_api_types::{
-    CatalogModelRef, CloneProviderRequest, CreateProviderModelRequest, HealthStatus,
-    ModelHealthStatus, ModelTask, ModelTrait, ProfileSource, ProviderConnectionResponse,
-    ProviderModelKeyRequest, ProviderModelResponse, ResolveModelsRequest, ResolveModelsResponse,
-    UpdateProviderModelRequest, UpsertProviderConnectionRequest,
+    AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, HealthStatus,
+    KnowledgeEmbeddingConfig, KnowledgeRerankConfig, KnowledgeRetrievalConfig,
+    ModelProtocolManifestResponse, ModelTask, ModelTrait, PlatformPresetDescriptor,
+    ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
+    ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
+    ProtocolTaskDescriptor, ProtocolTransportKind, ProviderConnectionInput,
+    ProviderConnectionResponse, ProviderHealthCheckErrorKind, ProviderHealthCheckRequest,
+    ProviderHealthCheckResponse, ProviderModelCapabilityInput, ProviderModelCapabilityResponse,
+    ProviderModelInput, ProviderModelKeyRequest, ProviderModelResponse,
+    SaveProviderConnectionRequest, SaveProviderModelRequest,
 };
 
 fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
@@ -23,10 +21,7 @@ fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../ui/src/common/protocolBindings")
         .join(file_name);
-    let unchanged = std::fs::read_to_string(&path)
-        .map(|current| current == generated)
-        .unwrap_or(false);
-    if !unchanged {
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(&generated) {
         std::fs::write(&path, generated)
             .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
     }
@@ -34,79 +29,106 @@ fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
 
 #[test]
 fn export_provider_domain_bindings() {
-    // Vocabulary enums.
+    export_binding_if_changed::<KnowledgeEmbeddingConfig>("KnowledgeEmbeddingConfig.ts");
+    export_binding_if_changed::<KnowledgeRerankConfig>("KnowledgeRerankConfig.ts");
+    export_binding_if_changed::<KnowledgeRetrievalConfig>("KnowledgeRetrievalConfig.ts");
     export_binding_if_changed::<ModelTask>("ModelTask.ts");
     export_binding_if_changed::<ModelTrait>("ModelTrait.ts");
-    export_binding_if_changed::<ProfileSource>("ProfileSource.ts");
     export_binding_if_changed::<HealthStatus>("HealthStatus.ts");
-    // Row-level provider model catalog DTOs.
-    export_binding_if_changed::<ModelHealthStatus>("ModelHealthStatus.ts");
+    export_binding_if_changed::<ProviderHealthCheckErrorKind>("ProviderHealthCheckErrorKind.ts");
+    export_binding_if_changed::<ProviderHealthCheckRequest>("ProviderHealthCheckRequest.ts");
+    export_binding_if_changed::<ProviderHealthCheckResponse>("ProviderHealthCheckResponse.ts");
+    export_binding_if_changed::<CapabilityHealth>("CapabilityHealth.ts");
+    export_binding_if_changed::<ProviderModelCapabilityInput>("ProviderModelCapabilityInput.ts");
+    export_binding_if_changed::<ProviderModelCapabilityResponse>(
+        "ProviderModelCapabilityResponse.ts",
+    );
+    export_binding_if_changed::<ProviderModelInput>("ProviderModelInput.ts");
     export_binding_if_changed::<ProviderModelResponse>("ProviderModelResponse.ts");
-    export_binding_if_changed::<CreateProviderModelRequest>("CreateProviderModelRequest.ts");
-    export_binding_if_changed::<UpdateProviderModelRequest>("UpdateProviderModelRequest.ts");
+    export_binding_if_changed::<SaveProviderModelRequest>("SaveProviderModelRequest.ts");
     export_binding_if_changed::<ProviderModelKeyRequest>("ProviderModelKeyRequest.ts");
-    // Connection profiles.
+    export_binding_if_changed::<ProviderConnectionInput>("ProviderConnectionInput.ts");
+    export_binding_if_changed::<SaveProviderConnectionRequest>("SaveProviderConnectionRequest.ts");
     export_binding_if_changed::<ProviderConnectionResponse>("ProviderConnectionResponse.ts");
-    export_binding_if_changed::<UpsertProviderConnectionRequest>("UpsertProviderConnectionRequest.ts");
-    // Catalog resolution + provider clone.
-    export_binding_if_changed::<CatalogModelRef>("CatalogModelRef.ts");
-    export_binding_if_changed::<ResolveModelsRequest>("ResolveModelsRequest.ts");
-    export_binding_if_changed::<ResolveModelsResponse>("ResolveModelsResponse.ts");
     export_binding_if_changed::<CloneProviderRequest>("CloneProviderRequest.ts");
+    export_binding_if_changed::<ProtocolExecutorKind>("ProtocolExecutorKind.ts");
+    export_binding_if_changed::<ProtocolTransportKind>("ProtocolTransportKind.ts");
+    export_binding_if_changed::<ProtocolScope>("ProtocolScope.ts");
+    export_binding_if_changed::<ProtocolEndpointPurpose>("ProtocolEndpointPurpose.ts");
+    export_binding_if_changed::<ProtocolEndpointDescriptor>("ProtocolEndpointDescriptor.ts");
+    export_binding_if_changed::<ProtocolDefaultConnection>("ProtocolDefaultConnection.ts");
+    export_binding_if_changed::<ProtocolDescriptor>("ProtocolDescriptor.ts");
+    export_binding_if_changed::<ProtocolTaskDescriptor>("ProtocolTaskDescriptor.ts");
+    export_binding_if_changed::<PlatformPresetDescriptor>("PlatformPresetDescriptor.ts");
+    export_binding_if_changed::<ProtocolRecommendation>("ProtocolRecommendation.ts");
+    export_binding_if_changed::<AuthSchemeDescriptor>("AuthSchemeDescriptor.ts");
+    export_binding_if_changed::<ModelProtocolManifestResponse>("ModelProtocolManifestResponse.ts");
 }
 
-/// The emitted shapes must mirror the serde wire truth — especially the
-/// double-Option tri-state fields (`x?: T | null`) and the `unknown` mapping
-/// for opaque `serde_json::Value` payloads.
 #[test]
-fn generated_shapes_mirror_serde_truth() {
+fn generated_shapes_mirror_single_source_wire_contract() {
     let cfg = Config::default();
+    let connection_create = ProviderConnectionInput::export_to_string(&cfg).unwrap();
+    assert!(
+        connection_create.contains("credentials: unknown,"),
+        "got: {connection_create}"
+    );
+    assert!(
+        !connection_create.contains("credentials?: unknown,"),
+        "got: {connection_create}"
+    );
+    let connection_save = SaveProviderConnectionRequest::export_to_string(&cfg).unwrap();
+    assert!(
+        connection_save.contains("credentials?: unknown,"),
+        "got: {connection_save}"
+    );
 
-    let update = UpdateProviderModelRequest::export_to_string(&cfg).unwrap();
-    // Double-Option: absent = keep, null = clear, value = set → `x?: T | null`.
-    assert!(update.contains("protocol?: string | null,"), "got: {update}");
-    assert!(update.contains("connection_role?: string | null,"), "got: {update}");
-    assert!(update.contains("context_limit?: number | null,"), "got: {update}");
-    assert!(update.contains("description?: string | null,"), "got: {update}");
-    // Opaque params → unknown; identity keys stay required.
-    assert!(update.contains("params?: unknown,"), "got: {update}");
-    assert!(update.contains("provider_id: string,"), "got: {update}");
-    assert!(update.contains("model: string,"), "got: {update}");
+    let save = SaveProviderModelRequest::export_to_string(&cfg).unwrap();
+    assert!(save.contains("provider_id: string,"), "got: {save}");
+    assert!(save.contains("model: ProviderModelInput,"), "got: {save}");
+
+    let capability = ProviderModelCapabilityResponse::export_to_string(&cfg).unwrap();
+    assert!(
+        capability.contains("protocol: string,"),
+        "got: {capability}"
+    );
+    assert!(
+        capability.contains("connection_role: string,"),
+        "got: {capability}"
+    );
+    assert!(
+        capability.contains("provider_params: unknown,"),
+        "got: {capability}"
+    );
+    assert!(
+        capability.contains("health?: CapabilityHealth,"),
+        "got: {capability}"
+    );
+    assert!(
+        capability.contains("context_limit?: number,"),
+        "got: {capability}"
+    );
 
     let response = ProviderModelResponse::export_to_string(&cfg).unwrap();
-    // skip_serializing_if optionals → `x?: T` (never null on the wire).
-    assert!(response.contains("protocol?: string,"), "got: {response}");
-    assert!(response.contains("health?: ModelHealthStatus,"), "got: {response}");
-    assert!(response.contains("health_checked_at?: number,"), "got: {response}");
-    // i64 renders as number (plain JSON numbers on this API), not bigint.
-    assert!(response.contains("sort_order: number,"), "got: {response}");
-    assert!(!response.contains("bigint"), "got: {response}");
-    assert!(response.contains("params: unknown,"), "got: {response}");
+    assert!(response.contains("capabilities: Array<ProviderModelCapabilityResponse>"));
+    assert!(!response.contains("protocol?:"));
+    assert!(!response.contains("tasks:"));
 
     let connection = ProviderConnectionResponse::export_to_string(&cfg).unwrap();
-    assert!(connection.contains("extra: unknown,"), "got: {connection}");
-    assert!(connection.contains("label?: string,"), "got: {connection}");
-    assert!(connection.contains("has_credentials: boolean,"), "got: {connection}");
+    assert!(!connection.contains("is_full_url"));
+    assert!(connection.contains("extra: unknown,"));
 
-    let clone = CloneProviderRequest::export_to_string(&cfg).unwrap();
-    assert!(clone.contains("name?: string | null"), "got: {clone}");
+    let manifest = ModelProtocolManifestResponse::export_to_string(&cfg).unwrap();
+    assert!(manifest.contains("tasks: Array<ModelTask>"));
+    assert!(manifest.contains("platform_default_base_url: string | null"));
+    assert!(manifest.contains("recommendation: ProtocolRecommendation | null"));
 
-    // Enum vocabularies stay snake_case wire values.
-    let task = ModelTask::export_to_string(&cfg).unwrap();
-    for value in [
-        "\"chat\"",
-        "\"image_generation\"",
-        "\"image_edit\"",
-        "\"video_generation\"",
-        "\"speech_synthesis\"",
-        "\"speech_recognition\"",
-        "\"embedding\"",
-        "\"rerank\"",
-    ] {
-        assert!(task.contains(value), "ModelTask missing {value}: {task}");
-    }
-    let health = HealthStatus::export_to_string(&cfg).unwrap();
-    assert!(health.contains("\"unknown\" | \"healthy\" | \"unhealthy\""), "got: {health}");
-    let source = ProfileSource::export_to_string(&cfg).unwrap();
-    assert!(source.contains("\"inferred\" | \"user\""), "got: {source}");
+    let recommendation = ProtocolRecommendation::export_to_string(&cfg).unwrap();
+    assert!(recommendation.contains("default_auth_scheme: string | null"));
+    assert!(recommendation.contains("base_url_override_required: boolean"));
+
+    let connection = ProtocolDefaultConnection::export_to_string(&cfg).unwrap();
+    assert!(connection.contains("connection_role: string | null"));
+    assert!(connection.contains("auth_scheme: string"));
+    assert!(connection.contains("requires_credentials: boolean"));
 }

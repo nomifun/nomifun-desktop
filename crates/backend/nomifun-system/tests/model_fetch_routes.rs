@@ -3,7 +3,7 @@
 //! Uses `wiremock` to mock remote API responses and tests the full
 //! HTTP flow: request -> handler -> remote API call -> response.
 
-use std::sync::Arc;
+mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -15,12 +15,11 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use nomifun_common::{ProviderId, encrypt_string};
 use nomifun_db::{
-    CreateProviderParams, IProviderRepository, SqliteClientPreferenceRepository,
-    SqliteProviderRepository, SqliteSettingsRepository, init_database_memory,
+    CreateProviderParams, IProviderRepository, NewProviderModel, NewProviderModelCapability,
+    SqliteProviderRepository, init_database_memory,
 };
 use nomifun_system::{
-    ClientPrefService, ModelFetchService, ProtocolDetectionService, ProviderService,
-    SettingsService, SystemRouterState, VersionCheckService, system_routes,
+    SystemRouterState, VersionCheckService, system_routes,
 };
 
 // ---------------------------------------------------------------------------
@@ -30,40 +29,17 @@ use nomifun_system::{
 const TEST_KEY: [u8; 32] = [0x42; 32];
 
 fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
-    let provider_repo = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
     let http_client = reqwest::Client::builder().no_proxy().build().unwrap();
-    SystemRouterState {
-        settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(
-            db.pool().clone(),
-        ))),
-        client_pref_service: ClientPrefService::new(Arc::new(
-            SqliteClientPreferenceRepository::new(db.pool().clone()),
-        )),
-        provider_service: ProviderService::new(
-            provider_repo.clone(),
-            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
-            TEST_KEY,
-        ),
-        provider_connection_service: nomifun_system::ProviderConnectionService::new(
-            std::sync::Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(db.pool().clone())),
-            provider_repo.clone(),
-            TEST_KEY,
-        ),
-        model_fetch_service: ModelFetchService::new(provider_repo.clone(), TEST_KEY, http_client.clone()),
-        model_profile_service: nomifun_system::ModelProfileService::new(std::sync::Arc::new(
-            nomifun_db::SqliteProviderModelRepository::new(db.pool().clone()),
-        )),
-        provider_model_service: nomifun_system::ProviderModelService::new(
-            std::sync::Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
-            provider_repo.clone(),
-        ),
-        managed_model_service: None,
-        protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
-        version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),
-        data_dir: std::env::temp_dir(),
-        work_dir: std::env::temp_dir(),
-        work_dir_is_cli_override: false,
-    }
+    common::build_system_state(
+        db,
+        TEST_KEY,
+        http_client.clone(),
+        VersionCheckService::new(http_client, "0.1.0".to_owned()),
+        None,
+        std::env::temp_dir(),
+        std::env::temp_dir(),
+        false,
+    )
 }
 
 async fn setup() -> (axum::Router, nomifun_db::Database) {
@@ -78,25 +54,55 @@ async fn create_provider(
     base_url: &str,
     api_key: &str,
 ) -> String {
+    create_provider_with_credentials(
+        db,
+        platform,
+        base_url,
+        json!({"api_keys":[api_key]}),
+    )
+    .await
+}
+
+async fn create_provider_with_credentials(
+    db: &nomifun_db::Database,
+    platform: &str,
+    base_url: &str,
+    credentials: serde_json::Value,
+) -> String {
     let repo = SqliteProviderRepository::new(db.pool().clone());
-    let encrypted = encrypt_string(api_key, &TEST_KEY).unwrap();
-    let row = repo
+    let encrypted = encrypt_string(&credentials.to_string(), &TEST_KEY).unwrap();
+    let capabilities = [NewProviderModelCapability {
+        task: "chat",
+        traits: "[]",
+        protocol: "openai.chat_text",
+        connection_role: "default",
+        provider_params: "{}",
+        ..Default::default()
+    }];
+    let initial_model = NewProviderModel {
+        model: "test-model",
+        enabled: true,
+        capabilities: &capabilities,
+        ..Default::default()
+    };
+    let (row, _) = repo
         .create(CreateProviderParams {
             provider_id: None,
             platform,
             name: "Test Provider",
             base_url,
-            api_key_encrypted: &encrypted,
-            models: "[]",
+            auth_scheme: match platform {
+                "deepgram" => "token",
+                "anthropic" | "claude" => "header_key:x-api-key",
+                "gemini" => "header_key:x-goog-api-key",
+                "bedrock" => "bedrock",
+                _ => "bearer",
+            },
+            credentials_encrypted: &encrypted,
             enabled: true,
-            model_context_limits: None,
-            model_protocols: None,
-            model_descriptions: None,
-            model_enabled: None,
             bedrock_config: None,
-            is_full_url: false,
             sort_order: None,
-        })
+        }, &initial_model, &[])
         .await
         .unwrap();
     row.provider_id
@@ -133,7 +139,7 @@ async fn fetch_models_nonexistent_provider() {
 }
 
 #[tokio::test]
-async fn fetch_models_vertex_ai_hardcoded() {
+async fn fetch_models_vertex_ai_rejects_the_retired_mixed_preset() {
     let (router, db) = setup().await;
     let id = create_provider(&db, "vertex-ai", "https://unused", "fake-key").await;
     let req = post_request(
@@ -141,15 +147,7 @@ async fn fetch_models_vertex_ai_hardcoded() {
         json!({"try_fix": false}),
     );
     let resp = router.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    let models = json["data"]["models"].as_array().unwrap();
-    assert_eq!(models.len(), 2);
-    assert_eq!(models[0]["id"], "gemini-2.5-pro");
-    assert_eq!(models[1]["id"], "gemini-2.5-flash");
-    assert!(json["data"].get("fixed_base_url").is_none());
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -164,11 +162,7 @@ async fn fetch_models_minimax_hardcoded() {
     let models = json["data"]["models"].as_array().unwrap();
     assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
     assert!(models.iter().any(|model| model["id"] == "MiniMax-M2.7"));
-    assert!(
-        models
-            .iter()
-            .any(|model| model["id"] == "MiniMax-Text-01")
-    );
+    assert!(!models.iter().any(|model| model["id"] == "MiniMax-Text-01"));
 }
 
 #[tokio::test]
@@ -239,7 +233,7 @@ async fn fetch_models_minimax_coding_plan_falls_back_to_supported_coding_models(
     assert!(
         models
             .iter()
-            .any(|model| model["id"] == "MiniMax-M2.1")
+            .any(|model| model["id"] == "MiniMax-M2.7-highspeed")
     );
 }
 
@@ -276,7 +270,7 @@ async fn fetch_models_glm_coding_plan_falls_back_to_supported_coding_models() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert!(models.iter().any(|model| model["id"] == "glm-5.2"));
-    assert!(models.iter().any(|model| model["id"] == "glm-5"));
+    assert!(models.iter().any(|model| model["id"] == "glm-5-turbo"));
     assert!(models.iter().any(|model| model["id"] == "glm-4.7"));
 }
 
@@ -436,7 +430,7 @@ async fn fetch_models_stepfun_prefers_live_catalog() {
 }
 
 #[tokio::test]
-async fn fetch_models_openai_compatible_uses_first_comma_separated_key() {
+async fn fetch_models_openai_compatible_uses_first_typed_key() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/models"))
@@ -448,7 +442,13 @@ async fn fetch_models_openai_compatible_uses_first_comma_separated_key() {
         .await;
 
     let (router, db) = setup().await;
-    let id = create_provider(&db, "openai", &mock_server.uri(), "first-key,second-key").await;
+    let id = create_provider_with_credentials(
+        &db,
+        "openai",
+        &mock_server.uri(),
+        json!({"api_keys":["first-key","second-key"]}),
+    )
+    .await;
 
     let req = post_request(
         &format!("/api/providers/{id}/models"),
@@ -769,7 +769,8 @@ async fn fetch_models_anonymous_returns_models_for_valid_input() {
         json!({
             "platform": "openai",
             "base_url": mock_server.uri(),
-            "api_key": "sk-anon"
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys":["sk-anon"]}
         }),
     );
     let resp = router.oneshot(req).await.unwrap();
@@ -781,7 +782,7 @@ async fn fetch_models_anonymous_returns_models_for_valid_input() {
 }
 
 #[tokio::test]
-async fn fetch_models_anonymous_uses_first_comma_separated_key() {
+async fn fetch_models_anonymous_uses_first_typed_key() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/models"))
@@ -798,7 +799,8 @@ async fn fetch_models_anonymous_uses_first_comma_separated_key() {
         json!({
             "platform": "openai",
             "base_url": mock_server.uri(),
-            "api_key": "first-key,second-key"
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys":["first-key","second-key"]}
         }),
     );
     let resp = router.oneshot(req).await.unwrap();
@@ -809,6 +811,35 @@ async fn fetch_models_anonymous_uses_first_comma_separated_key() {
 }
 
 #[tokio::test]
+async fn fetch_models_anonymous_applies_the_explicit_custom_auth_scheme() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("x-api-key", "custom-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "custom-model"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let (router, _db) = setup().await;
+    let response = router
+        .oneshot(post_request(
+            "/api/providers/fetch-models",
+            json!({
+                "platform": "custom-provider",
+                "base_url": mock_server.uri(),
+                "auth_scheme": "header_key:x-api-key",
+                "credentials": {"api_keys":["custom-key"]}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["data"]["models"][0]["id"], "custom-model");
+}
+
+#[tokio::test]
 async fn fetch_models_anonymous_rejects_empty_api_key() {
     let (router, _db) = setup().await;
     let req = post_request(
@@ -816,7 +847,8 @@ async fn fetch_models_anonymous_rejects_empty_api_key() {
         json!({
             "platform": "openai",
             "base_url": "https://api.openai.com",
-            "api_key": "   "
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys":["   "]}
         }),
     );
     let resp = router.oneshot(req).await.unwrap();
@@ -832,7 +864,8 @@ async fn fetch_models_anonymous_minimax_hardcoded() {
         json!({
             "platform": "minimax",
             "base_url": "https://unused",
-            "api_key": "fake"
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys":["fake"]}
         }),
     );
     let resp = router.oneshot(req).await.unwrap();
@@ -840,11 +873,7 @@ async fn fetch_models_anonymous_minimax_hardcoded() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
-    assert!(
-        models
-            .iter()
-            .any(|model| model["id"] == "MiniMax-Text-01")
-    );
+    assert!(!models.iter().any(|model| model["id"] == "MiniMax-Text-01"));
 }
 
 #[tokio::test]
@@ -857,7 +886,7 @@ async fn fetch_models_route_literal_segment_beats_id_shadowing() {
     let (router, _db) = setup().await;
     let req = post_request("/api/providers/fetch-models", json!({}));
     let resp = router.oneshot(req).await.unwrap();
-    // Missing "platform" / "base_url" / "api_key" — anonymous handler
+    // Missing "platform" / "base_url" / "credentials" — anonymous handler
     // rejects with 400 via JSON deserialization failure, not 404 from the
     // by-id handler.
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);

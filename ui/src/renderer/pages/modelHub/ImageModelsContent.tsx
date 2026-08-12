@@ -5,12 +5,14 @@
  */
 
 import React from 'react';
-import CreationModelsPanel from './CreationModelsPanel';
+import { Pic } from '@icon-park/react';
+import ModalityModelsPanel from './ModalityModelsPanel';
 
-/** 图像生成区：能出图的模型（image_generation ∪ image_edit 的投影）。 */
+/** Image generation is independent from image editing. */
 const ImageModelsContent: React.FC = () => (
-  <CreationModelsPanel
-    capability='image_generation'
+  <ModalityModelsPanel
+    modality='image'
+    icon={<Pic theme='outline' size='18' strokeWidth={3} />}
     titleKey='settings.modelHub.creation.imageTitle'
     subtitleKey='settings.modelHub.creation.imageSubtitle'
   />

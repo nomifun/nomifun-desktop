@@ -584,7 +584,10 @@ mod tests {
         assert_eq!(json["schedule"]["expr"], "0 0 9 * * *");
         assert_eq!(json["message"], "Generate report");
         assert_eq!(json["execution_mode"], "new_conversation");
-        assert_eq!(json["metadata"]["conversation_id"], "0190f5fe-7c00-7a00-8abc-012345678901");
+        assert_eq!(
+            json["metadata"]["conversation_id"],
+            "0190f5fe-7c00-7a00-8abc-012345678901"
+        );
         assert_eq!(json["metadata"]["agent_type"], "acp");
         assert_eq!(json["metadata"]["created_by"], "user");
         assert_eq!(json["metadata"]["created_at"], 1700000000000_i64);
@@ -671,7 +674,10 @@ mod tests {
         let req: CreateCronJobRequest = serde_json::from_value(raw).unwrap();
         assert_eq!(req.name, "Daily task");
         assert_eq!(req.message.as_deref(), Some("Do the thing"));
-        assert_eq!(req.conversation_id.as_deref(), Some("0190f5fe-7c00-7a00-8abc-012345678901"));
+        assert_eq!(
+            req.conversation_id.as_deref(),
+            Some("0190f5fe-7c00-7a00-8abc-012345678901")
+        );
         assert_eq!(req.agent_type, "acp");
         assert_eq!(req.created_by, "user");
         assert_eq!(req.execution_mode.as_deref(), Some("new_conversation"));
@@ -858,7 +864,10 @@ mod tests {
     fn list_query_with_conversation_id() {
         let raw = json!({"conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901"});
         let q: ListCronJobsQuery = serde_json::from_value(raw).unwrap();
-        assert_eq!(q.conversation_id.as_deref(), Some("0190f5fe-7c00-7a00-8abc-012345678901"));
+        assert_eq!(
+            q.conversation_id.as_deref(),
+            Some("0190f5fe-7c00-7a00-8abc-012345678901")
+        );
     }
 
     #[test]
@@ -871,8 +880,7 @@ mod tests {
     #[test]
     fn list_query_rejects_numeric_and_malformed_conversation_ids() {
         assert!(
-            serde_json::from_value::<ListCronJobsQuery>(json!({"conversation_id": 7}))
-                .is_err()
+            serde_json::from_value::<ListCronJobsQuery>(json!({"conversation_id": 7})).is_err()
         );
         assert!(
             serde_json::from_value::<ListCronJobsQuery>(json!({"conversation_id": "conv_7"}))
@@ -888,7 +896,10 @@ mod tests {
             conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),
         };
         let json = serde_json::to_value(&r).unwrap();
-        assert_eq!(json["conversation_id"], "0190f5fe-7c00-7a00-8abc-012345678901");
+        assert_eq!(
+            json["conversation_id"],
+            "0190f5fe-7c00-7a00-8abc-012345678901"
+        );
     }
 
     #[test]

@@ -128,6 +128,9 @@ pub struct NomiCompatOverrides {
     pub supports_image: Option<bool>,
     /// Some(true) = gateway requires assistant reasoning_content placeholders.
     pub require_reasoning_content: Option<bool>,
+    /// Provider-native request body fields after local Agent controls have
+    /// been removed. Typed serializer fields overwrite conflicts at send time.
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Fully resolved Nomi configuration passed to the agent manager.

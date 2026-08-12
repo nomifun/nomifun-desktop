@@ -472,10 +472,10 @@ mod tests {
         let provider_id = ProviderId::new().into_string();
         sqlx::query(
             "INSERT INTO providers \
-                (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+                (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
                  created_at, updated_at) \
              VALUES (?, 'openai', 'Creation Test Provider', \
-                 'https://example.invalid', 'encrypted', 1, 0, 0)",
+                 'https://example.invalid', 'bearer', '', 1, 0, 0)",
         )
         .bind(&provider_id)
         .execute(db.pool())

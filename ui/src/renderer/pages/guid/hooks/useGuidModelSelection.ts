@@ -50,8 +50,8 @@ export type GuidModelSelectionResult = {
  * @param agentKey - current provider-based agent (currently only 'nomi')
  */
 export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): GuidModelSelectionResult => {
-  // Chat-capable catalog from the unified backend resolve — replaces the old
-  // duplicate guid/utils/modelUtils name-heuristic implementation.
+  // Exact enabled Chat capabilities replace the deleted duplicate
+  // guid/utils/modelUtils model-name heuristic.
   const { groups } = useModelsForTask('chat');
 
   const modelList = useMemo(() => groups.map((group) => group.provider), [groups]);

@@ -6,7 +6,6 @@
 
 import type { IProvider, TProviderWithModel } from '@/common/config/storage';
 import { compositeKey } from '@/common/utils/compositeKey';
-import { modelHealthOf } from '@/common/utils/providerModels';
 import { iconColors } from '@/renderer/styles/colors';
 import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import type { AcpModelInfo } from '../types';
@@ -18,6 +17,7 @@ import { useNavigate } from 'react-router-dom';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
+import { exactChatHealthDotColor } from './guidModelHealth';
 
 type GuidModelSelectorProps = {
   // Gemini model state
@@ -46,11 +46,11 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
   const defaultModelLabel = t('common.defaultModel');
   const providerLabel = useModelSelectorProviderLabel();
 
-  // 获取模型配置数据（包含健康状态）
+  // Provider rows carry task-scoped health for exact capability lookups.
   const { data: modelConfig } = useProvidersQuery();
 
-  // 统一 chat catalog（后端 resolve，无名称启发式）。modelList 仅约束「允许哪些
-  // 供应商」（如 nomi 模式排除 Google Auth）；模型清单一律来自 catalog 分组。
+  // Unified Chat catalog from exact nested capabilities. modelList only
+  // constrains which providers the caller permits.
   const { groups: chatGroups } = useModelsForTask('chat');
 
   // 过滤掉被禁用的 provider，且仅保留调用方允许的供应商
@@ -100,11 +100,8 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
     const hasModels = enabledGroups.length > 0;
 
     // Per-model health dot color.
-    const healthDotColor = (providerId: string, modelName: string): string | null => {
-      const matchedProvider = modelConfig?.find((p) => p.id === providerId);
-      const healthStatus = modelHealthOf(matchedProvider, modelName)?.status || 'unknown';
-      if (healthStatus === 'unknown') return null;
-      return healthStatus === 'healthy' ? 'bg-green-500' : healthStatus === 'unhealthy' ? 'bg-red-500' : 'bg-gray-400';
+    const healthDotColor = (providerId: IProvider['id'], modelName: string): string | null => {
+      return exactChatHealthDotColor(modelConfig, providerId, modelName);
     };
 
     // Mirror the ACP selector exactly: the droplist is the bare <Menu> (no wrapper
@@ -198,16 +195,6 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
           droplist={
             <Menu selectedKeys={selectedAcpModel ? [selectedAcpModel] : []}>
               {currentAcpCachedModelInfo.available_models.map((model) => {
-                // 获取模型健康状态
-                const providerConfig = modelConfig?.find((p) => p.platform?.includes(''));
-                const healthStatus = modelHealthOf(providerConfig, model.id)?.status || 'unknown';
-                const healthColor =
-                  healthStatus === 'healthy'
-                    ? 'bg-green-500'
-                    : healthStatus === 'unhealthy'
-                      ? 'bg-red-500'
-                      : 'bg-gray-400';
-
                 return (
                   <Menu.Item
                     key={model.id}
@@ -215,9 +202,6 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
                     onClick={() => setSelectedAcpModel(model.id)}
                   >
                     <div className='flex items-center gap-8px w-full'>
-                      {healthStatus !== 'unknown' && (
-                        <div className={`w-6px h-6px rounded-full shrink-0 ${healthColor}`} />
-                      )}
                       <span>{model.label}</span>
                     </div>
                   </Menu.Item>

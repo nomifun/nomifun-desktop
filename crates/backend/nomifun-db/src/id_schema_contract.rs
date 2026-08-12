@@ -74,6 +74,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "preset_user_state",
     "presets",
     "provider_connections",
+    "provider_model_capabilities",
     "provider_models",
     "providers",
     "remote_agents",
@@ -733,6 +734,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("message_correlations", "message_id" => "messages", "message_id", false, "idx_message_correlations_message_id", KeepHistory)
         .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
     text_ref!("provider_connections", "provider_id" => "providers", "provider_id", false, "idx_provider_connections_provider_id", Cascade),
+    text_ref!("provider_model_capabilities", "provider_id" => "providers", "provider_id", false, "idx_provider_model_capabilities_provider_model", Cascade),
     text_ref!("provider_models", "provider_id" => "providers", "provider_id", false, "idx_provider_models_provider_id", Cascade),
     text_ref!("preset_agent_preferences", "preset_id" => "presets", "preset_id", false, "idx_preset_agent_preferences_preset_id", Cascade),
     text_ref!("preset_agent_preferences", "agent_id" => "agent_metadata", "agent_id", false, "idx_preset_agent_preferences_agent_id", Restrict),
@@ -841,6 +843,16 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
     json_text_ref!(
         "client_preferences", "value", "$.provider_id",
         "SELECT json_extract(value, '$.provider_id') AS value FROM client_preferences WHERE (key = 'nomi.defaultModel' OR key = 'knowledge.autogenModel' OR key = 'tools.imageGenerationModel' OR key = 'tools.speechToText' OR key = 'tools.textToSpeech' OR key LIKE 'channels.%.defaultModel') AND json_valid(value)" =>
+        "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
+    ),
+    json_text_ref!(
+        "client_preferences", "value", "$.embedding.provider_id",
+        "SELECT json_extract(value, '$.embedding.provider_id') AS value FROM client_preferences WHERE key = 'knowledge.retrieval' AND json_valid(value) AND json_extract(value, '$.embedding.mode') = 'remote'" =>
+        "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
+    ),
+    json_text_ref!(
+        "client_preferences", "value", "$.rerank.provider_id",
+        "SELECT json_extract(value, '$.rerank.provider_id') AS value FROM client_preferences WHERE key = 'knowledge.retrieval' AND json_valid(value) AND json_extract(value, '$.rerank.mode') = 'remote'" =>
         "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
     ),
     json_text_ref!(
@@ -2656,8 +2668,8 @@ mod tests {
         let provider_id = nomifun_common::ProviderId::new();
         sqlx::query(
             "INSERT INTO providers \
-             (provider_id, platform, name, base_url, api_key_encrypted, created_at, updated_at) \
-             VALUES (?, 'contract', 'Creation audit provider', 'https://example.invalid', '', 1, 1)",
+             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
+             VALUES (?, 'contract', 'Creation audit provider', 'https://example.invalid', 'bearer', '', 1, 1)",
         )
         .bind(provider_id.as_str())
         .execute(pool)

@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 
-use nomifun_common::{
-    CompanionId, CronJobId, DelegationPolicy, RemoteAgentId, UserId,
-};
+use nomifun_common::{CompanionId, CronJobId, DelegationPolicy, RemoteAgentId, UserId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, KnowledgeMcpConfig,
-    KnowledgeMountInfo, McpServerId, OpenMcpConfig, RequirementMcpConfig,
+    BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, KnowledgeMcpConfig, KnowledgeMountInfo,
+    McpServerId, OpenMcpConfig, RequirementMcpConfig,
 };
 
 macro_rules! optional_id_deserializer {
@@ -102,7 +100,6 @@ pub struct SessionMcpServer {
     pub name: String,
     pub transport: SessionMcpTransport,
 }
-
 
 /// ACP-specific fields extracted from `extra` in build runtime options.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -500,9 +497,7 @@ mod tests {
         let extra = AcpBuildExtra {
             browser_mcp_config: Some(BrowserMcpConfig::from_issuer(
                 41_000,
-                std::sync::Arc::new(
-                    nomifun_common::LoopbackCapabilityIssuer::random().unwrap(),
-                ),
+                std::sync::Arc::new(nomifun_common::LoopbackCapabilityIssuer::random().unwrap()),
                 "/usr/bin/nomicore".into(),
             )),
             computer_mcp_config: Some(ComputerMcpConfig {
@@ -517,7 +512,10 @@ mod tests {
             "browser issuer authority must remain process-local"
         );
         assert_eq!(
-            parsed.computer_mcp_config.as_ref().map(|c| c.binary_path.as_str()),
+            parsed
+                .computer_mcp_config
+                .as_ref()
+                .map(|c| c.binary_path.as_str()),
             Some("/usr/bin/nomicore"),
         );
     }
@@ -532,10 +530,9 @@ mod tests {
 
     #[test]
     fn nomi_build_extra_deserializes_delegation_policy() {
-        let extra: NomiBuildExtra = serde_json::from_value(
-            serde_json::json!({ "delegation_policy": "prefer_parallel" }),
-        )
-        .unwrap();
+        let extra: NomiBuildExtra =
+            serde_json::from_value(serde_json::json!({ "delegation_policy": "prefer_parallel" }))
+                .unwrap();
         assert_eq!(extra.delegation_policy, DelegationPolicy::PreferParallel);
     }
 
@@ -543,7 +540,10 @@ mod tests {
     fn nomi_build_extra_delegation_defaults_automatic() {
         let extra: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(extra.delegation_policy, DelegationPolicy::Automatic);
-        assert_eq!(NomiBuildExtra::default().delegation_policy, DelegationPolicy::Automatic);
+        assert_eq!(
+            NomiBuildExtra::default().delegation_policy,
+            DelegationPolicy::Automatic
+        );
     }
 
     #[test]

@@ -50,6 +50,7 @@ export type TParticipantCapability = {
   strengths: string[];
   modalities: string[];
   tools: boolean;
+  web_search: boolean;
   reasoning: string;
   cost_tier: string;
   speed_tier: string;
@@ -113,6 +114,7 @@ export type TStepControlPolicy =
 export type TExecutionStepProfile = {
   kind: string;
   needs_vision: boolean;
+  needs_web_search: boolean;
   needs_long_context: boolean;
   needs_high_reasoning: boolean;
   bulk: boolean;

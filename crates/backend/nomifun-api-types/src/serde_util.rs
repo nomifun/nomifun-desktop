@@ -3,16 +3,48 @@
 use nomifun_common::{
     AgentExecutionId, AgentExecutionTemplateId, AgentId, AttachmentId, ChannelPluginId,
     ChannelSessionId, ChannelUserId, CompanionId, ConversationId, CronJobId, CronJobRunId,
-    MessageId, PresetId, ProviderId, ProviderWithModel, RequirementId, TerminalId,
-    UserId,
+    MessageId, PresetId, ProviderId, ProviderWithModel, RequirementId, TerminalId, UserId,
 };
+
+pub(crate) fn deserialize_non_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(serde::de::Error::custom("value must not be blank"));
+    }
+    Ok(trimmed.to_owned())
+}
+
+pub(crate) fn deserialize_optional_non_empty_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err(serde::de::Error::custom("value must not be blank"))
+            } else {
+                Ok(trimmed.to_owned())
+            }
+        })
+        .transpose()
+}
 
 pub(crate) fn deserialize_model_name<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-    validate_model_name(&value).map(|_| value).map_err(serde::de::Error::custom)
+    validate_model_name(&value)
+        .map(|_| value)
+        .map_err(serde::de::Error::custom)
 }
 
 pub(crate) fn deserialize_optional_model_name<'de, D>(
@@ -38,7 +70,6 @@ fn validate_model_name(value: &str) -> Result<(), &'static str> {
         Ok(())
     }
 }
-
 pub(crate) fn validate_optional_provider_model_pair(
     provider_id: Option<&str>,
     model: Option<&str>,
@@ -81,9 +112,7 @@ macro_rules! string_id_deserializers {
         }
 
         #[allow(dead_code)]
-        pub(crate) fn $optional<'de, D>(
-            deserializer: D,
-        ) -> Result<Option<String>, D::Error>
+        pub(crate) fn $optional<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
@@ -192,9 +221,7 @@ where
         .transpose()
 }
 
-fn deserialize_optional_uuidv7<'de, D>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error>
+fn deserialize_optional_uuidv7<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -283,9 +310,7 @@ macro_rules! string_id_vec_deserializer {
 string_id_vec_deserializer!(deserialize_attachment_ids, AttachmentId);
 string_id_vec_deserializer!(deserialize_requirement_ids, RequirementId);
 
-pub(crate) fn deserialize_preset_tag_key<'de, D>(
-    deserializer: D,
-) -> Result<String, D::Error>
+pub(crate) fn deserialize_preset_tag_key<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -336,34 +361,11 @@ fn is_natural_key(value: &str) -> bool {
         })
 }
 
-/// Deserialize a "double Option" partial-update field, distinguishing the
-/// three JSON states of a nullable column:
-///
-/// - field absent → `None` ("keep current value"; requires `#[serde(default)]`)
-/// - field `null` → `Some(None)` ("clear the value")
-/// - field value  → `Some(Some(v))` ("set the value")
-///
-/// Use as `#[serde(default, deserialize_with =
-/// "crate::serde_util::deserialize_double_option")]`.
-pub(crate) fn deserialize_double_option<'de, T, D>(
-    deserializer: D,
-) -> Result<Option<Option<T>>, D::Error>
-where
-    T: serde::Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    Ok(Some(<Option<T> as serde::Deserialize>::deserialize(
-        deserializer,
-    )?))
-}
-
 /// Deserialize a canonical conversation-or-terminal entity ID.
 ///
 /// The wire representation is string-only. Numeric JSON values, malformed
 /// UUIDs, and IDs from any other entity namespace are rejected.
-pub(crate) fn deserialize_session_target_id<'de, D>(
-    deserializer: D,
-) -> Result<String, D::Error>
+pub(crate) fn deserialize_session_target_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -374,37 +376,5 @@ where
         Err(serde::de::Error::custom(
             "expected a canonical conversation or terminal entity ID",
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use serde::Deserialize;
-
-    #[derive(Debug, Deserialize, PartialEq)]
-    struct DoubleOptionProbe {
-        #[serde(
-            default,
-            deserialize_with = "super::deserialize_double_option"
-        )]
-        value: Option<Option<i64>>,
-    }
-
-    #[test]
-    fn double_option_absent_field_is_none() {
-        let probe: DoubleOptionProbe = serde_json::from_str("{}").unwrap();
-        assert_eq!(probe.value, None, "absent field must mean 'keep'");
-    }
-
-    #[test]
-    fn double_option_null_is_some_none() {
-        let probe: DoubleOptionProbe = serde_json::from_str(r#"{"value":null}"#).unwrap();
-        assert_eq!(probe.value, Some(None), "explicit null must mean 'clear'");
-    }
-
-    #[test]
-    fn double_option_value_is_some_some() {
-        let probe: DoubleOptionProbe = serde_json::from_str(r#"{"value":42}"#).unwrap();
-        assert_eq!(probe.value, Some(Some(42)), "present value must mean 'set'");
     }
 }

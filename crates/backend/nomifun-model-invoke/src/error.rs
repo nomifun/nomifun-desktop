@@ -74,11 +74,33 @@ impl InvokeError {
 
     /// Classify a reqwest transport error: timeout → [`InvokeErrorKind::Timeout`],
     /// anything else → [`InvokeErrorKind::Network`].
+    ///
+    /// The message intentionally excludes the source error because reqwest may
+    /// render a complete request URL containing query-key credentials.
     pub fn network(e: &reqwest::Error) -> Self {
         if e.is_timeout() {
-            Self::new(InvokeErrorKind::Timeout, format!("request timed out: {e}"))
+            Self::new(InvokeErrorKind::Timeout, "upstream request timed out")
+        } else if e.is_connect() {
+            Self::new(InvokeErrorKind::Network, "could not connect to upstream provider")
+        } else if e.is_body() {
+            Self::new(InvokeErrorKind::Network, "upstream response body transfer failed")
+        } else if e.is_decode() {
+            Self::new(InvokeErrorKind::Network, "upstream response decoding failed")
+        } else if e.is_request() {
+            Self::new(InvokeErrorKind::Network, "upstream request could not be sent")
         } else {
-            Self::new(InvokeErrorKind::Network, format!("request failed: {e}"))
+            Self::new(InvokeErrorKind::Network, "upstream network request failed")
+        }
+    }
+
+    /// Map a `Response::json` failure without copying `reqwest::Error`'s
+    /// display text. The source may carry the complete response URL (including
+    /// query-key credentials), so only a URL-free operation label is retained.
+    pub fn response_json(context: &str, e: &reqwest::Error) -> Self {
+        if e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() {
+            Self::network(e)
+        } else {
+            Self::parse(format!("{context}: upstream response was not valid JSON"))
         }
     }
 
@@ -90,6 +112,16 @@ impl InvokeError {
     /// The default `ProtocolAdapter::poll` failure ([`InvokeErrorKind::NotPollable`]).
     pub fn not_pollable() -> Self {
         Self::new(InvokeErrorKind::NotPollable, "this adapter does not support polling")
+    }
+
+    /// Preserve machine-readable classification while removing exact runtime
+    /// credential representations from an adapter/provider diagnostic.
+    pub(crate) fn redacted(
+        mut self,
+        redactor: &nomifun_net::secret_redaction::SecretRedactor,
+    ) -> Self {
+        self.message = redactor.redact(&self.message);
+        self
     }
 }
 

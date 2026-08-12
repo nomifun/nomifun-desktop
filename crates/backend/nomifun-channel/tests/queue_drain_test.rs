@@ -25,10 +25,10 @@ use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
 use nomifun_db::models::{NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow};
 use nomifun_db::{
-    CreateProviderParams, IChannelRepository, IProviderRepository,
-    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteChannelRepository,
-    SqliteClientPreferenceRepository, SqliteConversationRepository, SqliteProviderRepository,
-    init_database_memory,
+    CreateProviderParams, IChannelRepository, IProviderRepository, NewProviderModel,
+    NewProviderModelCapability, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
+    SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
+    SqliteProviderRepository, init_database_memory,
 };
 use nomifun_realtime::{BroadcastEventBus, UserEventSink};
 use nomifun_db::sqlx;
@@ -259,23 +259,38 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
 
     // Provider + default telegram model so channel conversations can be created.
     let providers = SqliteProviderRepository::new(pool.clone());
+    let chat = [NewProviderModelCapability {
+        task: "chat",
+        traits: "[]",
+        protocol: "openai.chat_text",
+        connection_role: "default",
+        provider_params: "{}",
+        ..Default::default()
+    }];
+    let initial_model = NewProviderModel {
+        model: "drain-model",
+        enabled: true,
+        sort_order: 0,
+        description: None,
+        capabilities: &chat,
+    };
+    let credentials_encrypted = nomifun_common::encrypt_string(
+        r#"{"api_keys":["test-only"]}"#,
+        &[0x42; 32],
+    )
+    .unwrap();
     providers
         .create(CreateProviderParams {
             provider_id: Some(PROVIDER),
             platform: "openai",
             name: "Queue drain provider",
-            base_url: "https://example.invalid/v1",
-            api_key_encrypted: "test-only",
-            models: r#"["drain-model"]"#,
+            base_url: "https://example.invalid",
+            auth_scheme: "bearer",
+            credentials_encrypted: &credentials_encrypted,
             enabled: true,
-            model_context_limits: None,
-            model_protocols: None,
-            model_descriptions: None,
-            model_enabled: None,
             bedrock_config: None,
-            is_full_url: false,
             sort_order: None,
-        })
+        }, &initial_model, &[])
         .await
         .unwrap();
     let prefs = SqliteClientPreferenceRepository::new(pool.clone());

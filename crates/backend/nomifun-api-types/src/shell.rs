@@ -80,9 +80,8 @@ pub const TEXT_TO_SPEECH_PREFERENCE_KEY: &str = "tools.textToSpeech";
 /// which provider voice. Every companion whose `voice.tts` slot is empty falls
 /// back to this.
 ///
-/// There is no legacy un-namespaced twin (the key is new in this release), so
-/// unlike [`SpeechToTextConfig`] there is nothing to migrate and no embedded
-/// credential shape to reject.
+/// There is no un-namespaced twin: provider credentials and transport belong
+/// exclusively to the provider/model capability catalog.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextToSpeechConfig {
@@ -110,68 +109,23 @@ impl TextToSpeechConfig {
 // Speech-to-text types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SpeechToTextProvider {
-    Openai,
-    Deepgram,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct SpeechToTextResult {
     pub text: String,
     pub model: String,
-    pub provider: SpeechToTextProvider,
+    /// Resolved provider platform identifier, for display/diagnostics only.
+    pub provider: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenAISpeechToTextConfig {
-    pub api_key: String,
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
-    pub is_full_url: bool,
-    #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
-    pub model: String,
-    #[serde(default)]
-    pub language: Option<String>,
-    #[serde(default)]
-    pub prompt: Option<String>,
-    #[serde(default)]
-    pub temperature: Option<f64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeepgramSpeechToTextConfig {
-    pub api_key: String,
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
-    pub model: String,
-    #[serde(default)]
-    pub language: Option<String>,
-    #[serde(default)]
-    pub detect_language: Option<bool>,
-    #[serde(default)]
-    pub punctuate: Option<bool>,
-    #[serde(default)]
-    pub smart_format: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SpeechToTextConfig {
     pub enabled: bool,
-    pub provider: SpeechToTextProvider,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub language: Option<String>,
     pub auto_send: Option<bool>,
-    pub openai: Option<OpenAISpeechToTextConfig>,
-    pub deepgram: Option<DeepgramSpeechToTextConfig>,
 }
 
 impl<'de> Deserialize<'de> for SpeechToTextConfig {
@@ -183,7 +137,6 @@ impl<'de> Deserialize<'de> for SpeechToTextConfig {
         #[serde(deny_unknown_fields)]
         struct Wire {
             enabled: bool,
-            provider: SpeechToTextProvider,
             #[serde(
                 default,
                 deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
@@ -198,10 +151,6 @@ impl<'de> Deserialize<'de> for SpeechToTextConfig {
             language: Option<String>,
             #[serde(default)]
             auto_send: Option<bool>,
-            #[serde(default)]
-            openai: Option<OpenAISpeechToTextConfig>,
-            #[serde(default)]
-            deepgram: Option<DeepgramSpeechToTextConfig>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -212,13 +161,10 @@ impl<'de> Deserialize<'de> for SpeechToTextConfig {
         .map_err(serde::de::Error::custom)?;
         Ok(Self {
             enabled: wire.enabled,
-            provider: wire.provider,
             provider_id: wire.provider_id,
             model: wire.model,
             language: wire.language,
             auto_send: wire.auto_send,
-            openai: wire.openai,
-            deepgram: wire.deepgram,
         })
     }
 }
@@ -234,8 +180,14 @@ mod tests {
     #[test]
     fn tool_type_serializes_lowercase() {
         assert_eq!(serde_json::to_value(ToolType::Vscode).unwrap(), "vscode");
-        assert_eq!(serde_json::to_value(ToolType::Terminal).unwrap(), "terminal");
-        assert_eq!(serde_json::to_value(ToolType::Explorer).unwrap(), "explorer");
+        assert_eq!(
+            serde_json::to_value(ToolType::Terminal).unwrap(),
+            "terminal"
+        );
+        assert_eq!(
+            serde_json::to_value(ToolType::Explorer).unwrap(),
+            "explorer"
+        );
     }
 
     #[test]
@@ -376,31 +328,6 @@ mod tests {
         assert!(serde_json::from_value::<TtsApiRequest>(raw).is_err());
     }
 
-    // -- SpeechToTextProvider --
-
-    #[test]
-    fn stt_provider_serializes_lowercase() {
-        assert_eq!(serde_json::to_value(SpeechToTextProvider::Openai).unwrap(), "openai");
-        assert_eq!(
-            serde_json::to_value(SpeechToTextProvider::Deepgram).unwrap(),
-            "deepgram"
-        );
-    }
-
-    #[test]
-    fn stt_provider_deserializes_lowercase() {
-        let o: SpeechToTextProvider = serde_json::from_str(r#""openai""#).unwrap();
-        assert_eq!(o, SpeechToTextProvider::Openai);
-        let d: SpeechToTextProvider = serde_json::from_str(r#""deepgram""#).unwrap();
-        assert_eq!(d, SpeechToTextProvider::Deepgram);
-    }
-
-    #[test]
-    fn stt_provider_rejects_unknown() {
-        let result = serde_json::from_str::<SpeechToTextProvider>(r#""azure""#);
-        assert!(result.is_err());
-    }
-
     // -- SpeechToTextResult --
 
     #[test]
@@ -408,13 +335,13 @@ mod tests {
         let result = SpeechToTextResult {
             text: "hello world".to_owned(),
             model: "whisper-1".to_owned(),
-            provider: SpeechToTextProvider::Openai,
+            provider: "stepfun".to_owned(),
             language: Some("en".to_owned()),
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["text"], "hello world");
         assert_eq!(json["model"], "whisper-1");
-        assert_eq!(json["provider"], "openai");
+        assert_eq!(json["provider"], "stepfun");
         assert_eq!(json["language"], "en");
     }
 
@@ -423,7 +350,7 @@ mod tests {
         let result = SpeechToTextResult {
             text: "test".to_owned(),
             model: "nova-2".to_owned(),
-            provider: SpeechToTextProvider::Deepgram,
+            provider: "deepgram".to_owned(),
             language: None,
         };
         let json = serde_json::to_value(&result).unwrap();
@@ -433,117 +360,46 @@ mod tests {
     // -- SpeechToTextConfig --
 
     #[test]
-    fn stt_config_full_openai() {
+    fn stt_config_uses_only_catalog_coordinates() {
         let raw = json!({
             "enabled": true,
-            "provider": "openai",
+            "provider_id": "018f0000-0000-7000-8000-000000000001",
+            "model": "step-asr",
+            "language": "zh",
             "auto_send": true,
-            "openai": {
-                "api_key": "sk-test",
-                "base_url": "https://api.openai.com",
-                "model": "whisper-1",
-                "language": "en",
-                "prompt": "technical terms",
-                "temperature": 0.2
-            }
         });
         let config: SpeechToTextConfig = serde_json::from_value(raw).unwrap();
         assert!(config.enabled);
-        assert_eq!(config.provider, SpeechToTextProvider::Openai);
+        assert_eq!(
+            config.provider_id.as_deref(),
+            Some("018f0000-0000-7000-8000-000000000001")
+        );
+        assert_eq!(config.model.as_deref(), Some("step-asr"));
+        assert_eq!(config.language.as_deref(), Some("zh"));
         assert_eq!(config.auto_send, Some(true));
-        let openai = config.openai.unwrap();
-        assert_eq!(openai.api_key, "sk-test");
-        assert_eq!(openai.base_url.as_deref(), Some("https://api.openai.com"));
-        assert_eq!(openai.model, "whisper-1");
-        assert_eq!(openai.language.as_deref(), Some("en"));
-        assert_eq!(openai.prompt.as_deref(), Some("technical terms"));
-        assert_eq!(openai.temperature, Some(0.2));
-        assert!(config.deepgram.is_none());
-    }
-
-    #[test]
-    fn stt_config_full_deepgram() {
-        let raw = json!({
-            "enabled": true,
-            "provider": "deepgram",
-            "deepgram": {
-                "api_key": "dg-test",
-                "model": "nova-2",
-                "language": "zh",
-                "detect_language": true,
-                "punctuate": true,
-                "smart_format": false
-            }
-        });
-        let config: SpeechToTextConfig = serde_json::from_value(raw).unwrap();
-        assert!(config.enabled);
-        assert_eq!(config.provider, SpeechToTextProvider::Deepgram);
-        assert!(config.auto_send.is_none());
-        assert!(config.openai.is_none());
-        let dg = config.deepgram.unwrap();
-        assert_eq!(dg.api_key, "dg-test");
-        assert!(dg.base_url.is_none());
-        assert_eq!(dg.model, "nova-2");
-        assert_eq!(dg.language.as_deref(), Some("zh"));
-        assert_eq!(dg.detect_language, Some(true));
-        assert_eq!(dg.punctuate, Some(true));
-        assert_eq!(dg.smart_format, Some(false));
     }
 
     #[test]
     fn stt_config_minimal() {
         let raw = json!({
-            "enabled": false,
-            "provider": "openai"
+            "enabled": false
         });
         let config: SpeechToTextConfig = serde_json::from_value(raw).unwrap();
         assert!(!config.enabled);
-        assert_eq!(config.provider, SpeechToTextProvider::Openai);
+        assert!(config.provider_id.is_none());
+        assert!(config.model.is_none());
         assert!(config.auto_send.is_none());
-        assert!(config.openai.is_none());
-        assert!(config.deepgram.is_none());
     }
 
     #[test]
-    fn stt_config_missing_required_field() {
-        let raw = json!({ "enabled": true });
-        let result = serde_json::from_value::<SpeechToTextConfig>(raw);
-        assert!(result.is_err());
-    }
-
-    // -- OpenAISpeechToTextConfig --
-
-    #[test]
-    fn openai_config_minimal() {
-        let raw = json!({
-            "api_key": "sk-key",
-            "model": "whisper-1"
-        });
-        let config: OpenAISpeechToTextConfig = serde_json::from_value(raw).unwrap();
-        assert_eq!(config.api_key, "sk-key");
-        assert_eq!(config.model, "whisper-1");
-        assert!(config.base_url.is_none());
-        assert!(config.language.is_none());
-        assert!(config.prompt.is_none());
-        assert!(config.temperature.is_none());
-    }
-
-    // -- DeepgramSpeechToTextConfig --
-
-    #[test]
-    fn deepgram_config_minimal() {
-        let raw = json!({
-            "api_key": "dg-key",
-            "model": "nova-2"
-        });
-        let config: DeepgramSpeechToTextConfig = serde_json::from_value(raw).unwrap();
-        assert_eq!(config.api_key, "dg-key");
-        assert_eq!(config.model, "nova-2");
-        assert!(config.base_url.is_none());
-        assert!(config.language.is_none());
-        assert!(config.detect_language.is_none());
-        assert!(config.punctuate.is_none());
-        assert!(config.smart_format.is_none());
+    fn stt_config_rejects_credentials_and_provider_guess() {
+        for invalid in [
+            json!({"enabled": true, "provider": "openai"}),
+            json!({"enabled": true, "openai": {"api_key": "secret"}}),
+            json!({"enabled": true, "deepgram": {"api_key": "secret"}}),
+        ] {
+            assert!(serde_json::from_value::<SpeechToTextConfig>(invalid).is_err());
+        }
     }
 
     // -- TextToSpeechConfig --

@@ -29,8 +29,9 @@ use nomifun_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
 use nomifun_db::models::{NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow};
 use nomifun_db::{
     CreateProviderParams, IChannelRepository, IConversationRepository, IProviderRepository,
-    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteChannelRepository,
-    SqliteConversationRepository, SqliteProviderRepository, init_database_memory,
+    NewProviderModel, NewProviderModelCapability, SqliteAcpSessionRepository,
+    SqliteAgentMetadataRepository, SqliteChannelRepository, SqliteConversationRepository,
+    SqliteProviderRepository, init_database_memory,
 };
 use nomifun_realtime::UserEventSink;
 use tokio::sync::broadcast;
@@ -231,23 +232,42 @@ async fn build_stack(pool: nomifun_db::SqlitePool) -> Stack {
     let owner = nomifun_db::installation_owner_id(&pool).await.unwrap();
 
     let providers = SqliteProviderRepository::new(pool.clone());
+    let capabilities = [NewProviderModelCapability {
+        task: "chat",
+        traits: "[]",
+        protocol: "openai.chat_text",
+        connection_role: "default",
+        provider_params: "{}",
+        ..Default::default()
+    }];
+    let initial_model = NewProviderModel {
+        model: "m",
+        enabled: true,
+        sort_order: 0,
+        description: None,
+        capabilities: &capabilities,
+    };
+    let credentials_encrypted = nomifun_common::encrypt_string(
+        r#"{"api_keys":["test-only"]}"#,
+        &[0x42; 32],
+    )
+    .unwrap();
     providers
-        .create(CreateProviderParams {
-            provider_id: Some(PROVIDER),
-            platform: "openai",
-            name: "Delivery notify provider",
-            base_url: "https://example.invalid/v1",
-            api_key_encrypted: "test-only",
-            models: r#"["m"]"#,
-            enabled: true,
-            model_context_limits: None,
-            model_protocols: None,
-            model_descriptions: None,
-            model_enabled: None,
-            bedrock_config: None,
-            is_full_url: false,
-            sort_order: None,
-        })
+        .create(
+            CreateProviderParams {
+                provider_id: Some(PROVIDER),
+                platform: "openai",
+                name: "Delivery notify provider",
+                base_url: "https://example.invalid/v1",
+                auth_scheme: "bearer",
+                credentials_encrypted: &credentials_encrypted,
+                enabled: true,
+                bedrock_config: None,
+                sort_order: None,
+            },
+            &initial_model,
+            &[],
+        )
         .await
         .unwrap();
 

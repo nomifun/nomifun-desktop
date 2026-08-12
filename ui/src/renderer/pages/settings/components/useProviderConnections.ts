@@ -23,10 +23,10 @@ const SWR_OPTIONS: SWRConfiguration<ProviderConnectionResponse[], Error> = {
  * (`GET /api/providers/{id}/connections`). Pass `enabled: false` to defer the
  * fetch until the UI actually needs the list (collapsed sections, popovers).
  */
-export const useProviderConnections = (providerId: ProviderId, enabled = true) => {
+export const useProviderConnections = (providerId: ProviderId | undefined, enabled = true) => {
   const { data, error, isLoading, mutate } = useSWR<ProviderConnectionResponse[]>(
-    enabled ? providerConnectionsSwrKey(providerId) : null,
-    () => ipcBridge.providerConnection.list.invoke({ provider_id: providerId }),
+    enabled && providerId ? providerConnectionsSwrKey(providerId) : null,
+    () => ipcBridge.providerConnection.list.invoke({ provider_id: providerId! }),
     SWR_OPTIONS
   );
 

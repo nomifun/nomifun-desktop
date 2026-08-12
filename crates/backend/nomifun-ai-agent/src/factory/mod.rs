@@ -8,7 +8,6 @@ pub(crate) mod construction_guard;
 mod context;
 mod nanobot;
 pub(crate) mod nomi;
-pub(crate) mod platform_table;
 mod openclaw;
 mod remote;
 
@@ -19,20 +18,23 @@ use futures_util::FutureExt;
 use nomi_agent::companion_tools::{CompanionMemorySink, CompanionSkillSink};
 use nomi_agent::requirement_tools::RequirementSink;
 use nomifun_api_types::{
-    BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, OpenMcpConfig, RequirementMcpConfig,
+    BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, ModelTask, OpenMcpConfig,
+    RequirementMcpConfig,
 };
 use nomifun_common::{AgentType, AppError, ExecutionAuthority};
 use nomifun_db::{
-    IClientPreferenceRepository, IMcpServerRepository, IProviderRepository, IRemoteAgentRepository,
-    ISettingsRepository,
+    IClientPreferenceRepository, IMcpServerRepository, IRemoteAgentRepository, ISettingsRepository,
 };
+use nomifun_model_invoke::{ModelInvokeService, ModelRef};
 
 use crate::runtime_handle::AgentRuntimeHandle;
 use crate::capability::skill_manager::AcpSkillManager;
 use crate::factory::context::FactoryContext;
 use crate::persistence::AcpSessionSyncService;
 use crate::registry::AgentRegistry;
-use crate::runtime_registry::AgentRuntimeFactory;
+use crate::runtime_registry::{
+    AgentRuntimeFactory, AgentRuntimeModelConfigResolver, RuntimeModelConfigBinding,
+};
 use crate::types::AgentRuntimeBuildOptions;
 
 /// Builds the persona system prompt for companion-companion conversations that do
@@ -109,10 +111,9 @@ pub struct AgentFactoryDeps {
     pub authoritative_user_id: Arc<str>,
     pub skill_manager: Arc<AcpSkillManager>,
     pub remote_agent_repo: Arc<dyn IRemoteAgentRepository>,
-    pub provider_repo: Arc<dyn IProviderRepository>,
-    /// Authoritative per-model rows (protocol/context-limit overrides for the
-    /// selected model live here since migration 016).
-    pub provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
+    /// Single task-capability and connection resolver used by every Nomi Chat
+    /// build. The factory never reads provider/model rows independently.
+    pub model_invoke: Arc<ModelInvokeService>,
     pub encryption_key: [u8; 32],
     pub agent_registry: Arc<AgentRegistry>,
     pub acp_agent_service: Arc<AcpSessionSyncService>,
@@ -246,6 +247,36 @@ pub fn build_agent_factory(deps: AgentFactoryDeps) -> AgentRuntimeFactory {
     Arc::new(move |options: AgentRuntimeBuildOptions| {
         let deps = deps.clone();
         async move { build_agent(deps, options).await }.boxed()
+    })
+}
+
+/// Build the exact provider-configuration revision resolver used to fence
+/// long-lived Nomi runtime reuse. It intentionally reuses ModelInvoke's Chat
+/// resolver so runtime admission and the factory consume one capability graph.
+pub fn build_agent_model_config_resolver(
+    model_invoke: Arc<ModelInvokeService>,
+) -> AgentRuntimeModelConfigResolver {
+    Arc::new(move |selection| {
+        let model_invoke = Arc::clone(&model_invoke);
+        async move {
+            let model = selection.use_model.unwrap_or(selection.model);
+            let resolved = model_invoke
+                .resolve_task_config(
+                    &ModelRef {
+                        provider_id: selection.provider_id,
+                        model,
+                    },
+                    ModelTask::Chat,
+                )
+                .await
+                .map_err(|error| AppError::BadRequest(error.to_string()))?;
+            Ok(RuntimeModelConfigBinding {
+                provider_id: resolved.provider_id,
+                model: resolved.model,
+                config_revision: resolved.config_revision,
+            })
+        }
+        .boxed()
     })
 }
 

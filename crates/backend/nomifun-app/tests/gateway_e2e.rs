@@ -139,26 +139,19 @@ async fn seed_user_and_conversation_with_extra(
 /// `nomi_cron_create` auto-filling a model-less nomi conversation) can
 /// complete their fallback chain.
 async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
+    let credentials_encrypted = common::encrypted_bearer_credentials();
     sqlx::query(
         "INSERT OR IGNORE INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, enabled, created_at, updated_at) \
-         VALUES (?, 'openai', ?, 'http://127.0.0.1:1', 'k', 1, 0, 0)",
+         (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, created_at, updated_at) \
+         VALUES (?, 'openai', ?, 'http://127.0.0.1:1', 'bearer', ?, 1, 0, 0)",
     )
     .bind(provider_id)
     .bind(format!("Provider {provider_id}"))
+    .bind(&credentials_encrypted)
     .execute(services.database.pool())
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT OR IGNORE INTO provider_models \
-         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
-         VALUES (?, ?, 1, 0, '[]', '[]', '{}', 'inferred', 0, 0)",
-    )
-    .bind(provider_id)
-    .bind(model)
-    .execute(services.database.pool())
-    .await
-    .unwrap();
+    common::seed_openai_chat_model(services.database.pool(), provider_id, model).await;
 }
 
 fn result_of(body: &Value) -> &Value {

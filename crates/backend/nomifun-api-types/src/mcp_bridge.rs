@@ -12,11 +12,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use nomifun_common::{
-    CompanionId, ConversationId, KnowledgeBaseId,
-    LoopbackCapabilityAccess, LoopbackCapabilityClaims, LoopbackCapabilityError,
-    LoopbackCapabilityIssuer, LoopbackCapabilityLease,
-    LoopbackCapabilityRenewalRequest, LoopbackSessionBinding, LoopbackSessionKind, TerminalId,
-    generate_id, validate_uuidv7,
+    CompanionId, ConversationId, KnowledgeBaseId, LoopbackCapabilityAccess,
+    LoopbackCapabilityClaims, LoopbackCapabilityError, LoopbackCapabilityIssuer,
+    LoopbackCapabilityLease, LoopbackCapabilityRenewalRequest, LoopbackSessionBinding,
+    LoopbackSessionKind, TerminalId, generate_id, validate_uuidv7,
 };
 use serde::{Deserialize, Serialize};
 
@@ -62,8 +61,12 @@ impl RequirementCapabilityScope {
         session: &LoopbackSessionBinding,
     ) -> Result<(), LoopbackCapabilityError> {
         let typed_id_is_valid = match self.owner_kind {
-            LoopbackSessionKind::Conversation => ConversationId::try_from(self.owner_session_id.as_str()).is_ok(),
-            LoopbackSessionKind::Terminal => TerminalId::try_from(self.owner_session_id.as_str()).is_ok(),
+            LoopbackSessionKind::Conversation => {
+                ConversationId::try_from(self.owner_session_id.as_str()).is_ok()
+            }
+            LoopbackSessionKind::Terminal => {
+                TerminalId::try_from(self.owner_session_id.as_str()).is_ok()
+            }
             LoopbackSessionKind::ExternalProcess => false,
         };
         if !typed_id_is_valid
@@ -78,8 +81,7 @@ impl RequirementCapabilityScope {
     }
 }
 
-pub type RequirementCapabilityClaims =
-    LoopbackCapabilityClaims<RequirementCapabilityScope>;
+pub type RequirementCapabilityClaims = LoopbackCapabilityClaims<RequirementCapabilityScope>;
 
 /// Knowledge scope resolved from persisted mounts and the authoritative
 /// workspace. The child cannot add ids, switch cwd, or enable writes.
@@ -94,10 +96,7 @@ impl KnowledgeCapabilityScope {
     pub fn validate(&self) -> Result<(), LoopbackCapabilityError> {
         if self.workspace_path.is_empty()
             || self.workspace_path.trim() != self.workspace_path
-            || self
-                .kb_ids
-                .windows(2)
-                .any(|pair| pair[0] >= pair[1])
+            || self.kb_ids.windows(2).any(|pair| pair[0] >= pair[1])
         {
             return Err(LoopbackCapabilityError::InvalidIdentity);
         }
@@ -388,15 +387,8 @@ impl KnowledgeMcpConfig {
         if allow_write {
             tools.push(KNOWLEDGE_WRITE_TOOL);
         }
-        let claims = KnowledgeCapabilityClaims::issue(
-            user_id,
-            session,
-            tools,
-            scope,
-        )?;
-        let (token, renewal_proof) = self
-            .issuer
-            .activate(KNOWLEDGE_CAPABILITY_DOMAIN, &claims)?;
+        let claims = KnowledgeCapabilityClaims::issue(user_id, session, tools, scope)?;
+        let (token, renewal_proof) = self.issuer.activate(KNOWLEDGE_CAPABILITY_DOMAIN, &claims)?;
         let lease = LoopbackCapabilityLease::new(
             self.issuer.clone(),
             KNOWLEDGE_CAPABILITY_DOMAIN,
@@ -856,13 +848,8 @@ pub const BROWSER_MCP_TOOL_NAMES: &[&str] = &[
 
 pub fn browser_tool_operation(tool: &str) -> Option<BrowserCapabilityOperation> {
     let operation = match tool {
-        "browser_open"
-        | "browser_fork"
-        | "browser_list"
-        | "browser_status"
-        | "browser_close"
-        | "browser_close_all"
-        | "capabilities" => BrowserCapabilityOperation::Manage,
+        "browser_open" | "browser_fork" | "browser_list" | "browser_status" | "browser_close"
+        | "browser_close_all" | "capabilities" => BrowserCapabilityOperation::Manage,
         "browser_crawl_many" => BrowserCapabilityOperation::Crawl,
         "navigate" | "back" | "forward" | "reload" => BrowserCapabilityOperation::Navigate,
         "observe"
@@ -879,18 +866,8 @@ pub fn browser_tool_operation(tool: &str) -> Option<BrowserCapabilityOperation> 
         "evaluate" | "get_console_logs" | "get_page_errors" | "get_network_log" => {
             BrowserCapabilityOperation::Debug
         }
-        "click"
-        | "extract"
-        | "hover"
-        | "press_key"
-        | "scroll"
-        | "scroll_to_text"
-        | "select_option"
-        | "set_value"
-        | "switch_frame"
-        | "type"
-        | "upload_file"
-        | "wait"
+        "click" | "extract" | "hover" | "press_key" | "scroll" | "scroll_to_text"
+        | "select_option" | "set_value" | "switch_frame" | "type" | "upload_file" | "wait"
         | "wait_for" => BrowserCapabilityOperation::Act,
         _ => return None,
     };
@@ -978,13 +955,11 @@ impl BrowserMcpConfig {
         // Multiple ACP runtimes (including cluster attempts) may legitimately
         // share a conversation. Their fresh runtime ids keep Lane ownership
         // distinct, so issuing one must not revoke its siblings.
-        let (token, renewal_proof) = self
-            .issuer
-            .activate_concurrent_bounded(
-                BROWSER_CAPABILITY_DOMAIN,
-                &claims,
-                MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY,
-            )?;
+        let (token, renewal_proof) = self.issuer.activate_concurrent_bounded(
+            BROWSER_CAPABILITY_DOMAIN,
+            &claims,
+            MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY,
+        )?;
         let lease = LoopbackCapabilityLease::new(
             self.issuer.clone(),
             BROWSER_CAPABILITY_DOMAIN,
@@ -1032,7 +1007,12 @@ mod tests {
     }
 
     fn gateway_config(port: u16, binary_path: &str, owner: &str) -> GatewayMcpConfig {
-        GatewayMcpConfig::from_issuer(port, test_issuer(), binary_path.into(), Arc::<str>::from(owner))
+        GatewayMcpConfig::from_issuer(
+            port,
+            test_issuer(),
+            binary_path.into(),
+            Arc::<str>::from(owner),
+        )
     }
 
     #[test]
@@ -1054,7 +1034,9 @@ mod tests {
     #[test]
     fn requirement_child_is_short_lived_domain_and_session_bound() {
         let cfg = requirement_config(41234, "/bin/nomicore");
-        let child = cfg.issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901").unwrap();
+        let child = cfg
+            .issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901")
+            .unwrap();
         let access = &child.bootstrap.access;
         assert_eq!(child.bootstrap.port, 41234);
         assert_eq!(
@@ -1068,18 +1050,16 @@ mod tests {
         assert!(access.claims.scope.requires_opaque_claim_token);
         assert!(access.claims.scope.validate(&access.claims.session).is_ok());
         assert!(access.claims.allows(REQUIREMENT_COMPLETE_TOOL));
-        assert!(cfg
-            .issuer
-            .verify_access(
-                REQUIREMENT_CAPABILITY_DOMAIN,
-                &access.claims,
-                &access.token,
-            )
-            .is_ok());
-        assert!(cfg
-            .issuer
-            .verify_access(KNOWLEDGE_CAPABILITY_DOMAIN, &access.claims, &access.token)
-            .is_err());
+        assert!(
+            cfg.issuer
+                .verify_access(REQUIREMENT_CAPABILITY_DOMAIN, &access.claims, &access.token,)
+                .is_ok()
+        );
+        assert!(
+            cfg.issuer
+                .verify_access(KNOWLEDGE_CAPABILITY_DOMAIN, &access.claims, &access.token)
+                .is_err()
+        );
 
         let bootstrap_json = child.bootstrap_json().unwrap();
         assert!(!bootstrap_json.contains("/bin/nomicore"));
@@ -1091,10 +1071,7 @@ mod tests {
     fn requirement_capability_rejects_pre_exact_claim_contract() {
         let cfg = requirement_config(41234, "/bin/nomicore");
         let child = cfg
-            .issue_for_conversation(
-                TEST_USER_ID,
-                "0190f5fe-7c00-7a00-8abc-012345678901",
-            )
+            .issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901")
             .unwrap();
         let mut stale_scope = child.bootstrap.access.claims.scope.clone();
         stale_scope.verdict_contract_version = 1;
@@ -1140,31 +1117,49 @@ mod tests {
         );
         // Terminal capabilities always sign all three tools; write authority
         // is enforced live per dispatch from the workpath binding.
-        assert!(terminal
-            .bootstrap
-            .access
-            .claims
-            .allows(KNOWLEDGE_WRITE_TOOL));
+        assert!(
+            terminal
+                .bootstrap
+                .access
+                .claims
+                .allows(KNOWLEDGE_WRITE_TOOL)
+        );
 
         // Conversation issuance keeps the allow_write switch (its runtime is
         // recycled on binding changes, so frozen claims stay accurate).
         let readonly = cfg
-            .issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901", "/workspace", &[kb_id(KB_A)], false)
+            .issue_for_conversation(
+                TEST_USER_ID,
+                "0190f5fe-7c00-7a00-8abc-012345678901",
+                "/workspace",
+                &[kb_id(KB_A)],
+                false,
+            )
             .unwrap();
-        assert!(!readonly
-            .bootstrap
-            .access
-            .claims
-            .allows(KNOWLEDGE_WRITE_TOOL));
+        assert!(
+            !readonly
+                .bootstrap
+                .access
+                .claims
+                .allows(KNOWLEDGE_WRITE_TOOL)
+        );
 
         let writable = cfg
-            .issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901", "/workspace", &[kb_id(KB_A)], true)
+            .issue_for_conversation(
+                TEST_USER_ID,
+                "0190f5fe-7c00-7a00-8abc-012345678901",
+                "/workspace",
+                &[kb_id(KB_A)],
+                true,
+            )
             .unwrap();
-        assert!(writable
-            .bootstrap
-            .access
-            .claims
-            .allows(KNOWLEDGE_WRITE_TOOL));
+        assert!(
+            writable
+                .bootstrap
+                .access
+                .claims
+                .allows(KNOWLEDGE_WRITE_TOOL)
+        );
         assert_ne!(
             readonly.bootstrap.access.token,
             writable.bootstrap.access.token
@@ -1245,14 +1240,16 @@ mod tests {
     #[test]
     fn gateway_child_binds_operations_identity_surface_profile_and_exclusions() {
         let cfg = gateway_config(41235, "/usr/bin/nomicore", TEST_USER_ID);
-        let child = cfg.issue_for_conversation(
-            OTHER_USER_ID,
-            "0190f5fe-7c00-7a00-8abc-012345678901",
-            Some(TEST_COMPANION_ID),
-            Some("lark"),
-            Some("yolo"),
-            &["nomi_delegate".into(), "nomi_delegate".into()],
-        ).unwrap();
+        let child = cfg
+            .issue_for_conversation(
+                OTHER_USER_ID,
+                "0190f5fe-7c00-7a00-8abc-012345678901",
+                Some(TEST_COMPANION_ID),
+                Some("lark"),
+                Some("yolo"),
+                &["nomi_delegate".into(), "nomi_delegate".into()],
+            )
+            .unwrap();
         let access = &child.bootstrap.access;
         assert_eq!(child.bootstrap.port, 41235);
         assert_eq!(access.claims.user_id.as_str(), OTHER_USER_ID);
@@ -1263,49 +1260,58 @@ mod tests {
         assert!(access.claims.allows(GATEWAY_LIST_TOOLS_OPERATION));
         assert!(access.claims.allows(GATEWAY_CALL_TOOL_OPERATION));
         assert_eq!(access.claims.scope.profile, GatewayMcpConfig::PROFILE_LITE);
-        assert_eq!(
-            access.claims.scope.excluded_tools,
-            vec!["nomi_delegate"]
-        );
+        assert_eq!(access.claims.scope.excluded_tools, vec!["nomi_delegate"]);
         assert!(!access.claims.scope.instance_owner);
-        assert!(cfg
-            .issuer
-            .verify_access(GATEWAY_CAPABILITY_DOMAIN, &access.claims, &access.token)
-            .is_ok());
+        assert!(
+            cfg.issuer
+                .verify_access(GATEWAY_CAPABILITY_DOMAIN, &access.claims, &access.token)
+                .is_ok()
+        );
 
         let mut forged_user = access.claims.clone();
         forged_user.user_id = nomifun_common::UserId::parse(TEST_USER_ID).unwrap();
         forged_user.scope.instance_owner = true;
-        assert!(cfg
-            .issuer
-            .verify_access(GATEWAY_CAPABILITY_DOMAIN, &forged_user, &access.token)
-            .is_err());
+        assert!(
+            cfg.issuer
+                .verify_access(GATEWAY_CAPABILITY_DOMAIN, &forged_user, &access.token)
+                .is_err()
+        );
 
         let mut forged_conversation = access.claims.clone();
-        forged_conversation.session = LoopbackSessionBinding::conversation("0190f5fe-7c00-7a00-8abc-012345678902");
-        assert!(cfg
-            .issuer
-            .verify_access(
-                GATEWAY_CAPABILITY_DOMAIN,
-                &forged_conversation,
-                &access.token,
-            )
-            .is_err());
+        forged_conversation.session =
+            LoopbackSessionBinding::conversation("0190f5fe-7c00-7a00-8abc-012345678902");
+        assert!(
+            cfg.issuer
+                .verify_access(
+                    GATEWAY_CAPABILITY_DOMAIN,
+                    &forged_conversation,
+                    &access.token,
+                )
+                .is_err()
+        );
 
         let mut forged_scope = access.claims.clone();
         forged_scope.scope.channel_platform = None;
         forged_scope.scope.profile = GatewayMcpConfig::PROFILE_WORK.into();
-        assert!(cfg
-            .issuer
-            .verify_access(GATEWAY_CAPABILITY_DOMAIN, &forged_scope, &access.token)
-            .is_err());
+        assert!(
+            cfg.issuer
+                .verify_access(GATEWAY_CAPABILITY_DOMAIN, &forged_scope, &access.token)
+                .is_err()
+        );
     }
 
     #[test]
     fn gateway_scope_reserves_top_level_creation_for_companions() {
         let cfg = gateway_config(41235, "/usr/bin/nomicore", TEST_USER_ID);
         let plain = cfg
-            .issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901", None, None, None, &[])
+            .issue_for_conversation(
+                TEST_USER_ID,
+                "0190f5fe-7c00-7a00-8abc-012345678901",
+                None,
+                None,
+                None,
+                &[],
+            )
             .unwrap();
         assert!(
             plain
@@ -1340,7 +1346,14 @@ mod tests {
     fn gateway_correctly_signed_expired_claims_fail_closed() {
         let cfg = gateway_config(41235, "/usr/bin/nomicore", TEST_USER_ID);
         let child = cfg
-            .issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901", None, None, None, &[])
+            .issue_for_conversation(
+                TEST_USER_ID,
+                "0190f5fe-7c00-7a00-8abc-012345678901",
+                None,
+                None,
+                None,
+                &[],
+            )
             .unwrap();
         let now = nomifun_common::unix_time_secs();
         let expired = cfg
@@ -1352,11 +1365,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            cfg.issuer.verify_access(
-                GATEWAY_CAPABILITY_DOMAIN,
-                &expired.claims,
-                &expired.token,
-            ),
+            cfg.issuer
+                .verify_access(GATEWAY_CAPABILITY_DOMAIN, &expired.claims, &expired.token,),
             Err(LoopbackCapabilityError::Expired)
         );
     }
@@ -1364,19 +1374,20 @@ mod tests {
     #[test]
     fn dropping_unaccepted_child_config_revokes_its_renewable_lease() {
         let cfg = requirement_config(41234, "/bin/nomicore");
-        let child = cfg.issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901").unwrap();
+        let child = cfg
+            .issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901")
+            .unwrap();
         let renewal = child.bootstrap.renewal.clone();
 
-        assert!(cfg
-            .issuer
-            .renew::<RequirementCapabilityScope>(REQUIREMENT_CAPABILITY_DOMAIN, &renewal)
-            .is_ok());
+        assert!(
+            cfg.issuer
+                .renew::<RequirementCapabilityScope>(REQUIREMENT_CAPABILITY_DOMAIN, &renewal)
+                .is_ok()
+        );
         drop(child);
         assert_eq!(
-            cfg.issuer.renew::<RequirementCapabilityScope>(
-                REQUIREMENT_CAPABILITY_DOMAIN,
-                &renewal,
-            ),
+            cfg.issuer
+                .renew::<RequirementCapabilityScope>(REQUIREMENT_CAPABILITY_DOMAIN, &renewal,),
             Err(LoopbackCapabilityError::InvalidToken)
         );
     }
@@ -1470,11 +1481,7 @@ mod tests {
 
     #[test]
     fn browser_mcp_config_issues_scoped_acp_capability() {
-        let cfg = BrowserMcpConfig::from_issuer(
-            41_000,
-            test_issuer(),
-            "/usr/bin/nomicore".into(),
-        );
+        let cfg = BrowserMcpConfig::from_issuer(41_000, test_issuer(), "/usr/bin/nomicore".into());
         let child = cfg
             .issue_for_conversation(TEST_USER_ID, OTHER_USER_ID, Some("agent-1"))
             .unwrap();
@@ -1531,24 +1538,12 @@ mod tests {
                 .scope
                 .allows(BrowserCapabilityOperation::Debug)
         );
-        assert!(validate_uuidv7(
-            &child
-                .bootstrap
-                .access
-                .claims
-                .scope
-                .runtime_instance_id
-        )
-        .is_ok());
+        assert!(validate_uuidv7(&child.bootstrap.access.claims.scope.runtime_instance_id).is_ok());
     }
 
     #[test]
     fn browser_mcp_config_keeps_sibling_runtimes_in_one_conversation_active() {
-        let cfg = BrowserMcpConfig::from_issuer(
-            41_000,
-            test_issuer(),
-            "/usr/bin/nomicore".into(),
-        );
+        let cfg = BrowserMcpConfig::from_issuer(41_000, test_issuer(), "/usr/bin/nomicore".into());
         let first = cfg
             .issue_for_conversation(TEST_USER_ID, OTHER_USER_ID, Some("agent-1"))
             .unwrap();
@@ -1582,11 +1577,7 @@ mod tests {
 
     #[test]
     fn browser_mcp_config_caps_one_task_family_and_drop_restores_capacity() {
-        let cfg = BrowserMcpConfig::from_issuer(
-            41_000,
-            test_issuer(),
-            "/usr/bin/nomicore".into(),
-        );
+        let cfg = BrowserMcpConfig::from_issuer(41_000, test_issuer(), "/usr/bin/nomicore".into());
         let mut children = Vec::with_capacity(MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY);
         for index in 0..MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY {
             children.push(
@@ -1610,19 +1601,12 @@ mod tests {
             cfg.issue_for_conversation(TEST_USER_ID, OTHER_USER_ID, Some("replacement"))
                 .expect("dropping the final lease guard must restore exact task capacity"),
         );
-        assert_eq!(
-            children.len(),
-            MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY
-        );
+        assert_eq!(children.len(), MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY);
     }
 
     #[test]
     fn browser_mcp_task_capacity_is_isolated_by_user_and_conversation() {
-        let cfg = BrowserMcpConfig::from_issuer(
-            41_000,
-            test_issuer(),
-            "/usr/bin/nomicore".into(),
-        );
+        let cfg = BrowserMcpConfig::from_issuer(41_000, test_issuer(), "/usr/bin/nomicore".into());
         let saturated = (0..MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY)
             .map(|index| {
                 cfg.issue_for_conversation(
@@ -1641,7 +1625,10 @@ mod tests {
             .issue_for_conversation(OTHER_USER_ID, OTHER_USER_ID, Some("other-user"))
             .expect("one user must not consume another user's capacity");
 
-        assert_eq!(saturated.len(), MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY);
+        assert_eq!(
+            saturated.len(),
+            MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY
+        );
         drop(other_conversation);
         drop(other_user);
     }

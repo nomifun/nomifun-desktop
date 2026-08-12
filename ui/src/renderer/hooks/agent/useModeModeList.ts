@@ -1,11 +1,18 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import { normalizeApiKeyList } from '@/common/utils/apiKeys';
-import type { ModelTask, ModelTrait } from '@/common/config/storage';
+import type { IProvider, ModelTask, ModelTrait } from '@/common/config/storage';
+import type { ProviderId } from '@/common/types/ids';
+import type { ProviderCredentials } from '@/common/types/provider/providerApi';
+import { useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 
-// Gemini 模型排序函数：Pro 优先，版本号降序
 export interface FetchedModelOption {
   label: string;
   value: string;
@@ -13,120 +20,109 @@ export interface FetchedModelOption {
   traits: ModelTrait[];
 }
 
-const sortGeminiModels = (models: FetchedModelOption[]) => {
-  return models.toSorted((a, b) => {
+export interface UseModeModelListOptions {
+  platform: string;
+  /** Existing providers use the server-side encrypted credentials. */
+  providerId?: ProviderId;
+  /** The remaining fields are for anonymous discovery before provider creation. */
+  baseUrl?: string;
+  authScheme?: string;
+  credentials?: ProviderCredentials;
+  bedrockConfig?: IProvider['bedrock_config'];
+  tryFix?: boolean;
+}
+
+const sortGeminiModels = (models: FetchedModelOption[]) =>
+  models.toSorted((a, b) => {
     const aPro = a.value.toLowerCase().includes('pro');
     const bPro = b.value.toLowerCase().includes('pro');
-
-    // Pro 模型排在前面
     if (aPro && !bPro) return -1;
     if (!aPro && bPro) return 1;
-
-    // 提取版本号进行比较
     const extractVersion = (name: string) => {
       const match = name.match(/(\d+\.?\d*)/);
       return match ? parseFloat(match[1]) : 0;
     };
-
-    const aVersion = extractVersion(a.value);
-    const bVersion = extractVersion(b.value);
-
-    // 版本号大的排在前面
-    if (aVersion !== bVersion) {
-      return bVersion - aVersion;
-    }
-
-    // 版本号相同时按字母顺序排序
-    return a.value.localeCompare(b.value);
+    const versionDifference = extractVersion(b.value) - extractVersion(a.value);
+    return versionDifference || a.value.localeCompare(b.value);
   });
-};
 
-const useModeModeList = (
-  platform: string,
-  base_url?: string,
-  api_key?: string,
-  try_fix?: boolean,
-  bedrock_config?: {
-    auth_method: 'accessKey' | 'profile';
-    region: string;
-    access_key_id?: string;
-    secret_access_key?: string;
-    profile?: string;
-  }
-) => {
+const useModeModeList = (options: UseModeModelListOptions) => {
   const { t } = useTranslation();
+  const credentialState = useRef({ snapshot: '', revision: 0 });
+  const credentialSnapshot =
+    options.credentials === undefined ? 'missing' : JSON.stringify(options.credentials);
+  if (credentialState.current.snapshot !== credentialSnapshot) {
+    credentialState.current = {
+      snapshot: credentialSnapshot,
+      revision: credentialState.current.revision + 1,
+    };
+  }
+  const canFetchStored = Boolean(options.providerId);
+  const canFetchAnonymous = Boolean(options.authScheme) && options.credentials !== undefined;
+  const cacheKey = canFetchStored
+    ? ['provider-models', options.providerId, options.tryFix]
+    : canFetchAnonymous
+      ? [
+          'anonymous-provider-models',
+          options.platform,
+          options.baseUrl,
+          options.authScheme,
+          // A local monotonic revision triggers a refresh without placing any
+          // credential material (or a reusable hash of it) in SWR's global key.
+          credentialState.current.revision,
+          options.bedrockConfig,
+          options.tryFix,
+        ]
+      : null;
 
   return useSWR(
-    [platform + '/models', { platform, base_url, api_key, try_fix, bedrock_config }],
-    async ([_url, { platform, base_url, api_key, try_fix, bedrock_config }]): Promise<{
-      models: FetchedModelOption[];
-      fix_base_url?: string;
-    }> => {
-      // Only call the backend when we have credentials it can actually use:
-      // - bedrock: bedrock_config carries the credentials (api_key not required)
-      // - everything else: api_key is mandatory per backend validator
-      const hasUsableCredentials = platform === 'bedrock' ? !!bedrock_config : !!api_key;
-      if (hasUsableCredentials) {
-        try {
-          const res = await ipcBridge.mode.fetchModelList.invoke({
-            base_url,
-            api_key: normalizeApiKeyList(api_key),
-            try_fix,
-            platform,
-            bedrock_config,
-          });
-          let modelList = res.models.map((v) => {
-            // Handle both string and object formats (Bedrock returns objects with id and name)
-            const id = typeof v === 'string' ? v : v.id;
-            const profile = res.model_profiles?.[id];
-            if (typeof v === 'string') {
-              return { label: v, value: v, tasks: profile?.tasks ?? [], traits: profile?.traits ?? [] };
-            } else {
-              return {
-                label: v.name || v.id,
-                value: v.id,
-                tasks: profile?.tasks ?? [],
-                traits: profile?.traits ?? [],
-              };
-            }
-          });
-
-          // 如果是 Gemini 平台，优化排序
-          if (platform?.includes('gemini')) {
-            modelList = sortGeminiModels(modelList);
-          }
-
-          // 如果返回了修复的 base_url，将其添加到结果中
-          if (res.fixed_base_url) {
-            return {
-              models: modelList,
-              fix_base_url: res.fixed_base_url,
-            };
-          }
-
-          return { models: modelList };
-        } catch (error) {
-          if (isBackendHttpError(error)) {
-            switch (error.code) {
-              case 'UNAUTHORIZED':
-                throw new Error(t('settings.modelCatalogUnauthorized'));
-              case 'FORBIDDEN':
-                throw new Error(t('settings.modelCatalogForbidden'));
-              case 'RATE_LIMITED':
-                throw new Error(t('settings.modelCatalogRateLimited'));
-              case 'TIMEOUT':
-              case 'BAD_GATEWAY':
-                throw new Error(t('settings.modelCatalogUnavailable'));
-              default:
-                throw new Error(error.backendMessage || t('settings.modelCatalogFetchFailed'));
-            }
-          }
-          throw error;
+    cacheKey,
+    async (): Promise<{ models: FetchedModelOption[]; fix_base_url?: string }> => {
+      try {
+        const response = options.providerId
+          ? await ipcBridge.mode.fetchProviderModels.invoke({
+              provider_id: options.providerId,
+              try_fix: options.tryFix,
+            })
+          : await ipcBridge.mode.fetchModelList.invoke({
+              platform: options.platform,
+              base_url: options.baseUrl ?? '',
+              auth_scheme: options.authScheme ?? '',
+              credentials: options.credentials ?? {},
+              bedrock_config: options.bedrockConfig,
+              try_fix: options.tryFix,
+            });
+        let models = response.models.map((model) => ({
+          label: model.name || model.id,
+          value: model.id,
+          tasks: model.tasks ?? [],
+          traits: model.traits ?? [],
+        }));
+        if (options.platform.includes('gemini')) {
+          models = sortGeminiModels(models);
         }
+        return {
+          models,
+          ...(response.fixed_base_url ? { fix_base_url: response.fixed_base_url } : {}),
+        };
+      } catch (error) {
+        if (isBackendHttpError(error)) {
+          switch (error.code) {
+            case 'UNAUTHORIZED':
+              throw new Error(t('settings.modelCatalogUnauthorized'));
+            case 'FORBIDDEN':
+              throw new Error(t('settings.modelCatalogForbidden'));
+            case 'RATE_LIMITED':
+              throw new Error(t('settings.modelCatalogRateLimited'));
+            case 'TIMEOUT':
+            case 'BAD_GATEWAY':
+              throw new Error(t('settings.modelCatalogUnavailable'));
+            default:
+              throw new Error(error.backendMessage || t('settings.modelCatalogFetchFailed'));
+          }
+        }
+        throw error;
       }
-
-      // 既没有 API key 也没有 base_url 也没有 bedrock_config 时，返回空列表
-      return { models: [] };
     },
     { shouldRetryOnError: false }
   );

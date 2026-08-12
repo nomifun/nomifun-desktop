@@ -7,8 +7,8 @@
 //!   synthesize in an `assistant` message and top-level `audio` options. The
 //!   response audio is base64 at `choices[0].message.audio.data`.
 //!
-//! The configured MiMo base normally ends in `/v1`. A full endpoint and a
-//! per-model `params.endpoint` override remain supported for gateways.
+//! The selected capability supplies the exact chat-completions endpoint, so a
+//! custom gateway can use a non-standard route without adapter heuristics.
 
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use nomifun_api_types::ModelTask;
 use serde_json::{Map, Value, json};
 
+use super::json_request_body;
 use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
@@ -26,28 +27,6 @@ const ASR_ADAPTER_ID: &str = "mimo.chat_asr";
 const TTS_ADAPTER_ID: &str = "mimo.chat_tts";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ASR_BASE64_BYTES: usize = 10 * 1024 * 1024;
-
-fn chat_completions_url(call: &ResolvedCall) -> String {
-    if super::has_endpoint_override(&call.model_params) {
-        return call.dispatch_target().url;
-    }
-
-    let base = call.connection.base_url.trim().trim_end_matches('/');
-    if call.connection.is_full_url || base.ends_with("/chat/completions") {
-        return base.to_owned();
-    }
-
-    let has_version = base.rsplit('/').next().is_some_and(|segment| {
-        segment.len() > 1
-            && segment.starts_with('v')
-            && segment[1..].chars().all(|ch| ch.is_ascii_digit())
-    });
-    if has_version {
-        format!("{base}/chat/completions")
-    } else {
-        format!("{base}/v1/chat/completions")
-    }
-}
 
 fn audio_input_format(mime: &str) -> Result<&'static str, InvokeError> {
     match mime.trim().to_ascii_lowercase().as_str() {
@@ -76,11 +55,15 @@ fn output_mime(format: &str) -> &'static str {
 /// overrides without dropping sibling fields.
 fn merge_object(target: &mut Map<String, Value>, source: &Map<String, Value>) {
     for (key, incoming) in source {
-        if let (Some(Value::Object(existing)), Value::Object(patch)) = (target.get_mut(key), incoming) {
-            merge_object(existing, patch);
-        } else {
-            target.insert(key.clone(), incoming.clone());
-        }
+        merge_field(target, key, incoming);
+    }
+}
+
+fn merge_field(target: &mut Map<String, Value>, key: &str, incoming: &Value) {
+    if let (Some(Value::Object(existing)), Value::Object(patch)) = (target.get_mut(key), incoming) {
+        merge_object(existing, patch);
+    } else {
+        target.insert(key.to_owned(), incoming.clone());
     }
 }
 
@@ -91,15 +74,6 @@ fn merge_named_object(target: &mut Map<String, Value>, source: &Value, key: &str
     let entry = target.entry(key.to_owned()).or_insert_with(|| Value::Object(Map::new()));
     if let Value::Object(existing) = entry {
         merge_object(existing, incoming);
-    }
-}
-
-/// Merge optional top-level request defaults from `params.request_body`.
-/// Transport-only params (`endpoint`, `request_shape`, protocol selection)
-/// therefore never leak into the provider payload.
-fn merge_request_body(target: &mut Map<String, Value>, source: &Value) {
-    if let Some(defaults) = source.get("request_body").and_then(Value::as_object) {
-        merge_object(target, defaults);
     }
 }
 
@@ -149,10 +123,11 @@ impl ProtocolAdapter for MiMoChatAsrAdapter {
             ));
         }
 
-        let mut body = Map::new();
-        merge_request_body(&mut body, &call.model_params);
+        let mut body = json_request_body(&call.model_params, &req.extra, json!({}))?
+            .as_object()
+            .cloned()
+            .expect("shared JSON body helper always returns an object");
         merge_named_object(&mut body, &call.model_params, "asr_options");
-        merge_request_body(&mut body, &req.extra);
         merge_named_object(&mut body, &req.extra, "asr_options");
 
         body.insert("model".into(), Value::String(call.model.clone()));
@@ -183,14 +158,15 @@ impl ProtocolAdapter for MiMoChatAsrAdapter {
             options.insert("language".into(), Value::String(language.to_owned()));
         }
 
-        let url = chat_completions_url(call);
+        let url = call.endpoint_url()?;
         let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &Value::Object(body)).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value = resp.json().await.map_err(|error| {
-            InvokeError::parse(format!("invalid MiMo ASR JSON response: {error}"))
-        })?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|error| InvokeError::response_json("invalid MiMo ASR JSON response", &error))?;
         let Some(text) = value
             .get("choices")
             .and_then(Value::as_array)
@@ -230,16 +206,17 @@ impl ProtocolAdapter for MiMoChatTtsAdapter {
             ));
         };
 
-        let mut body = Map::new();
-        merge_request_body(&mut body, &call.model_params);
+        let mut body = json_request_body(&call.model_params, &req.extra, json!({}))?
+            .as_object()
+            .cloned()
+            .expect("shared JSON body helper always returns an object");
         merge_named_object(&mut body, &call.model_params, "audio");
-        merge_request_body(&mut body, &req.extra);
         merge_named_object(&mut body, &req.extra, "audio");
 
         let mut messages = Vec::new();
         // Voice-design and voice-clone callers can provide preceding user or
-        // system messages through request_body.messages; the actual text to
-        // synthesize is always the typed assistant message and wins.
+        // preceding flat `messages`; the actual text to synthesize is always
+        // the typed assistant message and wins.
         if let Some(configured) = body.remove("messages").and_then(|value| value.as_array().cloned()) {
             messages.extend(configured.into_iter().filter(|message| {
                 message.get("role").and_then(Value::as_str) != Some("assistant")
@@ -277,14 +254,15 @@ impl ProtocolAdapter for MiMoChatTtsAdapter {
         body.insert("messages".into(), Value::Array(messages));
         body.insert("stream".into(), Value::Bool(false));
 
-        let url = chat_completions_url(call);
+        let url = call.endpoint_url()?;
         let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &Value::Object(body)).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value = resp.json().await.map_err(|error| {
-            InvokeError::parse(format!("invalid MiMo TTS JSON response: {error}"))
-        })?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|error| InvokeError::response_json("invalid MiMo TTS JSON response", &error))?;
         let Some(data) = value.pointer("/choices/0/message/audio/data").and_then(Value::as_str) else {
             return Err(provider_or_parse_error(&value, "TTS"));
         };
@@ -306,8 +284,25 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
+    use crate::adapters::test_support::call_with_endpoint;
     use crate::types::{AsrRequest, InputAsset, TtsRequest};
+
+    fn mimo_base(base_url: &str) -> String {
+        let base_url = base_url.trim_end_matches('/');
+        if base_url.ends_with("/v1") {
+            base_url.to_owned()
+        } else {
+            format!("{base_url}/v1")
+        }
+    }
+
+    fn mimo_asr_call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        call_with_endpoint(&mimo_base(base_url), model, "mimo.chat_asr", "/chat/completions", request)
+    }
+
+    fn mimo_tts_call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        call_with_endpoint(&mimo_base(base_url), model, "mimo.chat_tts", "/chat/completions", request)
+    }
 
     fn test_http() -> reqwest::Client {
         reqwest::Client::builder().no_proxy().build().unwrap()
@@ -336,6 +331,35 @@ mod tests {
         })
     }
 
+    #[test]
+    fn transport_metadata_never_enters_mimo_request_body() {
+        let mut provider_params = serde_json::Map::new();
+        for key in crate::adapters::LOCAL_TRANSPORT_PARAM_KEYS {
+            provider_params.insert((*key).to_owned(), json!(format!("secret-{key}")));
+        }
+        provider_params.insert("temperature".into(), json!(0.3));
+        provider_params.insert(
+            "provider_options".into(),
+            json!({"headers": {"x-provider-native": "allowed"}}),
+        );
+
+        let body = json_request_body(
+            &Value::Object(provider_params),
+            &json!({}),
+            json!({}),
+        )
+        .unwrap();
+
+        assert_eq!(body.get("temperature"), Some(&json!(0.3)));
+        assert_eq!(
+            body.get("provider_options"),
+            Some(&json!({"headers": {"x-provider-native": "allowed"}}))
+        );
+        for key in crate::adapters::LOCAL_TRANSPORT_PARAM_KEYS {
+            assert!(body.get(*key).is_none(), "local key {key} leaked into MiMo body");
+        }
+    }
+
     #[tokio::test]
     async fn asr_posts_chat_json_and_parses_transcript() {
         let server = MockServer::start().await;
@@ -362,7 +386,7 @@ mod tests {
             .await;
 
         let base = format!("{}/v1", server.uri());
-        let call = call(&base, "mimo-v2.5-asr", asr("audio/wav", Some("en")));
+        let call = mimo_asr_call(&base, "mimo-v2.5-asr", asr("audio/wav", Some("en")));
         let out = MiMoChatAsrAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Transcript { text, language, model }) = out else {
             panic!("expected Done(Transcript)")
@@ -391,8 +415,8 @@ mod tests {
             .await;
 
         let base = format!("{}/v1", server.uri());
-        let mut call = call(&base, "mimo-v2.5-tts", tts("hello", Some("Chloe"), Some("wav")));
-        call.model_params = json!({"audio": {"speed": 1.1}});
+        let mut call = mimo_tts_call(&base, "mimo-v2.5-tts", tts("hello", Some("Chloe"), Some("wav")));
+        call.model_params = json!({"endpoint": "/chat/completions", "audio": {"speed": 1.1}});
         let out = MiMoChatTtsAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 1);
@@ -401,7 +425,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tts_request_body_can_supply_voice_design_instruction() {
+    async fn tts_flat_params_can_supply_voice_design_instruction() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
@@ -420,11 +444,10 @@ mod tests {
             .await;
 
         let base = format!("{}/v1", server.uri());
-        let mut call = call(&base, "mimo-v2.5-tts-voicedesign", tts("Read this.", None, None));
+        let mut call = mimo_tts_call(&base, "mimo-v2.5-tts-voicedesign", tts("Read this.", None, None));
         call.model_params = json!({
-            "request_body": {
-                "messages": [{"role": "user", "content": "Give me a young male tone."}]
-            },
+            "endpoint": "/chat/completions",
+            "messages": [{"role": "user", "content": "Give me a young male tone."}],
             "audio": {"optimize_text_preview": true}
         });
         MiMoChatTtsAdapter.submit(&test_http(), &call).await.unwrap();
@@ -439,7 +462,7 @@ mod tests {
             .mount(&auth_server)
             .await;
         let auth_base = format!("{}/v1", auth_server.uri());
-        let auth_call = call(&auth_base, "mimo-v2.5-asr", asr("audio/wav", None));
+        let auth_call = mimo_asr_call(&auth_base, "mimo-v2.5-asr", asr("audio/wav", None));
         let err = MiMoChatAsrAdapter
             .submit(&test_http(), &auth_call)
             .await
@@ -456,7 +479,7 @@ mod tests {
             .mount(&body_server)
             .await;
         let body_base = format!("{}/v1", body_server.uri());
-        let body_call = call(&body_base, "mimo-v2.5-tts", tts("hi", None, None));
+        let body_call = mimo_tts_call(&body_base, "mimo-v2.5-tts", tts("hi", None, None));
         let err = MiMoChatTtsAdapter
             .submit(&test_http(), &body_call)
             .await
@@ -467,7 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_validation_and_parse_failures_are_classified() {
-        let invalid_call = call(
+        let invalid_call = mimo_asr_call(
             "http://127.0.0.1:9/v1",
             "mimo-v2.5-asr",
             asr("audio/ogg", None),
@@ -488,7 +511,7 @@ mod tests {
             .mount(&server)
             .await;
         let base = format!("{}/v1", server.uri());
-        let parse_call = call(&base, "mimo-v2.5-tts", tts("hi", None, None));
+        let parse_call = mimo_tts_call(&base, "mimo-v2.5-tts", tts("hi", None, None));
         let err = MiMoChatTtsAdapter
             .submit(&test_http(), &parse_call)
             .await
@@ -498,11 +521,11 @@ mod tests {
 
     #[tokio::test]
     async fn adapters_reject_the_other_audio_task_locally() {
-        let asr_call = call("http://127.0.0.1:9", "mimo-v2.5-asr", asr("audio/wav", None));
+        let asr_call = mimo_asr_call("http://127.0.0.1:9", "mimo-v2.5-asr", asr("audio/wav", None));
         let err = MiMoChatTtsAdapter.submit(&test_http(), &asr_call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
 
-        let tts_call = call("http://127.0.0.1:9", "mimo-v2.5-tts", tts("hi", None, None));
+        let tts_call = mimo_tts_call("http://127.0.0.1:9", "mimo-v2.5-tts", tts("hi", None, None));
         let err = MiMoChatAsrAdapter.submit(&test_http(), &tts_call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
     }

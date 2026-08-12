@@ -4,16 +4,14 @@
 //! keys are NOT interchangeable; the connection's base_url picks the platform).
 //!
 //! MiniMax signature quirks, all honored here:
-//! - current MiniMax APIs do not require `GroupId`; a connection profile's
-//!   `extra.group_id` is forwarded as a legacy query parameter only when it is
-//!   explicitly configured;
+//! - current MiniMax t2a requests carry no transport query parameters;
 //! - the returned audio (`data.audio`) is a **hex** string — NOT base64 —
 //!   decoded via [`crate::transport::decode_hex`];
 //! - failures often ride an HTTP 200 with a non-zero `base_resp.status_code`
 //!   (mapped to [`InvokeErrorKind::ProviderError`] with the status message);
 //! - the trailing `extra_info` block (durations/sizes) is ignored.
 //!
-//! `POST {base}/v1/t2a_v2[?GroupId={gid}]` with `{model, text,
+//! `POST {base}/v1/t2a_v2` with `{model, text,
 //! voice_setting: {voice_id}?, audio_setting: {format}?}` → a single
 //! [`TaskResult::Assets`] audio artifact.
 
@@ -24,51 +22,16 @@ use nomifun_api_types::ModelTask;
 use serde_json::{Value, json};
 
 use crate::adapter::ProtocolAdapter;
-use crate::call::{ResolvedCall, ResolvedConnection};
+use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::transport::{decode_hex, error_from_response, send_with_rotation};
 use crate::types::{ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult};
 
+use super::json_request_body;
+
 const ADAPTER_ID: &str = "minimax.t2a";
 /// Synthesis of long text can take a while; one synchronous round-trip.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-
-const T2A_PATH: &str = "/v1/t2a_v2";
-
-/// Compose the t2a endpoint: `{root}/v1/t2a_v2`. A trailing `/v1` on the
-/// configured base is tolerated (stripped then re-added); a full-url
-/// connection base is already the complete endpoint. An explicit
-/// `params.endpoint` override wins over both (routed through
-/// [`crate::call::ResolvedCall::dispatch_target`]). The legacy GroupId query
-/// parameter is appended only when it is explicitly configured.
-fn t2a_url(call: &ResolvedCall) -> String {
-    if super::has_endpoint_override(&call.model_params) {
-        return call.dispatch_target().url;
-    }
-    let conn: &ResolvedConnection = &call.connection;
-    let base = conn.base_url.trim().trim_end_matches('/');
-    if conn.is_full_url {
-        return base.to_string();
-    }
-    let root = base.strip_suffix("/v1").unwrap_or(base);
-    format!("{root}{T2A_PATH}")
-}
-
-/// Optional legacy MiniMax GroupId from the connection's `extra.group_id`
-/// (string or number). Missing, blank, and unsupported values are omitted.
-/// Pure and unit tested.
-pub(crate) fn group_id(extra: &Value) -> Option<String> {
-    let raw = extra.get("group_id");
-    let gid = match raw {
-        Some(Value::String(s)) => {
-            let s = s.trim();
-            if s.is_empty() { None } else { Some(s.to_string()) }
-        }
-        Some(Value::Number(n)) => Some(n.to_string()),
-        _ => None,
-    };
-    gid
-}
 
 /// MIME for the requested audio format (MiniMax vocabulary: mp3/pcm/flac/wav —
 /// default mp3). Unknown formats fall back to `audio/mpeg`.
@@ -101,8 +64,7 @@ impl ProtocolAdapter for MiniMaxT2aAdapter {
                 format!("minimax.t2a cannot serve task {:?}", call.request.task()),
             ));
         };
-        let gid = group_id(&call.connection.extra);
-        let url = t2a_url(call);
+        let url = call.endpoint_url()?;
 
         let mut body = json!({
             "model": call.model,
@@ -117,20 +79,19 @@ impl ProtocolAdapter for MiniMaxT2aAdapter {
             // audio_setting.format 词表 mp3/pcm/flac/wav —— 接入时需真实调用校准。
             body["audio_setting"] = json!({ "format": format });
         }
+        let body = json_request_body(&call.model_params, &req.extra, body)?;
 
         let resp = send_with_rotation(&call.connection.auth, || {
-            let builder = http.post(&url).timeout(REQUEST_TIMEOUT).json(&body);
-            Ok(match gid.as_deref() {
-                Some(gid) => builder.query(&[("GroupId", gid)]),
-                None => builder,
-            })
+            Ok(http.post(&url).timeout(REQUEST_TIMEOUT).json(&body))
         })
         .await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid minimax t2a JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid minimax t2a JSON", &e))?;
 
         let bytes = parse_t2a_audio(&value)?;
         Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
@@ -170,19 +131,22 @@ pub(crate) fn parse_t2a_audio(value: &Value) -> Result<Vec<u8>, InvokeError> {
 
 #[cfg(test)]
 mod tests {
-    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
+    use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
+    use crate::adapters::test_support::call_with_endpoint;
     use crate::types::TtsRequest;
 
-    /// A minimax [`ResolvedCall`]: Bearer key + `extra.group_id` on the
-    /// connection (as the resolver produces from a connection profile row).
-    fn minimax_call(base_url: &str, model: &str, request: TaskRequest, extra: Value) -> ResolvedCall {
-        let mut call = call(base_url, model, request);
+    fn minimax_call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        let base_url = base_url.trim_end_matches('/');
+        let base_url = if base_url.ends_with("/v1") {
+            base_url.to_owned()
+        } else {
+            format!("{base_url}/v1")
+        };
+        let mut call = call_with_endpoint(&base_url, model, "minimax.t2a", "/t2a_v2", request);
         call.platform = "minimax".into();
-        call.connection.extra = extra;
         call
     }
 
@@ -200,15 +164,6 @@ mod tests {
     }
 
     // -- pure helpers ------------------------------------------------------------
-
-    #[test]
-    fn group_id_accepts_string_and_number_omits_missing_or_blank() {
-        assert_eq!(group_id(&json!({"group_id": "1782658868262"})).as_deref(), Some("1782658868262"));
-        assert_eq!(group_id(&json!({"group_id": 1782658868262_i64})).as_deref(), Some("1782658868262"));
-        for bad in [json!({}), json!({"group_id": ""}), json!({"group_id": "  "}), json!({"group_id": null})] {
-            assert_eq!(group_id(&bad), None, "extra {bad}");
-        }
-    }
 
     #[test]
     fn t2a_audio_parses_hex_and_maps_failure_vocabulary() {
@@ -236,11 +191,10 @@ mod tests {
     // -- wiremock full chain -------------------------------------------------------
 
     #[tokio::test]
-    async fn t2a_posts_group_id_query_body_and_decodes_hex_audio() {
+    async fn t2a_posts_current_body_without_query_and_decodes_hex_audio() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/t2a_v2"))
-            .and(query_param("GroupId", "1782658868262"))
             .and(header("authorization", "Bearer sk-test"))
             .and(body_partial_json(json!({
                 "model": "speech-01-turbo",
@@ -261,7 +215,6 @@ mod tests {
             &server.uri(),
             "speech-01-turbo",
             tts("你好世界", Some("female-shaonv"), Some("wav")),
-            json!({"group_id": "1782658868262"}),
         );
         let out = MiniMaxT2aAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
@@ -275,7 +228,6 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/t2a_v2"))
-            .and(query_param("GroupId", "g1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {"audio": "6869"}
             })))
@@ -283,7 +235,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = minimax_call(&server.uri(), "speech-01", tts("hi", None, None), json!({"group_id": "g1"}));
+        let call = minimax_call(&server.uri(), "speech-01", tts("hi", None, None));
         let out = MiniMaxT2aAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets[0].mime.as_deref(), Some("audio/mpeg"));
@@ -305,12 +257,12 @@ mod tests {
             .await;
 
         let base = format!("{}/v1", server.uri());
-        let call = minimax_call(&base, "speech-01", tts("hi", None, None), json!({"group_id": "g1"}));
+        let call = minimax_call(&base, "speech-01", tts("hi", None, None));
         MiniMaxT2aAdapter.submit(&test_http(), &call).await.unwrap();
     }
 
     #[tokio::test]
-    async fn t2a_without_group_id_sends_no_query_and_succeeds() {
+    async fn t2a_sends_no_query_and_succeeds() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/t2a_v2"))
@@ -319,7 +271,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = minimax_call(&server.uri(), "speech-01", tts("hi", None, None), json!({}));
+        let call = minimax_call(&server.uri(), "speech-01", tts("hi", None, None));
         MiniMaxT2aAdapter.submit(&test_http(), &call).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -338,7 +290,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = minimax_call(&server.uri(), "speech-01", tts("hi", None, None), json!({"group_id": "g1"}));
+        let call = minimax_call(&server.uri(), "speech-01", tts("hi", None, None));
         let err = MiniMaxT2aAdapter.submit(&test_http(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::ProviderError);
         assert!(err.message.contains("2013"), "message: {}", err.message);
@@ -353,7 +305,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = minimax_call(&server.uri(), "speech-01", tts("hi", None, None), json!({"group_id": "g1"}));
+        let call = minimax_call(&server.uri(), "speech-01", tts("hi", None, None));
         let err = MiniMaxT2aAdapter.submit(&test_http(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::Auth);
         assert_eq!(err.http_status, Some(401));
@@ -368,7 +320,7 @@ mod tests {
             prompt: None,
             extra: json!({}),
         });
-        let call = minimax_call("http://127.0.0.1:9", "speech-01", request, json!({"group_id": "g1"}));
+        let call = minimax_call("http://127.0.0.1:9", "speech-01", request);
         let err = MiniMaxT2aAdapter.submit(&test_http(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
     }

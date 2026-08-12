@@ -153,7 +153,10 @@ pub struct UpdateRequirementRequest {
     #[serde(default)]
     pub add_attachments: Vec<NewAttachmentRef>,
     /// Existing attachment ids to remove (rows + files).
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_attachment_ids")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_attachment_ids"
+    )]
     pub remove_attachment_ids: Vec<String>,
 }
 
@@ -244,7 +247,10 @@ pub struct ResumeTagRequest {
     #[serde(default)]
     pub requeue_failed: bool,
     /// Re-queue these specific failed requirement ids back to pending.
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_requirement_ids")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_requirement_ids"
+    )]
     pub requeue_requirement_ids: Vec<String>,
 }
 
@@ -439,13 +445,20 @@ mod tests {
                 .expect("canonical UUIDv7 requirement ids are valid");
         assert_eq!(request.requirement_ids, vec![id]);
         assert!(serde_json::from_str::<BatchDeleteRequest>(r#"{"requirement_ids":[7]}"#).is_err());
-        assert!(serde_json::from_str::<BatchDeleteRequest>(r#"{"requirement_ids":["7"]}"#).is_err());
+        assert!(
+            serde_json::from_str::<BatchDeleteRequest>(r#"{"requirement_ids":["7"]}"#).is_err()
+        );
         assert!(
             serde_json::from_str::<BatchDeleteRequest>(r#"{"requirement_ids":["req_7"]}"#).is_err()
         );
-        assert!(serde_json::from_str::<BatchDeleteRequest>(r#"{"ids":[
+        assert!(
+            serde_json::from_str::<BatchDeleteRequest>(
+                r#"{"ids":[
             "0190f5fe-7c00-7a00-8000-000000000007"
-        ]}"#).is_err());
+        ]}"#
+            )
+            .is_err()
+        );
         assert!(
             serde_json::from_str::<UpdateRequirementRequest>(
                 r#"{"remove_attachment_ids":["att_7"]}"#
@@ -457,10 +470,12 @@ mod tests {
                 .is_err()
         );
         assert!(
-            serde_json::from_str::<ResumeTagRequest>(r#"{"requeue_ids":[
+            serde_json::from_str::<ResumeTagRequest>(
+                r#"{"requeue_ids":[
                 "0190f5fe-7c00-7a00-8000-000000000007"
-            ]}"#)
-                .is_err()
+            ]}"#
+            )
+            .is_err()
         );
     }
 
@@ -512,8 +527,7 @@ mod tests {
     #[test]
     fn conversation_filters_reject_noncanonical_ids() {
         assert!(
-            serde_json::from_str::<ListRequirementsQuery>(r#"{"conversation_id":"7"}"#)
-                .is_err()
+            serde_json::from_str::<ListRequirementsQuery>(r#"{"conversation_id":"7"}"#).is_err()
         );
     }
 
@@ -526,11 +540,9 @@ mod tests {
     #[test]
     fn autowork_request_accepts_string_target_id() {
         let body = r#"{"kind":"terminal","target_id":"0190f5fe-7c00-7a00-8000-000000000007","enabled":false}"#;
-        let req: AutoWorkConfigRequest = serde_json::from_str(body).expect("string target_id must deserialize");
-        assert_eq!(
-            req.target_id,
-            "0190f5fe-7c00-7a00-8000-000000000007"
-        );
+        let req: AutoWorkConfigRequest =
+            serde_json::from_str(body).expect("string target_id must deserialize");
+        assert_eq!(req.target_id, "0190f5fe-7c00-7a00-8000-000000000007");
         assert_eq!(req.kind, AutoWorkTargetKind::Terminal);
         assert!(!req.enabled);
     }

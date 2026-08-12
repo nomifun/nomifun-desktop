@@ -57,3 +57,6 @@ export interface ResolvedMention {
 
 /** The generation mode a card is currently in. */
 export type GenMode = WorkshopGeneratorMode;
+
+/** Exact persisted model task required by the image card's current inputs. */
+export type ImageGeneratorTask = 'image_generation' | 'image_edit';

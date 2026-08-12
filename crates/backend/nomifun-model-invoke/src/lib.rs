@@ -1,23 +1,24 @@
 //! nomifun-model-invoke — the unified multimodal model invocation layer.
 //!
-//! Foundation crate of the P1 invoke redesign (see
-//! `docs/specs/2026-07-28-multimodal-model-provider-redesign.zh.md`): typed
-//! task requests/results ([`types`]), the single error currency ([`error`]),
-//! declarative auth schemes ([`auth`]), shared HTTP transport helpers
-//! ([`transport`]), the protocol-adapter seam + registry ([`adapter`]), the
-//! built-in platform routing table ([`routes_table`]), the fully-resolved
-//! call value ([`call`]) and the catalog resolution pipeline
-//! ([`service`]/[`resolve`]).
+//! Runtime resolution reads one exact persisted
+//! `(provider_id, model, task)` capability ([`resolve`]). Its protocol id owns
+//! the transport and endpoint contract; [`service`] never guesses from a
+//! provider name or falls back to another task. Typed requests/results live in
+//! [`types`], declarative auth in [`auth`], resolved calls in [`call`], and
+//! protocol executors behind the [`adapter`] registry.
 //!
-//! Concrete protocol adapters live in [`adapters`]; the OpenAI-compatible
-//! family is in, the remaining platforms (gemini / deepgram / ark / volc)
-//! arrive in later tasks and are appended to [`adapters::default_adapters`].
+//! [`manifest`] and [`routes_table`] expose configuration-time recommendations
+//! for saving a capability. They are never runtime routing or fallback
+//! authority. Concrete executors live in [`adapters`] and are selected only by
+//! the persisted protocol id.
 
 pub mod adapter;
 pub mod adapters;
 pub mod auth;
 pub mod call;
 pub mod error;
+pub mod manifest;
+pub mod realtime;
 pub mod resolve;
 pub mod routes_table;
 pub mod service;
@@ -25,17 +26,39 @@ pub mod transport;
 pub mod types;
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
-pub use adapters::default_adapters;
+pub use adapters::{
+    default_adapters, default_realtime_adapters, is_reserved_local_transport_param_key,
+    reserved_local_transport_param_keys,
+};
 pub use auth::{AuthMaterial, AuthScheme};
-pub use call::{ResolvedCall, ResolvedConnection};
+pub use call::{
+    ResolvedCall, ResolvedConnection, ResolvedTaskConfig, ResolvedTaskTransport,
+    validate_credentialed_target_url,
+};
 pub use error::{InvokeError, InvokeErrorKind};
-pub use routes_table::{TaskRoute, platform_route};
+pub use manifest::{
+    ALL_MODEL_TASKS, AuthSchemeDescriptor, ModelProtocolManifestResponse,
+    PlatformPresetDescriptor, ProtocolDefaultConnection, ProtocolDescriptor,
+    ProtocolEndpointDescriptor, ProtocolEndpointPurpose, ProtocolExecutorKind,
+    ProtocolManifestRegistry, ProtocolRecommendation, ProtocolScope,
+    ProtocolTaskDescriptor, ProtocolTransportKind, auth_scheme_descriptors,
+    default_protocol_registry, platform_presets, protocol_descriptor,
+    protocol_manifest_for, protocol_manifest_for_connection, protocol_task_descriptor,
+    try_default_protocol_registry, validate_endpoint_template,
+    expand_protocol_endpoint_template, validate_provider_params_for_protocol,
+};
+pub use realtime::{
+    RealtimeAdapterRegistry, RealtimeClientCommand, RealtimeProtocolAdapter, RealtimeSendError,
+    RealtimeServerEvent, RealtimeSession, RealtimeSessionConfig, RealtimeSessionLimits,
+    RealtimeTurnDetection, ResolvedRealtimeCall,
+};
+pub use routes_table::{TaskRoute, preset_protocol_recommendation};
 pub use service::{ModelInvokeService, ProbeReport};
 pub use transport::{
     MAX_ARTIFACT_BYTES, decode_b64, encode_b64, error_from_response, net_err, read_body_capped,
 };
 pub use types::{
-    AsrRequest, ChatTextRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle,
+    AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle,
     ModelRef, ProducedAsset, ProducedData, RerankRequest, RerankResult, TaskOutcome, TaskRequest, TaskResult,
     TtsRequest, VideoGenRequest,
 };

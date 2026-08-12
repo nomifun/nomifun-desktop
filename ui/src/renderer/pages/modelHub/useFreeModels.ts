@@ -10,7 +10,6 @@ import type {
   ManagedModelHealthResult,
   ManagedModelServiceStatus,
 } from '@/common/types/provider/managedModelService';
-import { MODEL_PROFILES_SWR_KEY } from '@/renderer/hooks/agent/useModelProfiles';
 import { PROVIDERS_SWR_KEY } from '@/renderer/hooks/agent/useModelProviderList';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import useSWR, { mutate as mutateGlobal, type KeyedMutator, type SWRConfiguration } from 'swr';
@@ -40,7 +39,6 @@ const fetchFreeStatus = async () => {
   });
   if (lastFreeStatusSignature && signature !== lastFreeStatusSignature) {
     void mutateGlobal(PROVIDERS_SWR_KEY);
-    void mutateGlobal(MODEL_PROFILES_SWR_KEY);
   }
   lastFreeStatusSignature = signature;
   return status;
@@ -76,7 +74,6 @@ export const useFreeModels = () => {
     async (status: ManagedModelServiceStatus) => {
       await mutateStatus(status, false);
       await mutateGlobal(PROVIDERS_SWR_KEY);
-      await mutateGlobal(MODEL_PROFILES_SWR_KEY);
       return status;
     },
     [mutateStatus]

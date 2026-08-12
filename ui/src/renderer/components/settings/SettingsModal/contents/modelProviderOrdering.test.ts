@@ -15,7 +15,8 @@ const provider = (id: ProviderId, sort_order?: number): IProvider =>
     platform: 'openai',
     name: id,
     base_url: 'https://example.com',
-    api_key: 'sk-test',
+    auth_scheme: 'bearer',
+    has_credentials: true,
     models: [],
     sort_order,
   });

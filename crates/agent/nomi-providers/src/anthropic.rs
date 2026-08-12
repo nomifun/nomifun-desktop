@@ -100,6 +100,16 @@ impl AnthropicProvider {
             });
         }
 
+        let mut body = crate::request_body_with_extra(&self.compat, body);
+        let object = body
+            .as_object_mut()
+            .expect("typed Anthropic request body is an object");
+        if request.tools.is_empty() {
+            object.remove("tools");
+        }
+        if request.thinking.is_none() {
+            object.remove("thinking");
+        }
         body
     }
 
@@ -128,7 +138,15 @@ impl LlmProvider for AnthropicProvider {
         &self,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        let url = format!("{}/v1/messages", self.base_url);
+        // `base_url + api_path` is resolved exactly once. NomiFun's task
+        // capability resolver supplies a complete endpoint as `base_url` and
+        // an explicit empty path; standalone Anthropic configuration receives
+        // `/v1/messages` from `anthropic_defaults`.
+        let url = format!(
+            "{}{}",
+            self.base_url.trim_end_matches('/'),
+            self.compat.api_path()
+        );
         let client = crate::http_client();
         let sanitize_tool_schemas = self.should_sanitize_tool_schemas();
         let mut body = self.build_request_body(request, sanitize_tool_schemas);
@@ -167,13 +185,22 @@ impl LlmProvider for AnthropicProvider {
         let (tx, rx) = mpsc::channel(64);
         let client = client.clone();
         let url_clone = url.clone();
+        let redactor = nomifun_net::secret_redaction::SecretRedactor::new(&self.api_keys);
 
         tokio::spawn(async move {
             let outcome = anthropic_shared::process_sse_stream(response, &tx).await;
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,
-                || crate::retry::send_and_check(&client, &url_clone, &headers, &body),
+                || {
+                    crate::retry::send_and_check(
+                        &client,
+                        &url_clone,
+                        &headers,
+                        &body,
+                        &redactor,
+                    )
+                },
                 |resp| anthropic_shared::process_sse_stream(resp, &tx),
             )
             .await;

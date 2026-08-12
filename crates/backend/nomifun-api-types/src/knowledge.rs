@@ -1,6 +1,86 @@
 use nomifun_common::KnowledgeBaseId;
 use serde::{Deserialize, Serialize};
 
+/// Candidate-generation backend used by knowledge retrieval.
+///
+/// `local` is the explicit, no-network keyword implementation. `remote`
+/// identifies one exact provider model whose `embedding` capability must be
+/// enabled at save time and every time it is invoked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum KnowledgeEmbeddingConfig {
+    Local {},
+    Remote {
+        #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
+        provider_id: String,
+        #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
+        model: String,
+    },
+}
+
+impl Default for KnowledgeEmbeddingConfig {
+    fn default() -> Self {
+        Self::Local {}
+    }
+}
+
+impl KnowledgeEmbeddingConfig {
+    pub fn remote_model(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Local {} => None,
+            Self::Remote { provider_id, model } => Some((provider_id, model)),
+        }
+    }
+}
+
+/// Result-ordering backend used after knowledge candidates are collected.
+///
+/// The stages are independent: local keyword candidates may be remotely
+/// reranked, and remote embedding candidates may keep their local cosine
+/// order. A configured remote stage is never treated as optional at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum KnowledgeRerankConfig {
+    Local {},
+    Remote {
+        #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
+        provider_id: String,
+        #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
+        model: String,
+    },
+}
+
+impl Default for KnowledgeRerankConfig {
+    fn default() -> Self {
+        Self::Local {}
+    }
+}
+
+impl KnowledgeRerankConfig {
+    pub fn remote_model(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Local {} => None,
+            Self::Remote { provider_id, model } => Some((provider_id, model)),
+        }
+    }
+}
+
+/// Install-wide knowledge retrieval policy persisted under the single
+/// `client_preferences` key `knowledge.retrieval`.
+///
+/// Both stages default explicitly to `local`; there is no implicit "first
+/// available model" lookup and no runtime fallback from a configured remote
+/// stage.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeRetrievalConfig {
+    pub embedding: KnowledgeEmbeddingConfig,
+    pub rerank: KnowledgeRerankConfig,
+}
+
 /// A live (URL-backed) source attached to a knowledge base. Snapshots of
 /// such sources can go stale between syncs, so the knowledge context builder
 /// surfaces the URLs in a dedicated "Realtime sources" section.
@@ -130,6 +210,75 @@ pub struct UpdateKnowledgeTagRequest {
 mod tests {
     use super::*;
 
+    const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    #[test]
+    fn retrieval_config_is_two_independent_tagged_stages() {
+        let config: KnowledgeRetrievalConfig = serde_json::from_value(serde_json::json!({
+            "embedding": {"mode": "local"},
+            "rerank": {
+                "mode": "remote",
+                "provider_id": PROVIDER_ID,
+                "model": "rerank-v3"
+            }
+        }))
+        .unwrap();
+        assert_eq!(config.embedding, KnowledgeEmbeddingConfig::Local {});
+        assert_eq!(
+            config.rerank.remote_model(),
+            Some((PROVIDER_ID, "rerank-v3"))
+        );
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            serde_json::json!({
+                "embedding": {"mode": "local"},
+                "rerank": {
+                    "mode": "remote",
+                    "provider_id": PROVIDER_ID,
+                    "model": "rerank-v3"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn retrieval_config_default_serializes_both_stages_as_explicit_local() {
+        let config = KnowledgeRetrievalConfig::default();
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            serde_json::json!({
+                "embedding": {"mode": "local"},
+                "rerank": {"mode": "local"}
+            })
+        );
+    }
+
+    #[test]
+    fn retrieval_config_rejects_unknown_fields_blank_models_and_bad_provider_ids() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"embedding": {"mode": "local"}}),
+            serde_json::json!({"rerank": {"mode": "local"}}),
+            serde_json::json!({
+                "embedding": {"mode": "local", "provider_id": PROVIDER_ID},
+                "rerank": {"mode": "local"}
+            }),
+            serde_json::json!({
+                "embedding": {"mode": "remote", "provider_id": PROVIDER_ID, "model": " "},
+                "rerank": {"mode": "local"}
+            }),
+            serde_json::json!({
+                "embedding": {"mode": "local"},
+                "rerank": {"mode": "remote", "provider_id": "legacy", "model": "r"}
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<KnowledgeRetrievalConfig>(value.clone()).is_err(),
+                "malformed retrieval config was accepted: {value}"
+            );
+        }
+    }
+
     #[test]
     fn knowledge_mount_info_uses_named_id_and_rejects_legacy_id() {
         let knowledge_base_id = KnowledgeBaseId::new();
@@ -144,7 +293,10 @@ mod tests {
         assert_eq!(info.knowledge_base_id, knowledge_base_id);
         let wire = serde_json::to_value(info).unwrap();
         assert_eq!(wire["knowledge_base_id"], knowledge_base_id.as_str());
-        assert!(wire.get("id").is_none(), "legacy generic id must stay off the wire: {wire}");
+        assert!(
+            wire.get("id").is_none(),
+            "legacy generic id must stay off the wire: {wire}"
+        );
 
         let legacy = serde_json::json!({
             "id": knowledge_base_id,
@@ -182,7 +334,10 @@ mod tests {
         assert_eq!(parsed.kind, "url", "kind defaults to url");
         assert_eq!(parsed.last_fetched_at, None);
         let round = serde_json::to_value(&parsed).unwrap();
-        assert!(round.get("lastFetchedAt").is_none(), "None stays off the wire: {round}");
+        assert!(
+            round.get("lastFetchedAt").is_none(),
+            "None stays off the wire: {round}"
+        );
     }
 
     /// **P3-K3**: the `rendered` flag must be additive/backward-compatible —
@@ -193,7 +348,10 @@ mod tests {
         // Old wire shape (no `rendered` key) → defaults to false.
         let legacy: KnowledgeSourceEntry =
             serde_json::from_value(serde_json::json!({"url": "https://old.example.com"})).unwrap();
-        assert!(!legacy.rendered, "missing `rendered` key must default to false (HTTP)");
+        assert!(
+            !legacy.rendered,
+            "missing `rendered` key must default to false (HTTP)"
+        );
 
         // Present-and-true round-trips through the wire.
         let entry = KnowledgeSourceEntry {
@@ -217,7 +375,10 @@ mod tests {
         });
         let parsed: KnowledgeSource = serde_json::from_value(mixed).unwrap();
         assert!(!parsed.entries[0].rendered, "legacy entry defaults to HTTP");
-        assert!(parsed.entries[1].rendered, "explicit rendered entry preserved");
+        assert!(
+            parsed.entries[1].rendered,
+            "explicit rendered entry preserved"
+        );
     }
 
     /// Tag DTO wire shape: camelCase keys, optional fields omit-when-None,
@@ -246,7 +407,10 @@ mod tests {
             sort_order: 0,
         };
         let v2 = serde_json::to_value(&tag_no_color).unwrap();
-        assert!(v2.get("color").is_none(), "None color must be omitted: {v2}");
+        assert!(
+            v2.get("color").is_none(),
+            "None color must be omitted: {v2}"
+        );
 
         // CreateKnowledgeTagRequest — minimal (color defaults to None).
         let create: CreateKnowledgeTagRequest =

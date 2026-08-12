@@ -144,6 +144,11 @@ mod tests {
     ) -> (AppProviderDeletionCoordinator, Arc<nomifun_db::Database>) {
         let db = Arc::new(init_database_memory().await.unwrap());
         let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+        let credentials_encrypted = nomifun_common::encrypt_string(
+            r#"{"api_keys":["test-only"]}"#,
+            &[0x42; 32],
+        )
+        .unwrap();
         for provider_id in [
             "0190f5fe-7c00-7a00-8000-000000000021",
             "0190f5fe-7c00-7a00-8000-000000000022",
@@ -154,13 +159,14 @@ mod tests {
         ] {
             nomifun_db::sqlx::query(
                 "INSERT INTO providers (\
-                    provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+                    provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
                     created_at, updated_at\
-                 ) VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', \
+                 ) VALUES (?, 'openai', ?, 'https://example.invalid', 'bearer', ?, \
                             1, 1, 1)",
             )
             .bind(provider_id)
             .bind(provider_id)
+            .bind(&credentials_encrypted)
             .execute(db.pool())
             .await
             .unwrap();
@@ -559,6 +565,12 @@ mod tests {
         let provider_service = nomifun_system::ProviderService::new(
             provider_repo.clone(),
             Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            Arc::new(nomifun_db::SqliteProviderModelCapabilityRepository::new(
+                db.pool().clone(),
+            )),
+            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(
+                db.pool().clone(),
+            )),
             [0u8; 32],
         )
         .with_deletion_coordinator(Arc::new(coord));

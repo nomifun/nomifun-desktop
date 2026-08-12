@@ -1,4 +1,4 @@
-﻿//! Public DTOs for IDMM (Intelligent Decision-Making Mode) — a per-session,
+//! Public DTOs for IDMM (Intelligent Decision-Making Mode) — a per-session,
 //! opt-in supervision capability that keeps agent/terminal sessions alive
 //! through provider faults and decision stalls. Pure serde — no axum.
 //!
@@ -698,7 +698,7 @@ fn default_max_switches() -> u32 {
 ///
 /// 全局存于 `client_preferences` 键 `agent.model_failover`(整体 JSON);会话级
 /// 可在 `conversations.extra.model_failover` 覆盖(存在则优先于全局)。所有字段
-/// 带 serde 默认,故空对象 → 关闭、空队列、`max_switches=4`、`stamp_unhealthy=true`。
+/// 带 serde 默认,故空对象 → 关闭、空队列、`max_switches=4`。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ModelFailoverConfig {
     /// 默认 false:不配置即不转移。
@@ -710,9 +710,6 @@ pub struct ModelFailoverConfig {
     /// 单轮最大切换次数(默认 4;实际还受队列长度封顶)。
     #[serde(default = "default_max_switches")]
     pub max_switches: u32,
-    /// 默认 true:故障时把失败模型的 `model_health` 标 `Unhealthy`。
-    #[serde(default = "default_true")]
-    pub stamp_unhealthy: bool,
 }
 
 impl<'de> Deserialize<'de> for ModelFailoverConfig {
@@ -729,8 +726,6 @@ impl<'de> Deserialize<'de> for ModelFailoverConfig {
             queue: Vec<nomifun_common::ProviderWithModel>,
             #[serde(default = "default_max_switches")]
             max_switches: u32,
-            #[serde(default = "default_true")]
-            stamp_unhealthy: bool,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -743,7 +738,6 @@ impl<'de> Deserialize<'de> for ModelFailoverConfig {
             enabled: wire.enabled,
             queue: wire.queue,
             max_switches: wire.max_switches,
-            stamp_unhealthy: wire.stamp_unhealthy,
         })
     }
 }
@@ -754,7 +748,6 @@ impl Default for ModelFailoverConfig {
             enabled: false,
             queue: Vec::new(),
             max_switches: default_max_switches(),
-            stamp_unhealthy: true,
         }
     }
 }
@@ -895,10 +888,22 @@ mod tests {
         let json = serde_json::to_value(&cfg).unwrap();
         // flatten 把 base 字段提到 fault_watch / decision_watch 顶层。
         assert_eq!(json["fault_watch"]["enabled"], serde_json::json!(true));
-        assert_eq!(json["fault_watch"]["tier"], serde_json::json!("rule_plus_model"));
-        assert_eq!(json["fault_watch"]["wake_action"], serde_json::json!("failover_then_retry"));
-        assert_eq!(json["decision_watch"]["answer_open_questions"], serde_json::json!(true));
-        assert_eq!(json["decision_watch"]["strategy"]["tendency"], serde_json::json!("aggressive"));
+        assert_eq!(
+            json["fault_watch"]["tier"],
+            serde_json::json!("rule_plus_model")
+        );
+        assert_eq!(
+            json["fault_watch"]["wake_action"],
+            serde_json::json!("failover_then_retry")
+        );
+        assert_eq!(
+            json["decision_watch"]["answer_open_questions"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            json["decision_watch"]["strategy"]["tendency"],
+            serde_json::json!("aggressive")
+        );
         let back: IdmmConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back, cfg);
     }
@@ -958,7 +963,10 @@ mod tests {
             serde_json::to_value(WatchTier::RulePlusModel).unwrap(),
             serde_json::json!("rule_plus_model")
         );
-        assert_eq!(serde_json::to_value(WatchTier::RuleOnly).unwrap(), serde_json::json!("rule_only"));
+        assert_eq!(
+            serde_json::to_value(WatchTier::RuleOnly).unwrap(),
+            serde_json::json!("rule_only")
+        );
     }
 
     #[test]
@@ -996,10 +1004,7 @@ mod tests {
         let body = r#"{"kind":"terminal","target_id":"0190f5fe-7c00-7a00-8000-000000000007"}"#;
         let req: SetIdmmRequest =
             serde_json::from_str(body).expect("string target_id must deserialize");
-        assert_eq!(
-            req.target_id,
-            "0190f5fe-7c00-7a00-8000-000000000007"
-        );
+        assert_eq!(req.target_id, "0190f5fe-7c00-7a00-8000-000000000007");
         assert_eq!(req.kind, IdmmTargetKind::Terminal);
         assert!(!req.config.any_enabled());
     }
@@ -1126,7 +1131,7 @@ mod tests {
         assert_eq!(json["run_state"], serde_json::json!("off"));
     }
 
-    /// D1:空对象 → 关闭、空队列、`max_switches=4`、`stamp_unhealthy=true`,
+    /// D1:空对象 → 关闭、空队列、`max_switches=4`,
     /// 与 [`ModelFailoverConfig::default`] 等价。
     #[test]
     fn model_failover_config_defaults_from_empty_object() {
@@ -1134,7 +1139,6 @@ mod tests {
         assert!(!cfg.enabled);
         assert!(cfg.queue.is_empty());
         assert_eq!(cfg.max_switches, 4);
-        assert!(cfg.stamp_unhealthy);
         assert_eq!(cfg, ModelFailoverConfig::default());
     }
 
@@ -1147,8 +1151,7 @@ mod tests {
                 {"provider_id": "019b0000-0000-7000-8000-000000000001", "model": "gpt-x", "use_model": null},
                 {"provider_id": "019b0000-0000-7000-8000-000000000002", "model": "claude", "use_model": "claude-alias"}
             ],
-            "max_switches": 2,
-            "stamp_unhealthy": false
+            "max_switches": 2
         });
         let cfg: ModelFailoverConfig = serde_json::from_value(json).unwrap();
         assert!(cfg.enabled);
@@ -1159,7 +1162,6 @@ mod tests {
         );
         assert_eq!(cfg.queue[1].use_model.as_deref(), Some("claude-alias"));
         assert_eq!(cfg.max_switches, 2);
-        assert!(!cfg.stamp_unhealthy);
     }
 
     #[test]

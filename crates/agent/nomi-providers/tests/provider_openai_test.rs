@@ -200,6 +200,34 @@ async fn openai_gateway_does_not_schema_retry_an_unrelated_500() {
 }
 
 #[tokio::test]
+async fn openai_chat_error_never_exposes_raw_or_percent_encoded_runtime_key() {
+    let server = MockServer::start().await;
+    let secret = "agent-key/+?=value";
+    let encoded = "agent-key%2F%2B%3F%3Dvalue";
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", format!("Bearer {secret}")))
+        .respond_with(ResponseTemplate::new(401).set_body_string(format!(
+            "Authorization: Bearer {secret}; api_key={encoded}"
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIProvider::new(
+        secret,
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    );
+    let rendered = provider.stream(&make_request()).await.unwrap_err().to_string();
+
+    assert!(!rendered.contains(secret), "raw key leaked: {rendered}");
+    assert!(!rendered.contains(encoded), "encoded key leaked: {rendered}");
+    assert!(rendered.contains("[REDACTED]"));
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn openai_gateway_does_not_remember_a_failed_sanitized_resend() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -830,6 +858,52 @@ async fn test_openai_multi_key_rotates_after_auth_failure() {
     server.verify().await;
 }
 
+#[tokio::test]
+async fn openai_extra_body_preserves_unknown_fields_but_typed_fields_win() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_sse_body(&[
+                &json!({"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}).to_string(),
+                &json!({"choices":[{"delta":{},"finish_reason":"stop"}]}).to_string(),
+            ]),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut compat = ProviderCompat::openai_defaults();
+    compat.extra_body = Some(
+        json!({
+            "temperature": 0.35,
+            "future_options": {"mode": "fast"},
+            "model": "must-not-win",
+            "messages": [{"role": "user", "content": "must-not-win"}],
+            "max_tokens": 1,
+            "tools": [{"type":"function","function":{"name":"must-not-survive"}}],
+            "reasoning_effort": "must-not-survive"
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let provider = OpenAIProvider::new("test-key", &server.uri(), compat);
+    collect_events(provider.stream(&make_request()).await.unwrap()).await;
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["temperature"], 0.35);
+    assert_eq!(body["future_options"]["mode"], "fast");
+    assert_eq!(body["model"], "gpt-4o");
+    assert_eq!(body["messages"][0]["content"], "You are a test assistant.");
+    assert_eq!(body["max_tokens"], 512);
+    assert_eq!(body["stream"], true);
+    assert!(body.get("tools").is_none());
+    assert!(body.get("reasoning_effort").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // test_openai_rate_limited
 // ---------------------------------------------------------------------------
@@ -996,4 +1070,45 @@ async fn test_openai_stream_empty_content_delta_skipped() {
         LlmEvent::Done { stop_reason, .. } => assert_eq!(*stop_reason, StopReason::EndTurn),
         e => panic!("expected Done, got: {:?}", e),
     }
+}
+
+#[tokio::test]
+async fn openai_accepts_a_fully_resolved_custom_capability_endpoint() {
+    let server = MockServer::start().await;
+    let chunk = json!({
+        "choices": [{
+            "delta": { "content": "custom endpoint" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 2, "completion_tokens": 2 }
+    })
+    .to_string();
+    Mock::given(method("POST"))
+        .and(path("/tenant/chat"))
+        .and(header("authorization", "Bearer test-key"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(build_sse_body(&[&chunk]), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &format!("{}/tenant/chat?api-version=2026-08-11", server.uri()),
+        ProviderCompat {
+            api_path: Some(String::new()),
+            ..ProviderCompat::openai_defaults()
+        },
+    );
+    let events = collect_events(provider.stream(&make_request()).await.unwrap()).await;
+
+    assert!(events.iter().any(
+        |event| matches!(event, LlmEvent::TextDelta(text) if text == "custom endpoint")
+    ));
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].url.path(), "/tenant/chat");
+    assert_eq!(received[0].url.query(), Some("api-version=2026-08-11"));
 }

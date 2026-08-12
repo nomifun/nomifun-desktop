@@ -4,20 +4,15 @@
 //! `tower::ServiceExt::oneshot`, without authentication middleware.
 //! Auth protection is verified at the app-level E2E tests (task 3.9).
 
-use std::sync::Arc;
+mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use nomifun_db::{
-    SqliteClientPreferenceRepository, SqliteProviderRepository, SqliteSettingsRepository, init_database_memory,
-};
-use nomifun_system::{
-    ClientPrefService, ModelFetchService, ProtocolDetectionService, ProviderService, SettingsService,
-    SystemRouterState, VersionCheckService, system_routes,
-};
+use nomifun_db::init_database_memory;
+use nomifun_system::{SystemRouterState, VersionCheckService, system_routes};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,36 +21,17 @@ use nomifun_system::{
 const TEST_ENCRYPTION_KEY: [u8; 32] = [0x42; 32];
 
 fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
-    let provider_repo = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
     let http_client = reqwest::Client::new();
-    SystemRouterState {
-        settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(db.pool().clone()))),
-        client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()))),
-        provider_service: ProviderService::new(
-            provider_repo.clone(),
-            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
-            TEST_ENCRYPTION_KEY,
-        ),
-        provider_connection_service: nomifun_system::ProviderConnectionService::new(
-            std::sync::Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(db.pool().clone())),
-            provider_repo.clone(),
-            TEST_ENCRYPTION_KEY,
-        ),
-        model_fetch_service: ModelFetchService::new(provider_repo.clone(), TEST_ENCRYPTION_KEY, http_client.clone()),
-        model_profile_service: nomifun_system::ModelProfileService::new(std::sync::Arc::new(
-            nomifun_db::SqliteProviderModelRepository::new(db.pool().clone()),
-        )),
-        provider_model_service: nomifun_system::ProviderModelService::new(
-            std::sync::Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
-            provider_repo.clone(),
-        ),
-        managed_model_service: None,
-        protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
-        version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),
-        data_dir: std::env::temp_dir(),
-        work_dir: std::env::temp_dir(),
-        work_dir_is_cli_override: false,
-    }
+    common::build_system_state(
+        db,
+        TEST_ENCRYPTION_KEY,
+        http_client.clone(),
+        VersionCheckService::new(http_client, "0.1.0".to_owned()),
+        None,
+        std::env::temp_dir(),
+        std::env::temp_dir(),
+        false,
+    )
 }
 
 async fn setup() -> (axum::Router, nomifun_db::Database) {

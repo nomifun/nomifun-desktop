@@ -7,10 +7,54 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  parseDeepLink,
   tauriDownloadUpdate,
   tauriInstallUpdate,
   type TauriDownloadUpdateProgress,
 } from './tauriShell';
+
+describe('deep-link parsing', () => {
+  test('keeps only non-sensitive provider and model suggestions', () => {
+    const query = new URLSearchParams({
+      base_url: 'https://api.example.com/v1',
+      name: 'Example provider',
+      platform: 'custom',
+      model: 'model-1',
+      task: 'speech_synthesis',
+      api_key: 'must-not-travel',
+      key: 'must-not-travel-either',
+      token: 'also-secret',
+    });
+
+    expect(parseDeepLink(`nomifun://add-provider?${query.toString()}`)).toEqual({
+      action: 'add-provider',
+      params: {
+        base_url: 'https://api.example.com/v1',
+        name: 'Example provider',
+        platform: 'custom',
+        model: 'model-1',
+        task: 'speech_synthesis',
+      },
+    });
+  });
+
+  test('drops nested URL credentials and action-foreign parameters', () => {
+    const query = new URLSearchParams({
+      base_url: 'https://user:secret@api.example.com/v1?key=secret#fragment',
+      route: '/conversation/not-a-provider-field',
+      api_key: 'secret',
+    });
+
+    expect(parseDeepLink(`nomifun://add-provider?${query.toString()}`)).toEqual({
+      action: 'add-provider',
+      params: {},
+    });
+    expect(parseDeepLink('nomifun://navigate?route=%2Fconversation%2Fid%3Ftoken%3Dsecret')).toEqual({
+      action: 'navigate',
+      params: {},
+    });
+  });
+});
 
 const originalWindow = globalThis.window;
 

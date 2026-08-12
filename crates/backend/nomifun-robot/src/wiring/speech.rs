@@ -1,16 +1,17 @@
 //! ASR, TTS and one-shot vision against the platform's model layer.
 //!
-//! ASR and TTS go through `ModelInvokeService` (the single resolve algorithm for
-//! non-chat tasks). Vision does **not**: the invoke layer's `ChatTextRequest` is
-//! text-only, so a one-shot VLM call is made straight through
-//! `nomi_providers::LlmProvider` with an inline image block. Routing it through a
-//! conversation instead would self-nest (the device is already inside a tool call
-//! on that conversation) and blow the firmware's 30 s HTTP ceiling.
+//! ASR and TTS go through `ModelInvokeService`, while one-shot vision uses the
+//! shared Agent provider path so it can send an inline image block. Routing the
+//! vision request through a conversation would self-nest (the device is already
+//! inside a tool call on that conversation) and exceed the firmware's 30 s HTTP
+//! ceiling.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use nomifun_api_types::{TEXT_TO_SPEECH_PREFERENCE_KEY, TextToSpeechConfig};
+use nomifun_api_types::{
+    SpeechToTextConfig, TEXT_TO_SPEECH_PREFERENCE_KEY, TextToSpeechConfig,
+};
 use nomifun_model_invoke::ModelInvokeService;
 use nomifun_model_invoke::types::{
     AsrRequest, InputAsset, ModelRef, ProducedData, TaskOutcome, TaskRequest, TaskResult,
@@ -27,8 +28,6 @@ use crate::services::{SpeechContext, SpeechServices};
 /// `/robot/vision/explain` handler deliberately adds no second timeout — one
 /// ceiling, held here, next to the call it bounds.
 pub const VISION_TIMEOUT_SECS: u64 = 25;
-/// Cap on a single vision answer so the device's 8 KB body handling stays happy.
-const VISION_MAX_TOKENS: u32 = 512;
 /// The install-wide speech-recognition preference key.
 const SPEECH_TO_TEXT_PREFERENCE_KEY: &str = "tools.speechToText";
 
@@ -38,18 +37,20 @@ pub trait PreferenceReader: Send + Sync {
     async fn get(&self, key: &str) -> Option<Value>;
 }
 
-/// Provider credentials for a direct (non-invoke) call.
+/// Complete one-shot image question passed to the application's Agent Chat
+/// bridge. The bridge resolves the exact persisted Chat capability; this crate
+/// never sees credentials or infers a serializer from provider identity.
 #[derive(Debug, Clone)]
-pub struct ProviderCredentials {
-    pub api_key: String,
-    pub base_url: String,
-    pub platform: String,
+pub struct VisionCompletionRequest {
+    pub provider_id: String,
+    pub model: String,
+    pub jpeg: Vec<u8>,
+    pub question: String,
 }
 
-/// Read a provider row's credentials.
 #[async_trait::async_trait]
-pub trait ProviderRowReader: Send + Sync {
-    async fn credentials(&self, provider_id: &str) -> Option<ProviderCredentials>;
+pub trait VisionCompletionExecutor: Send + Sync {
+    async fn complete(&self, request: VisionCompletionRequest) -> anyhow::Result<String>;
 }
 
 /// Read a companion's model slots.
@@ -89,18 +90,13 @@ fn parse_global_tts(value: &Value) -> Option<(String, String, Option<String>)> {
 }
 
 /// Parse the `tools.speechToText` preference value down to a model reference.
-///
-/// Deliberately **not** `nomifun_api_types::SpeechToTextConfig`: that type is the
-/// desktop dictation button's config, gated on a required `enabled` flag and
-/// `deny_unknown_fields`. A robot has no dictation button — the companion profile
-/// documents `voice.asr` absent as "fall back to `tools.speechToText`", with no
-/// mention of the toggle — so only the coordinates are read here.
 fn parse_global_asr(value: &Value) -> Option<(String, String)> {
-    let provider_id = value.get("provider_id")?.as_str()?.to_owned();
-    let model = value.get("model")?.as_str()?.to_owned();
-    if provider_id.trim().is_empty() || model.trim().is_empty() {
+    let config = serde_json::from_value::<SpeechToTextConfig>(value.clone()).ok()?;
+    if !config.enabled {
         return None;
     }
+    let provider_id = config.provider_id?;
+    let model = config.model?;
     Some((provider_id, model))
 }
 
@@ -126,7 +122,7 @@ pub struct RobotSpeech {
     invoke: Arc<ModelInvokeService>,
     slots: Arc<dyn CompanionSlotReader>,
     prefs: Arc<dyn PreferenceReader>,
-    providers: Arc<dyn ProviderRowReader>,
+    vision: Arc<dyn VisionCompletionExecutor>,
 }
 
 impl RobotSpeech {
@@ -134,13 +130,13 @@ impl RobotSpeech {
         invoke: Arc<ModelInvokeService>,
         slots: Arc<dyn CompanionSlotReader>,
         prefs: Arc<dyn PreferenceReader>,
-        providers: Arc<dyn ProviderRowReader>,
+        vision: Arc<dyn VisionCompletionExecutor>,
     ) -> Self {
         Self {
             invoke,
             slots,
             prefs,
-            providers,
+            vision,
         }
     }
 }
@@ -247,89 +243,20 @@ impl SpeechServices for RobotSpeech {
             .vision_slot(&ctx.companion_id)
             .await
             .ok_or_else(|| anyhow::anyhow!("未配置视觉模型"))?;
-        let credentials = self
-            .providers
-            .credentials(&provider_id)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("视觉模型的供应商不可用"))?;
 
         let answer = tokio::time::timeout(
             Duration::from_secs(VISION_TIMEOUT_SECS),
-            one_shot_vision(&credentials, &model, jpeg, question),
+            self.vision.complete(VisionCompletionRequest {
+                provider_id,
+                model,
+                jpeg,
+                question: question.to_owned(),
+            }),
         )
         .await
         .map_err(|_| anyhow::anyhow!("视觉模型响应太慢"))??;
         Ok(answer)
     }
-}
-
-/// One non-streaming-shaped VLM call, collected from the stream.
-async fn one_shot_vision(
-    credentials: &ProviderCredentials,
-    model: &str,
-    jpeg: Vec<u8>,
-    question: &str,
-) -> anyhow::Result<String> {
-    use base64::Engine;
-    use nomi_providers::LlmProvider;
-    use nomi_types::llm::{LlmEvent, LlmRequest};
-    use nomi_types::message::{ContentBlock, Message, Role};
-
-    let data = base64::engine::general_purpose::STANDARD.encode(&jpeg);
-    let prompt = if question.trim().is_empty() {
-        "描述这张图片。"
-    } else {
-        question
-    };
-    let request = LlmRequest {
-        model: model.to_owned(),
-        system: "你在为一台物理机器人看图。用一到两句中文口语描述你看到的内容，直接回答问题。"
-            .to_owned(),
-        messages: vec![Message::new(
-            Role::User,
-            vec![
-                ContentBlock::Image {
-                    media_type: "image/jpeg".to_owned(),
-                    data,
-                },
-                ContentBlock::Text {
-                    text: prompt.to_owned(),
-                },
-            ],
-        )],
-        tools: vec![],
-        max_tokens: VISION_MAX_TOKENS,
-        thinking: None,
-        reasoning_effort: None,
-    };
-
-    // Anthropic-platform rows speak the anthropic wire shape; everything else in
-    // this repo defaults to OpenAI-compatible.
-    let provider: Box<dyn LlmProvider> = if credentials.platform == "anthropic" {
-        Box::new(nomi_providers::anthropic::AnthropicProvider::new(
-            &credentials.api_key,
-            &credentials.base_url,
-            nomi_config::compat::ProviderCompat::anthropic_defaults(),
-        ))
-    } else {
-        Box::new(nomi_providers::openai::OpenAIProvider::new(
-            &credentials.api_key,
-            &credentials.base_url,
-            nomi_config::compat::ProviderCompat::openai_defaults(),
-        ))
-    };
-
-    let mut rx = provider.stream(&request).await?;
-    let mut answer = String::new();
-    while let Some(event) = rx.recv().await {
-        if let LlmEvent::TextDelta(delta) = event {
-            answer.push_str(&delta);
-        }
-    }
-    if answer.trim().is_empty() {
-        anyhow::bail!("视觉模型没有返回内容");
-    }
-    Ok(answer)
 }
 
 #[cfg(test)]
@@ -375,12 +302,9 @@ mod tests {
     }
 
     #[test]
-    fn global_asr_preference_ignores_the_dictation_toggle() {
-        // The real value carries the dictation button's `enabled`/`provider`
-        // fields; the robot only needs the coordinates.
+    fn global_asr_preference_uses_the_shared_catalog_config() {
         let value = json!({
-            "enabled": false,
-            "provider": "openai",
+            "enabled": true,
             "provider_id": "0190f5fe-7c00-7a00-8000-0000000000aa",
             "model": "whisper-1",
         });
@@ -391,7 +315,25 @@ mod tests {
                 "whisper-1".to_owned()
             ))
         );
-        assert!(parse_global_asr(&json!({ "enabled": true, "provider": "openai" })).is_none());
+        assert!(
+            parse_global_asr(&json!({
+                "enabled": false,
+                "provider_id": "0190f5fe-7c00-7a00-8000-0000000000aa",
+                "model": "whisper-1"
+            }))
+            .is_none()
+        );
+        assert!(parse_global_asr(&json!({ "enabled": true })).is_none());
+        assert!(
+            parse_global_asr(&json!({
+                "enabled": true,
+                "provider": "openai",
+                "provider_id": "0190f5fe-7c00-7a00-8000-0000000000aa",
+                "model": "whisper-1"
+            }))
+            .is_none(),
+            "retired provider enums must not be accepted"
+        );
         assert!(
             parse_global_asr(&json!({ "provider_id": " ", "model": "whisper-1" })).is_none(),
             "a blank provider id is not a reference"

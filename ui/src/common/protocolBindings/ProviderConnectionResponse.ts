@@ -3,4 +3,4 @@
 /**
  * Response never echoes credentials back; `has_credentials` signals presence.
  */
-export type ProviderConnectionResponse = { connection_id: string, provider_id: string, role: string, label?: string, base_url: string, auth_scheme: string, has_credentials: boolean, is_full_url: boolean, extra: unknown, created_at: number, updated_at: number, };
+export type ProviderConnectionResponse = { connection_id: string, provider_id: string, role: string, label?: string, base_url: string, auth_scheme: string, has_credentials: boolean, extra: unknown, created_at: number, updated_at: number, };

@@ -9,12 +9,14 @@
 //! reqwest and followed manually (≤ [`MAX_REDIRECTS`] hops) with the full
 //! validation re-applied per hop.
 
-use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use nomifun_common::AppError;
-use url::{Host, Url};
+use nomifun_net::egress::{
+    BodyOverflowPolicy, SafeHttpClient, SafeHttpError, SafeHttpErrorKind,
+    redacted_url, validate_untrusted_url,
+};
+use url::Url;
 
 /// Base-root-relative directory holding URL snapshots.
 pub const SNAPSHOT_REL_DIR: &str = "snapshots";
@@ -112,204 +114,63 @@ impl HttpFetcher {
     /// Fetch `raw_url` and convert the response to markdown. Every hop is
     /// SSRF-validated; bodies larger than the cap are truncated, not failed.
     pub async fn fetch_page(&self, raw_url: &str) -> Result<FetchedPage, AppError> {
-        let mut url = parse_fetch_url(raw_url)?;
-        for _hop in 0..=MAX_REDIRECTS {
-            let addrs = resolve_validated(&url, self.allow_private).await?;
-            let response = self.send(&url, &addrs).await?;
-            let status = response.status();
-
-            if status.is_redirection() {
-                let location = response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| AppError::BadGateway(format!("redirect without Location from {url}")))?;
-                let next = url
-                    .join(location)
-                    .map_err(|e| AppError::BadGateway(format!("invalid redirect target {location}: {e}")))?;
-                url = check_scheme(next)?;
-                continue;
-            }
-            if !status.is_success() {
-                return Err(AppError::BadGateway(format!("fetch failed: HTTP {status} for {url}")));
-            }
-
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
-            let (body, truncated) = self.read_capped(response).await?;
-            let text = String::from_utf8_lossy(&body).into_owned();
-
-            let (title, markdown) = if looks_like_html(content_type.as_deref(), &text) {
-                html_to_markdown(&text)
-            } else {
-                (None, text)
-            };
-            return Ok(FetchedPage {
-                final_url: url.to_string(),
-                title,
-                markdown,
-                truncated,
-            });
+        let mut client = SafeHttpClient::new(self.timeout, self.max_bytes)
+            .max_redirects(MAX_REDIRECTS)
+            .overflow_policy(BodyOverflowPolicy::Truncate)
+            .user_agent("NomiFun-Knowledge/1.0");
+        if self.allow_private {
+            client = client.allow_private_for_tests();
         }
-        Err(AppError::BadGateway(format!("too many redirects fetching {raw_url}")))
-    }
-
-    async fn send(&self, url: &Url, addrs: &[SocketAddr]) -> Result<reqwest::Response, AppError> {
-        // A fresh Client per hop is deliberate: `resolve_to_addrs` pins one
-        // host's pre-validated addresses onto the client, and every redirect
-        // hop may land on a different host needing its own pinning.
-        let mut builder = nomifun_net::proxy::apply_detected_proxy(reqwest::Client::builder())
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(self.timeout);
-        // Pin the pre-validated addresses so the actual connection cannot be
-        // re-resolved to a different (private) host (DNS rebinding).
-        if let Some(host) = url.host_str()
-            && !addrs.is_empty()
-        {
-            builder = builder.resolve_to_addrs(host, addrs);
+        let response = client.get(raw_url).await.map_err(map_safe_http_error)?;
+        if !response.status.is_success() {
+            return Err(AppError::BadGateway(format!(
+                "fetch failed: HTTP {} for {}",
+                response.status,
+                redacted_url(&response.final_url)
+            )));
         }
-        let client = builder
-            .build()
-            .map_err(|e| AppError::Internal(format!("failed to build http client: {e}")))?;
-        client
-            .get(url.clone())
-            .header(reqwest::header::USER_AGENT, "NomiFun-Knowledge/1.0")
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    AppError::Timeout(format!("fetch timed out for {url}"))
-                } else {
-                    AppError::BadGateway(format!("fetch failed for {url}: {e}"))
-                }
-            })
-    }
-
-    /// Drain the body up to `max_bytes`; longer bodies are truncated. A body
-    /// of exactly `max_bytes` is kept whole and NOT flagged as truncated.
-    async fn read_capped(&self, response: reqwest::Response) -> Result<(Vec<u8>, bool), AppError> {
-        let mut body: Vec<u8> = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = match chunk {
-                Ok(c) => c,
-                Err(e) if e.is_timeout() => return Err(AppError::Timeout(format!("fetch body timed out: {e}"))),
-                Err(e) => return Err(AppError::BadGateway(format!("fetch body failed: {e}"))),
-            };
-            if body.len() + chunk.len() > self.max_bytes {
-                let take = self.max_bytes - body.len();
-                body.extend_from_slice(&chunk[..take]);
-                return Ok((body, true));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok((body, false))
+        let content_type = response
+            .headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        let text = String::from_utf8_lossy(&response.body).into_owned();
+        let (title, markdown) = if looks_like_html(content_type, &text) {
+            html_to_markdown(&text)
+        } else {
+            (None, text)
+        };
+        Ok(FetchedPage {
+            final_url: response.final_url.to_string(),
+            title,
+            markdown,
+            truncated: response.truncated,
+        })
     }
 }
 
-/// Parse + scheme-check a fetch URL (no DNS yet).
-fn parse_fetch_url(raw: &str) -> Result<Url, AppError> {
-    let url = Url::parse(raw.trim()).map_err(|e| AppError::BadRequest(format!("invalid URL: {e}")))?;
-    check_scheme(url)
-}
-
-fn check_scheme(url: Url) -> Result<Url, AppError> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(AppError::BadRequest(format!(
-            "only http(s) URLs are supported (got scheme: {})",
-            url.scheme()
-        )));
+fn map_safe_http_error(error: SafeHttpError) -> AppError {
+    match error.kind() {
+        SafeHttpErrorKind::InvalidUrl | SafeHttpErrorKind::ForbiddenTarget => {
+            AppError::BadRequest(error.to_string())
+        }
+        SafeHttpErrorKind::Timeout => AppError::Timeout(error.to_string()),
+        SafeHttpErrorKind::ClientBuild => AppError::Internal(error.to_string()),
+        SafeHttpErrorKind::Dns
+        | SafeHttpErrorKind::Network
+        | SafeHttpErrorKind::InvalidRedirect
+        | SafeHttpErrorKind::TooManyRedirects
+        | SafeHttpErrorKind::BodyTooLarge
+        | SafeHttpErrorKind::BodyRead => AppError::BadGateway(error.to_string()),
     }
-    if url.host_str().is_none() {
-        return Err(AppError::BadRequest("URL has no host".into()));
-    }
-    Ok(url)
 }
 
 /// Full pre-connect validation used by the fetcher and exposed for callers
 /// that want to vet a URL without fetching: scheme/host syntax plus a DNS
 /// resolution where EVERY resolved address must be public.
 pub async fn validate_fetch_url(raw: &str, allow_private: bool) -> Result<Url, AppError> {
-    let url = parse_fetch_url(raw)?;
-    resolve_validated(&url, allow_private).await?;
-    Ok(url)
-}
-
-/// Resolve the URL host and reject private/local addresses. Returns the
-/// resolved socket addresses for connection pinning.
-async fn resolve_validated(url: &Url, allow_private: bool) -> Result<Vec<SocketAddr>, AppError> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| AppError::BadRequest("URL has no host".into()))?;
-    let port = url.port_or_known_default().unwrap_or(443);
-
-    if !allow_private
-        && let Some(literal) = url.host().and_then(host_ip)
-        && forbidden_ip(&literal)
-    {
-        return Err(AppError::BadRequest(format!(
-            "URL host {host} is a private or local address; fetching it is blocked"
-        )));
-    }
-
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+    validate_untrusted_url(raw, allow_private)
         .await
-        .map_err(|e| AppError::BadGateway(format!("DNS resolution failed for {host}: {e}")))?
-        .collect();
-    if addrs.is_empty() {
-        return Err(AppError::BadGateway(format!("DNS resolution returned no addresses for {host}")));
-    }
-    if !allow_private && let Some(bad) = addrs.iter().find(|a| forbidden_ip(&a.ip())) {
-        return Err(AppError::BadRequest(format!(
-            "URL host {host} resolves to a private or local address ({}); fetching it is blocked",
-            bad.ip()
-        )));
-    }
-    Ok(addrs)
-}
-
-fn host_ip(host: Host<&str>) -> Option<IpAddr> {
-    match host {
-        Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
-        Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
-        Host::Domain(_) => None,
-    }
-}
-
-/// SSRF address policy: anything not unambiguously public is forbidden.
-fn forbidden_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || v4.is_documentation()
-                || octets[0] == 0
-                // CGNAT 100.64.0.0/10
-                || (octets[0] == 100 && (64..128).contains(&octets[1]))
-                // IETF protocol assignments 192.0.0.0/24
-                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
-        }
-        IpAddr::V6(v6) => {
-            let seg0 = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                // Unique-local fc00::/7
-                || (seg0 & 0xfe00) == 0xfc00
-                // Link-local fe80::/10
-                || (seg0 & 0xffc0) == 0xfe80
-                // v4-mapped/compatible addresses inherit the v4 verdict.
-                || v6.to_ipv4_mapped().is_some_and(|v4| forbidden_ip(&IpAddr::V4(v4)))
-        }
-    }
+        .map_err(map_safe_http_error)
 }
 
 /// Decide whether a response body should go through HTML→MD conversion.
@@ -585,44 +446,42 @@ mod tests {
         assert_eq!(Url::parse("http://0177.0.0.1/").unwrap().host_str(), Some("127.0.0.1"));
     }
 
-    /// Per-hop redirect validation, exercised at function level: `fetch_page`
-    /// follows a redirect by joining the Location value onto the current URL
-    /// (`Url::join`), re-checking the scheme (`check_scheme`) and re-resolving
-    /// with the private-address guard (`resolve_validated`). An end-to-end
+    /// Per-hop redirect validation is owned by the shared safe HTTP client.
+    /// An end-to-end
     /// wiremock test CANNOT cover the rejection: the mock server itself binds
     /// to loopback, so reaching hop 1 requires `allow_private` — which would
     /// also admit the private hop 2. This test drives the exact same functions
     /// on a redirect Location target instead.
     #[tokio::test]
     async fn redirect_hop_to_private_target_is_rejected() {
-        let origin = Url::parse("https://public.example.com/start").unwrap();
         // Absolute Location to the cloud metadata endpoint (classic SSRF pivot).
-        let next = origin.join("http://169.254.169.254/latest/meta-data/").unwrap();
-        let next = check_scheme(next).unwrap();
-        let err = resolve_validated(&next, false).await.unwrap_err();
+        let err = validate_fetch_url("http://169.254.169.254/latest/meta-data/", false)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
-        assert!(err.to_string().contains("private or local"), "{err}");
+        assert!(err.to_string().contains("forbidden address"), "{err}");
 
-        // A redirect downgrading to a non-http scheme dies at check_scheme.
-        let bad = origin.join("ftp://internal/").unwrap();
-        assert!(check_scheme(bad).is_err());
+        // A redirect downgrading to a non-http scheme is rejected too.
+        assert!(nomifun_net::egress::parse_untrusted_url("ftp://internal/").is_err());
     }
 
     #[test]
     fn forbidden_ip_policy() {
         let bad = ["127.0.0.1", "10.1.2.3", "172.31.0.1", "192.168.0.1", "169.254.0.1", "0.0.0.0", "100.100.0.1", "192.0.0.5", "224.0.0.1"];
         for ip in bad {
-            assert!(forbidden_ip(&ip.parse().unwrap()), "{ip}");
+            assert!(nomifun_net::egress::forbidden_ip(ip.parse().unwrap()), "{ip}");
         }
         let good = ["1.1.1.1", "8.8.8.8", "93.184.216.34", "100.128.0.1", "172.32.0.1"];
         for ip in good {
-            assert!(!forbidden_ip(&ip.parse().unwrap()), "{ip}");
+            assert!(!nomifun_net::egress::forbidden_ip(ip.parse().unwrap()), "{ip}");
         }
-        assert!(forbidden_ip(&"::1".parse().unwrap()));
-        assert!(forbidden_ip(&"fe80::1".parse().unwrap()));
-        assert!(forbidden_ip(&"fd12:3456::1".parse().unwrap()));
-        assert!(forbidden_ip(&"::ffff:192.168.0.1".parse().unwrap()));
-        assert!(!forbidden_ip(&"2606:4700:4700::1111".parse().unwrap()));
+        assert!(nomifun_net::egress::forbidden_ip("::1".parse().unwrap()));
+        assert!(nomifun_net::egress::forbidden_ip("fe80::1".parse().unwrap()));
+        assert!(nomifun_net::egress::forbidden_ip("fd12:3456::1".parse().unwrap()));
+        assert!(nomifun_net::egress::forbidden_ip("::ffff:192.168.0.1".parse().unwrap()));
+        assert!(!nomifun_net::egress::forbidden_ip(
+            "2606:4700:4700::1111".parse().unwrap()
+        ));
     }
 
     // ── slug / snapshot metadata / conversion ───────────────────────
@@ -824,6 +683,6 @@ mod tests {
         let server = MockServer::start().await;
         let err = HttpFetcher::new().fetch_page(&format!("{}/doc", server.uri())).await.unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
-        assert!(err.to_string().contains("private or local"), "{err}");
+        assert!(err.to_string().contains("forbidden address"), "{err}");
     }
 }

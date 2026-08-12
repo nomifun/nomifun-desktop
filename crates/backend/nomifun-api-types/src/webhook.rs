@@ -149,8 +149,7 @@ mod tests {
 
     #[test]
     fn webhook_response_serializes_canonical_uuidv7_business_id() {
-        let webhook_id =
-            WebhookId::parse("0190f5fe-7c00-7a00-8000-000000000042").unwrap();
+        let webhook_id = WebhookId::parse("0190f5fe-7c00-7a00-8000-000000000042").unwrap();
         let value = serde_json::to_value(Webhook {
             webhook_id: webhook_id.clone(),
             name: "bot".into(),
@@ -221,11 +220,10 @@ mod tests {
 
     #[test]
     fn upsert_tag_setting_accepts_uuidv7_webhook_id() {
-        let setting: UpsertTagSettingRequest =
-            serde_json::from_value(serde_json::json!({
-                "webhook_id": "0190f5fe-7c00-7a00-8000-000000000042"
-            }))
-            .unwrap();
+        let setting: UpsertTagSettingRequest = serde_json::from_value(serde_json::json!({
+            "webhook_id": "0190f5fe-7c00-7a00-8000-000000000042"
+        }))
+        .unwrap();
         assert_eq!(
             setting
                 .webhook_id
@@ -239,11 +237,9 @@ mod tests {
     #[test]
     fn upsert_tag_setting_rejects_legacy_id() {
         assert!(
-            serde_json::from_value::<UpsertTagSettingRequest>(
-                serde_json::json!({
-                    "id": "0190f5fe-7c00-7a00-8000-000000000042"
-                })
-            )
+            serde_json::from_value::<UpsertTagSettingRequest>(serde_json::json!({
+                "id": "0190f5fe-7c00-7a00-8000-000000000042"
+            }))
             .is_err()
         );
     }

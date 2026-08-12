@@ -13,6 +13,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::auth::AuthMaterial;
 use crate::error::{InvokeError, InvokeErrorKind};
+use nomifun_net::secret_redaction::SecretRedactor;
 
 /// Map a reqwest transport error onto [`InvokeError`]
 /// (timeout → [`InvokeErrorKind::Timeout`], else [`InvokeErrorKind::Network`]).
@@ -43,15 +44,19 @@ pub(crate) async fn send_with_rotation<F>(auth: &AuthMaterial, build: F) -> Resu
 where
     F: Fn() -> Result<reqwest::RequestBuilder, InvokeError>,
 {
+    let redactor = auth.secret_redactor();
     let secrets = if auth.scheme.rotates() { auth.secrets() } else { Vec::new() };
     if secrets.len() < 2 {
         // Single-shot path: `apply` also surfaces the canonical Config error
         // for empty credentials.
-        return auth.apply(build()?)?.send().await.map_err(net_err);
+        let mut response = auth.apply(build()?)?.send().await.map_err(net_err)?;
+        response.extensions_mut().insert(redactor);
+        return Ok(response);
     }
     let last = secrets.len() - 1;
     for (idx, secret) in secrets.iter().enumerate() {
-        let resp = auth.apply_with_secret(build()?, secret)?.send().await.map_err(net_err)?;
+        let mut resp = auth.apply_with_secret(build()?, secret)?.send().await.map_err(net_err)?;
+        resp.extensions_mut().insert(redactor.clone());
         if idx < last && is_rotation_status(resp.status()) {
             continue; // this key was refused/throttled — try the next one
         }
@@ -135,6 +140,7 @@ fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<u64
 /// 400/422 → [`InvokeErrorKind::InvalidParams`]; 5xx and everything else →
 /// [`InvokeErrorKind::ProviderError`]. `http_status` is always set.
 pub async fn error_from_response(resp: reqwest::Response) -> InvokeError {
+    let redactor = response_secret_redactor(&resp);
     let status = resp.status();
     let code = status.as_u16();
     let kind = match code {
@@ -148,13 +154,23 @@ pub async fn error_from_response(resp: reqwest::Response) -> InvokeError {
         .then(|| parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER)))
         .flatten();
     let body = resp.text().await.unwrap_or_default();
-    let snippet: String = body.chars().take(500).collect();
+    let snippet: String = redactor.redact(&body).chars().take(500).collect();
     InvokeError {
         kind,
         message: format!("provider returned {status}: {snippet}"),
         http_status: Some(code),
         retry_after_ms,
     }
+}
+
+/// Obtain the exact runtime credential redactor attached by the authenticated
+/// send path. Protocols that surface provider-specific failure headers/bodies
+/// use this before consuming the response.
+pub(crate) fn response_secret_redactor(resp: &reqwest::Response) -> SecretRedactor {
+    resp.extensions()
+        .get::<SecretRedactor>()
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Hard ceiling on a single downloaded artifact / video-content body. Streams
@@ -218,7 +234,7 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::json;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -228,6 +244,21 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET")).and(path("/x")).respond_with(template).mount(&server).await;
         reqwest::Client::new().get(format!("{}/x", server.uri())).send().await.unwrap()
+    }
+
+    fn assert_query_secret_redacted(error: &InvokeError, secret: &str, request_root: &str) {
+        let encoded = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("api_key", secret)
+            .finish();
+        let invoke_rendered = error.to_string();
+        let app_error: nomifun_common::AppError = error.clone().into();
+        let app_rendered = app_error.to_string();
+        for rendered in [&invoke_rendered, &app_rendered] {
+            assert!(!rendered.contains(secret), "raw secret leaked: {rendered}");
+            assert!(!rendered.contains(&encoded), "encoded secret leaked: {rendered}");
+            assert!(!rendered.contains("api_key"), "query parameter leaked: {rendered}");
+            assert!(!rendered.contains(request_root), "request URL leaked: {rendered}");
+        }
     }
 
     #[test]
@@ -463,7 +494,11 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(500)))
             .mount(&server)
             .await;
-        let client = reqwest::Client::builder().timeout(Duration::from_millis(50)).build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
         let err = client.get(format!("{}/slow", server.uri())).send().await.unwrap_err();
         assert_eq!(net_err(err).kind, InvokeErrorKind::Timeout);
 
@@ -472,12 +507,71 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        let err = reqwest::Client::new()
+        let err = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
             .get(format!("http://127.0.0.1:{port}/x"))
             .send()
             .await
             .unwrap_err();
         assert_eq!(net_err(err).kind, InvokeErrorKind::Network);
+    }
+
+    #[tokio::test]
+    async fn query_key_transport_error_never_discloses_raw_or_encoded_secret() {
+        let server = MockServer::start().await;
+        let secret = "query secret/+?&=TOP_SECRET";
+        Mock::given(method("GET"))
+            .and(path("/slow-secret"))
+            .and(query_param("api_key", secret))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(250)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let auth = AuthMaterial {
+            scheme: AuthScheme::QueryKey("api_key".into()),
+            credentials: json!({"api_keys": [secret]}),
+        };
+        let url = format!("{}/slow-secret", server.uri());
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let error = get_request(&client, &url, Duration::from_millis(20), &auth)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, InvokeErrorKind::Timeout);
+        assert_query_secret_redacted(&error, secret, &server.uri());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn query_key_json_decode_error_never_discloses_raw_or_encoded_secret() {
+        let server = MockServer::start().await;
+        let secret = "json secret/+?&=TOP_SECRET";
+        Mock::given(method("GET"))
+            .and(path("/invalid-json-secret"))
+            .and(query_param("api_key", secret))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let auth = AuthMaterial {
+            scheme: AuthScheme::QueryKey("api_key".into()),
+            credentials: json!({"api_keys": [secret]}),
+        };
+        let url = format!("{}/invalid-json-secret", server.uri());
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = get_request(&client, &url, Duration::from_secs(1), &auth)
+            .await
+            .unwrap();
+
+        let source = response.json::<serde_json::Value>().await.unwrap_err();
+        let error = InvokeError::response_json("invalid test JSON", &source);
+
+        assert_eq!(error.kind, InvokeErrorKind::ParseError);
+        assert_query_secret_redacted(&error, secret, &server.uri());
+        server.verify().await;
     }
 
     #[tokio::test]
@@ -498,6 +592,44 @@ mod tests {
             assert_eq!(err.retry_after_ms, None, "status {status}");
             assert!(err.message.contains("nope"), "status {status}: {}", err.message);
         }
+    }
+
+    #[tokio::test]
+    async fn error_from_response_redacts_every_runtime_key_and_encoded_form() {
+        let first = "sk first/+?=";
+        let second = "sk-second-secret";
+        let encoded_first = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("key", first)
+            .finish()
+            .strip_prefix("key=")
+            .unwrap()
+            .to_owned();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/redact"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(format!(
+                "Authorization: Bearer {first}; x-api-key={second}; query={encoded_first}"
+            )))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let response = post_json(
+            &reqwest::Client::new(),
+            &format!("{}/redact", server.uri()),
+            Duration::from_secs(5),
+            &bearer(&[first, second]),
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        let error = error_from_response(response).await;
+        assert_eq!(error.kind, InvokeErrorKind::Auth);
+        for secret in [first, second, encoded_first.as_str()] {
+            assert!(!error.message.contains(secret), "secret leaked: {}", error.message);
+        }
+        assert!(error.message.contains("[REDACTED]"));
+        server.verify().await;
     }
 
     #[tokio::test]

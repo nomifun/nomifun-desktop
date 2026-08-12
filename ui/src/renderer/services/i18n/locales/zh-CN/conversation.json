@@ -396,7 +396,8 @@
   "chat": {
     "noModelSelected": "当前会话未选择模型，无法发送消息",
     "modelHealedToDefault": "已回退到默认模型 {{model}}",
-    "visionModelHint": "当前模型 {{model}} 可能不支持图片输入，图片附件可能被忽略或导致报错。",
+    "visionModelBlocked": "当前模型 {{model}} 的对话能力未声明图片输入。请选择带“视觉输入”能力的对话模型，或移除图片后再发送。",
+    "visionCapabilityUnavailable": "暂时无法核验模型能力。请等待模型列表加载后重试，或移除图片后发送。",
     "sendMessageTo": "发送消息到 {{model}}",
     "processing": "正在处理中……",
     "quotaExceededTitle": "模型额度已用尽",

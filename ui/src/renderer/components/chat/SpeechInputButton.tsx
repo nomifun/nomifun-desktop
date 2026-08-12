@@ -17,6 +17,7 @@ import {
   SPEECH_TO_TEXT_CONFIG_CHANGED_EVENT,
 } from '@/renderer/services/speechToTextConfig';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
+import { modelSupportsTask } from '@/common/utils/providerModels';
 
 type SpeechInputButtonProps = {
   disabled?: boolean;
@@ -130,25 +131,18 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
       const selectedCloudProvider = config.provider_id
         ? providers?.find((provider) => provider.id === config.provider_id)
         : undefined;
+      const selectedCloudModel = selectedCloudProvider?.models.find(
+        (model) => model.model === config.model
+      );
       const referencedCloudModelIsReady = Boolean(
         selectedCloudProvider &&
           selectedCloudProvider.enabled !== false &&
-          selectedCloudProvider.api_key.trim() &&
-          config.model &&
-          selectedCloudProvider.models.includes(config.model) &&
-          selectedCloudProvider.model_enabled?.[config.model] !== false
-      );
-      const legacyCloudConfigIsReady = Boolean(
-        !config.provider_id &&
-          (config.provider === 'openai'
-            ? config.openai?.api_key.trim()
-            : config.provider === 'deepgram'
-              ? config.deepgram?.api_key.trim()
-              : false)
+          selectedCloudModel?.enabled &&
+          modelSupportsTask(selectedCloudModel, 'speech_recognition')
       );
       const speechEnabled = Boolean(
         config.enabled &&
-          (referencedCloudModelIsReady || legacyCloudConfigIsReady)
+          referencedCloudModelIsReady
       );
 
       if (cancelled) {

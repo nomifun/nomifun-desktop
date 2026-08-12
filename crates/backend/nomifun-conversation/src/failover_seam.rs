@@ -2,7 +2,7 @@
 //!
 //! 纯逻辑(挑选器 / 配置读写 / 故障分类)在 [`crate::model_failover`];本模块只放
 //! 需要 `&ConversationService`(仓库 + runtime_registry)的有副作用步骤,并把
-//! 「挑下一候选 → 写 `conversation.model` →(可选)标失败模型 Unhealthy →
+//! 「挑下一候选 → 写 `conversation.model` →
 //! kill_and_wait → 重建任务」抽成**一个** pub 方法 [`ConversationService::perform_model_failover`],
 //! 供 send-loop(D3)与 IDMM 故障值守(D6,Task 3)共用同一份实现。
 //!
@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef, HealthStatus, ModelHealthStatus};
+use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef};
 use nomifun_common::{
     AgentKillReason, AgentType, AppError, ConversationStatus, ErrorChain, ProviderWithModel, now_ms,
 };
@@ -90,51 +90,13 @@ impl ConversationService {
         if let Some(override_cfg) = read_conversation_failover_override(extra_json) {
             return Some(override_cfg);
         }
-        let (_, _, client_prefs) = self.failover_deps()?;
+        let (_, _, _, client_prefs) = self.failover_deps()?;
         Some(get_global_failover_config(&client_prefs).await)
-    }
-
-    /// 把失败模型的 `provider_models` 行健康标 `Unhealthy`(行级 `set_health`,
-    /// 其余模型的健康记录天然不受影响)。fail-open:任何一步出错只 warn 不致命 ——
-    /// 标记是尽力而为的加分项,不能拖垮故障转移本身。
-    async fn stamp_model_unhealthy(&self, failed: &ProviderWithModel) {
-        let Some((_, provider_model_repo, _)) = self.failover_deps() else {
-            return;
-        };
-        let health = ModelHealthStatus {
-            status: HealthStatus::Unhealthy,
-            last_check: Some(now_ms()),
-            latency: None,
-            error: Some("model_failover: provider fault on live turn".into()),
-        };
-        let serialized = match serde_json::to_string(&health) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %ErrorChain(&e), "Failover stamp-unhealthy: serialize model health failed");
-                return;
-            }
-        };
-        match provider_model_repo
-            .set_health(&failed.provider_id, &failed.model, Some(serialized.as_str()))
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                warn!(
-                    provider_id = %failed.provider_id,
-                    model = %failed.model,
-                    "Failover stamp-unhealthy skipped: provider model row missing"
-                );
-            }
-            Err(e) => {
-                warn!(error = %ErrorChain(&e), provider_id = %failed.provider_id, "Failover stamp-unhealthy: health write failed");
-            }
-        }
     }
 
     /// **核心、可复用**的故障转移动作(plan D3 的「Some(next)」分支主体):
     /// 挑下一候选 → 写 `conversation.model`(origin 标记,非用户编辑)→
-    /// (`stamp_unhealthy` 则)标失败模型 Unhealthy → `kill_and_wait`(镜像
+    /// `kill_and_wait`(镜像
     /// [`Self::evict_acp_task_after_terminal_error`])→ 用刷新后的行
     /// `build_runtime_options` 重建任务。返回 `Some(FailoverSwitch)` 表示换好新模型、
     /// 新句柄就绪;返回 `None` 表示**队列耗尽**(无可用候选)—— 调用方据此回落到
@@ -195,7 +157,8 @@ impl ConversationService {
         if cancellation.is_cancelled() {
             return None;
         }
-        let Some((provider_repo, provider_model_repo, _)) = self.failover_deps() else {
+        let Some((provider_repo, provider_model_repo, capability_repo, _)) = self.failover_deps()
+        else {
             return None;
         };
         let conv_id = conversation_id;
@@ -252,11 +215,18 @@ impl ConversationService {
                 return None;
             }
         };
-        // 每模型 enabled / health 只在 provider_models 行上(迁移 016)。
+        // 模型 enabled 来自 provider_models;可用性和健康来自精确 Chat capability。
         let model_rows = match provider_model_repo.list().await {
             Ok(rows) => rows,
             Err(e) => {
                 warn!(error = %ErrorChain(&e), conversation_id, "Failover skipped: failed to list provider models");
+                return None;
+            }
+        };
+        let capability_rows = match capability_repo.list().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(error = %ErrorChain(&e), conversation_id, "Failover skipped: failed to list provider model capabilities");
                 return None;
             }
         };
@@ -265,7 +235,14 @@ impl ConversationService {
         }
 
         // 队列耗尽 / 无可用候选 → None(调用方回落到原始错误)。
-        let picked = next_failover_model(&config.queue, &failed, tried, &providers, &model_rows)?;
+        let picked = next_failover_model(
+            &config.queue,
+            &failed,
+            tried,
+            &providers,
+            &model_rows,
+            &capability_rows,
+        )?;
 
         // 写 conversation.model(origin 标记:非用户编辑)。这正是 spec §5.5 锚定的
         // 「改模型 + 终止 runtime → 下次 send 重建」形状,只是这里立刻重建。
@@ -301,13 +278,6 @@ impl ConversationService {
         }
         if cancellation.is_cancelled() {
             return None;
-        }
-
-        if config.stamp_unhealthy {
-            self.stamp_model_unhealthy(&failed).await;
-            if cancellation.is_cancelled() {
-                return None;
-            }
         }
 
         info!(

@@ -57,7 +57,6 @@ import type {
   IMcpServer,
   IProvider,
   ISessionMcpServer,
-  ModelProfile,
   TChatConversation,
   TProviderWithModel,
 } from '../config/storage';
@@ -89,15 +88,15 @@ import {
   type CreateProviderInput,
   type FetchModelsAnonymousRequest,
   type FetchModelsResponse,
-  type ModelProfileKeyRequest,
-  type ModelProfileUpsertRequest,
   type ProviderResponse,
   type ProviderHealthCheckRequest,
   type ProviderHealthCheckResponse,
-  type ResolveModelsRequest,
-  type ResolveModelsResponse,
   type UpdateProviderRequest,
 } from '../types/provider/providerApi';
+import type {
+  ModelProtocolManifestRequest,
+  ModelProtocolManifestResponse,
+} from '../types/provider/modelProtocolManifest';
 import type {
   CheckManagedModelHealthRequest,
   ManagedModel,
@@ -108,15 +107,15 @@ import type {
   SetManagedModelServiceEnabledRequest,
 } from '../types/provider/managedModelService';
 import type {
-  CreateProviderModelRequest,
   ProviderModelKeyRequest,
   ProviderModelResponse,
-  UpdateProviderModelRequest,
+  SaveProviderModelRequest,
 } from '../types/provider/providerModel';
 import type {
   ProviderConnectionResponse,
-  UpsertProviderConnectionRequest,
+  SaveProviderConnectionRequest,
 } from '../types/provider/providerConnection';
+import type { KnowledgeRetrievalConfig as ApiKnowledgeRetrievalConfig } from '../protocolBindings/KnowledgeRetrievalConfig';
 import type {
   TAdoptExecutionStepOutput,
   TAdjustAgentExecution,
@@ -164,7 +163,6 @@ import type {
   UpdateDownloadResult,
   UpdateReleaseInfo,
 } from '../update/updateTypes';
-import type { ProtocolDetectionRequest, ProtocolDetectionResponse } from '../utils/protocolDetector';
 import {
   fromApiConversation,
   fromApiPaginatedConversations,
@@ -1307,11 +1305,6 @@ export const fileSnapshot = {
 // Mode (Provider management) — routed to /api/providers/*
 // ---------------------------------------------------------------------------
 
-const normalizeModelProfile = (profile: ModelProfile): ModelProfile => ({
-  ...profile,
-  provider_id: parseProviderId(profile.provider_id),
-});
-
 const normalizeManagedModelStatus = (
   status: ManagedModelServiceStatus
 ): ManagedModelServiceStatus => ({
@@ -1331,7 +1324,7 @@ export const mode = {
     (p) => `/api/providers/${p.provider_id}`,
     // Call sites may derive this object from a whole renderer record or form.
     // Serialize only the strict UpdateProviderRequest contract: response-only
-    // (`models_detail`) and form-only (`model`, Bedrock helper) fields must not
+    // (nested models) and form-only fields must not
     // reach the backend's deny_unknown_fields DTO.
     toUpdateProviderRequest
   ), fromProviderResponse),
@@ -1363,7 +1356,6 @@ export const mode = {
    * dropdown is still being populated.
    */
   fetchModelList: httpPost<FetchModelsResponse, FetchModelsAnonymousRequest>('/api/providers/fetch-models'),
-  detectProtocol: httpPost<ProtocolDetectionResponse, ProtocolDetectionRequest>('/api/providers/detect-protocol'),
 };
 
 // ---------------------------------------------------------------------------
@@ -1404,27 +1396,16 @@ export const managedModelService = {
 };
 
 // ---------------------------------------------------------------------------
-// Model profiles (multimodal model hub) — routed to /api/model-profiles/*
+// Model protocol capability manifest — server-owned operational defaults
 // ---------------------------------------------------------------------------
 
-export const modelProfile = {
-  list: withResponseMap(httpGet<ModelProfile[], void>('/api/model-profiles'), (profiles) =>
-    profiles.map(normalizeModelProfile)
-  ),
-  upsert: withResponseMap(
-    httpPost<ModelProfile, ModelProfileUpsertRequest>('/api/model-profiles'),
-    normalizeModelProfile
-  ),
-  remove: httpPost<void, ModelProfileKeyRequest>('/api/model-profiles/delete'),
-  resolve: withResponseMap(
-    httpPost<ResolveModelsResponse, ResolveModelsRequest>('/api/model-profiles/resolve'),
-    (response) => ({
-      ...response,
-      models: response.models.map((model) => ({
-        ...model,
-        provider_id: parseProviderId(model.provider_id),
-      })),
-    })
+export const modelProtocol = {
+  list: httpGet<ModelProtocolManifestResponse, ModelProtocolManifestRequest>(
+    (p) => {
+      const query = new URLSearchParams({ preset: p.preset, task: p.task });
+      if (p.base_url) query.set('base_url', p.base_url);
+      return `/api/model-protocols?${query.toString()}`;
+    }
   ),
 };
 
@@ -1447,15 +1428,15 @@ export const providerModel = {
     ),
     (rows) => rows.map(normalizeProviderModel)
   ),
-  create: withResponseMap(
-    httpPost<ProviderModelResponse, CreateProviderModelRequest>('/api/provider-models'),
+  /** Full upsert: one request replaces the model's complete capability set. */
+  save: withResponseMap(
+    httpPut<ProviderModelResponse, SaveProviderModelRequest>('/api/provider-models'),
     normalizeProviderModel
   ),
-  update: withResponseMap(
-    httpPost<ProviderModelResponse, UpdateProviderModelRequest>('/api/provider-models/update'),
-    normalizeProviderModel
+  remove: httpDelete<void, ProviderModelKeyRequest>(
+    ({ provider_id, model }) =>
+      `/api/provider-models?provider_id=${encodeURIComponent(provider_id)}&model=${encodeURIComponent(model)}`
   ),
-  remove: httpPost<void, ProviderModelKeyRequest>('/api/provider-models/delete'),
 };
 
 // ---------------------------------------------------------------------------
@@ -1477,16 +1458,13 @@ export const providerConnection = {
     ),
     (connections) => connections.map(normalizeProviderConnection)
   ),
-  upsert: withResponseMap(
-    httpPost<
+  save: withResponseMap(
+    httpPut<
       ProviderConnectionResponse,
-      { provider_id: ProviderId } & UpsertProviderConnectionRequest
+      { provider_id: ProviderId; connection: SaveProviderConnectionRequest }
     >(
       (p) => `/api/providers/${p.provider_id}/connections`,
-      (p) => {
-        const { provider_id: _providerId, ...body } = p;
-        return body;
-      }
+      (p) => p.connection
     ),
     normalizeProviderConnection
   ),
@@ -4371,14 +4349,13 @@ export interface IModelFailoverConfig {
   queue: IModelFailoverCandidate[];
   /** Per-turn cap on switches (also bounded by `queue.length`); default 4. */
   max_switches: number;
-  /** Stamp the failed model `Unhealthy` on switch; default true. */
-  stamp_unhealthy: boolean;
 }
 
 const fromApiModelFailoverConfig = (config: IModelFailoverConfig): IModelFailoverConfig => ({
-  ...config,
+  enabled: config.enabled,
+  max_switches: config.max_switches,
   queue: config.queue.map((candidate) => ({
-    ...candidate,
+    model: candidate.model,
     provider_id: parseProviderId(candidate.provider_id),
   })),
 });
@@ -5955,6 +5932,16 @@ export interface IKnowledgeSearchHit {
   score: number;
 }
 
+type WithProviderEntityId<T> = T extends { provider_id: string }
+  ? Omit<T, 'provider_id'> & { provider_id: ProviderId }
+  : T;
+
+/** Install-wide, task-exact retrieval pipeline returned by the knowledge API. */
+export type IKnowledgeRetrievalConfig = {
+  embedding: WithProviderEntityId<ApiKnowledgeRetrievalConfig['embedding']>;
+  rerank: WithProviderEntityId<ApiKnowledgeRetrievalConfig['rerank']>;
+};
+
 export interface IKnowledgeFileEntry {
   rel_path: string;
   size: number;
@@ -6263,6 +6250,20 @@ const fromApiKnowledgeBase = (base: IKnowledgeBase): IKnowledgeBase => ({
   knowledge_base_id: parseKnowledgeBaseId(base.knowledge_base_id),
 });
 
+const fromApiKnowledgeRetrievalStage = <T extends { mode: string }>(
+  stage: T
+): WithProviderEntityId<T> =>
+  (stage.mode === 'remote'
+    ? { ...stage, provider_id: parseProviderId((stage as T & { provider_id: unknown }).provider_id) }
+    : stage) as WithProviderEntityId<T>;
+
+const fromApiKnowledgeRetrievalConfig = (
+  config: ApiKnowledgeRetrievalConfig
+): IKnowledgeRetrievalConfig => ({
+  embedding: fromApiKnowledgeRetrievalStage(config.embedding),
+  rerank: fromApiKnowledgeRetrievalStage(config.rerank),
+});
+
 const fromApiKnowledgeBinding = (binding: IKnowledgeBinding): IKnowledgeBinding => ({
   ...binding,
   kb_ids: binding.kb_ids.map(parseKnowledgeBaseId),
@@ -6320,6 +6321,14 @@ export const knowledge = {
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}`,
     (p) => ({ name: p.name, description: p.description, tags: p.tags })
   ), fromApiKnowledgeBase),
+  getRetrievalConfig: withResponseMap(
+    httpGet<ApiKnowledgeRetrievalConfig, void>('/api/knowledge/retrieval'),
+    fromApiKnowledgeRetrievalConfig
+  ),
+  setRetrievalConfig: withResponseMap(
+    httpPut<ApiKnowledgeRetrievalConfig, IKnowledgeRetrievalConfig>('/api/knowledge/retrieval'),
+    fromApiKnowledgeRetrievalConfig
+  ),
   /** AI overview generation (description + README.md). Slow (LLM round-trip, 30s+); 409 when no AI provider is configured. */
   autogenBase: withResponseMap(httpPost<IKnowledgeAutogenOutcome, { knowledge_base_id: KnowledgeBaseId; overwrite_readme?: boolean; provider_id?: ProviderId; model?: string }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/autogen`,

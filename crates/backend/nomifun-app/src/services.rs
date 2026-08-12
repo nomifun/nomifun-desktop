@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use nomifun_ai_agent::{
     AcpSessionSyncService, AcpSkillManager, AgentFactoryDeps, AgentRegistry, AgentRuntimeRegistry,
-    InMemoryAgentRuntimeRegistry, build_agent_factory,
+    InMemoryAgentRuntimeRegistry, build_agent_factory, build_agent_model_config_resolver,
 };
 use nomifun_api_types::{GatewayMcpConfig, RequirementMcpConfig};
 use nomifun_auth::{
@@ -20,12 +20,15 @@ use nomifun_conversation::{
 };
 use nomifun_db::{
     Database, IAcpSessionRepository, IAgentMetadataRepository, ICompanionTokenRepository,
-    IConversationRepository, IMcpServerRepository, IProviderModelRepository, IProviderRepository,
+    IConversationRepository, IMcpServerRepository, IProviderModelCapabilityRepository,
+    IProviderModelRepository, IProviderRepository,
     IUserRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
     SqliteCompanionTokenRepository, SqliteConversationRepository, SqliteMcpServerRepository,
-    SqliteProviderModelRepository, SqliteProviderRepository, SqliteRemoteAgentRepository,
+    SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
+    SqliteProviderRepository, SqliteRemoteAgentRepository,
     SqliteTerminalRepository, SqliteUserRepository,
 };
+#[cfg(feature = "browser-use")]
 use nomifun_db::{IClientPreferenceRepository, SqliteClientPreferenceRepository};
 use nomifun_realtime::{BroadcastEventBus, WebSocketManager};
 use nomifun_terminal::{TerminalEventEmitter, TerminalLifecycleServer, TerminalService};
@@ -38,6 +41,45 @@ fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String
             "backend executable path is not valid Unicode; refusing to configure child-process bridges or lifecycle hooks: {path:?}"
         )
     })
+}
+
+/// Workshop text-node executor over the production Agent Chat stack.
+///
+/// The selected model's persisted Chat capability is resolved by
+/// `ModelInvokeService`, then the shared Agent provider factory performs the
+/// completion. Consequently OpenAI-compatible, Anthropic Messages, Gemini and
+/// Bedrock text calls use the same serializer/auth rules as live conversations;
+/// this bridge contains no platform-name routing table.
+struct AgentCreationTextExecutor {
+    model_invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
+    workspace: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl nomifun_creation::CreationTextExecutor for AgentCreationTextExecutor {
+    async fn complete(
+        &self,
+        request: nomifun_creation::CreationTextRequest,
+    ) -> Result<String, nomifun_creation::CreationError> {
+        let config = nomifun_ai_agent::factory::provider_config::resolve_provider_config(
+            self.model_invoke.as_ref(),
+            &request.provider_id,
+            &request.model,
+            &self.workspace,
+        )
+        .await
+        .map_err(|error| nomifun_creation::CreationError::config(error.to_string()))?;
+        nomifun_ai_agent::factory::provider_config::one_shot_completion(
+            &config,
+            &request.system,
+            vec![nomifun_ai_agent::factory::provider_config::user_message(
+                request.prompt,
+            )],
+            request.max_tokens,
+        )
+        .await
+        .map_err(|error| nomifun_creation::CreationError::provider_error(error.to_string()))
+    }
 }
 
 #[cfg(feature = "browser-use")]
@@ -1461,6 +1503,8 @@ pub struct AppServices {
     /// Authoritative per-model catalog rows (capability profiles + health;
     /// the multimodal model hub reads/writes these).
     pub provider_model_repo: Arc<dyn IProviderModelRepository>,
+    /// Task-scoped transport and health authority for provider models.
+    pub provider_model_capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
     pub cookie_config: Arc<CookieConfig>,
     pub qr_token_store: Arc<QrTokenStore>,
     pub ws_manager: Arc<WebSocketManager>,
@@ -2255,14 +2299,32 @@ impl AppServices {
         let provider_repo = Arc::new(SqliteProviderRepository::new(database.pool().clone()));
         let provider_model_repo: Arc<dyn IProviderModelRepository> =
             Arc::new(SqliteProviderModelRepository::new(database.pool().clone()));
+        let provider_model_capability_repo: Arc<dyn IProviderModelCapabilityRepository> = Arc::new(
+            SqliteProviderModelCapabilityRepository::new(database.pool().clone()),
+        );
+        let provider_connection_repo: Arc<dyn nomifun_db::IProviderConnectionRepository> =
+            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(
+                database.pool().clone(),
+            ));
+        let model_invoke_http = nomifun_net::http_client();
+        let model_invoke_service = Arc::new(nomifun_model_invoke::ModelInvokeService::new(
+            provider_repo.clone(),
+            provider_model_repo.clone(),
+            provider_model_capability_repo.clone(),
+            provider_connection_repo,
+            encryption_key,
+            model_invoke_http.clone(),
+            nomifun_model_invoke::AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
+        ));
         // Start the stable managed-model loopback supply and provision its
-        // provider projection before any model-profile reconciliation or agent
-        // factory construction. A seed catalog makes a fresh install usable
-        // without blocking boot on third-party discovery.
+        // provider/model capability graph before agent factory construction.
+        // A seed catalog makes a fresh install usable without blocking boot on
+        // third-party discovery.
         let (managed_model_service, managed_model_server) =
             nomifun_system::start_and_provision_free_model_with_preferences(
                 provider_repo.clone(),
                 provider_model_repo.clone(),
+                provider_model_capability_repo.clone(),
                 Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
                     database.pool().clone(),
                 ))),
@@ -2272,46 +2334,10 @@ impl AppServices {
             .map_err(|e| anyhow::anyhow!("Failed to provision NomiFun free model service: {e}"))?;
         // Refresh immediately, then about every six hours with jitter. Failed
         // attempts retain the current catalog and use capped exponential
-        // backoff. Successful refreshes atomically seed profiles for any newly
-        // discovered models without overwriting concurrent user edits.
-        let managed_model_refresh_task = {
-            let profile_repo = provider_model_repo.clone();
-            nomifun_system::ManagedModelRefreshTask::start_with_success_hook(
-                managed_model_service.clone(),
-                move |status| {
-                    let profile_repo = profile_repo.clone();
-                    async move {
-                        let Some(provider_id) = status.provider_id.as_deref() else {
-                            tracing::warn!("Managed free-model refresh returned no provider id");
-                            return;
-                        };
-                        let models = status
-                            .models
-                            .iter()
-                            .map(|model| model.id.as_str())
-                            .collect::<Vec<_>>();
-                        match nomifun_system::seed_missing_inferred_profiles(
-                            profile_repo.as_ref(),
-                            provider_id,
-                            nomifun_system::FREE_MODEL_PLATFORM,
-                            &models,
-                        )
-                        .await
-                        {
-                            Ok(seeded) if seeded > 0 => tracing::info!(
-                                seeded,
-                                "Managed free-model refresh seeded inferred model profiles"
-                            ),
-                            Ok(_) => {}
-                            Err(error) => tracing::warn!(
-                                error = %error,
-                                "Managed free-model profile reconciliation failed"
-                            ),
-                        }
-                    }
-                },
-            )
-        };
+        // backoff. ManagedModelService owns the single transactional graph
+        // write; there is deliberately no second profile/backfill writer.
+        let managed_model_refresh_task =
+            nomifun_system::ManagedModelRefreshTask::start(managed_model_service.clone());
         // User-configured MCP servers — injected into ACP `session/new`
         // so the agent gets the operator's tools (ELECTRON-1JG fix).
         let mcp_server_repo: Arc<dyn IMcpServerRepository> =
@@ -2503,14 +2529,19 @@ impl AppServices {
                 authoritative_user_id.clone(),
             ),
         ));
+        knowledge_service.set_retrieval_runtime(
+            Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
+                database.pool().clone(),
+            )),
+            model_invoke_service.clone(),
+        );
         // Late-wire the LLM seam for knowledge autogen / snapshot compression
         // (`LiveKnowledgeCompleter` resolves the first enabled provider/model
-        // per call, so it tolerates providers configured after boot). NOTE:
-        // `provider_repo` is moved into `build_agent_factory` below — clone.
+        // per call, so it tolerates providers configured after boot).
         knowledge_service.set_completer(Arc::new(nomifun_ai_agent::LiveKnowledgeCompleter {
             provider_repo: provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>,
             provider_model_repo: provider_model_repo.clone(),
-            encryption_key,
+            model_invoke: model_invoke_service.clone(),
             workspace: data_dir.clone(),
         }));
         // Recover profiles left by an interrupted earlier browser runtime
@@ -2687,7 +2718,7 @@ impl AppServices {
         terminal_service.with_title_completer(Arc::new(nomifun_ai_agent::LiveTerminalTitleCompleter {
             provider_repo: provider_repo.clone(),
             provider_model_repo: provider_model_repo.clone(),
-            encryption_key,
+            model_invoke: model_invoke_service.clone(),
             workspace: data_dir.clone(),
         }));
         // Start the terminal lifecycle server (house pattern, 4th instance):
@@ -2731,9 +2762,7 @@ impl AppServices {
         // instance via `services.companion_service`.
         let companion_completer: Arc<dyn nomifun_companion::learner::CompanionCompleter> =
             Arc::new(nomifun_companion::learner::LiveCompanionCompleter {
-                provider_repo: provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>,
-                provider_model_repo: provider_model_repo.clone(),
-                encryption_key,
+                model_invoke: model_invoke_service.clone(),
                 workspace: data_dir.clone(),
             });
         let provider_lifecycle = Arc::new(nomifun_common::ProviderLifecycleBarrier::new());
@@ -2766,10 +2795,7 @@ impl AppServices {
             knowledge_service.clone(),
             Arc::new(nomifun_customer_service::LiveTurnRunner {
                 deps: nomifun_ai_agent::OneShotDeps {
-                    provider_repo: provider_repo.clone()
-                        as Arc<dyn nomifun_db::IProviderRepository>,
-                    provider_model_repo: provider_model_repo.clone(),
-                    encryption_key,
+                    model_invoke: model_invoke_service.clone(),
                     workspace: data_dir.clone(),
                 },
             }),
@@ -2794,24 +2820,16 @@ impl AppServices {
         }
         // The generation engine delegates model execution to the unified
         // invoke layer (provider/model/protocol resolution + adapters live
-        // there), runs over a proxy-aware HTTP client, and reads/writes canvas
-        // assets through the workshop bridge (AssetSource/AssetSink — no crate
-        // cycle). `reconcile_on_boot` (running-with-remote resume / else
+        // there), and reads/writes canvas assets through the workshop bridge
+        // (AssetSource/AssetSink — no crate cycle). Untrusted provider-returned
+        // artifact URLs use the creation engine's proxy-free, DNS-pinned safe
+        // downloader. `reconcile_on_boot` (running-with-remote resume / else
         // fail-interrupted) is driven from `build_creation_state` at router
         // assembly.
-        let creation_http = nomifun_net::http_client();
         // Unified multimodal invoke layer (P1): one process-wide singleton over
         // the catalog repos + the same proxy-aware HTTP client. The creation
         // engine and `/api/tts` consume it; later tasks (health probes) reuse
         // this exact instance.
-        let model_invoke_service = Arc::new(nomifun_model_invoke::ModelInvokeService::new(
-            Arc::new(nomifun_db::SqliteProviderRepository::new(database.pool().clone())),
-            Arc::new(nomifun_db::SqliteProviderModelRepository::new(database.pool().clone())),
-            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(database.pool().clone())),
-            encryption_key,
-            creation_http.clone(),
-            nomifun_model_invoke::AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
-        ));
         let creation_asset_bridge = Arc::new(crate::workshop_bridge::WorkshopAssetBridge::new(
             data_dir.clone(),
             Arc::new(nomifun_db::SqliteWorkshopRepository::new(database.pool().clone())),
@@ -2819,8 +2837,11 @@ impl AppServices {
         let creation_service = nomifun_creation::CreationService::builder(Arc::new(
             nomifun_db::SqliteCreationTaskRepository::new(database.pool().clone()),
         ))
-        .with_http(creation_http.clone())
         .with_invoke(model_invoke_service.clone())
+        .with_text_executor(Arc::new(AgentCreationTextExecutor {
+            model_invoke: model_invoke_service.clone(),
+            workspace: data_dir.clone(),
+        }))
         .with_asset_source(creation_asset_bridge.clone())
         .with_asset_sink(creation_asset_bridge)
         .build();
@@ -2878,20 +2899,6 @@ impl AppServices {
         let provider_repo_for_services: Arc<dyn IProviderRepository> =
             provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>;
 
-        // Seed authoritative capability profiles for any provider models that
-        // lack one (multimodal model hub). Best-effort: never blocks boot on error.
-        reconcile_model_profiles(&provider_repo_for_services, &provider_model_repo).await;
-
-        // One-time legacy speech-preference migration: pre-provider-catalog
-        // configs that still embed a raw openai/deepgram credential (and have
-        // no provider_id) are disabled and de-credentialed. Best-effort:
-        // never blocks boot on error.
-        {
-            let preference_repo =
-                SqliteClientPreferenceRepository::new(database.pool().clone());
-            migrate_legacy_speech_preference(&preference_repo).await;
-        }
-
         #[cfg(feature = "browser-use")]
         let browser_lane_provider_slot =
             nomifun_ai_agent::BrowserLaneClientProviderSlot::new();
@@ -2944,12 +2951,9 @@ impl AppServices {
             event_bus.clone(),
             model_invoke_service.clone(),
             companion_service.clone(),
-            provider_repo_for_services.clone(),
-            provider_model_repo.clone(),
             Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
                 database.pool().clone(),
             )),
-            encryption_key,
         )
         .await
         {
@@ -2964,8 +2968,7 @@ impl AppServices {
             authoritative_user_id: authoritative_user_id.clone(),
             skill_manager: AcpSkillManager::new(skill_paths.clone()),
             remote_agent_repo,
-            provider_repo,
-            provider_model_repo: provider_model_repo.clone(),
+            model_invoke: model_invoke_service.clone(),
             encryption_key,
             agent_registry: agent_registry.clone(),
             acp_agent_service: acp_agent_service.clone(),
@@ -3045,6 +3048,9 @@ impl AppServices {
         // relevant service calls `AgentRegistry::hydrate`.
         let runtime_registry_concrete = Arc::new(
             InMemoryAgentRuntimeRegistry::new(factory)
+                .with_model_config_resolver(build_agent_model_config_resolver(
+                    model_invoke_service.clone(),
+                ))
                 .with_nomi_session_directory(data_dir.join("nomi-sessions")),
         );
         let agent_runtime_registry: Arc<dyn AgentRuntimeRegistry> = runtime_registry_concrete.clone();
@@ -3065,6 +3071,7 @@ impl AppServices {
             _managed_model_server: managed_model_server,
             _managed_model_refresh_task: managed_model_refresh_task,
             provider_model_repo: provider_model_repo.clone(),
+            provider_model_capability_repo: provider_model_capability_repo.clone(),
             cookie_config: Arc::new(CookieConfig::from_env()),
             qr_token_store: Arc::new(QrTokenStore::new()),
             ws_manager: Arc::new(WebSocketManager::new()),
@@ -3273,135 +3280,6 @@ where
     browser_cleanup?;
     close_database().await;
     Ok(())
-}
-
-/// Ensure every provider catalog model has an authoritative capability
-/// profile on its [`nomifun_db::ProviderModelRow`]. Since migration 016 the
-/// rows ARE the catalog, so this is a pure backfill pass: unprofiled
-/// membership rows (`tasks == "[]"`, `source == "inferred"`) get tasks/traits
-/// from the name/platform heuristic; existing profiles (incl. user overrides)
-/// are left untouched. Best-effort — logs and returns on any error so boot
-/// never fails on profile reconciliation.
-async fn reconcile_model_profiles(
-    provider_repo: &Arc<dyn IProviderRepository>,
-    provider_model_repo: &Arc<dyn IProviderModelRepository>,
-) {
-    let providers = match provider_repo.list().await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("model-profile reconcile: failed to list providers: {e}");
-            return;
-        }
-    };
-    let mut seeded = 0usize;
-    for provider in &providers {
-        match nomifun_system::seed_inferred_provider_models(
-            provider_model_repo.as_ref(),
-            &provider.provider_id,
-            &provider.platform,
-        )
-        .await
-        {
-            Ok(count) => seeded += count,
-            Err(error) => tracing::warn!(
-                provider_id = %provider.provider_id,
-                error = %error,
-                "model-profile reconcile failed"
-            ),
-        }
-    }
-    if seeded > 0 {
-        tracing::info!("model-profile reconcile: seeded {seeded} inferred profile(s)");
-    }
-}
-
-/// Preference keys holding the speech-to-text tool config, in the order the
-/// shell reads them (`nomifun-shell` STT route: namespaced key first, then
-/// the pre-namespacing legacy fallback key).
-const SPEECH_PREFERENCE_KEYS: [&str; 2] = ["tools.speechToText", "speechToText"];
-
-/// One-time boot migration for pre-provider-catalog speech configs.
-///
-/// Legacy speech preferences embedded raw `openai`/`deepgram` credential
-/// blocks instead of referencing a catalog provider (`provider_id`). The
-/// invoke layer only executes catalog-backed models — the shell STT route
-/// already rejects such configs with a "re-select your speech provider"
-/// error — so a stored config that still carries an embedded credential but
-/// no `provider_id` is rewritten here: `enabled` is forced to `false` and the
-/// embedded blocks are removed. All other fields (`model`, `language`,
-/// `auto_send`, ...) are preserved so the user only has to re-select a
-/// provider in Settings.
-///
-/// Idempotent: after the rewrite no embedded credential remains, so the next
-/// boot leaves the value untouched. Credential-less `openai`/`deepgram`
-/// shells (the frontend historically persisted empty-key blocks for
-/// unconfigured providers) are NOT legacy and keep their existing
-/// "not configured" behavior; configs that already carry a `provider_id` are
-/// never touched. Best-effort — logs and returns on any error so boot never
-/// fails on this migration.
-async fn migrate_legacy_speech_preference<R>(preference_repo: &R)
-where
-    R: IClientPreferenceRepository + ?Sized,
-{
-    let rows = match preference_repo.get_by_keys(&SPEECH_PREFERENCE_KEYS).await {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "legacy speech preference migration: could not read preferences; skipping"
-            );
-            return;
-        }
-    };
-    for row in rows {
-        let Some(rewritten) = rewrite_legacy_speech_preference(&row.value) else {
-            continue;
-        };
-        match preference_repo
-            .upsert_batch(&[(row.key.as_str(), rewritten.as_str())])
-            .await
-        {
-            Ok(()) => tracing::info!(
-                key = row.key.as_str(),
-                "legacy speech config disabled and its embedded credential removed; \
-                 re-select the speech provider in Settings to re-enable speech recognition"
-            ),
-            Err(error) => tracing::warn!(
-                key = row.key.as_str(),
-                %error,
-                "legacy speech preference migration: rewrite failed; value left untouched"
-            ),
-        }
-    }
-}
-
-/// Pure rewrite rule for [`migrate_legacy_speech_preference`].
-///
-/// Returns the replacement JSON when `value` is a legacy embedded-credential
-/// speech config — an object with no `provider_id` (absent or `null`) whose
-/// `openai` or `deepgram` block carries a non-empty `api_key` — and `None`
-/// when the stored value must be left untouched (already-migrated, catalog
-/// mode, credential-less shells, or anything unparseable).
-fn rewrite_legacy_speech_preference(value: &str) -> Option<String> {
-    let mut parsed: serde_json::Value = serde_json::from_str(value).ok()?;
-    let object = parsed.as_object_mut()?;
-    if object.get("provider_id").is_some_and(|id| !id.is_null()) {
-        return None;
-    }
-    let has_embedded_credential = ["openai", "deepgram"].iter().any(|block| {
-        object
-            .get(*block)
-            .and_then(|block| block.get("api_key"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|api_key| !api_key.trim().is_empty())
-    });
-    if !has_embedded_credential {
-        return None;
-    }
-    object.remove("openai");
-    object.remove("deepgram");
-    object.insert("enabled".to_owned(), serde_json::Value::Bool(false));
-    Some(parsed.to_string())
 }
 
 #[cfg(test)]
@@ -5315,152 +5193,4 @@ mod tests {
         services.database.close().await;
     }
 
-    // -- legacy speech preference migration --
-
-    fn legacy_speech_preference() -> serde_json::Value {
-        serde_json::json!({
-            "enabled": true,
-            "provider": "openai",
-            "model": "whisper-1",
-            "language": "zh",
-            "auto_send": true,
-            "openai": {
-                "api_key": "sk-legacy-secret",
-                "base_url": "https://api.openai.com/v1",
-                "model": "whisper-1"
-            }
-        })
-    }
-
-    #[test]
-    fn rewrite_legacy_speech_preference_disables_and_strips_credentials() {
-        let rewritten =
-            rewrite_legacy_speech_preference(&legacy_speech_preference().to_string())
-                .expect("embedded-credential config without provider_id must be rewritten");
-        let rewritten: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
-        assert_eq!(
-            rewritten,
-            serde_json::json!({
-                "enabled": false,
-                "provider": "openai",
-                "model": "whisper-1",
-                "language": "zh",
-                "auto_send": true
-            }),
-            "non-credential fields must be preserved verbatim"
-        );
-
-        // Idempotent: the rewritten value no longer matches the legacy shape.
-        assert_eq!(rewrite_legacy_speech_preference(&rewritten.to_string()), None);
-    }
-
-    #[test]
-    fn rewrite_legacy_speech_preference_handles_deepgram_and_null_provider_id() {
-        let value = serde_json::json!({
-            "enabled": true,
-            "provider": "deepgram",
-            "provider_id": null,
-            "deepgram": {"api_key": "dg-secret", "model": "nova-2"}
-        });
-        let rewritten = rewrite_legacy_speech_preference(&value.to_string())
-            .expect("null provider_id counts as absent");
-        let rewritten: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
-        assert_eq!(rewritten["enabled"], serde_json::json!(false));
-        assert!(rewritten.get("deepgram").is_none());
-        assert!(rewritten.get("openai").is_none());
-    }
-
-    #[test]
-    fn rewrite_legacy_speech_preference_leaves_non_legacy_values_untouched() {
-        for value in [
-            // Catalog mode: provider_id present (even with a stale embedded block).
-            serde_json::json!({
-                "enabled": true,
-                "provider": "openai",
-                "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
-                "model": "whisper-1",
-                "openai": {"api_key": "sk-stale", "model": "whisper-1"}
-            })
-            .to_string(),
-            // Credential-less shell (frontend historically persisted empty keys).
-            serde_json::json!({
-                "enabled": true,
-                "provider": "openai",
-                "openai": {"api_key": "  ", "model": "whisper-1"}
-            })
-            .to_string(),
-            // No embedded blocks at all.
-            serde_json::json!({"enabled": false, "provider": "openai"}).to_string(),
-            // Unparseable / non-object values are never touched.
-            "not-json".to_string(),
-            serde_json::json!(["enabled"]).to_string(),
-        ] {
-            assert_eq!(
-                rewrite_legacy_speech_preference(&value),
-                None,
-                "value must be left untouched: {value}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn migrate_legacy_speech_preference_rewrites_both_keys_and_is_idempotent() {
-        let db = nomifun_db::init_database_memory().await.unwrap();
-        let repo = SqliteClientPreferenceRepository::new(db.pool().clone());
-
-        let legacy = legacy_speech_preference().to_string();
-        let unrelated = "\"dark\"";
-        repo.upsert_batch(&[
-            ("tools.speechToText", legacy.as_str()),
-            ("speechToText", legacy.as_str()),
-            ("theme", unrelated),
-        ])
-        .await
-        .unwrap();
-
-        migrate_legacy_speech_preference(&repo).await;
-
-        let read_value = |rows: &[nomifun_db::models::ClientPreference], key: &str| {
-            rows.iter()
-                .find(|row| row.key == key)
-                .map(|row| row.value.clone())
-                .unwrap_or_else(|| panic!("preference '{key}' must survive the migration"))
-        };
-        let rows = repo.get_all().await.unwrap();
-        for key in ["tools.speechToText", "speechToText"] {
-            let migrated: serde_json::Value =
-                serde_json::from_str(&read_value(&rows, key)).unwrap();
-            assert_eq!(migrated["enabled"], serde_json::json!(false), "{key}");
-            assert!(migrated.get("openai").is_none(), "{key} keeps no credential");
-            assert_eq!(migrated["model"], serde_json::json!("whisper-1"), "{key}");
-        }
-        assert_eq!(read_value(&rows, "theme"), unrelated);
-
-        // Second boot: no-op (values byte-identical after another pass).
-        migrate_legacy_speech_preference(&repo).await;
-        let rows_after = repo.get_all().await.unwrap();
-        for key in ["tools.speechToText", "speechToText", "theme"] {
-            assert_eq!(
-                read_value(&rows_after, key),
-                read_value(&rows, key),
-                "second migration pass must not rewrite '{key}'"
-            );
-        }
-
-        db.close().await;
-    }
-
-    #[tokio::test]
-    async fn migrate_legacy_speech_preference_is_a_noop_without_speech_keys() {
-        let db = nomifun_db::init_database_memory().await.unwrap();
-        let repo = SqliteClientPreferenceRepository::new(db.pool().clone());
-        repo.upsert_batch(&[("theme", "\"light\"")]).await.unwrap();
-
-        migrate_legacy_speech_preference(&repo).await;
-
-        let rows = repo.get_all().await.unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].key, "theme");
-        db.close().await;
-    }
 }

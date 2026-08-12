@@ -6,26 +6,22 @@ use axum::routing::{delete, get, patch, post};
 use std::path::PathBuf;
 
 use nomifun_api_types::{
-    ApiResponse, ClientPreferencesResponse, CloneProviderRequest, CreateProviderModelRequest,
-    CreateProviderRequest, DetectProtocolRequest,
+    ApiResponse, ClientPreferencesResponse, CloneProviderRequest, CreateProviderRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ManagedModel,
-    ManagedModelHealthBatchResult,
-    ManagedModelHealthResult, ManagedModelServiceStatus, ModelProfile, ModelProfileKeyRequest,
-    ModelProfileUpsertRequest, ProtocolDetectionResponse, ProviderConnectionResponse,
-    ProviderModelKeyRequest, ProviderModelResponse, ProviderResponse, ResolveModelsRequest,
-    ResolveModelsResponse, SetManagedModelEnabledRequest,
+    ManagedModelHealthBatchResult, ModelTask,
+    ManagedModelHealthResult, ManagedModelServiceStatus, SaveProviderConnectionRequest,
+    ProviderConnectionResponse,
+    ProviderModelKeyRequest, ProviderModelResponse, ProviderResponse, SaveProviderModelRequest,
+    SetManagedModelEnabledRequest,
     SetManagedModelServiceEnabledRequest, SystemInfoResponse, SystemSettingsResponse, UpdateCheckRequest,
-    UpdateCheckResult, UpdateClientPreferencesRequest, UpdateProviderModelRequest,
-    UpdateProviderRequest, UpdateSettingsRequest,
-    UpdateWorkDirRequest, UpsertProviderConnectionRequest,
+    UpdateCheckResult, UpdateClientPreferencesRequest, UpdateProviderRequest, UpdateSettingsRequest,
+    UpdateWorkDirRequest,
 };
 use nomifun_common::AppError;
 
 use crate::client_pref::ClientPrefService;
 use crate::managed_model::ManagedModelService;
 use crate::model_fetcher::ModelFetchService;
-use crate::model_profile::ModelProfileService;
-use crate::protocol::ProtocolDetectionService;
 use crate::provider::ProviderService;
 use crate::provider_connection::ProviderConnectionService;
 use crate::provider_model::ProviderModelService;
@@ -40,10 +36,8 @@ pub struct SystemRouterState {
     pub provider_service: ProviderService,
     pub provider_connection_service: ProviderConnectionService,
     pub model_fetch_service: ModelFetchService,
-    pub model_profile_service: ModelProfileService,
     pub provider_model_service: ProviderModelService,
     pub managed_model_service: Option<std::sync::Arc<ManagedModelService>>,
-    pub protocol_detection_service: ProtocolDetectionService,
     pub version_check_service: VersionCheckService,
     /// Data directory root — used to arm the v3 reset request consumed by the
     /// next boot. See `nomifun_common::factory_reset`.
@@ -70,15 +64,13 @@ pub struct SystemRouterState {
 /// - `DELETE /api/providers/:provider_id`    — delete a provider
 /// - `POST /api/providers/:provider_id/clone` — clone a provider (models + connections)
 /// - `GET  /api/providers/:provider_id/connections` — list connection profiles
-/// - `POST /api/providers/:provider_id/connections` — upsert a connection profile
+/// - `PUT  /api/providers/:provider_id/connections` — upsert a connection profile
 /// - `DELETE /api/providers/:provider_id/connections/:role` — delete a connection profile
 /// - `POST /api/providers/:provider_id/models` — fetch models from remote API
 /// - `POST /api/providers/fetch-models`      — fetch models anonymously (pre-create preview)
-/// - `POST /api/providers/detect-protocol`   — detect API protocol
 /// - `GET  /api/provider-models`             — list model catalog rows (`?provider_id=` filter)
-/// - `POST /api/provider-models`             — create a model catalog row
-/// - `POST /api/provider-models/update`      — partially update a model catalog row
-/// - `POST /api/provider-models/delete`      — delete a model catalog row
+/// - `PUT  /api/provider-models`             — full-save one model and all capabilities
+/// - `DELETE /api/provider-models`           — delete one model and all capabilities
 /// - `GET  /api/system/info`                 — system directory & platform info
 /// - `POST /api/system/check-update`         — check GitHub for new versions
 /// - `POST /api/system/factory-reset`        — arm a factory reset (wipes on next boot)
@@ -92,10 +84,10 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         )
         .route("/api/providers", get(list_providers).post(create_provider))
         // Literal-segment routes must register BEFORE the provider routes so
-        // axum matches the literals instead of treating "detect-protocol" /
-        // "fetch-models" as a provider id.
-        .route("/api/providers/detect-protocol", post(detect_protocol))
+        // axum matches the literal instead of treating "fetch-models" as a
+        // provider id.
         .route("/api/providers/fetch-models", post(fetch_models_anonymous))
+        .route("/api/model-protocols", get(list_model_protocols))
         .route("/api/model-services/free/status", get(get_free_model_status))
         .route("/api/model-services/free/models", get(get_free_models))
         .route("/api/model-services/free/refresh", post(refresh_free_models))
@@ -122,7 +114,7 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         )
         .route(
             "/api/providers/{provider_id}/connections",
-            get(list_provider_connections).post(upsert_provider_connection),
+            get(list_provider_connections).put(upsert_provider_connection),
         )
         .route(
             "/api/providers/{provider_id}/connections/{role}",
@@ -132,18 +124,14 @@ pub fn system_routes(state: SystemRouterState) -> Router {
             "/api/providers/{provider_id}/models",
             post(fetch_models),
         )
-        // Multimodal model hub: authoritative per-model capability profiles.
-        .route("/api/model-profiles", get(list_model_profiles).post(upsert_model_profile))
-        .route("/api/model-profiles/delete", post(delete_model_profile))
-        .route("/api/model-profiles/resolve", post(resolve_model_profiles))
-        // Row-level model catalog CRUD over the authoritative provider_models
-        // entity (`(provider_id, model)` composite natural key).
+        // One configuration write surface: PUT atomically saves model metadata
+        // and replaces its complete task-capability set.
         .route(
             "/api/provider-models",
-            get(list_provider_models).post(create_provider_model),
+            get(list_provider_models)
+                .put(save_provider_model)
+                .delete(delete_provider_model),
         )
-        .route("/api/provider-models/update", post(update_provider_model))
-        .route("/api/provider-models/delete", post(delete_provider_model))
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/check-update", post(check_update))
         .route("/api/system/factory-reset", post(factory_reset))
@@ -206,6 +194,70 @@ async fn update_client_preferences(
     Ok(Json(ApiResponse::success()))
 }
 
+#[cfg(test)]
+mod protocol_manifest_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn model_protocol_manifest_handler_returns_scoped_stepfun_protocols() {
+        let Json(response) = list_model_protocols(Query(ModelProtocolManifestQuery {
+            preset: Some("StepFun-Plan".to_owned()),
+            platform: None,
+            base_url: None,
+            task: ModelTask::RealtimeConversation,
+        }))
+        .await
+        .expect("manifest response");
+        let data = response.data.expect("manifest data");
+        assert_eq!(data.tasks.len(), 9);
+        assert_eq!(data.platform, "stepfun-plan");
+        assert_eq!(data.protocols.len(), 1);
+        assert_eq!(data.protocols[0].protocol_id, "stepfun.realtime_s2s");
+    }
+
+    #[tokio::test]
+    async fn model_protocol_manifest_handler_requires_preset_or_platform() {
+        let error = list_model_protocols(Query(ModelProtocolManifestQuery {
+            preset: None,
+            platform: None,
+            base_url: None,
+            task: ModelTask::Chat,
+        }))
+        .await
+        .expect_err("missing preset must fail");
+        assert!(matches!(error, AppError::BadRequest(_)));
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ModelProtocolManifestQuery {
+    /// Stable UI preset id (`MODEL_PLATFORMS[].value`).
+    preset: Option<String>,
+    /// Backward-compatible canonical platform lookup for an existing provider.
+    platform: Option<String>,
+    /// Stored provider base URL, used to disambiguate regional presets that
+    /// share a canonical platform id (for example SiliconFlow CN/global).
+    base_url: Option<String>,
+    task: ModelTask,
+}
+
+async fn list_model_protocols(
+    Query(query): Query<ModelProtocolManifestQuery>,
+) -> Result<Json<ApiResponse<nomifun_model_invoke::ModelProtocolManifestResponse>>, AppError> {
+    let preset = query
+        .preset
+        .or(query.platform)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("preset query parameter is required".into()))?;
+    Ok(Json(ApiResponse::ok(
+        nomifun_model_invoke::protocol_manifest_for_connection(
+            &preset,
+            query.base_url.as_deref(),
+            query.task,
+        ),
+    )))
+}
+
 // ===========================================================================
 // Provider handlers
 // ===========================================================================
@@ -245,9 +297,8 @@ async fn delete_provider(
 }
 
 /// Server-side provider clone: copies the provider row (api-key ciphertext
-/// as-is), every `provider_models` profile row (minus per-deployment health)
-/// and every connection profile. Replaces the frontend clone, which lost the
-/// per-model rows keyed by the old provider_id.
+/// as-is), every model and task capability (without health observations), and
+/// every named connection in one graph transaction.
 ///
 /// The JSON body is optional: a missing body (or one without a usable
 /// `name`) falls back to the default `"{source name} copy"` clone name; a
@@ -258,10 +309,9 @@ async fn clone_provider(
     body: Option<Json<CloneProviderRequest>>,
 ) -> Result<(StatusCode, Json<ApiResponse<ProviderResponse>>), AppError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
-    let connection_repo = state.provider_connection_service.repository();
     let provider = state
         .provider_service
-        .clone_provider(&provider_id, req.name.as_deref(), &connection_repo)
+        .clone_provider(&provider_id, req.name.as_deref())
         .await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(provider))))
 }
@@ -288,15 +338,6 @@ async fn fetch_models_anonymous(
     Ok(Json(ApiResponse::ok(result)))
 }
 
-async fn detect_protocol(
-    State(state): State<SystemRouterState>,
-    body: Result<Json<DetectProtocolRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<ProtocolDetectionResponse>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let result = state.protocol_detection_service.detect_protocol(&req).await?;
-    Ok(Json(ApiResponse::ok(result)))
-}
-
 // ===========================================================================
 // Provider connection handlers (non-default per-role connection profiles)
 // ===========================================================================
@@ -312,7 +353,7 @@ async fn list_provider_connections(
 async fn upsert_provider_connection(
     State(state): State<SystemRouterState>,
     Path(provider_id): Path<String>,
-    body: Result<Json<UpsertProviderConnectionRequest>, JsonRejection>,
+    body: Result<Json<SaveProviderConnectionRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ProviderConnectionResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let connection = state
@@ -365,35 +406,6 @@ async fn refresh_free_models(
     State(state): State<SystemRouterState>,
 ) -> Result<Json<ApiResponse<ManagedModelServiceStatus>>, AppError> {
     let status = managed_service(&state)?.refresh_free_models().await?;
-    if status.last_error.is_none() {
-        let provider_id = status.provider_id.as_deref().ok_or_else(|| {
-            AppError::Internal("managed free-model status is missing its provider id".into())
-        })?;
-        let models = status
-            .models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect::<Vec<_>>();
-        match state
-            .model_profile_service
-            .seed_missing_inferred(
-                provider_id,
-                crate::managed_model::FREE_MODEL_PLATFORM,
-                &models,
-            )
-            .await
-        {
-            Ok(seeded) if seeded > 0 => tracing::info!(
-                seeded,
-                "Manual managed free-model refresh seeded inferred profiles"
-            ),
-            Ok(_) => {}
-            Err(error) => tracing::warn!(
-                error = %error,
-                "Manual managed free-model profile reconciliation failed"
-            ),
-        }
-    }
     Ok(Json(ApiResponse::ok(status)))
 }
 
@@ -401,7 +413,7 @@ async fn get_free_model_health(
     State(state): State<SystemRouterState>,
 ) -> Result<Json<ApiResponse<Vec<ManagedModelHealthResult>>>, AppError> {
     Ok(Json(ApiResponse::ok(
-        managed_service(&state)?.free_health_snapshot().await,
+        managed_service(&state)?.free_health_snapshot().await?,
     )))
 }
 
@@ -447,53 +459,7 @@ async fn set_free_model_enabled(
 }
 
 // ===========================================================================
-// Model-profile handlers (multimodal model hub)
-// ===========================================================================
-
-async fn list_model_profiles(
-    State(state): State<SystemRouterState>,
-) -> Result<Json<ApiResponse<Vec<ModelProfile>>>, AppError> {
-    let profiles = state.model_profile_service.list().await?;
-    Ok(Json(ApiResponse::ok(profiles)))
-}
-
-async fn upsert_model_profile(
-    State(state): State<SystemRouterState>,
-    body: Result<Json<ModelProfileUpsertRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<ModelProfile>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let profile = state.model_profile_service.upsert(req).await?;
-    Ok(Json(ApiResponse::ok(profile)))
-}
-
-async fn delete_model_profile(
-    State(state): State<SystemRouterState>,
-    body: Result<Json<ModelProfileKeyRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state
-        .model_profile_service
-        .delete(&req.provider_id, &req.model)
-        .await?;
-    Ok(Json(ApiResponse::success()))
-}
-
-/// Resolve enabled models supporting a task (+ required traits) across all
-/// providers. Composes the provider list with stored profiles via the pure
-/// [`nomifun_api_types::resolve_models`] authority.
-async fn resolve_model_profiles(
-    State(state): State<SystemRouterState>,
-    body: Result<Json<ResolveModelsRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<ResolveModelsResponse>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let providers = state.provider_service.list().await?;
-    let profiles = state.model_profile_service.list().await?;
-    let models = nomifun_api_types::resolve_models(&providers, &profiles, req.task, &req.required_traits);
-    Ok(Json(ApiResponse::ok(ResolveModelsResponse { models })))
-}
-
-// ===========================================================================
-// Provider-model handlers (row-level model catalog CRUD)
+// Provider-model handlers (one full-save configuration surface)
 // ===========================================================================
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -512,29 +478,19 @@ async fn list_provider_models(
     Ok(Json(ApiResponse::ok(models)))
 }
 
-async fn create_provider_model(
+async fn save_provider_model(
     State(state): State<SystemRouterState>,
-    body: Result<Json<CreateProviderModelRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<ApiResponse<ProviderModelResponse>>), AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let model = state.provider_model_service.create(req).await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::ok(model))))
-}
-
-async fn update_provider_model(
-    State(state): State<SystemRouterState>,
-    body: Result<Json<UpdateProviderModelRequest>, JsonRejection>,
+    body: Result<Json<SaveProviderModelRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ProviderModelResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let model = state.provider_model_service.update(req).await?;
+    let model = state.provider_model_service.save(req).await?;
     Ok(Json(ApiResponse::ok(model)))
 }
 
 async fn delete_provider_model(
     State(state): State<SystemRouterState>,
-    body: Result<Json<ProviderModelKeyRequest>, JsonRejection>,
+    Query(req): Query<ProviderModelKeyRequest>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let deleted = state
         .provider_model_service
         .delete(&req.provider_id, &req.model)

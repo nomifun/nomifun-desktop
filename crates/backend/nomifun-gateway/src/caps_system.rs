@@ -15,11 +15,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    CreateProviderRequest, FetchModelsRequest, UpdateProviderRequest, UpdateSettingsRequest,
+    CreateProviderRequest, FetchModelsRequest, ProviderModelInput, UpdateProviderRequest,
+    UpdateSettingsRequest,
 };
 use nomifun_common::ProviderId;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
@@ -89,23 +90,67 @@ struct CreateProviderParams {
     /// API base URL (must start with http:// or https://). Empty string allowed
     /// only for bedrock platform.
     base_url: String,
-    /// Plain-text API key (supports comma/newline-separated multi-keys for
-    /// load balancing). Required for non-bedrock platforms.
-    api_key: String,
-    /// Initial model list. If omitted, use nomi_system_fetch_models after
-    /// creation to populate.
-    #[serde(default)]
-    models: Option<Vec<String>>,
+    /// Authentication transport, for example `bearer`,
+    /// `header_key:x-api-key`, `query_key:key`, or `bedrock`.
+    auth_scheme: String,
+    /// Write-only typed credential material selected by `auth_scheme`, for
+    /// example `{ "api_keys": ["sk-..."] }` for bearer/header schemes.
+    credentials: Value,
+    /// First fully configured model. A provider cannot be created without a
+    /// usable task capability.
+    initial_model: ProviderModelParams,
     /// Whether the provider is enabled (default true).
     #[serde(default)]
     enabled: Option<bool>,
-    /// Optional per-model context-window overrides.
-    #[serde(default)]
-    model_context_limits: Option<HashMap<String, i64>>,
     /// Optional AWS Bedrock configuration (required when platform = "bedrock").
     /// Pass the full BedrockConfig object as JSON.
     #[serde(default)]
     bedrock_config: Option<Value>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProviderModelParams {
+    /// Exact model identifier accepted by the provider. Custom identifiers are allowed.
+    model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sort_order: Option<i64>,
+    /// Complete non-empty modality configuration for this model.
+    capabilities: Vec<ProviderModelCapabilityParams>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProviderModelCapabilityParams {
+    /// Modality task such as `chat`, `speech_synthesis`, `speech_recognition`,
+    /// `realtime_conversation`, `image_generation`, or `video_generation`.
+    task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    traits: Option<Vec<String>>,
+    /// Exact invoke protocol supported by NomiFun for this provider/task.
+    protocol: String,
+    /// Provider connection role, normally `default`.
+    connection_role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_url_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    poll_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    realtime_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_cross_origin_credentials: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_params: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_limit: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -114,27 +159,21 @@ struct UpdateProviderParams {
     /// Provider ID (from nomi_list_providers).
     #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
     provider_id: ProviderId,
-    /// New platform identifier (omit to keep).
-    #[serde(default)]
-    platform: Option<String>,
     /// New display name (omit to keep).
     #[serde(default)]
     name: Option<String>,
     /// New API base URL (omit to keep).
     #[serde(default)]
     base_url: Option<String>,
-    /// New API key in plain text (omit to keep).
+    /// New default authentication scheme (omit to keep).
     #[serde(default)]
-    api_key: Option<String>,
-    /// Replace model list (omit to keep).
+    auth_scheme: Option<String>,
+    /// New typed credential material (omit to keep the encrypted value).
     #[serde(default)]
-    models: Option<Vec<String>>,
+    credentials: Option<Value>,
     /// Enable or disable (omit to keep).
     #[serde(default)]
     enabled: Option<bool>,
-    /// Replace per-model context-window overrides (omit to keep).
-    #[serde(default)]
-    model_context_limits: Option<HashMap<String, i64>>,
     /// AWS Bedrock configuration update (omit to keep).
     #[serde(default)]
     bedrock_config: Option<Value>,
@@ -219,22 +258,24 @@ async fn create_provider(deps: Arc<GatewayDeps>, p: CreateProviderParams) -> Val
         },
         None => None,
     };
+    let initial_model: ProviderModelInput = match serde_json::to_value(p.initial_model)
+        .and_then(serde_json::from_value)
+    {
+        Ok(model) => model,
+        Err(error) => return json!({ "error": format!("invalid initial_model: {error}") }),
+    };
     let req = CreateProviderRequest {
         provider_id: None,
         platform: p.platform,
         name: p.name,
         base_url: p.base_url,
-        api_key: p.api_key,
-        models: p.models.unwrap_or_default(),
+        auth_scheme: p.auth_scheme,
+        credentials: p.credentials,
         enabled: p.enabled.unwrap_or(true),
-        model_context_limits: p.model_context_limits,
-        model_protocols: None,
-        model_descriptions: None,
-        model_enabled: None,
-        model_health: None,
         bedrock_config,
-        is_full_url: false,
         sort_order: None,
+        initial_model,
+        connections: Vec::new(),
     };
     match deps.provider_service.create(req).await {
         Ok(resp) => ok(json!({
@@ -242,9 +283,10 @@ async fn create_provider(deps: Arc<GatewayDeps>, p: CreateProviderParams) -> Val
             "platform": resp.platform,
             "name": resp.name,
             "base_url": resp.base_url,
+            "has_credentials": resp.has_credentials,
             "models": resp.models,
             "enabled": resp.enabled,
-            "note": "provider created; use nomi_system_fetch_models to populate the model list from the remote API if models were not specified",
+            "note": "provider and its first fully configured model were created atomically",
         })),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -259,19 +301,12 @@ async fn update_provider(deps: Arc<GatewayDeps>, p: UpdateProviderParams) -> Val
         None => None,
     };
     let req = UpdateProviderRequest {
-        platform: p.platform,
         name: p.name,
         base_url: p.base_url,
-        api_key: p.api_key,
-        models: p.models,
+        auth_scheme: p.auth_scheme,
+        credentials: p.credentials,
         enabled: p.enabled,
-        model_context_limits: p.model_context_limits,
-        model_protocols: None,
-        model_descriptions: None,
-        model_enabled: None,
-        model_health: None,
         bedrock_config,
-        is_full_url: None,
         sort_order: None,
     };
     match deps.provider_service.update(p.provider_id.as_str(), req).await {
@@ -280,6 +315,7 @@ async fn update_provider(deps: Arc<GatewayDeps>, p: UpdateProviderParams) -> Val
             "platform": resp.platform,
             "name": resp.name,
             "base_url": resp.base_url,
+            "has_credentials": resp.has_credentials,
             "models": resp.models,
             "enabled": resp.enabled,
         })),
@@ -373,23 +409,23 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         |deps, _ctx, p| update_preferences(deps, p),
     ));
 
-    // 5. Create provider (sensitive — handles API keys)
+    // 5. Create provider (sensitive — handles credentials)
     out.push(Capability::new::<CreateProviderParams, _, _>(
         CapabilityMeta::new(
             "nomi_system_create_provider",
             "system",
-            "Register a new model provider (platform + base URL + API key). The service validates credentials format and encrypts the key at rest.",
+            "Register a model provider with one fully configured model. Credentials are typed according to auth_scheme, validated, and encrypted at rest.",
             DangerTier::Sensitive,
         ),
         |deps, _ctx, p| create_provider(deps, p),
     ));
 
-    // 6. Update provider (sensitive — may update API key)
+    // 6. Update provider (sensitive — may update credentials)
     out.push(Capability::new::<UpdateProviderParams, _, _>(
         CapabilityMeta::new(
             "nomi_system_update_provider",
             "system",
-            "Partially update an existing model provider (name, URL, API key, models, enabled). Only provided fields are changed.",
+            "Partially update an existing model provider (name, URL, authentication, credentials, enabled). Only provided fields are changed.",
             DangerTier::Sensitive,
         ),
         |deps, _ctx, p| update_provider(deps, p),
@@ -440,3 +476,60 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 //     Needs: `deps.data_dir: PathBuf`
 //     Method: `nomifun_common::factory_reset::request_v3_dataset_reset(&data_dir, &work_dir)`
 //     Not wired because data_dir is not in the assumed GatewayDeps.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn initial_model() -> Value {
+        json!({
+            "model": "gpt-test",
+            "capabilities": [{
+                "task": "chat",
+                "protocol": "openai.chat_text",
+                "connection_role": "default"
+            }]
+        })
+    }
+
+    #[test]
+    fn create_provider_tool_accepts_only_typed_credentials() {
+        let params: CreateProviderParams = serde_json::from_value(json!({
+            "platform": "openai",
+            "name": "OpenAI",
+            "base_url": "https://api.openai.com/v1",
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys": ["sk-test"]},
+            "initial_model": initial_model()
+        }))
+        .unwrap();
+        assert_eq!(params.credentials, json!({"api_keys": ["sk-test"]}));
+
+        let legacy = serde_json::from_value::<CreateProviderParams>(json!({
+            "platform": "openai",
+            "name": "OpenAI",
+            "base_url": "https://api.openai.com/v1",
+            "auth_scheme": "bearer",
+            "api_key": "sk-test",
+            "initial_model": initial_model()
+        }));
+        assert!(legacy.is_err(), "the removed flat api_key contract must stay rejected");
+    }
+
+    #[test]
+    fn update_provider_tool_uses_typed_optional_credentials() {
+        let provider_id = ProviderId::new();
+        let params: UpdateProviderParams = serde_json::from_value(json!({
+            "provider_id": provider_id.as_str(),
+            "credentials": {"api_keys": ["sk-next"]}
+        }))
+        .unwrap();
+        assert_eq!(params.credentials, Some(json!({"api_keys": ["sk-next"]})));
+
+        let legacy = serde_json::from_value::<UpdateProviderParams>(json!({
+            "provider_id": provider_id.as_str(),
+            "api_key": "sk-next"
+        }));
+        assert!(legacy.is_err(), "the removed flat api_key contract must stay rejected");
+    }
+}

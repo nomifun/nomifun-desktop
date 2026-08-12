@@ -6,7 +6,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Drawer, Input, Popconfirm, Select, Switch, Tag, Tooltip } from '@arco-design/web-react';
+import { Button, Drawer, Input, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
 import { DeleteFour, Down, LinkCloud, Plus, Right, Write } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
@@ -61,7 +61,6 @@ const ConnectionDrawer: React.FC<{
   const [baseUrl, setBaseUrl] = useState(editing?.base_url ?? '');
   const [schemeSelect, setSchemeSelect] = useState(schemeIsPreset ? initialScheme : CUSTOM_SCHEME);
   const [customScheme, setCustomScheme] = useState(schemeIsPreset ? '' : initialScheme);
-  const [isFullUrl, setIsFullUrl] = useState(editing?.is_full_url ?? false);
   const [creds, setCreds] = useState<ConnectionCredentialsDraft>(emptyCredentialsDraft);
   const [saving, setSaving] = useState(false);
 
@@ -100,16 +99,21 @@ const ConnectionDrawer: React.FC<{
       message.error(t(errorKey));
       return;
     }
+    if (built.credentials === undefined && (!isEdit || editing?.has_credentials !== true)) {
+      message.error(t('settings.connections.credentialsRequired'));
+      return;
+    }
     setSaving(true);
     try {
-      await ipcBridge.providerConnection.upsert.invoke({
+      await ipcBridge.providerConnection.save.invoke({
         provider_id: provider.id,
-        role: nextRole,
-        label: label.trim() || undefined,
-        base_url: baseUrl.trim(),
-        auth_scheme: scheme,
-        ...(built.credentials !== undefined ? { credentials: built.credentials } : {}),
-        is_full_url: isFullUrl,
+        connection: {
+          role: nextRole,
+          label: label.trim() || undefined,
+          base_url: baseUrl.trim(),
+          auth_scheme: scheme,
+          ...(built.credentials !== undefined ? { credentials: built.credentials } : {}),
+        },
       });
       message.success(t('settings.connections.saved', { defaultValue: '连接档案已保存' }));
       onSaved();
@@ -236,12 +240,6 @@ const ConnectionDrawer: React.FC<{
           )}
         </div>
 
-        <div className='flex items-center justify-between'>
-          <div className='text-13px font-500 text-t-secondary'>
-            {t('settings.connections.isFullUrl', { defaultValue: '完整 URL（不拼接路径）' })}
-          </div>
-          <Switch size='small' checked={isFullUrl} onChange={setIsFullUrl} />
-        </div>
       </div>
     </Drawer>
   );

@@ -1,4 +1,6 @@
-use nomifun_common::{RemoteAgentAuthType, RemoteAgentId, RemoteAgentProtocol, RemoteAgentStatus, TimestampMs};
+use nomifun_common::{
+    RemoteAgentAuthType, RemoteAgentId, RemoteAgentProtocol, RemoteAgentStatus, TimestampMs,
+};
 use serde::{Deserialize, Serialize};
 
 /// Request body for creating a remote agent.

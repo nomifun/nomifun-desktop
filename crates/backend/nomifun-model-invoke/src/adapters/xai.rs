@@ -8,9 +8,8 @@
 //! - batch TTS is `/tts` with `{text, voice_id, language}` and raw audio;
 //! - batch STT is `/stt` multipart and does not take an OpenAI `model` field.
 //!
-//! The configured xAI base normally already ends in `/v1`.  The URL helper
-//! tolerates an origin-only base as well, but never rewrites a versioned xAI
-//! root through the generic OpenAI dispatch convention.
+//! Every transport path is supplied by the selected typed capability; the
+//! adapter never infers media endpoints from the provider name or task.
 
 use std::time::Duration;
 
@@ -20,8 +19,9 @@ use reqwest::multipart::{Form, Part};
 use serde_json::{Map, Value, json};
 
 use crate::adapter::ProtocolAdapter;
-use crate::call::{ResolvedCall, ResolvedConnection};
+use crate::call::{ResolvedCall, resolve_endpoint};
 use crate::error::{InvokeError, InvokeErrorKind};
+use crate::manifest::expand_protocol_endpoint_template;
 use crate::transport::{
     MAX_ARTIFACT_BYTES, decode_b64, encode_b64, error_from_response, get_request, post_json,
     post_multipart, read_body_capped,
@@ -30,6 +30,8 @@ use crate::types::{
     AsrRequest, ImageEditRequest, ImageGenRequest, JobHandle, ProducedAsset, ProducedData,
     TaskOutcome, TaskRequest, TaskResult, TtsRequest, VideoGenRequest,
 };
+
+use super::{json_request_body, scalar_request_fields};
 
 const MEDIA_TIMEOUT: Duration = Duration::from_secs(180);
 const TTS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -45,67 +47,25 @@ fn non_empty_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
 }
 
-/// Per-model request defaults may be stored directly in `params` or grouped
-/// under `request_defaults`.  The grouped form keeps protocol wiring keys such
-/// as `endpoint` separate from upstream request fields.
 fn configured_value<'a>(params: &'a Value, key: &str) -> Option<&'a Value> {
-    params.get("request_defaults").and_then(Value::as_object).and_then(|o| o.get(key)).or_else(|| params.get(key))
+    params.get(key)
 }
 
-fn resolve_endpoint_override(base_url: &str, endpoint: &str) -> String {
-    let endpoint = endpoint.trim();
-    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        endpoint.to_owned()
-    } else {
-        let base = base_url.trim().trim_end_matches('/');
-        if endpoint.starts_with('/') {
-            format!("{base}{endpoint}")
-        } else {
-            format!("{base}/{endpoint}")
-        }
-    }
+fn xai_submit_url(call: &ResolvedCall) -> Result<String, InvokeError> {
+    call.endpoint_url()
 }
 
-fn xai_default_url(connection: &ResolvedConnection, path: &str) -> String {
-    let base = connection.base_url.trim().trim_end_matches('/');
-    if connection.is_full_url {
-        return base.to_owned();
-    }
-    if base.ends_with("/v1") {
-        format!("{base}{path}")
-    } else {
-        format!("{base}/v1{path}")
-    }
-}
-
-fn xai_submit_url(call: &ResolvedCall, path: &str) -> String {
-    non_empty_str(&call.model_params, "endpoint")
-        .map(|endpoint| resolve_endpoint_override(&call.connection.base_url, endpoint))
-        .unwrap_or_else(|| xai_default_url(&call.connection, path))
-}
-
-fn xai_video_status_url(call: &ResolvedCall, request_id: &str) -> String {
-    let override_endpoint = non_empty_str(&call.model_params, "poll_endpoint")
-        .or_else(|| non_empty_str(&call.model_params, "status_endpoint"));
-    if let Some(endpoint) = override_endpoint {
-        let resolved = resolve_endpoint_override(&call.connection.base_url, endpoint);
-        return if resolved.contains("{request_id}") {
-            resolved.replace("{request_id}", request_id)
-        } else {
-            format!("{}/{request_id}", resolved.trim_end_matches('/'))
-        };
-    }
-
-    // A full-url connection commonly points at the submit endpoint.  Polling
-    // is its sibling `/videos/{id}`, not `/videos/generations/{id}`.
-    if call.connection.is_full_url {
-        let submit = call.connection.base_url.trim().trim_end_matches('/');
-        if let Some(videos_base) = submit.strip_suffix("/generations") {
-            return format!("{videos_base}/{request_id}");
-        }
-        return format!("{submit}/{request_id}");
-    }
-    xai_default_url(&call.connection, &format!("/videos/{request_id}"))
+fn xai_video_status_url(call: &ResolvedCall, request_id: &str) -> Result<String, InvokeError> {
+    let endpoint = non_empty_str(&call.model_params, "poll_endpoint")
+        .ok_or_else(|| InvokeError::config("xai.video_jobs requires an injected poll endpoint"))?;
+    let endpoint = expand_protocol_endpoint_template(
+        &call.protocol,
+        call.task,
+        "poll_endpoint",
+        endpoint,
+        request_id,
+    )?;
+    Ok(resolve_endpoint(&call.connection.base_url, &endpoint))
 }
 
 fn apply_allowed(
@@ -195,7 +155,7 @@ impl ProtocolAdapter for XaiImagesJsonAdapter {
     }
 }
 
-fn image_generation_body(call: &ResolvedCall, req: &ImageGenRequest) -> Value {
+fn image_generation_body(call: &ResolvedCall, req: &ImageGenRequest) -> Result<Value, InvokeError> {
     let mut body = Map::new();
     apply_allowed(
         &mut body,
@@ -211,7 +171,7 @@ fn image_generation_body(call: &ResolvedCall, req: &ImageGenRequest) -> Value {
     {
         body.insert("aspect_ratio".into(), Value::String(ratio.into()));
     }
-    Value::Object(body)
+    json_request_body(&call.model_params, &req.extra, Value::Object(body))
 }
 
 async fn submit_image_generation(
@@ -219,8 +179,8 @@ async fn submit_image_generation(
     call: &ResolvedCall,
     req: &ImageGenRequest,
 ) -> Result<TaskOutcome, InvokeError> {
-    let url = xai_submit_url(call, "/images/generations");
-    let body = image_generation_body(call, req);
+    let url = xai_submit_url(call)?;
+    let body = image_generation_body(call, req)?;
     let resp = post_json(http, &url, MEDIA_TIMEOUT, &call.connection.auth, &body).await?;
     parse_image_http_response(resp).await
 }
@@ -265,7 +225,7 @@ fn image_edit_body(call: &ResolvedCall, req: &ImageEditRequest) -> Result<Value,
     } else {
         body.insert("images".into(), Value::Array(images));
     }
-    Ok(Value::Object(body))
+    json_request_body(&call.model_params, &req.extra, Value::Object(body))
 }
 
 async fn submit_image_edit(
@@ -273,7 +233,7 @@ async fn submit_image_edit(
     call: &ResolvedCall,
     req: &ImageEditRequest,
 ) -> Result<TaskOutcome, InvokeError> {
-    let url = xai_submit_url(call, "/images/edits");
+    let url = xai_submit_url(call)?;
     let body = image_edit_body(call, req)?;
     let resp = post_json(http, &url, MEDIA_TIMEOUT, &call.connection.auth, &body).await?;
     parse_image_http_response(resp).await
@@ -283,7 +243,10 @@ async fn parse_image_http_response(resp: reqwest::Response) -> Result<TaskOutcom
     if !resp.status().is_success() {
         return Err(error_from_response(resp).await);
     }
-    let value: Value = resp.json().await.map_err(|e| InvokeError::parse(format!("invalid xAI images JSON: {e}")))?;
+    let value: Value = resp
+        .json()
+        .await
+        .map_err(|e| InvokeError::response_json("invalid xAI images JSON", &e))?;
     Ok(TaskOutcome::Done(TaskResult::Assets(parse_images_response(&value)?)))
 }
 
@@ -339,14 +302,16 @@ impl ProtocolAdapter for XaiVideoJobsAdapter {
                 format!("{VIDEO_ADAPTER_ID} cannot serve task {:?}", call.request.task()),
             ));
         };
-        let url = xai_submit_url(call, "/videos/generations");
-        let body = video_generation_body(call, req);
+        let url = xai_submit_url(call)?;
+        let body = video_generation_body(call, req)?;
         let resp = post_json(http, &url, MEDIA_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid xAI video submit JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid xAI video submit JSON", &e))?;
         let request_id = value
             .get("request_id")
             .and_then(Value::as_str)
@@ -354,8 +319,9 @@ impl ProtocolAdapter for XaiVideoJobsAdapter {
             .ok_or_else(|| InvokeError::parse("xAI video submit response missing 'request_id'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: VIDEO_ADAPTER_ID.into(),
+            config_revision: call.config_revision,
             remote_id: request_id.into(),
-            poll_state: json!({"status_url": xai_video_status_url(call, request_id)}),
+            poll_state: json!({}),
         }))
     }
 
@@ -365,20 +331,24 @@ impl ProtocolAdapter for XaiVideoJobsAdapter {
         call: &ResolvedCall,
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
-        let status_url = non_empty_str(&job.poll_state, "status_url")
-            .map(str::to_owned)
-            .unwrap_or_else(|| xai_video_status_url(call, &job.remote_id));
+        let status_url = call.credentialed_http_url(
+            &xai_video_status_url(call, &job.remote_id)?,
+            "poll_endpoint",
+        )?;
         let resp = get_request(http, &status_url, POLL_TIMEOUT, &call.connection.auth).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid xAI video status JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid xAI video status JSON", &e))?;
         match parse_video_status(&value)? {
             XaiVideoState::Pending => Ok(TaskOutcome::Pending(JobHandle {
                 adapter_id: VIDEO_ADAPTER_ID.into(),
+                config_revision: call.config_revision,
                 remote_id: job.remote_id.clone(),
-                poll_state: json!({"status_url": status_url}),
+                poll_state: json!({}),
             })),
             XaiVideoState::Done(url) => Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
                 data: ProducedData::Url(url),
@@ -389,7 +359,7 @@ impl ProtocolAdapter for XaiVideoJobsAdapter {
     }
 }
 
-fn video_generation_body(call: &ResolvedCall, req: &VideoGenRequest) -> Value {
+fn video_generation_body(call: &ResolvedCall, req: &VideoGenRequest) -> Result<Value, InvokeError> {
     let mut body = Map::new();
     apply_allowed(
         &mut body,
@@ -436,7 +406,7 @@ fn video_generation_body(call: &ResolvedCall, req: &VideoGenRequest) -> Value {
             body.remove("image");
         }
     }
-    Value::Object(body)
+    json_request_body(&call.model_params, &req.extra, Value::Object(body))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -496,8 +466,8 @@ impl ProtocolAdapter for XaiTtsAdapter {
                 format!("{TTS_ADAPTER_ID} cannot serve task {:?}", call.request.task()),
             ));
         };
-        let url = xai_submit_url(call, "/tts");
-        let body = tts_body(call, req);
+        let url = xai_submit_url(call)?;
+        let body = tts_body(call, req)?;
         let resp = post_json(http, &url, TTS_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
@@ -539,7 +509,7 @@ impl ProtocolAdapter for XaiTtsAdapter {
     }
 }
 
-fn tts_body(call: &ResolvedCall, req: &TtsRequest) -> Value {
+fn tts_body(call: &ResolvedCall, req: &TtsRequest) -> Result<Value, InvokeError> {
     let mut body = Map::new();
     apply_allowed(
         &mut body,
@@ -571,7 +541,7 @@ fn tts_body(call: &ResolvedCall, req: &TtsRequest) -> Value {
         }
         output.as_object_mut().expect("object").insert("codec".into(), Value::String(format.into()));
     }
-    Value::Object(body)
+    json_request_body(&call.model_params, &req.extra, Value::Object(body))
 }
 
 fn mime_for_codec(codec: &str) -> &'static str {
@@ -609,8 +579,8 @@ impl ProtocolAdapter for XaiSttAdapter {
                 format!("{STT_ADAPTER_ID} cannot serve task {:?}", call.request.task()),
             ));
         };
-        let url = xai_submit_url(call, "/stt");
-        let options = stt_options(call, req);
+        let url = xai_submit_url(call)?;
+        let options = stt_options(call, req)?;
         let build_form = || -> Result<Form, InvokeError> {
             let mut form = Form::new();
             // xAI explicitly requires every option to precede the file part.
@@ -627,8 +597,10 @@ impl ProtocolAdapter for XaiSttAdapter {
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let body: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid xAI STT JSON: {e}")))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid xAI STT JSON", &e))?;
         let text = body
             .get("text")
             .and_then(Value::as_str)
@@ -649,7 +621,11 @@ impl ProtocolAdapter for XaiSttAdapter {
     }
 }
 
-fn value_as_form_fields(key: &str, value: &Value, output: &mut Vec<(String, String)>) {
+fn value_as_form_fields(
+    key: &str,
+    value: &Value,
+    output: &mut Vec<(String, String)>,
+) -> Result<(), InvokeError> {
     match value {
         Value::String(value) => output.push((key.into(), value.clone())),
         Value::Bool(value) => output.push((key.into(), value.to_string())),
@@ -657,45 +633,54 @@ fn value_as_form_fields(key: &str, value: &Value, output: &mut Vec<(String, Stri
         // `keyterm` is repeatable; arrays encode repeated multipart fields.
         Value::Array(values) if key == "keyterm" => {
             for value in values {
-                if let Some(value) = value.as_str().map(str::trim).filter(|value| !value.is_empty()) {
-                    output.push((key.into(), value.into()));
-                }
+                let value = value.as_str().map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| {
+                    InvokeError::new(
+                        InvokeErrorKind::InvalidParams,
+                        "xAI STT keyterm entries must be non-empty strings",
+                    )
+                })?;
+                output.push((key.into(), value.into()));
             }
         }
-        _ => {}
+        Value::Null | Value::Array(_) | Value::Object(_) => {
+            return Err(InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                format!("xAI STT provider field {key:?} cannot be represented as multipart text"),
+            ));
+        }
     }
+    Ok(())
 }
 
-fn stt_options(call: &ResolvedCall, req: &AsrRequest) -> Vec<(String, String)> {
-    const KEYS: &[&str] = &[
-        "audio_format",
-        "sample_rate",
-        "language",
-        "format",
-        "multichannel",
-        "channels",
-        "diarize",
-        "keyterm",
-        "filler_words",
-        "vad_threshold",
-    ];
-    let mut merged = Map::new();
-    apply_allowed(&mut merged, &call.model_params, &req.extra, KEYS);
+fn stt_options(call: &ResolvedCall, req: &AsrRequest) -> Result<Vec<(String, String)>, InvokeError> {
+    let keyterm = req
+        .extra
+        .get("keyterm")
+        .or_else(|| configured_value(&call.model_params, "keyterm"))
+        .cloned();
+    let mut configured = call.model_params.clone();
+    let mut extra = req.extra.clone();
+    if let Some(configured) = configured.as_object_mut() {
+        configured.remove("keyterm");
+    }
+    if let Some(extra) = extra.as_object_mut() {
+        extra.remove("keyterm");
+    }
+    let mut merged = scalar_request_fields(&configured, &extra)?;
+    merged.remove("file");
     if let Some(language) = req.language.as_deref().map(str::trim).filter(|language| !language.is_empty()) {
-        merged.insert("language".into(), Value::String(language.into()));
+        merged.insert("language".into(), language.into());
     }
     // xAI has no OpenAI-style free-form transcription prompt.  Do not silently
     // reinterpret it as `keyterm` (which is limited to 50 characters and has
     // narrower semantics); configured/request-extra `keyterm` values above are
     // the explicit escape hatch.
 
-    let mut output = Vec::new();
-    for key in KEYS {
-        if let Some(value) = merged.get(*key) {
-            value_as_form_fields(key, value, &mut output);
-        }
+    let mut output = merged.into_iter().collect::<Vec<_>>();
+    if let Some(keyterm) = keyterm {
+        value_as_form_fields("keyterm", &keyterm, &mut output)?;
     }
-    output
+    Ok(output)
 }
 
 fn extension_for_audio_mime(mime: &str) -> &'static str {
@@ -718,11 +703,33 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
+    use crate::adapters::test_support::call_with_endpoint;
     use crate::types::{InputAsset, TtsRequest};
 
     fn xai_base(server: &MockServer) -> String {
         format!("{}/v1", server.uri())
+    }
+
+    fn image_generation_call(base: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        call_with_endpoint(base, model, IMAGES_ADAPTER_ID, "/images/generations", request)
+    }
+
+    fn image_edit_call(base: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        call_with_endpoint(base, model, IMAGES_ADAPTER_ID, "/images/edits", request)
+    }
+
+    fn video_call(base: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        let mut call = call_with_endpoint(base, model, VIDEO_ADAPTER_ID, "/videos/generations", request);
+        call.model_params["poll_endpoint"] = Value::String("/videos/{request_id}".into());
+        call
+    }
+
+    fn tts_call(base: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        call_with_endpoint(base, model, TTS_ADAPTER_ID, "/tts", request)
+    }
+
+    fn stt_call(base: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        call_with_endpoint(base, model, STT_ADAPTER_ID, "/stt", request)
     }
 
     fn test_http() -> reqwest::Client {
@@ -763,8 +770,11 @@ mod tests {
             quality: None,
             extra: json!({}),
         });
-        let mut call = call(&xai_base(&server), "grok-imagine-image-quality", request);
-        call.model_params = json!({"request_defaults": {"resolution": "2k"}});
+        let mut call = image_generation_call(&xai_base(&server), "grok-imagine-image-quality", request);
+        call.model_params = json!({
+            "endpoint": "/images/generations",
+            "resolution": "2k"
+        });
         let outcome = XaiImagesJsonAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = outcome else { panic!("expected image assets") };
         assert!(matches!(&assets[0].data, ProducedData::Url(url) if url == "https://cdn/image.jpeg"));
@@ -796,7 +806,7 @@ mod tests {
             inputs: vec![input("image", "image/png", b"hi")],
             extra: json!({}),
         });
-        let call = call(&xai_base(&server), "grok-imagine-image-quality", request);
+        let call = image_edit_call(&xai_base(&server), "grok-imagine-image-quality", request);
         let outcome = XaiImagesJsonAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = outcome else { panic!("expected image assets") };
         assert!(matches!(&assets[0].data, ProducedData::Bytes(bytes) if bytes == b"hi"));
@@ -811,8 +821,11 @@ mod tests {
             inputs: vec![input("image", "image/png", b"a"), input("image", "image/jpeg", b"b")],
             extra: json!({}),
         };
-        let multi_call =
-            call("https://api.x.ai/v1", "grok-imagine-image-quality", TaskRequest::ImageEdit(request.clone()));
+        let multi_call = image_edit_call(
+            "https://api.x.ai/v1",
+            "grok-imagine-image-quality",
+            TaskRequest::ImageEdit(request.clone()),
+        );
         let body = image_edit_body(&multi_call, &request).unwrap();
         assert_eq!(body["images"].as_array().unwrap().len(), 2);
         assert!(body.get("image").is_none());
@@ -821,8 +834,11 @@ mod tests {
             inputs: vec![input("image", "image/png", b"a"), input("mask", "image/png", b"m")],
             ..request
         };
-        let masked_call =
-            call("https://api.x.ai/v1", "grok-imagine-image-quality", TaskRequest::ImageEdit(masked.clone()));
+        let masked_call = image_edit_call(
+            "https://api.x.ai/v1",
+            "grok-imagine-image-quality",
+            TaskRequest::ImageEdit(masked.clone()),
+        );
         assert_eq!(image_edit_body(&masked_call, &masked).unwrap_err().kind, InvokeErrorKind::InvalidParams);
     }
 
@@ -859,7 +875,7 @@ mod tests {
             inputs: vec![input("image", "image/png", b"hi")],
             extra: json!({}),
         });
-        let call = call(&xai_base(&server), "grok-imagine-video-1.5", request);
+        let call = video_call(&xai_base(&server), "grok-imagine-video-1.5", request);
         let http = test_http();
         let TaskOutcome::Pending(job) = XaiVideoJobsAdapter.submit(&http, &call).await.unwrap()
         else {
@@ -867,12 +883,55 @@ mod tests {
         };
         assert_eq!(job.adapter_id, VIDEO_ADAPTER_ID);
         assert_eq!(job.remote_id, "req-1");
-        assert_eq!(job.poll_state["status_url"], format!("{}/v1/videos/req-1", server.uri()));
+        assert_eq!(job.poll_state, json!({}));
 
         let outcome = XaiVideoJobsAdapter.poll(&http, &call, &job).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = outcome else { panic!("expected video asset") };
         assert!(matches!(&assets[0].data, ProducedData::Url(url) if url.ends_with("tmp.mp4")));
         assert_eq!(assets[0].mime.as_deref(), Some("video/mp4"));
+    }
+
+    #[tokio::test]
+    async fn poll_state_cannot_override_the_capability_poll_endpoint() {
+        let selected = MockServer::start().await;
+        let foreign = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/videos/req-foreign"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "done",
+                "video": {"url": "https://cdn.example/video.mp4"}
+            })))
+            .expect(1)
+            .mount(&selected)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/req-foreign"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "done",
+                "video": {"url": "https://cdn.example/foreign.mp4"}
+            })))
+            .expect(0)
+            .mount(&foreign)
+            .await;
+
+        let request = TaskRequest::VideoGeneration(VideoGenRequest {
+            prompt: "waves".into(),
+            seconds: None,
+            size: None,
+            inputs: vec![],
+            extra: json!({}),
+        });
+        let call = video_call(&xai_base(&selected), "grok-imagine-video-1.5", request);
+        let job = JobHandle {
+            adapter_id: VIDEO_ADAPTER_ID.into(),
+            config_revision: call.config_revision,
+            remote_id: "req-foreign".into(),
+            poll_state: json!({"status_url": format!("{}/jobs/req-foreign", foreign.uri())}),
+        };
+
+        let result = XaiVideoJobsAdapter.poll(&test_http(), &call, &job).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Done(TaskResult::Assets(_))));
+        assert!(foreign.received_requests().await.unwrap().is_empty());
     }
 
     #[test]
@@ -912,8 +971,11 @@ mod tests {
             format: Some("wav".into()),
             extra: json!({"language": "zh", "speed": 1.1}),
         });
-        let mut call = call(&xai_base(&server), "xai-tts", request);
-        call.model_params = json!({"request_defaults": {"output_format": {"codec": "mp3", "sample_rate": 24000}}});
+        let mut call = tts_call(&xai_base(&server), "xai-tts", request);
+        call.model_params = json!({
+            "endpoint": "/tts",
+            "output_format": {"codec": "mp3", "sample_rate": 24000}
+        });
         let outcome = XaiTtsAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = outcome else { panic!("expected audio asset") };
         assert!(matches!(&assets[0].data, ProducedData::Bytes(bytes) if bytes == b"RIFFaudio"));
@@ -944,8 +1006,11 @@ mod tests {
             prompt: Some("Nomifun".into()),
             extra: json!({"diarize": true}),
         });
-        let mut call = call(&xai_base(&server), "xai-stt", request);
-        call.model_params = json!({"request_defaults": {"keyterm": ["Nomifun"]}});
+        let mut call = stt_call(&xai_base(&server), "xai-stt", request);
+        call.model_params = json!({
+            "endpoint": "/stt",
+            "keyterm": ["Nomifun"]
+        });
         let outcome = XaiSttAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Transcript { text, language, model }) = outcome else {
             panic!("expected transcript")
@@ -971,12 +1036,18 @@ mod tests {
             inputs: vec![],
             extra: json!({}),
         });
-        let mut call = call("https://api.x.ai/v1", "grok-imagine-video-1.5", request);
-        call.model_params = json!({
-            "endpoint": "/custom/video-submit",
-            "poll_endpoint": "https://status.example/jobs/{request_id}"
-        });
-        assert_eq!(xai_submit_url(&call, "/videos/generations"), "https://api.x.ai/v1/custom/video-submit");
-        assert_eq!(xai_video_status_url(&call, "r-9"), "https://status.example/jobs/r-9");
+        let mut call = call_with_endpoint(
+            "https://api.x.ai/v1",
+            "grok-imagine-video-1.5",
+            VIDEO_ADAPTER_ID,
+            "/custom/video-submit",
+            request,
+        );
+        call.model_params["poll_endpoint"] = json!("https://status.example/jobs/{request_id}");
+        assert_eq!(
+            xai_submit_url(&call).unwrap(),
+            "https://api.x.ai/v1/custom/video-submit"
+        );
+        assert_eq!(xai_video_status_url(&call, "r-9").unwrap(), "https://status.example/jobs/r-9");
     }
 }

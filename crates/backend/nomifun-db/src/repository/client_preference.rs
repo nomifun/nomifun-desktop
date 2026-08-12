@@ -5,6 +5,7 @@ const MODEL_FAILOVER_KEY: &str = "agent.model_failover";
 const COLLABORATION_MODELS_KEY: &str = "nomi.collaborationModels";
 const NOMI_DEFAULT_MODEL_KEY: &str = "nomi.defaultModel";
 const KNOWLEDGE_AUTOGEN_MODEL_KEY: &str = "knowledge.autogenModel";
+pub const KNOWLEDGE_RETRIEVAL_KEY: &str = "knowledge.retrieval";
 const IMAGE_GENERATION_MODEL_KEY: &str = "tools.imageGenerationModel";
 const SPEECH_TO_TEXT_KEY: &str = "tools.speechToText";
 const TEXT_TO_SPEECH_KEY: &str = "tools.textToSpeech";
@@ -62,6 +63,7 @@ enum ProviderPreferenceKind {
     CollaborationModels,
     RequiredModelObject,
     OptionalObjectProviderId,
+    KnowledgeRetrieval,
 }
 
 fn provider_preference_kind(key: &str) -> Option<ProviderPreferenceKind> {
@@ -76,11 +78,110 @@ fn provider_preference_kind(key: &str) -> Option<ProviderPreferenceKind> {
         // than leaving a half-broken reference behind.
         | TEXT_TO_SPEECH_KEY => Some(ProviderPreferenceKind::RequiredModelObject),
         SPEECH_TO_TEXT_KEY => Some(ProviderPreferenceKind::OptionalObjectProviderId),
+        KNOWLEDGE_RETRIEVAL_KEY => Some(ProviderPreferenceKind::KnowledgeRetrieval),
         _ if is_channel_default_model_key(key) => {
             Some(ProviderPreferenceKind::RequiredModelObject)
         }
         _ => None,
     }
+}
+
+fn reject_unknown_fields(
+    key: &str,
+    path: &str,
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+) -> Result<(), DbError> {
+    if let Some(field) = object.keys().find(|field| !allowed.contains(&field.as_str())) {
+        return Err(invalid_preference(
+            key,
+            format!("{path}.{field} is not a supported field"),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_retrieval_stage(
+    key: &str,
+    path: &str,
+    value: &serde_json::Value,
+    provider_ids: &mut Vec<String>,
+) -> Result<serde_json::Value, DbError> {
+    let object = require_object(key, path, value)?;
+    let mode = object
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_preference(key, format!("{path}.mode must be 'local' or 'remote'")))?;
+    match mode {
+        "local" => {
+            reject_unknown_fields(key, path, object, &["mode"])?;
+            Ok(serde_json::json!({"mode": "local"}))
+        }
+        "remote" => {
+            reject_unknown_fields(key, path, object, &["mode", "provider_id", "model"])?;
+            reject_legacy_provider_id_field(key, path, object)?;
+            require_model_field(key, path, object)?;
+            let provider_id = required_provider_field(key, path, object, "provider_id")?;
+            let model = object
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .expect("validated retrieval model");
+            provider_ids.push(provider_id.clone());
+            Ok(serde_json::json!({
+                "mode": "remote",
+                "provider_id": provider_id,
+                "model": model,
+            }))
+        }
+        _ => Err(invalid_preference(
+            key,
+            format!("{path}.mode must be 'local' or 'remote'"),
+        )),
+    }
+}
+
+fn parse_knowledge_retrieval_preference(
+    key: &str,
+    value: &str,
+) -> Result<NormalizedProviderPreference, DbError> {
+    let parsed = parse_json(key, value)?;
+    let object = require_object(key, "$", &parsed)?;
+    reject_unknown_fields(key, "$", object, &["embedding", "rerank"])?;
+    let mut provider_ids = Vec::new();
+    let embedding_value = object.get("embedding").ok_or_else(|| {
+        invalid_preference(
+            key,
+            "$.embedding is required; use {\"mode\":\"local\"} for local retrieval",
+        )
+    })?;
+    let rerank_value = object.get("rerank").ok_or_else(|| {
+        invalid_preference(
+            key,
+            "$.rerank is required; use {\"mode\":\"local\"} for local retrieval",
+        )
+    })?;
+    let embedding = normalize_retrieval_stage(
+        key,
+        "$.embedding",
+        embedding_value,
+        &mut provider_ids,
+    )?;
+    let rerank = normalize_retrieval_stage(
+        key,
+        "$.rerank",
+        rerank_value,
+        &mut provider_ids,
+    )?;
+    provider_ids.sort();
+    provider_ids.dedup();
+    Ok(NormalizedProviderPreference {
+        value: serde_json::json!({
+            "embedding": embedding,
+            "rerank": rerank,
+        })
+        .to_string(),
+        provider_ids,
+    })
 }
 
 fn is_channel_default_model_key(key: &str) -> bool {
@@ -261,6 +362,9 @@ fn parse_json_provider_preference(
                 provider_ids.push(provider_id);
             }
         }
+        ProviderPreferenceKind::KnowledgeRetrieval => {
+            return parse_knowledge_retrieval_preference(key, value);
+        }
     }
 
     provider_ids.sort();
@@ -333,6 +437,24 @@ pub(crate) fn provider_preference_delete_action(
                 .insert("provider_id".to_owned(), serde_json::Value::Null);
             Ok(ProviderPreferenceDeleteAction::Update(parsed.to_string()))
         }
+        ProviderPreferenceKind::KnowledgeRetrieval => {
+            let object = parsed
+                .as_object_mut()
+                .expect("validated knowledge retrieval preference");
+            for stage in ["embedding", "rerank"] {
+                let stage_value = object
+                    .get_mut(stage)
+                    .expect("normalized retrieval stage");
+                if stage_value
+                    .get("provider_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(provider_id)
+                {
+                    *stage_value = serde_json::json!({"mode": "local"});
+                }
+            }
+            Ok(ProviderPreferenceDeleteAction::Update(parsed.to_string()))
+        }
     }
 }
 
@@ -373,6 +495,15 @@ mod provider_reference_tests {
                 serde_json::json!({"provider_id": PROVIDER_A, "model": "a"})
                     .to_string(),
                 1,
+            ),
+            (
+                KNOWLEDGE_RETRIEVAL_KEY,
+                serde_json::json!({
+                    "embedding": {"mode": "remote", "provider_id": PROVIDER_A, "model": "embed"},
+                    "rerank": {"mode": "remote", "provider_id": PROVIDER_B, "model": "rerank"}
+                })
+                .to_string(),
+                2,
             ),
             (
                 IMAGE_GENERATION_MODEL_KEY,
@@ -418,6 +549,10 @@ mod provider_reference_tests {
             (COLLABORATION_MODELS_KEY, r#"[{"model":"a"}]"#),
             (NOMI_DEFAULT_MODEL_KEY, r#"{"id":42}"#),
             (KNOWLEDGE_AUTOGEN_MODEL_KEY, "not-json"),
+            (
+                KNOWLEDGE_RETRIEVAL_KEY,
+                r#"{"embedding":{"mode":"remote","provider_id":"prov_legacy","model":"e"},"rerank":{"mode":"local"}}"#,
+            ),
             (IMAGE_GENERATION_MODEL_KEY, r#"[]"#),
             (SPEECH_TO_TEXT_KEY, r#"{"provider_id":42}"#),
             (
@@ -533,6 +668,60 @@ mod provider_reference_tests {
             )
             .unwrap(),
             ProviderPreferenceDeleteAction::Delete
+        );
+    }
+
+    #[test]
+    fn knowledge_retrieval_requires_both_explicit_stages() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"embedding": {"mode": "local"}}),
+            serde_json::json!({"rerank": {"mode": "local"}}),
+        ] {
+            assert!(
+                normalize_provider_preference(KNOWLEDGE_RETRIEVAL_KEY, &value.to_string())
+                    .is_err(),
+                "incomplete knowledge retrieval preference unexpectedly accepted: {value}"
+            );
+        }
+
+        let normalized = normalize_provider_preference(
+            KNOWLEDGE_RETRIEVAL_KEY,
+            &serde_json::json!({
+                "embedding": {"mode": "local"},
+                "rerank": {"mode": "local"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&normalized.value).unwrap(),
+            serde_json::json!({
+                "embedding": {"mode": "local"},
+                "rerank": {"mode": "local"}
+            })
+        );
+    }
+
+    #[test]
+    fn knowledge_retrieval_clears_only_deleted_provider_stages() {
+        let value = serde_json::json!({
+            "embedding": {"mode": "remote", "provider_id": PROVIDER_A, "model": "embed"},
+            "rerank": {"mode": "remote", "provider_id": PROVIDER_B, "model": "rerank"}
+        })
+        .to_string();
+        let ProviderPreferenceDeleteAction::Update(updated) =
+            provider_preference_delete_action(KNOWLEDGE_RETRIEVAL_KEY, &value, PROVIDER_A)
+                .unwrap()
+        else {
+            panic!("knowledge retrieval must be atomically rewritten");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&updated).unwrap(),
+            serde_json::json!({
+                "embedding": {"mode": "local"},
+                "rerank": {"mode": "remote", "provider_id": PROVIDER_B, "model": "rerank"}
+            })
         );
     }
 }

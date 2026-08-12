@@ -1096,6 +1096,8 @@ pub struct ConversationService {
     failover_provider_repo: Arc<RwLock<Option<Arc<dyn nomifun_db::IProviderRepository>>>>,
     failover_provider_model_repo:
         Arc<RwLock<Option<Arc<dyn nomifun_db::IProviderModelRepository>>>>,
+    failover_provider_model_capability_repo:
+        Arc<RwLock<Option<Arc<dyn nomifun_db::IProviderModelCapabilityRepository>>>>,
     failover_client_prefs: Arc<RwLock<Option<Arc<dyn nomifun_db::IClientPreferenceRepository>>>>,
     /// Mandatory read-side for the explicit Conversation↔Execution relation.
     /// Production assembly shares one repository-backed instance across every
@@ -2229,6 +2231,7 @@ impl ConversationService {
             turn_completion_observer: Arc::new(RwLock::new(None)),
             failover_provider_repo: Arc::new(RwLock::new(None)),
             failover_provider_model_repo: Arc::new(RwLock::new(None)),
+            failover_provider_model_capability_repo: Arc::new(RwLock::new(None)),
             failover_client_prefs: Arc::new(RwLock::new(None)),
             execution_conversation_boundary,
             terminal_proof_provider: Arc::new(RwLock::new(None)),
@@ -2405,6 +2408,7 @@ impl ConversationService {
         &self,
         provider_repo: Arc<dyn nomifun_db::IProviderRepository>,
         provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
+        provider_model_capability_repo: Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
         client_prefs: Arc<dyn nomifun_db::IClientPreferenceRepository>,
     ) {
         if let Ok(mut guard) = self.failover_provider_repo.write() {
@@ -2412,6 +2416,9 @@ impl ConversationService {
         }
         if let Ok(mut guard) = self.failover_provider_model_repo.write() {
             *guard = Some(provider_model_repo);
+        }
+        if let Ok(mut guard) = self.failover_provider_model_capability_repo.write() {
+            *guard = Some(provider_model_capability_repo);
         }
         if let Ok(mut guard) = self.failover_client_prefs.write() {
             *guard = Some(client_prefs);
@@ -2459,12 +2466,23 @@ impl ConversationService {
     ) -> Option<(
         Arc<dyn nomifun_db::IProviderRepository>,
         Arc<dyn nomifun_db::IProviderModelRepository>,
+        Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
         Arc<dyn nomifun_db::IClientPreferenceRepository>,
     )> {
         let provider_repo = self.failover_provider_repo.read().ok()?.clone()?;
         let provider_model_repo = self.failover_provider_model_repo.read().ok()?.clone()?;
+        let provider_model_capability_repo = self
+            .failover_provider_model_capability_repo
+            .read()
+            .ok()?
+            .clone()?;
         let client_prefs = self.failover_client_prefs.read().ok()?.clone()?;
-        Some((provider_repo, provider_model_repo, client_prefs))
+        Some((
+            provider_repo,
+            provider_model_repo,
+            provider_model_capability_repo,
+            client_prefs,
+        ))
     }
 
     /// Resolve the model for one knowledge write-back. A valid explicit
@@ -2476,7 +2494,9 @@ impl ConversationService {
         session_model: Option<&ProviderWithModel>,
     ) -> Result<Option<ProviderWithModel>, String> {
         let fallback = session_model.cloned();
-        let Some((provider_repo, provider_model_repo, client_prefs)) = self.failover_deps() else {
+        let Some((provider_repo, provider_model_repo, provider_model_capability_repo, client_prefs)) =
+            self.failover_deps()
+        else {
             return Ok(fallback);
         };
         let preferences = match client_prefs
@@ -2564,7 +2584,25 @@ impl ConversationService {
                 );
             }
         };
-        if !provider.enabled || !model_row.is_some_and(|row| row.enabled) {
+        let has_chat_capability = match provider_model_capability_repo
+            .get(&selected.provider_id, &selected.model, "chat")
+            .await
+        {
+            Ok(capability) => capability.is_some(),
+            Err(error) => {
+                warn!(
+                    provider_id = %selected.provider_id,
+                    model = %selected.model,
+                    error = %ErrorChain(&error),
+                    "Failed to validate explicit knowledge write-back model capability"
+                );
+                return Err(
+                    "Could not validate the configured knowledge write-back model; retry"
+                        .to_owned(),
+                );
+            }
+        };
+        if !provider.enabled || !model_row.is_some_and(|row| row.enabled) || !has_chat_capability {
             warn!(
                 provider_id = %selected.provider_id,
                 model = %selected.model,
@@ -10625,46 +10663,37 @@ impl ConversationService {
         // runtime recovery all legitimately leave this registry cold. Restore
         // through the same execution preparation path as a normal send, while
         // still outside the durable destructive receipt/fence.
-        let agent = if let Some(agent) = runtime_registry.get_runtime(conv_id) {
-            agent
-        } else {
-            let (runtime_options, knowledge_signature) = self
-                .prepare_runtime_options_for_execution(
-                    &row,
-                    runtime_registry,
-                    Some(&preparation_token),
-                )
-                .await?;
-            runtime_build_lease.ensure_active()?;
-            let stored_workspace = runtime_options.workspace.clone();
-            let agent = runtime_registry
-                .get_or_create_runtime_for_preparation(
-                    conv_id,
-                    preparation_token.clone(),
-                    runtime_options,
-                )
-                .await?;
-            if runtime_build_lease.is_cancelled() {
-                Self::terminate_runtime_until_confirmed(
-                    runtime_registry,
-                    conv_id,
-                    AgentKillReason::UserCancelled,
-                    "cancelled edit/resubmit runtime preparation",
-                )
-                .await;
-                return Err(AppError::Conflict(format!(
-                    "conversation {conversation_id} runtime preparation was cancelled"
-                )));
-            }
-            self.maybe_persist_workspace(
-                conv_id,
-                &stored_workspace,
-                agent.workspace(),
+        let (runtime_options, knowledge_signature) = self
+            .prepare_runtime_options_for_execution(
+                &row,
+                runtime_registry,
+                Some(&preparation_token),
             )
             .await?;
-            self.commit_runtime_knowledge_signature(conv_id, knowledge_signature);
-            agent
-        };
+        runtime_build_lease.ensure_active()?;
+        let stored_workspace = runtime_options.workspace.clone();
+        let agent = runtime_registry
+            .get_or_create_runtime_for_preparation(
+                conv_id,
+                preparation_token.clone(),
+                runtime_options,
+            )
+            .await?;
+        if runtime_build_lease.is_cancelled() {
+            Self::terminate_runtime_until_confirmed(
+                runtime_registry,
+                conv_id,
+                AgentKillReason::UserCancelled,
+                "cancelled edit/resubmit runtime preparation",
+            )
+            .await;
+            return Err(AppError::Conflict(format!(
+                "conversation {conversation_id} runtime preparation was cancelled"
+            )));
+        }
+        self.maybe_persist_workspace(conv_id, &stored_workspace, agent.workspace())
+            .await?;
+        self.commit_runtime_knowledge_signature(conv_id, knowledge_signature);
         runtime_build_lease.ensure_active()?;
 
         // Legacy/compacted sessions do not contain enough information to infer

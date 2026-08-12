@@ -144,7 +144,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
   const { cliAgents, presets: presetPresets } = useConversationAgents();
-  // Chat-capable catalog groups (backend resolve; task='chat').
+  // Provider/model groups with an exact enabled Chat capability.
   const { groups: chatGroups } = useModelsForTask('chat');
   const [frequency, setFrequency] = useState<FrequencyType>('manual');
   const [time, setTime] = useState('09:00');

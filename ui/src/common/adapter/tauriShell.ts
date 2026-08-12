@@ -233,13 +233,48 @@ export async function tauriSendNotification(opts: { title: string; body: string;
   if (granted) mod.sendNotification({ title: opts.title, body: opts.body, icon: opts.icon });
 }
 
-function parseDeepLink(url: string): { action: string; params: Record<string, string> } {
+const ADD_PROVIDER_DEEP_LINK_PARAMS = new Set(['base_url', 'name', 'platform', 'model', 'task']);
+const NAVIGATE_DEEP_LINK_PARAMS = new Set(['route']);
+
+const allowedDeepLinkParams = (action: string): ReadonlySet<string> => {
+  if (action === 'add-provider' || action === 'provider/add') return ADD_PROVIDER_DEEP_LINK_PARAMS;
+  if (action === 'navigate') return NAVIGATE_DEEP_LINK_PARAMS;
+  return new Set();
+};
+
+const isSafeDeepLinkBaseUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    return (
+      (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+      parsed.hostname.length > 0 &&
+      parsed.username.length === 0 &&
+      parsed.password.length === 0 &&
+      parsed.search.length === 0 &&
+      parsed.hash.length === 0
+    );
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Parse only non-sensitive deep-link suggestions. Provider credentials must
+ * never travel in a URL; users enter them directly in the provider form.
+ */
+export function parseDeepLink(url: string): { action: string; params: Record<string, string> } {
   try {
     const u = new URL(url);
     const action = u.hostname || u.pathname.replace(/^\/+/, '');
+    const allowed = allowedDeepLinkParams(action);
     const params: Record<string, string> = {};
     u.searchParams.forEach((value, key) => {
-      params[key] = value;
+      if (!allowed.has(key)) return;
+      const normalized = value.trim();
+      if (!normalized) return;
+      if (key === 'base_url' && !isSafeDeepLinkBaseUrl(normalized)) return;
+      if (key === 'route' && /[?#]/u.test(normalized)) return;
+      params[key] = normalized;
     });
     return { action, params };
   } catch {

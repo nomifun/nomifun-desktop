@@ -6,13 +6,14 @@
 //! provider-backed implementation, and `nomifun-app` wires it via
 //! `TerminalService::with_title_completer`. There is no per-feature model
 //! setting — auto-titling is a cheap background touch, so the default is the
-//! first enabled provider (registry order) and its first enabled model.
+//! first enabled provider/model pair with an explicit Chat capability.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomifun_common::AppError;
 use nomifun_db::{IProviderModelRepository, IProviderRepository};
+use nomifun_model_invoke::ModelInvokeService;
 use nomifun_terminal::TerminalTitleCompleter;
 
 use crate::factory::provider_config::{one_shot_completion, resolve_provider_config, user_message};
@@ -34,21 +35,23 @@ the SAME language as the input (Chinese input → Chinese title). Output only th
 pub struct LiveTerminalTitleCompleter {
     pub provider_repo: Arc<dyn IProviderRepository>,
     pub provider_model_repo: Arc<dyn IProviderModelRepository>,
-    pub encryption_key: [u8; 32],
+    pub model_invoke: Arc<ModelInvokeService>,
     pub workspace: PathBuf,
 }
 
 impl LiveTerminalTitleCompleter {
-    /// First enabled provider (creation order) + its first enabled model.
+    /// First enabled provider/model pair with an exact Chat capability.
     async fn resolve_default_model(&self) -> Result<(String, String), AppError> {
         crate::knowledge_completer::resolve_default_model(
             &self.provider_repo,
             &self.provider_model_repo,
+            self.model_invoke.provider_model_capability_repo(),
         )
         .await
         .ok_or_else(|| {
             AppError::Conflict(
-                "terminal auto-title unavailable: no enabled provider/model is configured".into(),
+                "terminal auto-title unavailable: no enabled Chat-capable provider/model is configured"
+                    .into(),
             )
         })
     }
@@ -59,9 +62,7 @@ impl TerminalTitleCompleter for LiveTerminalTitleCompleter {
     async fn summarize(&self, content: &str) -> Result<String, AppError> {
         let (provider_id, model) = self.resolve_default_model().await?;
         let cfg = resolve_provider_config(
-            &self.provider_repo,
-            &self.provider_model_repo,
-            &self.encryption_key,
+            self.model_invoke.as_ref(),
             &provider_id,
             &model,
             &self.workspace,

@@ -34,7 +34,9 @@ async fn t8_1_bedrock_missing_region() {
         json!({
             "bedrock_config": {
                 "auth_method": "accessKey",
-                "region": "",
+                "region": ""
+            },
+            "credentials": {
                 "access_key_id": "AKIAIOSFODNN7",
                 "secret_access_key": "wJalrXUtnFEMI"
             }
@@ -61,7 +63,9 @@ async fn t8_1_bedrock_access_key_missing_key_id() {
         json!({
             "bedrock_config": {
                 "auth_method": "accessKey",
-                "region": "us-east-1",
+                "region": "us-east-1"
+            },
+            "credentials": {
                 "secret_access_key": "wJalrXUtnFEMI"
             }
         }),
@@ -72,7 +76,7 @@ async fn t8_1_bedrock_access_key_missing_key_id() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     let json = body_json(resp).await;
-    assert!(json["error"].as_str().unwrap().contains("accessKeyId"));
+    assert!(json["error"].as_str().unwrap().contains("access_key_id"));
 }
 
 #[tokio::test]
@@ -86,7 +90,9 @@ async fn t8_1_bedrock_access_key_missing_secret() {
         json!({
             "bedrock_config": {
                 "auth_method": "accessKey",
-                "region": "us-east-1",
+                "region": "us-east-1"
+            },
+            "credentials": {
                 "access_key_id": "AKIAIOSFODNN7"
             }
         }),
@@ -97,7 +103,7 @@ async fn t8_1_bedrock_access_key_missing_secret() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     let json = body_json(resp).await;
-    assert!(json["error"].as_str().unwrap().contains("secretAccessKey"));
+    assert!(json["error"].as_str().unwrap().contains("secret_access_key"));
 }
 
 #[tokio::test]
@@ -112,7 +118,8 @@ async fn t8_1_bedrock_profile_missing() {
             "bedrock_config": {
                 "auth_method": "profile",
                 "region": "us-east-1"
-            }
+            },
+            "credentials": {}
         }),
         &token,
         &csrf,
@@ -136,7 +143,9 @@ async fn t8_1_bedrock_unauthenticated() {
             serde_json::to_vec(&json!({
                 "bedrock_config": {
                     "auth_method": "accessKey",
-                    "region": "us-east-1",
+                    "region": "us-east-1"
+                },
+                "credentials": {
                     "access_key_id": "AKIA",
                     "secret_access_key": "secret"
                 }
@@ -160,7 +169,9 @@ async fn t8_1_bedrock_invalid_credentials() {
         json!({
             "bedrock_config": {
                 "auth_method": "accessKey",
-                "region": "us-east-1",
+                "region": "us-east-1"
+            },
+            "credentials": {
                 "access_key_id": "AKIAFAKEKEY1234567890",
                 "secret_access_key": "fakesecretkey1234567890abcdefghijklmnopq"
             }
