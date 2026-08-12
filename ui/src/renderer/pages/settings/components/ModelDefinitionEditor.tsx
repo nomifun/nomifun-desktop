@@ -7,8 +7,8 @@
 import { MODEL_TASK_ORDER, MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
-import { Button, Checkbox, Input, Popconfirm, Select, Tag } from '@arco-design/web-react';
-import { DeleteFour, Down, Right } from '@icon-park/react';
+import { AutoComplete, Button, Checkbox, Input, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
+import { DeleteFour, Down, Refresh, Right } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContextLimitSelect } from './ContextLimitSelect';
@@ -29,7 +29,9 @@ import {
 import {
   CAPABILITY_ENDPOINT_FIELDS,
   addCapabilityTask,
-  applyCatalogSuggestion as applyCatalogMetadata,
+  applyCatalogSuggestionForTask,
+  catalogSuggestionsForTask,
+  changePrimaryModelTask,
   changeCapabilityProtocol,
   effectiveBaseUrl,
   endpointDescriptorValue,
@@ -40,6 +42,7 @@ import {
   protocolDescriptorForDraft,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
+  resolveModelInputChange,
   requiresCrossOriginConsent,
   type CapabilityEndpointDescriptor,
   type CapabilityEndpointField,
@@ -291,8 +294,8 @@ const sameCapabilities = (
 
 /**
  * Shared provider-model editor used by create-provider, add-model, and edit-model.
- * Catalog data is advisory. Selecting a catalog model initializes its suggested
- * task cards, while manual models add one explicit task at a time.
+ * Catalog data is advisory. New models choose one primary type before selecting
+ * or typing a model ID; existing multi-task models keep their full capability set.
  */
 const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
   value,
@@ -317,7 +320,6 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
   const modelInputId = useId();
   const taskSectionId = useId();
   const capabilityDetailsId = useId();
-  const [catalogSelection, setCatalogSelection] = useState<string>();
   const [customConnectionTask, setCustomConnectionTask] = useState<ModelTask>();
   const selectedTasks = useMemo(
     () => value.capabilities.map((capability) => capability.task),
@@ -326,6 +328,11 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
   const availableTasks = useMemo(
     () => MODEL_TASK_ORDER.filter((task) => !selectedTasks.includes(task)),
     [selectedTasks]
+  );
+  const primaryTask = modelReadOnly ? undefined : selectedTasks[0];
+  const filteredCatalogSuggestions = useMemo(
+    () => catalogSuggestionsForTask(catalogSuggestions, primaryTask),
+    [catalogSuggestions, primaryTask]
   );
   const recommendationManifests = useMemo(() => {
     const ready: ModelProtocolManifestMap = {};
@@ -377,18 +384,6 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
   }, [selectedTasks, settledValidationErrors]);
 
   const duplicateModel = isDuplicateModelId(value.model, existingModelIds);
-  const activeCatalogSelection = catalogSelection === value.model ? catalogSelection : undefined;
-  const catalogProfile = useMemo(
-    () => catalogSuggestions.find((item) => item.value === activeCatalogSelection),
-    [activeCatalogSelection, catalogSuggestions]
-  );
-  const catalogSuggestedTasks = useMemo(
-    () =>
-      catalogProfile
-        ? MODEL_TASK_ORDER.filter((task) => catalogProfile.tasks.includes(task))
-        : [],
-    [catalogProfile]
-  );
 
   const updateCapability = (task: ModelTask, patch: Partial<ModelCapabilityDraft>) => {
     onChange({
@@ -399,127 +394,156 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
     });
   };
 
-  const applyCatalogSuggestion = (profile: ModelCatalogSuggestion) => {
+  const selectPrimaryTask = (task: ModelTask) => {
+    if (task === primaryTask) return;
+    onChange(changePrimaryModelTask(value, task));
+  };
+
+  const selectCatalogSuggestion = (profile: ModelCatalogSuggestion) => {
+    if (!primaryTask) return;
     onChange(
-      applyCatalogMetadata(value, {
-        model: profile.value,
-        tasks: profile.tasks,
-        traits: profile.traits,
-      })
+      applyCatalogSuggestionForTask(
+        value,
+        { model: profile.value, tasks: profile.tasks, traits: profile.traits },
+        primaryTask
+      )
     );
   };
 
   const addTask = (task: ModelTask) => {
-    onChange({ ...value, capabilities: addCapabilityTask(value.capabilities, task) });
+    onChange({
+      ...value,
+      capabilities: addCapabilityTask(value.capabilities, task),
+    });
   };
 
   const removeTask = (task: ModelTask) => {
-    onChange({ ...value, capabilities: removeCapabilityTask(value.capabilities, task) });
+    onChange({
+      ...value,
+      capabilities: removeCapabilityTask(value.capabilities, task),
+    });
   };
 
   return (
     <div className='flex flex-col gap-16px' data-model-definition-editor>
-      <div className='space-y-8px'>
-        <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
-          {t('settings.modelId', { defaultValue: '模型 ID' })}
-        </label>
-        <Input
-          id={modelInputId}
-          value={value.model}
-          readOnly={modelReadOnly}
-          allowClear={!modelReadOnly}
-          status={!value.model.trim() || duplicateModel ? 'error' : undefined}
-          placeholder={t('settings.modelIdPlaceholder', {
-            defaultValue: '输入官网模型 ID；不要求必须出现在目录中',
-          })}
-          onChange={(model) => {
-            setCatalogSelection(undefined);
-            onChange({ ...value, model });
-          }}
-          onBlur={() => onChange({ ...value, model: value.model.trim() })}
-          aria-describedby={`${modelInputId}-hint`}
-        />
-        <div
-          id={`${modelInputId}-hint`}
-          role={duplicateModel ? 'alert' : 'note'}
-          className={`text-11px leading-4 ${duplicateModel ? 'text-danger-6' : 'text-t-secondary'}`}
-        >
-          {duplicateModel
-            ? t('settings.modelIdDuplicate', { defaultValue: '该模型 ID 已存在。' })
-            : t('settings.modelIdManualHint', {
-                defaultValue: '目录仅提供建议；官网已有但目录未收录的模型可以直接手填。',
+      {!modelReadOnly ? (
+        <>
+          <div className='space-y-8px' data-primary-model-task-section>
+            <label className='text-13px font-500 text-t-secondary'>
+              {t('settings.modelType', { defaultValue: '模型类型' })}
+            </label>
+            <Select
+              value={primaryTask}
+              options={MODEL_TASK_ORDER.map((task) => ({
+                value: task,
+                label: t(`settings.modelTask.${task}`, { defaultValue: task }),
+              }))}
+              placeholder={t('settings.selectModelType', {
+                defaultValue: '先选择模型主要用于什么任务',
               })}
-        </div>
-      </div>
-
-      {!modelReadOnly && (
-        <div className='space-y-8px'>
-          <div className='flex items-center justify-between gap-8px'>
-            <div className='text-13px font-500 text-t-secondary'>
-              {t('settings.modelCatalogSuggestions', { defaultValue: '模型目录建议（可选）' })}
+              onChange={(task) => {
+                if (typeof task === 'string') selectPrimaryTask(task as ModelTask);
+              }}
+              triggerProps={{ getPopupContainer: () => document.body }}
+              data-primary-model-task-picker
+            />
+            <div className='text-11px leading-4 text-t-secondary'>
+              {t('settings.modelTypeHint', {
+                defaultValue: '模型候选会按类型筛选；每次请求只使用所选任务对应的协议。',
+              })}
             </div>
-            {onRefreshCatalog && (
-              <Button size='mini' type='text' loading={catalogLoading} onClick={onRefreshCatalog}>
-                {t('common.refresh', { defaultValue: '刷新' })}
-              </Button>
-            )}
           </div>
-          <Select
-            showSearch
-            allowClear
-            value={activeCatalogSelection}
-            loading={catalogLoading}
-            options={catalogSuggestions.map((suggestion) => ({
-              label: suggestion.label,
-              value: suggestion.value,
-            }))}
-            placeholder={t('settings.modelCatalogPlaceholder', {
-              defaultValue: '选择模型并应用该模型的任务建议',
-            })}
-            onChange={(selection) => {
-              const selected = typeof selection === 'string' ? selection : undefined;
-              setCatalogSelection(selected);
-              const suggestion = catalogSuggestions.find((item) => item.value === selected);
-              if (suggestion) applyCatalogSuggestion(suggestion);
-            }}
-            triggerProps={{ getPopupContainer: () => document.body }}
-            data-model-catalog-picker
-          />
-          {catalogProfile && (
-            <div className='space-y-6px' data-active-catalog-model={catalogProfile.value}>
-              <div className='flex flex-wrap items-center gap-6px'>
-                <span className='text-11px text-t-secondary'>
-                  {t('settings.catalogSuggestedTasks', { defaultValue: '目录任务建议' })}
-                </span>
-                {catalogSuggestedTasks.length > 0 ? (
-                  catalogSuggestedTasks.map((task) => (
-                    <Tag key={task} size='small' color='arcoblue'>
-                      {t(`settings.modelTask.${task}`, { defaultValue: task })}
-                    </Tag>
-                  ))
-                ) : (
-                  <span className='text-11px text-warning-6'>
-                    {t('settings.catalogNoSuggestedTasks', {
-                      defaultValue: '目录没有提供任务建议，请在下方手动添加。',
-                    })}
-                  </span>
-                )}
-              </div>
-              <div className='text-11px text-t-tertiary'>
-                {t('settings.catalogCapabilityConfirmation', {
-                  defaultValue: '任务建议已显示在下方，请确认后保存。',
+
+          <div className='space-y-8px' data-filtered-catalog-count={filteredCatalogSuggestions.length}>
+            <div className='flex items-center justify-between gap-8px'>
+              <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
+                {t('settings.modelSelection', { defaultValue: '模型' })}
+              </label>
+              {onRefreshCatalog && (
+                <Tooltip content={t('common.refresh', { defaultValue: '刷新' })}>
+                  <Button
+                    size='mini'
+                    type='text'
+                    className='!h-28px !w-28px !min-w-28px'
+                    icon={<Refresh theme='outline' size='14' />}
+                    loading={catalogLoading}
+                    onClick={onRefreshCatalog}
+                    aria-label={t('common.refresh', { defaultValue: '刷新' })}
+                  />
+                </Tooltip>
+              )}
+            </div>
+            <AutoComplete
+              value={value.model}
+              data={filteredCatalogSuggestions.map((suggestion) => ({
+                value: suggestion.value,
+                name: suggestion.label,
+              }))}
+              disabled={!primaryTask}
+              loading={catalogLoading}
+              allowClear
+              status={primaryTask && (!value.model.trim() || duplicateModel) ? 'error' : undefined}
+              placeholder={
+                primaryTask
+                  ? t('settings.modelSelectionPlaceholder', {
+                      defaultValue: '搜索目录模型，或直接输入官网模型 ID',
+                    })
+                  : t('settings.modelSelectionRequiresType', {
+                      defaultValue: '请先选择模型类型',
+                    })
+              }
+              defaultActiveFirstOption={false}
+              onChange={(model, option) => {
+                const manualModel = resolveModelInputChange(model, option);
+                if (manualModel !== undefined) onChange({ ...value, model: manualModel });
+              }}
+              onSelect={(model) => {
+                const suggestion = filteredCatalogSuggestions.find((item) => item.value === model);
+                if (suggestion) selectCatalogSuggestion(suggestion);
+              }}
+              triggerProps={{ getPopupContainer: () => document.body }}
+              inputProps={{
+                id: modelInputId,
+                'aria-describedby': `${modelInputId}-hint`,
+              }}
+              data-unified-model-input
+            />
+            <div
+              id={`${modelInputId}-hint`}
+              role={duplicateModel ? 'alert' : 'note'}
+              className={`text-11px leading-4 ${duplicateModel ? 'text-danger-6' : 'text-t-secondary'}`}
+            >
+              {duplicateModel
+                ? t('settings.modelIdDuplicate', {
+                    defaultValue: '该模型 ID 已存在。',
+                  })
+                : t('settings.modelSelectionHint', {
+                    defaultValue: '目录仅提供当前类型的建议；没有匹配项时可直接输入模型 ID。',
+                  })}
+            </div>
+            {primaryTask && !catalogLoading && filteredCatalogSuggestions.length === 0 && !catalogError && (
+              <div className='text-11px text-t-tertiary' role='note' data-empty-filtered-model-catalog>
+                {t('settings.modelCatalogFilteredEmpty', {
+                  defaultValue: '目录中暂无该类型的模型，请直接输入模型 ID。',
                 })}
               </div>
-            </div>
-          )}
-          {catalogError && (
-            <div className='text-11px text-warning-6' role='note'>
-              {t('settings.modelCatalogUnavailable', {
-                defaultValue: '目录暂不可用，不影响手填模型 ID。',
-              })}{' '}
-              {catalogError}
-            </div>
-          )}
+            )}
+            {catalogError && (
+              <div className='text-11px text-warning-6' role='note'>
+                {t('settings.modelCatalogUnavailable', {
+                  defaultValue: '目录暂不可用，不影响手填模型 ID。',
+                })}{' '}
+                {catalogError}
+              </div>
+            )}
+          </div>
+        </>
+      ) : (
+        <div className='space-y-8px'>
+          <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
+            {t('settings.modelId', { defaultValue: '模型 ID' })}
+          </label>
+          <Input id={modelInputId} value={value.model} readOnly data-readonly-model-id />
         </div>
       )}
 
@@ -535,39 +559,41 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           </div>
         </div>
 
-        {value.capabilities.length === 0 && (
+        {modelReadOnly && value.capabilities.length === 0 && (
           <div className='text-12px text-t-secondary' role='note' data-empty-model-tasks>
-            {value.model.trim()
-              ? t('settings.modelTasksEmpty', {
-                  defaultValue: '尚未添加任务。请先选择这个模型的主要任务。',
-                })
-              : t('settings.modelTaskRequiresModel', {
-                  defaultValue: '请先输入或选择模型 ID，再添加任务。',
-                })}
+            {t('settings.modelTasksEmpty', {
+              defaultValue: '该模型尚未配置任何任务。',
+            })}
           </div>
         )}
 
-        <Select
-          value={undefined}
-          disabled={!value.model.trim() || availableTasks.length === 0}
-          options={availableTasks.map((task) => ({
-            value: task,
-            label: t(`settings.modelTask.${task}`, { defaultValue: task }),
-          }))}
-          placeholder={
-            availableTasks.length === 0
-              ? t('settings.modelTasksAllAdded', { defaultValue: '所有任务均已添加' })
-              : value.capabilities.length === 0
-                ? t('settings.selectPrimaryModelTask', { defaultValue: '选择主要任务' })
-                : t('settings.addAnotherModelTask', { defaultValue: '添加其他任务' })
-          }
-          onChange={(task) => {
-            if (typeof task === 'string') addTask(task as ModelTask);
-          }}
-          triggerProps={{ getPopupContainer: () => document.body }}
-          aria-label={t('settings.addAnotherModelTask', { defaultValue: '添加其他任务' })}
-          data-model-task-picker
-        />
+        {(modelReadOnly || value.capabilities.length > 0) && (
+          <Select
+            value={undefined}
+            disabled={!value.model.trim() || availableTasks.length === 0}
+            options={availableTasks.map((task) => ({
+              value: task,
+              label: t(`settings.modelTask.${task}`, { defaultValue: task }),
+            }))}
+            placeholder={
+              availableTasks.length === 0
+                ? t('settings.modelTasksAllAdded', {
+                    defaultValue: '所有任务均已添加',
+                  })
+                : t('settings.addAnotherModelTask', {
+                    defaultValue: '添加其他任务',
+                  })
+            }
+            onChange={(task) => {
+              if (typeof task === 'string') addTask(task as ModelTask);
+            }}
+            triggerProps={{ getPopupContainer: () => document.body }}
+            aria-label={t('settings.addAnotherModelTask', {
+              defaultValue: '添加其他任务',
+            })}
+            data-model-task-picker
+          />
+        )}
 
         {value.capabilities.map((capability) => {
         const loading = manifestLoadingTasks.includes(capability.task);
@@ -706,25 +732,27 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                   </span>
                 </div>
               </button>
-              <div className='flex shrink-0 items-center pr-10px'>
-                <Popconfirm
-                  title={t('settings.removeModelTaskConfirm', {
-                    defaultValue: `移除“${t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}”及其高级配置？`,
-                    task: t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task }),
-                  })}
-                  onOk={() => removeTask(capability.task)}
-                >
-                  <Button
-                    size='mini'
-                    type='text'
-                    status='danger'
-                    className='!h-28px !w-28px !min-w-28px'
-                    icon={<DeleteFour theme='outline' size='14' />}
-                    aria-label={t('settings.removeModelTask', { defaultValue: '移除任务' })}
-                    data-remove-model-task={capability.task}
-                  />
-                </Popconfirm>
-              </div>
+              {(modelReadOnly || capability.task !== primaryTask) && (
+                <div className='flex shrink-0 items-center pr-10px'>
+                  <Popconfirm
+                    title={t('settings.removeModelTaskConfirm', {
+                      defaultValue: `移除“${t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}”及其高级配置？`,
+                      task: t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task }),
+                    })}
+                    onOk={() => removeTask(capability.task)}
+                  >
+                    <Button
+                      size='mini'
+                      type='text'
+                      status='danger'
+                      className='!h-28px !w-28px !min-w-28px'
+                      icon={<DeleteFour theme='outline' size='14' />}
+                      aria-label={t('settings.removeModelTask', { defaultValue: '移除任务' })}
+                      data-remove-model-task={capability.task}
+                    />
+                  </Popconfirm>
+                </div>
+              )}
             </div>
 
             <div
