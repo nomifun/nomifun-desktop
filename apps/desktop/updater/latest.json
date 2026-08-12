@@ -1,11 +1,15 @@
 {
   "version": "0.6.1",
   "notes": "# NomiFun v0.6.1\n\nWindows first release for v0.6.1.\n\n## Highlights\n\n- Adds verified native image generation, including durable image artifact delivery and conversation-side rendering for generated image outputs.\n- Reworks model and provider management around protocol manifests, explicit provider connections, model capabilities, and task-specific model selection.\n- Expands multimodal provider support across image generation/editing, realtime, rerank, speech, video, and embeddings, with new Gemini and StepFun protocol coverage.\n- Improves Model Hub and settings workflows for editing model definitions, credentials, health checks, capability disclosure, and serialized writes.\n- Unifies browser lifecycle and browser-use settings management, with related presentation and localization refinements.\n- Fixes startup issues and improves model type/catalog selection interactions.",
-  "pub_date": "2026-08-12T05:20:11.529Z",
+  "pub_date": "2026-08-12T05:37:12.121Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHkzeXJFeFJwenZGbVVmZWovR1JuWHJ4QmFuQ3hXUjdLRDhBK29XZlJqMnRacU5NL3ZCLytZbmxkQzg5OGY4WmVuL2ZuNE9lc3QxRUlQSWo0dHRDY0FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NTEyMDEwCWZpbGU6Tm9taUZ1bl8wLjYuMV94NjQtc2V0dXAuZXhlClFYRXRnUEZndUJrS0lkOC9lYnE2NHBXT3d0emxrRDdLc1pRSjBtbkFaYStLQnZKaXdiT3pSTUs3a1ZKVUlrZGNnOWJoRUt3NEtYcEhZWVFwRm8vQ0RnPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.1/NomiFun_0.6.1_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHhELzBHQzRnWjUwWmlXY2hUVVFBZXRTYUYvbkxJYzhEbzY3VGY1ajlYdG90TUZYdG0vVUVObW1ZR0tGU2dDZjd0SGhDU3hRSi9hUWdpVXNwZDV2V1FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NTEyOTE1CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CklwU2ZhbmdadXpBM1JTMEpybEJGVzBIZTR2TWdwNldNdGx3V2VyQWdpbFlXb2dPRFU5cVhFak1QYkpBMHU5Z3loSHlKL1pEVjNZOEZ5NUE3TU9JR0NRPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.1/NomiFun.app.tar.gz"
     }
   }
 }
