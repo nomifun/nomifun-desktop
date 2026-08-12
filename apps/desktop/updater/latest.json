@@ -1,15 +1,11 @@
 {
-  "version": "0.6.0",
-  "notes": "# NomiFun v0.6.0\n\nWindows first release for v0.6.0.\n\n## Highlights\n\n- Adds mini-apps: create a normal Nomi conversation that produces a self-contained `miniapp.html`, preview it live, then publish it as a reusable app or replace an existing one explicitly.\n- Adds the mini-app library and runner at `/mini-apps`, with published snapshots separated from editable working copies under the app workspace.\n- Adds mini-app import and validation for user-authored H5 pages, including concrete validation reports and session-based repair flow.\n- Routes provider capabilities through verified modality/protocol mappings, including new or repaired provider adapters and rerank result handling.\n- Refines desktop update presentation, WebUI remote access on launch, markdown preview typography, and related UI polish.",
-  "pub_date": "2026-08-11T07:49:25.690Z",
+  "version": "0.6.1",
+  "notes": "# NomiFun v0.6.1\n\nWindows first release for v0.6.1.\n\n## Highlights\n\n- Adds verified native image generation, including durable image artifact delivery and conversation-side rendering for generated image outputs.\n- Reworks model and provider management around protocol manifests, explicit provider connections, model capabilities, and task-specific model selection.\n- Expands multimodal provider support across image generation/editing, realtime, rerank, speech, video, and embeddings, with new Gemini and StepFun protocol coverage.\n- Improves Model Hub and settings workflows for editing model definitions, credentials, health checks, capability disclosure, and serialized writes.\n- Unifies browser lifecycle and browser-use settings management, with related presentation and localization refinements.\n- Fixes startup issues and improves model type/catalog selection interactions.",
+  "pub_date": "2026-08-12T05:20:11.529Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODYveDFUaVNEcGE2V2dSRjFxbXVpck1zb2FKV3VjZittZEZSMGlqZjlBMzhLcFlHSldDMzQyMUlVZDg3WG9KZks1dTE0OWV1Y0dqeDYwNFk0dE1NamdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NDMwMjA0CWZpbGU6Tm9taUZ1bl8wLjYuMF94NjQtc2V0dXAuZXhlCmJGQ1lBUzV0RE9nL1VaS1FJbTVKN1AxWVlRRm0ybnZZQ2FtQkRqSWEvY1J4MHV1dyttTm5vS0pCa21HWjEzUGFzN2pWMDVLb2tpdkJiUStLQ2t6d0R3PT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.0/NomiFun_0.6.0_x64-setup.exe"
-    },
-    "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOCtxUGFIZkR2OEhxK1JoS2krUEdNUm5pR3J0WVhSMlkrTFFYVGZUNVJwdFZIYUVZV1lLOXlOWEV5NnJNRFFnMk1rVk9YakllcVJkempmekFCL0NtY3dJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NDM0Mzk5CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CklGZTg0NGVxMGR1bDNwbkNZRjhjR3h1T2dhaXBvbWhJZjZ3SXFHVnVRTTVoY2owV2s3VnMyRG9aM3RLc1NaRmhhSW5rV3Jva1VZdmxVb3pMZU9yeEJ3PT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.0/NomiFun.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHkzeXJFeFJwenZGbVVmZWovR1JuWHJ4QmFuQ3hXUjdLRDhBK29XZlJqMnRacU5NL3ZCLytZbmxkQzg5OGY4WmVuL2ZuNE9lc3QxRUlQSWo0dHRDY0FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NTEyMDEwCWZpbGU6Tm9taUZ1bl8wLjYuMV94NjQtc2V0dXAuZXhlClFYRXRnUEZndUJrS0lkOC9lYnE2NHBXT3d0emxrRDdLc1pRSjBtbkFaYStLQnZKaXdiT3pSTUs3a1ZKVUlrZGNnOWJoRUt3NEtYcEhZWVFwRm8vQ0RnPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.1/NomiFun_0.6.1_x64-setup.exe"
     }
   }
 }
