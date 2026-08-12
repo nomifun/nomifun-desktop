@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -5,14 +7,10 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use nomifun_common::ProviderId;
 use nomifun_db::{
-    SqliteClientPreferenceRepository, SqliteProviderModelRepository,
-    SqliteProviderRepository, SqliteSettingsRepository, init_database_memory,
+    SqliteProviderRepository, init_database_memory,
 };
 use nomifun_system::{
-    ClientPrefService, ManagedModelServer, ModelFetchService,
-    ModelProfileService, ProtocolDetectionService, ProviderService, SettingsService,
-    SystemRouterState, VersionCheckService, start_and_provision_free_model,
-    system_routes,
+    ManagedModelServer, VersionCheckService, start_and_provision_free_model, system_routes,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -28,47 +26,24 @@ async fn setup() -> (
     let (managed, server) = start_and_provision_free_model(
         provider_repo.clone(),
         Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+        Arc::new(nomifun_db::SqliteProviderModelCapabilityRepository::new(
+            db.pool().clone(),
+        )),
         TEST_KEY,
     )
     .await
     .unwrap();
     let http = reqwest::Client::new();
-    let state = SystemRouterState {
-        settings_service: SettingsService::new(Arc::new(
-            SqliteSettingsRepository::new(db.pool().clone()),
-        )),
-        client_pref_service: ClientPrefService::new(Arc::new(
-            SqliteClientPreferenceRepository::new(db.pool().clone()),
-        )),
-        provider_service: ProviderService::new(
-            provider_repo.clone(),
-            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
-            TEST_KEY,
-        ),
-        provider_connection_service: nomifun_system::ProviderConnectionService::new(
-            std::sync::Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(db.pool().clone())),
-            provider_repo.clone(),
-            TEST_KEY,
-        ),
-        model_fetch_service: ModelFetchService::new(
-            provider_repo.clone(),
-            TEST_KEY,
-            http.clone(),
-        ),
-        model_profile_service: ModelProfileService::new(Arc::new(
-            SqliteProviderModelRepository::new(db.pool().clone()),
-        )),
-        provider_model_service: nomifun_system::ProviderModelService::new(
-            Arc::new(SqliteProviderModelRepository::new(db.pool().clone())),
-            provider_repo.clone(),
-        ),
-        managed_model_service: Some(managed),
-        protocol_detection_service: ProtocolDetectionService::new(http.clone()),
-        version_check_service: VersionCheckService::new(http, "0.1.0".into()),
-        data_dir: std::env::temp_dir(),
-        work_dir: std::env::temp_dir(),
-        work_dir_is_cli_override: false,
-    };
+    let state = common::build_system_state(
+        &db,
+        TEST_KEY,
+        http.clone(),
+        VersionCheckService::new(http, "0.1.0".into()),
+        Some(managed),
+        std::env::temp_dir(),
+        std::env::temp_dir(),
+        false,
+    );
     (system_routes(state), db, server)
 }
 

@@ -17,7 +17,8 @@ const model: TProviderWithModel = {
   name: 'Provider 1',
   platform: 'openai',
   base_url: 'https://example.invalid',
-  api_key: '',
+  auth_scheme: 'bearer',
+  has_credentials: false,
   use_model: 'model-1',
 };
 

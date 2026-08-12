@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 reqwest.workspace = true
 tracing.workspace = true
+tokio.workspace = true
+url.workspace = true
 
 # Native registry access for Windows system-proxy detection, replacing a `reg`
 # subprocess: no console-window flash, no blocking spawn, correct UTF-16 decode.

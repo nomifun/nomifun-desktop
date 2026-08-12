@@ -20,17 +20,22 @@
 
 import React, { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { type NodeProps, useNodesData, useStore } from '@xyflow/react';
+import { type NodeProps, useEdges, useNodes, useNodesData, useStore } from '@xyflow/react';
 import { AlignTextLeft, Cycle, DeleteFour, ListNumbers, Pause, Play, SortAmountDown } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { parseCanvasId, parseWorkshopNodeId, tryParseEntityId } from '@/common/types/ids';
 import type { ProviderId } from '@/common/types/ids';
 import { useCanvasNode } from '../CanvasNodeContext';
-import type { LoopFlowNode, WorkshopFlowNode } from '../model';
+import type { LoopFlowNode, WorkshopFlowEdge, WorkshopFlowNode } from '../model';
 import { KIND_META } from '../model';
-import type { WorkshopGeneratorMode, WorkshopLoopMode } from '../../types';
+import type {
+  WorkshopGeneratorMode,
+  WorkshopGeneratorNodeData,
+  WorkshopLoopMode,
+} from '../../types';
 import { useGeneratorModels } from '../../generation/useGeneratorModels';
 import type { ModelOption } from '../../generation/genTypes';
+import { imageGeneratorTaskForInputs } from '../../generation/pipeline';
 import {
   LOOP_BATCH_MAX,
   LOOP_BATCH_MIN,
@@ -132,7 +137,24 @@ function LoopNodeImpl({ id, data, selected }: NodeProps<LoopFlowNode>) {
   const targetMode: WorkshopGeneratorMode =
     (targetData?.data as { mode?: WorkshopGeneratorMode } | undefined)?.mode ?? 'image';
 
-  const models = useGeneratorModels(targetMode);
+  const liveNodes = useNodes<WorkshopFlowNode>();
+  const liveEdges = useEdges<WorkshopFlowEdge>();
+  const imageTask = useMemo(() => {
+    if (!targetId) return 'image_generation' as const;
+    const generatorData = targetData?.data as
+      | { mentions?: string[]; maskAssetId?: WorkshopGeneratorNodeData['maskAssetId'] }
+      | undefined;
+    return imageGeneratorTaskForInputs({
+      nodeId: targetId,
+      nodes: liveNodes,
+      edges: liveEdges,
+      mentions: generatorData?.mentions ?? [],
+      maskAssetId: generatorData?.maskAssetId,
+      imageWindow: { offset: config.start - 1, size: config.batch },
+    });
+  }, [config.batch, config.start, liveEdges, liveNodes, targetData, targetId]);
+
+  const models = useGeneratorModels(targetMode, imageTask);
   const effectiveModel = useMemo<ModelOption | null>(() => {
     const td = targetData?.data as { providerId?: ProviderId; model?: string } | undefined;
     const explicit = models.flat.find((m) => m.providerId === td?.providerId && m.model === td?.model);

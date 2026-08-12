@@ -19,7 +19,8 @@ use nomifun_common::{
     AgentStepMode, AgentToolPolicy, AppError, ExecutionStepKind, ProviderId, ProviderWithModel,
     StepFailurePolicy,
 };
-use nomifun_db::{IProviderModelRepository, IProviderRepository, ProviderModelRow};
+use nomifun_db::{IProviderModelRepository, ProviderModelRow};
+use nomifun_model_invoke::ModelInvokeService;
 
 use crate::event_publisher::{AgentExecutionEventPublisher, LeadThinkingKind, LeadThinkingPhase};
 
@@ -192,23 +193,20 @@ pub(crate) trait PlanProducer: Send + Sync {
 }
 
 pub(crate) struct LlmPlanProducer {
-    provider_repo: Arc<dyn IProviderRepository>,
     provider_model_repo: Arc<dyn IProviderModelRepository>,
-    encryption_key: [u8; 32],
+    model_invoke: Arc<ModelInvokeService>,
     workspace: PathBuf,
 }
 
 impl LlmPlanProducer {
     pub fn new(
-        provider_repo: Arc<dyn IProviderRepository>,
         provider_model_repo: Arc<dyn IProviderModelRepository>,
-        encryption_key: [u8; 32],
+        model_invoke: Arc<ModelInvokeService>,
         workspace: impl Into<PathBuf>,
     ) -> Self {
         Self {
-            provider_repo,
             provider_model_repo,
-            encryption_key,
+            model_invoke,
             workspace: workspace.into(),
         }
     }
@@ -228,9 +226,7 @@ impl LlmPlanProducer {
         })?;
         let model = lead.use_model.as_deref().unwrap_or(&lead.model);
         let config = resolve_provider_config(
-            &self.provider_repo,
-            &self.provider_model_repo,
-            &self.encryption_key,
+            self.model_invoke.as_ref(),
             &lead.provider_id,
             model,
             self.workspace.as_path(),
@@ -322,7 +318,7 @@ fn pick_lead(participants: &[ExecutionParticipant]) -> Option<ProviderWithModel>
 
 const PLAN_SYSTEM: &str = r#"You are the lead Agent planning one AgentExecution.
 Return ONLY strict JSON with this shape:
-{"steps":[{"title":"...","spec":"...","profile":null,"kind":"agent","agent_mode":"normal","depends_on":[],"participant_index":0,"assignment_rationale":"...","role":"...","tool_policy":"full","fanout_group":null,"control_policy":null,"failure_policy":"fail_execution"}]}
+{"steps":[{"title":"...","spec":"...","profile":{"kind":"research","needs_vision":false,"needs_web_search":false,"needs_long_context":false,"needs_high_reasoning":false,"bulk":false},"kind":"agent","agent_mode":"normal","depends_on":[],"participant_index":0,"assignment_rationale":"...","role":"...","tool_policy":"full","fanout_group":null,"control_policy":null,"failure_policy":"fail_execution"}]}
 
 Rules:
 - depends_on contains only zero-based indices of earlier steps; keep the DAG acyclic and minimal.
@@ -334,6 +330,7 @@ Rules:
 - Controller steps have agent_mode=null and participant_index=null. Agent steps have control_policy=null and a participant_index when a particular participant is preferred.
 - Use failure_policy=skip_dependents only for a gate whose failure must prevent unsafe downstream work; otherwise fail_execution.
 - Assign cheap/fast participants to simple or bulk work and stronger participants to difficult reasoning. Do not route everything to the strongest model.
+- profile may be null when there is no capability-routing requirement. Set needs_web_search=true only when the work specifically requires provider-native model web search; generic research performed through ordinary tools does not require it.
 - role is an optional short human-readable description of the work, in the goal's language. It is never a permission value.
 - tool_policy is exactly full, read_only, or read_shell. Use read_only for research/review that only needs Read/Grep/Glob, read_shell for verification/testing that also needs Bash, and full for implementation or any task that must modify files. Controller steps use full. A policy only narrows the caller's inherited authority.
 - title is short; spec is the complete instruction.
@@ -394,6 +391,25 @@ fn build_plan_user_prompt(
             .map(|capability| capability.strengths.join("/"))
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "-".to_owned());
+        let modalities = participant
+            .capability
+            .as_ref()
+            .map(|capability| capability.modalities.join("/"))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "-".to_owned());
+        let tools = participant
+            .capability
+            .as_ref()
+            .is_some_and(|capability| capability.tools);
+        let web_search = participant
+            .capability
+            .as_ref()
+            .is_some_and(|capability| capability.web_search);
+        let reasoning = participant
+            .capability
+            .as_ref()
+            .map(|capability| capability.reasoning.as_str())
+            .unwrap_or("-");
         let description = participant
             .description
             .as_deref()
@@ -408,11 +424,15 @@ fn build_plan_user_prompt(
             })
             .unwrap_or("-");
         prompt.push_str(&format!(
-            "{index}. agent={} role={} model={} strengths={} description={}\n",
+            "{index}. agent={} role={} model={} strengths={} modalities={} tools={} web_search={} reasoning={} description={}\n",
             participant.source_agent_id,
             participant.role.as_deref().unwrap_or("-"),
             participant.model.as_deref().unwrap_or("-"),
             strengths,
+            modalities,
+            tools,
+            web_search,
+            reasoning,
             description,
         ));
     }

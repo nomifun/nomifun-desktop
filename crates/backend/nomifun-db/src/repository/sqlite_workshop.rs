@@ -672,8 +672,8 @@ mod tests {
         let provider_id = nomifun_common::generate_id();
         sqlx::query(
             "INSERT INTO providers \
-             (provider_id, platform, name, base_url, api_key_encrypted, created_at, updated_at) \
-             VALUES (?, 'test', 'origin provider', 'https://example.invalid', '', 1, 1)",
+             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
+             VALUES (?, 'test', 'origin provider', 'https://example.invalid', 'bearer', '', 1, 1)",
         )
         .bind(&provider_id)
         .execute(db.pool())

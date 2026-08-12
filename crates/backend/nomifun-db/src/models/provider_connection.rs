@@ -1,10 +1,10 @@
 use nomifun_common::TimestampMs;
 use serde::{Deserialize, Serialize};
 
-/// Row mapping for the `provider_connections` table — non-default per-role
+/// Row mapping for the `provider_connections` table: non-default per-role
 /// connection profiles for a provider (e.g. a separate voice domain +
-/// credential set). The providers row itself remains the 'default' connection
-/// in P0. `extra` is a JSON object.
+/// credential set). The providers row itself is the explicit `default`
+/// connection. `extra` is a JSON object.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ProviderConnectionRow {
     pub id: i64,
@@ -15,7 +15,6 @@ pub struct ProviderConnectionRow {
     pub base_url: String,
     pub auth_scheme: String,
     pub credentials_encrypted: String,
-    pub is_full_url: bool,
     pub extra: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
@@ -30,6 +29,5 @@ pub struct UpsertProviderConnectionParams<'a> {
     pub base_url: &'a str,
     pub auth_scheme: &'a str,
     pub credentials_encrypted: &'a str,
-    pub is_full_url: bool,
     pub extra: &'a str,
 }

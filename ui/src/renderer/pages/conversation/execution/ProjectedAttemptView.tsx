@@ -36,6 +36,7 @@ function participantSupportsProfile(participant: TExecutionParticipant, profile:
   if (allowedKinds && !allowedKinds.includes(profile.kind)) return false;
   if (profile.needs_vision && !participant.capability?.modalities.includes('vision')) return false;
   if (profile.kind === 'tool' && participant.capability?.tools !== true) return false;
+  if (profile.needs_web_search && participant.capability?.web_search !== true) return false;
   return true;
 }
 

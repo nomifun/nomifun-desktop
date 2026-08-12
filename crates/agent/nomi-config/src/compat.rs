@@ -48,8 +48,9 @@ pub struct ProviderCompat {
 
     /// Custom API path appended to base_url for chat completions.
     /// Default: "/v1/chat/completions" for OpenAI provider.
-    /// Override to "/chat/completions" for providers like Gemini that include
-    /// version prefix in the base URL itself.
+    /// An explicitly empty value marks `base_url` as a fully resolved endpoint
+    /// for native providers whose capability resolver already expanded model
+    /// and modality placeholders.
     pub api_path: Option<String>,
 
     /// Whether this provider supports extended thinking (Anthropic-style).
@@ -72,12 +73,19 @@ pub struct ProviderCompat {
     /// Require a non-empty `reasoning_content` field on assistant history
     /// messages. Used only by gateways that explicitly enforce this extension.
     pub require_reasoning_content: Option<bool>,
+
+    /// Open-ended provider-native request body fields. Provider serializers
+    /// merge these first and then overlay typed model/messages/tools/token
+    /// fields, so saved capability parameters take effect without being able
+    /// to replace protocol invariants.
+    pub extra_body: Option<Map<String, Value>>,
 }
 
 impl ProviderCompat {
     /// Defaults for Anthropic-family providers (Anthropic, Vertex)
     pub fn anthropic_defaults() -> Self {
         Self {
+            api_path: Some("/v1/messages".into()),
             ensure_alternation: Some(true),
             merge_same_role: Some(true),
             auto_tool_id: Some(true),
@@ -115,6 +123,24 @@ impl ProviderCompat {
         }
     }
 
+    /// Defaults for Google's native Gemini GenerateContent API.
+    ///
+    /// Gemini accepts an OpenAPI subset for function declarations, requires
+    /// stable call IDs for function responses, and supports inline image
+    /// parts. The native provider constructs its endpoint directly instead of
+    /// using the OpenAI/Anthropic `api_path` compatibility switch.
+    pub fn gemini_defaults() -> Self {
+        Self {
+            merge_same_role: Some(true),
+            sanitize_schema: Some(true),
+            auto_tool_id: Some(true),
+            supports_thinking: Some(false),
+            supports_effort: Some(false),
+            supports_image: Some(true),
+            ..Default::default()
+        }
+    }
+
     /// Merge user config over defaults (user wins on non-None fields)
     pub fn merge(defaults: Self, user: Self) -> Self {
         Self {
@@ -139,6 +165,7 @@ impl ProviderCompat {
             require_reasoning_content: user
                 .require_reasoning_content
                 .or(defaults.require_reasoning_content),
+            extra_body: user.extra_body.or(defaults.extra_body),
         }
     }
 
@@ -196,6 +223,10 @@ impl ProviderCompat {
 
     pub fn require_reasoning_content(&self) -> bool {
         self.require_reasoning_content.unwrap_or(false)
+    }
+
+    pub fn extra_body(&self) -> Map<String, Value> {
+        self.extra_body.clone().unwrap_or_default()
     }
 }
 
@@ -591,6 +622,7 @@ mod tests {
         assert!(!compat.sanitize_schema());
         assert!(!compat.merge_assistant_messages());
         assert!(!compat.clean_orphan_tool_calls());
+        assert_eq!(compat.api_path(), "/v1/messages");
     }
 
     #[test]
@@ -610,6 +642,17 @@ mod tests {
         assert!(compat.dedup_tool_results());
         assert_eq!(compat.max_tokens_field.as_deref(), Some("max_tokens"));
         assert!(!compat.ensure_alternation());
+    }
+
+    #[test]
+    fn test_gemini_defaults() {
+        let compat = ProviderCompat::gemini_defaults();
+        assert!(compat.merge_same_role());
+        assert!(compat.sanitize_schema());
+        assert!(compat.auto_tool_id());
+        assert!(compat.supports_image());
+        assert!(!compat.supports_thinking());
+        assert!(!compat.supports_effort());
     }
 
     #[test]

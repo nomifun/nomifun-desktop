@@ -407,6 +407,19 @@ impl OpenAIProvider {
             body["reasoning_effort"] = json!(effort);
         }
 
+        let mut body = crate::request_body_with_extra(&self.compat, body);
+        let object = body
+            .as_object_mut()
+            .expect("typed OpenAI request body is an object");
+        if request.tools.is_empty() {
+            object.remove("tools");
+        }
+        if request.reasoning_effort.is_none() {
+            object.remove("reasoning_effort");
+        }
+        if !include_stream_usage {
+            object.remove("stream_options");
+        }
         body
     }
 
@@ -825,13 +838,22 @@ impl LlmProvider for OpenAIProvider {
         let auto_tool_id = self.compat.auto_tool_id();
         let client = client.clone();
         let url_clone = url.clone();
+        let redactor = nomifun_net::secret_redaction::SecretRedactor::new(&self.api_keys);
 
         tokio::spawn(async move {
             let outcome = process_sse_stream(response, &tx, auto_tool_id).await;
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,
-                || crate::retry::send_and_check(&client, &url_clone, &headers, &body),
+                || {
+                    crate::retry::send_and_check(
+                        &client,
+                        &url_clone,
+                        &headers,
+                        &body,
+                        &redactor,
+                    )
+                },
                 |resp| process_sse_stream(resp, &tx, auto_tool_id),
             )
             .await;
@@ -860,7 +882,7 @@ async fn process_sse_stream(
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
-                let err = ProviderError::Connection(e.to_string());
+                let err = ProviderError::from(e);
                 return if emitted_content {
                     StreamOutcome::FailedPartial(err)
                 } else {
@@ -889,7 +911,9 @@ async fn process_sse_stream(
             }
 
             if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
-                tracing::debug!(target: "nomi_providers", chunk = %data, "sse chunk received");
+                // Raw upstream events are untrusted diagnostics and may echo
+                // credentials. They also contain private conversation text.
+                tracing::debug!(target: "nomi_providers", "sse event received");
                 if data == "[DONE]" {
                     // A few compatible gateways use [DONE] as their only
                     // terminal marker. Infer stop/tool_calls from the already

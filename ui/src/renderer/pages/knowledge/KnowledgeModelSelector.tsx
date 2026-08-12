@@ -82,7 +82,7 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  // Chat-capable catalog (backend resolve; heuristics gone).
+  // Exact enabled Chat capabilities; model-name heuristics never grant eligibility.
   const { groups, isLoading } = useModelsForTask('chat');
   const providerLabel = useModelSelectorProviderLabel();
 
@@ -121,7 +121,7 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
             return (
               <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
                 {models.map((modelName) => {
-                  const healthStatus = modelHealthOf(provider, modelName)?.status || 'unknown';
+                  const healthStatus = modelHealthOf(provider, modelName, 'chat')?.status || 'unknown';
                   const healthColor =
                     healthStatus === 'healthy'
                       ? 'bg-green-500'

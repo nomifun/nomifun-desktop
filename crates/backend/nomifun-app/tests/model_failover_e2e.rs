@@ -15,27 +15,20 @@ use common::{body_json, build_app, get_with_token, json_with_token, setup_and_lo
 /// transaction (dangling references are a 409 Conflict). Queue fixtures must
 /// therefore reference real rows.
 async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
+    let credentials_encrypted = common::encrypted_bearer_credentials();
     nomifun_db::sqlx::query(
         "INSERT INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+         (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
           created_at, updated_at) \
-         VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', 1, 1, 1)",
+         VALUES (?, 'openai', ?, 'https://example.invalid', 'bearer', ?, 1, 1, 1)",
     )
     .bind(provider_id)
     .bind(format!("Provider {provider_id}"))
+    .bind(&credentials_encrypted)
     .execute(services.database.pool())
     .await
     .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO provider_models \
-         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
-         VALUES (?, ?, 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
-    )
-    .bind(provider_id)
-    .bind(model)
-    .execute(services.database.pool())
-    .await
-    .unwrap();
+    common::seed_openai_chat_model(services.database.pool(), provider_id, model).await;
 }
 
 #[tokio::test]
@@ -68,8 +61,7 @@ async fn model_failover_put_then_get_roundtrips_with_auth() {
             {"provider_id": "0190f5fe-7c00-7a00-8000-000000000010", "model": "m1"},
             {"provider_id": "0190f5fe-7c00-7a00-8000-000000000011", "model": "m2"}
         ],
-        "max_switches": 3,
-        "stamp_unhealthy": false
+        "max_switches": 3
     });
 
     let req = json_with_token("PUT", "/api/agent/model-failover", cfg.clone(), &token, &csrf);
@@ -88,7 +80,7 @@ async fn model_failover_put_then_get_roundtrips_with_auth() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["data"]["enabled"], true);
-    assert_eq!(json["data"]["stamp_unhealthy"], false);
+    assert_eq!(json["data"].as_object().unwrap().len(), 3);
     assert_eq!(json["data"]["queue"][0]["model"], "m1");
     assert_eq!(json["data"]["queue"][1]["model"], "m2");
 }

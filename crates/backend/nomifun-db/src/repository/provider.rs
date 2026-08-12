@@ -1,84 +1,66 @@
 use crate::error::DbError;
-use crate::models::Provider;
+use crate::models::{NewProviderModel, Provider, ProviderModelRow, UpsertProviderConnectionParams};
 
-/// Model provider data access abstraction.
-///
-/// Provides CRUD operations on the `providers` table.
-/// API keys are stored encrypted; callers handle encryption/decryption.
 #[async_trait::async_trait]
 pub trait IProviderRepository: Send + Sync {
-    /// Returns all providers, ordered by creation time ascending.
     async fn list(&self) -> Result<Vec<Provider>, DbError>;
-
-    /// Finds a provider by ID, or `None` if not found.
     async fn find_by_id(&self, id: &str) -> Result<Option<Provider>, DbError>;
 
-    /// Creates a new provider and returns the inserted row.
-    async fn create(&self, params: CreateProviderParams<'_>) -> Result<Provider, DbError>;
+    /// Create a provider and its first fully configured model in one
+    /// transaction. A provider cannot exist in a half-configured state.
+    async fn create(
+        &self,
+        params: CreateProviderParams<'_>,
+        initial_model: &NewProviderModel<'_>,
+        connections: &[UpsertProviderConnectionParams<'_>],
+    ) -> Result<(Provider, ProviderModelRow), DbError>;
 
-    /// Updates an existing provider. Returns `DbError::NotFound` if the ID doesn't exist.
-    async fn update(&self, id: &str, params: UpdateProviderParams<'_>) -> Result<Provider, DbError>;
+    async fn update(
+        &self,
+        id: &str,
+        expected_config_revision: i64,
+        params: UpdateProviderParams<'_>,
+    ) -> Result<Provider, DbError>;
 
-    /// Deletes a provider by ID. Returns `DbError::NotFound` if the ID doesn't exist.
+    /// Clone provider metadata, models, capabilities, and named connections in
+    /// one transaction. Capability health observations are not copied.
+    async fn clone_graph(
+        &self,
+        source_provider_id: &str,
+        clone_name: &str,
+    ) -> Result<Provider, DbError>;
+
+    /// Atomically upsert one managed provider and make its model graph exactly
+    /// match `models`. Matching capability health observations are preserved.
+    async fn save_managed_graph(
+        &self,
+        params: CreateProviderParams<'_>,
+        models: &[NewProviderModel<'_>],
+    ) -> Result<Provider, DbError>;
+
     async fn delete(&self, id: &str) -> Result<(), DbError>;
 }
 
-/// Parameters for creating a new provider.
-///
-/// `models` and the four per-model map params (`model_context_limits`,
-/// `model_protocols`, `model_descriptions`, `model_enabled`) are wire-compat
-/// INPUTS only: migration 016 dropped the matching providers columns, so
-/// these params feed exclusively the `provider_models` row sync
-/// (`sync_provider_models_tx`) — one row per `models` entry, mirrored columns
-/// seeded from the maps. They are never persisted on the providers row.
-///
-/// There is deliberately no `model_health` param: since P3 the server-side
-/// health probe (`IProviderModelRepository::set_health`) is the only health
-/// writer, and no `capabilities` param: migration 017 dropped the column.
 #[derive(Debug)]
 pub struct CreateProviderParams<'a> {
-    /// Optional caller-supplied stable business ID.
     pub provider_id: Option<&'a str>,
     pub platform: &'a str,
     pub name: &'a str,
     pub base_url: &'a str,
-    pub api_key_encrypted: &'a str,
-    pub models: &'a str,
+    pub auth_scheme: &'a str,
+    pub credentials_encrypted: &'a str,
     pub enabled: bool,
-    pub model_context_limits: Option<&'a str>,
-    pub model_protocols: Option<&'a str>,
-    pub model_descriptions: Option<&'a str>,
-    pub model_enabled: Option<&'a str>,
     pub bedrock_config: Option<&'a str>,
-    pub is_full_url: bool,
-    /// Optional explicit provider priority. Omitted means append after current max.
     pub sort_order: Option<i64>,
 }
 
-/// Parameters for updating an existing provider.
-///
-/// All fields are optional; `None` means "keep the current value".
-///
-/// Like [`CreateProviderParams`], `models` and the four per-model map params
-/// are wire-compat INPUTS that only drive the `provider_models` row sync:
-/// `models: Some` replaces membership (insert new rows, delete removed,
-/// re-index survivors); a map param `Some(...)` is a whole-map replacement of
-/// that mirrored column across ALL rows (`Some(None)` = empty map → column
-/// defaults); a map param `None` leaves existing rows untouched. Health is
-/// intentionally not updatable here — `set_health` is the only write path.
 #[derive(Debug, Default)]
 pub struct UpdateProviderParams<'a> {
-    pub platform: Option<&'a str>,
     pub name: Option<&'a str>,
     pub base_url: Option<&'a str>,
-    pub api_key_encrypted: Option<&'a str>,
-    pub models: Option<&'a str>,
+    pub auth_scheme: Option<&'a str>,
+    pub credentials_encrypted: Option<&'a str>,
     pub enabled: Option<bool>,
-    pub model_context_limits: Option<Option<&'a str>>,
-    pub model_protocols: Option<Option<&'a str>>,
-    pub model_descriptions: Option<Option<&'a str>>,
-    pub model_enabled: Option<Option<&'a str>>,
     pub bedrock_config: Option<Option<&'a str>>,
-    pub is_full_url: Option<bool>,
     pub sort_order: Option<i64>,
 }

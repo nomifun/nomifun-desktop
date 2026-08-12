@@ -12,12 +12,13 @@ import NomiSelect from '@/renderer/components/base/NomiSelect';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
+import { capabilityOf } from '@/common/utils/providerModels';
 import {
   taskModelSelectState,
   type TaskModelProviderScope,
   type TaskModelSelection,
 } from './taskModelSelectState';
-import { ttsVoiceOptionsFor } from './ttsVoiceOptions';
+import { ttsUsesModelIdAsVoice, ttsVoiceOptionsFor } from './ttsVoiceOptions';
 
 export type { TaskModelSelection, TaskModelProviderScope } from './taskModelSelectState';
 
@@ -39,15 +40,17 @@ interface TaskModelSelectProps {
   hideHint?: boolean;
   /** Copy shown when the catalog has no model for this task at all. */
   emptyHint?: string;
+  /** Optional copy for the model field; provider keeps its task-aware default. */
+  placeholder?: string;
 }
 
 /**
  * The shared "pick a model for this task" control: provider + model, plus a
  * voice id for speech synthesis.
  *
- * Membership comes from `useModelsForTask` (→ `POST /api/model-profiles/resolve`),
- * the single authority on which models can do which task — no name heuristics
- * here. Every judgement about the SAVED reference lives in
+ * Membership comes from `useModelsForTask`, which reads the capability nested
+ * under each provider model — no name heuristics or second profile request.
+ * Every judgement about the SAVED reference lives in
  * `taskModelSelectState`, so a stale provider and a stale model are rendered as
  * explicit disabled "(unavailable)" options rather than silently blanked: the
  * saved value stays visible and the user is told to re-pick.
@@ -64,6 +67,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
   disabled = false,
   hideHint = false,
   emptyHint,
+  placeholder,
 }) => {
   const { t } = useTranslation();
   const { groups, isLoading } = useModelsForTask(task, traits);
@@ -91,8 +95,12 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
 
   const providerId = draftProviderId;
   const selectedModel = value?.provider_id === providerId ? value.model : null;
-  const currentPlatform = state.providers.find((p) => p.id === providerId)?.platform;
-  const voices = voiceOptions ?? ttsVoiceOptionsFor(currentPlatform);
+  const selectedProvider = state.providers.find((provider) => provider.id === providerId);
+  const speechSynthesisProtocol = selectedModel
+    ? capabilityOf(selectedProvider, selectedModel, 'speech_synthesis')?.protocol
+    : undefined;
+  const modelIdIsVoice = ttsUsesModelIdAsVoice(speechSynthesisProtocol);
+  const voices = voiceOptions ?? ttsVoiceOptionsFor(speechSynthesisProtocol, selectedModel ?? undefined);
   const selectedVoice = value?.provider_id === providerId ? (value.voice ?? null) : null;
 
   const hint =
@@ -132,16 +140,25 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
           contentFit
           contentMaxWidth={280}
           disabled={disabled || providerId == null || state.providerStale}
-          placeholder={t('settings.taskModel.modelPlaceholder')}
+          placeholder={placeholder ?? t('settings.taskModel.modelPlaceholder')}
           value={selectedModel ?? undefined}
           onChange={(model: string) => {
             if (!providerId) return;
+            const nextSpeechSynthesisProtocol = capabilityOf(
+              selectedProvider,
+              model,
+              'speech_synthesis'
+            )?.protocol;
             onChange({
               provider_id: providerId,
               model,
               // Re-picking the model must keep a voice already chosen for this
               // provider; only a provider switch resets it.
-              voice: value?.provider_id === providerId ? value.voice : null,
+              voice:
+                !ttsUsesModelIdAsVoice(nextSpeechSynthesisProtocol) &&
+                value?.provider_id === providerId
+                  ? value.voice
+                  : null,
             });
           }}
         >
@@ -156,7 +173,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
             </NomiSelect.Option>
           ))}
         </NomiSelect>
-        {withVoice && (
+        {withVoice && !modelIdIsVoice && (
           <NomiSelect
             size={size}
             contentFit

@@ -493,7 +493,9 @@ where
             if day.len() == 8 && day.bytes().all(|byte| byte.is_ascii_digit()) {
                 Ok(day)
             } else {
-                Err(serde::de::Error::custom("day must be a YYYYMMDD calendar day"))
+                Err(serde::de::Error::custom(
+                    "day must be a YYYYMMDD calendar day",
+                ))
             }
         })
         .transpose()
@@ -897,9 +899,7 @@ mod tests {
                 serde_json::from_value::<ListMessagesQuery>(json!({ "cursor": cursor })).is_err()
             );
         }
-        assert!(
-            serde_json::from_value::<ListMessagesQuery>(json!({ "cursor": "" })).is_ok()
-        );
+        assert!(serde_json::from_value::<ListMessagesQuery>(json!({ "cursor": "" })).is_ok());
     }
 
     // ── SearchMessagesQuery ─────────────────────────────────────────
@@ -974,7 +974,10 @@ mod tests {
         assert!(json.get("createdAt").is_none());
         assert!(json.get("pinnedAt").is_none());
         // Null-valued Option fields must be omitted from JSON.
-        assert!(json.get("pinned_at").is_none(), "pinned_at None should be omitted");
+        assert!(
+            json.get("pinned_at").is_none(),
+            "pinned_at None should be omitted"
+        );
         assert!(
             json.get("channel_chat_id").is_none(),
             "channel_chat_id None should be omitted"
@@ -1010,8 +1013,14 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json.get("model").is_none(), "model None should be omitted");
-        assert!(json.get("source").is_none(), "source None should be omitted");
-        assert!(json.get("pinned_at").is_none(), "pinned_at None should be omitted");
+        assert!(
+            json.get("source").is_none(),
+            "source None should be omitted"
+        );
+        assert!(
+            json.get("pinned_at").is_none(),
+            "pinned_at None should be omitted"
+        );
         assert!(
             json.get("channel_chat_id").is_none(),
             "channel_chat_id None should be omitted"
@@ -1123,7 +1132,10 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["message_id"], MESSAGE_ID_1);
         assert!(json.get("id").is_none());
-        assert_eq!(json["conversation_id"], "0190f5fe-7c00-7a00-8abc-012345678901");
+        assert_eq!(
+            json["conversation_id"],
+            "0190f5fe-7c00-7a00-8abc-012345678901"
+        );
         assert_eq!(json["msg_id"], MESSAGE_ID_2);
         assert_eq!(json["type"], "text");
         assert_eq!(json["position"], "right");

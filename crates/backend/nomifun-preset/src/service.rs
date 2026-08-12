@@ -24,6 +24,7 @@ pub struct PresetService {
     agent_repo: Arc<dyn IAgentMetadataRepository>,
     provider_repo: Arc<dyn IProviderRepository>,
     provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
+    provider_model_capability_repo: Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
     builtin: Arc<BuiltinPresetRegistry>,
     extension_registry: ExtensionRegistry,
     user_data_dir: PathBuf,
@@ -65,6 +66,7 @@ impl PresetService {
         agent_repo: Arc<dyn IAgentMetadataRepository>,
         provider_repo: Arc<dyn IProviderRepository>,
         provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
+        provider_model_capability_repo: Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
         builtin: Arc<BuiltinPresetRegistry>,
         extension_registry: ExtensionRegistry,
         user_data_dir: PathBuf,
@@ -76,6 +78,7 @@ impl PresetService {
             agent_repo,
             provider_repo,
             provider_model_repo,
+            provider_model_capability_repo,
             builtin,
             extension_registry,
             user_data_dir,
@@ -406,8 +409,8 @@ impl PresetService {
             })?;
         }
         let providers = self.provider_repo.list().await?;
-        // Membership lives on provider_models rows since migration 016.
         let model_rows = self.provider_model_repo.list().await?;
+        let capability_rows = self.provider_model_capability_repo.list().await?;
         let candidates: Vec<_> = providers
             .into_iter()
             .filter(|provider| {
@@ -419,10 +422,16 @@ impl PresetService {
             })
             .collect();
         for provider in candidates {
-            let has_model = model_rows.iter().any(|row| {
-                row.provider_id == provider.provider_id && row.model == preference.model
-            });
-            if has_model {
+            if is_enabled_chat_model(
+                &provider.provider_id,
+                &preference.model,
+                model_rows.iter().map(|row| {
+                    (row.provider_id.as_str(), row.model.as_str(), row.enabled)
+                }),
+                capability_rows.iter().map(|row| {
+                    (row.provider_id.as_str(), row.model.as_str(), row.task.as_str())
+                }),
+            ) {
                 if preference.provider_id.is_none() {
                     warnings.push(format!(
                         "Unqualified model '{}' resolved to provider '{}'",
@@ -844,6 +853,18 @@ fn slugify_tag_label(label:&str)->String{let lower=label.to_lowercase();let mut 
 fn deduplicate_tag_key(base:&str,existing:&HashSet<String>)->String{if !existing.contains(base){return base.to_owned()}for n in 2..=999{let candidate=format!("{base}-{n}");if !existing.contains(&candidate){return candidate}}format!("{base}-{}",nomifun_common::now_ms())}
 fn localized_value(map:&HashMap<String,String>,locale:&str)->Option<String>{map.get(locale).cloned().or_else(||map.get(locale.split('-').next().unwrap_or(locale)).cloned())}
 fn dedupe(values:&mut Vec<String>){let mut seen=HashSet::new();values.retain(|v|seen.insert(v.clone()))}
+fn is_enabled_chat_model<'a>(
+    provider_id: &str,
+    model: &str,
+    model_rows: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+    capability_rows: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+) -> bool {
+    model_rows.into_iter().any(|(row_provider_id, row_model, enabled)| {
+        enabled && row_provider_id == provider_id && row_model == model
+    }) && capability_rows.into_iter().any(|(row_provider_id, row_model, task)| {
+        row_provider_id == provider_id && row_model == model && task == "chat"
+    })
+}
 fn collect_localizations(names:&HashMap<String,String>,descriptions:&HashMap<String,String>,instructions:&HashMap<String,String>)->Vec<(String,Option<String>,Option<String>,Option<String>,Option<String>)>{let keys:HashSet<_>=names.keys().chain(descriptions.keys()).chain(instructions.keys()).cloned().collect();keys.into_iter().map(|k|(k.clone(),names.get(&k).cloned(),descriptions.get(&k).cloned(),None,instructions.get(&k).cloned())).collect()}
 fn collect_examples_i18n(rows:&[nomifun_db::PresetExampleRow])->HashMap<String,Vec<String>>{let mut output=HashMap::new();for row in rows.iter().filter(|row|!row.locale.is_empty()){output.entry(row.locale.clone()).or_insert_with(Vec::new).push(row.prompt.clone());}output}
 fn flatten_examples(defaults:Vec<String>,localized:HashMap<String,Vec<String>>)->Vec<(String,String)>{defaults.into_iter().map(|value|(String::new(),value)).chain(localized.into_iter().flat_map(|(locale,values)|values.into_iter().map(move|value|(locale.clone(),value)))).collect()}
@@ -884,6 +905,33 @@ mod tag_key_tests {
                 "{legacy_alias} must not be accepted as agent_id"
             );
         }
+    }
+
+    #[test]
+    fn preset_model_resolution_requires_enabled_model_and_exact_chat_capability() {
+        let provider_id = "0190f5fe-7c00-7a00-8000-0000000000aa";
+        let models = [(provider_id, "shared-name", true)];
+        let chat = [(provider_id, "shared-name", "chat")];
+        assert!(is_enabled_chat_model(provider_id, "shared-name", models, chat));
+
+        assert!(!is_enabled_chat_model(
+            provider_id,
+            "shared-name",
+            [(provider_id, "shared-name", false)],
+            chat,
+        ));
+        assert!(!is_enabled_chat_model(
+            provider_id,
+            "shared-name",
+            models,
+            [(provider_id, "shared-name", "speech_synthesis")],
+        ));
+        assert!(!is_enabled_chat_model(
+            provider_id,
+            "shared-name",
+            models,
+            [("0190f5fe-7c00-7a00-8000-0000000000bb", "shared-name", "chat")],
+        ));
     }
 
     #[test]

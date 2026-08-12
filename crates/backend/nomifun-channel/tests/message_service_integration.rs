@@ -14,9 +14,11 @@ use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
 use nomifun_db::models::{ChannelSessionRow, NewChannelPluginRow};
 use nomifun_db::{
-    CreateProviderParams, IClientPreferenceRepository, IProviderRepository, SqliteAcpSessionRepository,
-    SqliteAgentMetadataRepository, SqliteChannelRepository, SqliteClientPreferenceRepository,
-    SqliteConversationRepository, SqliteProviderRepository, init_database_memory,
+    CreateProviderParams, IClientPreferenceRepository, IProviderModelRepository,
+    IProviderRepository, NewProviderModel, NewProviderModelCapability,
+    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteChannelRepository,
+    SqliteClientPreferenceRepository, SqliteConversationRepository, SqliteProviderModelRepository,
+    SqliteProviderRepository, init_database_memory,
 };
 use nomifun_realtime::UserEventSink;
 use tokio::sync::broadcast;
@@ -187,26 +189,64 @@ impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
 /// Conversation model authorities, so tests must model a real provider catalog.
 async fn seed_channel_models(pool: &nomifun_db::SqlitePool) {
     let providers = SqliteProviderRepository::new(pool.clone());
+    let models = SqliteProviderModelRepository::new(pool.clone());
+    let chat = [NewProviderModelCapability {
+        task: "chat",
+        traits: "[]",
+        protocol: "openai.chat_text",
+        connection_role: "default",
+        provider_params: "{}",
+        ..Default::default()
+    }];
+    let credentials_encrypted = nomifun_common::encrypt_string(
+        r#"{"api_keys":["test-only"]}"#,
+        &[0x42; 32],
+    )
+    .unwrap();
     for id in [DEFAULT_PROVIDER, COMPANION_PROVIDER] {
+        let initial_model = NewProviderModel {
+            model: "channel-test-model",
+            enabled: true,
+            sort_order: 0,
+            description: None,
+            capabilities: &chat,
+        };
         providers
             .create(CreateProviderParams {
                 provider_id: Some(id),
                 platform: "openai",
                 name: "Channel test provider",
-                base_url: "https://example.invalid/v1",
-                api_key_encrypted: "test-only",
-                models: r#"["channel-test-model","m","pa-model-v1"]"#,
+                base_url: "https://example.invalid",
+                auth_scheme: "bearer",
+                credentials_encrypted: &credentials_encrypted,
                 enabled: true,
-                model_context_limits: None,
-                model_protocols: None,
-                model_descriptions: None,
-                model_enabled: None,
                 bedrock_config: None,
-                is_full_url: false,
                 sort_order: None,
-            })
+            }, &initial_model, &[])
             .await
             .unwrap();
+        for (sort_order, model) in ["m", "pa-model-v1"].into_iter().enumerate() {
+            let expected_config_revision = providers
+                .find_by_id(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .config_revision;
+            models
+                .save(
+                    id,
+                    expected_config_revision,
+                    &NewProviderModel {
+                        model,
+                        enabled: true,
+                        sort_order: sort_order as i64 + 1,
+                        description: None,
+                        capabilities: &chat,
+                    },
+                )
+                .await
+                .unwrap();
+        }
     }
 
     let preferences = SqliteClientPreferenceRepository::new(pool.clone());

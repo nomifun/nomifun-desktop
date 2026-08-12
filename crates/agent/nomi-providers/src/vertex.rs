@@ -260,6 +260,7 @@ impl LlmProvider for VertexProvider {
         tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
 
         let access_token = self.get_access_token().await?;
+        let redactor = nomifun_net::secret_redaction::SecretRedactor::new([&access_token]);
         let client = crate::http_client();
 
         let mut headers = HeaderMap::new();
@@ -281,7 +282,7 @@ impl LlmProvider for VertexProvider {
             let status = response.status();
             if !status.is_success() {
                 let retry_after_ms = crate::parse_retry_after_ms(response.headers()).unwrap_or(5000);
-                let body_text = response.text().await.unwrap_or_default();
+                let body_text = redactor.redact(&response.text().await.unwrap_or_default());
                 if status.as_u16() == 429 {
                     return Err(ProviderError::RateLimited {
                         retry_after_ms,
@@ -310,15 +311,35 @@ impl LlmProvider for VertexProvider {
             );
             h
         };
+        let stream_redactor = redactor.clone();
 
         // Vertex uses standard SSE (same as Anthropic)
         tokio::spawn(async move {
-            let outcome = anthropic_shared::process_sse_stream(response, &tx).await;
+            let outcome = anthropic_shared::process_sse_stream_redacted(
+                response,
+                &tx,
+                &stream_redactor,
+            )
+            .await;
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,
-                || crate::retry::send_and_check(&client, &url_clone, &headers_clone, &body),
-                |resp| anthropic_shared::process_sse_stream(resp, &tx),
+                || {
+                    crate::retry::send_and_check(
+                        &client,
+                        &url_clone,
+                        &headers_clone,
+                        &body,
+                        &stream_redactor,
+                    )
+                },
+                |resp| {
+                    anthropic_shared::process_sse_stream_redacted(
+                        resp,
+                        &tx,
+                        &stream_redactor,
+                    )
+                },
             )
             .await;
         });

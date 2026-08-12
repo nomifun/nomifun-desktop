@@ -6,23 +6,18 @@
 
 /**
  * Resolve the models a generation card can pick, by mode — every mode reads the
- * authoritative catalog (`useModelsForTask` / `useCreationModels`, i.e.
- * `POST /api/model-profiles/resolve`; no name heuristics):
- *  - image → resolve(image_generation) ∪ resolve(image_edit)
- *  - video → resolve(video_generation)
- *  - text  → resolve(chat)
- *  - tts   → resolve(speech_synthesis)
+ * nested model capability graph through `useModelsForTask` (no name
+ * heuristics and no cross-task unions): image_generation, video_generation,
+ * chat, and speech_synthesis are each resolved independently.
  *
  * Grouped by provider and flattened, plus a `hasProviders` signal so the picker
  * can tell "no platforms configured" apart from "no matching models".
  */
 
 import { useMemo } from 'react';
-import { modelNamesOf } from '@/common/utils/providerModels';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
 import { useModelsForTask, type TaskModelGroup } from '@renderer/hooks/agent/useModelsForTask';
-import { filterCreationModels, useCreationModels } from '@renderer/pages/modelHub/creationModels';
-import type { GenMode, ModelGroup, ModelOption } from './genTypes';
+import type { GenMode, ImageGeneratorTask, ModelGroup, ModelOption } from './genTypes';
 import { useModelSelectorProviderLabel } from '@renderer/hooks/agent/useModelSelectorProviderLabel';
 
 export interface GeneratorModels {
@@ -31,6 +26,14 @@ export interface GeneratorModels {
   /** Any enabled provider exposes at least one usable model at all. */
   hasProviders: boolean;
 }
+
+export type GeneratorModelTask =
+  | 'chat'
+  | 'speech_synthesis'
+  | 'video_generation'
+  | ImageGeneratorTask;
+
+export type GeneratorTaskPools<T> = Record<GeneratorModelTask, readonly T[]>;
 
 function group(flat: ModelOption[]): ModelGroup[] {
   const groups = new Map<string, ModelGroup>();
@@ -58,30 +61,64 @@ function flattenTaskGroups(
   return flat;
 }
 
-export function useGeneratorModels(mode: GenMode): GeneratorModels {
+export function generatorTaskForMode(
+  mode: GenMode,
+  imageTask: ImageGeneratorTask
+): GeneratorModelTask {
+  if (mode === 'text') return 'chat';
+  if (mode === 'tts') return 'speech_synthesis';
+  if (mode === 'video') return 'video_generation';
+  return imageTask;
+}
+
+/** Select one exact pool; a missing task can never fall through to another. */
+export function exactGeneratorTaskPool<T>(
+  mode: GenMode,
+  imageTask: ImageGeneratorTask,
+  pools: GeneratorTaskPools<T>
+): readonly T[] {
+  return pools[generatorTaskForMode(mode, imageTask)];
+}
+
+export function useGeneratorModels(
+  mode: GenMode,
+  imageTask: ImageGeneratorTask
+): GeneratorModels {
   const { data: rawProviders } = useProvidersQuery();
-  // 对话/语音合成模型来自统一 task catalog resolve（无名称启发式）。
+  // Every mode reads its exact task capability; image_edit is not generation.
   const { groups: chatGroups } = useModelsForTask('chat');
   const { groups: ttsGroups } = useModelsForTask('speech_synthesis');
-  const { entries: creationEntries } = useCreationModels();
+  const { groups: imageGenerationGroups } = useModelsForTask('image_generation');
+  const { groups: imageEditGroups } = useModelsForTask('image_edit');
+  const { groups: videoGroups } = useModelsForTask('video_generation');
   const providerLabel = useModelSelectorProviderLabel();
 
   return useMemo<GeneratorModels>(() => {
     const hasProviders =
-      (rawProviders ?? []).some((p) => p.enabled !== false && modelNamesOf(p).length > 0) || chatGroups.length > 0;
+      (rawProviders ?? []).some(
+        (provider) =>
+          provider.enabled !== false &&
+          provider.models.some((model) => model.enabled && model.capabilities.length > 0)
+      ) || chatGroups.length > 0;
 
-    if (mode === 'text' || mode === 'tts') {
-      const flat = flattenTaskGroups(mode === 'text' ? chatGroups : ttsGroups, providerLabel);
-      return { groups: group(flat), flat, hasProviders };
-    }
-
-    const cap = mode === 'video' ? 'video_generation' : 'image_generation';
-    const flat: ModelOption[] = filterCreationModels(creationEntries, cap).map((e) => ({
-      providerId: e.providerId,
-      providerName: e.providerName,
-      platform: e.platform,
-      model: e.model,
-    }));
+    const selectedGroups = exactGeneratorTaskPool(mode, imageTask, {
+      chat: chatGroups,
+      speech_synthesis: ttsGroups,
+      video_generation: videoGroups,
+      image_generation: imageGenerationGroups,
+      image_edit: imageEditGroups,
+    });
+    const flat = flattenTaskGroups(selectedGroups, providerLabel);
     return { groups: group(flat), flat, hasProviders };
-  }, [mode, rawProviders, chatGroups, ttsGroups, creationEntries, providerLabel]);
+  }, [
+    mode,
+    imageTask,
+    rawProviders,
+    chatGroups,
+    ttsGroups,
+    imageGenerationGroups,
+    imageEditGroups,
+    videoGroups,
+    providerLabel,
+  ]);
 }

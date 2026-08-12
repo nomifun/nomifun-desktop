@@ -26,7 +26,12 @@ import {
 import { workshopFileUrl } from '../api';
 import type { WorkshopFlowEdge, WorkshopFlowNode } from '../canvas/model';
 import type { CreationInput, MediaCapability, WorkshopAssetKind } from '../types';
-import type { GenMode, MentionCandidate, ResolvedMention } from './genTypes';
+import type {
+  GenMode,
+  ImageGeneratorTask,
+  MentionCandidate,
+  ResolvedMention,
+} from './genTypes';
 
 // ─── Mention ref encoding ──────────────────────────────────────────────────────
 
@@ -104,6 +109,86 @@ export function nodeContribution(node: WorkshopFlowNode): NodeContribution | nul
     return { assetId: primary, kind, text: null };
   }
   return null;
+}
+
+function upstreamSourcesForNode(
+  nodeId: WorkshopNodeId,
+  nodes: WorkshopFlowNode[],
+  edges: WorkshopFlowEdge[]
+): WorkshopFlowNode[] {
+  const upstreamSources: WorkshopFlowNode[] = [];
+  for (const edge of edges) {
+    if (edge.target !== nodeId) continue;
+    const source = nodes.find((node) => node.id === edge.source);
+    if (!source) continue;
+    if (source.type === 'group') {
+      upstreamSources.push(
+        ...nodes
+          .filter((node) => node.parentId === source.id)
+          .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
+      );
+    } else {
+      upstreamSources.push(source);
+    }
+  }
+  return upstreamSources;
+}
+
+export interface ImageGeneratorTaskInput {
+  nodeId: WorkshopNodeId;
+  nodes: WorkshopFlowNode[];
+  edges: WorkshopFlowEdge[];
+  mentions: string[];
+  maskAssetId?: AssetId;
+  imageWindow?: { offset: number; size: number };
+}
+
+/**
+ * Resolve the exact model task required by the same references the run plan
+ * consumes. Any effective image reference or a mask is an edit; there is no
+ * generation-task fallback for i2i/inpaint.
+ */
+export function imageGeneratorTaskForInputs(input: ImageGeneratorTaskInput): ImageGeneratorTask {
+  if (input.maskAssetId) return 'image_edit';
+
+  const imageAssets: AssetId[] = [];
+  const seen = new Set<string>();
+  const pushContribution = (contribution: NodeContribution | null) => {
+    if (
+      !contribution?.assetId ||
+      contribution.kind === 'text' ||
+      seen.has(contribution.assetId)
+    ) {
+      return;
+    }
+    seen.add(contribution.assetId);
+    if (contribution.kind === 'image') imageAssets.push(contribution.assetId);
+  };
+
+  for (const source of upstreamSourcesForNode(input.nodeId, input.nodes, input.edges)) {
+    pushContribution(nodeContribution(source));
+  }
+  for (const ref of input.mentions) {
+    const parsed = parseMentionRef(ref);
+    if (!parsed) continue;
+    if (parsed.source === 'asset') {
+      if (parsed.kind === 'text') continue;
+      if (!seen.has(parsed.id)) {
+        seen.add(parsed.id);
+        if (parsed.kind === 'image') imageAssets.push(parsed.id);
+      }
+      continue;
+    }
+    const mentionedNode = input.nodes.find((node) => node.id === parsed.id);
+    if (mentionedNode) pushContribution(nodeContribution(mentionedNode));
+  }
+
+  if (!input.imageWindow) return imageAssets.length > 0 ? 'image_edit' : 'image_generation';
+  const start = Math.max(0, Math.round(input.imageWindow.offset));
+  const size = Math.max(0, Math.round(input.imageWindow.size));
+  return imageAssets.slice(start, start + size).length > 0
+    ? 'image_edit'
+    : 'image_generation';
 }
 
 // ─── Mention candidate collection (for the picker) ──────────────────────────────
@@ -218,20 +303,7 @@ export async function buildRunPlan(input: RunPlanInput): Promise<RunPlan> {
 
   // 1) Upstream edge-connected nodes (in edge order). A group source (M8) expands
   //    into its members, ordered by position, so a group acts as an input group.
-  const upstreamSources: WorkshopFlowNode[] = [];
-  for (const edge of edges) {
-    if (edge.target !== node.id) continue;
-    const src = nodes.find((n) => n.id === edge.source);
-    if (!src) continue;
-    if (src.type === 'group') {
-      const members = nodes
-        .filter((n) => n.parentId === src.id)
-        .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
-      upstreamSources.push(...members);
-    } else {
-      upstreamSources.push(src);
-    }
-  }
+  const upstreamSources = upstreamSourcesForNode(node.id, nodes, edges);
   for (const src of upstreamSources) {
     const contrib = nodeContribution(src);
     if (!contrib) continue;

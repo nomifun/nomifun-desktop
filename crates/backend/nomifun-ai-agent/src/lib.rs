@@ -63,7 +63,7 @@ pub use factory::provider_config::{
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use factory::{
     AgentFactoryDeps, CompanionPromptProvider, CompanionSummonProvider,
-    build_agent_factory,
+    build_agent_factory, build_agent_model_config_resolver,
 };
 #[cfg(feature = "browser-use")]
 pub use factory::browser_lane::{
@@ -92,4 +92,7 @@ pub use registry::{AgentRegistry, UnavailableReason};
 pub use routes::{AgentRouterState, RemoteAgentRouterState, agent_routes, remote_agent_routes};
 pub use services::AgentService;
 pub use services::RemoteAgentService;
-pub use runtime_registry::{AgentRuntimeRegistry, InMemoryAgentRuntimeRegistry};
+pub use runtime_registry::{
+    AgentRuntimeModelConfigResolver, AgentRuntimeRegistry, InMemoryAgentRuntimeRegistry,
+    RuntimeModelConfigBinding,
+};

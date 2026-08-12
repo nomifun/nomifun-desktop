@@ -53,8 +53,9 @@ describe('speech input recording handling', () => {
       new URL('../../components/chat/SpeechInputButton.tsx', import.meta.url)
     );
 
-    expect(button.includes('selectedCloudProvider.models.includes(config.model)')).toBe(true);
-    expect(button.includes('selectedCloudProvider.model_enabled?.[config.model] !== false')).toBe(true);
+    expect(button.includes('selectedCloudProvider?.models.find(')).toBe(true);
+    expect(button.includes("modelSupportsTask(selectedCloudModel, 'speech_recognition')")).toBe(true);
+    expect(button.includes('legacyCloudConfigIsReady')).toBe(false);
   });
 
   test('does not opt the desktop multipart request into credentialed CORS', () => {

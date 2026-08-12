@@ -11,6 +11,7 @@ nomifun-auth.workspace = true
 nomifun-file.workspace = true
 nomifun-realtime.workspace = true
 nomifun-ai-agent.workspace = true
+nomifun-model-invoke.workspace = true
 nomifun-conversation.workspace = true
 nomifun-preset.workspace = true
 axum.workspace = true

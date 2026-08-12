@@ -20,7 +20,6 @@ use nomifun_api_types::{
     ProviderHealthCheckResponse,
 };
 use nomifun_common::AppError;
-use nomifun_db::{IProviderModelRepository, IProviderRepository};
 use nomifun_model_invoke::ModelInvokeService;
 
 use super::provider_health::ProviderHealthCheckService;
@@ -35,16 +34,10 @@ pub struct AgentService {
 impl AgentService {
     pub fn new(
         registry: Arc<AgentRegistry>,
-        provider_repo: Arc<dyn IProviderRepository>,
-        provider_model_repo: Arc<dyn IProviderModelRepository>,
-        encryption_key: [u8; 32],
         data_dir: PathBuf,
         model_invoke_service: Arc<ModelInvokeService>,
     ) -> Arc<Self> {
         let provider_health = ProviderHealthCheckService::new(
-            provider_repo,
-            provider_model_repo,
-            encryption_key,
             data_dir.clone(),
             model_invoke_service,
         );

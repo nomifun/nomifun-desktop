@@ -3,11 +3,8 @@
 //! `docs/specs/2026-07-28-provider-protocol-variance.zh.md` §3, Ark domain:
 //! `ark.cn-beijing.volces.com`, Bearer ARK_API_KEY on the default connection).
 //!
-//! Ark lives under `/api/v3` rather than the OpenAI `/v1` convention, so both
-//! adapters compose their own URLs via [`ark_v3_url`] instead of the
-//! conventional dispatch path; a `params.endpoint` override still wins for
-//! images (routed through [`crate::call::ResolvedCall::dispatch_target`]) and
-//! for video (submit + poll alike, via [`video_tasks_base`]).
+//! Ark lives under `/api/v3` rather than the OpenAI `/v1` convention. The
+//! selected capability supplies the exact protocol endpoint for both adapters.
 //!
 //! - [`ArkImagesAdapter`] (`"ark.images"`, ImageGeneration): sync
 //!   `POST {root}/api/v3/images/generations`, OpenAI-shaped body plus Ark
@@ -30,34 +27,20 @@ use nomifun_api_types::ModelTask;
 use serde_json::{Value, json};
 
 use crate::adapter::ProtocolAdapter;
-use crate::call::{ResolvedCall, ResolvedConnection};
+use crate::call::{ResolvedCall, resolve_endpoint};
 use crate::error::{InvokeError, InvokeErrorKind};
+use crate::manifest::expand_protocol_endpoint_template;
 use crate::transport::{encode_b64, error_from_response, get_request, post_json};
 use crate::types::{
     JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, VideoGenRequest,
 };
 
-use super::has_endpoint_override;
-use super::openai_images::parse_images_response;
+use super::{json_request_body, openai_images::parse_images_response};
 
 /// Generous ceiling for image generation / video-task submission.
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(180);
 /// Poll round-trips are cheap status reads.
 const POLL_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Compose an Ark endpoint: `{root}/api/v3{path}`. The configured base is
-/// tolerated with or without a trailing `/api/v3` (stripped then re-added) so
-/// both `https://ark.cn-beijing.volces.com` and
-/// `https://ark.cn-beijing.volces.com/api/v3` resolve identically. A full-url
-/// connection base is already the complete endpoint (no path appended).
-fn ark_v3_url(conn: &ResolvedConnection, path: &str) -> String {
-    let base = conn.base_url.trim().trim_end_matches('/');
-    if conn.is_full_url {
-        return base.to_string();
-    }
-    let root = base.strip_suffix("/api/v3").unwrap_or(base);
-    format!("{root}/api/v3{path}")
-}
 
 // ---------------------------------------------------------------------------
 // ark.images
@@ -83,14 +66,7 @@ impl ProtocolAdapter for ArkImagesAdapter {
                 format!("ark.images cannot serve task {:?}", call.request.task()),
             ));
         };
-        // Ark does not follow the `/v1` convention, so the URL is composed
-        // here — but an explicit per-model `endpoint` override still wins
-        // (resolved by the single dispatch authority).
-        let url = if has_endpoint_override(&call.model_params) {
-            call.dispatch_target().url
-        } else {
-            ark_v3_url(&call.connection, "/images/generations")
-        };
+        let url = call.endpoint_url()?;
 
         let mut body = json!({
             "model": call.model,
@@ -100,19 +76,16 @@ impl ProtocolAdapter for ArkImagesAdapter {
         if let Some(size) = &req.size {
             body["size"] = Value::String(size.clone());
         }
-        // Ark private generation knobs — whitelisted passthrough from `extra`.
-        for key in ["watermark", "seed", "guidance_scale"] {
-            if let Some(v) = req.extra.get(key) {
-                body[key] = v.clone();
-            }
-        }
+        let body = json_request_body(&call.model_params, &req.extra, body)?;
 
         let resp = post_json(http, &url, SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid ark images JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid ark images JSON", &e))?;
         Ok(TaskOutcome::Done(TaskResult::Assets(parse_images_response(&value)?)))
     }
 }
@@ -122,22 +95,6 @@ impl ProtocolAdapter for ArkImagesAdapter {
 // ---------------------------------------------------------------------------
 
 const VIDEO_ADAPTER_ID: &str = "ark.video_jobs";
-const VIDEO_TASKS_PATH: &str = "/contents/generations/tasks";
-
-/// The video-tasks collection URL for this call: an explicit `params.endpoint`
-/// override wins (the dispatch-target URL with any query string stripped —
-/// the poll's `/{id}` sub-path cannot carry a mid-URL query segment);
-/// otherwise the conventional Ark `/api/v3` path. Submit and poll both ride
-/// this, so an override moves the whole job lifecycle.
-fn video_tasks_base(call: &ResolvedCall) -> String {
-    if has_endpoint_override(&call.model_params) {
-        let url = call.dispatch_target().url;
-        let no_query = url.split('?').next().unwrap_or(url.as_str());
-        no_query.trim_end_matches('/').to_string()
-    } else {
-        ark_v3_url(&call.connection, VIDEO_TASKS_PATH)
-    }
-}
 
 /// Ark asynchronous `/api/v3/contents/generations/tasks` submit→poll
 /// (seedance family).
@@ -160,15 +117,21 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
                 format!("ark.video_jobs cannot serve task {:?}", call.request.task()),
             ));
         };
-        let url = video_tasks_base(call);
-        let body = build_video_submit_body(&call.model, req);
+        let url = call.endpoint_url()?;
+        let body = json_request_body(
+            &call.model_params,
+            &req.extra,
+            build_video_submit_body(&call.model, req),
+        )?;
 
         let resp = post_json(http, &url, SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid ark task JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid ark task JSON", &e))?;
         let id = value
             .get("id")
             .and_then(|v| v.as_str())
@@ -176,6 +139,7 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
             .ok_or_else(|| InvokeError::parse("ark task submit response missing 'id'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: VIDEO_ADAPTER_ID.into(),
+            config_revision: call.config_revision,
             remote_id: id.to_string(),
             poll_state: json!({}),
         }))
@@ -187,17 +151,39 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
         call: &ResolvedCall,
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
-        let status_url = format!("{}/{}", video_tasks_base(call), job.remote_id);
+        let template = call
+            .model_params
+            .get("poll_endpoint")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                InvokeError::config("ark.video_jobs requires an injected poll endpoint")
+            })?;
+        let endpoint = expand_protocol_endpoint_template(
+            &call.protocol,
+            call.task,
+            "poll_endpoint",
+            template,
+            &job.remote_id,
+        )?;
+        let status_url = call.credentialed_http_url(
+            &resolve_endpoint(&call.connection.base_url, &endpoint),
+            "poll_endpoint",
+        )?;
         let resp = get_request(http, &status_url, POLL_TIMEOUT, &call.connection.auth).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid ark task status JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid ark task status JSON", &e))?;
 
         match parse_video_task_status(&value)? {
             ArkTaskState::Pending => Ok(TaskOutcome::Pending(JobHandle {
                 adapter_id: VIDEO_ADAPTER_ID.into(),
+                config_revision: call.config_revision,
                 remote_id: job.remote_id.clone(),
                 poll_state: json!({}),
             })),
@@ -277,13 +263,44 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
-    use crate::auth::{AuthMaterial, AuthScheme};
+    use crate::adapters::test_support::call_with_endpoint;
     use crate::types::{ImageGenRequest, InputAsset};
 
-    fn ark_call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
-        let mut call = call(base_url, model, request);
+    fn ark_base(base_url: &str) -> String {
+        let base_url = base_url.trim_end_matches('/');
+        if base_url.ends_with("/api/v3") {
+            base_url.to_owned()
+        } else {
+            format!("{base_url}/api/v3")
+        }
+    }
+
+    fn ark_call_with_endpoint(
+        base_url: &str,
+        model: &str,
+        protocol: &str,
+        endpoint: &str,
+        request: TaskRequest,
+    ) -> ResolvedCall {
+        let mut call = call_with_endpoint(base_url, model, protocol, endpoint, request);
         call.platform = "ark".into();
+        call
+    }
+
+    fn image_call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        ark_call_with_endpoint(&ark_base(base_url), model, "ark.images", "/images/generations", request)
+    }
+
+    fn video_call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        let mut call = ark_call_with_endpoint(
+            &ark_base(base_url),
+            model,
+            "ark.video_jobs",
+            "/contents/generations/tasks",
+            request,
+        );
+        call.model_params["poll_endpoint"] =
+            Value::String("/contents/generations/tasks/{id}".into());
         call
     }
 
@@ -308,34 +325,7 @@ mod tests {
     }
 
     fn job(remote_id: &str) -> JobHandle {
-        JobHandle { adapter_id: VIDEO_ADAPTER_ID.into(), remote_id: remote_id.into(), poll_state: json!({}) }
-    }
-
-    // -- URL composition ------------------------------------------------------
-
-    #[test]
-    fn ark_v3_url_tolerates_trailing_api_v3_and_full_url() {
-        let conn = |base: &str, full: bool| ResolvedConnection {
-            role: "default".into(),
-            base_url: base.into(),
-            is_full_url: full,
-            auth: AuthMaterial { scheme: AuthScheme::Bearer, credentials: json!({}) },
-            extra: json!({}),
-        };
-        assert_eq!(
-            ark_v3_url(&conn("https://ark.cn-beijing.volces.com", false), "/images/generations"),
-            "https://ark.cn-beijing.volces.com/api/v3/images/generations"
-        );
-        // Trailing /api/v3 (and trailing slash) tolerated — no doubling.
-        assert_eq!(
-            ark_v3_url(&conn("https://ark.cn-beijing.volces.com/api/v3/", false), "/images/generations"),
-            "https://ark.cn-beijing.volces.com/api/v3/images/generations"
-        );
-        // Full-url base used verbatim, no path appended.
-        assert_eq!(
-            ark_v3_url(&conn("https://proxy.example/exact/endpoint", true), "/images/generations"),
-            "https://proxy.example/exact/endpoint"
-        );
+        JobHandle { adapter_id: VIDEO_ADAPTER_ID.into(), config_revision: 1, remote_id: remote_id.into(), poll_state: json!({}) }
     }
 
     // -- pure body/status fixtures ---------------------------------------------
@@ -400,7 +390,7 @@ mod tests {
     // -- ark.images wiremock ----------------------------------------------------
 
     #[tokio::test]
-    async fn images_posts_api_v3_body_with_whitelisted_extras_and_decodes_b64() {
+    async fn images_posts_api_v3_body_with_open_provider_fields_and_decodes_b64() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v3/images/generations"))
@@ -412,6 +402,7 @@ mod tests {
                 "size": "1024x1024",
                 "watermark": false,
                 "seed": 42,
+                "steps": 9,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": "aGk="}]})))
             .expect(1)
@@ -419,16 +410,17 @@ mod tests {
             .await;
 
         let extra = json!({"watermark": false, "seed": 42, "steps": 9});
-        let call = ark_call(&server.uri(), "doubao-seedream", image_request(Some("1024x1024"), extra));
+        let call = image_call(&server.uri(), "doubao-seedream", image_request(Some("1024x1024"), extra));
         let out = ArkImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 1);
         assert!(matches!(&assets[0].data, ProducedData::Bytes(b) if b == b"hi"));
 
-        // Non-whitelisted extras (steps) must not leak into the body.
+        // Unknown provider-native fields are deliberately forwarded so newly
+        // documented Ark options work without a NomiFun release.
         let requests = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-        assert!(body.get("steps").is_none(), "non-whitelisted extra leaked");
+        assert_eq!(body["steps"], 9);
         assert!(body.get("size").is_some());
     }
 
@@ -443,7 +435,7 @@ mod tests {
             .await;
 
         let base = format!("{}/api/v3", server.uri());
-        let call = ark_call(&base, "doubao-seedream", image_request(None, json!({})));
+        let call = image_call(&base, "doubao-seedream", image_request(None, json!({})));
         let out = ArkImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert!(matches!(&assets[0].data, ProducedData::Url(u) if u == "https://cdn/x.png"));
@@ -459,8 +451,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut call = ark_call(&server.uri(), "doubao-seedream", image_request(None, json!({})));
-        call.model_params = json!({"endpoint": "/custom/images"});
+        let call = ark_call_with_endpoint(
+            &server.uri(),
+            "doubao-seedream",
+            "ark.images",
+            "/custom/images",
+            image_request(None, json!({})),
+        );
         let out = ArkImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         assert!(matches!(out, TaskOutcome::Done(TaskResult::Assets(a)) if a.len() == 1));
     }
@@ -474,7 +471,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = ark_call(&server.uri(), "doubao-seedream", image_request(None, json!({})));
+        let call = image_call(&server.uri(), "doubao-seedream", image_request(None, json!({})));
         let err = ArkImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::Auth);
         assert_eq!(err.http_status, Some(401));
@@ -498,7 +495,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = ark_call(&server.uri(), "doubao-seedance", video_request(Some("720x480"), Some(5), vec![]));
+        let call = video_call(&server.uri(), "doubao-seedance", video_request(Some("720x480"), Some(5), vec![]));
         let out = ArkVideoJobsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Pending(handle) = out else { panic!("expected Pending") };
         assert_eq!(handle.adapter_id, "ark.video_jobs");
@@ -524,7 +521,7 @@ mod tests {
 
         let inputs =
             vec![InputAsset { id: None, role: "first_frame".into(), bytes: b"hi".to_vec(), mime: "image/png".into() }];
-        let call = ark_call(&server.uri(), "doubao-seedance", video_request(None, None, inputs));
+        let call = video_call(&server.uri(), "doubao-seedance", video_request(None, None, inputs));
         let out = ArkVideoJobsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         assert!(matches!(out, TaskOutcome::Pending(h) if h.remote_id == "cgt-2"));
     }
@@ -538,7 +535,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = ark_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
+        let call = video_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
         let err = ArkVideoJobsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::ParseError);
     }
@@ -563,7 +560,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = ark_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
+        let call = video_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
         let http = reqwest::Client::new();
 
         let first = ArkVideoJobsAdapter.poll(&http, &call, &job("cgt-1")).await.unwrap();
@@ -589,16 +586,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = ark_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
+        let call = video_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
         let err = ArkVideoJobsAdapter.poll(&reqwest::Client::new(), &call, &job("cgt-9")).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::JobFailed);
         assert_eq!(err.message, "content blocked");
     }
 
     #[tokio::test]
-    async fn video_params_endpoint_override_applies_to_submit_and_poll() {
-        // Task 9 review fix: an explicit params.endpoint moves the WHOLE job
-        // lifecycle — the custom path is the only place anything is mounted.
+    async fn video_capability_endpoints_apply_independently() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/custom/video-tasks"))
@@ -615,8 +610,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut call = ark_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
-        call.model_params = json!({"endpoint": "/custom/video-tasks"});
+        let mut call = ark_call_with_endpoint(
+            &server.uri(),
+            "doubao-seedance",
+            "ark.video_jobs",
+            "/custom/video-tasks",
+            video_request(None, None, vec![]),
+        );
+        call.model_params["poll_endpoint"] = Value::String("/custom/video-tasks/{id}".into());
         let http = reqwest::Client::new();
 
         let out = ArkVideoJobsAdapter.submit(&http, &call).await.unwrap();
@@ -637,7 +638,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = ark_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
+        let call = video_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
         let err = ArkVideoJobsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::Auth);
     }

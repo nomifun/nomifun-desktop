@@ -4,41 +4,47 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * The modality-first projection behind the hub's 对话 / 视觉 / 嵌入与检索 sections.
- *
- * The source of truth is the `provider_models` catalog ROWS
- * (`GET /api/provider-models`), not `POST /api/model-profiles/resolve`: resolve
- * answers "which models may a selector offer", so it returns enabled rows only.
- * A management view has to show a DISABLED row too — otherwise its own toggle
- * could only turn models off and then lose them. The backend data model is
- * untouched: this is a filter over `tasks` / `traits`, nothing more.
- *
- * 视觉 is deliberately a trait-filtered `chat` projection rather than its own
- * `ModelTask`, because that is what the backend vocabulary says
- * (`ModelTrait::VisionInput` modifies `ModelTask::Chat`).
- */
+/** Capability-first projections over `ProviderResponse.models`. */
 
 import type { IProvider } from '@/common/config/storage';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
-import type { ProviderModelResponse } from '@/common/protocolBindings/ProviderModelResponse';
+import type {
+  ProviderModelCapabilityResponse,
+  ProviderModelResponse,
+} from '@/common/types/provider/providerModel';
 import type { ProviderId } from '@/common/types/ids';
 
-/** The modality sections that project `provider_models` rows by task/trait. */
-export type ModalityKey = 'chat' | 'vision' | 'embedding';
+/** Nine endpoint tasks plus the useful trait-only vision projection. */
+export type ModalityKey =
+  | 'chat'
+  | 'realtime'
+  | 'vision'
+  | 'image'
+  | 'image_edit'
+  | 'video'
+  | 'tts'
+  | 'asr'
+  | 'embedding'
+  | 'rerank';
 
 export interface ModalitySpec {
-  /** Membership needs ANY of these tasks. */
-  tasks: readonly ModelTask[];
-  /** …and EVERY one of these traits. */
+  task: ModelTask;
+  /** Every trait must be present on this exact task capability. */
   traits: readonly ModelTrait[];
 }
 
 export const MODALITY_SPECS: Record<ModalityKey, ModalitySpec> = {
-  chat: { tasks: ['chat'], traits: [] },
-  vision: { tasks: ['chat'], traits: ['vision_input'] },
-  embedding: { tasks: ['embedding', 'rerank'], traits: [] },
+  chat: { task: 'chat', traits: [] },
+  realtime: { task: 'realtime_conversation', traits: [] },
+  vision: { task: 'chat', traits: ['vision_input'] },
+  image: { task: 'image_generation', traits: [] },
+  image_edit: { task: 'image_edit', traits: [] },
+  video: { task: 'video_generation', traits: [] },
+  tts: { task: 'speech_synthesis', traits: [] },
+  asr: { task: 'speech_recognition', traits: [] },
+  embedding: { task: 'embedding', traits: [] },
+  rerank: { task: 'rerank', traits: [] },
 };
 
 export interface ModalityModelRow {
@@ -48,87 +54,72 @@ export interface ModalityModelRow {
   description: string | null;
   tasks: ModelTask[];
   traits: ModelTrait[];
+  protocol: string;
+  /** Full response row needed by the full-replacement save endpoint. */
+  definition: ProviderModelResponse;
+  /** Exact capability that placed the model in this section. */
+  capability: ProviderModelCapabilityResponse;
 }
 
 export interface ModalityProviderGroup {
   providerId: ProviderId;
   providerName: string;
   platform: string;
+  enabled: boolean;
   models: ModalityModelRow[];
 }
 
-export const rowMatchesModality = (row: ProviderModelResponse, spec: ModalitySpec): boolean =>
-  spec.tasks.some((task) => row.tasks.includes(task)) &&
-  spec.traits.every((trait) => row.traits.includes(trait));
+export const matchingCapability = (
+  model: ProviderModelResponse,
+  spec: ModalitySpec
+): ProviderModelCapabilityResponse | undefined =>
+  model.capabilities.find(
+    (capability) =>
+      capability.task === spec.task &&
+      spec.traits.every((trait) => capability.traits.includes(trait))
+  );
+
+export const rowMatchesModality = (
+  model: ProviderModelResponse,
+  spec: ModalitySpec
+): boolean => matchingCapability(model, spec) !== undefined;
 
 /**
- * A row carrying no task at all. The backend seeds `tasks` when a row is
- * created, so this is legacy/hand-edited data — it belongs to no modality and
- * would otherwise be invisible everywhere in the hub.
+ * Management projection. Unlike runtime selectors, it deliberately retains
+ * disabled providers and disabled models so users can inspect and re-enable
+ * them. Provider/model ordering is the order already supplied by the backend.
  */
-export const isUntaggedRow = (row: ProviderModelResponse): boolean => row.tasks.length === 0;
-
-const groupRows = (
-  rows: readonly ProviderModelResponse[],
-  providers: readonly IProvider[],
-  providerName: (provider: IProvider) => string
-): ModalityProviderGroup[] => {
-  const byProvider = new Map<string, ModalityModelRow[]>();
-  for (const row of rows) {
-    const list = byProvider.get(row.provider_id) ?? [];
-    list.push({
-      providerId: row.provider_id as ProviderId,
-      model: row.model,
-      enabled: row.enabled,
-      description: row.description ?? null,
-      tasks: [...row.tasks],
-      traits: [...row.traits],
-    });
-    byProvider.set(row.provider_id, list);
-  }
-
-  const groups: ModalityProviderGroup[] = [];
-  // Provider order is the caller's: it passes the shared selector ordering, so
-  // the managed free platform lands LAST — a management view must not lead with
-  // models the user never configured. Rows inside a provider follow the catalog
-  // `sort_order`, with the model name as the tie-break so the list never
-  // reshuffles between renders.
-  for (const provider of providers) {
-    const models = byProvider.get(provider.id);
-    if (!models || models.length === 0) continue;
-    const orderOf = new Map(
-      rows
-        .filter((row) => row.provider_id === provider.id)
-        .map((row) => [row.model, row.sort_order] as const)
-    );
-    models.sort((a, b) => {
-      const delta = (orderOf.get(a.model) ?? 0) - (orderOf.get(b.model) ?? 0);
-      return delta !== 0 ? delta : a.model.localeCompare(b.model);
-    });
-    groups.push({
-      providerId: provider.id,
-      providerName: providerName(provider),
-      platform: provider.platform,
-      models,
-    });
-  }
-  return groups;
-};
-
 export const buildModalityGroups = (
-  rows: readonly ProviderModelResponse[],
   providers: readonly IProvider[],
   spec: ModalitySpec,
   providerName: (provider: IProvider) => string = (provider) => provider.name
 ): ModalityProviderGroup[] =>
-  groupRows(
-    rows.filter((row) => rowMatchesModality(row, spec)),
-    providers,
-    providerName
-  );
-
-export const buildUntaggedGroups = (
-  rows: readonly ProviderModelResponse[],
-  providers: readonly IProvider[],
-  providerName: (provider: IProvider) => string = (provider) => provider.name
-): ModalityProviderGroup[] => groupRows(rows.filter(isUntaggedRow), providers, providerName);
+  providers.flatMap((provider) => {
+    const models = provider.models.flatMap((model): ModalityModelRow[] => {
+      const capability = matchingCapability(model, spec);
+      if (!capability) return [];
+      return [
+        {
+          providerId: provider.id,
+          model: model.model,
+          enabled: model.enabled,
+          description: model.description ?? null,
+          tasks: model.capabilities.map((item) => item.task),
+          traits: [...capability.traits],
+          protocol: capability.protocol,
+          definition: model,
+          capability,
+        },
+      ];
+    });
+    if (models.length === 0) return [];
+    return [
+      {
+        providerId: provider.id,
+        providerName: providerName(provider),
+        platform: provider.platform,
+        enabled: provider.enabled !== false,
+        models,
+      },
+    ];
+  });

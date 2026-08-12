@@ -172,8 +172,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
     () => (providers ?? []).map((p) => ({ label: providerLabel(p), value: p.id })),
     [providers, providerLabel]
   );
-  // 旁路模型要做对话补全 —— 只列 chat-capable 模型（统一 catalog resolve；
-  // 此前列出 provider 的全部模型，首次获得任务过滤）。
+  // 旁路模型要做对话补全，只列拥有精确 Chat capability 的已启用模型。
   const { groups: chatGroups } = useModelsForTask('chat');
   const modelsForProvider = (providerId?: ProviderId | null) => {
     const group = chatGroups.find((g) => g.provider.id === providerId);

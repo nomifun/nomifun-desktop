@@ -14,7 +14,5 @@
   "duplicate": "That provider + model is already in the queue.",
   "maxSwitches": "Max switches per turn",
   "maxSwitchesHint": "Upper bound on switches within a single turn (also capped by the queue length).",
-  "stampUnhealthy": "Mark failed model unhealthy",
-  "stampUnhealthyHint": "On switch, stamp the failed model as Unhealthy so it is skipped next time.",
   "saved": "Failover queue saved"
 }

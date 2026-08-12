@@ -12,34 +12,16 @@ export const SPEECH_TO_TEXT_CONFIG_CHANGED_EVENT = 'nomifun:speech-to-text-confi
 
 export const DEFAULT_SPEECH_TO_TEXT_CONFIG: SpeechToTextConfig = {
   enabled: false,
-  provider: 'openai',
   language: '',
 };
 
-/**
- * True when this stored config still carries a retired embedded-credential
- * block. The backend stopped executing those at the catalog migration
- * (`nomifun-shell` answers a 400 telling the user to re-pick a provider), so
- * they are dead weight that keeps an API key on disk.
- */
-export const hasLegacyEmbeddedSpeechBlocks = (config?: SpeechToTextConfig): boolean =>
-  Boolean(config?.openai) || Boolean(config?.deepgram);
-
-export const normalizeSpeechToTextConfig = (config?: SpeechToTextConfig): SpeechToTextConfig => {
-  if (!config) return DEFAULT_SPEECH_TO_TEXT_CONFIG;
-
-  // Keep the user's actual model/language choice, drop the credential shape.
-  // `provider` stays pinned as a legacy wire constant: the Rust
-  // `SpeechToTextConfig` still requires it and the backend ignores its value
-  // (transcription executes by provider_id + model).
-  const { openai, deepgram, ...rest } = config;
-  return {
-    ...rest,
-    provider: config.provider ?? 'openai',
-    language: config.language ?? openai?.language ?? deepgram?.language ?? '',
-    model: config.model ?? openai?.model ?? deepgram?.model,
-  };
-};
+export const normalizeSpeechToTextConfig = (config?: SpeechToTextConfig): SpeechToTextConfig => ({
+  enabled: config?.enabled ?? false,
+  language: config?.language ?? '',
+  ...(config?.autoSend === undefined ? {} : { autoSend: config.autoSend }),
+  ...(config?.provider_id === undefined ? {} : { provider_id: config.provider_id }),
+  ...(config?.model === undefined ? {} : { model: config.model }),
+});
 
 export const getSpeechToTextConfig = (): SpeechToTextConfig =>
   normalizeSpeechToTextConfig(configService.get(SPEECH_TO_TEXT_CONFIG_KEY));
@@ -49,9 +31,6 @@ export const saveSpeechToTextConfig = async (config: SpeechToTextConfig): Promis
   try {
     await configService.set(SPEECH_TO_TEXT_CONFIG_KEY, normalized);
   } catch (error) {
-    // configService updates its in-memory cache optimistically. Restore the
-    // persisted view when the backend rejects the write, so the form and the
-    // microphone button do not claim an unsaved provider is enabled.
     await configService.reload();
     throw error;
   } finally {

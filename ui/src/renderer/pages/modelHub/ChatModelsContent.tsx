@@ -16,7 +16,6 @@ const ChatModelsContent: React.FC = () => (
     titleKey='settings.modelHub.modality.chatTitle'
     subtitleKey='settings.modelHub.modality.chatSubtitle'
     showDefaultModel
-    showUntagged
   />
 );
 

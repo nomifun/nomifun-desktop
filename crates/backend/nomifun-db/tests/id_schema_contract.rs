@@ -175,6 +175,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "preset_user_state",
     "presets",
     "provider_connections",
+    "provider_model_capabilities",
     "provider_models",
     "providers",
     "remote_agents",
@@ -618,8 +619,8 @@ async fn remaining_product_business_ids_reject_duplicates_and_non_uuid_values() 
     let provider_id = nomifun_common::generate_id();
     sqlx::query(
         "INSERT INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, created_at, updated_at) \
-         VALUES (?, 'contract', 'contract provider', 'https://example.invalid', '', 1, 1)",
+         (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
+         VALUES (?, 'contract', 'contract provider', 'https://example.invalid', 'bearer', '', 1, 1)",
     )
     .bind(&provider_id)
     .execute(pool)
@@ -980,8 +981,8 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
     let provider_id = nomifun_common::generate_id();
     sqlx::query(
         "INSERT INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, created_at, updated_at) \
-         VALUES (?, 'contract', 'link provider', 'https://example.invalid', '', 1, 1)",
+         (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
+         VALUES (?, 'contract', 'link provider', 'https://example.invalid', 'bearer', '', 1, 1)",
     )
     .bind(&provider_id)
     .execute(pool)

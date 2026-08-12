@@ -2,8 +2,8 @@
 //! queue behind the 创意工坊 canvas's generation nodes.
 //!
 //! The engine is **provider-agnostic**: model execution is delegated to the
-//! unified invocation layer (`nomifun-model-invoke`), which owns provider /
-//! model / protocol resolution against the model catalog. The
+//! unified invocation layer (`nomifun-model-invoke`), while text nodes use the
+//! injected [`CreationTextExecutor`] backed by the Agent Chat engine. The
 //! [`CreationService`] owns the state machine (`queued → running →
 //! succeeded/failed/canceled`), per-provider concurrency + a global cap,
 //! cancellation, boot reconciliation, and hands produced bytes to an
@@ -23,9 +23,9 @@ pub use artifact::validate_artifact_payload;
 pub use dto::CreationTask;
 pub use routes::creation_routes;
 pub use service::{
-    AssetSink, AssetSource, CreationService, CreationServiceBuilder, LoadedAsset, NewCreationTask,
-    PersistAsset, TaskArtifactCleanupFailure, TaskArtifactIssue, TaskArtifactManifest,
-    TaskArtifactReconcileReport,
+    AssetSink, AssetSource, CreationService, CreationServiceBuilder, CreationTextExecutor,
+    CreationTextRequest, LoadedAsset, NewCreationTask, PersistAsset, TaskArtifactCleanupFailure,
+    TaskArtifactIssue, TaskArtifactManifest, TaskArtifactReconcileReport,
 };
 pub use state::CreationRouterState;
 pub use types::{CreationError, CreationInput, MediaCapability, TaskStatus};

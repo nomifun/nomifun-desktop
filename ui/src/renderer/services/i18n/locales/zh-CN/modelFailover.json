@@ -14,7 +14,5 @@
   "duplicate": "该供应商 + 模型已在队列中。",
   "maxSwitches": "单轮最大切换次数",
   "maxSwitchesHint": "单轮内切换次数的上限（同时受队列长度封顶）。",
-  "stampUnhealthy": "把失败模型标记为不健康",
-  "stampUnhealthyHint": "切换时把失败的模型标记为不健康，下次跳过它。",
   "saved": "故障转移队列已保存"
 }

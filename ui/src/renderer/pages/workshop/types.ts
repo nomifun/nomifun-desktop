@@ -45,7 +45,7 @@ export type WorkshopAssetKind = 'image' | 'video' | 'text';
 export type AssetSortKey = 'created_desc' | 'created_asc' | 'updated_desc' | 'name_asc' | 'size_desc';
 
 /** Media generation capability a task exercises. */
-export type MediaCapability = 't2i' | 'i2i' | 'inpaint' | 't2v' | 'i2v' | 'v2v' | 'tts' | 'text';
+export type MediaCapability = 't2i' | 'i2i' | 'inpaint' | 't2v' | 'i2v' | 'tts' | 'text';
 
 /** Generation task lifecycle state. */
 export type CreationTaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';

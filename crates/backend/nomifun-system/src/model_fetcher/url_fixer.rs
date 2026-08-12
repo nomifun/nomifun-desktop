@@ -4,7 +4,7 @@ use tokio::task::JoinSet;
 use tracing::debug;
 
 use super::FetchConfig;
-use super::fetchers::fetch_openai_compatible;
+use super::fetchers::fetch_openai_compatible_with_auth;
 
 /// URL path suffixes to probe when auto-fixing.
 const URL_VARIANTS: &[&str] = &[
@@ -36,9 +36,9 @@ pub(crate) async fn try_fix_url(
     let mut set = JoinSet::new();
     for candidate in candidates {
         let client = client.clone();
-        let api_key = config.api_key.clone();
+        let auth = config.auth.clone();
         set.spawn(async move {
-            let models = fetch_openai_compatible(&client, &candidate, &api_key).await?;
+            let models = fetch_openai_compatible_with_auth(&client, &candidate, &auth).await?;
             Ok::<(Vec<ModelInfo>, String), AppError>((models, candidate))
         });
     }
@@ -49,7 +49,6 @@ pub(crate) async fn try_fix_url(
             debug!(fixed_url = %fixed_url, "URL auto-fix succeeded");
             return Ok(FetchModelsResponse {
                 models,
-                model_profiles: Default::default(),
                 fixed_base_url: Some(fixed_url),
             });
         }

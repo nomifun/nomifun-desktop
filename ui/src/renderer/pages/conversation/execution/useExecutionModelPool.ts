@@ -27,8 +27,8 @@ export type ExecutionModelPoolSource = {
 
 export function useExecutionModelPool() {
   const { configuredProviders, isLoading: isProvidersLoading, formatModelLabel } = useModelProviderList();
-  // Selectable execution models come from the unified chat catalog resolve —
-  // the same source as every other chat-family selector (heuristics gone).
+  // Selectable execution models come from the same enabled chat-capability
+  // projection as every other chat-family selector.
   const { groups, isLoading: isCatalogLoading } = useModelsForTask('chat');
 
   const providers = useMemo(() => groups.map((group) => group.provider), [groups]);
@@ -46,9 +46,9 @@ export function useExecutionModelPool() {
   const configuredPairs = useMemo<TExecutionModelRef[]>(
     () =>
       configuredProviders.flatMap((provider) =>
-        (provider.models ?? []).map((model) => ({
+        provider.models.map((model) => ({
           provider_id: provider.id,
-          model,
+          model: model.model,
         })),
       ),
     [configuredProviders],

@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use nomifun_api_types::ModelTask;
 use serde_json::{Map, Value, json};
 
+use super::provider_body_fields;
 use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
@@ -37,13 +38,16 @@ impl ProtocolAdapter for GenericRerankAdapter {
         };
         validate_request(req)?;
 
-        let url = call.dispatch_target().url;
+        let url = call.endpoint_url()?;
         let body = build_body(&call.model, &call.model_params, req);
         let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value = resp.json().await.map_err(|e| InvokeError::parse(format!("invalid rerank JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid rerank JSON", &e))?;
         Ok(TaskOutcome::Done(TaskResult::Reranked(parse_results(&value)?)))
     }
 }
@@ -61,20 +65,22 @@ fn validate_request(req: &RerankRequest) -> Result<(), InvokeError> {
     Ok(())
 }
 
-fn merge_options(body: &mut Map<String, Value>, source: &Value) {
-    let Some(options) = source.as_object() else { return };
-    for (key, value) in options {
-        // Routing metadata is local-only; core typed fields cannot be replaced
-        // by an opaque extra object.
+fn merge_option_object(body: &mut Map<String, Value>, source: &Value) {
+    for (key, value) in provider_body_fields(source) {
+        // Core typed fields cannot be replaced by opaque options. Local
+        // routing/auth metadata has already been removed by the shared helper.
         if matches!(
             key.as_str(),
-            "endpoint" | "poll_endpoint" | "protocol" | "model" | "query" | "documents" | "top_n"
-        ) || value.is_null()
-        {
+            "model" | "query" | "documents" | "top_n"
+        ) {
             continue;
         }
         body.insert(key.clone(), value.clone());
     }
+}
+
+fn merge_options(body: &mut Map<String, Value>, source: &Value) {
+    merge_option_object(body, source);
 }
 
 fn build_body(model: &str, model_params: &Value, req: &RerankRequest) -> Value {
@@ -128,7 +134,11 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
+    use crate::adapters::test_support::call_with_endpoint;
+
+    fn call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        call_with_endpoint(base_url, model, "generic.rerank", "/rerank", request)
+    }
 
     fn request() -> TaskRequest {
         TaskRequest::Rerank(RerankRequest {
@@ -155,6 +165,70 @@ mod tests {
         for value in [json!({}), json!({"results": []}), json!({"results": [{}]})] {
             assert_eq!(parse_results(&value).unwrap_err().kind, InvokeErrorKind::ParseError);
         }
+    }
+
+    #[test]
+    fn transport_metadata_never_enters_rerank_body() {
+        let params = json!({
+            "base_url": "https://other.example/v1",
+            "allow_cross_origin_credentials": true,
+            "endpoint": "/rerank",
+            "poll_endpoint": "/jobs/{id}",
+            "content_endpoint": "/jobs/{id}/content",
+            "realtime_endpoint": "wss://socket.example/realtime",
+            "protocol": "generic.rerank",
+            "connection": {"role": "voice"},
+            "connection_id": "connection-secret-id",
+            "connection_role": "voice",
+            "auth": {"token": "secret"},
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys": ["secret"]},
+            "api_key": "secret",
+            "api_keys": ["secret"],
+            "headers": {"x-secret": "secret"},
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "max_chunks_per_doc": 4
+        });
+        let req = RerankRequest {
+            query: "best fruit".into(),
+            documents: vec!["apple".into()],
+            top_n: Some(1),
+            extra: json!({
+                "base_url": "https://request.example/v1",
+                "connection_role": "request-role",
+                "return_documents": true
+            }),
+        };
+
+        let body = build_body("reranker", &params, &req);
+        let object = body.as_object().unwrap();
+        for local_key in [
+            "base_url",
+            "allow_cross_origin_credentials",
+            "endpoint",
+            "poll_endpoint",
+            "content_endpoint",
+            "realtime_endpoint",
+            "protocol",
+            "connection",
+            "connection_id",
+            "connection_role",
+            "auth",
+            "auth_scheme",
+            "credentials",
+            "api_key",
+            "api_keys",
+            "headers",
+        ] {
+            assert!(!object.contains_key(local_key), "local key {local_key} leaked into request body: {body}");
+        }
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["top_p"], 0.9);
+        assert_eq!(body["max_chunks_per_doc"], 4);
+        assert_eq!(body["return_documents"], true);
+        assert_eq!(body["model"], "reranker");
+        assert!(!serde_json::to_string(&body).unwrap().contains("secret"));
     }
 
     #[tokio::test]

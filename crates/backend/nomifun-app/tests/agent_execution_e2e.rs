@@ -27,24 +27,24 @@ use nomifun_db::{
 const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
 
 async fn seed_test_provider(services: &nomifun_app::AppServices) {
+    let credentials_encrypted = common::encrypted_bearer_credentials();
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
             created_at, updated_at\
          ) VALUES ('0190f5fe-7c00-7a00-8000-000000000013', 'openai', 'test', 'https://example.invalid', \
-                   'encrypted', 1, 1, 1)",
+                   'bearer', ?, 1, 1, 1)",
     )
+    .bind(&credentials_encrypted)
     .execute(services.database.pool())
     .await
     .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO provider_models \
-         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
-         VALUES ('0190f5fe-7c00-7a00-8000-000000000013', 'model_test', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
+    common::seed_openai_chat_model(
+        services.database.pool(),
+        "0190f5fe-7c00-7a00-8000-000000000013",
+        "model_test",
     )
-    .execute(services.database.pool())
-    .await
-    .unwrap();
+    .await;
 }
 
 #[tokio::test]

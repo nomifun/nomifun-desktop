@@ -426,8 +426,8 @@ const NomiConversationPanel: React.FC<{
     />
   );
 
-  // Heal against the unified chat catalog (backend resolve, no heuristics).
-  // On resolve failure/loading `chatGroups` is empty ⇒ resolveHealModel is a
+  // Heal against exact enabled Chat capabilities, with no name heuristics.
+  // While capability data is unavailable/loading `chatGroups` is empty, so resolveHealModel is a
   // no-op, so a transient error can never trigger a destructive model swap.
   const { groups: healGroups } = useModelsForTask('chat');
   const healPool = useMemo(

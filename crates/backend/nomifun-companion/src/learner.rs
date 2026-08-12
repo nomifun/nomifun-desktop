@@ -15,7 +15,7 @@ use std::sync::Arc;
 use nomifun_ai_agent::nomi_config;
 use nomifun_ai_agent::{one_shot_completion, resolve_provider_config, user_message};
 use nomifun_common::{AppError, now_ms};
-use nomifun_db::IProviderRepository;
+use nomifun_model_invoke::ModelInvokeService;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
@@ -83,18 +83,14 @@ pub trait CompanionCompleter: Send + Sync {
 
 /// Production completer: provider row → nomi Config → one-shot completion.
 pub struct LiveCompanionCompleter {
-    pub provider_repo: Arc<dyn IProviderRepository>,
-    pub provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
-    pub encryption_key: [u8; 32],
+    pub model_invoke: Arc<ModelInvokeService>,
     pub workspace: PathBuf,
 }
 
 impl LiveCompanionCompleter {
     async fn resolve(&self, provider_id: &str, model: &str) -> Result<nomi_config::config::Config, AppError> {
         resolve_provider_config(
-            &self.provider_repo,
-            &self.provider_model_repo,
-            &self.encryption_key,
+            self.model_invoke.as_ref(),
             provider_id,
             model,
             &self.workspace,

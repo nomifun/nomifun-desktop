@@ -8,7 +8,7 @@ import React from 'react';
 import { SafeRetrieval } from '@icon-park/react';
 import ModalityModelsPanel from './ModalityModelsPanel';
 
-/** 嵌入与检索区：embedding + rerank 两个任务的合并投影。 */
+/** Embedding is an independent task and never includes rerank-only models. */
 const EmbeddingModelsContent: React.FC = () => (
   <ModalityModelsPanel
     modality='embedding'

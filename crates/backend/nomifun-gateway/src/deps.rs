@@ -48,6 +48,10 @@ pub struct GatewayDeps {
     /// Authoritative per-model rows (membership + enabled flags) backing the
     /// provider summaries since migration 016 dropped the legacy columns.
     pub provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
+    /// Task-scoped capabilities for each provider model. Gateway model
+    /// selection never infers a task from a model name.
+    pub provider_model_capability_repo:
+        Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
     /// IDMM supervision config (same instance as `/api/idmm` so save also
     /// arms/stops the live supervisor).
     pub idmm_service: Arc<IdmmService>,

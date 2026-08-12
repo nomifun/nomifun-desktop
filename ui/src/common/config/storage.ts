@@ -7,7 +7,6 @@
 import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
-import type { ProfileSource } from '@/common/protocolBindings/ProfileSource';
 import type { PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import type {
   TDecisionPolicy,
@@ -286,58 +285,27 @@ export type IChatConversationRefer = {
  */
 export type { ModelTask } from '@/common/protocolBindings/ModelTask';
 export type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
-export type { ProfileSource } from '@/common/protocolBindings/ProfileSource';
 
 /** 权威 per-model 能力档案（键 (provider_id, model)）。 */
-export interface ModelProfile {
-  provider_id: ProviderId;
-  model: string;
-  tasks: ModelTask[];
-  traits: ModelTrait[];
-  params?: Record<string, unknown>;
-  source?: ProfileSource;
-  updated_at: number;
-}
-
 export interface IProvider {
   id: ProviderId;
   platform: string;
   name: string;
   base_url: string;
-  api_key: string;
-  models: string[];
-  /**
-   * 每个模型的上下文窗口限制。映射模型名称到 token 数。
-   * Per-model context window limits. Maps model name to token count.
-   */
-  model_context_limits?: Record<string, number>;
-  /**
-   * 每个模型的协议覆盖配置。映射模型名称到协议字符串。
-   * 仅在 platform 为 'new-api' 时使用。
-   * Per-model protocol overrides. Maps model name to protocol string.
-   * Only used when platform is 'new-api'.
-   * e.g. { "gemini-2.5-pro": "gemini", "claude-sonnet-4": "anthropic", "gpt-4o": "openai" }
-   */
-  model_protocols?: Record<string, string>;
-  /**
-   * 每个模型的用户撰写描述。映射模型名称到描述文本。
-   * 供智能协作按描述自动选择模型。
-   * Per-model user-authored descriptions. Maps model name to description text.
-   * Used by collaboration planning to select models by description.
-   * e.g. { "gpt-4o": "擅长前端与多模态", "claude-sonnet-4": "长上下文推理" }
-   */
-  model_descriptions?: Record<string, string>;
+  /** Explicit auth transport for the provider's default connection. */
+  auth_scheme: string;
+  /** Credentials are write-only; responses expose only whether any are configured. */
+  has_credentials: boolean;
+  /** Authoritative configured models with their complete task capabilities. */
+  models: ProviderModelResponse[];
   /**
    * AWS Bedrock specific configuration
    * Only used when platform is 'bedrock'
    */
   bedrock_config?: {
-    auth_method: 'accessKey' | 'profile';
+    auth_method: 'accessKey' | 'profile' | 'defaultChain';
     region: string;
-    // For access key method
-    access_key_id?: string;
-    secret_access_key?: string;
-    // For profile method
+    /** Non-secret AWS profile name; present only for profile auth. */
     profile?: string;
   };
   /**
@@ -350,31 +318,6 @@ export interface IProvider {
    * Provider priority order; lower values are used first.
    */
   sort_order?: number;
-  /**
-   * 各个模型的启用状态，默认全部为 true
-   * Individual model enabled states, defaults to all true
-   */
-  model_enabled?: Record<string, boolean>;
-  /**
-   * 各个模型的健康检测结果（仅用于 UI 显示，不影响启用状态）
-   * Model health check results (for UI display only, does not affect enabled state)
-   */
-  model_health?: Record<
-    string,
-    {
-      status: 'unknown' | 'healthy' | 'unhealthy';
-      last_check?: number; // 时间戳 / timestamp
-      latency?: number; // 延迟时间（毫秒）/ latency in milliseconds
-      error?: string; // 错误信息 / error message
-    }
-  >;
-  /**
-   * 权威 per-model 目录行（provider_models 表投影），wire→renderer 透传。
-   * Authoritative row-level model catalog entries, passed through as-is from
-   * `ProviderResponse.models_detail`. Absent when the provider has no rows.
-   */
-  models_detail?: ProviderModelResponse[];
-  is_full_url?: boolean;
 }
 
 export type TProviderWithModel = Omit<IProvider, 'models'> & {

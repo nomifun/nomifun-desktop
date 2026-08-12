@@ -213,14 +213,20 @@ mod tests {
 
     #[test]
     fn test_error_response_from_workspace_error_includes_details() {
-        let resp = ErrorResponse::from(AppError::WorkspacePathEdgeWhitespace("/tmp/Archive ".into()));
+        let resp = ErrorResponse::from(AppError::WorkspacePathEdgeWhitespace(
+            "/tmp/Archive ".into(),
+        ));
         assert_eq!(resp.code, "WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED");
         assert_eq!(
-            resp.details.as_ref().and_then(|details| details.get("workspace_path")),
+            resp.details
+                .as_ref()
+                .and_then(|details| details.get("workspace_path")),
             Some(&serde_json::json!("/tmp/Archive "))
         );
         assert_eq!(
-            resp.details.as_ref().and_then(|details| details.get("operation")),
+            resp.details
+                .as_ref()
+                .and_then(|details| details.get("operation")),
             Some(&serde_json::json!("create"))
         );
     }
@@ -230,13 +236,20 @@ mod tests {
         let resp = ErrorResponse::from(AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(
             "/tmp/Archive ".into(),
         ));
-        assert_eq!(resp.code, "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED");
         assert_eq!(
-            resp.details.as_ref().and_then(|details| details.get("workspace_path")),
+            resp.code,
+            "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED"
+        );
+        assert_eq!(
+            resp.details
+                .as_ref()
+                .and_then(|details| details.get("workspace_path")),
             Some(&serde_json::json!("/tmp/Archive "))
         );
         assert_eq!(
-            resp.details.as_ref().and_then(|details| details.get("operation")),
+            resp.details
+                .as_ref()
+                .and_then(|details| details.get("operation")),
             Some(&serde_json::json!("runtime"))
         );
     }

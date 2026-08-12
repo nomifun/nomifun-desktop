@@ -50,7 +50,6 @@ export function generationModeForTask(task: Pick<CreationTask, 'capability'>): W
       return 'text';
     case 't2v':
     case 'i2v':
-    case 'v2v':
       return 'video';
     case 't2i':
     case 'i2i':

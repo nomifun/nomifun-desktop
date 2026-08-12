@@ -16,10 +16,10 @@ const providerResponse = {
   platform: 'openai',
   name: 'StepFun edited',
   base_url: 'https://api.stepfun.com/v1',
-  api_key: 'sk-test',
-  models: ['step-3.7-flash'],
+  auth_scheme: 'bearer',
+  has_credentials: true,
+  models: [],
   enabled: true,
-  is_full_url: false,
   sort_order: 0,
   created_at: 1,
   updated_at: 2,
@@ -49,20 +49,20 @@ describe('provider update wire contract', () => {
       platform: 'openai',
       name: 'StepFun edited',
       base_url: 'https://api.stepfun.com/v1',
-      api_key: 'sk-test',
-      models: ['step-3.7-flash'],
+      auth_scheme: 'bearer',
+      credentials: { api_keys: ['sk-test'] },
+      models: [],
       enabled: true,
-      is_full_url: false,
       sort_order: 0,
       // Runtime-only fields previously leaked from EditModeModal and caused
       // UpdateProviderRequest's deny_unknown_fields deserializer to return 400.
+      // `platform` is also immutable after creation and must be stripped.
       model: 'step-3.7-flash',
       bedrockAuthMethod: 'accessKey',
       bedrockRegion: 'us-east-1',
       bedrockAccessKeyId: '',
       bedrockSecretAccessKey: '',
       bedrockProfile: '',
-      models_detail: [],
     } as unknown as Parameters<typeof mode.updateProvider.invoke>[0];
 
     await mode.updateProvider.invoke(dirtyRendererInput);
@@ -71,14 +71,12 @@ describe('provider update wire contract', () => {
     expect(calls[0].method).toBe('PUT');
     expect(calls[0].url.endsWith(`/api/providers/${PROVIDER_ID}`)).toBe(true);
     expect(JSON.parse(String(calls[0].body))).toEqual({
-      platform: 'openai',
       name: 'StepFun edited',
       base_url: 'https://api.stepfun.com/v1',
-      api_key: 'sk-test',
-      models: ['step-3.7-flash'],
+      auth_scheme: 'bearer',
+      credentials: { api_keys: ['sk-test'] },
       enabled: true,
       sort_order: 0,
-      is_full_url: false,
     });
   });
 });

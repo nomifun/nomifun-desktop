@@ -41,7 +41,8 @@ pub use models::{
     NewCsAgentRow,
 };
 pub use models::{
-    NewProviderModel, ProviderConnectionRow, ProviderModelRow, ProviderModelUpdate,
+    NewProviderModel, NewProviderModelCapability, ProviderConnectionRow,
+    ProviderModelCapabilityRow, ProviderModelRow,
     UpsertProviderConnectionParams,
 };
 pub use repository::channel::UpdatePluginStatusParams;
@@ -92,12 +93,13 @@ pub use repository::{
     IAgentMetadataRepository, IAttachmentRepository, ChannelInboundClaim,
     IChannelRepository, PENDING_PROMPT_EXPIRY_MS, PENDING_PROMPT_QUEUE_LIMIT,
     PendingPromptEnqueue, SettleChannelInboundReceiptParams,
-    IClientPreferenceRepository, ICompanionTokenRepository,
+    IClientPreferenceRepository, ICompanionTokenRepository, KNOWLEDGE_RETRIEVAL_KEY,
     IConversationRepository, ICronRepository, IIdmmInterventionRepository,
     IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,
     IdmmActionSettlement, IdmmActionTurnIdentity, IKnowledgeRepository,
     IMcpServerRepository, IOAuthTokenRepository,
-    IProviderConnectionRepository, IProviderModelRepository, IProviderRepository,
+    IProviderConnectionRepository, IProviderModelCapabilityRepository, IProviderModelRepository,
+    IProviderRepository,
     IRemoteAgentRepository, IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
     ListRequirementsParams, RequirementClaim, RequirementClaimResolution,
@@ -111,7 +113,8 @@ pub use repository::{
     SqliteConversationRepository, SqliteCronRepository,
     SqliteIdmmInterventionRepository, SqliteKnowledgeRepository, SqliteMcpServerRepository,
     SqliteOAuthTokenRepository,
-    SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
+    SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
+    SqliteProviderModelRepository, SqliteProviderRepository,
     SqliteRemoteAgentRepository, SqliteRequirementRepository, SqliteSettingsRepository,
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,
     SqliteUserRepository, SqliteWebhookRepository, TerminalTurnAdmissionClaim,

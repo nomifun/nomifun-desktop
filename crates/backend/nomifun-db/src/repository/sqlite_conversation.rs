@@ -5611,10 +5611,10 @@ mod tests {
     async fn insert_fixture_provider(pool: &SqlitePool, provider_id: &str) {
         sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+                provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
                 created_at, updated_at\
              ) VALUES (?, 'openai', ?, 'https://example.invalid', \
-                       'encrypted', 1, 0, 0)",
+                       'bearer', '', 1, 0, 0)",
         )
         .bind(provider_id)
         .bind(provider_id)

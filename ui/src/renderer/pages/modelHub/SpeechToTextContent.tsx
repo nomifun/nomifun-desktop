@@ -9,19 +9,17 @@ import { HeadsetOne, LinkCloud, Radar } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { configService } from '@/common/config/configService';
 import type { SpeechToTextConfig } from '@/common/types/provider/speech';
 import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
 import {
   DEFAULT_SPEECH_TO_TEXT_CONFIG,
   getSpeechToTextConfig,
-  hasLegacyEmbeddedSpeechBlocks,
   normalizeSpeechToTextConfig,
   saveSpeechToTextConfig,
   SPEECH_TO_TEXT_CONFIG_CHANGED_EVENT,
-  SPEECH_TO_TEXT_CONFIG_KEY,
 } from '@/renderer/services/speechToTextConfig';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
+import ModalityModelsPanel from './ModalityModelsPanel';
 
 /**
  * 语音识别（ASR）分区：哪个目录里的模型负责把说话转成文字，外加本机 VAD 说明。
@@ -51,18 +49,6 @@ const SpeechToTextContent: React.FC = () => {
     return () => window.removeEventListener(SPEECH_TO_TEXT_CONFIG_CHANGED_EVENT, syncConfig);
   }, []);
 
-  // One-time migration: a config still carrying a retired embedded-credential
-  // block is rewritten in the catalog shape the moment this page is opened. The
-  // backend has refused those blocks since the catalog migration, so leaving
-  // them on disk only keeps a dead API key around.
-  useEffect(() => {
-    const stored = getSpeechToTextConfig();
-    if (!hasLegacyEmbeddedSpeechBlocks(configService.get(SPEECH_TO_TEXT_CONFIG_KEY))) return;
-    void saveSpeechToTextConfig(stored).catch((error) => {
-      console.error('Failed to migrate the legacy speech-to-text config:', error);
-    });
-  }, []);
-
   const persist = useCallback(
     (next: SpeechToTextConfig) => {
       const normalized = normalizeSpeechToTextConfig(next);
@@ -80,6 +66,12 @@ const SpeechToTextContent: React.FC = () => {
 
   return (
     <div className='flex flex-col gap-14px'>
+      <ModalityModelsPanel
+        modality='asr'
+        icon={<HeadsetOne theme='outline' size='18' strokeWidth={3} />}
+        titleKey='settings.modelHub.modality.asrTitle'
+        subtitleKey='settings.modelHub.modality.asrSubtitle'
+      />
       <div className='flex min-h-0 flex-col rd-16px bg-2 px-24px py-16px'>
         {messageContext}
         <header className='flex items-center gap-9px border-b border-b-solid border-[var(--color-border-2)] pb-14px'>
@@ -108,7 +100,7 @@ const SpeechToTextContent: React.FC = () => {
               }
               emptyHint={t('settings.modelHub.speech.noSources')}
               onChange={({ provider_id, model }) =>
-                persist({ ...config, enabled: true, provider: 'openai', provider_id, model })
+                persist({ ...config, enabled: true, provider_id, model })
               }
             />
           </Form.Item>

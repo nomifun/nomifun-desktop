@@ -1,6 +1,4 @@
-//! Shared helper that resolves a Provider DB row into a fully-configured
-//! `nomi_config::config::Config`, and a standalone one-shot LLM completion
-//! function for the IDMM sidecar.
+//! Shared Chat capability resolver and one-shot completion support.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -9,24 +7,28 @@ use nomi_config::config::{CliArgs, Config};
 use nomi_providers::{LlmProvider, ProviderError, create_provider};
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role};
+use nomifun_api_types::{ModelTask, ModelTrait};
 use nomifun_common::{AppError, ProviderId};
-use nomifun_db::{IProviderModelRepository, IProviderRepository};
+use nomifun_model_invoke::{
+    AuthMaterial, AuthScheme, ModelInvokeService, ModelRef, ProtocolExecutorKind,
+    protocol_task_descriptor,
+};
 
 use crate::types::NomiCompatOverrides;
 
-use super::nomi::{map_nomi_provider, resolve_bedrock_config, resolve_nomi_url_and_compat};
+use super::nomi::resolve_bedrock_config;
 
-/// 依 registry 决定该 provider+model 的图片支持 override。
-/// `Some(false)` = 已知不支持(发送时剔图);`None` = 未知(默认支持,行为不变)。
-///
-/// 只读进程级 `VisionUnsupportedRegistry`(内存,不落库),registry 无条目时
-/// 返回 `None` → 下游 `compat.supports_image` 保持默认 `true`,现有行为不变。
-pub(crate) fn image_support_override(provider_id: &str, model: &str) -> Option<bool> {
-    if nomifun_common::VisionUnsupportedRegistry::global().is_unsupported(provider_id, model) {
-        Some(false)
-    } else {
-        None
-    }
+/// Image input is opt-in on the exact Chat capability. Runtime observations
+/// may downgrade a declared vision model after an explicit upstream rejection,
+/// but can never promote a capability that omitted `vision_input`.
+pub(crate) fn capability_supports_image(
+    provider_id: &str,
+    model: &str,
+    traits: &[ModelTrait],
+) -> bool {
+    traits.contains(&ModelTrait::VisionInput)
+        && !nomifun_common::VisionUnsupportedRegistry::global()
+            .is_unsupported(provider_id, model)
 }
 
 /// Intermediate result of resolving a provider DB row before building a full
@@ -42,82 +44,29 @@ pub(crate) struct ResolvedProviderFields {
     pub context_limit: Option<i64>,
 }
 
-/// Load a provider row from the DB, decrypt its API key, map platform to nomi
-/// provider name, and resolve base URL / compat / bedrock fields. The
-/// per-model protocol override and context limit come from the model's
-/// `provider_models` row (absent row → no override, matching the legacy
-/// "no map entry" semantics).
-///
-/// This is the shared extraction used by both the full `resolve_provider_config`
-/// (which also calls `Config::resolve`) and the nomi factory `build()` (which
-/// passes the pieces into `NomiResolvedConfig`).
-pub(crate) async fn resolve_provider_fields(
-    provider_repo: &Arc<dyn IProviderRepository>,
-    provider_model_repo: &Arc<dyn IProviderModelRepository>,
-    encryption_key: &[u8; 32],
-    provider_id: &str,
-    model: &str,
-) -> Result<ResolvedProviderFields, AppError> {
-    let row = provider_repo
-        .find_by_id(provider_id)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to load provider config: {e}")))?
-        .ok_or_else(|| AppError::BadRequest(format!("Provider '{provider_id}' not found")))?;
-    let model_row = provider_model_repo
-        .get(provider_id, model)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to load provider model row: {e}")))?;
-
-    let api_key = nomifun_common::decrypt_string(&row.api_key_encrypted, encryption_key)?;
-
-    let protocol = model_row.as_ref().and_then(|m| m.protocol.as_deref());
-    let provider = map_nomi_provider(&row.platform, protocol);
-
-    let (base_url, mut compat_overrides) =
-        resolve_nomi_url_and_compat(&row.platform, &row.base_url, &provider, row.is_full_url);
-    // 依进程级 registry 命中把「不支持图片」透传为 compat override(主动剔除)。
-    // 未命中 → None → 下游默认 supports_image=true,现有行为不变。
-    compat_overrides.supports_image = image_support_override(provider_id, model);
-    if row.platform == "nomifun-free-model"
-        && model.trim().eq_ignore_ascii_case("deepseek-v4-flash-free")
-    {
-        compat_overrides.require_reasoning_content = Some(true);
-    }
-
-    let bedrock_config = if row.platform == "bedrock" {
-        resolve_bedrock_config(row.bedrock_config.as_deref())
-    } else {
-        None
-    };
-
-    Ok(ResolvedProviderFields {
-        provider,
-        api_key,
-        model: model.to_owned(),
-        base_url,
-        compat_overrides,
-        bedrock_config,
-        context_limit: model_row
-            .and_then(|m| m.context_limit)
-            .filter(|value| *value > 0),
-    })
+fn invoke_error_to_app_error(error: nomifun_model_invoke::InvokeError) -> AppError {
+    AppError::BadRequest(error.to_string())
 }
 
-/// Resolve provider fields for a conversation send, falling back only when a
-/// canonical provider reference names a row that has since been deleted.
-/// Only `AppError::ProviderUnavailable` when NOTHING is configured.
-///
-/// This is the send-time counterpart to [`resolve_provider_fields`]: a
-/// conversation may reference a provider that has since been deleted. Rather
-/// than surfacing a hard `BadRequest`/crash to the
-/// user mid-send, we fall back to the app default (first enabled provider +
-/// model, via [`crate::resolve_default_model`]). The returned
-/// [`ResolvedProviderFields`] carries the ACTUAL resolved provider/model, so
-/// callers must read the model from `fields.model` (not the requested id).
-pub(crate) async fn resolve_provider_fields_with_fallback(
-    provider_repo: &Arc<dyn IProviderRepository>,
-    provider_model_repo: &Arc<dyn IProviderModelRepository>,
-    encryption_key: &[u8; 32],
+/// Preserve the complete connection key ring for providers that rotate keys
+/// on auth/rate-limit failures. Nomi's provider constructors accept the same
+/// comma/newline-separated representation as provider settings; a newline is
+/// used here because individual persisted keys are already trimmed.
+fn agent_api_keys(auth: &AuthMaterial) -> Result<String, AppError> {
+    let keys = auth.secrets();
+    if keys.is_empty() {
+        return Err(AppError::BadRequest(
+            "selected Agent Chat connection carries no API keys".into(),
+        ));
+    }
+    Ok(keys.join("\n"))
+}
+
+/// Resolve Chat through the same task capability and connection resolver used
+/// by multimodal, realtime and health paths. Protocol is the sole serializer
+/// authority; platform never chooses a URL or silently substitutes a family.
+pub(crate) async fn resolve_provider_fields(
+    invoke: &ModelInvokeService,
     provider_id: &str,
     model: &str,
 ) -> Result<ResolvedProviderFields, AppError> {
@@ -129,60 +78,161 @@ pub(crate) async fn resolve_provider_fields_with_fallback(
             "model must be trimmed and non-empty".to_owned(),
         ));
     }
-    let stored_ok = provider_repo
-        .find_by_id(provider_id)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to load provider config: {e}")))?
-        .is_some();
 
-    if stored_ok {
-        return resolve_provider_fields(
-            provider_repo,
-            provider_model_repo,
-            encryption_key,
+    let task = invoke
+        .resolve_task_config(
+            &ModelRef {
+                provider_id: provider_id.to_owned(),
+                model: model.to_owned(),
+            },
+            ModelTask::Chat,
+        )
+        .await
+        .map_err(invoke_error_to_app_error)?;
+    let descriptor = protocol_task_descriptor(&task.protocol, ModelTask::Chat).ok_or_else(|| {
+        AppError::BadRequest(format!("Unsupported Chat protocol {:?}", task.protocol))
+    })?;
+    if descriptor.executor != ProtocolExecutorKind::Agent {
+        return Err(AppError::BadRequest(format!(
+            "Protocol {:?} is not an Agent Chat protocol",
+            task.protocol
+        )));
+    }
+
+    let (provider, api_key, base_url, bedrock_config) = match task.protocol.as_str() {
+        "openai.chat_text" => {
+            if task.connection.auth.scheme != AuthScheme::Bearer {
+                return Err(AppError::BadRequest(
+                    "openai.chat_text requires a bearer-auth connection".into(),
+                ));
+            }
+            (
+                "openai".to_owned(),
+                agent_api_keys(&task.connection.auth)?,
+                Some(task.http_endpoint().map_err(invoke_error_to_app_error)?),
+                None,
+            )
+        }
+        "anthropic.messages" => {
+            if !matches!(
+                &task.connection.auth.scheme,
+                AuthScheme::HeaderKey(name) if name.eq_ignore_ascii_case("x-api-key")
+            ) {
+                return Err(AppError::BadRequest(
+                    "anthropic.messages requires a header_key:x-api-key connection".into(),
+                ));
+            }
+            (
+                "anthropic".to_owned(),
+                agent_api_keys(&task.connection.auth)?,
+                Some(task.http_endpoint().map_err(invoke_error_to_app_error)?),
+                None,
+            )
+        }
+        "gemini.generate_text" => {
+            if !matches!(
+                &task.connection.auth.scheme,
+                AuthScheme::HeaderKey(name) if name.eq_ignore_ascii_case("x-goog-api-key")
+            ) {
+                return Err(AppError::BadRequest(
+                    "gemini.generate_text requires a header_key:x-goog-api-key connection".into(),
+                ));
+            }
+            (
+                "gemini".to_owned(),
+                agent_api_keys(&task.connection.auth)?,
+                Some(task.http_endpoint().map_err(invoke_error_to_app_error)?),
+                None,
+            )
+        }
+        "bedrock.anthropic_messages" => {
+            if task.connection.auth.scheme != AuthScheme::Bedrock {
+                return Err(AppError::BadRequest(
+                    "bedrock.anthropic_messages requires a bedrock-auth connection".into(),
+                ));
+            }
+            let bedrock = resolve_bedrock_config(
+                task.bedrock_config.as_deref(),
+                &task.connection.auth.credentials,
+            )
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "bedrock.anthropic_messages requires a valid providers.bedrock_config".into(),
+                )
+            })?;
+            ("bedrock".to_owned(), String::new(), None, Some(bedrock))
+        }
+        protocol => {
+            return Err(AppError::BadRequest(format!(
+                "Unsupported Chat protocol {protocol:?}; expected openai.chat_text, anthropic.messages, gemini.generate_text or bedrock.anthropic_messages"
+            )));
+        }
+    };
+
+    let mut provider_body = task
+        .provider_params
+        .as_object()
+        .cloned()
+        .ok_or_else(|| AppError::BadRequest("Chat capability provider_params must be a JSON object".into()))?;
+    let max_tokens_field = match provider_body.remove("max_tokens_field") {
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            Some(value.trim().to_owned())
+        }
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Chat provider_params.max_tokens_field must be a non-empty string".into(),
+            ));
+        }
+        None => None,
+    };
+    let require_reasoning_content = match provider_body.remove("require_reasoning_content") {
+        Some(serde_json::Value::Bool(value)) => Some(value),
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Chat provider_params.require_reasoning_content must be a boolean".into(),
+            ));
+        }
+        None => None,
+    };
+
+    let compat_overrides = NomiCompatOverrides {
+        // The resolver passes Nomi a complete task endpoint.
+        api_path: base_url.as_ref().map(|_| String::new()),
+        supports_image: Some(capability_supports_image(
             provider_id,
             model,
-        )
-        .await;
-    }
-
-    match crate::resolve_default_model(provider_repo, provider_model_repo).await {
-        Some((pid, m)) => {
-            tracing::warn!(
-                requested_provider = %provider_id,
-                fallback_provider = %pid,
-                fallback_model = %m,
-                "conversation provider unavailable; falling back to first enabled model"
-            );
-            resolve_provider_fields(provider_repo, provider_model_repo, encryption_key, &pid, &m)
-                .await
-        }
-        None => Err(AppError::ProviderUnavailable(
-            "no enabled model provider is configured".into(),
+            &task.traits,
         )),
-    }
+        max_tokens_field,
+        require_reasoning_content,
+        extra_body: (!provider_body.is_empty()).then_some(provider_body),
+    };
+
+    Ok(ResolvedProviderFields {
+        provider,
+        api_key,
+        model: task.model,
+        base_url,
+        compat_overrides,
+        bedrock_config,
+        context_limit: task.context_limit,
+    })
 }
 
-/// Resolve a provider DB row into a base `Config` suitable for LLM calls.
-///
-/// This performs: load provider row, decrypt API key, map platform to nomi
-/// provider name, resolve base URL / compat overrides, build `CliArgs`,
-/// call `Config::resolve`, then apply bedrock and compat post-assignments.
+/// Resolve the exact Chat capability into a base `Config` suitable for LLM
+/// calls. Protocol selects the serializer and endpoint; provider identity does
+/// not participate in transport inference.
 ///
 /// The returned `Config` does NOT include session-specific settings (MCP
 /// servers, session directory, session mode) — callers layer those on top.
 pub async fn resolve_provider_config(
-    provider_repo: &Arc<dyn IProviderRepository>,
-    provider_model_repo: &Arc<dyn IProviderModelRepository>,
-    encryption_key: &[u8; 32],
+    invoke: &ModelInvokeService,
     provider_id: &str,
     model: &str,
     workspace: &Path,
 ) -> Result<Config, AppError> {
     let fields = resolve_provider_fields(
-        provider_repo,
-        provider_model_repo,
-        encryption_key,
+        invoke,
         provider_id,
         model,
     )
@@ -216,10 +266,10 @@ pub async fn resolve_provider_config(
     if let Some(required) = fields.compat_overrides.require_reasoning_content {
         config.compat.require_reasoning_content = Some(required);
     }
-    // NB: compat_overrides.supports_image is intentionally NOT applied here —
-    // this one-shot path (IDMM sidecar) builds text-only messages, so image
-    // stripping is moot. Only the nomi agent manager applies it. Do not add it
-    // for "consistency"; it would be dead config on this path.
+    config.compat.extra_body = fields.compat_overrides.extra_body;
+    // One-shot consumers include robot vision, so the same persisted Chat
+    // trait must govern provider serialization here as in long-lived agents.
+    config.compat.supports_image = fields.compat_overrides.supports_image;
 
     Ok(config)
 }
@@ -418,8 +468,227 @@ mod image_override_tests {
     use super::*;
 
     #[test]
-    fn override_none_when_not_marked() {
-        assert_eq!(image_support_override("unlikely-prov-xyz", "unlikely-model"), None);
+    fn absent_vision_trait_never_defaults_to_supported() {
+        assert!(!capability_supports_image(
+            "unlikely-prov-xyz",
+            "unlikely-model",
+            &[]
+        ));
+        assert!(capability_supports_image(
+            "unlikely-prov-xyz",
+            "unlikely-model",
+            &[ModelTrait::VisionInput]
+        ));
+    }
+}
+
+#[cfg(test)]
+mod provider_resolution_tests {
+    use super::*;
+    use nomifun_common::encrypt_string;
+    use nomifun_db::{
+        CreateProviderParams, IProviderConnectionRepository,
+        IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
+        NewProviderModel, NewProviderModelCapability, SqliteProviderConnectionRepository,
+        SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
+        SqliteProviderRepository, init_database_memory,
+    };
+    use nomifun_model_invoke::{AdapterRegistry, default_adapters};
+
+    const ENCRYPTION_KEY: [u8; 32] = [0x42; 32];
+
+    struct ChatCase {
+        provider_id: &'static str,
+        protocol: &'static str,
+        auth_scheme: &'static str,
+        base_url: &'static str,
+        base_url_override: Option<&'static str>,
+        endpoint: Option<&'static str>,
+        traits: &'static str,
+        credentials: &'static str,
+        provider_params: &'static str,
+        bedrock_config: Option<&'static str>,
+    }
+
+    async fn resolve_case(case: ChatCase) -> ResolvedProviderFields {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let provider_repo: Arc<dyn IProviderRepository> =
+            Arc::new(SqliteProviderRepository::new(pool.clone()));
+        let model_repo: Arc<dyn IProviderModelRepository> =
+            Arc::new(SqliteProviderModelRepository::new(pool.clone()));
+        let capability_repo: Arc<dyn IProviderModelCapabilityRepository> =
+            Arc::new(SqliteProviderModelCapabilityRepository::new(pool.clone()));
+        let connection_repo: Arc<dyn IProviderConnectionRepository> =
+            Arc::new(SqliteProviderConnectionRepository::new(pool));
+        let encrypted_key = encrypt_string(case.credentials, &ENCRYPTION_KEY).unwrap();
+        let capabilities = [NewProviderModelCapability {
+            task: "chat",
+            traits: case.traits,
+            protocol: case.protocol,
+            connection_role: "default",
+            base_url_override: case.base_url_override,
+            endpoint: case.endpoint,
+            provider_params: case.provider_params,
+            context_limit: Some(131_072),
+            ..Default::default()
+        }];
+        provider_repo
+            .create(
+                CreateProviderParams {
+                    provider_id: Some(case.provider_id),
+                    // Deliberately unrelated: platform must never select the
+                    // serializer, authentication or endpoint.
+                    platform: "unrelated-platform",
+                    name: "Protocol seam test",
+                    base_url: case.base_url,
+                    auth_scheme: case.auth_scheme,
+                    credentials_encrypted: &encrypted_key,
+                    enabled: true,
+                    bedrock_config: case.bedrock_config,
+                    sort_order: None,
+                },
+                &NewProviderModel {
+                    model: "test-model",
+                    enabled: true,
+                    sort_order: 0,
+                    description: None,
+                    capabilities: &capabilities,
+                },
+                &[],
+            )
+            .await
+            .unwrap();
+        let invoke = ModelInvokeService::new(
+            provider_repo,
+            model_repo,
+            capability_repo,
+            connection_repo,
+            ENCRYPTION_KEY,
+            reqwest::Client::new(),
+            AdapterRegistry::new(default_adapters()),
+        );
+        resolve_provider_fields(&invoke, case.provider_id, "test-model")
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn exact_openai_chat_capability_resolves_nomi_config() {
+        let fields = resolve_case(ChatCase {
+            provider_id: "0190f5fe-7c00-7a00-8000-000000000101",
+            protocol: "openai.chat_text",
+            auth_scheme: "bearer",
+            base_url: "https://transport.example/root",
+            base_url_override: Some("https://transport.example/openai-root"),
+            endpoint: Some("/custom/chat"),
+            traits: "[]",
+            credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
+            provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true}"#,
+            bedrock_config: None,
+        })
+        .await;
+        assert_eq!(fields.provider, "openai");
+        assert_eq!(fields.api_key, "test-secret\ntest-secret-2");
+        assert_eq!(fields.base_url.as_deref(), Some("https://transport.example/openai-root/custom/chat"));
+        assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
+        assert_eq!(fields.compat_overrides.max_tokens_field.as_deref(), Some("max_completion_tokens"));
+        assert_eq!(fields.compat_overrides.require_reasoning_content, Some(true));
+        assert_eq!(fields.context_limit, Some(131_072));
+        assert_eq!(fields.compat_overrides.supports_image, Some(false));
+    }
+
+    #[tokio::test]
+    async fn vision_input_is_strictly_controlled_by_the_exact_chat_trait() {
+        let fields = resolve_case(ChatCase {
+            provider_id: "0190f5fe-7c00-7a00-8000-000000000105",
+            protocol: "openai.chat_text",
+            auth_scheme: "bearer",
+            base_url: "https://transport.example/root",
+            base_url_override: None,
+            endpoint: Some("/chat/completions"),
+            traits: r#"["vision_input"]"#,
+            credentials: r#"{"api_keys":["test-secret"]}"#,
+            provider_params: "{}",
+            bedrock_config: None,
+        })
+        .await;
+        assert_eq!(fields.compat_overrides.supports_image, Some(true));
+    }
+
+    #[tokio::test]
+    async fn exact_anthropic_chat_capability_resolves_nomi_config() {
+        let fields = resolve_case(ChatCase {
+            provider_id: "0190f5fe-7c00-7a00-8000-000000000102",
+            protocol: "anthropic.messages",
+            auth_scheme: "header_key:x-api-key",
+            base_url: "https://transport.example/root",
+            base_url_override: Some("https://transport.example/anthropic-root"),
+            endpoint: Some("/custom/messages?beta=true"),
+            traits: "[]",
+            credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
+            provider_params: "{}",
+            bedrock_config: None,
+        })
+        .await;
+        assert_eq!(fields.provider, "anthropic");
+        assert_eq!(fields.api_key, "test-secret\ntest-secret-2");
+        assert_eq!(fields.base_url.as_deref(), Some("https://transport.example/anthropic-root/custom/messages?beta=true"));
+        assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
+        assert!(fields.bedrock_config.is_none());
+    }
+
+    #[tokio::test]
+    async fn exact_gemini_chat_capability_resolves_nomi_config() {
+        let fields = resolve_case(ChatCase {
+            provider_id: "0190f5fe-7c00-7a00-8000-000000000103",
+            protocol: "gemini.generate_text",
+            auth_scheme: "header_key:x-goog-api-key",
+            base_url: "https://transport.example/root",
+            base_url_override: Some("https://transport.example/gemini-root"),
+            endpoint: Some("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
+            traits: "[]",
+            credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
+            provider_params: "{}",
+            bedrock_config: None,
+        })
+        .await;
+        assert_eq!(fields.provider, "gemini");
+        assert_eq!(fields.api_key, "test-secret\ntest-secret-2");
+        assert_eq!(fields.base_url.as_deref(), Some("https://transport.example/gemini-root/v1beta/models/test-model:streamGenerateContent?alt=sse"));
+        assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
+        assert!(fields.bedrock_config.is_none());
+    }
+
+    #[tokio::test]
+    async fn exact_bedrock_chat_capability_resolves_nomi_config() {
+        let fields = resolve_case(ChatCase {
+            provider_id: "0190f5fe-7c00-7a00-8000-000000000104",
+            protocol: "bedrock.anthropic_messages",
+            auth_scheme: "bedrock",
+            // Bedrock is an SDK protocol and therefore owns no HTTP root.
+            base_url: "",
+            base_url_override: None,
+            endpoint: None,
+            traits: "[]",
+            credentials: r#"{"access_key_id":"AKIATEST","secret_access_key":"bedrock-secret"}"#,
+            provider_params: r#"{"top_k":11}"#,
+            bedrock_config: Some(
+                r#"{"auth_method":"accessKey","region":"us-east-1"}"#,
+            ),
+        })
+        .await;
+        assert_eq!(fields.provider, "bedrock");
+        assert!(fields.api_key.is_empty());
+        assert!(fields.base_url.is_none());
+        let bedrock = fields.bedrock_config.unwrap();
+        assert_eq!(bedrock.region.as_deref(), Some("us-east-1"));
+        assert_eq!(bedrock.access_key_id.as_deref(), Some("AKIATEST"));
+        assert_eq!(bedrock.secret_access_key.as_deref(), Some("bedrock-secret"));
+        assert_eq!(
+            fields.compat_overrides.extra_body.as_ref().unwrap()["top_k"],
+            11
+        );
     }
 }
 
@@ -537,124 +806,5 @@ mod tests {
 
         let result = drain_text_or_reasoning(rx, |_, _| {}).await.unwrap();
         assert_eq!(result, "real answer");
-    }
-}
-
-#[cfg(test)]
-mod fallback_tests {
-    use super::*;
-    use nomifun_db::models::Provider;
-    use nomifun_db::{CreateProviderParams, DbError, UpdateProviderParams};
-
-    const PROVIDER_A: &str = "0190f5fe-7c00-7a00-8000-000000000001";
-    const PROVIDER_DEAD: &str = "0190f5fe-7c00-7a00-8000-000000000099";
-
-    // Copied (and lightly adapted) from knowledge_completer.rs tests: the same
-    // `ListOnlyRepo`/`ListOnlyModelRepo` + `provider(...)` fixture.
-    // `api_key_encrypted` is a REAL AES-GCM ciphertext under the all-zero
-    // test key so `resolve_provider_fields` (which decrypts) succeeds — an
-    // empty string would fail decrypt. Per-model state lives on the stubbed
-    // `provider_models` rows.
-    fn provider(id: &str, enabled: bool) -> Provider {
-        Provider {
-            id: 0,
-            provider_id: id.into(),
-            platform: "openai".into(),
-            name: id.into(),
-            base_url: String::new(),
-            api_key_encrypted: nomifun_common::encrypt_string("sk-test", &[0u8; 32])
-                .expect("encrypt test api key"),
-            enabled,
-            bedrock_config: None,
-            is_full_url: false,
-            sort_order: 0,
-            created_at: 0,
-            updated_at: 0,
-        }
-    }
-
-    struct ListOnlyRepo(Vec<Provider>);
-
-    #[async_trait::async_trait]
-    impl IProviderRepository for ListOnlyRepo {
-        async fn list(&self) -> Result<Vec<Provider>, DbError> {
-            Ok(self.0.clone())
-        }
-        async fn find_by_id(&self, id: &str) -> Result<Option<Provider>, DbError> {
-            Ok(self.0.iter().find(|p| p.provider_id == id).cloned())
-        }
-        async fn create(&self, _params: CreateProviderParams<'_>) -> Result<Provider, DbError> {
-            unimplemented!("not used by these tests")
-        }
-        async fn update(&self, _id: &str, _params: UpdateProviderParams<'_>) -> Result<Provider, DbError> {
-            unimplemented!("not used by these tests")
-        }
-        async fn delete(&self, _id: &str) -> Result<(), DbError> {
-            unimplemented!("not used by these tests")
-        }
-    }
-
-    fn list_only(providers: Vec<Provider>) -> Arc<dyn IProviderRepository> {
-        Arc::new(ListOnlyRepo(providers))
-    }
-
-    fn rows_for(provider_id: &str, models: &[&str]) -> Arc<dyn IProviderModelRepository> {
-        Arc::new(crate::knowledge_completer::tests::ListOnlyModelRepo(
-            models
-                .iter()
-                .enumerate()
-                .map(|(index, model)| {
-                    crate::knowledge_completer::tests::model_row(
-                        provider_id,
-                        model,
-                        true,
-                        index as i64,
-                    )
-                })
-                .collect(),
-        ))
-    }
-
-    #[tokio::test]
-    async fn fallback_uses_stored_provider_when_present() {
-        let repo = list_only(vec![provider(PROVIDER_A, true)]);
-        let models = rows_for(PROVIDER_A, &["m1"]);
-        let f = resolve_provider_fields_with_fallback(&repo, &models, &[0u8; 32], PROVIDER_A, "m1")
-            .await
-            .unwrap();
-        assert_eq!(f.model, "m1");
-    }
-
-    #[tokio::test]
-    async fn fallback_to_first_enabled_when_provider_missing() {
-        let repo = list_only(vec![provider(PROVIDER_A, true)]);
-        let models = rows_for(PROVIDER_A, &["m1"]);
-        let f =
-            resolve_provider_fields_with_fallback(&repo, &models, &[0u8; 32], PROVIDER_DEAD, "mX")
-                .await
-                .unwrap();
-        assert_eq!(f.model, "m1"); // 回退到首个可用
-    }
-
-    #[tokio::test]
-    async fn empty_provider_id_is_rejected() {
-        let repo = list_only(vec![provider(PROVIDER_A, true)]);
-        let models = rows_for(PROVIDER_A, &["m1"]);
-        let result =
-            resolve_provider_fields_with_fallback(&repo, &models, &[0u8; 32], "", "m1").await;
-        assert!(matches!(result, Err(AppError::BadRequest(_))));
-    }
-
-    #[tokio::test]
-    async fn fallback_errors_provider_unavailable_when_none() {
-        let repo = list_only(vec![provider(PROVIDER_A, false)]); // disabled
-        let models = rows_for(PROVIDER_A, &["m1"]);
-        // NB: match on the `Result` directly rather than `.unwrap_err()` — the Ok
-        // variant (`ResolvedProviderFields`) intentionally does not derive `Debug`
-        // (it holds a decrypted api key we must not risk logging).
-        let result =
-            resolve_provider_fields_with_fallback(&repo, &models, &[0u8; 32], PROVIDER_DEAD, "m")
-                .await;
-        assert!(matches!(result, Err(AppError::ProviderUnavailable(_))));
     }
 }

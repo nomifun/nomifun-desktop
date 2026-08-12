@@ -14,14 +14,15 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{StreamExt, future, stream};
 use nomifun_api_types::{
-    ManagedModel, ManagedModelHealthBatchResult, ManagedModelHealthErrorKind,
-    ManagedModelHealthResult, ManagedModelHealthStatus, ManagedModelServiceAvailability,
-    ManagedModelServiceStatus,
+    CapabilityHealth, HealthStatus, ManagedModel, ManagedModelHealthBatchResult,
+    ManagedModelHealthErrorKind, ManagedModelHealthResult, ManagedModelHealthStatus,
+    ManagedModelServiceAvailability, ManagedModelServiceStatus,
 };
-use nomifun_common::{AppError, ProviderId, encrypt_string, now_ms};
+use nomifun_common::{AppError, ProviderId, now_ms};
 use nomifun_db::{
-    CreateProviderParams, IClientPreferenceRepository, IProviderModelRepository,
-    IProviderRepository, ProviderModelRow, UpdateProviderParams, models::Provider,
+    CreateProviderParams, IClientPreferenceRepository, IProviderModelCapabilityRepository,
+    IProviderModelRepository, IProviderRepository, NewProviderModel, NewProviderModelCapability,
+    ProviderModelCapabilityRow, ProviderModelRow, models::Provider,
 };
 use reqwest::Url;
 use serde::Deserialize;
@@ -30,6 +31,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
+
+use crate::provider_connection::encrypt_credentials;
 
 pub const FREE_MODEL_PLATFORM: &str = "nomifun-free-model";
 pub const MANAGED_MODEL_PROTOCOL_VERSION: &str = "1";
@@ -89,6 +92,57 @@ impl CatalogModel {
     }
 }
 
+const MANAGED_MODEL_DESCRIPTION: &str =
+    "Free model supplied through NomiFun's managed model adapter";
+
+struct ManagedGraphModel {
+    model: String,
+    enabled: bool,
+    sort_order: i64,
+    capability: NewProviderModelCapability<'static>,
+}
+
+impl ManagedGraphModel {
+    fn as_db(&self) -> NewProviderModel<'_> {
+        NewProviderModel {
+            model: &self.model,
+            enabled: self.enabled,
+            sort_order: self.sort_order,
+            description: Some(MANAGED_MODEL_DESCRIPTION),
+            capabilities: std::slice::from_ref(&self.capability),
+        }
+    }
+}
+
+fn managed_graph_models(
+    catalog: &[CatalogModel],
+    model_enabled: &HashMap<String, bool>,
+) -> Vec<ManagedGraphModel> {
+    catalog
+        .iter()
+        .enumerate()
+        .map(|(index, model)| ManagedGraphModel {
+            model: model.id.clone(),
+            enabled: model_enabled.get(&model.id).copied().unwrap_or(true),
+            sort_order: i64::try_from(index).unwrap_or(i64::MAX),
+            capability: NewProviderModelCapability {
+                task: "chat",
+                traits: "[]",
+                protocol: "openai.chat_text",
+                connection_role: "default",
+                base_url_override: None,
+                endpoint: None,
+                poll_endpoint: None,
+                content_endpoint: None,
+                realtime_endpoint: None,
+                allow_cross_origin_credentials: false,
+                provider_params: "{}",
+                context_limit: None,
+            },
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 struct FreeState {
     enabled: bool,
@@ -114,20 +168,24 @@ struct LoopbackState {
 pub struct ManagedModelService {
     provider_id: String,
     provider_repo: Arc<dyn IProviderRepository>,
+    capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
     preference_repo: Option<Arc<dyn IClientPreferenceRepository>>,
     http_client: reqwest::Client,
     health_limiter: Arc<Semaphore>,
-    health_cache: RwLock<HashMap<String, ManagedModelHealthResult>>,
     refresh_lock: Mutex<()>,
     mutation_lock: Mutex<()>,
     free: RwLock<FreeState>,
 }
 
 impl ManagedModelService {
-    pub fn new(provider_repo: Arc<dyn IProviderRepository>) -> Arc<Self> {
+    pub fn new(
+        provider_repo: Arc<dyn IProviderRepository>,
+        capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
+    ) -> Arc<Self> {
         Self::new_with_client_and_preferences(
             ProviderId::new().into_string(),
             provider_repo,
+            capability_repo,
             None,
             managed_http_client(),
         )
@@ -135,11 +193,13 @@ impl ManagedModelService {
 
     pub fn new_with_preferences(
         provider_repo: Arc<dyn IProviderRepository>,
+        capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
         preference_repo: Arc<dyn IClientPreferenceRepository>,
     ) -> Arc<Self> {
         Self::new_with_client_and_preferences(
             ProviderId::new().into_string(),
             provider_repo,
+            capability_repo,
             Some(preference_repo),
             managed_http_client(),
         )
@@ -147,11 +207,13 @@ impl ManagedModelService {
 
     pub fn new_with_client(
         provider_repo: Arc<dyn IProviderRepository>,
+        capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
         http_client: reqwest::Client,
     ) -> Arc<Self> {
         Self::new_with_client_and_preferences(
             ProviderId::new().into_string(),
             provider_repo,
+            capability_repo,
             None,
             http_client,
         )
@@ -160,16 +222,17 @@ impl ManagedModelService {
     fn new_with_client_and_preferences(
         provider_id: String,
         provider_repo: Arc<dyn IProviderRepository>,
+        capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
         preference_repo: Option<Arc<dyn IClientPreferenceRepository>>,
         http_client: reqwest::Client,
     ) -> Arc<Self> {
         Arc::new(Self {
             provider_id,
             provider_repo,
+            capability_repo,
             preference_repo,
             http_client,
             health_limiter: Arc::new(Semaphore::new(FREE_HEALTH_MAX_CONCURRENCY)),
-            health_cache: RwLock::new(HashMap::new()),
             refresh_lock: Mutex::new(()),
             mutation_lock: Mutex::new(()),
             free: RwLock::new(FreeState {
@@ -265,24 +328,39 @@ impl ManagedModelService {
         self.free_status().await.models
     }
 
-    /// Return the latest in-process health results keyed by model id.
-    ///
-    /// Health is intentionally diagnostic and ephemeral: a stale result must
-    /// never become provider configuration or block inference after restart.
-    pub async fn free_health_snapshot(&self) -> Vec<ManagedModelHealthResult> {
+    /// Project the standard persisted Chat capability observations in managed
+    /// catalog order. Managed models do not own a second health cache.
+    pub async fn free_health_snapshot(
+        &self,
+    ) -> Result<Vec<ManagedModelHealthResult>, AppError> {
         let catalog = self
             .free
             .read()
             .await
             .catalog
             .iter()
-            .map(|model| model.id.clone())
-            .collect::<Vec<_>>();
-        let cache = self.health_cache.read().await;
-        catalog
+            .enumerate()
+            .map(|(index, model)| (model.id.clone(), index))
+            .collect::<HashMap<_, _>>();
+        let mut results = self
+            .capability_repo
+            .list_for_provider(&self.provider_id)
+            .await?
             .into_iter()
-            .filter_map(|model_id| cache.get(&model_id).cloned())
-            .collect()
+            .filter(|row| row.task == "chat" && catalog.contains_key(&row.model))
+            .filter_map(|row| match managed_health_from_capability_row(row) {
+                Ok(Some(result)) => Some(Ok(result)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        results.sort_by_key(|result| {
+            catalog
+                .get(&result.model_id)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+        Ok(results)
     }
 
     /// Check one model using the same internal adapter as ordinary
@@ -307,6 +385,17 @@ impl ManagedModelService {
         if model_id.is_empty() {
             return Err(AppError::BadRequest("model id must not be empty".into()));
         }
+        let expected_config_revision = self
+            .provider_repo
+            .find_by_id(&self.provider_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "Managed free-model provider '{}' was not found",
+                    self.provider_id
+                ))
+            })?
+            .config_revision;
 
         let (service_enabled, model_enabled) = {
             let state = self.free.read().await;
@@ -343,7 +432,8 @@ impl ManagedModelService {
             None
         };
         if let Some(result) = immediate {
-            self.cache_health_result(result.clone()).await;
+            self.persist_health_result(&result, expected_config_revision)
+                .await;
             return Ok(result);
         }
 
@@ -367,7 +457,8 @@ impl ManagedModelService {
                         ManagedModelHealthErrorKind::Busy,
                         "Health checks are already running. Try again shortly.",
                     );
-                    self.cache_health_result(result.clone()).await;
+                    self.persist_health_result(&result, expected_config_revision)
+                        .await;
                     return Ok(result);
                 }
             }
@@ -402,7 +493,8 @@ impl ManagedModelService {
                 "The model check timed out. Try again later.",
             ),
         };
-        self.cache_health_result(result.clone()).await;
+        self.persist_health_result(&result, expected_config_revision)
+            .await;
         Ok(result)
     }
 
@@ -467,11 +559,58 @@ impl ManagedModelService {
         health_batch_result(results)
     }
 
-    async fn cache_health_result(&self, result: ManagedModelHealthResult) {
-        self.health_cache
-            .write()
+    async fn persist_health_result(
+        &self,
+        result: &ManagedModelHealthResult,
+        expected_config_revision: i64,
+    ) {
+        let health = CapabilityHealth {
+            status: match result.status {
+                ManagedModelHealthStatus::Unknown => HealthStatus::Unknown,
+                ManagedModelHealthStatus::Healthy => HealthStatus::Healthy,
+                ManagedModelHealthStatus::Unhealthy => HealthStatus::Unhealthy,
+            },
+            latency: result
+                .latency_ms
+                .map(|latency| i64::try_from(latency).unwrap_or(i64::MAX)),
+            error: result.message.clone(),
+        };
+        let json = match serde_json::to_string(&health) {
+            Ok(json) => json,
+            Err(error) => {
+                warn!(
+                    provider_id = %self.provider_id,
+                    model = %result.model_id,
+                    %error,
+                    "Could not serialize managed Chat capability health"
+                );
+                return;
+            }
+        };
+        match self
+            .capability_repo
+            .set_health(
+                &self.provider_id,
+                expected_config_revision,
+                &result.model_id,
+                "chat",
+                Some(&json),
+            )
             .await
-            .insert(result.model_id.clone(), result);
+        {
+            Ok(true) => {}
+            Ok(false) => warn!(
+                provider_id = %self.provider_id,
+                model = %result.model_id,
+                "Managed Chat capability disappeared before health write-back"
+            ),
+            Err(error) => warn!(
+                provider_id = %self.provider_id,
+                model = %result.model_id,
+                %error,
+                "Managed Chat capability health write-back failed"
+            ),
+        }
     }
 
     async fn set_refresh_schedule(
@@ -700,45 +839,32 @@ impl ManagedModelService {
         catalog: &[CatalogModel],
         model_enabled: &HashMap<String, bool>,
     ) -> Result<(), AppError> {
-        let models_json = serde_json::to_string(
-            &catalog
-                .iter()
-                .map(|model| model.id.as_str())
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|e| AppError::Internal(format!("Failed to serialize managed models: {e}")))?;
-        let enabled_json = serde_json::to_string(model_enabled).map_err(|e| {
-            AppError::Internal(format!("Failed to serialize managed model flags: {e}"))
-        })?;
-        let descriptions_json = serde_json::to_string(
-            &catalog
-                .iter()
-                .map(|model| {
-                    (
-                        model.id.as_str(),
-                        "Free model supplied through NomiFun's managed model adapter",
-                    )
-                })
-                .collect::<HashMap<_, _>>(),
-        )
-        .map_err(|e| {
-            AppError::Internal(format!("Failed to serialize managed model descriptions: {e}"))
-        })?;
-
+        let provider = self
+            .provider_repo
+            .find_by_id(&self.provider_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::Internal(format!(
+                    "managed provider {} disappeared while its service was running",
+                    self.provider_id
+                ))
+            })?;
+        let graph = managed_graph_models(catalog, model_enabled);
+        let models = graph.iter().map(ManagedGraphModel::as_db).collect::<Vec<_>>();
         self.provider_repo
-            .update(
-                &self.provider_id,
-                UpdateProviderParams {
-                    platform: Some(FREE_MODEL_PLATFORM),
-                    name: Some(FREE_MODEL_PROVIDER_NAME),
-                    models: Some(&models_json),
-                    enabled: Some(enabled),
-                    model_descriptions: Some(Some(&descriptions_json)),
-                    model_enabled: Some(Some(&enabled_json)),
-                    bedrock_config: Some(None),
-                    is_full_url: Some(false),
-                    ..Default::default()
+            .save_managed_graph(
+                CreateProviderParams {
+                    provider_id: Some(&self.provider_id),
+                    platform: FREE_MODEL_PLATFORM,
+                    name: FREE_MODEL_PROVIDER_NAME,
+                    base_url: &provider.base_url,
+                    auth_scheme: "bearer",
+                    credentials_encrypted: &provider.credentials_encrypted,
+                    enabled,
+                    bedrock_config: None,
+                    sort_order: Some(provider.sort_order),
                 },
+                &models,
             )
             .await?;
         Ok(())
@@ -1133,11 +1259,13 @@ async fn run_refresh_loop<J>(
 pub async fn start_and_provision_free_model(
     provider_repo: Arc<dyn IProviderRepository>,
     provider_model_repo: Arc<dyn IProviderModelRepository>,
+    capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
     encryption_key: [u8; 32],
 ) -> Result<(Arc<ManagedModelService>, ManagedModelServer), AppError> {
     start_and_provision_free_model_with_preferences(
         provider_repo,
         provider_model_repo,
+        capability_repo,
         None,
         encryption_key,
     )
@@ -1149,6 +1277,7 @@ pub async fn start_and_provision_free_model(
 pub async fn start_and_provision_free_model_with_preferences(
     provider_repo: Arc<dyn IProviderRepository>,
     provider_model_repo: Arc<dyn IProviderModelRepository>,
+    capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
     preference_repo: Option<Arc<dyn IClientPreferenceRepository>>,
     encryption_key: [u8; 32],
 ) -> Result<(Arc<ManagedModelService>, ManagedModelServer), AppError> {
@@ -1188,12 +1317,14 @@ pub async fn start_and_provision_free_model_with_preferences(
         Some(repo) => ManagedModelService::new_with_client_and_preferences(
             provider_id.clone(),
             provider_repo.clone(),
+            capability_repo.clone(),
             Some(repo),
             managed_http_client(),
         ),
         None => ManagedModelService::new_with_client_and_preferences(
             provider_id.clone(),
             provider_repo.clone(),
+            capability_repo,
             None,
             managed_http_client(),
         ),
@@ -1218,84 +1349,37 @@ pub async fn start_and_provision_free_model_with_preferences(
         .await
         .map_err(AppError::Internal)?;
 
-    let token_encrypted = encrypt_string(server.auth_token(), &encryption_key)?;
+    let credentials_encrypted = encrypt_credentials(
+        &json!({"api_keys":[server.auth_token()]}),
+        &encryption_key,
+    )?;
     let base_url = server.base_url();
-    let (status, model_enabled) = {
+    let (status, model_enabled, catalog) = {
         let state = service.free.read().await;
         (
             status_from_free_state(&state, &service.provider_id),
             state.model_enabled.clone(),
+            state.catalog.clone(),
         )
     };
-    let models_json = serde_json::to_string(
-        &status
-            .models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|e| AppError::Internal(format!("Failed to serialize startup model catalog: {e}")))?;
-    let enabled_json = serde_json::to_string(&model_enabled).map_err(|e| {
-        AppError::Internal(format!("Failed to serialize startup managed model flags: {e}"))
-    })?;
-    let descriptions_json = serde_json::to_string(
-        &status
-            .models
-            .iter()
-            .map(|model| {
-                (
-                    model.id.as_str(),
-                    "Free model supplied through NomiFun's managed model adapter",
-                )
-            })
-            .collect::<HashMap<_, _>>(),
-    )
-    .map_err(|e| {
-        AppError::Internal(format!("Failed to serialize startup model descriptions: {e}"))
-    })?;
-
-    match existing {
-        Some(_) => {
-            provider_repo
-                .update(
-                    &provider_id,
-                    UpdateProviderParams {
-                        platform: Some(FREE_MODEL_PLATFORM),
-                        name: Some(FREE_MODEL_PROVIDER_NAME),
-                        base_url: Some(&base_url),
-                        api_key_encrypted: Some(&token_encrypted),
-                        models: Some(&models_json),
-                        enabled: Some(status.enabled),
-                        model_descriptions: Some(Some(&descriptions_json)),
-                        model_enabled: Some(Some(&enabled_json)),
-                        bedrock_config: Some(None),
-                        is_full_url: Some(false),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-        }
-        None => {
-            provider_repo
-                .create(CreateProviderParams {
-                    provider_id: Some(&provider_id),
-                    platform: FREE_MODEL_PLATFORM,
-                    name: FREE_MODEL_PROVIDER_NAME,
-                    base_url: &base_url,
-                    api_key_encrypted: &token_encrypted,
-                    models: &models_json,
-                    enabled: status.enabled,
-                    model_context_limits: None,
-                    model_protocols: None,
-                    model_descriptions: Some(&descriptions_json),
-                    model_enabled: Some(&enabled_json),
-                    bedrock_config: None,
-                    is_full_url: false,
-                    sort_order: None,
-                })
-                .await?;
-        }
-    }
+    let graph = managed_graph_models(&catalog, &model_enabled);
+    let models = graph.iter().map(ManagedGraphModel::as_db).collect::<Vec<_>>();
+    provider_repo
+        .save_managed_graph(
+            CreateProviderParams {
+                provider_id: Some(&provider_id),
+                platform: FREE_MODEL_PLATFORM,
+                name: FREE_MODEL_PROVIDER_NAME,
+                base_url: &base_url,
+                auth_scheme: "bearer",
+                credentials_encrypted: &credentials_encrypted,
+                enabled: status.enabled,
+                bedrock_config: None,
+                sort_order: existing.as_ref().map(|provider| provider.sort_order),
+            },
+            &models,
+        )
+        .await?;
 
     Ok((service, server))
 }
@@ -1651,6 +1735,53 @@ fn openai_error(status: StatusCode, message: &str, kind: &str) -> Response {
         .into_response()
 }
 
+fn managed_health_from_capability_row(
+    row: ProviderModelCapabilityRow,
+) -> Result<Option<ManagedModelHealthResult>, AppError> {
+    let Some(health_json) = row.health else {
+        return Ok(None);
+    };
+    let health: CapabilityHealth = serde_json::from_str(&health_json).map_err(|error| {
+        AppError::Internal(format!(
+            "stored managed Chat capability health for model {:?} is invalid: {error}",
+            row.model
+        ))
+    })?;
+    let checked_at = row.health_checked_at.ok_or_else(|| {
+        AppError::Internal(format!(
+            "stored managed Chat capability health for model {:?} has no observation timestamp",
+            row.model
+        ))
+    })?;
+    let latency_ms = health
+        .latency
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| {
+            AppError::Internal(format!(
+                "stored managed Chat capability health for model {:?} has a negative latency",
+                row.model
+            ))
+        })?;
+    let status = match health.status {
+        HealthStatus::Unknown => ManagedModelHealthStatus::Unknown,
+        HealthStatus::Healthy => ManagedModelHealthStatus::Healthy,
+        HealthStatus::Unhealthy => ManagedModelHealthStatus::Unhealthy,
+    };
+    let error_kind = health
+        .error
+        .as_ref()
+        .map(|_| ManagedModelHealthErrorKind::Unknown);
+    Ok(Some(ManagedModelHealthResult {
+        model_id: row.model,
+        status,
+        latency_ms,
+        checked_at,
+        error_kind,
+        message: health.error,
+    }))
+}
+
 fn unknown_health_result(
     model_id: &str,
     error_kind: ManagedModelHealthErrorKind,
@@ -1969,10 +2100,11 @@ struct OpenAiModel {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use nomifun_common::decrypt_string;
+    use crate::provider_connection::decrypt_credentials;
     use nomifun_db::{
         IClientPreferenceRepository, SqliteClientPreferenceRepository,
-        SqliteProviderModelRepository, SqliteProviderRepository, init_database_memory,
+        SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
+        SqliteProviderRepository, init_database_memory,
     };
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1981,6 +2113,14 @@ mod tests {
 
     fn model_repo(db: &nomifun_db::Database) -> Arc<dyn IProviderModelRepository> {
         Arc::new(SqliteProviderModelRepository::new(db.pool().clone()))
+    }
+
+    fn capability_repo(
+        db: &nomifun_db::Database,
+    ) -> Arc<dyn IProviderModelCapabilityRepository> {
+        Arc::new(SqliteProviderModelCapabilityRepository::new(
+            db.pool().clone(),
+        ))
     }
 
     fn normalize_managed_sse(input: &str, chunk_size: usize) -> String {
@@ -2111,7 +2251,14 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let upstream = reqwest::get(server.uri()).await.unwrap();
+        let upstream = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap();
 
         let response = proxy_upstream_response(upstream).await;
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -2205,7 +2352,14 @@ mod tests {
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
         let (service, mut server) =
-            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
+            start_and_provision_free_model(
+                repo.clone(),
+                model_repo(&db),
+                capability_repo(&db),
+                TEST_KEY,
+            )
+            .await
+            .unwrap();
 
         let provider_id = service.free_status().await.provider_id.unwrap();
         let row = repo.find_by_id(&provider_id).await.unwrap().unwrap();
@@ -2213,8 +2367,8 @@ mod tests {
         assert!(row.base_url.starts_with("http://127.0.0.1:"));
         assert!(row.base_url.ends_with("/v1"));
         assert_eq!(
-            decrypt_string(&row.api_key_encrypted, &TEST_KEY).unwrap(),
-            server.auth_token()
+            decrypt_credentials(&row.credentials_encrypted, &TEST_KEY).unwrap(),
+            json!({"api_keys":[server.auth_token()]})
         );
         assert!(row.enabled);
         assert!(service.free_status().await.ready);
@@ -2227,22 +2381,31 @@ mod tests {
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
         let (first_service, mut first_server) =
-            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
+            start_and_provision_free_model(
+                repo.clone(),
+                model_repo(&db),
+                capability_repo(&db),
+                TEST_KEY,
+            )
+            .await
+            .unwrap();
         let provider_id = first_service.free_status().await.provider_id.unwrap();
+        first_service.set_free_enabled(false).await.unwrap();
+        first_service
+            .set_free_model_enabled("big-pickle", false)
+            .await
+            .unwrap();
         first_server.stop();
-        repo.update(
-            &provider_id,
-            UpdateProviderParams {
-                enabled: Some(false),
-                model_enabled: Some(Some(r#"{"big-pickle":false}"#)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
 
         let (service, mut second_server) =
-            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
+            start_and_provision_free_model(
+                repo.clone(),
+                model_repo(&db),
+                capability_repo(&db),
+                TEST_KEY,
+            )
+            .await
+            .unwrap();
         let status = service.free_status().await;
         assert!(!status.enabled);
         assert_eq!(
@@ -2264,28 +2427,36 @@ mod tests {
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
         let (first_service, mut first_server) =
-            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
-        let provider_id = first_service.free_status().await.provider_id.unwrap();
+            start_and_provision_free_model(
+                repo.clone(),
+                model_repo(&db),
+                capability_repo(&db),
+                TEST_KEY,
+            )
+            .await
+            .unwrap();
+        let catalog = vec![CatalogModel::opencode("big-pickle", "big-pickle")];
+        let model_enabled = HashMap::from([
+            ("big-pickle".to_owned(), false),
+            ("temporarily-missing-free".to_owned(), false),
+        ]);
+        first_service
+            .sync_provider_projection(true, &catalog, &model_enabled)
+            .await
+            .unwrap();
         first_server.stop();
-        // Shrink the persisted catalog to one model and disable it. The map
-        // entry for a model with no catalog row is not representable since
-        // migration 016 (rows are the only per-model store), so it cannot
-        // survive a restart; the row-backed toggle must.
-        repo.update(
-            &provider_id,
-            UpdateProviderParams {
-                models: Some(r#"["big-pickle"]"#),
-                model_enabled: Some(Some(
-                    r#"{"big-pickle":false,"temporarily-missing-free":false}"#,
-                )),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        // Shrink the authoritative model graph to one disabled row. A toggle
+        // without a provider_models row cannot survive restart.
 
         let (service, mut second_server) =
-            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
+            start_and_provision_free_model(
+                repo.clone(),
+                model_repo(&db),
+                capability_repo(&db),
+                TEST_KEY,
+            )
+            .await
+            .unwrap();
         let status = service.free_status().await;
         assert_eq!(
             status
@@ -2311,27 +2482,39 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let encrypted = encrypt_string("legacy-token", &TEST_KEY).unwrap();
-        repo.create(CreateProviderParams {
-            provider_id: Some("0190f5fe-7c00-7a00-8abc-000000000001"),
-            platform: " NOMIFUN-FREE-MODEL ",
-            name: "Legacy managed alias",
-            base_url: "http://127.0.0.1:12345/v1",
-            api_key_encrypted: &encrypted,
-            models: r#"["big-pickle"]"#,
-            enabled: true,
-            model_context_limits: None,
-            model_protocols: None,
-            model_descriptions: None,
-            model_enabled: None,
-            bedrock_config: None,
-            is_full_url: false,
-            sort_order: None,
-        })
+        let encrypted =
+            encrypt_credentials(&json!({"api_keys":["legacy-token"]}), &TEST_KEY).unwrap();
+        let graph = managed_graph_models(
+            &[CatalogModel::opencode("big-pickle", "big-pickle")],
+            &HashMap::new(),
+        );
+        let initial_model = graph[0].as_db();
+        repo.create(
+            CreateProviderParams {
+                provider_id: Some("0190f5fe-7c00-7a00-8abc-000000000001"),
+                platform: " NOMIFUN-FREE-MODEL ",
+                name: "Legacy managed alias",
+                base_url: "http://127.0.0.1:12345/v1",
+                auth_scheme: "bearer",
+                credentials_encrypted: &encrypted,
+                enabled: true,
+                bedrock_config: None,
+                sort_order: None,
+            },
+            &initial_model,
+            &[],
+        )
         .await
         .unwrap();
 
-        let error = match start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await {
+        let error = match start_and_provision_free_model(
+            repo.clone(),
+            model_repo(&db),
+            capability_repo(&db),
+            TEST_KEY,
+        )
+        .await
+        {
             Ok(_) => panic!("noncanonical managed platform alias must be rejected"),
             Err(error) => error,
         };
@@ -2346,28 +2529,43 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let encrypted = encrypt_string("old-token", &TEST_KEY).unwrap();
+        let encrypted =
+            encrypt_credentials(&json!({"api_keys":["old-token"]}), &TEST_KEY).unwrap();
         let provider_id = ProviderId::new().into_string();
-        repo.create(CreateProviderParams {
-            provider_id: Some(&provider_id),
-            platform: FREE_MODEL_PLATFORM,
-            name: FREE_MODEL_PROVIDER_NAME,
-            base_url: "http://127.0.0.1:1/v1",
-            api_key_encrypted: &encrypted,
-            models: r#"["big-pickle"]"#,
+        let capabilities = [NewProviderModelCapability {
+            task: "chat",
+            traits: "[]",
+            protocol: "openai.chat_text",
+            connection_role: "default",
+            provider_params: "{}",
+            ..Default::default()
+        }];
+        let initial_model = NewProviderModel {
+            model: "big-pickle",
             enabled: true,
-            model_context_limits: None,
-            model_protocols: None,
-            model_descriptions: Some(r#"{"big-pickle":"A long capability description"}"#),
-            model_enabled: None,
-            bedrock_config: None,
-            is_full_url: false,
-            sort_order: None,
-        })
+            sort_order: 0,
+            description: Some("A long capability description"),
+            capabilities: &capabilities,
+        };
+        repo.create(
+            CreateProviderParams {
+                provider_id: Some(&provider_id),
+                platform: FREE_MODEL_PLATFORM,
+                name: FREE_MODEL_PROVIDER_NAME,
+                base_url: "http://127.0.0.1:1/v1",
+                auth_scheme: "bearer",
+                credentials_encrypted: &encrypted,
+                enabled: true,
+                bedrock_config: None,
+                sort_order: None,
+            },
+            &initial_model,
+            &[],
+        )
         .await
         .unwrap();
 
-        let service = ManagedModelService::new(repo.clone());
+        let service = ManagedModelService::new(repo.clone(), capability_repo(&db));
         let row = repo.find_by_id(&provider_id).await.unwrap();
         let rows = model_repo(&db)
             .list_for_provider(&provider_id)
@@ -2388,7 +2586,7 @@ mod tests {
             .connect_timeout(Duration::from_millis(100))
             .build()
             .unwrap();
-        let service = ManagedModelService::new_with_client(repo, client);
+        let service = ManagedModelService::new_with_client(repo, capability_repo(&db), client);
 
         let status = service.refresh_free_models().await.unwrap();
         assert!(status.ready, "seed catalog remains locally ready");
@@ -2405,7 +2603,15 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = ManagedModelService::new(repo);
+        let capabilities = capability_repo(&db);
+        let (service, mut server) = start_and_provision_free_model(
+            repo,
+            model_repo(&db),
+            capabilities.clone(),
+            TEST_KEY,
+        )
+        .await
+        .unwrap();
         {
             let mut state = service.free.write().await;
             state.model_enabled.insert("big-pickle".into(), false);
@@ -2420,7 +2626,72 @@ mod tests {
             result.error_kind,
             Some(ManagedModelHealthErrorKind::ModelDisabled)
         );
-        assert_eq!(service.free_health_snapshot().await, vec![result]);
+        let snapshot = service.free_health_snapshot().await.unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].model_id, result.model_id);
+        assert_eq!(snapshot[0].status, result.status);
+        assert_eq!(snapshot[0].message, result.message);
+        let stored = capabilities
+            .get(&service.provider_id, "big-pickle", "chat")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.health.is_some());
+        assert!(stored.health_checked_at.is_some());
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn stale_managed_probe_never_overwrites_a_newer_chat_graph() {
+        let db = init_database_memory().await.unwrap();
+        let provider_repo: Arc<dyn IProviderRepository> =
+            Arc::new(SqliteProviderRepository::new(db.pool().clone()));
+        let capabilities = capability_repo(&db);
+        let (service, mut server) = start_and_provision_free_model(
+            provider_repo.clone(),
+            model_repo(&db),
+            capabilities.clone(),
+            TEST_KEY,
+        )
+        .await
+        .unwrap();
+        let stale_revision = provider_repo
+            .find_by_id(&service.provider_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision;
+
+        // This is an invocation-graph mutation and advances the provider CAS
+        // revision after the synthetic probe has started.
+        service.set_free_enabled(false).await.unwrap();
+        let current_revision = provider_repo
+            .find_by_id(&service.provider_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision;
+        assert!(current_revision > stale_revision);
+
+        let stale_result = ManagedModelHealthResult {
+            model_id: "big-pickle".into(),
+            status: ManagedModelHealthStatus::Healthy,
+            latency_ms: Some(1),
+            checked_at: now_ms(),
+            error_kind: None,
+            message: None,
+        };
+        service
+            .persist_health_result(&stale_result, stale_revision)
+            .await;
+        let row = capabilities
+            .get(&service.provider_id, "big-pickle", "chat")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.health, None);
+        assert_eq!(row.health_checked_at, None);
+        server.stop();
     }
 
     #[tokio::test]
@@ -2525,7 +2796,9 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let status = ManagedModelService::new(repo).free_status().await;
+        let status = ManagedModelService::new(repo, capability_repo(&db))
+            .free_status()
+            .await;
         assert!(status.ready);
         assert_eq!(
             status.availability,
@@ -2543,7 +2816,7 @@ mod tests {
             .connect_timeout(Duration::from_millis(20))
             .build()
             .unwrap();
-        let service = ManagedModelService::new_with_client(repo, client);
+        let service = ManagedModelService::new_with_client(repo, capability_repo(&db), client);
         let policy = ManagedModelRefreshPolicy {
             success_interval: Duration::from_millis(200),
             success_jitter: Duration::ZERO,
@@ -2596,8 +2869,11 @@ mod tests {
             .await
             .unwrap();
 
-        let service =
-            ManagedModelService::new_with_preferences(provider_repo, preference_repo);
+        let service = ManagedModelService::new_with_preferences(
+            provider_repo,
+            capability_repo(&db),
+            preference_repo,
+        );
         service.hydrate_refresh_metadata().await.unwrap();
         let status = service.free_status().await;
         assert_eq!(status.last_refresh, Some(1_700_000_000_000));
@@ -2621,6 +2897,7 @@ mod tests {
             .unwrap();
         let service = ManagedModelService::new_with_preferences(
             provider_repo,
+            capability_repo(&db),
             preference_repo.clone(),
         );
 
@@ -2652,7 +2929,7 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = ManagedModelService::new(repo);
+        let service = ManagedModelService::new(repo, capability_repo(&db));
         let response = loopback_models(
             State(LoopbackState {
                 service,
@@ -2672,7 +2949,7 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = ManagedModelService::new(repo);
+        let service = ManagedModelService::new(repo, capability_repo(&db));
         {
             let mut state = service.free.write().await;
             state.model_enabled.insert("big-pickle".into(), false);
@@ -2708,7 +2985,7 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = ManagedModelService::new(repo);
+        let service = ManagedModelService::new(repo, capability_repo(&db));
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
@@ -2734,7 +3011,7 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = ManagedModelService::new(repo);
+        let service = ManagedModelService::new(repo, capability_repo(&db));
         let mut server = ManagedModelServer::start(service).await.unwrap();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 

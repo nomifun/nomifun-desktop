@@ -162,8 +162,12 @@ mod tests {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         ));
         assert!(!is_preview_capability("43210"));
-        assert!(!is_preview_capability(&"A".repeat(PREVIEW_CAPABILITY_HEX_LEN)));
-        assert!(!is_preview_capability(&"0".repeat(PREVIEW_CAPABILITY_HEX_LEN - 1)));
+        assert!(!is_preview_capability(
+            &"A".repeat(PREVIEW_CAPABILITY_HEX_LEN)
+        ));
+        assert!(!is_preview_capability(
+            &"0".repeat(PREVIEW_CAPABILITY_HEX_LEN - 1)
+        ));
     }
 
     #[test]
@@ -232,8 +236,11 @@ mod tests {
     #[test]
     fn preview_url_response_roundtrip() {
         let resp = PreviewUrlResponse {
-            url: "/api/ppt-proxy/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/".into(),
-            capability: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
+            url: "/api/ppt-proxy/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/"
+                .into(),
+            capability: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            ),
             error: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -330,7 +337,10 @@ mod tests {
         assert_eq!(t.file_name.as_deref(), Some("a.md"));
         assert_eq!(t.title.as_deref(), Some("My Doc"));
         assert_eq!(t.language.as_deref(), Some("rust"));
-        assert_eq!(t.conversation_id.as_ref().map(|id| id.as_str()), Some(conversation_id));
+        assert_eq!(
+            t.conversation_id.as_ref().map(|id| id.as_str()),
+            Some(conversation_id)
+        );
     }
 
     #[test]
@@ -375,7 +385,8 @@ mod tests {
 
     #[test]
     fn target_dto_roundtrip() {
-        let conversation_id = ConversationId::try_from("0190f5fe-7c00-7a00-8abc-012345678904").unwrap();
+        let conversation_id =
+            ConversationId::try_from("0190f5fe-7c00-7a00-8abc-012345678904").unwrap();
         let t = PreviewHistoryTargetDto {
             content_type: PreviewContentType::Excel,
             file_path: Some("/sheet.xlsx".into()),
@@ -416,10 +427,8 @@ mod tests {
     #[test]
     fn snapshot_info_serialize() {
         let info = PreviewSnapshotInfoDto {
-            snapshot_id: PreviewSnapshotId::try_from(
-                "0190f5fe-7c00-7a00-8000-000000000001",
-            )
-            .unwrap(),
+            snapshot_id: PreviewSnapshotId::try_from("0190f5fe-7c00-7a00-8000-000000000001")
+                .unwrap(),
             label: "2023-11-14 12:00".into(),
             created_at: 1700000000000,
             size: 1024,
@@ -428,10 +437,7 @@ mod tests {
             file_path: Some("/a/doc.md".into()),
         };
         let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(
-            json["snapshot_id"],
-            "0190f5fe-7c00-7a00-8000-000000000001"
-        );
+        assert_eq!(json["snapshot_id"], "0190f5fe-7c00-7a00-8000-000000000001");
         assert!(json.get("id").is_none());
         assert_eq!(json["label"], "2023-11-14 12:00");
         assert_eq!(json["created_at"], 1700000000000_i64);
@@ -444,10 +450,8 @@ mod tests {
     #[test]
     fn snapshot_info_without_file_info() {
         let info = PreviewSnapshotInfoDto {
-            snapshot_id: PreviewSnapshotId::try_from(
-                "0190f5fe-7c00-7a00-8000-000000000002",
-            )
-            .unwrap(),
+            snapshot_id: PreviewSnapshotId::try_from("0190f5fe-7c00-7a00-8000-000000000002")
+                .unwrap(),
             label: "Snapshot 1".into(),
             created_at: 1000,
             size: 256,
@@ -463,10 +467,8 @@ mod tests {
     #[test]
     fn snapshot_info_roundtrip() {
         let info = PreviewSnapshotInfoDto {
-            snapshot_id: PreviewSnapshotId::try_from(
-                "0190f5fe-7c00-7a00-8000-000000000003",
-            )
-            .unwrap(),
+            snapshot_id: PreviewSnapshotId::try_from("0190f5fe-7c00-7a00-8000-000000000003")
+                .unwrap(),
             label: "Label".into(),
             created_at: 2000,
             size: 512,
@@ -547,10 +549,8 @@ mod tests {
     fn snapshot_content_response_serialize() {
         let resp = SnapshotContentResponse {
             snapshot: PreviewSnapshotInfoDto {
-                snapshot_id: PreviewSnapshotId::try_from(
-                    "0190f5fe-7c00-7a00-8000-000000000004",
-                )
-                .unwrap(),
+                snapshot_id: PreviewSnapshotId::try_from("0190f5fe-7c00-7a00-8000-000000000004")
+                    .unwrap(),
                 label: "L".into(),
                 created_at: 1000,
                 size: 5,
@@ -573,10 +573,8 @@ mod tests {
     fn snapshot_content_response_roundtrip() {
         let resp = SnapshotContentResponse {
             snapshot: PreviewSnapshotInfoDto {
-                snapshot_id: PreviewSnapshotId::try_from(
-                    "0190f5fe-7c00-7a00-8000-000000000005",
-                )
-                .unwrap(),
+                snapshot_id: PreviewSnapshotId::try_from("0190f5fe-7c00-7a00-8000-000000000005")
+                    .unwrap(),
                 label: "Lab".into(),
                 created_at: 2000,
                 size: 10,
