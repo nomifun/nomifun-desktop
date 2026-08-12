@@ -129,9 +129,10 @@ Apache-2.0 条款下使用、修改、再分发，并将代码打包——包括
 
 - **桌面端**：`bun install && bun run build:ui && cargo run -p
   nomifun-desktop`（或 `cargo build --release -p nomifun-desktop`）。
-- **服务端**：运行 `nomifun/nomifun-web:v0.3.4`、从源码构建
+- **服务端**：运行稳定滚动标签 `nomifun/nomifun-web:latest`、从源码构建
   （`cargo build --release -p nomifun-web`），或用
-  `docker compose up -d --build` 本地构建。
+  `docker compose up -d --build` 本地构建。如需可复现部署，请固定明确版本或镜像
+  digest。
 
 已发布的制品会从项目 README 与 [新手入门指南](../getting-started/) 链接出来。
 

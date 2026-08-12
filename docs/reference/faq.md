@@ -85,7 +85,10 @@ available as
 The supported install paths are:
 
 - **Desktop**: `bun install && bun run build:ui && cargo run -p nomifun-desktop` (or `cargo build --release -p nomifun-desktop`).
-- **Server**: run `nomifun/nomifun-web:v0.3.4`, build from source (`cargo build --release -p nomifun-web`), or build locally with `docker compose up -d --build`.
+- **Server**: run `nomifun/nomifun-web:latest` (the stable rolling tag), build
+  from source (`cargo build --release -p nomifun-web`), or build locally with
+  `docker compose up -d --build`. Pin an explicit version or image digest when
+  reproducibility is required.
 
 Published artifacts are linked from the project README and the [getting-started guide](../getting-started/).
 

@@ -2,7 +2,7 @@
 
 # Runtime-only image for locally prebuilt artifacts.
 # Build it through:
-#   bun run docker:prebuilt -- --tag nomifun/nomifun-web:v0.3.4
+#   bun run docker:prebuilt -- --tag nomifun/nomifun-web:latest
 
 ARG BUN_IMAGE="oven/bun:1"
 ARG NODE_IMAGE="node:22-bookworm-slim"
