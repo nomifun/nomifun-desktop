@@ -51,7 +51,7 @@ if (args.help) {
 
 const requestedTags = args.tags.length
   ? args.tags
-  : [`${args.repository}:v${version}`];
+  : [`${args.repository}:latest`];
 
 if (args.buildMissing) {
   ensureUiDistForBuild();
@@ -186,11 +186,11 @@ function printHelp(currentVersion) {
   console.log(`Usage:
   bun run docker:prebuilt
   bun run docker:prebuilt -- --build-missing --sudo
-  bun run docker:prebuilt -- --tag nomifun/nomifun-web:v${currentVersion} --build-missing --sudo
+  bun run docker:prebuilt -- --tag nomifun/nomifun-web:latest --build-missing --sudo
 
 Options:
   -t, --tag <tag>          Docker image tag. Repeatable.
-      --repository <repo>  Repository for the default tag. Default: ${DEFAULT_REPOSITORY}
+      --repository <repo>  Repository for the default latest tag. Default: ${DEFAULT_REPOSITORY}
       --binary <path>      Linux release nomifun-web binary to copy.
       --build-missing      Build missing/outdated local artifacts first; no-op when they already match.
       --dry-run            Stage artifacts and print the docker command only.

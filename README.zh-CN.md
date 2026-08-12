@@ -55,6 +55,42 @@
 
 ---
 
+## NomiFun 开源产品家族
+
+NomiFun 由三个相互关联的开源产品组成。**Desktop 是本地数据、模型、Agent、任务与
+工具中枢**；Mobile 和小智机器人接入你在 Desktop 中显式开放的能力。Desktop 还承载
+Agent 小程序，让 Agent 创建的应用继续复用同一套本地运行时与受治理能力，而不是沦为
+一个割裂的演示页面。
+
+| 项目 | 定位 | 文档与入口 |
+|---|---|---|
+| **[NomiFun Desktop](https://github.com/nomifun/nomifun-desktop)**（本仓库） | 数据、模型、Agent、任务、Skill、知识库、小程序、WebUI、REST 与 MCP 的本地事实源和执行中枢 | [下载](https://github.com/nomifun/nomifun-desktop/releases) · [Desktop 文档](https://www.nomifun.com/zh/docs/) · [WebUI 远程访问](docs/guides/webui-remote-access.zh.md) |
+| [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | 直接复用 Desktop 会话、任务、需求、伙伴与管理能力的 Android / iOS / H5 客户端 | [Mobile 文档](https://github.com/nomifun/nomifun-mobile#readme) · 在 Desktop 开启**远程与开放 → WebUI 访问**后扫描一次性二维码 |
+| [NomiFun 小智云台](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | 为伙伴提供语音、运动、屏幕和设备侧多模态交互的 ESP32-S3 机器人与云台 | [小智文档](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop 接入指南](docs/guides/xiaozhi-robot.zh.md) |
+
+### 三个项目如何接入
+
+1. 运行 Desktop，配置需要的模型和伙伴；Desktop 保留主数据集并实际执行任务。
+2. Mobile 在 Desktop 的**远程与开放 → WebUI 访问**页面开启监听，然后扫描短时效、
+   一次性的二维码。局域网内 Mobile **直连 Desktop，不经过 NomiFun 云中转**；手机是
+   已认证客户端，Desktop 是权威服务器，所以无需把模型密钥和持久数据复制到手机。
+3. 小智云台刷入固件后，在伙伴的**远程控制 → 机器人连接**页面完成绑定。
+
+请仅在可信网络中开启远程接口。认证、局域网暴露和部署边界以相应指南为准。
+
+### 一个本地中枢，多种交互界面
+
+这不是三个恰好使用同一 Logo 的独立客户端。Desktop 保存持久状态并执行模型、Agent、
+需求、工具、知识库、伙伴记忆和 Skill；Mobile 是局域网直连的移动控制界面；小智是
+语音与运动硬件界面；小程序则是同一 Desktop 安装创建并托管的软件交互界面。它们共享
+一张受治理的能力图，而不是各自创建云账号、凭据和用户数据副本。
+
+信任边界、通信模型、架构创新与产品里程碑详见
+[《NomiFun 产品生态架构》](docs/architecture/product-ecosystem.zh.md)；English:
+[`product-ecosystem.md`](docs/architecture/product-ecosystem.md)。
+
+---
+
 ## ✨ 为什么选 NomiFun
 
 |  | |
@@ -144,6 +180,12 @@
 扬声器、显示屏、舵机和设备端 MCP 工具；NomiFun 提供伙伴人格、模型、记忆、
 ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控制 → 机器人连接**：
 复制 OTA 地址，输入机器人显示的 6 位激活码，即可把实体设备绑定到该伙伴。
+
+### 🧩 Agent 小程序 —— 把一次会话变成可复用工具
+
+在普通 Agent 会话中创建、预览小程序，并发布到本地小程序库。已发布快照和可编辑工作
+副本均由 Desktop 管理；继续迭代时仍然使用一条正常、可审计的会话，而不是藏在小程序
+里的第二套聊天系统。因此，小程序能成为同一套本地 Agent、数据和受治理工具的持久界面。
 
 ### 🧠 Agent 协作
 
@@ -238,11 +280,14 @@ NomiFun 不绑定任何一家模型厂商。你可以按地区、价格、额度
 
 在应用内 PTY 会话里运行各种 agent CLI（或独立的 `nomi` CLI）。NomiFun 会把原生能力 —— 知识检索、需求完成、生命周期 hooks —— 经各 CLI *自己的*原生配置注入进去，从而保留完整保真度与 OAuth。
 
-### 📱 WebUI 远程操控 —— 一扫即用
+### 📱 NomiFun Mobile —— 直连你的 Desktop
 
 > 指南：[`docs/guides/webui-remote-access.zh.md`](docs/guides/webui-remote-access.zh.md)
+> · 应用：[nomifun-mobile](https://github.com/nomifun/nomifun-mobile)
 
-不用任何社交平台。一键**扫码配对**，就能让手机或平板经局域网连上电脑（一次性令牌，实时走 WebSocket），让你窝在沙发上也能远程操控你的工作站。
+局域网内无需社交平台，也无需 NomiFun 云中转。一键**扫码配对**会给手机签发短时效、
+一次性的登录凭证，让 Mobile 直连 Desktop 进程内的认证监听器。Mobile 随即实时使用
+Desktop 中同一套会话、任务、需求、伙伴、模型和工具；Desktop 始终是数据与执行权威端。
 
 ### ⚙️ config one，use anywhere
 
@@ -261,6 +306,10 @@ NomiFun 不绑定任何一家模型厂商。你可以按地区、价格、额度
 ## 🏗️ 架构
 
 一套 React 前端、一套 Rust 后端，**两种宿主模式** —— 同一套后端在两者中均为进程内运行。
+
+在产品家族层面，Desktop 同时也是 Mobile、小智、小程序和伙伴 IM 渠道的中枢。完整
+通信、安全与创新模型见
+[`docs/architecture/product-ecosystem.zh.md`](docs/architecture/product-ecosystem.zh.md)。
 
 | | `nomifun-desktop` | `nomifun-web` |
 |---|---|---|
@@ -328,7 +377,7 @@ bun run build:ui && bun run serve:web
 
 官方镜像已发布到 Docker Hub：
 [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
-下面示例使用已发布的 `v0.3.4` tag；后续有新版本时，可按 Docker Hub 页面替换。
+下面示例使用稳定滚动标签 `latest`。如需可复现部署，请固定明确版本或镜像 digest。
 
 ```bash
 # 拉取并运行官方镜像。
@@ -337,7 +386,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8787:8787 \
   -v nomifun-data:/data \
-  nomifun/nomifun-web:v0.3.4
+  nomifun/nomifun-web:latest
 # 然后打开 http://<服务器IP>:8787 并创建首位管理员
 ```
 
@@ -351,7 +400,7 @@ docker run -d \
   -v nomifun-data:/data \
   -e NOMIFUN_ADMIN_USERNAME=admin \
   -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
-  nomifun/nomifun-web:v0.3.4
+  nomifun/nomifun-web:latest
 ```
 
 Docker Compose 也可以直接使用官方镜像：
@@ -359,7 +408,7 @@ Docker Compose 也可以直接使用官方镜像：
 ```yaml
 services:
   nomifun:
-    image: nomifun/nomifun-web:v0.3.4
+    image: nomifun/nomifun-web:latest
     restart: unless-stopped
     ports:
       - "8787:8787"
@@ -382,7 +431,7 @@ docker compose up -d --build
 # 然后打开 http://<服务器IP>:8787  —  配合自带的 Caddyfile 启用 TLS
 
 # 已有 ui/dist 和 target/release/nomifun-web 时的快路径：
-bun run docker:prebuilt -- --tag nomifun/nomifun-web:v0.3.4 --build-missing --sudo
+bun run docker:prebuilt -- --tag nomifun/nomifun-web:latest --build-missing --sudo
 ```
 
 详见 [`docs/getting-started/installation.zh.md`](docs/getting-started/installation.zh.md) 与 [`docs/guides/web-server-deployment.zh.md`](docs/guides/web-server-deployment.zh.md)。
@@ -523,13 +572,14 @@ NomiFun **完全开源、毫无保留**。个人与企业都可以在它之上�
 
 ## 📬 联系我们 / 社区
 
-我们很想听到你的声音。最快的方式是 GitHub；下列社交渠道均为官方。
+以下联系信息由 NomiFun 开源产品家族统一使用。对于可复现的问题与功能建议，优先使用
+GitHub Issues。
 
 | 渠道 | 入口 |
 |---|---|
 | 🌐 **官网** | [www.nomifun.com](https://www.nomifun.com) |
-| 🐙 **GitHub** | [nomifun/nomifun-desktop](https://github.com/nomifun/nomifun-desktop) · [Issues](https://github.com/nomifun/nomifun-desktop/issues) · [Releases](https://github.com/nomifun/nomifun-desktop/releases) |
-| ✉️ **邮箱** | `www.nomifun.com/contact` <sub>（占位 · 待确认）</sub> |
+| 🐙 **问题反馈** | [github.com/nomifun/nomifun-desktop/issues](https://github.com/nomifun/nomifun-desktop/issues) |
+| ✉️ **邮箱** | [www.nomifun.com/contact](https://www.nomifun.com/contact) |
 | 📕 **小红书** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
 | 📺 **哔哩哔哩** | [NomiFun](https://b23.tv/0UhgKDh) · [演示视频](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |
 | 🎵 **抖音** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) |
@@ -542,7 +592,7 @@ NomiFun **完全开源、毫无保留**。个人与企业都可以在它之上�
 <div align="center">
 <table>
   <tr>
-    <td align="center"><img src="docs/images/contact/wechat-group-qr.jpg" alt="微信群二维码" width="220"><br/><sub><b>微信群</b></sub></td>
+    <td align="center"><img src="docs/assets/nomifun-wechat-group.jpg" alt="NomiFun 微信交流群二维码" width="220"><br/><sub><b>NomiFun 微信交流群</b></sub></td>
     <td align="center"><img src="docs/images/contact/qq-group-qr.png" alt="QQ 群二维码" width="220"><br/><sub><b>QQ 群</b></sub></td>
   </tr>
 </table>
