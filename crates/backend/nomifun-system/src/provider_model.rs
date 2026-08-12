@@ -1,314 +1,776 @@
-//! Row-level service + row → wire projection for the authoritative
-//! `provider_models` entity (`/api/provider-models`).
-//!
-//! JSON parse failures on a row degrade to empty/None values with a
-//! `tracing::warn!` instead of failing the whole listing — one bad row must
-//! never take down `GET /api/providers` (same tolerance strategy as
-//! `row_to_profile` in `model_profile.rs` uses for profile rows).
-
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    CreateProviderModelRequest, ModelHealthStatus, ModelTask, ModelTrait, ProfileSource,
-    ProviderModelResponse, UpdateProviderModelRequest,
+    CapabilityHealth, ModelTask, ModelTrait, ProviderModelCapabilityInput,
+    ProviderModelCapabilityResponse, ProviderModelResponse, SaveProviderModelRequest,
 };
 use nomifun_common::{AppError, ProviderId};
 use nomifun_db::{
-    IProviderModelRepository, IProviderRepository, NewProviderModel, ProviderModelRow,
-    ProviderModelUpdate,
+    IProviderConnectionRepository, IProviderModelCapabilityRepository,
+    IProviderModelRepository, IProviderRepository, NewProviderModel,
+    NewProviderModelCapability, ProviderModelCapabilityRow, ProviderModelRow,
 };
+use nomifun_model_invoke::{
+    ProtocolScope, ProtocolTransportKind, protocol_descriptor,
+    validate_credentialed_target_url, validate_provider_params_for_protocol,
+};
+use reqwest::Url;
 
-fn source_from_str(s: &str) -> ProfileSource {
-    match s {
-        "user" => ProfileSource::User,
-        _ => ProfileSource::Inferred,
-    }
-}
+use crate::managed_model::is_managed_provider_platform;
+use crate::provider_connection::{normalize_auth_scheme, validate_role};
 
-/// CRUD over the row-level model catalog (`/api/provider-models`).
-///
-/// Since migration 016 dropped the legacy per-model `providers` columns, the
-/// `provider_models` row store is the ONLY per-model store: every reader of
-/// catalog membership (including `ProviderService::list`) projects from these
-/// rows, so a row created/deleted here is immediately visible there. The
-/// legacy wire maps (`models`, `model_enabled`, ...) still exist on the
-/// provider DTOs for compatibility, but they are translated to/from rows at
-/// the wire boundary — there is no second store to keep in sync.
 #[derive(Clone)]
 pub struct ProviderModelService {
-    repo: Arc<dyn IProviderModelRepository>,
+    model_repo: Arc<dyn IProviderModelRepository>,
+    capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
     provider_repo: Arc<dyn IProviderRepository>,
+    connection_repo: Arc<dyn IProviderConnectionRepository>,
 }
 
 impl ProviderModelService {
     pub fn new(
-        repo: Arc<dyn IProviderModelRepository>,
+        model_repo: Arc<dyn IProviderModelRepository>,
+        capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
         provider_repo: Arc<dyn IProviderRepository>,
+        connection_repo: Arc<dyn IProviderConnectionRepository>,
     ) -> Self {
-        Self { repo, provider_repo }
+        Self {
+            model_repo,
+            capability_repo,
+            provider_repo,
+            connection_repo,
+        }
     }
 
-    /// All rows, or one provider's rows when `provider_id` is given.
     pub async fn list(
         &self,
         provider_id: Option<&str>,
     ) -> Result<Vec<ProviderModelResponse>, AppError> {
-        let rows = match provider_id {
-            Some(provider_id) => {
-                let provider_id = ProviderId::parse(provider_id).map_err(|error| {
-                    AppError::BadRequest(format!("invalid provider_id: {error}"))
-                })?;
-                self.repo.list_for_provider(provider_id.as_str()).await?
-            }
-            None => self.repo.list().await?,
+        if let Some(provider_id) = provider_id {
+            validate_provider_id(provider_id)?;
+        }
+        let (models, capabilities) = match provider_id {
+            Some(provider_id) => (
+                self.model_repo.list_for_provider(provider_id).await?,
+                self.capability_repo.list_for_provider(provider_id).await?,
+            ),
+            None => (self.model_repo.list().await?, self.capability_repo.list().await?),
         };
-        rows.into_iter().map(row_to_model_response).collect()
+        rows_to_model_responses(models, capabilities)
     }
 
-    /// Create one catalog row.
-    ///
-    /// - the parent provider must exist (`NotFound`), and a duplicate
-    ///   `(provider_id, model)` key is a `Conflict` (from the repository);
-    /// - an empty `tasks` means "no explicit profile": tasks (and traits, when
-    ///   not explicitly given) are seeded from
-    ///   [`nomifun_api_types::derive_tasks_and_traits`] with
-    ///   `source = inferred`; a non-empty `tasks` is stored as given with
-    ///   `source = user`;
-    /// - `sort_order` defaults to appending after the provider's catalog.
-    pub async fn create(
+    pub async fn get(
         &self,
-        req: CreateProviderModelRequest,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<Option<ProviderModelResponse>, AppError> {
+        validate_provider_id(provider_id)?;
+        let Some(row) = self.model_repo.get(provider_id, model).await? else {
+            return Ok(None);
+        };
+        let capabilities = self
+            .capability_repo
+            .list_for_model(provider_id, model)
+            .await?;
+        Ok(Some(row_to_model_response(row, capabilities)?))
+    }
+
+    /// Upsert one model and replace its complete capability configuration in
+    /// the repository's single transaction.
+    pub async fn save(
+        &self,
+        req: SaveProviderModelRequest,
     ) -> Result<ProviderModelResponse, AppError> {
-        let provider_id = ProviderId::parse(req.provider_id)
-            .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
-            .into_string();
-        let model = req.model.trim();
-        if model.is_empty() {
-            return Err(AppError::BadRequest("model is required".into()));
-        }
-        if let Some(role) = req.connection_role.as_deref() {
-            crate::provider_connection::validate_role(role)?;
-        }
+        validate_provider_id(&req.provider_id)?;
         let provider = self
             .provider_repo
-            .find_by_id(&provider_id)
+            .find_by_id(&req.provider_id)
             .await?
-            .ok_or_else(|| AppError::NotFound(format!("Provider '{provider_id}' not found")))?;
-
-        let (tasks, traits, source): (Vec<ModelTask>, Vec<ModelTrait>, &str) = if req
-            .tasks
-            .is_empty()
-        {
-            let (derived_tasks, derived_traits) =
-                nomifun_api_types::derive_tasks_and_traits(&provider.platform, model);
-            let traits = if req.traits.is_empty() { derived_traits } else { req.traits };
-            (derived_tasks, traits, "inferred")
-        } else {
-            (req.tasks, req.traits, "user")
-        };
-        let tasks_json = serde_json::to_string(&tasks)
-            .map_err(|e| AppError::Internal(format!("serialize tasks: {e}")))?;
-        let traits_json = serde_json::to_string(&traits)
-            .map_err(|e| AppError::Internal(format!("serialize traits: {e}")))?;
-        let params_value = req.params.unwrap_or_else(|| serde_json::json!({}));
-        let params_json = serde_json::to_string(&params_value)
-            .map_err(|e| AppError::Internal(format!("serialize params: {e}")))?;
-
-        let sort_order = match req.sort_order {
-            Some(sort_order) => sort_order,
-            None => next_sort_order(self.repo.as_ref(), &provider_id).await?,
-        };
-
-        let row = self
-            .repo
-            .create(
-                &provider_id,
-                &NewProviderModel {
-                    model,
-                    enabled: req.enabled,
-                    sort_order,
-                    tasks: &tasks_json,
-                    traits: &traits_json,
-                    protocol: req.protocol.as_deref(),
-                    params: &params_json,
-                    context_limit: req.context_limit,
-                    description: req.description.as_deref(),
-                    source,
-                    health: None,
-                },
-            )
-            .await?;
-
-        // `NewProviderModel` has no connection_role member (inserts always
-        // start with NULL); apply an explicitly requested role right after.
-        let row = match req.connection_role.as_deref() {
-            Some(role) => {
-                self.repo
-                    .update(
-                        &provider_id,
-                        model,
-                        &ProviderModelUpdate {
-                            connection_role: Some(Some(role)),
-                            ..Default::default()
-                        },
-                    )
-                    .await?
-            }
-            None => row,
-        };
-        row_to_model_response(row)
-    }
-
-    /// Partially update one row. Double-Option fields distinguish keep
-    /// (absent) / clear (`null`) / set (value). An explicit `tasks` or
-    /// `traits` update is a user profile edit, so it also flips
-    /// `source = user` (making the stored profile authoritative over the
-    /// name heuristic). A missing row is `NotFound` (from the repository).
-    pub async fn update(
-        &self,
-        req: UpdateProviderModelRequest,
-    ) -> Result<ProviderModelResponse, AppError> {
-        let provider_id = ProviderId::parse(req.provider_id)
-            .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
-            .into_string();
-        // Double-Option: Some(Some(role)) sets and must satisfy the same role
-        // grammar as the connections API; Some(None) clears without validation.
-        if let Some(Some(role)) = req.connection_role.as_ref() {
-            crate::provider_connection::validate_role(role)?;
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Provider {} not found", req.provider_id))
+            })?;
+        if is_managed_provider_platform(&provider.platform) {
+            return Err(AppError::Forbidden(
+                "Managed model providers must be changed through their dedicated model-service API"
+                    .into(),
+            ));
         }
 
-        let tasks_json = req
-            .tasks
-            .as_ref()
-            .map(|tasks| {
-                serde_json::to_string(tasks)
-                    .map_err(|e| AppError::Internal(format!("serialize tasks: {e}")))
-            })
-            .transpose()?;
-        let traits_json = req
-            .traits
-            .as_ref()
-            .map(|traits| {
-                serde_json::to_string(traits)
-                    .map_err(|e| AppError::Internal(format!("serialize traits: {e}")))
-            })
-            .transpose()?;
-        let params_json = req
-            .params
-            .as_ref()
-            .map(|params| {
-                serde_json::to_string(params)
-                    .map_err(|e| AppError::Internal(format!("serialize params: {e}")))
-            })
-            .transpose()?;
-
-        let update = ProviderModelUpdate {
-            enabled: req.enabled,
-            sort_order: req.sort_order,
-            tasks: tasks_json.as_deref(),
-            traits: traits_json.as_deref(),
-            protocol: req.protocol.as_ref().map(|v| v.as_deref()),
-            connection_role: req.connection_role.as_ref().map(|v| v.as_deref()),
-            params: params_json.as_deref(),
-            context_limit: req.context_limit,
-            description: req.description.as_ref().map(|v| v.as_deref()),
-            source: (req.tasks.is_some() || req.traits.is_some()).then_some("user"),
+        let existing = self
+            .model_repo
+            .get(&req.provider_id, &req.model.model)
+            .await?;
+        let sort_order = match req.model.sort_order {
+            Some(value) => {
+                validate_sort_order(value)?;
+                value
+            }
+            None => match existing {
+                Some(ref row) => row.sort_order,
+                None => self
+                    .model_repo
+                    .list_for_provider(&req.provider_id)
+                    .await?
+                    .into_iter()
+                    .map(|row| row.sort_order)
+                    .max()
+                    .unwrap_or(-1)
+                    .saturating_add(1),
+            },
         };
-        let row = self.repo.update(&provider_id, &req.model, &update).await?;
-        row_to_model_response(row)
+
+        self.validate_capabilities(&provider, &req.model.capabilities)
+            .await?;
+        let serialized = serialize_capabilities(&req.model.capabilities)?;
+        let db_capabilities = serialized
+            .iter()
+            .map(SerializedCapability::as_db)
+            .collect::<Vec<_>>();
+        let new_model = NewProviderModel {
+            model: req.model.model.trim(),
+            enabled: req.model.enabled,
+            sort_order,
+            description: req.model.description.as_deref(),
+            capabilities: &db_capabilities,
+        };
+        let row = self
+            .model_repo
+            .save(&req.provider_id, provider.config_revision, &new_model)
+            .await?;
+        let capabilities = self
+            .capability_repo
+            .list_for_model(&req.provider_id, &row.model)
+            .await?;
+        row_to_model_response(row, capabilities)
     }
 
-    /// Delete one row; returns whether a row was removed (same contract as
-    /// `ModelProfileService::delete`).
     pub async fn delete(&self, provider_id: &str, model: &str) -> Result<bool, AppError> {
-        ProviderId::parse(provider_id)
-            .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?;
-        Ok(self.repo.delete(provider_id, model).await?)
+        validate_provider_id(provider_id)?;
+        let provider = self
+            .provider_repo
+            .find_by_id(provider_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
+        if is_managed_provider_platform(&provider.platform) {
+            return Err(AppError::Forbidden(
+                "Managed model providers must be changed through their dedicated model-service API"
+                    .into(),
+            ));
+        }
+        Ok(self.model_repo.delete(provider_id, model).await?)
+    }
+
+    async fn validate_capabilities(
+        &self,
+        provider: &nomifun_db::models::Provider,
+        capabilities: &[ProviderModelCapabilityInput],
+    ) -> Result<(), AppError> {
+        if capabilities.is_empty() {
+            return Err(AppError::BadRequest(
+                "provider model must declare at least one capability".into(),
+            ));
+        }
+        let mut tasks = HashSet::with_capacity(capabilities.len());
+        for capability in capabilities {
+            if !tasks.insert(capability.task) {
+                return Err(AppError::BadRequest(format!(
+                    "capability task {} is duplicated",
+                    task_wire(capability.task)?
+                )));
+            }
+            validate_context_limit(capability.context_limit)?;
+            validate_provider_params(
+                &capability.protocol,
+                capability.task,
+                &capability.provider_params,
+            )?;
+            validate_protocol(&provider.platform, capability)?;
+
+            let (connection_base_url, connection_auth_scheme) =
+                if capability.connection_role == "default" {
+                    (provider.base_url.clone(), provider.auth_scheme.clone())
+            } else {
+                validate_role(&capability.connection_role).map_err(|error| match error {
+                    AppError::BadRequest(message) => AppError::BadRequest(format!(
+                        "invalid capability connection_role {:?}: {message}",
+                        capability.connection_role
+                    )),
+                    other => other,
+                })?;
+                let connection = self
+                    .connection_repo
+                    .get(&provider.provider_id, &capability.connection_role)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::BadRequest(format!(
+                            "capability connection_role {:?} does not exist for provider {}",
+                            capability.connection_role, provider.provider_id
+                        ))
+                    })?;
+                    (connection.base_url, connection.auth_scheme)
+                };
+            validate_capability_auth_scheme(capability, &connection_auth_scheme)?;
+            validate_capability_urls(capability, &connection_base_url)?;
+        }
+        Ok(())
     }
 }
 
-/// Next append position for a provider's catalog (shared with
-/// `ModelProfileService::upsert`'s create path).
-pub(crate) async fn next_sort_order(
-    repo: &dyn IProviderModelRepository,
-    provider_id: &str,
-) -> Result<i64, AppError> {
-    Ok(repo
-        .list_for_provider(provider_id)
-        .await?
-        .iter()
-        .map(|row| row.sort_order)
-        .max()
-        .map_or(0, |max| max + 1))
+fn validate_provider_id(provider_id: &str) -> Result<(), AppError> {
+    ProviderId::parse(provider_id)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid provider id: {error}")))
 }
 
-/// Convert one `provider_models` row into the wire DTO.
-///
-/// Only a non-canonical stored `provider_id` is a hard error (it indicates
-/// corrupted identity, not a degraded field); malformed JSON columns degrade
-/// gracefully: `tasks`/`traits` → empty vec, `params` → `null`, `health` →
-/// absent — each with a warning.
-pub(crate) fn row_to_model_response(row: ProviderModelRow) -> Result<ProviderModelResponse, AppError> {
-    ProviderId::parse(&row.provider_id).map_err(|error| {
-        AppError::Internal(format!(
-            "stored provider_models.provider_id '{}' is not canonical: {error}",
-            row.provider_id
+fn validate_sort_order(value: i64) -> Result<(), AppError> {
+    if value < 0 {
+        return Err(AppError::BadRequest(
+            "sort_order must be greater than or equal to zero".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_context_limit(value: Option<i64>) -> Result<(), AppError> {
+    if value.is_some_and(|value| value <= 0) {
+        return Err(AppError::BadRequest(
+            "capability context_limit must be greater than zero".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_protocol(
+    platform: &str,
+    capability: &ProviderModelCapabilityInput,
+) -> Result<(), AppError> {
+    let protocol = capability.protocol.trim();
+    if protocol.is_empty() {
+        return Err(AppError::BadRequest(
+            "capability protocol must not be blank".into(),
+        ));
+    }
+    let descriptor = protocol_descriptor(protocol).ok_or_else(|| {
+        AppError::BadRequest(format!("unknown capability protocol {protocol:?}"))
+    })?;
+    if !descriptor.supported_tasks.contains(&capability.task) {
+        return Err(AppError::BadRequest(format!(
+            "protocol {protocol:?} does not support task {}",
+            task_wire(capability.task)?
+        )));
+    }
+    let supports_platform = descriptor
+        .platforms
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(platform))
+        || descriptor.scopes.contains(&ProtocolScope::Custom);
+    if !supports_platform {
+        return Err(AppError::BadRequest(format!(
+            "protocol {protocol:?} is not available for provider platform {platform:?}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_capability_auth_scheme(
+    capability: &ProviderModelCapabilityInput,
+    raw_auth_scheme: &str,
+) -> Result<(), AppError> {
+    let descriptor = protocol_descriptor(capability.protocol.trim()).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "unknown capability protocol {:?}",
+            capability.protocol.trim()
         ))
     })?;
+    let auth_scheme = normalize_auth_scheme(raw_auth_scheme)?;
+    let supported = descriptor.allowed_auth_schemes.iter().any(|allowed| {
+        auth_scheme_exact_match(allowed, &auth_scheme)
+            || (allowed == "header_key:<name>"
+                && auth_scheme
+                    .strip_prefix("header_key:")
+                    .is_some_and(|name| !name.trim().is_empty()))
+            || (allowed == "query_key:<param>"
+                && auth_scheme
+                    .strip_prefix("query_key:")
+                    .is_some_and(|param| !param.trim().is_empty()))
+    });
+    if supported {
+        return Ok(());
+    }
+    Err(AppError::BadRequest(format!(
+        "protocol {:?} does not support connection auth_scheme {:?}; allowed: {}",
+        capability.protocol.trim(),
+        auth_scheme,
+        descriptor.allowed_auth_schemes.join(", ")
+    )))
+}
 
-    let tasks: Vec<ModelTask> = serde_json::from_str(&row.tasks).unwrap_or_else(|error| {
-        tracing::warn!(
-            provider_id = %row.provider_id,
-            model = %row.model,
-            %error,
-            "invalid provider_models.tasks JSON; degrading to empty tasks"
-        );
-        Vec::new()
-    });
-    let traits: Vec<ModelTrait> = serde_json::from_str(&row.traits).unwrap_or_else(|error| {
-        tracing::warn!(
-            provider_id = %row.provider_id,
-            model = %row.model,
-            %error,
-            "invalid provider_models.traits JSON; degrading to empty traits"
-        );
-        Vec::new()
-    });
-    let params: serde_json::Value = serde_json::from_str(&row.params).unwrap_or_else(|error| {
-        tracing::warn!(
-            provider_id = %row.provider_id,
-            model = %row.model,
-            %error,
-            "invalid provider_models.params JSON; degrading to null params"
-        );
-        serde_json::Value::Null
-    });
-    let health: Option<ModelHealthStatus> = row.health.as_deref().and_then(|json| {
-        serde_json::from_str(json)
-            .map_err(|error| {
-                tracing::warn!(
-                    provider_id = %row.provider_id,
-                    model = %row.model,
-                    %error,
-                    "invalid provider_models.health JSON; dropping health entry"
-                );
+fn validate_endpoint_overrides(
+    descriptor: &nomifun_model_invoke::ProtocolDescriptor,
+    capability: &ProviderModelCapabilityInput,
+) -> Result<(), AppError> {
+    for (field, value) in [
+        ("endpoint", capability.endpoint.as_deref()),
+        ("poll_endpoint", capability.poll_endpoint.as_deref()),
+        ("content_endpoint", capability.content_endpoint.as_deref()),
+        ("realtime_endpoint", capability.realtime_endpoint.as_deref()),
+    ] {
+        let Some(value) = value else { continue };
+        let endpoint = descriptor
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.task == capability.task && endpoint.field == field)
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "protocol {:?} does not define {field} for task {}",
+                    descriptor.protocol_id,
+                    task_wire(capability.task).unwrap_or_else(|_| "unknown".into())
+                ))
+            })?;
+        if !endpoint.editable && value.trim() != endpoint.default_value {
+            return Err(AppError::BadRequest(format!(
+                "protocol {:?} does not allow overriding {field}",
+                descriptor.protocol_id
+            )));
+        }
+        nomifun_model_invoke::validate_endpoint_template(
+            &descriptor.protocol_id,
+            capability.task,
+            field,
+            value,
+        )
+        .map_err(|error| AppError::BadRequest(error.message))?;
+    }
+    Ok(())
+}
+
+fn auth_scheme_exact_match(allowed: &str, actual: &str) -> bool {
+    match (
+        allowed.strip_prefix("header_key:"),
+        actual.strip_prefix("header_key:"),
+    ) {
+        (Some(allowed_header), Some(actual_header)) => {
+            allowed_header.eq_ignore_ascii_case(actual_header)
+        }
+        _ => allowed == actual,
+    }
+}
+
+pub(crate) fn validate_provider_params(
+    protocol: &str,
+    task: ModelTask,
+    params: &serde_json::Value,
+) -> Result<(), AppError> {
+    validate_provider_params_for_protocol(protocol.trim(), task, params).map_err(Into::into)
+}
+
+pub(crate) fn validate_capability_urls(
+    capability: &ProviderModelCapabilityInput,
+    connection_base_url: &str,
+) -> Result<(), AppError> {
+    let descriptor = protocol_descriptor(capability.protocol.trim()).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "unknown capability protocol {:?}",
+            capability.protocol.trim()
+        ))
+    })?;
+    validate_endpoint_overrides(&descriptor, capability)?;
+    let effective_base = capability
+        .base_url_override
+        .as_deref()
+        .unwrap_or(connection_base_url);
+
+    if descriptor.transport == ProtocolTransportKind::Sdk {
+        if !connection_base_url.trim().is_empty()
+            || capability
+            .base_url_override
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || capability.endpoint.is_some()
+            || capability.poll_endpoint.is_some()
+            || capability.content_endpoint.is_some()
+            || capability.realtime_endpoint.is_some()
+        {
+            return Err(AppError::BadRequest(
+                "SDK capability must not use a connection/base URL override or transport endpoints"
+                    .into(),
+            ));
+        }
+        return Ok(());
+    }
+
+    if let Some(override_url) = capability.base_url_override.as_deref() {
+        validate_credentialed_target_url(
+            connection_base_url,
+            capability.allow_cross_origin_credentials,
+            override_url,
+            "base_url_override",
+            descriptor.transport,
+            false,
+        )
+        .map_err(|error| AppError::BadRequest(error.message))?;
+    }
+
+    let base = match descriptor.transport {
+        ProtocolTransportKind::Http => parse_http_url(effective_base, "capability base URL")?,
+        ProtocolTransportKind::Websocket => {
+            parse_websocket_base_url(effective_base, "capability base URL")?
+        }
+        ProtocolTransportKind::Sdk => unreachable!("handled above"),
+    };
+
+    if descriptor.transport == ProtocolTransportKind::Websocket
+        && (capability.endpoint.is_some()
+            || capability.poll_endpoint.is_some()
+            || capability.content_endpoint.is_some())
+    {
+        return Err(AppError::BadRequest(
+            "WebSocket capability must use realtime_endpoint, not HTTP job endpoints".into(),
+        ));
+    }
+    if descriptor.transport == ProtocolTransportKind::Http
+        && capability.realtime_endpoint.is_some()
+    {
+        return Err(AppError::BadRequest(
+            "HTTP capability must not define realtime_endpoint".into(),
+        ));
+    }
+
+    for (field, value) in [
+        ("endpoint", capability.endpoint.as_deref()),
+        ("poll_endpoint", capability.poll_endpoint.as_deref()),
+        ("content_endpoint", capability.content_endpoint.as_deref()),
+    ] {
+        let Some(value) = value else { continue };
+        validate_credentialed_target_url(
+            effective_base,
+            capability.allow_cross_origin_credentials,
+            value,
+            field,
+            ProtocolTransportKind::Http,
+            true,
+        )
+        .map_err(|error| AppError::BadRequest(error.message))?;
+        resolve_http_endpoint(&base, value, field)?;
+    }
+
+    if let Some(value) = capability.realtime_endpoint.as_deref() {
+        validate_credentialed_target_url(
+            effective_base,
+            capability.allow_cross_origin_credentials,
+            value,
+            "realtime_endpoint",
+            ProtocolTransportKind::Websocket,
+            true,
+        )
+        .map_err(|error| AppError::BadRequest(error.message))?;
+        resolve_realtime_endpoint(&base, value)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_base_url(value: &str) -> Result<(), AppError> {
+    parse_http_url(value, "base_url").map(|_| ())
+}
+
+fn parse_http_url(value: &str, field: &str) -> Result<Url, AppError> {
+    let url = Url::parse(value.trim())
+        .map_err(|error| AppError::BadRequest(format!("{field} is not a valid URL: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(AppError::BadRequest(format!(
+            "{field} must be an absolute http(s) URL with a host"
+        )));
+    }
+    validate_safe_url(&url, field)?;
+    if url.query().is_some() {
+        return Err(AppError::BadRequest(format!(
+            "{field} must not contain a query; put task-specific query parameters on the endpoint"
+        )));
+    }
+    Ok(url)
+}
+
+fn parse_realtime_url(value: &str, field: &str) -> Result<Url, AppError> {
+    let url = Url::parse(value.trim())
+        .map_err(|error| AppError::BadRequest(format!("{field} is not a valid URL: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") || url.host_str().is_none() {
+        return Err(AppError::BadRequest(format!(
+            "{field} must be an absolute http(s) or ws(s) URL with a host"
+        )));
+    }
+    validate_safe_url(&url, field)?;
+    Ok(url)
+}
+
+fn parse_websocket_base_url(value: &str, field: &str) -> Result<Url, AppError> {
+    let url = Url::parse(value.trim())
+        .map_err(|error| AppError::BadRequest(format!("{field} is not a valid URL: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") || url.host_str().is_none() {
+        return Err(AppError::BadRequest(format!(
+            "{field} must be an absolute http(s) or ws(s) URL with a host"
+        )));
+    }
+    validate_safe_url(&url, field)?;
+    if url.query().is_some() {
+        return Err(AppError::BadRequest(format!(
+            "{field} must not contain a query; put task-specific query parameters on realtime_endpoint"
+        )));
+    }
+    Ok(url)
+}
+
+fn resolve_realtime_endpoint(base: &Url, value: &str) -> Result<Url, AppError> {
+    let value = value.trim();
+    if value.starts_with("//") {
+        return Err(AppError::BadRequest(
+            "realtime_endpoint must not be a scheme-relative URL".into(),
+        ));
+    }
+    match Url::parse(value) {
+        Ok(_) => parse_realtime_url(value, "realtime_endpoint"),
+        Err(_) => {
+            let resolved = resolve_relative_url(base, value, "realtime_endpoint")?;
+            validate_safe_url(&resolved, "realtime_endpoint")?;
+            Ok(resolved)
+        }
+    }
+}
+
+fn validate_safe_url(url: &Url, field: &str) -> Result<(), AppError> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(AppError::BadRequest(format!(
+            "{field} must not contain URL credentials"
+        )));
+    }
+    if url.fragment().is_some() {
+        return Err(AppError::BadRequest(format!(
+            "{field} must not contain a fragment"
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_http_endpoint(base: &Url, value: &str, field: &str) -> Result<Url, AppError> {
+    let value = value.trim();
+    if value.starts_with("//") {
+        return Err(AppError::BadRequest(format!(
+            "{field} must not be a scheme-relative URL"
+        )));
+    }
+    let url = match Url::parse(value) {
+        Ok(url) => {
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return Err(AppError::BadRequest(format!(
+                    "absolute {field} must be an http(s) URL with a host"
+                )));
+            }
+            url
+        }
+        Err(_) => resolve_relative_url(base, value, field)?,
+    };
+    validate_safe_url(&url, field)?;
+    Ok(url)
+}
+
+fn resolve_relative_url(base: &Url, value: &str, field: &str) -> Result<Url, AppError> {
+    let relative = value.trim();
+    if relative.is_empty() || relative.starts_with('?') || relative.starts_with('#') {
+        return Err(AppError::BadRequest(format!(
+            "relative {field} must contain a path"
+        )));
+    }
+    if relative.starts_with("//") {
+        return Err(AppError::BadRequest(format!(
+            "{field} must not be a scheme-relative URL"
+        )));
+    }
+    let combined = format!(
+        "{}/{}",
+        base.as_str().trim_end_matches('/'),
+        relative.trim_start_matches('/')
+    );
+    Url::parse(&combined)
+        .map_err(|error| AppError::BadRequest(format!("{field} is not a valid relative URL: {error}")))
+}
+
+pub(crate) struct SerializedCapability {
+    task: String,
+    traits: String,
+    protocol: String,
+    connection_role: String,
+    base_url_override: Option<String>,
+    endpoint: Option<String>,
+    poll_endpoint: Option<String>,
+    content_endpoint: Option<String>,
+    realtime_endpoint: Option<String>,
+    allow_cross_origin_credentials: bool,
+    provider_params: String,
+    context_limit: Option<i64>,
+}
+
+impl SerializedCapability {
+    pub(crate) fn as_db(&self) -> NewProviderModelCapability<'_> {
+        NewProviderModelCapability {
+            task: &self.task,
+            traits: &self.traits,
+            protocol: &self.protocol,
+            connection_role: &self.connection_role,
+            base_url_override: self.base_url_override.as_deref(),
+            endpoint: self.endpoint.as_deref(),
+            poll_endpoint: self.poll_endpoint.as_deref(),
+            content_endpoint: self.content_endpoint.as_deref(),
+            realtime_endpoint: self.realtime_endpoint.as_deref(),
+            allow_cross_origin_credentials: self.allow_cross_origin_credentials,
+            provider_params: &self.provider_params,
+            context_limit: self.context_limit,
+        }
+    }
+}
+
+pub(crate) fn serialize_capabilities(
+    capabilities: &[ProviderModelCapabilityInput],
+) -> Result<Vec<SerializedCapability>, AppError> {
+    capabilities
+        .iter()
+        .map(|capability| {
+            Ok(SerializedCapability {
+                task: task_wire(capability.task)?,
+                traits: serde_json::to_string(&capability.traits).map_err(|error| {
+                    AppError::Internal(format!("failed to serialize capability traits: {error}"))
+                })?,
+                protocol: capability.protocol.trim().to_owned(),
+                connection_role: capability.connection_role.trim().to_owned(),
+                base_url_override: capability.base_url_override.clone(),
+                endpoint: capability.endpoint.clone(),
+                poll_endpoint: capability.poll_endpoint.clone(),
+                content_endpoint: capability.content_endpoint.clone(),
+                realtime_endpoint: capability.realtime_endpoint.clone(),
+                allow_cross_origin_credentials: capability.allow_cross_origin_credentials,
+                provider_params: serde_json::to_string(&capability.provider_params).map_err(
+                    |error| {
+                        AppError::Internal(format!(
+                            "failed to serialize capability provider_params: {error}"
+                        ))
+                    },
+                )?,
+                context_limit: capability.context_limit,
             })
-            .ok()
-    });
+        })
+        .collect()
+}
 
+fn task_wire(task: ModelTask) -> Result<String, AppError> {
+    serde_json::to_value(task)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| AppError::Internal("failed to serialize model task".into()))
+}
+
+pub(crate) fn rows_to_model_responses(
+    models: Vec<ProviderModelRow>,
+    capabilities: Vec<ProviderModelCapabilityRow>,
+) -> Result<Vec<ProviderModelResponse>, AppError> {
+    let mut grouped = HashMap::<(String, String), Vec<ProviderModelCapabilityRow>>::new();
+    for capability in capabilities {
+        grouped
+            .entry((capability.provider_id.clone(), capability.model.clone()))
+            .or_default()
+            .push(capability);
+    }
+    models
+        .into_iter()
+        .map(|row| {
+            let capabilities = grouped
+                .remove(&(row.provider_id.clone(), row.model.clone()))
+                .unwrap_or_default();
+            row_to_model_response(row, capabilities)
+        })
+        .collect()
+}
+
+pub(crate) fn row_to_model_response(
+    row: ProviderModelRow,
+    capabilities: Vec<ProviderModelCapabilityRow>,
+) -> Result<ProviderModelResponse, AppError> {
+    let mut capabilities = capabilities
+        .into_iter()
+        .map(capability_row_to_response)
+        .collect::<Result<Vec<_>, _>>()?;
+    capabilities.sort_by_key(|capability| model_task_order(capability.task));
     Ok(ProviderModelResponse {
         provider_id: row.provider_id,
         model: row.model,
         enabled: row.enabled,
         sort_order: row.sort_order,
-        tasks,
+        description: row.description,
+        capabilities,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn model_task_order(task: ModelTask) -> u8 {
+    match task {
+        ModelTask::Chat => 0,
+        ModelTask::RealtimeConversation => 1,
+        ModelTask::ImageGeneration => 2,
+        ModelTask::ImageEdit => 3,
+        ModelTask::VideoGeneration => 4,
+        ModelTask::SpeechSynthesis => 5,
+        ModelTask::SpeechRecognition => 6,
+        ModelTask::Embedding => 7,
+        ModelTask::Rerank => 8,
+    }
+}
+
+pub(crate) fn capability_row_to_response(
+    row: ProviderModelCapabilityRow,
+) -> Result<ProviderModelCapabilityResponse, AppError> {
+    let task = serde_json::from_value(serde_json::Value::String(row.task.clone())).map_err(
+        |error| {
+            AppError::Internal(format!(
+                "stored capability task {:?} is invalid: {error}",
+                row.task
+            ))
+        },
+    )?;
+    let traits: Vec<ModelTrait> = serde_json::from_str(&row.traits).map_err(|error| {
+        AppError::Internal(format!(
+            "stored capability traits for {}/{} are invalid: {error}",
+            row.provider_id, row.model
+        ))
+    })?;
+    let provider_params = serde_json::from_str(&row.provider_params).map_err(|error| {
+        AppError::Internal(format!(
+            "stored capability provider_params for {}/{} are invalid: {error}",
+            row.provider_id, row.model
+        ))
+    })?;
+    let health = row
+        .health
+        .as_deref()
+        .map(serde_json::from_str::<CapabilityHealth>)
+        .transpose()
+        .map_err(|error| {
+            AppError::Internal(format!(
+                "stored capability health for {}/{} is invalid: {error}",
+                row.provider_id, row.model
+            ))
+        })?;
+    Ok(ProviderModelCapabilityResponse {
+        task,
         traits,
         protocol: row.protocol,
         connection_role: row.connection_role,
-        params,
+        base_url_override: row.base_url_override,
+        endpoint: row.endpoint,
+        poll_endpoint: row.poll_endpoint,
+        content_endpoint: row.content_endpoint,
+        realtime_endpoint: row.realtime_endpoint,
+        allow_cross_origin_credentials: row.allow_cross_origin_credentials,
+        provider_params,
         context_limit: row.context_limit,
-        description: row.description,
-        source: source_from_str(&row.source),
         health,
         health_checked_at: row.health_checked_at,
         created_at: row.created_at,
@@ -320,429 +782,225 @@ pub(crate) fn row_to_model_response(row: ProviderModelRow) -> Result<ProviderMod
 mod tests {
     use super::*;
 
-    const PROVIDER_ID: &str = "018f1234-5678-7abc-8def-012345678990";
-
-    fn sample_row() -> ProviderModelRow {
-        ProviderModelRow {
-            id: 7,
-            provider_id: PROVIDER_ID.into(),
-            model: "gpt-4o".into(),
-            enabled: true,
-            sort_order: 2,
-            tasks: r#"["chat"]"#.into(),
-            traits: r#"["vision_input"]"#.into(),
-            protocol: Some("openai".into()),
-            connection_role: None,
-            params: r#"{"temperature":0.5}"#.into(),
-            context_limit: Some(128000),
-            description: Some("desc".into()),
-            source: "user".into(),
-            health: Some(r#"{"status":"healthy","latency":320}"#.into()),
-            health_checked_at: Some(123),
-            created_at: 1,
-            updated_at: 2,
-        }
-    }
-
-    #[test]
-    fn projects_all_fields() {
-        let resp = row_to_model_response(sample_row()).unwrap();
-        assert_eq!(resp.provider_id, PROVIDER_ID);
-        assert_eq!(resp.model, "gpt-4o");
-        assert!(resp.enabled);
-        assert_eq!(resp.sort_order, 2);
-        assert_eq!(resp.tasks, vec![ModelTask::Chat]);
-        assert_eq!(resp.traits, vec![ModelTrait::VisionInput]);
-        assert_eq!(resp.protocol.as_deref(), Some("openai"));
-        assert_eq!(resp.params["temperature"], 0.5);
-        assert_eq!(resp.context_limit, Some(128000));
-        assert_eq!(resp.description.as_deref(), Some("desc"));
-        assert_eq!(resp.source, ProfileSource::User);
-        assert_eq!(
-            resp.health.as_ref().map(|h| h.status),
-            Some(nomifun_api_types::HealthStatus::Healthy)
-        );
-        assert_eq!(resp.health_checked_at, Some(123));
-    }
-
-    #[test]
-    fn bad_json_degrades_instead_of_failing() {
-        let row = ProviderModelRow {
-            tasks: "not-json".into(),
-            traits: "{broken".into(),
-            params: "###".into(),
-            health: Some("oops".into()),
-            ..sample_row()
-        };
-        let resp = row_to_model_response(row).unwrap();
-        assert!(resp.tasks.is_empty());
-        assert!(resp.traits.is_empty());
-        assert_eq!(resp.params, serde_json::Value::Null);
-        assert!(resp.health.is_none());
-    }
-
-    #[test]
-    fn noncanonical_provider_id_is_an_error() {
-        let row = ProviderModelRow {
-            provider_id: "not-a-uuid".into(),
-            ..sample_row()
-        };
-        assert!(row_to_model_response(row).is_err());
-    }
-
-    // -- ProviderModelService tests (real in-memory SQLite repositories) --
-
-    use nomifun_api_types::{CreateProviderModelRequest, UpdateProviderModelRequest};
-    use nomifun_db::{
-        CreateProviderParams, IProviderRepository, SqliteProviderModelRepository,
-        SqliteProviderRepository, init_database_memory,
-    };
-
-    async fn setup(platform: &str) -> (ProviderModelService, crate::ProviderService, String, nomifun_db::Database) {
-        let db = init_database_memory().await.unwrap();
-        let provider_repo = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let model_repo = Arc::new(SqliteProviderModelRepository::new(db.pool().clone()));
-        let provider_id = nomifun_common::ProviderId::new().into_string();
-        provider_repo
-            .create(CreateProviderParams {
-                provider_id: Some(&provider_id),
-                platform,
-                name: "Test Provider",
-                base_url: "https://x.test/v1",
-                api_key_encrypted: &nomifun_common::encrypt_string("sk-test", &[0x42; 32]).unwrap(),
-                models: "[]",
-                enabled: true,
-                model_context_limits: None,
-                model_protocols: None,
-                model_descriptions: None,
-                model_enabled: None,
-                bedrock_config: None,
-                is_full_url: false,
-                sort_order: None,
-            })
-            .await
-            .unwrap();
-        let service = ProviderModelService::new(model_repo.clone(), provider_repo.clone());
-        let provider_service =
-            crate::ProviderService::new(provider_repo, model_repo, [0x42; 32]);
-        (service, provider_service, provider_id, db)
-    }
-
-    fn create_req(provider_id: &str, model: &str) -> CreateProviderModelRequest {
-        CreateProviderModelRequest {
-            provider_id: provider_id.into(),
-            model: model.into(),
-            enabled: true,
-            tasks: vec![],
-            traits: vec![],
-            protocol: None,
-            connection_role: None,
-            params: None,
+    fn capability(task: ModelTask, protocol: &str) -> ProviderModelCapabilityInput {
+        ProviderModelCapabilityInput {
+            task,
+            traits: Vec::new(),
+            protocol: protocol.into(),
+            connection_role: "default".into(),
+            base_url_override: None,
+            endpoint: None,
+            poll_endpoint: None,
+            content_endpoint: None,
+            realtime_endpoint: None,
+            allow_cross_origin_credentials: false,
+            provider_params: serde_json::json!({}),
             context_limit: None,
-            description: None,
-            sort_order: None,
         }
     }
 
-    fn update_req(provider_id: &str, model: &str) -> UpdateProviderModelRequest {
-        UpdateProviderModelRequest {
-            provider_id: provider_id.into(),
-            model: model.into(),
-            enabled: None,
-            sort_order: None,
-            tasks: None,
-            traits: None,
-            protocol: None,
-            connection_role: None,
-            params: None,
-            context_limit: None,
-            description: None,
+    #[test]
+    fn provider_params_reject_locally_owned_routing_fields() {
+        for key in nomifun_model_invoke::reserved_local_transport_param_keys() {
+            assert!(nomifun_model_invoke::is_reserved_local_transport_param_key(key));
+            let mut object = serde_json::Map::new();
+            object.insert((*key).to_owned(), serde_json::Value::Null);
+            let error = validate_provider_params(
+                "openai.audio_speech",
+                ModelTask::SpeechSynthesis,
+                &serde_json::Value::Object(object),
+            )
+            .unwrap_err();
+            assert!(matches!(error, AppError::BadRequest(message) if message.contains("reserved local transport/auth")));
+        }
+        validate_provider_params(
+            "openai.audio_speech",
+            ModelTask::SpeechSynthesis,
+            &serde_json::json!({"voice":"alloy","speed":1.1}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn provider_params_follow_the_exact_protocol_encoding_contract() {
+        validate_provider_params(
+            "bedrock.anthropic_messages",
+            ModelTask::Chat,
+            &serde_json::json!({"top_k":7,"future":{"nested":true}}),
+        )
+        .unwrap();
+        validate_provider_params(
+            "xai.stt",
+            ModelTask::SpeechRecognition,
+            &serde_json::json!({"keyterm":["NomiFun","StepFun"]}),
+        )
+        .unwrap();
+        assert!(
+            validate_provider_params(
+                "openai.images",
+                ModelTask::ImageEdit,
+                &serde_json::json!({"future":{"nested":true}}),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn response_task_order_matches_the_model_management_contract() {
+        let tasks = [
+            ModelTask::Chat,
+            ModelTask::RealtimeConversation,
+            ModelTask::ImageGeneration,
+            ModelTask::ImageEdit,
+            ModelTask::VideoGeneration,
+            ModelTask::SpeechSynthesis,
+            ModelTask::SpeechRecognition,
+            ModelTask::Embedding,
+            ModelTask::Rerank,
+        ];
+        assert_eq!(
+            tasks.map(model_task_order),
+            [0_u8, 1_u8, 2_u8, 3_u8, 4_u8, 5_u8, 6_u8, 7_u8, 8_u8]
+        );
+    }
+
+    #[test]
+    fn endpoints_are_same_origin_unless_explicitly_allowed() {
+        validate_credentialed_target_url(
+            "https://api.example.com/v1",
+            false,
+            "wss://api.example.com/realtime",
+            "realtime_endpoint",
+            ProtocolTransportKind::Websocket,
+            false,
+        )
+        .unwrap();
+        assert!(
+            validate_credentialed_target_url(
+                "https://api.example.com/v1",
+                false,
+                "https://media.example.com/jobs",
+                "endpoint",
+                ProtocolTransportKind::Http,
+                false,
+            )
+            .is_err()
+        );
+        validate_credentialed_target_url(
+            "https://api.example.com/v1",
+            true,
+            "https://media.example.com/jobs",
+            "endpoint",
+            ProtocolTransportKind::Http,
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn connection_roots_reject_queries_while_http_endpoints_allow_them() {
+        assert!(validate_base_url("https://api.example.com/v1?tenant=one").is_err());
+        let mut chat = capability(ModelTask::Chat, "openai.chat_text");
+        chat.endpoint = Some("/chat/completions?tenant=one".into());
+        validate_capability_urls(&chat, "https://api.example.com/v1").unwrap();
+    }
+
+    #[test]
+    fn websocket_capability_accepts_relative_endpoint_and_ws_base_override() {
+        let mut realtime = capability(
+            ModelTask::RealtimeConversation,
+            "stepfun.realtime_s2s",
+        );
+        realtime.realtime_endpoint = Some("/realtime?model={model}".into());
+        validate_capability_urls(&realtime, "https://api.stepfun.com/v1").unwrap();
+
+        realtime.base_url_override = Some("wss://api.stepfun.com/v1".into());
+        validate_capability_urls(&realtime, "https://api.stepfun.com/v1").unwrap();
+        assert!(validate_capability_urls(&realtime, "https://unused.example/v1").is_err());
+        realtime.allow_cross_origin_credentials = true;
+        validate_capability_urls(&realtime, "https://unused.example/v1").unwrap();
+
+        realtime.realtime_endpoint =
+            Some("https://api.stepfun.com/v1/realtime?model={model}".into());
+        realtime.allow_cross_origin_credentials = false;
+        validate_capability_urls(&realtime, "https://api.stepfun.com/v1").unwrap();
+    }
+
+    #[test]
+    fn http_base_override_requires_same_origin_or_explicit_acknowledgement() {
+        let mut chat = capability(ModelTask::Chat, "openai.chat_text");
+        chat.base_url_override = Some("https://api.example.com/v2".into());
+        validate_capability_urls(&chat, "https://api.example.com/v1").unwrap();
+        chat.base_url_override = Some("https://gateway.example.com/v1".into());
+        assert!(validate_capability_urls(&chat, "https://api.example.com/v1").is_err());
+        chat.allow_cross_origin_credentials = true;
+        validate_capability_urls(&chat, "https://api.example.com/v1").unwrap();
+    }
+
+    #[test]
+    fn relative_endpoints_preserve_the_connection_version_root() {
+        let base = Url::parse("https://api.example.com/v1").unwrap();
+        for endpoint in ["chat/completions", "/chat/completions"] {
+            let resolved = resolve_http_endpoint(&base, endpoint, "endpoint").unwrap();
+            assert_eq!(resolved.as_str(), "https://api.example.com/v1/chat/completions");
+        }
+        for endpoint in ["realtime?model=x", "/realtime?model=x"] {
+            let resolved = resolve_realtime_endpoint(&base, endpoint).unwrap();
+            assert_eq!(resolved.as_str(), "https://api.example.com/v1/realtime?model=x");
         }
     }
 
-    #[tokio::test]
-    async fn create_seeds_inferred_tasks_when_tasks_empty() {
-        let (service, _, provider_id, _db) = setup("stepfun").await;
-        let resp = service
-            .create(create_req(&provider_id, "step-asr"))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.tasks,
-            vec![ModelTask::SpeechRecognition],
-            "empty tasks are seeded from the platform+name heuristic"
-        );
-        assert_eq!(resp.source, ProfileSource::Inferred);
-        assert!(resp.enabled);
-        assert_eq!(resp.sort_order, 0);
-        assert_eq!(resp.params, serde_json::json!({}));
+    #[test]
+    fn sdk_capability_rejects_transport_urls() {
+        let mut bedrock = capability(ModelTask::Chat, "bedrock.anthropic_messages");
+        validate_capability_urls(&bedrock, "").unwrap();
+        assert!(validate_capability_urls(&bedrock, "https://runtime.example").is_err());
+        bedrock.endpoint = Some("/converse".into());
+        assert!(validate_capability_urls(&bedrock, "").is_err());
     }
 
-    #[tokio::test]
-    async fn create_with_explicit_tasks_is_user_source() {
-        let (service, _, provider_id, _db) = setup("openai").await;
-        let resp = service
-            .create(CreateProviderModelRequest {
-                tasks: vec![ModelTask::ImageGeneration],
-                traits: vec![],
-                context_limit: Some(64_000),
-                description: Some("img".into()),
-                protocol: Some("openai".into()),
-                connection_role: Some("primary".into()),
-                params: Some(serde_json::json!({"steps": 4})),
-                ..create_req(&provider_id, "my-image-model")
-            })
-            .await
-            .unwrap();
-        assert_eq!(resp.tasks, vec![ModelTask::ImageGeneration]);
-        assert_eq!(resp.source, ProfileSource::User);
-        assert_eq!(resp.context_limit, Some(64_000));
-        assert_eq!(resp.description.as_deref(), Some("img"));
-        assert_eq!(resp.protocol.as_deref(), Some("openai"));
-        assert_eq!(resp.connection_role.as_deref(), Some("primary"));
-        assert_eq!(resp.params["steps"], 4);
+    #[test]
+    fn protocol_auth_validation_honors_exact_and_parameterized_schemes() {
+        let chat = capability(ModelTask::Chat, "openai.chat_text");
+        validate_capability_auth_scheme(&chat, "bearer").unwrap();
+        assert!(validate_capability_auth_scheme(&chat, "header_key:x-api-key").is_err());
+
+        let speech = capability(ModelTask::SpeechSynthesis, "openai.audio_speech");
+        validate_capability_auth_scheme(&speech, "header_key:x-api-key").unwrap();
+        validate_capability_auth_scheme(&speech, "query_key:key").unwrap();
+
+        let anthropic = capability(ModelTask::Chat, "anthropic.messages");
+        validate_capability_auth_scheme(&anthropic, "header_key:X-API-Key").unwrap();
+
+        let gemini = capability(ModelTask::Chat, "gemini.generate_text");
+        validate_capability_auth_scheme(&gemini, "header_key:X-Goog-Api-Key").unwrap();
+        assert!(validate_capability_auth_scheme(&gemini, "bearer").is_err());
+
+        let bedrock = capability(ModelTask::Chat, "bedrock.anthropic_messages");
+        validate_capability_auth_scheme(&bedrock, "bedrock").unwrap();
+        assert!(validate_capability_auth_scheme(&bedrock, "bearer").is_err());
     }
 
-    #[tokio::test]
-    async fn create_appends_after_existing_catalog_and_rejects_duplicates() {
-        let (service, _, provider_id, _db) = setup("openai").await;
-        let first = service.create(create_req(&provider_id, "gpt-4o")).await.unwrap();
-        assert_eq!(first.sort_order, 0);
-        let second = service.create(create_req(&provider_id, "gpt-4o-mini")).await.unwrap();
-        assert_eq!(second.sort_order, 1, "default sort_order appends (max+1)");
+    #[test]
+    fn async_endpoint_overrides_preserve_manifest_placeholders() {
+        let mut video = capability(ModelTask::VideoGeneration, "openai.videos");
+        video.poll_endpoint = Some("videos/{id}".into());
+        video.content_endpoint = Some("videos/{id}/content".into());
+        validate_capability_urls(&video, "https://api.example.com/v1").unwrap();
 
-        let err = service.create(create_req(&provider_id, "gpt-4o")).await.unwrap_err();
-        assert!(matches!(err, AppError::Conflict(_)), "duplicate key is Conflict: {err:?}");
-    }
+        video.poll_endpoint = Some("videos/static".into());
+        assert!(validate_capability_urls(&video, "https://api.example.com/v1").is_err());
+        video.poll_endpoint = Some("videos/{request_id}".into());
+        assert!(validate_capability_urls(&video, "https://api.example.com/v1").is_err());
 
-    #[tokio::test]
-    async fn create_for_missing_provider_is_not_found() {
-        let (service, _, _, _db) = setup("openai").await;
-        let ghost = nomifun_common::ProviderId::new().into_string();
-        let err = service.create(create_req(&ghost, "gpt-4o")).await.unwrap_err();
-        assert!(matches!(err, AppError::NotFound(_)), "missing provider is NotFound: {err:?}");
-    }
+        let mut fixed_poll = capability(ModelTask::VideoGeneration, "siliconflow.video_jobs");
+        fixed_poll.poll_endpoint = Some("video/status".into());
+        validate_capability_urls(&fixed_poll, "https://api.example.com/v1").unwrap();
 
-    #[tokio::test]
-    async fn created_model_appears_in_provider_service_list_projection() {
-        let (service, provider_service, provider_id, _db) = setup("openai").await;
-        service.create(create_req(&provider_id, "gpt-4o")).await.unwrap();
-
-        let providers = provider_service.list().await.unwrap();
-        let provider = providers.iter().find(|p| p.provider_id == provider_id).unwrap();
-        assert!(
-            provider.models.contains(&"gpt-4o".to_string()),
-            "row create is immediately visible in the legacy models projection"
-        );
-    }
-
-    #[tokio::test]
-    async fn update_partial_description_keeps_tasks_and_source() {
-        let (service, _, provider_id, _db) = setup("stepfun").await;
-        service.create(create_req(&provider_id, "step-asr")).await.unwrap();
-
-        let resp = service
-            .update(UpdateProviderModelRequest {
-                description: Some(Some("speech to text".into())),
-                ..update_req(&provider_id, "step-asr")
-            })
-            .await
-            .unwrap();
-        assert_eq!(resp.description.as_deref(), Some("speech to text"));
-        assert_eq!(
-            resp.tasks,
-            vec![ModelTask::SpeechRecognition],
-            "partial update leaves tasks untouched"
-        );
-        assert_eq!(resp.source, ProfileSource::Inferred, "no tasks/traits edit keeps source");
-    }
-
-    #[tokio::test]
-    async fn update_clears_context_limit_with_explicit_null() {
-        let (service, _, provider_id, _db) = setup("openai").await;
-        service
-            .create(CreateProviderModelRequest {
-                context_limit: Some(128_000),
-                ..create_req(&provider_id, "gpt-4o")
-            })
-            .await
-            .unwrap();
-
-        let resp = service
-            .update(UpdateProviderModelRequest {
-                context_limit: Some(None),
-                ..update_req(&provider_id, "gpt-4o")
-            })
-            .await
-            .unwrap();
-        assert_eq!(resp.context_limit, None, "Some(None) clears the column");
-    }
-
-    #[tokio::test]
-    async fn update_tasks_flips_source_to_user() {
-        let (service, _, provider_id, _db) = setup("stepfun").await;
-        let created = service.create(create_req(&provider_id, "step-asr")).await.unwrap();
-        assert_eq!(created.source, ProfileSource::Inferred);
-
-        let resp = service
-            .update(UpdateProviderModelRequest {
-                tasks: Some(vec![ModelTask::Chat]),
-                ..update_req(&provider_id, "step-asr")
-            })
-            .await
-            .unwrap();
-        assert_eq!(resp.tasks, vec![ModelTask::Chat]);
-        assert_eq!(resp.source, ProfileSource::User, "explicit tasks edit becomes user profile");
-    }
-
-    #[tokio::test]
-    async fn update_missing_row_is_not_found() {
-        let (service, _, provider_id, _db) = setup("openai").await;
-        let err = service
-            .update(UpdateProviderModelRequest {
-                enabled: Some(false),
-                ..update_req(&provider_id, "ghost-model")
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, AppError::NotFound(_)), "missing row is NotFound: {err:?}");
-    }
-
-    #[tokio::test]
-    async fn delete_removes_row_from_provider_projection() {
-        let (service, provider_service, provider_id, _db) = setup("openai").await;
-        service.create(create_req(&provider_id, "gpt-4o")).await.unwrap();
-
-        assert!(service.delete(&provider_id, "gpt-4o").await.unwrap());
-        assert!(!service.delete(&provider_id, "gpt-4o").await.unwrap(), "second delete is false");
-
-        let providers = provider_service.list().await.unwrap();
-        let provider = providers.iter().find(|p| p.provider_id == provider_id).unwrap();
-        assert!(
-            !provider.models.contains(&"gpt-4o".to_string()),
-            "deleted row disappears from ProviderService::list()'s models projection"
-        );
-        assert!(provider.models_detail.is_empty());
-    }
-
-    #[tokio::test]
-    async fn create_rejects_invalid_connection_role_before_writing() {
-        let (service, _, provider_id, _db) = setup("openai").await;
-        let err = service
-            .create(CreateProviderModelRequest {
-                connection_role: Some("Bad Role!".into()),
-                ..create_req(&provider_id, "gpt-4o")
-            })
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                AppError::BadRequest(ref message)
-                    if message == "role must match ^[a-z][a-z0-9_-]{0,31}$"
-            ),
-            "unexpected error: {err:?}"
-        );
-        assert!(
-            service.list(Some(&provider_id)).await.unwrap().is_empty(),
-            "validation must run before any write; no half-created row may remain"
-        );
-    }
-
-    #[tokio::test]
-    async fn create_rejects_reserved_default_connection_role() {
-        let (service, _, provider_id, _db) = setup("openai").await;
-        let err = service
-            .create(CreateProviderModelRequest {
-                connection_role: Some("default".into()),
-                ..create_req(&provider_id, "gpt-4o")
-            })
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                AppError::BadRequest(ref message)
-                    if message
-                        == "role 'default' is reserved: the provider's own base_url/api_key is the default connection"
-            ),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn update_validates_connection_role_set_but_not_clear() {
-        let (service, _, provider_id, _db) = setup("openai").await;
-        service.create(create_req(&provider_id, "gpt-4o")).await.unwrap();
-
-        let err = service
-            .update(UpdateProviderModelRequest {
-                connection_role: Some(Some("bad!".into())),
-                ..update_req(&provider_id, "gpt-4o")
-            })
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                AppError::BadRequest(ref message)
-                    if message == "role must match ^[a-z][a-z0-9_-]{0,31}$"
-            ),
-            "unexpected error: {err:?}"
-        );
-
-        // A valid role is accepted (Some(Some(valid))).
-        let resp = service
-            .update(UpdateProviderModelRequest {
-                connection_role: Some(Some("voice".into())),
-                ..update_req(&provider_id, "gpt-4o")
-            })
-            .await
-            .unwrap();
-        assert_eq!(resp.connection_role.as_deref(), Some("voice"));
-
-        // Clearing with Some(None) must not run role validation.
-        let resp = service
-            .update(UpdateProviderModelRequest {
-                connection_role: Some(None),
-                ..update_req(&provider_id, "gpt-4o")
-            })
-            .await
-            .unwrap();
-        assert_eq!(resp.connection_role, None, "Some(None) clears the column");
-    }
-
-    #[tokio::test]
-    async fn list_filters_by_provider() {
-        let (service, _, provider_id, db) = setup("openai").await;
-        let provider_repo = SqliteProviderRepository::new(db.pool().clone());
-        let other_id = nomifun_common::ProviderId::new().into_string();
-        provider_repo
-            .create(CreateProviderParams {
-                provider_id: Some(&other_id),
-                platform: "deepseek",
-                name: "Other",
-                base_url: "https://y.test/v1",
-                api_key_encrypted: "enc",
-                models: "[]",
-                enabled: true,
-                model_context_limits: None,
-                model_protocols: None,
-                model_descriptions: None,
-                model_enabled: None,
-                bedrock_config: None,
-                is_full_url: false,
-                sort_order: None,
-            })
-            .await
-            .unwrap();
-        service.create(create_req(&provider_id, "gpt-4o")).await.unwrap();
-        service.create(create_req(&other_id, "deepseek-chat")).await.unwrap();
-
-        assert_eq!(service.list(None).await.unwrap().len(), 2);
-        let one = service.list(Some(&provider_id)).await.unwrap();
-        assert_eq!(one.len(), 1);
-        assert_eq!(one[0].model, "gpt-4o");
-        assert!(service.list(Some("not-a-uuid")).await.is_err());
+        let mut zhipu = capability(ModelTask::VideoGeneration, "zhipu.video_jobs");
+        zhipu.poll_endpoint = Some("async-result/{task_id}".into());
+        validate_capability_urls(&zhipu, "https://open.bigmodel.cn/api/paas/v4").unwrap();
+        zhipu.poll_endpoint = Some("async-result/{request_id}".into());
+        assert!(validate_capability_urls(&zhipu, "https://open.bigmodel.cn/api/paas/v4").is_err());
     }
 }

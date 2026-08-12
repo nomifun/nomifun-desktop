@@ -15,7 +15,6 @@ const baseConfig = {
   enabled: true,
   queue: [{ provider_id: P1, model: 'm1' }],
   max_switches: 4,
-  stamp_unhealthy: true,
 };
 
 describe('buildModelFailoverConfigForSave', () => {
@@ -42,4 +41,14 @@ describe('buildModelFailoverConfigForSave', () => {
     expect(result.config.queue).toEqual([{ provider_id: P1, model: 'm1' }]);
     expect(result.appendedDraft).toBe(false);
   });
+
+  test('serializes only the active failover controls', () => {
+    expect(resultKeys(buildModelFailoverConfigForSave(baseConfig).config)).toEqual([
+      'enabled',
+      'max_switches',
+      'queue',
+    ]);
+  });
 });
+
+const resultKeys = (value: object): string[] => Object.keys(value).sort();

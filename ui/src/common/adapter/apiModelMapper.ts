@@ -65,7 +65,8 @@ export function fromApiModel(raw: ApiProviderWithModel): TProviderWithModel {
     platform: '',
     name: '',
     base_url: '',
-    api_key: '',
+    auth_scheme: '',
+    has_credentials: false,
     use_model: raw.use_model ?? raw.model,
   };
 }

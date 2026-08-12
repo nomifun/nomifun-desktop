@@ -5,7 +5,10 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
 use axum::routing::{get, post};
 
-use nomifun_api_types::{ApiResponse, CreateKnowledgeTagRequest, KnowledgeSource, KnowledgeTag, UpdateKnowledgeTagRequest};
+use nomifun_api_types::{
+    ApiResponse, CreateKnowledgeTagRequest, KnowledgeRetrievalConfig, KnowledgeSource,
+    KnowledgeTag, UpdateKnowledgeTagRequest,
+};
 use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, KnowledgeBaseId};
 use serde::{Deserialize, Serialize};
@@ -86,8 +89,32 @@ pub fn knowledge_routes(state: KnowledgeRouterState) -> Router {
             "/api/knowledge/binding/{kind}/{target_id}",
             get(get_binding).post(set_binding),
         )
+        .route(
+            "/api/knowledge/retrieval",
+            get(get_retrieval_config).put(update_retrieval_config),
+        )
         .route("/api/knowledge/search", post(search_bases))
         .with_state(state)
+}
+
+async fn get_retrieval_config(
+    State(state): State<KnowledgeRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<KnowledgeRetrievalConfig>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.retrieval_config().await?,
+    )))
+}
+
+async fn update_retrieval_config(
+    State(state): State<KnowledgeRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<KnowledgeRetrievalConfig>, JsonRejection>,
+) -> Result<Json<ApiResponse<KnowledgeRetrievalConfig>>, AppError> {
+    let Json(config) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    Ok(Json(ApiResponse::ok(
+        state.service.update_retrieval_config(config).await?,
+    )))
 }
 
 async fn list_bases(
@@ -697,6 +724,124 @@ mod tests {
     async fn json_body(resp: axum::response::Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn retrieval_get_defaults_local_and_first_complete_put_persists() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = test_app(dir.path());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/knowledge/retrieval")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(
+            body["data"],
+            serde_json::json!({
+                "embedding": {"mode": "local"},
+                "rerank": {"mode": "local"}
+            })
+        );
+
+        let complete = serde_json::json!({
+            "embedding": {"mode": "local"},
+            "rerank": {"mode": "local"}
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put("/api/knowledge/retrieval")
+                    .header("content-type", "application/json")
+                    .body(Body::from(complete.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::get("/api/knowledge/retrieval")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(response).await["data"], complete);
+    }
+
+    #[tokio::test]
+    async fn retrieval_put_rejects_partial_or_unknown_stage_configuration() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = test_app(dir.path());
+        for body in [
+            serde_json::json!({"embedding": {"mode": "local"}}),
+            serde_json::json!({
+                "embedding": {"mode": "local", "provider_id": TEST_PROVIDER_ID},
+                "rerank": {"mode": "local"}
+            }),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::put("/api/knowledge/retrieval")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieval_put_never_persists_unvalidated_remote_stage() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = test_app(dir.path());
+        let body = serde_json::json!({
+            "embedding": {
+                "mode": "remote",
+                "provider_id": TEST_PROVIDER_ID,
+                "model": "embedding-model"
+            },
+            "rerank": {"mode": "local"}
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put("/api/knowledge/retrieval")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = app
+            .oneshot(
+                Request::get("/api/knowledge/retrieval")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let saved = json_body(response).await;
+        assert_eq!(
+            saved["data"],
+            serde_json::json!({
+                "embedding": {"mode": "local"},
+                "rerank": {"mode": "local"}
+            })
+        );
     }
 
     /// Wire-contract pin for workpath bindings (frontend Task 11): the

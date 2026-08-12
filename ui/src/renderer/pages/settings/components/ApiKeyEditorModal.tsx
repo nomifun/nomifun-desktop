@@ -2,7 +2,7 @@ import { Button, Input, Message, Modal, Spin, Tooltip } from '@arco-design/web-r
 import { CheckOne, CloseOne, Delete, Edit, Plus, DeleteFive, CheckSmall, Shield } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { parseApiKeyList, validateApiKeysForSave } from '@/common/utils/apiKeys';
+import { normalizeApiKeyList, parseApiKeyList } from '@/common/utils/apiKeys';
 
 /**
  * API Key 状态
@@ -131,33 +131,21 @@ const ApiKeyEditorModal: React.FC<ApiKeyEditorModalProps> = ({ visible, api_keys
 
     setIsSaving(true);
     try {
-      setKeys((prev) => prev.map((key) => (key.value.trim() ? { ...key, status: 'testing' } : key)));
-      const validation = await validateApiKeysForSave(apiKeys, onTestKey);
-      const invalidIndexes = new Set(validation.invalidIndexes);
-
-      setKeys((prev) => {
-        let nonEmptyIndex = -1;
-        return prev.map((key) => {
-          if (!key.value.trim()) return key;
-          nonEmptyIndex += 1;
-          return {
-            ...key,
-            status: invalidIndexes.has(nonEmptyIndex) ? 'invalid' : 'valid',
-          };
-        });
-      });
-
-      if (!validation.valid) {
-        Message.warning(t('settings.removeInvalidApiKeysBeforeSave', { count: validation.invalidIndexes.length }));
+      const normalized = normalizeApiKeyList(apiKeys);
+      if (!normalized) {
+        Message.warning(t('settings.apiKeyRequired', { defaultValue: '请输入至少一个非空 API Key。' }));
         return;
       }
-
-      onSave(validation.normalized);
+      // Saving and remote testing are deliberately separate. A provider may
+      // reject `/models` while its selected chat/audio/media endpoint works;
+      // users can still run the explicit per-key test buttons, then verify the
+      // configured model through its task-aware health check.
+      onSave(normalized);
       onClose();
     } finally {
       setIsSaving(false);
     }
-  }, [keys, onTestKey, onSave, onClose, t]);
+  }, [keys, onSave, onClose, t]);
 
   // 是否有多个 key
   const hasMultipleKeys = keys.filter((k) => k.value.trim()).length > 1;

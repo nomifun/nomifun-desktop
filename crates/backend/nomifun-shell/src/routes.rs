@@ -8,7 +8,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use nomifun_api_types::{
     ApiResponse, CheckToolInstalledRequest, CheckToolInstalledResponse, ClientPreferencesResponse,
     OpenExternalRequest, OpenFileRequest, OpenFolderWithRequest, ShowItemInFolderRequest,
-    SpeechToTextConfig, SpeechToTextProvider, TextToSpeechConfig, TtsApiRequest,
+    SpeechToTextConfig, TextToSpeechConfig, TtsApiRequest,
 };
 use nomifun_common::AppError;
 use nomifun_model_invoke::{ModelRef, ProducedData, TaskOutcome, TaskRequest, TaskResult, TtsRequest};
@@ -227,7 +227,7 @@ async fn speech_to_text(
 
     let prefs = state
         .client_pref_service
-        .get_preferences(Some(&["tools.speechToText", "speechToText"]))
+        .get_preferences(Some(&["tools.speechToText"]))
         .await
         .map_err(|e| {
             let status = e.status_code();
@@ -239,7 +239,8 @@ async fn speech_to_text(
             (status, Json(body))
         })?;
 
-    let config = speech_to_text_config_from_preferences(&prefs);
+    let config = speech_to_text_config_from_preferences(&prefs)
+        .map_err(|error| stt_error_response(&error))?;
 
     let route = resolve_cloud_speech_to_text_config(&state, config)
         .await
@@ -263,26 +264,27 @@ async fn speech_to_text(
     Ok((StatusCode::OK, Json(body)))
 }
 
-fn speech_to_text_config_from_preferences(prefs: &ClientPreferencesResponse) -> SpeechToTextConfig {
-    ["tools.speechToText", "speechToText"]
-        .into_iter()
-        .filter_map(|key| prefs.get(key))
-        .find_map(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or(SpeechToTextConfig {
+fn speech_to_text_config_from_preferences(
+    prefs: &ClientPreferencesResponse,
+) -> Result<SpeechToTextConfig, SttError> {
+    let Some(value) = prefs.get("tools.speechToText") else {
+        return Ok(SpeechToTextConfig {
             enabled: false,
-            provider: SpeechToTextProvider::Openai,
             provider_id: None,
             model: None,
             language: None,
             auto_send: None,
-            openai: None,
-            deepgram: None,
-        })
+        });
+    };
+    serde_json::from_value(value.clone()).map_err(|error| {
+        SttError::Unknown(format!(
+            "stored tools.speechToText configuration is invalid: {error}"
+        ))
+    })
 }
 
 /// The install-wide speech-synthesis default, or `None` when the user has not
-/// picked one. Mirrors [`speech_to_text_config_from_preferences`] minus the
-/// legacy-key fallback: `tools.textToSpeech` has no un-namespaced predecessor.
+/// picked one. `tools.textToSpeech` is the only persisted source.
 ///
 /// Read here rather than inside `/api/tts` on purpose — that route takes its
 /// `(provider_id, model)` from the request body. This is the resolver the
@@ -296,9 +298,8 @@ pub fn text_to_speech_config_from_preferences(
 
 /// Validate the stored speech preference against the provider catalog and
 /// produce the invoke-layer coordinates ([`CloudSttRoute`]). The execution
-/// protocol is NOT chosen here — the invoke layer's platform routing (plus any
-/// model-row protocol override) decides it; the config's `provider` enum only
-/// picks which legacy "not configured" error to surface.
+/// protocol is not inferred here: the selected model's explicit
+/// speech-recognition capability owns it.
 async fn resolve_cloud_speech_to_text_config(
     state: &ShellRouterState,
     config: SpeechToTextConfig,
@@ -307,30 +308,7 @@ async fn resolve_cloud_speech_to_text_config(
         return Err(SttError::Disabled);
     }
     let Some(provider_id) = config.provider_id.as_deref() else {
-        // Legacy embedded-credential configs (openai:/deepgram: blocks without
-        // a provider_id) predate the provider catalog. The invoke layer only
-        // executes catalog-backed models and the current UI always writes
-        // provider_id mode, so this form is retired rather than emulated.
-        // Only a block actually CARRYING a credential counts as legacy — the
-        // frontend historically persisted empty-key shells for unconfigured
-        // providers, and those keep the legacy "not configured" 400s.
-        let has_embedded_credential = config
-            .openai
-            .as_ref()
-            .is_some_and(|openai| !openai.api_key.trim().is_empty())
-            || config
-                .deepgram
-                .as_ref()
-                .is_some_and(|deepgram| !deepgram.api_key.trim().is_empty());
-        if has_embedded_credential {
-            return Err(SttError::Unknown(
-                "embedded-credential speech config is no longer supported; re-select your speech provider in Settings → 模型 → 语音识别".into(),
-            ));
-        }
-        return Err(match config.provider {
-            SpeechToTextProvider::Openai => SttError::OpenaiNotConfigured,
-            SpeechToTextProvider::Deepgram => SttError::DeepgramNotConfigured,
-        });
+        return Err(SttError::NotConfigured);
     };
     let Some(provider_service) = state.provider_service.as_ref() else {
         return Err(SttError::Unknown(
@@ -344,26 +322,21 @@ async fn resolve_cloud_speech_to_text_config(
         .into_iter()
         .find(|provider| provider.provider_id == provider_id && provider.enabled)
         .ok_or_else(|| SttError::Unknown("selected speech provider was not found or is disabled".into()))?;
-    if provider.api_key.trim().is_empty() {
-        return Err(match config.provider {
-            SpeechToTextProvider::Openai => SttError::OpenaiNotConfigured,
-            SpeechToTextProvider::Deepgram => SttError::DeepgramNotConfigured,
-        });
-    }
-
     let model = config
         .model
         .clone()
         .ok_or_else(|| SttError::Unknown("selected speech provider has no selected speech model".into()))?;
-    let model_is_enabled = provider
-        .model_enabled
-        .as_ref()
-        .and_then(|models| models.get(&model))
-        .copied()
-        .unwrap_or(true);
-    if !provider.models.contains(&model) || !model_is_enabled {
+    let model_is_available = provider.models.iter().any(|candidate| {
+        candidate.model == model
+            && candidate.enabled
+            && candidate
+                .capabilities
+                .iter()
+                .any(|capability| capability.task == nomifun_api_types::ModelTask::SpeechRecognition)
+    });
+    if !model_is_available {
         return Err(SttError::Unknown(
-            "selected speech model was not found or is disabled".into(),
+            "selected speech model was not found, is disabled, or has no speech-recognition capability".into(),
         ));
     }
     let language = config.language.clone().filter(|value| !value.trim().is_empty());
@@ -457,76 +430,46 @@ mod tests {
     }
 
     #[test]
-    fn speech_to_text_config_prefers_tools_key_and_supports_legacy_key() {
-        let legacy = json!({
-            "enabled": true,
-            "provider": "openai",
-            "openai": {
-                "api_key": "legacy-key",
-                "model": "legacy-model"
-            }
-        });
+    fn speech_to_text_config_reads_only_catalog_coordinates_from_tools_key() {
         let current = json!({
             "enabled": true,
-            "provider": "deepgram",
-            "deepgram": {
-                "api_key": "current-key",
-                "model": "nova-2"
-            }
+            "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
+            "model": "nova-2",
+            "language": "zh"
         });
-
-        let legacy_only = ClientPreferencesResponse::from([("speechToText".into(), legacy.clone())]);
-        let config = speech_to_text_config_from_preferences(&legacy_only);
-        assert!(matches!(
-            config.provider,
-            nomifun_api_types::SpeechToTextProvider::Openai
-        ));
-        assert_eq!(
-            config.openai.as_ref().map(|value| value.api_key.as_str()),
-            Some("legacy-key")
-        );
-
         let both = ClientPreferencesResponse::from([
-            ("speechToText".into(), legacy),
+            (
+                "speechToText".into(),
+                json!({"enabled": true, "provider_id": "ignored", "model": "ignored"}),
+            ),
             ("tools.speechToText".into(), current),
         ]);
-        let config = speech_to_text_config_from_preferences(&both);
-        assert!(matches!(
-            config.provider,
-            nomifun_api_types::SpeechToTextProvider::Deepgram
-        ));
+        let config = speech_to_text_config_from_preferences(&both).unwrap();
         assert_eq!(
-            config.deepgram.as_ref().map(|value| value.api_key.as_str()),
-            Some("current-key")
+            config.provider_id.as_deref(),
+            Some("0190f5fe-7c00-7a00-8000-000000000001")
         );
+        assert_eq!(config.model.as_deref(), Some("nova-2"));
+        assert_eq!(config.language.as_deref(), Some("zh"));
     }
 
     #[test]
-    fn invalid_current_speech_to_text_config_falls_back_to_legacy_key() {
+    fn invalid_current_speech_config_is_rejected_without_legacy_fallback() {
         let prefs = ClientPreferencesResponse::from([
-            ("tools.speechToText".into(), json!({"enabled": true})),
+            ("tools.speechToText".into(), json!({"enabled": true, "provider": "openai"})),
             (
                 "speechToText".into(),
                 json!({
                     "enabled": true,
-                    "provider": "openai",
-                    "openai": {
-                        "api_key": "legacy-key",
-                        "model": "whisper-1"
-                    }
+                    "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                    "model": "whisper-1"
                 }),
             ),
         ]);
 
-        let config = speech_to_text_config_from_preferences(&prefs);
-        assert!(matches!(
-            config.provider,
-            nomifun_api_types::SpeechToTextProvider::Openai
-        ));
-        assert_eq!(
-            config.openai.as_ref().map(|value| value.api_key.as_str()),
-            Some("legacy-key")
-        );
+        let error = speech_to_text_config_from_preferences(&prefs).unwrap_err();
+        assert!(matches!(error, SttError::Unknown(_)));
+        assert!(error.to_string().contains("configuration is invalid"));
     }
 
     #[test]

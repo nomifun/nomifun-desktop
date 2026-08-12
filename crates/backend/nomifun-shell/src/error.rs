@@ -43,11 +43,8 @@ pub enum SttError {
     #[error("STT is not enabled")]
     Disabled,
 
-    #[error("OpenAI STT is not configured: missing API key")]
-    OpenaiNotConfigured,
-
-    #[error("Deepgram STT is not configured: missing API key")]
-    DeepgramNotConfigured,
+    #[error("STT is not configured: select a speech-recognition provider and model")]
+    NotConfigured,
 
     #[error("STT request failed: {0}")]
     RequestFailed(String),
@@ -60,8 +57,7 @@ impl SttError {
     pub fn error_code(&self) -> &'static str {
         match self {
             Self::Disabled => "STT_DISABLED",
-            Self::OpenaiNotConfigured => "STT_OPENAI_NOT_CONFIGURED",
-            Self::DeepgramNotConfigured => "STT_DEEPGRAM_NOT_CONFIGURED",
+            Self::NotConfigured => "STT_NOT_CONFIGURED",
             Self::RequestFailed(_) => "STT_REQUEST_FAILED",
             Self::Unknown(_) => "STT_UNKNOWN",
         }
@@ -70,8 +66,7 @@ impl SttError {
     pub fn status_code(&self) -> u16 {
         match self {
             Self::Disabled
-            | Self::OpenaiNotConfigured
-            | Self::DeepgramNotConfigured => 400,
+            | Self::NotConfigured => 400,
             Self::RequestFailed(_) => 502,
             Self::Unknown(_) => 500,
         }
@@ -82,8 +77,7 @@ impl From<SttError> for AppError {
     fn from(err: SttError) -> Self {
         match &err {
             SttError::Disabled
-            | SttError::OpenaiNotConfigured
-            | SttError::DeepgramNotConfigured => {
+            | SttError::NotConfigured => {
                 AppError::BadRequest(err.to_string())
             }
             SttError::RequestFailed(_) => AppError::BadGateway(err.to_string()),
@@ -161,15 +155,9 @@ mod tests {
     }
 
     #[test]
-    fn stt_openai_not_configured_maps_to_bad_request() {
-        let err: AppError = SttError::OpenaiNotConfigured.into();
-        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("OpenAI")));
-    }
-
-    #[test]
-    fn stt_deepgram_not_configured_maps_to_bad_request() {
-        let err: AppError = SttError::DeepgramNotConfigured.into();
-        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("Deepgram")));
+    fn stt_not_configured_maps_to_bad_request() {
+        let err: AppError = SttError::NotConfigured.into();
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("not configured")));
     }
 
     #[test]
@@ -187,11 +175,7 @@ mod tests {
     #[test]
     fn stt_error_codes() {
         assert_eq!(SttError::Disabled.error_code(), "STT_DISABLED");
-        assert_eq!(SttError::OpenaiNotConfigured.error_code(), "STT_OPENAI_NOT_CONFIGURED");
-        assert_eq!(
-            SttError::DeepgramNotConfigured.error_code(),
-            "STT_DEEPGRAM_NOT_CONFIGURED"
-        );
+        assert_eq!(SttError::NotConfigured.error_code(), "STT_NOT_CONFIGURED");
         assert_eq!(SttError::RequestFailed("x".into()).error_code(), "STT_REQUEST_FAILED");
         assert_eq!(SttError::Unknown("x".into()).error_code(), "STT_UNKNOWN");
     }
@@ -199,8 +183,7 @@ mod tests {
     #[test]
     fn stt_status_codes() {
         assert_eq!(SttError::Disabled.status_code(), 400);
-        assert_eq!(SttError::OpenaiNotConfigured.status_code(), 400);
-        assert_eq!(SttError::DeepgramNotConfigured.status_code(), 400);
+        assert_eq!(SttError::NotConfigured.status_code(), 400);
         assert_eq!(SttError::RequestFailed("x".into()).status_code(), 502);
         assert_eq!(SttError::Unknown("x".into()).status_code(), 500);
     }
@@ -209,12 +192,8 @@ mod tests {
     fn stt_error_display_messages() {
         assert_eq!(SttError::Disabled.to_string(), "STT is not enabled");
         assert_eq!(
-            SttError::OpenaiNotConfigured.to_string(),
-            "OpenAI STT is not configured: missing API key"
-        );
-        assert_eq!(
-            SttError::DeepgramNotConfigured.to_string(),
-            "Deepgram STT is not configured: missing API key"
+            SttError::NotConfigured.to_string(),
+            "STT is not configured: select a speech-recognition provider and model"
         );
         assert_eq!(
             SttError::RequestFailed("timeout".into()).to_string(),

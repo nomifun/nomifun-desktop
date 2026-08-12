@@ -102,7 +102,7 @@ export const buildConnectionCredentials = (
   } catch {
     return { ok: false, error: 'invalid_json' };
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed) || Object.keys(parsed).length === 0) {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     return { ok: false, error: 'json_not_object' };
   }
   return { ok: true, credentials: parsed as Record<string, unknown> };

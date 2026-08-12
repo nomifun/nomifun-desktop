@@ -1,4 +1,4 @@
-//! Provider CRUD, model fetch, and protocol detection tests with auth.
+//! Provider CRUD and model fetch tests with auth.
 
 mod common;
 
@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use nomifun_common::ProviderId;
 use serde_json::json;
 use tower::ServiceExt;
-use wiremock::matchers::{header as match_header, method, path};
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::{body_json, build_app, delete_with_token, get_with_token, json_with_token, setup_and_login};
@@ -41,7 +41,18 @@ async fn provider_full_crud_with_auth() {
             "platform": "anthropic",
             "name": "Anthropic",
             "base_url": "https://api.anthropic.com",
-            "api_key": "sk-ant-api03-test1234"
+            "auth_scheme": "header_key:x-api-key",
+            "credentials": {"api_keys": ["sk-ant-api03-test1234"]},
+            "initial_model": {
+                "model": "claude-test",
+                "capabilities": [{
+                    "task": "chat",
+                    "protocol": "anthropic.messages",
+                    "connection_role": "default",
+                    "provider_params": {}
+                }]
+            },
+            "connections": []
         }),
         &token,
         &csrf,
@@ -52,11 +63,9 @@ async fn provider_full_crud_with_auth() {
     let id = json["data"]["provider_id"].as_str().unwrap().to_string();
     assert_eq!(json["data"]["platform"], "anthropic");
     assert_eq!(json["data"]["name"], "Anthropic");
-    let api_key = json["data"]["api_key"].as_str().unwrap();
-    assert_eq!(
-        api_key, "sk-ant-api03-test1234",
-        "API key should be plaintext on the wire (pre-launch)"
-    );
+    assert_eq!(json["data"]["has_credentials"], true);
+    assert!(json["data"].get("credentials").is_none());
+    assert!(json["data"].get("api_key").is_none());
 
     // 3. List — should contain one
     let resp = app
@@ -118,7 +127,11 @@ async fn provider_create_validation_with_auth() {
     let req = json_with_token(
         "POST",
         "/api/providers",
-        json!({"name": "Test", "base_url": "https://api.example.com", "api_key": "sk-test"}),
+        json!({
+            "name": "Test",
+            "base_url": "https://api.example.com",
+            "credentials": {"api_keys": ["sk-test"]}
+        }),
         &token,
         &csrf,
     );
@@ -129,7 +142,23 @@ async fn provider_create_validation_with_auth() {
     let req = json_with_token(
         "POST",
         "/api/providers",
-        json!({"platform": "openai", "name": "Test", "base_url": "not-a-url", "api_key": "sk-test"}),
+        json!({
+            "platform": "openai",
+            "name": "Test",
+            "base_url": "not-a-url",
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys": ["sk-test"]},
+            "initial_model": {
+                "model": "gpt-test",
+                "capabilities": [{
+                    "task": "chat",
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default",
+                    "provider_params": {}
+                }]
+            },
+            "connections": []
+        }),
         &token,
         &csrf,
     );
@@ -196,7 +225,18 @@ async fn model_fetch_openai_with_auth() {
             "platform": "openai",
             "name": "OpenAI Mock",
             "base_url": mock_server.uri(),
-            "api_key": "test-api-key"
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys": ["test-api-key"]},
+            "initial_model": {
+                "model": "gpt-test",
+                "capabilities": [{
+                    "task": "chat",
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default",
+                    "provider_params": {}
+                }]
+            },
+            "connections": []
         }),
         &token,
         &csrf,
@@ -237,131 +277,4 @@ async fn model_fetch_nonexistent_provider_with_auth() {
     );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-// ===========================================================================
-// Protocol detection
-// ===========================================================================
-
-#[tokio::test]
-async fn protocol_detect_openai_with_auth() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/models"))
-        .and(match_header("Authorization", "Bearer sk-test-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{"id": "gpt-4"}, {"id": "gpt-3.5-turbo"}]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    let req = json_with_token(
-        "POST",
-        "/api/providers/detect-protocol",
-        json!({
-            "base_url": mock_server.uri(),
-            "api_key": "sk-test-key"
-        }),
-        &token,
-        &csrf,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["protocol"], "openai");
-    assert!(json["data"]["confidence"].as_u64().unwrap() > 0);
-    let models = json["data"]["models"].as_array().unwrap();
-    assert!(!models.is_empty());
-}
-
-#[tokio::test]
-async fn protocol_detect_all_fail_with_auth() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(404))
-        .mount(&mock_server)
-        .await;
-
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    let req = json_with_token(
-        "POST",
-        "/api/providers/detect-protocol",
-        json!({
-            "base_url": mock_server.uri(),
-            "api_key": "sk-unknown"
-        }),
-        &token,
-        &csrf,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["protocol"], "unknown");
-    assert_eq!(json["data"]["confidence"], 0);
-}
-
-#[tokio::test]
-async fn protocol_detect_validation_with_auth() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    // Missing baseUrl
-    let req = json_with_token(
-        "POST",
-        "/api/providers/detect-protocol",
-        json!({"api_key": "sk-test"}),
-        &token,
-        &csrf,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-    // Missing apiKey
-    let req = json_with_token(
-        "POST",
-        "/api/providers/detect-protocol",
-        json!({"base_url": "https://api.example.com"}),
-        &token,
-        &csrf,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn protocol_detect_switch_platform_suggestion_with_auth() {
-    let mock_server = MockServer::start().await;
-
-    Mock::given(method("GET"))
-        .and(path("/models"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{"id": "gpt-4"}]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    let req = json_with_token(
-        "POST",
-        "/api/providers/detect-protocol",
-        json!({
-            "base_url": mock_server.uri(),
-            "api_key": "sk-test",
-            "preferred_protocol": "anthropic"
-        }),
-        &token,
-        &csrf,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["protocol"], "openai");
-    assert_eq!(json["data"]["suggestion"]["type"], "switch_platform");
 }

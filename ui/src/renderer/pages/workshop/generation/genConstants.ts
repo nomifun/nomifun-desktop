@@ -124,7 +124,9 @@ export const DEFAULT_VIDEO_PARAMS: VideoParams = {
 };
 
 export const DEFAULT_TTS_PARAMS: TtsParams = {
-  voice: 'alloy',
+  // No cross-provider voice is safe. OpenAI can still apply its own default;
+  // provider-native adapters either accept an explicit id or validate it.
+  voice: '',
 };
 
 /** Comfortable default node box the card grows to on first mount, per mode. */

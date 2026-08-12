@@ -19,6 +19,7 @@ pub mod oauth_token;
 pub mod provider;
 pub mod provider_connection;
 pub mod provider_model;
+pub mod provider_model_capability;
 pub mod preset;
 pub mod remote_agent;
 pub mod requirement;
@@ -44,6 +45,7 @@ mod sqlite_oauth_token;
 mod sqlite_provider;
 mod sqlite_provider_connection;
 mod sqlite_provider_model;
+mod sqlite_provider_model_capability;
 mod sqlite_miniapp;
 mod sqlite_preset;
 mod sqlite_remote_agent;
@@ -71,7 +73,7 @@ pub use channel::{
     ChannelInboundClaim, IChannelRepository, PENDING_PROMPT_EXPIRY_MS,
     PENDING_PROMPT_QUEUE_LIMIT, PendingPromptEnqueue, SettleChannelInboundReceiptParams,
 };
-pub use client_preference::IClientPreferenceRepository;
+pub use client_preference::{IClientPreferenceRepository, KNOWLEDGE_RETRIEVAL_KEY};
 pub(crate) use client_preference::{
     provider_preference_delete_action, ProviderPreferenceDeleteAction,
 };
@@ -93,6 +95,7 @@ pub use oauth_token::IOAuthTokenRepository;
 pub use provider::IProviderRepository;
 pub use provider_connection::IProviderConnectionRepository;
 pub use provider_model::IProviderModelRepository;
+pub use provider_model_capability::IProviderModelCapabilityRepository;
 pub use preset::{IPresetRepository, IPresetStateRepository, IPresetTagRepository};
 pub use remote_agent::IRemoteAgentRepository;
 pub use requirement::{
@@ -120,6 +123,7 @@ pub use sqlite_oauth_token::SqliteOAuthTokenRepository;
 pub use sqlite_provider::SqliteProviderRepository;
 pub use sqlite_provider_connection::SqliteProviderConnectionRepository;
 pub use sqlite_provider_model::SqliteProviderModelRepository;
+pub use sqlite_provider_model_capability::SqliteProviderModelCapabilityRepository;
 pub use sqlite_miniapp::SqliteMiniAppRepository;
 pub use sqlite_preset::{SqlitePresetRepository, SqlitePresetStateRepository, SqlitePresetTagRepository};
 pub use sqlite_remote_agent::SqliteRemoteAgentRepository;

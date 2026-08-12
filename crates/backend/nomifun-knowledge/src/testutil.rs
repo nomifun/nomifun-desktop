@@ -1,14 +1,15 @@
 //! Shared test fixtures for the knowledge crate: an in-memory
 //! `IKnowledgeRepository`, a no-op event broadcaster, and service factories.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nomifun_common::{
     CompanionId, ConversationId, KnowledgeBaseId, KnowledgeBindingId, TerminalId, TimestampMs,
 };
-use nomifun_db::models::{CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeTagRow, UpdateKnowledgeTagParams};
-use nomifun_db::{DbError, IKnowledgeRepository};
+use nomifun_db::models::{ClientPreference, CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeTagRow, UpdateKnowledgeTagParams};
+use nomifun_db::{DbError, IClientPreferenceRepository, IKnowledgeRepository};
 
 use crate::events::KnowledgeEventEmitter;
 use crate::service::KnowledgeService;
@@ -20,6 +21,54 @@ pub(crate) struct MemRepo {
     /// `knowledge_binding_bases` junction).
     pub bindings: Mutex<Vec<(KnowledgeBindingRow, Vec<String>)>>,
     pub tags: Mutex<Vec<KnowledgeTagRow>>,
+}
+
+#[derive(Default)]
+struct MemPreferenceRepo {
+    values: Mutex<HashMap<String, ClientPreference>>,
+}
+
+#[async_trait::async_trait]
+impl IClientPreferenceRepository for MemPreferenceRepo {
+    async fn get_all(&self) -> Result<Vec<ClientPreference>, DbError> {
+        Ok(self.values.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn get_by_keys(&self, keys: &[&str]) -> Result<Vec<ClientPreference>, DbError> {
+        let values = self.values.lock().unwrap();
+        Ok(keys
+            .iter()
+            .filter_map(|key| values.get(*key).cloned())
+            .collect())
+    }
+
+    async fn upsert_batch(&self, entries: &[(&str, &str)]) -> Result<(), DbError> {
+        let mut values = self.values.lock().unwrap();
+        for (key, value) in entries {
+            let id = values
+                .get(*key)
+                .map(|row| row.id)
+                .unwrap_or_else(|| values.len() as i64 + 1);
+            values.insert(
+                (*key).to_owned(),
+                ClientPreference {
+                    id,
+                    key: (*key).to_owned(),
+                    value: (*value).to_owned(),
+                    updated_at: nomifun_common::now_ms(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    async fn delete_keys(&self, keys: &[&str]) -> Result<(), DbError> {
+        let mut values = self.values.lock().unwrap();
+        for key in keys {
+            values.remove(*key);
+        }
+        Ok(())
+    }
 }
 
 /// Build a binding row with the `target_id` written to the column selected by
@@ -246,14 +295,16 @@ impl nomifun_realtime::UserEventSink for NoopBroadcaster {
 
 pub(crate) fn make_service(data_dir: &Path) -> KnowledgeService {
     let owner_id = nomifun_common::UserId::new();
-    KnowledgeService::new(
+    let service = KnowledgeService::new(
         Arc::new(MemRepo::default()),
         data_dir,
         KnowledgeEventEmitter::new(
             Arc::new(NoopBroadcaster),
             Arc::from(owner_id.into_string()),
         ),
-    )
+    );
+    service.set_retrieval_preferences(Arc::new(MemPreferenceRepo::default()));
+    service
 }
 
 /// Service plus one managed base provisioned on disk, seeded with `docs` as

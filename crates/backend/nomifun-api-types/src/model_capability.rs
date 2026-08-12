@@ -1,24 +1,21 @@
-//! Per-model capability inference from the model NAME — the only per-model
-//! signal available (the retired provider-level `capabilities` wire field was
-//! removed at ui-api-contract v4; there is no user-authored per-model
-//! capability field). Ported from the frontend
-//! `ui/src/common/utils/modelCapabilities.ts`. Dep-free substring matching.
+//! Catalog-only suggestions inferred from model names.
+//!
+//! These dependency-free heuristics help populate catalog recommendations and
+//! defaults. They never authorize invocation and never replace user-authored
+//! configuration: persisted `provider_model_capabilities` rows are the sole
+//! runtime authority.
 //!
 //! Two heuristics live here and MUST stay in sync with the frontend twin:
-//! - [`infer_model_modalities`] — chat-modality signal (currently `"vision"`),
-//!   consumed by the execution participant router's `needs_vision` hard filter.
+//! - [`infer_model_modalities`] — suggests chat traits such as vision input.
 //! - [`infer_generation_capabilities`] — Creative Workshop signal: does the
 //!   model NAME look like an image/video generator? Returns suggested
-//!   [`ModelType`] tags used as **defaults** the user may override. This is a
-//!   separate function so it has ZERO impact on Agent Execution routing (a
-//!   generator model keeps returning no chat modality and stays a router
-//!   baseline member exactly as before).
+//!   [`ModelTask`] values used only as catalog defaults the user may override.
 
-use crate::ModelType;
+use crate::ModelTask;
 
 /// Normalize a model id for name matching (mirrors FE `getBaseModelName`):
 /// lowercase, non-[a-z0-9./-] → '-', collapse runs, trim leading/trailing '-'.
-pub fn base_model_name(model: &str) -> String {
+pub(crate) fn base_model_name(model: &str) -> String {
     let lowered = model.to_lowercase();
     let mut s = String::with_capacity(lowered.len());
     for ch in lowered.chars() {
@@ -46,8 +43,15 @@ pub fn base_model_name(model: &str) -> String {
 }
 
 /// Model families that DISQUALIFY vision (checked first).
-const VISION_EXCLUDE: &[&str] =
-    &["embed", "rerank", "dall-e", "flux", "stable-diffusion", "whisper", "tts"];
+const VISION_EXCLUDE: &[&str] = &[
+    "embed",
+    "rerank",
+    "dall-e",
+    "flux",
+    "stable-diffusion",
+    "whisper",
+    "tts",
+];
 /// Model families that IMPLY vision. Note `"-vl"` catches the current-gen
 /// vision-language IDs (`qwen2-vl`, `qwen2.5-vl`, future `qwenN-vl`, …) that the
 /// bare `"qwen-vl"` substring misses once a version digit is inserted. `"step-1v"`
@@ -55,12 +59,25 @@ const VISION_EXCLUDE: &[&str] =
 /// nor `-vl`), and `"step-3.7"` catches the flagship multimodal `step-3.7-flash`;
 /// `step-3.5-flash` is text-only and does not match either.
 const VISION_INCLUDE: &[&str] = &[
-    "4o", "claude-3", "gpt-4", "gemini", "-vl", "qwen-vl", "llava", "vision", "pixtral",
-    "grok-vision", "internvl", "minicpm-v", "mimo-v2.5", "step-1v", "step-3.7",
+    "4o",
+    "claude-3",
+    "gpt-4",
+    "gemini",
+    "-vl",
+    "qwen-vl",
+    "llava",
+    "vision",
+    "pixtral",
+    "grok-vision",
+    "internvl",
+    "minicpm-v",
+    "mimo-v2.5",
+    "step-1v",
+    "step-3.7",
 ];
 
 /// Infer per-model modalities from the model name. Currently only `"vision"`.
-pub fn infer_model_modalities(model: &str) -> Vec<String> {
+pub(crate) fn infer_model_modalities(model: &str) -> Vec<String> {
     let base = base_model_name(model);
     let mut out = Vec::new();
     let excluded = VISION_EXCLUDE.iter().any(|k| base.contains(k));
@@ -113,21 +130,21 @@ const VIDEO_GENERATION_INCLUDE: &[&str] = &[
 ];
 
 /// Infer the Creative Workshop generation capabilities suggested by a model
-/// NAME. Returns [`ModelType::ImageGeneration`] and/or
-/// [`ModelType::VideoGeneration`] when the name matches a known generator
+/// NAME. Returns [`ModelTask::ImageGeneration`] and/or
+/// [`ModelTask::VideoGeneration`] when the name matches a known generator
 /// family. The result is a **suggested default** — the user may override it.
 ///
 /// This is intentionally decoupled from [`infer_model_modalities`]: generation
 /// models advertise NO chat modality here, so the execution participant router is
 /// unaffected.
-pub fn infer_generation_capabilities(model: &str) -> Vec<ModelType> {
+pub(crate) fn infer_generation_capabilities(model: &str) -> Vec<ModelTask> {
     let base = base_model_name(model);
     let mut out = Vec::new();
     if IMAGE_GENERATION_INCLUDE.iter().any(|k| base.contains(k)) {
-        out.push(ModelType::ImageGeneration);
+        out.push(ModelTask::ImageGeneration);
     }
     if VIDEO_GENERATION_INCLUDE.iter().any(|k| base.contains(k)) {
-        out.push(ModelType::VideoGeneration);
+        out.push(ModelTask::VideoGeneration);
     }
     out
 }
@@ -175,12 +192,15 @@ mod tests {
 
     #[test]
     fn base_model_name_normalizes() {
-        assert_eq!(super::base_model_name("GPT-4o (Preview)!"), "gpt-4o-preview");
+        assert_eq!(
+            super::base_model_name("GPT-4o (Preview)!"),
+            "gpt-4o-preview"
+        );
     }
 
     #[test]
     fn image_generation_models_infer_image_capability() {
-        use crate::ModelType;
+        use crate::ModelTask;
         for m in [
             "gpt-image-1",
             "dall-e-3",
@@ -198,7 +218,7 @@ mod tests {
             "cogview-4",
         ] {
             assert!(
-                super::infer_generation_capabilities(m).contains(&ModelType::ImageGeneration),
+                super::infer_generation_capabilities(m).contains(&ModelTask::ImageGeneration),
                 "{m} should infer image_generation"
             );
         }
@@ -206,7 +226,7 @@ mod tests {
 
     #[test]
     fn video_generation_models_infer_video_capability() {
-        use crate::ModelType;
+        use crate::ModelTask;
         for m in [
             "sora-2",
             "veo-3",
@@ -223,7 +243,7 @@ mod tests {
             "dream-machine",
         ] {
             assert!(
-                super::infer_generation_capabilities(m).contains(&ModelType::VideoGeneration),
+                super::infer_generation_capabilities(m).contains(&ModelTask::VideoGeneration),
                 "{m} should infer video_generation"
             );
         }

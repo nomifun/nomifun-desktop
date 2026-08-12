@@ -34,6 +34,44 @@ pub async fn build_app() -> (axum::Router, AppServices) {
     (router, services)
 }
 
+/// Produce real encrypted-at-rest fixture credentials whose plaintext follows
+/// the canonical typed credential-object contract.
+pub fn encrypted_bearer_credentials() -> String {
+    nomifun_common::encrypt_string(r#"{"api_keys":["test-only"]}"#, &[0x42; 32]).unwrap()
+}
+
+/// Idempotently seed one enabled model with an exact Chat capability.
+///
+/// The protocol is explicit so App E2E fixtures exercise the same normalized,
+/// task-scoped authority as production.
+pub async fn seed_openai_chat_model(
+    pool: &nomifun_db::SqlitePool,
+    provider_id: &str,
+    model: &str,
+) {
+    nomifun_db::sqlx::query(
+        "INSERT OR IGNORE INTO provider_models \
+         (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
+         VALUES (?, ?, 1, 0, NULL, 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(model)
+    .execute(pool)
+    .await
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT OR IGNORE INTO provider_model_capabilities \
+         (provider_id, model, task, traits, protocol, connection_role, \
+          allow_cross_origin_credentials, provider_params, created_at, updated_at) \
+         VALUES (?, ?, 'chat', '[]', 'openai.chat_text', 'default', 0, '{}', 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(model)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 pub const CLAUDE_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000101";
 pub const GEMINI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
 

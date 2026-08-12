@@ -1,7 +1,7 @@
 //! Black-box tests for `POST /api/tts`: real in-memory catalog + wiremock
 //! provider behind the unified invoke layer. Covers the binary happy path
 //! (audio bytes + Content-Type, no ApiResponse envelope), the local input
-//! validation (empty / oversized text), and catalog gating (unprofiled model).
+//! validation (empty / oversized text), and explicit capability gating.
 
 use std::sync::Arc;
 
@@ -14,9 +14,9 @@ use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use nomifun_db::{
-    CreateProviderParams, IProviderModelRepository, IProviderRepository, NewProviderModel,
-    SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
-    init_database_memory,
+    CreateProviderParams, IProviderRepository, NewProviderModel, NewProviderModelCapability,
+    SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
+    SqliteProviderModelRepository, SqliteProviderRepository, init_database_memory,
 };
 use nomifun_model_invoke::{AdapterRegistry, ModelInvokeService, default_adapters};
 use nomifun_shell::{NoopSystemOpener, ShellRouterState, ShellService, SttService, shell_routes};
@@ -34,6 +34,7 @@ async fn setup() -> (axum::Router, nomifun_db::SqlitePool) {
     let invoke = Arc::new(ModelInvokeService::new(
         Arc::new(SqliteProviderRepository::new(pool.clone())),
         Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+        Arc::new(SqliteProviderModelCapabilityRepository::new(pool.clone())),
         Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
         TEST_KEY,
         reqwest::Client::new(),
@@ -54,50 +55,54 @@ async fn setup() -> (axum::Router, nomifun_db::SqlitePool) {
 
 /// Seed an enabled openai-platform provider whose base_url is the mock server
 /// (key decrypts to `sk-test` → `Authorization: Bearer sk-test`).
-async fn seed_provider(pool: &nomifun_db::SqlitePool, base_url: &str) -> String {
+async fn seed_provider(
+    pool: &nomifun_db::SqlitePool,
+    base_url: &str,
+    model: &str,
+    task: &str,
+) -> String {
     let repo = SqliteProviderRepository::new(pool.clone());
-    let encrypted = nomifun_common::encrypt_string("sk-test", &TEST_KEY).unwrap();
-    repo.create(CreateProviderParams {
-        provider_id: None,
-        platform: "openai",
-        name: "Wiremock Provider",
-        base_url,
-        api_key_encrypted: &encrypted,
-        models: "[]",
-        enabled: true,
-        model_context_limits: None,
-        model_protocols: None,
-        model_descriptions: None,
-        model_enabled: None,
-        bedrock_config: None,
-        is_full_url: false,
-        sort_order: None,
-    })
-    .await
-    .unwrap()
-    .provider_id
-}
-
-async fn seed_model(pool: &nomifun_db::SqlitePool, provider_id: &str, model: &str, tasks: &str) {
-    let repo = SqliteProviderModelRepository::new(pool.clone());
-    repo.create(
-        provider_id,
-        &NewProviderModel {
+    let encrypted =
+        nomifun_common::encrypt_string(r#"{"api_keys":["sk-test"]}"#, &TEST_KEY).unwrap();
+    let protocol = match task {
+        "speech_synthesis" => "openai.audio_speech",
+        "chat" => "openai.chat_text",
+        other => panic!("unsupported test task {other}"),
+    };
+    let capabilities = [NewProviderModelCapability {
+        task,
+        traits: "[]",
+        protocol,
+        connection_role: "default",
+        provider_params: "{}",
+        ..Default::default()
+    }];
+    let initial_model = NewProviderModel {
             model,
             enabled: true,
             sort_order: 0,
-            tasks,
-            traits: "[]",
-            protocol: None,
-            params: "{}",
-            context_limit: None,
             description: None,
-            source: "user",
-            health: None,
+            capabilities: &capabilities,
+        };
+    repo.create(
+        CreateProviderParams {
+            provider_id: None,
+            platform: "openai",
+            name: "Wiremock Provider",
+            base_url,
+            auth_scheme: "bearer",
+            credentials_encrypted: &encrypted,
+            enabled: true,
+            bedrock_config: None,
+            sort_order: None,
         },
+        &initial_model,
+        &[],
     )
     .await
-    .unwrap();
+    .unwrap()
+    .0
+    .provider_id
 }
 
 fn tts_request(body: serde_json::Value) -> Request<Body> {
@@ -130,8 +135,8 @@ async fn tts_returns_audio_bytes_with_content_type() {
         .await;
 
     let (app, pool) = setup().await;
-    let pid = seed_provider(&pool, &server.uri()).await;
-    seed_model(&pool, &pid, "tts-1", r#"["speech_synthesis"]"#).await;
+    let base_url = format!("{}/v1", server.uri());
+    let pid = seed_provider(&pool, &base_url, "tts-1", "speech_synthesis").await;
 
     let resp = app
         .oneshot(tts_request(json!({
@@ -168,8 +173,8 @@ async fn tts_passes_voice_and_format_through() {
         .await;
 
     let (app, pool) = setup().await;
-    let pid = seed_provider(&pool, &server.uri()).await;
-    seed_model(&pool, &pid, "tts-1", r#"["speech_synthesis"]"#).await;
+    let base_url = format!("{}/v1", server.uri());
+    let pid = seed_provider(&pool, &base_url, "tts-1", "speech_synthesis").await;
 
     let resp = app
         .oneshot(tts_request(json!({
@@ -190,12 +195,11 @@ async fn tts_passes_voice_and_format_through() {
 }
 
 #[tokio::test]
-async fn tts_unprofiled_model_is_400_without_network() {
+async fn tts_model_without_speech_capability_is_400_without_network() {
     let server = MockServer::start().await;
     // No mock mounted: the catalog gate must refuse before the wire.
     let (app, pool) = setup().await;
-    let pid = seed_provider(&pool, &server.uri()).await;
-    seed_model(&pool, &pid, "gpt-4o", r#"["chat"]"#).await;
+    let pid = seed_provider(&pool, &server.uri(), "gpt-4o", "chat").await;
 
     let resp = app
         .oneshot(tts_request(json!({
@@ -215,8 +219,13 @@ async fn tts_unprofiled_model_is_400_without_network() {
 #[tokio::test]
 async fn tts_empty_text_is_400() {
     let (app, pool) = setup().await;
-    let pid = seed_provider(&pool, "https://unused.example").await;
-    seed_model(&pool, &pid, "tts-1", r#"["speech_synthesis"]"#).await;
+    let pid = seed_provider(
+        &pool,
+        "https://unused.example",
+        "tts-1",
+        "speech_synthesis",
+    )
+    .await;
 
     let resp = app
         .oneshot(tts_request(json!({
@@ -232,8 +241,13 @@ async fn tts_empty_text_is_400() {
 #[tokio::test]
 async fn tts_text_over_4096_chars_is_400() {
     let (app, pool) = setup().await;
-    let pid = seed_provider(&pool, "https://unused.example").await;
-    seed_model(&pool, &pid, "tts-1", r#"["speech_synthesis"]"#).await;
+    let pid = seed_provider(
+        &pool,
+        "https://unused.example",
+        "tts-1",
+        "speech_synthesis",
+    )
+    .await;
 
     let resp = app
         .oneshot(tts_request(json!({
@@ -256,8 +270,8 @@ async fn tts_upstream_401_maps_to_bad_gateway() {
         .await;
 
     let (app, pool) = setup().await;
-    let pid = seed_provider(&pool, &server.uri()).await;
-    seed_model(&pool, &pid, "tts-1", r#"["speech_synthesis"]"#).await;
+    let base_url = format!("{}/v1", server.uri());
+    let pid = seed_provider(&pool, &base_url, "tts-1", "speech_synthesis").await;
 
     let resp = app
         .oneshot(tts_request(json!({

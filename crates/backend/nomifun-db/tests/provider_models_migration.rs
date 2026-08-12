@@ -48,6 +48,7 @@ async fn backfill_merges_maps_and_profiles_and_drops_orphans() {
     .execute(&pool)
     .await
     .unwrap();
+
     // Profile for gpt-4o + an ORPHAN profile (model not in catalog).
     sqlx::query(
         "INSERT INTO model_profiles (provider_id, model, tasks, traits, params, source, updated_at) VALUES \

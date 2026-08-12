@@ -26,10 +26,10 @@ async fn database() -> nomifun_db::Database {
     .unwrap();
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
             created_at, updated_at\
          ) VALUES (?, 'openai', 'Fixture provider', 'https://example.invalid', \
-                   'encrypted', 1, 1, 1)",
+                   'bearer', '', 1, 1, 1)",
     )
     .bind(PROVIDER_ID)
     .execute(database.pool())

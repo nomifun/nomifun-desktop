@@ -30,7 +30,8 @@ describe('model-owned tool configuration placement', () => {
   test('every model capability is its own section; no host page hides categories', () => {
     const hubSource = readSource('./index.tsx');
     const asrSource = readSource('./SpeechToTextContent.tsx');
-    const creationSource = readSource('./CreationModelsPanel.tsx');
+    const imageSource = readSource('./ImageModelsContent.tsx');
+    const imageEditSource = readSource('./ImageEditModelsContent.tsx');
     const providerSource = readSource(
       '../../components/settings/SettingsModal/contents/ModelModalContent.tsx'
     );
@@ -39,7 +40,10 @@ describe('model-owned tool configuration placement', () => {
     expect(hubSource.includes("key: 'asr'")).toBe(true);
     expect(hubSource.includes("key: 'tts'")).toBe(true);
     expect(hubSource.includes("key: 'image'")).toBe(true);
+    expect(hubSource.includes("key: 'image-edit'")).toBe(true);
     expect(hubSource.includes("key: 'video'")).toBe(true);
+    expect(hubSource.includes("key: 'embedding'")).toBe(true);
+    expect(hubSource.includes("key: 'rerank'")).toBe(true);
     expect(hubSource.includes('SpeechModelsContent')).toBe(false);
     expect(hubSource.includes('<SpeechToTextContent />')).toBe(true);
     expect(hubSource.includes('<TextToSpeechContent />')).toBe(true);
@@ -55,9 +59,9 @@ describe('model-owned tool configuration placement', () => {
     expect(asrSource.includes('<TaskModelSelect')).toBe(true);
     expect(asrSource.includes('inferCloudSpeechService')).toBe(false);
 
-    // One capability per section means no page-level capability filter either.
-    expect(creationSource.includes('SegmentedTabs')).toBe(false);
-    expect(creationSource.includes('ImageGenerationToolSettings')).toBe(false);
+    // Image generation and image edit have distinct task projections.
+    expect(imageSource.includes("modality='image'")).toBe(true);
+    expect(imageEditSource.includes("modality='image_edit'")).toBe(true);
     expect(providerSource.includes('SpeechToTextCloudSettings')).toBe(false);
   });
 

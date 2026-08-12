@@ -88,7 +88,7 @@ describe('credentials form → structured JSON', () => {
     });
   });
 
-  test('custom scheme takes a non-empty JSON object, rejecting garbage', () => {
+  test('custom scheme takes an explicit JSON object, including a credentialless empty object', () => {
     expect(buildConnectionCredentials('weird', draft({ rawJson: '{"secret":"s"}' }))).toEqual({
       ok: true,
       credentials: { secret: 's' },
@@ -103,8 +103,8 @@ describe('credentials form → structured JSON', () => {
       error: 'json_not_object',
     });
     expect(buildConnectionCredentials('weird', draft({ rawJson: '{}' }))).toEqual({
-      ok: false,
-      error: 'json_not_object',
+      ok: true,
+      credentials: {},
     });
   });
 });

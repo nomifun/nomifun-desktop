@@ -584,6 +584,49 @@ async fn test_anthropic_multi_key_rotates_after_auth_failure() {
     server.verify().await;
 }
 
+#[tokio::test]
+async fn anthropic_extra_body_preserves_unknown_fields_but_typed_fields_win() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(text_sse_body("ok"), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut compat = ProviderCompat::anthropic_defaults();
+    compat.extra_body = Some(
+        serde_json::json!({
+            "temperature": 0.25,
+            "future_options": {"mode": "careful"},
+            "model": "must-not-win",
+            "messages": [{"role": "user", "content": "must-not-win"}],
+            "max_tokens": 1,
+            "tools": [{"name":"must-not-survive"}],
+            "thinking": {"type":"enabled","budget_tokens":999}
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let provider = AnthropicProvider::new("test-key", &server.uri(), compat).with_cache(false);
+    collect_events(provider.stream(&minimal_request()).await.unwrap()).await;
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["temperature"], 0.25);
+    assert_eq!(body["future_options"]["mode"], "careful");
+    assert_eq!(body["model"], "claude-3-5-sonnet-20241022");
+    assert_eq!(body["messages"][0]["content"][0]["text"], "Hello");
+    assert_eq!(body["max_tokens"], 1024);
+    assert_eq!(body["stream"], true);
+    assert!(body.get("tools").is_none());
+    assert!(body.get("thinking").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // test_anthropic_rate_limit_retryable
 // ---------------------------------------------------------------------------
@@ -751,4 +794,35 @@ async fn test_anthropic_no_prompt_caching_header_when_disabled() {
         !has_beta,
         "anthropic-beta header should not be present when cache is disabled"
     );
+}
+
+#[tokio::test]
+async fn anthropic_accepts_a_fully_resolved_capability_endpoint() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/custom/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(text_sse_body("custom endpoint"), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = AnthropicProvider::new(
+        "test-api-key",
+        &format!("{}/custom/messages?version=2026-08-11", server.uri()),
+        ProviderCompat {
+            api_path: Some(String::new()),
+            ..ProviderCompat::anthropic_defaults()
+        },
+    )
+    .with_cache(false);
+    let events = collect_events(provider.stream(&minimal_request()).await.unwrap()).await;
+    assert!(events.iter().any(
+        |event| matches!(event, LlmEvent::TextDelta(text) if text == "custom endpoint")
+    ));
+
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received[0].url.query(), Some("version=2026-08-11"));
 }

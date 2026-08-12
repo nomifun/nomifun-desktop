@@ -6,11 +6,23 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { ttsVoiceOptionsFor, TTS_VOICE_OPTIONS_BY_PLATFORM } from './ttsVoiceOptions';
+import {
+  ttsUsesModelIdAsVoice,
+  ttsVoiceOptionsFor,
+  TTS_VOICE_OPTIONS_BY_PROTOCOL,
+} from './ttsVoiceOptions';
 
 const src = readFileSync(new URL('./TaskModelSelect.tsx', import.meta.url), 'utf8');
 const companionControl = readFileSync(
   new URL('../../pages/nomi/CompanionModelControl.tsx', import.meta.url),
+  'utf8'
+);
+const generatorCard = readFileSync(
+  new URL('../../pages/workshop/generation/GeneratorCard.tsx', import.meta.url),
+  'utf8'
+);
+const failoverContent = readFileSync(
+  new URL('../../pages/modelHub/ModelFailoverContent.tsx', import.meta.url),
   'utf8'
 );
 
@@ -38,7 +50,14 @@ describe('TaskModelSelect', () => {
   test('committing a model keeps the voice already chosen for that provider', () => {
     // Re-picking the model must not silently drop the voice: the user would
     // hear the provider default and have no idea why.
-    expect(src.includes('voice: value?.provider_id === providerId ? value.voice : null')).toBe(true);
+    expect(src.includes('!ttsUsesModelIdAsVoice(nextSpeechSynthesisProtocol)')).toBe(true);
+  });
+
+  test('voice behavior comes from the exact speech-synthesis capability protocol', () => {
+    expect(src.includes("capabilityOf(selectedProvider, selectedModel, 'speech_synthesis')")).toBe(true);
+    expect(src.includes('ttsVoiceOptionsFor(speechSynthesisProtocol')).toBe(true);
+    expect(src.includes('currentPlatform')).toBe(false);
+    expect(src.includes('.platform')).toBe(false);
   });
 
   test('CompanionModelControl is now a thin wrapper, keeping its all-enabled scope', () => {
@@ -48,18 +67,47 @@ describe('TaskModelSelect', () => {
     // Its own duplicated select markup is gone.
     expect(companionControl.includes('NomiSelect.Option')).toBe(false);
   });
+
+  test('generation and failover reuse this selector instead of owning parallel pickers', () => {
+    expect(generatorCard.includes("components/model/TaskModelSelect'")).toBe(true);
+    expect(generatorCard.includes('onChange={setTaskModel}')).toBe(true);
+    expect(failoverContent.includes("components/model/TaskModelSelect'")).toBe(true);
+    expect(failoverContent.includes('onChange={setDraft}')).toBe(true);
+  });
 });
 
 describe('tts voice candidates', () => {
-  test('only platforms whose voice ids are documented get a list', () => {
-    expect(ttsVoiceOptionsFor('openai')).toEqual(TTS_VOICE_OPTIONS_BY_PLATFORM.openai);
-    expect(ttsVoiceOptionsFor('openai').includes('alloy')).toBe(true);
+  test('only exact protocols whose voice ids are documented get a list', () => {
+    expect(ttsVoiceOptionsFor('openai.audio_speech')).toEqual(
+      TTS_VOICE_OPTIONS_BY_PROTOCOL['openai.audio_speech']
+    );
+    expect(ttsVoiceOptionsFor('openai.audio_speech').includes('alloy')).toBe(true);
     // StepFun voices are verified against its live system-voices API, so they
     // are offered as suggestions (still free text for cloned/newer ids).
-    expect(ttsVoiceOptionsFor('stepfun').includes('cixingnansheng')).toBe(true);
+    expect(ttsVoiceOptionsFor('stepfun.audio_speech').includes('cixingnansheng')).toBe(true);
+    expect(
+      ttsVoiceOptionsFor('siliconflow.audio_speech', 'FunAudioLLM/CosyVoice2-0.5B').includes(
+        'FunAudioLLM/CosyVoice2-0.5B:alex'
+      )
+    ).toBe(true);
+    expect(
+      ttsVoiceOptionsFor('siliconflow.audio_speech', 'fnlp/MOSS-TTSD-v0.5').includes(
+        'fnlp/MOSS-TTSD-v0.5:diana'
+      )
+    ).toBe(true);
+    // Do not guess model-prefixed voice ids for a newly launched model.
+    expect(ttsVoiceOptionsFor('siliconflow.audio_speech', 'vendor/new-speech-model')).toEqual([]);
+    expect(ttsVoiceOptionsFor('siliconflow.audio_speech')).toEqual([]);
     // Everything else is free text — inventing ids for a provider we have not
     // verified would offer the user values that just fail at synthesis time.
-    expect(ttsVoiceOptionsFor('some-gateway')).toEqual([]);
+    expect(ttsVoiceOptionsFor('future.tts_protocol')).toEqual([]);
     expect(ttsVoiceOptionsFor(undefined)).toEqual([]);
+  });
+
+  test('Deepgram uses the selected Aura model id as its voice', () => {
+    expect(ttsUsesModelIdAsVoice('deepgram.speak_rest')).toBe(true);
+    expect(ttsUsesModelIdAsVoice('openai.audio_speech')).toBe(false);
+    expect(ttsUsesModelIdAsVoice('deepgram')).toBe(false);
+    expect(src.includes('withVoice && !modelIdIsVoice')).toBe(true);
   });
 });

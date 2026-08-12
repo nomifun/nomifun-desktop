@@ -18,6 +18,8 @@ use crate::error::{InvokeError, InvokeErrorKind};
 use crate::transport::{error_from_response, post_json};
 use crate::types::{TaskOutcome, TaskRequest, TaskResult};
 
+use super::json_request_body;
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// OpenAI-compatible sync `/embeddings` protocol.
@@ -46,15 +48,21 @@ impl ProtocolAdapter for OpenAiEmbeddingsAdapter {
                 "embeddings requires at least one input string",
             ));
         }
-        let url = call.dispatch_target().url;
-        let body = json!({ "model": call.model, "input": req.inputs });
+        let url = call.endpoint_url()?;
+        let body = json_request_body(
+            &call.model_params,
+            &req.extra,
+            json!({ "model": call.model, "input": req.inputs }),
+        )?;
 
         let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        let value: Value =
-            resp.json().await.map_err(|e| InvokeError::parse(format!("invalid embeddings JSON: {e}")))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| InvokeError::response_json("invalid embeddings JSON", &e))?;
         Ok(TaskOutcome::Done(TaskResult::Embeddings(parse_embeddings_response(&value)?)))
     }
 }
@@ -99,8 +107,13 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
+    use crate::adapters::test_support::call_with_endpoint;
     use crate::types::EmbedRequest;
+
+    fn call(base_url: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        let base_url = format!("{}/v1", base_url.trim_end_matches('/'));
+        call_with_endpoint(&base_url, model, "openai.embeddings", "/embeddings", request)
+    }
 
     fn embed_request(inputs: &[&str]) -> TaskRequest {
         TaskRequest::Embedding(EmbedRequest {

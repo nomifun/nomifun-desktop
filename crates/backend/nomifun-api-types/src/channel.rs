@@ -1022,13 +1022,19 @@ mod tests {
             json!("018F1234-5678-7ABC-8DEF-012345678990"),
             json!("channel_018f1234-5678-7abc-8def-012345678990"),
         ] {
-            assert!(serde_json::from_value::<EnablePluginRequest>(json!({
-                "plugin_id": plugin_id.clone(),
-                "config": {}
-            })).is_err());
-            assert!(serde_json::from_value::<DisablePluginRequest>(json!({
-                "plugin_id": plugin_id.clone()
-            })).is_err());
+            assert!(
+                serde_json::from_value::<EnablePluginRequest>(json!({
+                    "plugin_id": plugin_id.clone(),
+                    "config": {}
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<DisablePluginRequest>(json!({
+                    "plugin_id": plugin_id.clone()
+                }))
+                .is_err()
+            );
 
             let mut raw = valid_status.clone();
             raw["plugin_id"] = plugin_id;
@@ -1051,9 +1057,12 @@ mod tests {
             json!("018F1234-5678-7ABC-8DEF-012345678992"),
             json!("user_018f1234-5678-7abc-8def-012345678992"),
         ] {
-            assert!(serde_json::from_value::<RevokeUserRequest>(json!({
-                "channel_user_id": channel_user_id.clone()
-            })).is_err());
+            assert!(
+                serde_json::from_value::<RevokeUserRequest>(json!({
+                    "channel_user_id": channel_user_id.clone()
+                }))
+                .is_err()
+            );
             let mut raw = valid_user.clone();
             raw["channel_user_id"] = channel_user_id;
             assert!(serde_json::from_value::<ChannelUserResponse>(raw).is_err());

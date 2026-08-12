@@ -3,14 +3,12 @@
 //! Since the P1 invoke redesign this module no longer speaks any provider
 //! protocol itself: the route validates the stored preference against the
 //! provider catalog into a [`CloudSttRoute`], and [`SttService::transcribe`]
-//! hands the audio to [`ModelInvokeService`], whose platform routing table
-//! (openai.audio_transcriptions / deepgram.listen / …, overridable per model
-//! row) decides the actual protocol. The frontend's stored `provider` enum
-//! guess is ignored for execution.
+//! hands the audio to [`ModelInvokeService`]. The selected model's explicit
+//! speech-recognition capability decides the actual protocol.
 
 use std::sync::Arc;
 
-use nomifun_api_types::{SpeechToTextProvider, SpeechToTextResult};
+use nomifun_api_types::SpeechToTextResult;
 use nomifun_model_invoke::{
     AsrRequest, InputAsset, InvokeError, InvokeErrorKind, ModelInvokeService, ModelRef,
     TaskOutcome, TaskRequest, TaskResult,
@@ -25,8 +23,7 @@ use crate::error::SttError;
 pub struct CloudSttRoute {
     pub provider_id: String,
     pub model: String,
-    /// The provider row's platform. Display-only: it feeds the wire
-    /// `provider` enum (see [`wire_provider`]), never protocol selection.
+    /// The provider row's platform. Display-only; never protocol selection.
     pub platform: String,
     /// Preferred transcription language from the stored config
     /// (trimmed, non-empty). Wins over the per-request hint.
@@ -99,27 +96,13 @@ impl SttService {
             // Adapters echo the served model when the provider reports one
             // (deepgram's model_info); fall back to the selected model.
             model: model.unwrap_or_else(|| route.model.clone()),
-            provider: wire_provider(&route.platform),
+            provider: route.platform.clone(),
             language: transcript_language.or(language),
         })
     }
 }
 
-/// Map the resolved provider's platform onto the wire `provider` enum.
-///
-/// The field is display-only in the frontend; the execution protocol comes
-/// from the invoke layer's platform routing (plus any model-row protocol
-/// override). The honest mapping left: the deepgram platform reports
-/// `deepgram`, everything else reports `openai`.
-fn wire_provider(platform: &str) -> SpeechToTextProvider {
-    if platform.eq_ignore_ascii_case("deepgram") {
-        SpeechToTextProvider::Deepgram
-    } else {
-        SpeechToTextProvider::Openai
-    }
-}
-
-/// Map an [`InvokeError`] onto the legacy [`SttError`] wire semantics: any
+/// Map an [`InvokeError`] onto the STT route error contract: any
 /// failure that reached (or failed reaching) the provider mirrors the old
 /// `RequestFailed` (502); purely local resolution/config failures stay
 /// `Unknown` (500), matching what the route's own validations return.
@@ -168,15 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_provider_maps_deepgram_platform_and_defaults_to_openai() {
-        assert!(matches!(wire_provider("deepgram"), SpeechToTextProvider::Deepgram));
-        assert!(matches!(wire_provider("openai"), SpeechToTextProvider::Openai));
-        assert!(matches!(wire_provider("stepfun"), SpeechToTextProvider::Openai));
-        assert!(matches!(wire_provider("custom"), SpeechToTextProvider::Openai));
-    }
-
-    #[test]
-    fn invoke_errors_map_to_legacy_stt_semantics() {
+    fn invoke_errors_map_to_stt_semantics() {
         // Anything carrying an upstream HTTP status is a RequestFailed (502).
         let upstream = InvokeError {
             kind: InvokeErrorKind::InvalidParams,

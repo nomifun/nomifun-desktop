@@ -1,17 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
-const readSource = (url: URL) => readFileSync(url, 'utf8');
+const readSource = (relative: string) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
-describe('AddPlatformModal context window control', () => {
-  test('uses common preset choices instead of a free-form token input', () => {
-    const addSource = readSource(new URL('./AddPlatformModal.tsx', import.meta.url));
-    const addModelSource = readSource(new URL('./AddModelModal.tsx', import.meta.url));
-    const editSource = readSource(new URL('./EditModeModal.tsx', import.meta.url));
-    const modelListSource = readSource(
-      new URL('../../../components/settings/SettingsModal/contents/ModelModalContent.tsx', import.meta.url)
-    );
-    const selectSource = readSource(new URL('./ContextLimitSelect.tsx', import.meta.url));
+describe('task capability context window control', () => {
+  test('keeps common presets in the shared task card', () => {
+    const editorSource = readSource('./ModelDefinitionEditor.tsx');
+    const selectSource = readSource('./ContextLimitSelect.tsx');
 
     expect(selectSource.includes('CONTEXT_WINDOW_OPTIONS')).toBe(true);
     expect(selectSource.includes('value: 32_000')).toBe(true);
@@ -19,27 +14,25 @@ describe('AddPlatformModal context window control', () => {
     expect(selectSource.includes('value: 128_000')).toBe(true);
     expect(selectSource.includes('value: 200_000')).toBe(true);
     expect(selectSource.includes('value: 1_000_000')).toBe(true);
-    expect(selectSource.includes('getPopupContainer={() => document.body}')).toBe(true);
-    expect(selectSource.includes('node.parentElement')).toBe(false);
-    expect(addSource.includes('<ContextLimitSelect')).toBe(true);
-    expect(addSource.includes('model_context_limits')).toBe(true);
-    expect(addSource.includes('context_limit: values.context_limit')).toBe(false);
-    expect(addModelSource.includes('<ContextLimitSelect')).toBe(true);
-    expect(addModelSource.includes('model_context_limits')).toBe(true);
-    expect(modelListSource.includes('ModelContextLimitEditor')).toBe(true);
-    // Context limit persists through the row-level API (tri-state: null clears),
-    // not the legacy whole-provider model_context_limits map PUT.
-    expect(modelListSource.includes('context_limit: value && value > 0 ? value : null')).toBe(true);
-    expect(modelListSource.includes('newModelContextLimits')).toBe(false);
-    expect(modelListSource.includes('model_context_limits: next')).toBe(false);
-    expect(modelListSource.includes('model_context_limits: Object.keys(next).length > 0 ? next : undefined')).toBe(
-      false
-    );
-    expect(editSource.includes('<ContextLimitSelect')).toBe(false);
-    expect(/\bcontext_limit\b/.test(editSource)).toBe(false);
-    expect(modelListSource.includes('platform.context_limit')).toBe(false);
-    expect(modelListSource.includes('inheritedContextLimit')).toBe(false);
-    expect(addSource.includes('<InputNumber')).toBe(false);
-    expect(editSource.includes('<InputNumber')).toBe(false);
+    expect(editorSource.includes('<ContextLimitSelect')).toBe(true);
+    expect(editorSource.includes('value={capability.contextLimit}')).toBe(true);
+    expect(editorSource.includes('{ contextLimit }')).toBe(true);
+  });
+
+  test('all create and edit surfaces reuse the same capability editor', () => {
+    for (const relative of ['./AddPlatformModal.tsx', './AddModelModal.tsx', './ModelAdvancedEditor.tsx']) {
+      expect(readSource(relative).includes('<ModelDefinitionEditor')).toBe(true);
+    }
+  });
+
+  test('serializes context as part of each full capability save', () => {
+    const advancedSource = readSource('./providerModelAdvanced.ts');
+    const addProviderSource = readSource('./AddPlatformModal.tsx');
+    const addModelSource = readSource('./AddModelModal.tsx');
+
+    expect(advancedSource.includes('context_limit: capability.contextLimit')).toBe(true);
+    expect(addProviderSource.includes('initial_model')).toBe(true);
+    expect(addProviderSource.includes('capabilityInputsFromDefinition')).toBe(true);
+    expect(addModelSource.includes('ipcBridge.providerModel.save.invoke')).toBe(true);
   });
 });

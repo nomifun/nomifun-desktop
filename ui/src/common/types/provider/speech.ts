@@ -6,44 +6,17 @@
 
 import type { ProviderId } from '@/common/types/ids';
 
-export type SpeechToTextProvider = 'openai' | 'deepgram';
-
-export type OpenAISpeechToTextConfig = {
-  api_key: string;
-  base_url?: string;
-  language?: string;
-  model: string;
-  prompt?: string;
-  temperature?: number;
-};
-
-export type DeepgramSpeechToTextConfig = {
-  api_key: string;
-  base_url?: string;
-  detectLanguage?: boolean;
-  language?: string;
-  model: string;
-  punctuate?: boolean;
-  smartFormat?: boolean;
-};
-
 /**
  * Install-wide speech-to-text default (`tools.speechToText`).
- *
- * `openai` / `deepgram` are RETIRED embedded-credential blocks: the backend has
- * executed transcription by `(provider_id, model)` since the catalog migration
- * and refuses those shapes, so `normalizeSpeechToTextConfig` strips them the
- * first time the section is opened rather than keeping a dead API key on disk.
+ * Provider credentials and transport live exclusively on the selected model's
+ * speech_recognition capability.
  */
 export type SpeechToTextConfig = {
   autoSend?: boolean;
   enabled: boolean;
-  provider: SpeechToTextProvider;
   provider_id?: ProviderId;
   language?: string;
   model?: string;
-  deepgram?: DeepgramSpeechToTextConfig;
-  openai?: OpenAISpeechToTextConfig;
 };
 
 /**
@@ -72,6 +45,7 @@ export type SpeechToTextRequest = {
 export type SpeechToTextResult = {
   language?: string;
   model: string;
-  provider: SpeechToTextProvider;
+  /** Resolved runtime platform, not a hard-coded two-provider enum. */
+  provider: string;
   text: string;
 };

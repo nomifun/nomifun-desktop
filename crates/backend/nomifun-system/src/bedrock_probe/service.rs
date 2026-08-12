@@ -3,6 +3,7 @@ use std::time::Duration;
 use aws_sdk_bedrock::config::Credentials;
 use nomifun_api_types::{BedrockAuthMethod, BedrockConfig};
 use nomifun_common::AppError;
+use nomifun_model_invoke::{AuthMaterial, AuthScheme};
 use tracing::{info, warn};
 
 /// Default Bedrock model for lightweight connection testing.
@@ -28,10 +29,12 @@ impl ConnectionTestService {
     ///
     /// Constructs an isolated credential provider (no global env pollution)
     /// and calls `get_foundation_model` as a zero-cost validation.
-    pub async fn test_bedrock_connection(&self, config: BedrockConfig) -> Result<(), AppError> {
-        validate_bedrock_config(&config)?;
-
-        let aws_config = build_aws_config(&config).await;
+    pub async fn test_bedrock_connection(
+        &self,
+        config: BedrockConfig,
+        credentials: serde_json::Value,
+    ) -> Result<(), AppError> {
+        let aws_config = build_bedrock_aws_config(&config, &credentials).await?;
         let bedrock_config = aws_sdk_bedrock::config::Builder::from(&aws_config)
             .timeout_config(
                 aws_config::timeout::TimeoutConfig::builder()
@@ -56,49 +59,104 @@ impl ConnectionTestService {
     }
 }
 
-/// Validate required fields in BedrockConfig based on auth method.
-fn validate_bedrock_config(config: &BedrockConfig) -> Result<(), AppError> {
-    if config.region.is_empty() {
-        return Err(AppError::BadRequest("region is required".into()));
+/// Validate the non-secret Bedrock metadata together with its write-only
+/// typed credentials. Each auth method is fail-closed; no missing field may
+/// silently select a different AWS credential chain.
+pub(crate) fn validate_bedrock_auth(
+    config: &BedrockConfig,
+    credentials: &serde_json::Value,
+) -> Result<(), AppError> {
+    if config.region.trim().is_empty() {
+        return Err(AppError::BadRequest("bedrock region is required".into()));
     }
-
+    AuthMaterial {
+        scheme: AuthScheme::Bedrock,
+        credentials: credentials.clone(),
+    }
+    .validate_credentials()
+    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let object = credentials.as_object().ok_or_else(|| {
+        AppError::BadRequest("bedrock credentials must be a JSON object".into())
+    })?;
     match config.auth_method {
         BedrockAuthMethod::AccessKey => {
-            if config.access_key_id.as_deref().unwrap_or("").is_empty() {
+            if config.profile.is_some() {
                 return Err(AppError::BadRequest(
-                    "accessKeyId is required for accessKey auth method".into(),
+                    "bedrock profile must be omitted for accessKey auth".into(),
                 ));
             }
-            if config.secret_access_key.as_deref().unwrap_or("").is_empty() {
+            if object.is_empty() {
                 return Err(AppError::BadRequest(
-                    "secretAccessKey is required for accessKey auth method".into(),
+                    "bedrock accessKey auth requires access_key_id and secret_access_key credentials"
+                        .into(),
                 ));
             }
         }
         BedrockAuthMethod::Profile => {
-            if config.profile.as_deref().unwrap_or("").is_empty() {
+            if config
+                .profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .is_none()
+            {
                 return Err(AppError::BadRequest(
-                    "profile is required for profile auth method".into(),
+                    "bedrock profile is required for profile auth".into(),
+                ));
+            }
+            if !object.is_empty() {
+                return Err(AppError::BadRequest(
+                    "bedrock profile auth requires empty credentials".into(),
+                ));
+            }
+        }
+        BedrockAuthMethod::DefaultChain => {
+            if config.profile.is_some() {
+                return Err(AppError::BadRequest(
+                    "bedrock profile must be omitted for defaultChain auth".into(),
+                ));
+            }
+            if !object.is_empty() {
+                return Err(AppError::BadRequest(
+                    "bedrock defaultChain auth requires empty credentials".into(),
                 ));
             }
         }
     }
-
     Ok(())
 }
 
-/// Build AWS SDK config from BedrockConfig without polluting global environment.
-async fn build_aws_config(config: &BedrockConfig) -> aws_config::SdkConfig {
-    let region = aws_config::Region::new(config.region.clone());
+/// Build AWS SDK config without placing secrets in global process state.
+pub(crate) async fn build_bedrock_aws_config(
+    config: &BedrockConfig,
+    credentials: &serde_json::Value,
+) -> Result<aws_config::SdkConfig, AppError> {
+    validate_bedrock_auth(config, credentials)?;
+    let region = aws_config::Region::new(config.region.trim().to_owned());
 
-    match config.auth_method {
+    let sdk_config = match config.auth_method {
         BedrockAuthMethod::AccessKey => {
+            let object = credentials.as_object().ok_or_else(|| {
+                AppError::BadRequest("bedrock credentials must be a JSON object".into())
+            })?;
+            let access_key_id = object
+                .get("access_key_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| AppError::BadRequest("access_key_id is required".into()))?;
+            let secret_access_key = object
+                .get("secret_access_key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| AppError::BadRequest("secret_access_key is required".into()))?;
+            let session_token = object
+                .get("session_token")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
             let credentials = Credentials::new(
-                config.access_key_id.as_deref().unwrap_or_default(),
-                config.secret_access_key.as_deref().unwrap_or_default(),
+                access_key_id,
+                secret_access_key,
+                session_token,
                 None,
-                None,
-                "nomifun-bedrock-test",
+                "nomifun-bedrock",
             );
             aws_config::defaults(aws_config::BehaviorVersion::latest())
                 .region(region)
@@ -107,122 +165,118 @@ async fn build_aws_config(config: &BedrockConfig) -> aws_config::SdkConfig {
                 .await
         }
         BedrockAuthMethod::Profile => {
+            let profile = config.profile.as_deref().ok_or_else(|| {
+                AppError::BadRequest("bedrock profile is required for profile auth".into())
+            })?;
             aws_config::defaults(aws_config::BehaviorVersion::latest())
                 .region(region)
-                .profile_name(config.profile.as_deref().unwrap_or_default())
+                .profile_name(profile)
                 .load()
                 .await
         }
-    }
+        BedrockAuthMethod::DefaultChain => {
+            aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .region(region)
+                .load()
+                .await
+        }
+    };
+    Ok(sdk_config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::BedrockConfig;
+    use serde_json::json;
 
-    // -- validate_bedrock_config --
-
-    #[test]
-    fn test_validate_access_key_ok() {
-        let config = BedrockConfig {
-            auth_method: BedrockAuthMethod::AccessKey,
+    fn config(auth_method: BedrockAuthMethod, profile: Option<&str>) -> BedrockConfig {
+        BedrockConfig {
+            auth_method,
             region: "us-east-1".into(),
-            access_key_id: Some("AKIAIOSFODNN7".into()),
-            secret_access_key: Some("wJalrXUtnFEMI".into()),
-            profile: None,
-        };
-        assert!(validate_bedrock_config(&config).is_ok());
+            profile: profile.map(str::to_owned),
+        }
     }
 
     #[test]
-    fn test_validate_profile_ok() {
-        let config = BedrockConfig {
-            auth_method: BedrockAuthMethod::Profile,
-            region: "eu-west-1".into(),
-            access_key_id: None,
-            secret_access_key: None,
-            profile: Some("my-profile".into()),
-        };
-        assert!(validate_bedrock_config(&config).is_ok());
+    fn access_key_accepts_only_typed_secret_credentials() {
+        let access_config = config(BedrockAuthMethod::AccessKey, None);
+        validate_bedrock_auth(
+            &access_config,
+            &json!({
+                "access_key_id":"AKIA",
+                "secret_access_key":"secret",
+                "session_token":"session"
+            }),
+        )
+        .unwrap();
+        for invalid in [
+            json!({}),
+            json!({"access_key_id":"AKIA"}),
+            json!({"access_key_id":"AKIA","secret_access_key":""}),
+            json!({"access_key_id":"AKIA","secret_access_key":"secret","unknown":"x"}),
+        ] {
+            assert!(validate_bedrock_auth(&access_config, &invalid).is_err());
+        }
+        assert!(
+            validate_bedrock_auth(
+                &config(BedrockAuthMethod::AccessKey, Some("forbidden")),
+                &json!({"access_key_id":"AKIA","secret_access_key":"secret"}),
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn test_validate_empty_region() {
-        let config = BedrockConfig {
-            auth_method: BedrockAuthMethod::AccessKey,
-            region: "".into(),
-            access_key_id: Some("AKIA".into()),
-            secret_access_key: Some("secret".into()),
-            profile: None,
-        };
-        let err = validate_bedrock_config(&config).unwrap_err();
-        assert!(err.to_string().contains("region"));
+    fn profile_and_default_chain_require_empty_credentials_without_fallback() {
+        validate_bedrock_auth(
+            &config(BedrockAuthMethod::Profile, Some("work")),
+            &json!({}),
+        )
+        .unwrap();
+        validate_bedrock_auth(
+            &config(BedrockAuthMethod::DefaultChain, None),
+            &json!({}),
+        )
+        .unwrap();
+
+        assert!(
+            validate_bedrock_auth(&config(BedrockAuthMethod::Profile, None), &json!({})).is_err()
+        );
+        assert!(
+            validate_bedrock_auth(
+                &config(BedrockAuthMethod::Profile, Some("work")),
+                &json!({"access_key_id":"AKIA","secret_access_key":"secret"}),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_bedrock_auth(
+                &config(BedrockAuthMethod::DefaultChain, Some("forbidden")),
+                &json!({}),
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn test_validate_access_key_missing_key_id() {
-        let config = BedrockConfig {
-            auth_method: BedrockAuthMethod::AccessKey,
-            region: "us-east-1".into(),
-            access_key_id: None,
-            secret_access_key: Some("secret".into()),
-            profile: None,
-        };
-        let err = validate_bedrock_config(&config).unwrap_err();
-        assert!(err.to_string().contains("accessKeyId"));
-    }
-
-    #[test]
-    fn test_validate_access_key_missing_secret() {
-        let config = BedrockConfig {
-            auth_method: BedrockAuthMethod::AccessKey,
-            region: "us-east-1".into(),
-            access_key_id: Some("AKIA".into()),
-            secret_access_key: None,
-            profile: None,
-        };
-        let err = validate_bedrock_config(&config).unwrap_err();
-        assert!(err.to_string().contains("secretAccessKey"));
-    }
-
-    #[test]
-    fn test_validate_access_key_empty_key_id() {
-        let config = BedrockConfig {
-            auth_method: BedrockAuthMethod::AccessKey,
-            region: "us-east-1".into(),
-            access_key_id: Some("".into()),
-            secret_access_key: Some("secret".into()),
-            profile: None,
-        };
-        let err = validate_bedrock_config(&config).unwrap_err();
-        assert!(err.to_string().contains("accessKeyId"));
-    }
-
-    #[test]
-    fn test_validate_profile_missing() {
-        let config = BedrockConfig {
-            auth_method: BedrockAuthMethod::Profile,
-            region: "us-east-1".into(),
-            access_key_id: None,
-            secret_access_key: None,
-            profile: None,
-        };
-        let err = validate_bedrock_config(&config).unwrap_err();
-        assert!(err.to_string().contains("profile"));
-    }
-
-    #[test]
-    fn test_validate_profile_empty() {
-        let config = BedrockConfig {
-            auth_method: BedrockAuthMethod::Profile,
-            region: "us-east-1".into(),
-            access_key_id: None,
-            secret_access_key: None,
-            profile: Some("".into()),
-        };
-        let err = validate_bedrock_config(&config).unwrap_err();
-        assert!(err.to_string().contains("profile"));
+    fn every_method_requires_nonblank_region() {
+        for auth_method in [
+            BedrockAuthMethod::AccessKey,
+            BedrockAuthMethod::Profile,
+            BedrockAuthMethod::DefaultChain,
+        ] {
+            let mut config = config(
+                auth_method,
+                (auth_method == BedrockAuthMethod::Profile).then_some("work"),
+            );
+            config.region = " ".into();
+            let credentials = if auth_method == BedrockAuthMethod::AccessKey {
+                json!({"access_key_id":"AKIA","secret_access_key":"secret"})
+            } else {
+                json!({})
+            };
+            assert!(validate_bedrock_auth(&config, &credentials).is_err());
+        }
     }
 
     #[test]

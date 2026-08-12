@@ -5,9 +5,8 @@ import useSWR, { type SWRConfiguration } from 'swr';
 import { orderModelSelectorProviders } from './modelSelectorProviderOrdering';
 
 export interface ModelProviderListResult {
-  /** Enabled providers in selector order — provider METADATA only. Which
-   * models a surface may list comes from `useModelsForTask` (catalog resolve);
-   * the old name-heuristic `getAvailableModels` filter is gone. */
+  /** Enabled providers in selector order. Task membership is filtered from
+   * each provider's nested model capabilities by `useModelsForTask`. */
   providers: IProvider[];
   configuredProviders: IProvider[];
   isLoading: boolean;
@@ -35,7 +34,7 @@ export const useProvidersQuery = () => {
 /**
  * Shared hook that builds the provider list and exposes provider
  * metadata/label helpers. Task-capable MODEL lists are
- * resolved by `useModelsForTask` against the backend catalog — this hook
+ * resolved by `useModelsForTask` from the nested provider response — this hook
  * deliberately no longer filters models by capability name heuristics.
  */
 export const useModelProviderList = (): ModelProviderListResult => {
@@ -49,7 +48,7 @@ export const useModelProviderList = (): ModelProviderListResult => {
   const providers = useMemo(() => {
     // 过滤掉被禁用的 provider（默认为启用）。
     // 注意：不再按「是否有可用模型」过滤 —— 模型级别的可用性由
-    // useModelsForTask（后端 catalog resolve）决定，空组不会被渲染。
+    // useModelsForTask（嵌套 task capability）决定，空组不会被渲染。
     return orderModelSelectorProviders(configuredProviders.filter((p) => p.enabled !== false));
   }, [configuredProviders]);
 

@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use nomifun_api_types::{
     BehaviorPolicy, CustomAgentAdvancedOverrides, CustomAgentUpsertRequest, ModelFailoverConfig,
-    ProviderHealthCheckRequest, TestRemoteAgentConnectionRequest, TryConnectCustomAgentRequest,
+    ModelTask, ProviderHealthCheckRequest, TestRemoteAgentConnectionRequest,
+    TryConnectCustomAgentRequest,
 };
 use nomifun_common::{AgentId, ProviderId, RemoteAgentId};
 use schemars::JsonSchema;
@@ -45,7 +46,7 @@ struct AgentHealthCheckParams {
     backend: String,
 }
 
-/// Run a provider-level health check (verify model reachability via a provider).
+/// Run a Chat-capability health check for an Agent model.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AgentProviderHealthCheckParams {
@@ -329,16 +330,10 @@ struct ModelFailoverSetParams {
     /// Maximum number of model switches per conversation turn (default: 4).
     #[serde(default = "default_max_switches")]
     max_switches: u32,
-    /// Whether to mark the failed provider-model as unhealthy after failover (default: true).
-    #[serde(default = "default_stamp_unhealthy")]
-    stamp_unhealthy: bool,
 }
 
 fn default_max_switches() -> u32 {
     4
-}
-fn default_stamp_unhealthy() -> bool {
-    true
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────
@@ -367,7 +362,7 @@ async fn agent_provider_health_check(
     let req = ProviderHealthCheckRequest {
         provider_id: p.provider_id.into_string(),
         model: p.model,
-        task: None,
+        task: ModelTask::Chat,
     };
     match deps.agent_service.provider_health_check(req).await {
         Ok(resp) => ok(resp),
@@ -588,7 +583,6 @@ async fn model_failover_set(deps: Arc<GatewayDeps>, p: ModelFailoverSetParams) -
         enabled: p.enabled,
         queue: p.queue.into_iter().map(Into::into).collect(),
         max_switches: p.max_switches,
-        stamp_unhealthy: p.stamp_unhealthy,
     };
 
     match nomifun_conversation::model_failover::set_global_failover_config(

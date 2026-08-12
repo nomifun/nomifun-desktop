@@ -16,6 +16,7 @@ import {
   TEXT_TO_SPEECH_CONFIG_CHANGED_EVENT,
 } from '@/renderer/services/textToSpeechConfig';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
+import ModalityModelsPanel from './ModalityModelsPanel';
 
 /**
  * TTS 首次获得配置面：全局默认的「语音合成模型 + 音色」。
@@ -53,8 +54,15 @@ const TextToSpeechContent: React.FC = () => {
   );
 
   return (
-    <div className='flex min-h-0 flex-col rd-16px bg-2 px-24px py-16px'>
-      {messageContext}
+    <div className='flex flex-col gap-14px'>
+      <ModalityModelsPanel
+        modality='tts'
+        icon={<Voice theme='outline' size='18' strokeWidth={3} />}
+        titleKey='settings.modelHub.modality.ttsTitle'
+        subtitleKey='settings.modelHub.modality.ttsSubtitle'
+      />
+      <div className='flex min-h-0 flex-col rd-16px bg-2 px-24px py-16px'>
+        {messageContext}
       <header className='flex items-center gap-9px border-b border-b-solid border-[var(--color-border-2)] pb-14px'>
         <span className='size-30px shrink-0 flex items-center justify-center rd-9px bg-primary-1 text-primary-6'>
           <Voice theme='outline' size='18' strokeWidth={3} />
@@ -87,13 +95,14 @@ const TextToSpeechContent: React.FC = () => {
         </Form.Item>
       </Form>
 
-      {config && (
-        <div className='flex items-center gap-8px'>
-          <Button size='small' onClick={() => persist(null)}>
-            {t('settings.modelHub.speech.ttsClear')}
-          </Button>
-        </div>
-      )}
+        {config && (
+          <div className='flex items-center gap-8px'>
+            <Button size='small' onClick={() => persist(null)}>
+              {t('settings.modelHub.speech.ttsClear')}
+            </Button>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

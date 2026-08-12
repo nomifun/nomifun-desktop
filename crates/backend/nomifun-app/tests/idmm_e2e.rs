@@ -61,27 +61,20 @@ async fn create_terminal(app: &mut axum::Router, token: &str, csrf: &str) -> Str
 /// provider row explicitly so settings tests exercise a valid production
 /// configuration instead of relying on a dangling provider reference.
 async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
+    let credentials_encrypted = common::encrypted_bearer_credentials();
     nomifun_db::sqlx::query(
         "INSERT INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+         (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
           created_at, updated_at) \
-         VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', 1, 1, 1)",
+         VALUES (?, 'openai', ?, 'https://example.invalid', 'bearer', ?, 1, 1, 1)",
     )
     .bind(provider_id)
     .bind(format!("Provider {provider_id}"))
+    .bind(&credentials_encrypted)
     .execute(services.database.pool())
     .await
     .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO provider_models \
-         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
-         VALUES (?, ?, 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
-    )
-    .bind(provider_id)
-    .bind(model)
-    .execute(services.database.pool())
-    .await
-    .unwrap();
+    common::seed_openai_chat_model(services.database.pool(), provider_id, model).await;
 }
 
 #[tokio::test]

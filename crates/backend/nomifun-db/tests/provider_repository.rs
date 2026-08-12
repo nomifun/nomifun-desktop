@@ -1,23 +1,119 @@
-//! Black-box integration tests for IProviderRepository.
-//!
-//! Tests exercise the public trait interface against an in-memory SQLite database.
-
-use std::sync::Arc;
-
+use nomifun_db::models::ConversationRow;
 use nomifun_db::{
     CreateProviderParams, CreateTerminalParams, DbError, IConversationRepository,
-    IProviderRepository, ITerminalRepository, SqliteConversationRepository,
+    IProviderConnectionRepository, IProviderModelCapabilityRepository, IProviderModelRepository,
+    IProviderRepository, ITerminalRepository, NewProviderModel, NewProviderModelCapability,
+    SqliteConversationRepository, SqliteProviderConnectionRepository,
+    SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
     SqliteProviderRepository, SqliteTerminalRepository, UpdateProviderParams,
-    init_database_memory,
+    UpsertProviderConnectionParams, init_database_memory,
 };
-use nomifun_db::models::ConversationRow;
 
+const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
 const CALLER_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000010";
-const DUPLICATE_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000011";
 
-async fn repo() -> Arc<dyn IProviderRepository> {
-    let db = init_database_memory().await.unwrap();
-    Arc::new(SqliteProviderRepository::new(db.pool().clone()))
+static CHAT_CAPABILITIES: [NewProviderModelCapability<'static>; 1] = [NewProviderModelCapability {
+    task: "chat",
+    traits: "[\"vision_input\"]",
+    protocol: "openai.chat_text",
+    connection_role: "default",
+    base_url_override: None,
+    endpoint: Some("/chat/completions"),
+    poll_endpoint: None,
+    content_endpoint: None,
+    realtime_endpoint: None,
+    allow_cross_origin_credentials: false,
+    provider_params: "{}",
+    context_limit: Some(128_000),
+}];
+
+static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
+    [NewProviderModelCapability {
+        task: "image_generation",
+        traits: "[]",
+        protocol: "ark.images",
+        connection_role: "default",
+        base_url_override: None,
+        endpoint: None,
+        poll_endpoint: None,
+        content_endpoint: None,
+        realtime_endpoint: None,
+        allow_cross_origin_credentials: false,
+        provider_params: "{\"seed\":7}",
+        context_limit: None,
+    }];
+
+static VIDEO_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
+    [NewProviderModelCapability {
+        task: "video_generation",
+        traits: "[]",
+        protocol: "openai.videos",
+        connection_role: "default",
+        base_url_override: None,
+        endpoint: Some("/videos"),
+        poll_endpoint: Some("/videos/{id}"),
+        content_endpoint: Some("/videos/{id}/content"),
+        realtime_endpoint: None,
+        allow_cross_origin_credentials: false,
+        provider_params: "{}",
+        context_limit: None,
+    }];
+
+static VOICE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
+    [NewProviderModelCapability {
+        task: "speech_synthesis",
+        traits: "[]",
+        protocol: "volc.tts_v3",
+        connection_role: "voice",
+        base_url_override: None,
+        endpoint: Some("/api/v3/tts/unidirectional"),
+        poll_endpoint: None,
+        content_endpoint: None,
+        realtime_endpoint: None,
+        allow_cross_origin_credentials: false,
+        provider_params: "{}",
+        context_limit: None,
+    }];
+
+fn provider_params(provider_id: Option<&str>) -> CreateProviderParams<'_> {
+    CreateProviderParams {
+        provider_id,
+        platform: "openai",
+        name: "OpenAI",
+        base_url: "https://api.openai.com/v1",
+        auth_scheme: "bearer",
+        credentials_encrypted: "cipher",
+        enabled: true,
+        bedrock_config: None,
+        sort_order: None,
+    }
+}
+
+fn voice_connection<'a>(
+    label: Option<&'a str>,
+    base_url: &'a str,
+) -> UpsertProviderConnectionParams<'a> {
+    UpsertProviderConnectionParams {
+        role: "voice",
+        label,
+        base_url,
+        auth_scheme: "bearer",
+        credentials_encrypted: "voice-cipher",
+        extra: "{}",
+    }
+}
+
+fn model<'a>(
+    name: &'a str,
+    capabilities: &'a [NewProviderModelCapability<'a>],
+) -> NewProviderModel<'a> {
+    NewProviderModel {
+        model: name,
+        enabled: true,
+        sort_order: 0,
+        description: Some("configured model"),
+        capabilities,
+    }
 }
 
 async fn insert_provider(
@@ -25,421 +121,845 @@ async fn insert_provider(
     provider_id: &'static str,
     name: &'static str,
 ) {
+    let mut params = provider_params(Some(provider_id));
+    params.name = name;
     repository
-        .create(CreateProviderParams {
-            provider_id: Some(provider_id),
-            name,
-            ..sample_params()
-        })
+        .create(params, &model("chat", &CHAT_CAPABILITIES), &[])
         .await
         .unwrap();
 }
 
-fn sample_params() -> CreateProviderParams<'static> {
-    CreateProviderParams {
-        provider_id: None,
-        platform: "anthropic",
-        name: "Anthropic",
-        base_url: "https://api.anthropic.com",
-        api_key_encrypted: "enc_key_data",
-        models: r#"["claude-sonnet-4-20250514"]"#,
-        enabled: true,
-        model_context_limits: None,
-        model_protocols: None,
-        model_descriptions: None,
-        model_enabled: None,
-        bedrock_config: None,
-        is_full_url: false,
-        sort_order: None,
-    }
-}
-
-// -- Empty state --
-
 #[tokio::test]
-async fn list_returns_empty_when_no_providers() {
-    let r = repo().await;
-    assert!(r.list().await.unwrap().is_empty());
-}
-
-// -- Create --
-
-#[tokio::test]
-async fn create_returns_provider_with_generated_id() {
-    let r = repo().await;
-    let p = r.create(sample_params()).await.unwrap();
-
-    assert!(p.id > 0);
-    nomifun_common::validate_uuidv7(&p.provider_id).unwrap();
-    assert_eq!(p.platform, "anthropic");
-    assert_eq!(p.name, "Anthropic");
-    assert_eq!(p.base_url, "https://api.anthropic.com");
-    assert!(p.enabled);
-    assert!(p.created_at > 0);
-}
-
-#[tokio::test]
-async fn create_stores_json_fields_as_strings() {
+async fn aggregate_create_persists_provider_model_capability_and_named_connection() {
     let db = init_database_memory().await.unwrap();
-    let r = SqliteProviderRepository::new(db.pool().clone());
-    let p = r.create(sample_params()).await.unwrap();
-
-    // The models array param has no providers column since migration 016; it
-    // materializes as provider_models rows.
-    let models: Vec<String> = sqlx::query_scalar(
-        "SELECT model FROM provider_models WHERE provider_id = ? ORDER BY sort_order",
-    )
-    .bind(&p.provider_id)
-    .fetch_all(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(models, vec!["claude-sonnet-4-20250514"]);
-}
-
-#[tokio::test]
-async fn create_accepts_canonical_caller_supplied_uuidv7() {
-    let r = repo().await;
-    let p = r
-        .create(CreateProviderParams {
-            provider_id: Some(CALLER_PROVIDER_ID),
-            ..sample_params()
-        })
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    let connection = voice_connection(Some("Voice API"), "https://voice.example.com/v1");
+    let (provider, stored_model) = repository
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("voice-model", &VOICE_CAPABILITIES),
+            &[connection],
+        )
         .await
         .unwrap();
 
-    assert_eq!(p.provider_id, CALLER_PROVIDER_ID);
-    nomifun_common::ProviderId::parse(&p.provider_id).unwrap();
-}
-
-#[tokio::test]
-async fn create_rejects_invalid_caller_supplied_provider_id() {
-    let r = repo().await;
-    let err = r
-        .create(CreateProviderParams {
-            provider_id: Some("my-custom-id"),
-            ..sample_params()
-        })
+    assert_eq!(provider.provider_id, PROVIDER_ID);
+    assert_eq!(provider.auth_scheme, "bearer");
+    assert_eq!(stored_model.model, "voice-model");
+    let capability = SqliteProviderModelCapabilityRepository::new(db.pool().clone())
+        .get(PROVIDER_ID, "voice-model", "speech_synthesis")
         .await
-        .unwrap_err();
-
-    assert!(
-        matches!(err, DbError::Conflict(ref message) if message.contains("invalid provider_id")),
-        "expected invalid provider_id conflict, got: {err:?}"
-    );
-    assert!(r.list().await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn create_duplicate_canonical_caller_id_returns_conflict() {
-    let r = repo().await;
-    r.create(CreateProviderParams {
-        provider_id: Some(DUPLICATE_PROVIDER_ID),
-        ..sample_params()
-    })
-    .await
-    .unwrap();
-
-    let err = r
-        .create(CreateProviderParams {
-            provider_id: Some(DUPLICATE_PROVIDER_ID),
-            ..sample_params()
-        })
-        .await
-        .unwrap_err();
-
-    assert!(
-        matches!(err, DbError::Conflict(_)),
-        "expected conflict, got: {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn create_with_all_optional_fields() {
-    let db = init_database_memory().await.unwrap();
-    let r = SqliteProviderRepository::new(db.pool().clone());
-    let p = r
-        .create(CreateProviderParams {
-            models: r#"["m1"]"#,
-            model_context_limits: Some(r#"{"m1":128000}"#),
-            model_protocols: Some(r#"{"m1":"openai"}"#),
-            model_descriptions: Some(r#"{"m1":"擅长前端"}"#),
-            model_enabled: Some(r#"{"m1":true}"#),
-            bedrock_config: Some(r#"{"region":"us-east-1"}"#),
-            ..sample_params()
-        })
-        .await
+        .unwrap()
         .unwrap();
-
-    assert!(p.bedrock_config.is_some());
-    // The per-model map params landed on the m1 provider_models row.
-    let (enabled, context_limit, protocol, description, health): (
-        i64,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = sqlx::query_as(
-        "SELECT enabled, context_limit, protocol, description, health \
-         FROM provider_models WHERE provider_id = ? AND model = 'm1'",
+    assert_eq!(capability.protocol, "volc.tts_v3");
+    assert_eq!(capability.connection_role, "voice");
+    let connection_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM provider_connections WHERE provider_id = ? AND role = 'voice'",
     )
-    .bind(&p.provider_id)
+    .bind(PROVIDER_ID)
     .fetch_one(db.pool())
     .await
     .unwrap();
-    assert_eq!(enabled, 1);
-    assert_eq!(context_limit, Some(128_000));
-    assert_eq!(protocol.as_deref(), Some("openai"));
-    assert_eq!(description.as_deref(), Some("擅长前端"));
-    assert!(
-        health.is_none(),
-        "create never seeds health; the server probe (set_health) is the only writer"
+    assert_eq!(connection_count, 1);
+}
+
+#[tokio::test]
+async fn aggregate_create_rejects_a_capability_with_an_unconfigured_named_role() {
+    let db = init_database_memory().await.unwrap();
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    let error = repository
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("voice-model", &VOICE_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict(_)));
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM providers")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "the invalid aggregate must roll back its provider"
     );
 }
 
-// -- Find by ID --
-
 #[tokio::test]
-async fn find_by_id_existing_returns_provider() {
-    let r = repo().await;
-    let created = r.create(sample_params()).await.unwrap();
-
-    let found = r.find_by_id(&created.provider_id).await.unwrap().unwrap();
-    assert_eq!(found.id, created.id);
-    assert_eq!(found.provider_id, created.provider_id);
-    assert_eq!(found.name, "Anthropic");
-}
-
-#[tokio::test]
-async fn find_by_id_nonexistent_returns_none() {
-    let r = repo().await;
-    assert!(r.find_by_id("no_such_id").await.unwrap().is_none());
-}
-
-// -- List --
-
-#[tokio::test]
-async fn list_returns_all_providers_in_creation_order() {
-    let r = repo().await;
-    let first = r.create(sample_params()).await.unwrap();
-    let second = r
-        .create(CreateProviderParams {
-            platform: "openai",
-            name: "OpenAI",
-            ..sample_params()
-        })
+async fn aggregate_create_rolls_back_everything_on_invalid_child() {
+    let db = init_database_memory().await.unwrap();
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    let invalid = NewProviderModel {
+        capabilities: &[],
+        ..model("broken", &CHAT_CAPABILITIES)
+    };
+    assert!(
+        repository
+            .create(provider_params(Some(PROVIDER_ID)), &invalid, &[])
+            .await
+            .is_err()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM providers")
+        .fetch_one(db.pool())
         .await
         .unwrap();
-
-    let all = r.list().await.unwrap();
-    assert_eq!(all.len(), 2);
-    assert_eq!(all[0].id, first.id);
-    assert_eq!(all[1].id, second.id);
+    assert_eq!(count, 0);
 }
 
 #[tokio::test]
-async fn provider_sort_order_defaults_to_append_order() {
-    let r = repo().await;
-    let first = r.create(sample_params()).await.unwrap();
-    let second = r
-        .create(CreateProviderParams {
-            platform: "openai",
-            name: "OpenAI",
-            ..sample_params()
-        })
+async fn model_save_preserves_health_only_when_invocation_config_is_unchanged() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("multi", &CHAT_CAPABILITIES),
+            &[],
+        )
         .await
         .unwrap();
-
-    assert_eq!(first.sort_order, 0);
-    assert_eq!(second.sort_order, 1);
-
-    let all = r.list().await.unwrap();
-    assert_eq!(all.len(), 2);
-    assert_eq!(all[0].id, first.id);
-    assert_eq!(all[1].id, second.id);
-}
-
-#[tokio::test]
-async fn provider_sort_order_controls_list_priority() {
-    let r = repo().await;
-    let first = r.create(sample_params()).await.unwrap();
-    let second = r
-        .create(CreateProviderParams {
-            platform: "openai",
-            name: "OpenAI",
-            ..sample_params()
-        })
-        .await
-        .unwrap();
-
-    r.update(
-        &first.provider_id,
-        UpdateProviderParams {
-            sort_order: Some(1),
-            ..Default::default()
-        },
+    sqlx::query(
+        "UPDATE provider_model_capabilities SET updated_at = 123 \
+         WHERE provider_id = ? AND model = 'multi' AND task = 'chat'",
     )
+    .bind(PROVIDER_ID)
+    .execute(db.pool())
     .await
     .unwrap();
-    r.update(
-        &second.provider_id,
-        UpdateProviderParams {
-            sort_order: Some(0),
-            ..Default::default()
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    capabilities
+        .set_health(
+            PROVIDER_ID,
+            0,
+            "multi",
+            "chat",
+            Some(r#"{"status":"healthy"}"#),
+        )
+        .await
+        .unwrap();
+
+    models
+        .save(PROVIDER_ID, 0, &model("multi", &CHAT_CAPABILITIES))
+        .await
+        .unwrap();
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "multi", "chat")
+            .await
+            .unwrap()
+            .unwrap()
+            .health
+            .is_some(),
+        "an identical full save must preserve the observation"
+    );
+    let unchanged = capabilities
+        .get(PROVIDER_ID, "multi", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.updated_at, 123);
+    assert_eq!(
+        providers
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        0
+    );
+
+    static TWO: [NewProviderModelCapability<'static>; 2] = [
+        NewProviderModelCapability {
+            task: "chat",
+            traits: "[]",
+            protocol: "openai.chat_text",
+            connection_role: "default",
+            base_url_override: None,
+            endpoint: Some("/v2/chat"),
+            poll_endpoint: None,
+            content_endpoint: None,
+            realtime_endpoint: None,
+            allow_cross_origin_credentials: false,
+            provider_params: "{}",
+            context_limit: None,
         },
-    )
-    .await
-    .unwrap();
+        NewProviderModelCapability {
+            task: "image_generation",
+            ..IMAGE_CAPABILITIES[0]
+        },
+    ];
+    models
+        .save(PROVIDER_ID, 0, &model("multi", &TWO))
+        .await
+        .unwrap();
+    let changed = capabilities
+        .get(PROVIDER_ID, "multi", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(changed.health.is_none());
+    assert!(changed.health_checked_at.is_none());
+    assert_ne!(changed.updated_at, 123);
+    assert_eq!(
+        providers
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        1
+    );
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "multi", "image_generation")
+            .await
+            .unwrap()
+            .is_some()
+    );
 
-    let all = r.list().await.unwrap();
-    assert_eq!(all.len(), 2);
-    assert_eq!(all[0].id, second.id);
-    assert_eq!(all[0].sort_order, 0);
-    assert_eq!(all[1].id, first.id);
-    assert_eq!(all[1].sort_order, 1);
+    models
+        .save(PROVIDER_ID, 1, &model("multi", &IMAGE_CAPABILITIES))
+        .await
+        .unwrap();
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "multi", "chat")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "multi", "image_generation")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        providers
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        2
+    );
+
+    let disabled = NewProviderModel {
+        enabled: false,
+        ..model("multi", &IMAGE_CAPABILITIES)
+    };
+    models.save(PROVIDER_ID, 2, &disabled).await.unwrap();
+    assert_eq!(
+        providers
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        3
+    );
+    assert!(models.delete(PROVIDER_ID, "multi").await.unwrap());
+    assert_eq!(
+        providers
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        4
+    );
 }
 
-// -- Update --
-
 #[tokio::test]
-async fn update_partial_fields_preserves_others() {
-    let r = repo().await;
-    let created = r.create(sample_params()).await.unwrap();
-
-    let updated = r
-        .update(
-            &created.provider_id,
-            UpdateProviderParams {
-                name: Some("New Name"),
-                enabled: Some(false),
-                ..Default::default()
-            },
+async fn concurrent_model_saves_use_provider_config_revision_as_a_cas_guard() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("chat", &CHAT_CAPABILITIES),
+            &[],
         )
         .await
         .unwrap();
+    let first = SqliteProviderModelRepository::new(db.pool().clone());
+    let second = first.clone();
+    let video = model("video", &VIDEO_CAPABILITIES);
+    let image = model("image", &IMAGE_CAPABILITIES);
 
-    assert_eq!(updated.name, "New Name");
-    assert!(!updated.enabled);
-    assert_eq!(updated.platform, "anthropic");
-    assert_eq!(updated.base_url, "https://api.anthropic.com");
+    let (first_result, second_result) = tokio::join!(
+        first.save(PROVIDER_ID, 0, &video),
+        second.save(PROVIDER_ID, 0, &image)
+    );
+    assert_eq!(
+        usize::from(first_result.is_ok()) + usize::from(second_result.is_ok()),
+        1
+    );
+    let conflict = first_result.err().or_else(|| second_result.err()).unwrap();
+    assert!(matches!(conflict, DbError::Conflict(_)));
+    assert_eq!(
+        providers
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        1
+    );
 }
 
 #[tokio::test]
-async fn update_api_key_changes_encrypted_value() {
-    let r = repo().await;
-    let created = r.create(sample_params()).await.unwrap();
-
-    let updated = r
-        .update(
-            &created.provider_id,
-            UpdateProviderParams {
-                api_key_encrypted: Some("new_encrypted"),
-                ..Default::default()
-            },
+async fn stale_provider_and_connection_mutations_fail_after_a_model_revision_wins() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("chat", &CHAT_CAPABILITIES),
+            &[],
         )
         .await
         .unwrap();
+    SqliteProviderModelRepository::new(db.pool().clone())
+        .save(PROVIDER_ID, 0, &model("video", &VIDEO_CAPABILITIES))
+        .await
+        .unwrap();
 
-    assert_eq!(updated.api_key_encrypted, "new_encrypted");
-}
-
-#[tokio::test]
-async fn update_optional_fields_can_be_set_and_cleared() {
-    let r = repo().await;
-    let created = r.create(sample_params()).await.unwrap();
-    assert!(created.bedrock_config.is_none());
-
-    // Set
-    let with_config = r
+    let provider_error = providers
         .update(
-            &created.provider_id,
+            PROVIDER_ID,
+            0,
             UpdateProviderParams {
-                bedrock_config: Some(Some(r#"{"region":"eu-west-1"}"#)),
+                name: Some("stale rename"),
                 ..Default::default()
             },
         )
-        .await
-        .unwrap();
-    assert!(with_config.bedrock_config.is_some());
-
-    // Clear
-    let cleared = r
-        .update(
-            &created.provider_id,
-            UpdateProviderParams {
-                bedrock_config: Some(None),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(cleared.bedrock_config.is_none());
-}
-
-#[tokio::test]
-async fn update_nonexistent_returns_not_found() {
-    let r = repo().await;
-    let err = r
-        .update("nonexistent", UpdateProviderParams::default())
         .await
         .unwrap_err();
-    assert!(matches!(err, DbError::NotFound(_)), "expected NotFound, got: {err:?}");
+    assert!(matches!(provider_error, DbError::Conflict(_)));
+    let connection_error = SqliteProviderConnectionRepository::new(db.pool().clone())
+        .upsert(
+            PROVIDER_ID,
+            0,
+            &voice_connection(Some("stale voice"), "https://voice.example.com/v1"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(connection_error, DbError::Conflict(_)));
+    let provider = providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap();
+    assert_eq!(provider.name, "OpenAI");
+    assert_eq!(provider.config_revision, 1);
 }
 
 #[tokio::test]
-async fn update_advances_updated_at() {
-    let r = repo().await;
-    let created = r.create(sample_params()).await.unwrap();
+async fn stale_health_probe_cannot_overwrite_a_newer_invocation_graph() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("chat", &CHAT_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap();
+    let changed_capabilities = [NewProviderModelCapability {
+        endpoint: Some("/v2/chat/completions"),
+        ..CHAT_CAPABILITIES[0]
+    }];
+    SqliteProviderModelRepository::new(db.pool().clone())
+        .save(PROVIDER_ID, 0, &model("chat", &changed_capabilities))
+        .await
+        .unwrap();
 
-    let updated = r
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    let before = capabilities
+        .get(PROVIDER_ID, "chat", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !capabilities
+            .set_health(
+                PROVIDER_ID,
+                0,
+                "chat",
+                "chat",
+                Some(r#"{"status":"healthy"}"#),
+            )
+            .await
+            .unwrap()
+    );
+    let after_stale = capabilities
+        .get(PROVIDER_ID, "chat", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(after_stale.health.is_none());
+    assert!(after_stale.health_checked_at.is_none());
+    assert_eq!(after_stale.updated_at, before.updated_at);
+
+    assert!(
+        capabilities
+            .set_health(
+                PROVIDER_ID,
+                1,
+                "chat",
+                "chat",
+                Some(r#"{"status":"healthy"}"#),
+            )
+            .await
+            .unwrap()
+    );
+    let after_fresh = capabilities
+        .get(PROVIDER_ID, "chat", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(after_fresh.health.is_some());
+    assert!(after_fresh.health_checked_at.is_some());
+    assert_eq!(after_fresh.updated_at, before.updated_at);
+}
+
+#[tokio::test]
+async fn model_save_persists_distinct_async_route_endpoints() {
+    let db = init_database_memory().await.unwrap();
+    SqliteProviderRepository::new(db.pool().clone())
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("chat", &CHAT_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap();
+    SqliteProviderModelRepository::new(db.pool().clone())
+        .save(PROVIDER_ID, 0, &model("video", &VIDEO_CAPABILITIES))
+        .await
+        .unwrap();
+
+    let stored = SqliteProviderModelCapabilityRepository::new(db.pool().clone())
+        .get(PROVIDER_ID, "video", "video_generation")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.endpoint.as_deref(), Some("/videos"));
+    assert_eq!(stored.poll_endpoint.as_deref(), Some("/videos/{id}"));
+    assert_eq!(
+        stored.content_endpoint.as_deref(),
+        Some("/videos/{id}/content")
+    );
+}
+
+#[tokio::test]
+async fn clone_graph_copies_configuration_but_not_health() {
+    let db = init_database_memory().await.unwrap();
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    repository
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("gpt-5", &CHAT_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap();
+    SqliteProviderModelCapabilityRepository::new(db.pool().clone())
+        .set_health(
+            PROVIDER_ID,
+            0,
+            "gpt-5",
+            "chat",
+            Some(r#"{"status":"healthy"}"#),
+        )
+        .await
+        .unwrap();
+    let cloned = repository
+        .clone_graph(PROVIDER_ID, "OpenAI Copy")
+        .await
+        .unwrap();
+    assert_ne!(cloned.provider_id, PROVIDER_ID);
+    let copied = SqliteProviderModelCapabilityRepository::new(db.pool().clone())
+        .get(&cloned.provider_id, "gpt-5", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(copied.protocol, "openai.chat_text");
+    assert!(copied.health.is_none());
+    assert!(copied.health_checked_at.is_none());
+}
+
+#[tokio::test]
+async fn managed_graph_replaces_membership_and_keeps_matching_capability_health() {
+    let db = init_database_memory().await.unwrap();
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    repository
+        .save_managed_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[
+                model("old", &CHAT_CAPABILITIES),
+                model("kept", &CHAT_CAPABILITIES),
+            ],
+        )
+        .await
+        .unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    capabilities
+        .set_health(
+            PROVIDER_ID,
+            0,
+            "kept",
+            "chat",
+            Some(r#"{"status":"healthy"}"#),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE provider_model_capabilities SET updated_at = 321 \
+         WHERE provider_id = ? AND model = 'kept' AND task = 'chat'",
+    )
+    .bind(PROVIDER_ID)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    repository
+        .save_managed_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[
+                model("kept", &CHAT_CAPABILITIES),
+                model("new", &CHAT_CAPABILITIES),
+            ],
+        )
+        .await
+        .unwrap();
+    let models = SqliteProviderModelRepository::new(db.pool().clone())
+        .list_for_provider(PROVIDER_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        models
+            .iter()
+            .map(|row| row.model.as_str())
+            .collect::<Vec<_>>(),
+        ["kept", "new"]
+    );
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "kept", "chat")
+            .await
+            .unwrap()
+            .unwrap()
+            .health
+            .is_some()
+    );
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "old", "chat")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let mut changed_provider = provider_params(Some(PROVIDER_ID));
+    changed_provider.base_url = "https://managed.example.test/v2";
+    repository
+        .save_managed_graph(
+            changed_provider,
+            &[
+                model("kept", &CHAT_CAPABILITIES),
+                model("new", &CHAT_CAPABILITIES),
+            ],
+        )
+        .await
+        .unwrap();
+    let invalidated = capabilities
+        .get(PROVIDER_ID, "kept", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(invalidated.health.is_none());
+    assert!(invalidated.health_checked_at.is_none());
+    assert_eq!(invalidated.updated_at, 321);
+    assert_eq!(
+        repository
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        2
+    );
+}
+
+#[tokio::test]
+async fn provider_delete_explicitly_removes_owned_graph() {
+    let db = init_database_memory().await.unwrap();
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    repository
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("gpt-5", &CHAT_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap();
+    repository.delete(PROVIDER_ID).await.unwrap();
+    for table in [
+        "providers",
+        "provider_models",
+        "provider_model_capabilities",
+    ] {
+        let sql = format!("SELECT COUNT(*) FROM {table} WHERE provider_id = ?");
+        let count: i64 = sqlx::query_scalar(&sql)
+            .bind(PROVIDER_ID)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+}
+
+#[tokio::test]
+async fn provider_auth_scheme_is_explicit_and_nonblank() {
+    let db = init_database_memory().await.unwrap();
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    repository
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("gpt-5", &CHAT_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap();
+    let updated = repository
         .update(
-            &created.provider_id,
+            PROVIDER_ID,
+            0,
             UpdateProviderParams {
-                name: Some("Changed"),
+                auth_scheme: Some("token"),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-
-    assert!(updated.updated_at >= created.updated_at);
-    assert_eq!(updated.created_at, created.created_at);
-}
-
-// -- Delete --
-
-#[tokio::test]
-async fn delete_removes_provider() {
-    let r = repo().await;
-    let created = r.create(sample_params()).await.unwrap();
-
-    r.delete(&created.provider_id).await.unwrap();
-    assert!(r.find_by_id(&created.provider_id).await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn delete_nonexistent_returns_not_found() {
-    let r = repo().await;
-    let err = r.delete("nonexistent").await.unwrap_err();
-    assert!(matches!(err, DbError::NotFound(_)), "expected NotFound, got: {err:?}");
+    assert_eq!(updated.auth_scheme, "token");
+    let error = repository
+        .update(
+            PROVIDER_ID,
+            1,
+            UpdateProviderParams {
+                auth_scheme: Some(" "),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict(_)));
 }
 
 #[tokio::test]
-async fn delete_does_not_affect_other_providers() {
-    let r = repo().await;
-    let p1 = r.create(sample_params()).await.unwrap();
-    let p2 = r
-        .create(CreateProviderParams {
-            name: "Other",
-            ..sample_params()
-        })
+async fn default_connection_changes_invalidate_only_effective_health() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("gpt-5", &CHAT_CAPABILITIES),
+            &[],
+        )
         .await
         .unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    capabilities
+        .set_health(
+            PROVIDER_ID,
+            0,
+            "gpt-5",
+            "chat",
+            Some(r#"{"status":"healthy"}"#),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE provider_model_capabilities SET updated_at = 322 \
+         WHERE provider_id = ? AND model = 'gpt-5' AND task = 'chat'",
+    )
+    .bind(PROVIDER_ID)
+    .execute(db.pool())
+    .await
+    .unwrap();
 
-    r.delete(&p1.provider_id).await.unwrap();
+    providers
+        .update(
+            PROVIDER_ID,
+            0,
+            UpdateProviderParams {
+                name: Some("Renamed only"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "gpt-5", "chat")
+            .await
+            .unwrap()
+            .unwrap()
+            .health
+            .is_some()
+    );
 
-    let all = r.list().await.unwrap();
-    assert_eq!(all.len(), 1);
-    assert_eq!(all[0].id, p2.id);
+    providers
+        .update(
+            PROVIDER_ID,
+            0,
+            UpdateProviderParams {
+                base_url: Some("https://api.openai.com/v2"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let invalidated = capabilities
+        .get(PROVIDER_ID, "gpt-5", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(invalidated.health.is_none());
+    assert!(invalidated.health_checked_at.is_none());
+    assert_eq!(invalidated.updated_at, 322);
+    assert_eq!(
+        providers
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        1
+    );
+}
+
+#[tokio::test]
+async fn named_connection_changes_invalidate_only_its_capability_health() {
+    let db = init_database_memory().await.unwrap();
+    SqliteProviderRepository::new(db.pool().clone())
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("voice-model", &VOICE_CAPABILITIES),
+            &[voice_connection(
+                Some("Voice API"),
+                "https://voice.example.com/v1",
+            )],
+        )
+        .await
+        .unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    capabilities
+        .set_health(
+            PROVIDER_ID,
+            0,
+            "voice-model",
+            "speech_synthesis",
+            Some(r#"{"status":"healthy"}"#),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE provider_model_capabilities SET updated_at = 323 \
+         WHERE provider_id = ? AND model = 'voice-model' AND task = 'speech_synthesis'",
+    )
+    .bind(PROVIDER_ID)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let connections = SqliteProviderConnectionRepository::new(db.pool().clone());
+
+    connections
+        .upsert(
+            PROVIDER_ID,
+            0,
+            &voice_connection(Some("Label-only change"), "https://voice.example.com/v1"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "voice-model", "speech_synthesis")
+            .await
+            .unwrap()
+            .unwrap()
+            .health
+            .is_some()
+    );
+
+    connections
+        .upsert(
+            PROVIDER_ID,
+            0,
+            &voice_connection(Some("Label-only change"), "https://voice.example.com/v2"),
+        )
+        .await
+        .unwrap();
+    let invalidated = capabilities
+        .get(PROVIDER_ID, "voice-model", "speech_synthesis")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(invalidated.health.is_none());
+    assert!(invalidated.health_checked_at.is_none());
+    assert_eq!(invalidated.updated_at, 323);
+    assert_eq!(
+        SqliteProviderRepository::new(db.pool().clone())
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        1
+    );
+}
+
+#[tokio::test]
+async fn bedrock_provider_allows_the_manifest_defined_empty_base_url() {
+    static BEDROCK: [NewProviderModelCapability<'static>; 1] = [NewProviderModelCapability {
+        task: "chat",
+        traits: "[]",
+        protocol: "bedrock.anthropic_messages",
+        connection_role: "default",
+        base_url_override: None,
+        endpoint: None,
+        poll_endpoint: None,
+        content_endpoint: None,
+        realtime_endpoint: None,
+        allow_cross_origin_credentials: false,
+        provider_params: "{}",
+        context_limit: None,
+    }];
+    let db = init_database_memory().await.unwrap();
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    let (provider, _) = repository
+        .create(
+            CreateProviderParams {
+                provider_id: Some(PROVIDER_ID),
+                platform: "bedrock",
+                name: "Amazon Bedrock",
+                base_url: "",
+                auth_scheme: "bedrock",
+                credentials_encrypted: "cipher",
+                enabled: true,
+                bedrock_config: Some("{}"),
+                sort_order: None,
+            },
+            &model("anthropic.claude", &BEDROCK),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(provider.base_url, "");
+    assert_eq!(provider.auth_scheme, "bedrock");
 }
 
 #[tokio::test]
@@ -549,7 +1069,11 @@ async fn delete_clears_all_idmm_session_bypass_references_but_preserves_watch_co
 
     provider_repo.delete(DELETED_PROVIDER).await.unwrap();
 
-    let conversation = conversation_repo.get(&conversation_id).await.unwrap().unwrap();
+    let conversation = conversation_repo
+        .get(&conversation_id)
+        .await
+        .unwrap()
+        .unwrap();
     let extra: serde_json::Value = serde_json::from_str(&conversation.extra).unwrap();
     assert!(extra["idmm"]["fault_watch"].get("bypass_model").is_none());
     assert_eq!(extra["idmm"]["fault_watch"]["enabled"], true);
@@ -623,5 +1147,8 @@ async fn delete_fails_closed_on_malformed_cron_provider_json() {
             .fetch_one(db.pool())
             .await
             .unwrap();
-    assert_eq!(cron_count, 1, "failed deletion must not mutate the cron row");
+    assert_eq!(
+        cron_count, 1,
+        "failed deletion must not mutate the cron row"
+    );
 }

@@ -252,7 +252,10 @@ mod tests {
         };
 
         let json = serde_json::to_value(&payload).unwrap();
-        assert_eq!(json["code"], "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED");
+        assert_eq!(
+            json["code"],
+            "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED"
+        );
         assert_eq!(json["workspacePath"], "/tmp/Archive ");
         assert!(
             json.get("workspace_path").is_none(),

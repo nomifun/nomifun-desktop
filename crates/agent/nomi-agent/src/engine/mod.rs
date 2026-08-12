@@ -346,7 +346,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 const DEFAULT_SAFETY_MAX_TURNS: usize = 200;
 
 /// Strictest image-count limit among the supported message providers. Amazon
-/// Bedrock Converse rejects a request containing more than 20 images.
+/// Bedrock Claude Anthropic Messages rejects a request containing more than 20 images.
 const MAX_PROVIDER_REQUEST_IMAGES: usize = 20;
 
 /// Bound the cumulative base64 image data replayed with one provider request.

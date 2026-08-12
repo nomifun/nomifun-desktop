@@ -5,12 +5,15 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { IProvider, ModelProfile, ModelTask, ModelTrait } from '@/common/config/storage';
-import type { ProviderModelResponse, UpdateProviderModelRequest } from '@/common/types/provider/providerModel';
+import type { IProvider, ModelTask } from '@/common/config/storage';
+import type {
+  ProviderModelCapabilityResponse,
+  ProviderModelResponse,
+} from '@/common/types/provider/providerModel';
 import type { ProviderId } from '@/common/types/ids';
-import { Button, Checkbox, Collapse, Divider, Input, Message, Modal, Popconfirm, Popover, Select, Switch, Tag, Tooltip } from '@arco-design/web-react';
+import { Button, Collapse, Divider, Input, Message, Modal, Popconfirm, Popover, Switch, Tag, Tooltip } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import { Copy, DeleteFour, Info, Minus, Plus, Write, Heartbeat, Drag, TagOne } from '@icon-park/react';
+import { Copy, DeleteFour, Info, Minus, Plus, Write, Heartbeat, Drag } from '@icon-park/react';
 import {
   closestCenter,
   DndContext,
@@ -41,109 +44,182 @@ import AddModelModal from '@/renderer/pages/settings/components/AddModelModal';
 import AddPlatformModal from '@/renderer/pages/settings/components/AddPlatformModal';
 import ModelAdvancedEditor from '@/renderer/pages/settings/components/ModelAdvancedEditor';
 import ProviderConnectionsSection from '@/renderer/pages/settings/components/ProviderConnectionsSection';
-import { isNewApiPlatform, NEW_API_PROTOCOL_OPTIONS } from '@/renderer/utils/model/modelPlatforms';
 import EditModeModal from '@/renderer/pages/settings/components/EditModeModal';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
-import { useModelProfiles } from '@/renderer/hooks/agent/useModelProfiles';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
-import { ContextLimitSelect, formatContextLimit } from '@/renderer/pages/settings/components/ContextLimitSelect';
 import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
 import { reorderById, reorderStrings } from './modelProviderOrdering';
 import {
-  buildModelProfileUpsertRequest,
-  editableModelTasks,
-  editableModelTraits,
-  isInferredModelProfile,
-  MODEL_TASK_ORDER,
-  MODEL_TRAIT_ORDER,
-  primaryModelTask,
-  visibleModelTaskBadges,
-} from '@/renderer/hooks/agent/modelProfileEditing';
+  capabilityInputFromResponse,
+  type ProviderModelCapabilityInput,
+} from '@/renderer/pages/settings/components/providerModelAdvanced';
 import '../model-provider.css';
 
 /**
- * 获取协议显示标签颜色
- * Get protocol badge color
+ * Health probe entry for one model row. A single-task model stays one click;
+ * multi-task models require an explicit task so the probe cannot silently
+ * exercise only the first advertised modality.
  */
-const getProtocolColor = (protocol: string): string => {
-  switch (protocol) {
-    case 'gemini':
-      return 'blue';
-    case 'anthropic':
-      return 'orange';
-    case 'openai':
-    default:
-      return 'green';
+const ModelHealthCheckAction: React.FC<{
+  tasks: readonly ModelTask[];
+  loading: boolean;
+  onCheck: (task: ModelTask) => Promise<void>;
+}> = ({ tasks, loading, onCheck }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const label = t('settings.healthCheck');
+  const buttonClass =
+    '!w-28px !h-28px !min-w-28px !bg-[var(--color-bg-1)] text-t-secondary hover:text-t-primary hover:!bg-[var(--fill-0)]';
+
+  if (tasks.length <= 1) {
+    const task = tasks[0];
+    return (
+      <Tooltip content={label}>
+        <Button
+          size='mini'
+          className={buttonClass}
+          icon={<Heartbeat theme='outline' size='16' />}
+          loading={loading}
+          disabled={!task}
+          aria-label={label}
+          onClick={() => task && void onCheck(task)}
+        />
+      </Tooltip>
+    );
   }
+
+  return (
+    <Popover
+      trigger='click'
+      position='bl'
+      popupVisible={open}
+      onVisibleChange={(visible) => {
+        if (!loading) setOpen(visible);
+      }}
+      content={
+        <div
+          className='flex flex-col gap-4px min-w-180px'
+          role='menu'
+          aria-label={label}
+          data-health-task-menu
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className='px-8px pb-2px text-12px text-t-secondary'>
+            {label} · {t('settings.modelModality', { defaultValue: '模态能力' })}
+          </div>
+          {tasks.map((task) => (
+            <Button
+              key={task}
+              type='text'
+              size='small'
+              long
+              role='menuitem'
+              className='!justify-start'
+              disabled={loading}
+              data-health-task={task}
+              onClick={() => {
+                setOpen(false);
+                void onCheck(task);
+              }}
+            >
+              {t(`settings.modelTask.${task}`, { defaultValue: task })}
+            </Button>
+          ))}
+        </div>
+      }
+    >
+      <Tooltip content={label}>
+        <Button
+          size='mini'
+          className={buttonClass}
+          icon={<Heartbeat theme='outline' size='16' />}
+          loading={loading}
+          aria-label={label}
+          aria-haspopup='menu'
+          aria-expanded={open}
+        />
+      </Tooltip>
+    </Popover>
+  );
 };
 
-/**
- * 获取协议显示名称
- * Get protocol display name
- */
-const getProtocolLabel = (protocol: string): string => {
-  return NEW_API_PROTOCOL_OPTIONS.find((p) => p.value === protocol)?.label || 'OpenAI';
+/** One badge reflects one persisted task capability, never the row aggregate. */
+const CapabilityHealthTag: React.FC<{ capability: ProviderModelCapabilityResponse }> = ({ capability }) => {
+  const { t } = useTranslation();
+  const capabilityHealth = capability.health;
+  const status = capabilityHealth?.status ?? 'unknown';
+  const color = status === 'healthy' ? 'green' : status === 'unhealthy' ? 'red' : capability.task === 'chat' ? 'gray' : 'purple';
+
+  return (
+    <Tooltip
+      content={
+        <div data-capability-health-tooltip={capability.task}>
+          <div>
+            {t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}:{' '}
+            {status === 'healthy'
+              ? t('common.success')
+              : status === 'unhealthy'
+                ? t('common.failed')
+                : t('settings.healthNotChecked', { defaultValue: 'Not checked' })}
+          </div>
+          {capabilityHealth?.latency !== undefined && (
+            <div className='text-12px mt-4px'>
+              {t('settings.latency')}: {capabilityHealth.latency}ms
+            </div>
+          )}
+          {capabilityHealth?.error && <div className='text-12px mt-4px'>{capabilityHealth.error}</div>}
+          {capability.health_checked_at !== undefined && (
+            <div className='text-12px mt-4px'>
+              {t('mcp.lastCheck')}: {new Date(capability.health_checked_at).toLocaleString()}
+            </div>
+          )}
+        </div>
+      }
+    >
+      <Tag
+        size='small'
+        color={color}
+        bordered
+        className='shrink-0 select-none'
+        data-capability-health-task={capability.task}
+        data-capability-health-status={status}
+      >
+        <span
+          className={`inline-block w-6px h-6px mr-4px rounded-full ${
+            status === 'healthy' ? 'bg-green-500' : status === 'unhealthy' ? 'bg-red-500' : 'bg-current opacity-35'
+          }`}
+          aria-hidden='true'
+        />
+        {t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}
+      </Tag>
+    </Tooltip>
+  );
 };
 
-/**
- * 获取下一个协议（循环切换）
- * Get next protocol (cycle through options)
- */
-const getNextProtocol = (current: string): string => {
-  const idx = NEW_API_PROTOCOL_OPTIONS.findIndex((p) => p.value === current);
-  const nextIdx = (idx + 1) % NEW_API_PROTOCOL_OPTIONS.length;
-  return NEW_API_PROTOCOL_OPTIONS[nextIdx].value;
-};
-
-// Calculate API Key count
-const getApiKeyCount = (api_key: string): number => {
-  if (!api_key) return 0;
-  return api_key.split(/[,\n]/).filter((k) => k.trim().length > 0).length;
-};
-
-/**
- * 权威 per-model 行：优先 `models_detail`（provider_models 投影）；无投影时
- * 从 legacy 字段合成只读行（仅剩托管/异常供应商会走到这里）。
- * Prefer the authoritative `models_detail` rows; synthesize fallback rows
- * from the legacy projection fields when absent.
- */
-const modelRowsFor = (platform: IProvider): ProviderModelResponse[] => {
-  if (platform.models_detail && platform.models_detail.length > 0) return platform.models_detail;
-  return (platform.models ?? []).map((model, index) => ({
-    provider_id: platform.id,
-    model,
-    enabled: platform.model_enabled?.[model] !== false,
-    sort_order: index,
-    tasks: [],
-    traits: [],
-    protocol: platform.model_protocols?.[model],
-    params: null,
-    context_limit: platform.model_context_limits?.[model],
-    description: platform.model_descriptions?.[model],
-    source: 'inferred',
-    health: platform.model_health?.[model],
-    created_at: 0,
-    updated_at: 0,
-  }));
-};
+/** ProviderResponse.models is the only authoritative model collection. */
+const modelRowsFor = (platform: IProvider): ProviderModelResponse[] => platform.models;
 
 /** Row-level partial update body minus the composite key. */
-type ModelRowPatch = Omit<UpdateProviderModelRequest, 'provider_id' | 'model'>;
+type ModelRowPatch = Partial<Pick<ProviderModelResponse, 'enabled' | 'sort_order'>> & {
+  description?: string | null;
+};
 
 /** Apply a tri-state row patch to the cached row for optimistic rendering. */
 const applyRowPatch = (row: ProviderModelResponse, patch: ModelRowPatch): ProviderModelResponse => ({
   ...row,
   ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
   ...(patch.sort_order !== undefined ? { sort_order: patch.sort_order } : {}),
-  ...(patch.tasks !== undefined ? { tasks: patch.tasks } : {}),
-  ...(patch.traits !== undefined ? { traits: patch.traits } : {}),
-  ...(patch.protocol !== undefined ? { protocol: patch.protocol ?? undefined } : {}),
-  ...(patch.connection_role !== undefined ? { connection_role: patch.connection_role ?? undefined } : {}),
-  ...(patch.params !== undefined ? { params: patch.params } : {}),
-  ...(patch.context_limit !== undefined ? { context_limit: patch.context_limit ?? undefined } : {}),
-  ...(patch.description !== undefined ? { description: patch.description ?? undefined } : {}),
+  ...('description' in patch ? { description: patch.description ?? undefined } : {}),
+});
+
+const providerModelInputFor = (row: ProviderModelResponse) => ({
+  model: row.model,
+  enabled: row.enabled,
+  sort_order: row.sort_order,
+  ...(row.description ? { description: row.description } : {}),
+  capabilities: row.capabilities.map(capabilityInputFromResponse),
 });
 
 /**
@@ -212,189 +288,6 @@ const ModelDescriptionEditor: React.FC<{
           size='mini'
           className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${description ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
           icon={<Write theme='outline' size='14' />}
-          onClick={(e) => e.stopPropagation()}
-        />
-      </Tooltip>
-    </Popover>
-  );
-};
-
-/**
- * 每模型上下文窗口编辑浮层 / Per-model context window editor popover.
- */
-const ModelContextLimitEditor: React.FC<{
-  value?: number;
-  onSave: (value?: number) => void;
-}> = ({ value, onSave }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<number | undefined>(value);
-
-  const handleVisibleChange = (visible: boolean) => {
-    if (visible) setDraft(value);
-    setOpen(visible);
-  };
-
-  const handleSave = () => {
-    onSave(draft);
-    setOpen(false);
-  };
-
-  const label = value
-    ? formatContextLimit(value)
-    : t('settings.modelContextLimitDefault', { defaultValue: '默认' });
-
-  return (
-    <Popover
-      trigger='click'
-      position='bl'
-      popupVisible={open}
-      onVisibleChange={handleVisibleChange}
-      content={
-        <div className='flex flex-col gap-8px w-240px' onClick={(e) => e.stopPropagation()}>
-          <div className='text-12px text-t-secondary'>
-            {t('settings.modelContextLimit', { defaultValue: '模型上下文窗口' })}
-          </div>
-          <ContextLimitSelect value={draft} onChange={setDraft} />
-          <div className='flex items-center justify-end gap-8px'>
-            <Button size='mini' onClick={() => setOpen(false)}>
-              {t('common.cancel', { defaultValue: '取消' })}
-            </Button>
-            <Button size='mini' type='primary' onClick={handleSave}>
-              {t('common.save', { defaultValue: '保存' })}
-            </Button>
-          </div>
-        </div>
-      }
-    >
-      <Tooltip content={t('settings.editModelContextLimit', { defaultValue: '编辑模型上下文窗口' })}>
-        <Button
-          size='mini'
-          className={`model-provider-action-btn !h-24px !min-w-44px shrink-0 px-6px text-11px ${value ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {label}
-        </Button>
-      </Tooltip>
-    </Popover>
-  );
-};
-
-/**
- * 模态能力编辑浮层。推断档案（source='inferred'）的任务/能力预勾选展示，
- * 并带「系统推断」提示标；保存即转为 user 档案。四项 trait 全部可编辑。
- * Inferred profiles are shown pre-checked with a hint tag; saving converts
- * them to a user profile. All four traits are editable.
- */
-const ModelModalityEditor: React.FC<{
-  profile?: ModelProfile;
-  onSave: (tasks: ModelTask[], traits: ModelTrait[]) => Promise<void>;
-}> = ({ profile, onSave }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [draftTasks, setDraftTasks] = useState<ModelTask[]>(() => editableModelTasks(profile));
-  const [draftTraits, setDraftTraits] = useState<ModelTrait[]>(() => editableModelTraits(profile));
-  const isInferred = isInferredModelProfile(profile);
-  const taskOptions = useMemo(
-    () => MODEL_TASK_ORDER.map((v) => ({ label: t(`settings.modelTask.${v}`), value: v })),
-    [t]
-  );
-  const hasUserSelection =
-    profile?.source === 'user' && ((profile.tasks?.length ?? 0) > 0 || (profile.traits?.length ?? 0) > 0);
-
-  const handleVisibleChange = (visible: boolean) => {
-    if (visible) {
-      setDraftTasks(editableModelTasks(profile));
-      setDraftTraits(editableModelTraits(profile));
-    }
-    setOpen(visible);
-  };
-
-  const toggleTrait = (trait: ModelTrait, checked: boolean) => {
-    setDraftTraits((prev) => (checked ? [...prev.filter((item) => item !== trait), trait] : prev.filter((item) => item !== trait)));
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      // Persist traits in canonical display order for stable badges/serialization.
-      await onSave(draftTasks, MODEL_TRAIT_ORDER.filter((trait) => draftTraits.includes(trait)));
-      setOpen(false);
-    } catch {
-      // Parent save handler owns the toast; keep the editor open so the user can retry.
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Popover
-      trigger='click'
-      position='bl'
-      popupVisible={open}
-      onVisibleChange={handleVisibleChange}
-      content={
-        <div className='flex flex-col gap-8px w-280px' onClick={(e) => e.stopPropagation()}>
-          <div className='flex items-center gap-6px text-12px text-t-secondary'>
-            <span>{t('settings.modelModality', { defaultValue: '模态能力' })}</span>
-            {isInferred && (
-              <Tag size='small' color='arcoblue' bordered className='select-none'>
-                {t('settings.modelInferredTag', { defaultValue: '系统推断' })}
-              </Tag>
-            )}
-          </div>
-          {isInferred && (
-            <div className='text-11px text-t-tertiary leading-4'>
-              {t('settings.modelInferredHint', {
-                defaultValue: '以下为系统推断的能力，保存后转为人工确认',
-              })}
-            </div>
-          )}
-          <Select
-            mode='multiple'
-            value={draftTasks}
-            onChange={(value: ModelTask[]) => setDraftTasks(value ?? [])}
-            options={taskOptions}
-            placeholder={t('settings.modelModality', { defaultValue: '模态能力' })}
-            triggerProps={{ getPopupContainer: () => document.body }}
-          />
-          <div className='text-11px text-t-tertiary'>
-            {t('settings.modelTraitsLabel', { defaultValue: '能力细化（traits）' })}
-          </div>
-          <div className='flex flex-col gap-2px'>
-            {MODEL_TRAIT_ORDER.map((trait) => (
-              <Checkbox
-                key={trait}
-                checked={draftTraits.includes(trait)}
-                onChange={(checked) => toggleTrait(trait, checked)}
-                className='!pl-0'
-              >
-                <span className='text-12px text-t-secondary'>{t(`settings.modelTrait.${trait}`)}</span>
-              </Checkbox>
-            ))}
-          </div>
-          <div className='text-11px text-t-tertiary leading-4'>
-            {t('settings.modelModalityTip', {
-              defaultValue: '声明该模型能做什么——探测与调用据此选择正确的端点',
-            })}
-          </div>
-          <div className='flex items-center justify-end gap-8px'>
-            <Button size='mini' onClick={() => setOpen(false)} disabled={saving}>
-              {t('common.cancel', { defaultValue: '取消' })}
-            </Button>
-            <Button size='mini' type='primary' loading={saving} onClick={handleSave}>
-              {t('common.save', { defaultValue: '保存' })}
-            </Button>
-          </div>
-        </div>
-      }
-    >
-      <Tooltip content={t('settings.editModelModality', { defaultValue: '编辑模型类别' })}>
-        <Button
-          size='mini'
-          className={`model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 ${hasUserSelection ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'}`}
-          icon={<TagOne theme='outline' size='14' />}
           onClick={(e) => e.stopPropagation()}
         />
       </Tooltip>
@@ -506,7 +399,6 @@ const ModelModalContent: React.FC = () => {
   // prevents exposing or accidentally overwriting their internal endpoint and
   // per-boot credential.
   const editableProviders = useMemo(() => (data ?? []).filter((provider) => !isManagedModelProvider(provider)), [data]);
-  const { profileFor, mutate: mutateProfiles } = useModelProfiles();
   const [message, messageContext] = useArcoMessage();
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -518,65 +410,30 @@ const ModelModalContent: React.FC = () => {
   );
 
   /**
-   * Create when the provider id is new, update otherwise.
-   * The caller is expected to have mutated the id-bearing record already.
+   * 行级模型更新：统一走 providerModel.save 全量模型聚合写。
+   * Every model write is a full canonical upsert. Capability omission is a
+   * deletion, so even metadata edits resend the complete visible capability set.
    */
-  const persistPlatform = async (platform: IProvider): Promise<void> => {
-    const existing = (data || []).some((item) => item.id === platform.id);
-    if (existing) {
-      const { id, ...body } = platform;
-      await ipcBridge.mode.updateProvider.invoke({ provider_id: id, ...body });
-    } else {
-      await ipcBridge.mode.createProvider.invoke(platform);
-    }
-  };
-
-  const updatePlatform = (platform: IProvider, success: () => void, throwOnError = false): Promise<void> => {
-    const existing = (data || []).find((item) => item.id === platform.id);
-    const nextArray = existing
-      ? (data || []).map((item) => (item.id === platform.id ? { ...item, ...platform } : item))
-      : [...(data || []), platform];
-
-    // Optimistic update
-    void mutate(nextArray, false);
-
-    return persistPlatform(platform)
-      .then(() => {
-        void mutate();
-        success();
-      })
-      .catch((error) => {
-        void mutate();
-        console.error('Failed to save provider:', error);
-        // 409 Conflict — duplicate id (rare pre-launch); different toast
-        const msg = error instanceof Error ? error.message : String(error);
-        if (msg.includes('409')) {
-          message.error(t('settings.providerIdConflict', { defaultValue: 'Provider id already exists, retry.' }));
-        } else {
-          message.error(t('settings.saveModelConfigFailed'));
-        }
-        if (throwOnError) throw error;
-      });
-  };
-
-  /**
-   * 行级模型更新（providerModel.update）：修复整 map PUT 的读改写竞态。
-   * Row-level partial update with optimistic `models_detail` patch.
-   */
-  const updateModelRow = (platform: IProvider, model: string, patch: ModelRowPatch, rethrow = false): Promise<void> => {
+  const updateModelRow = (
+    platform: IProvider,
+    row: ProviderModelResponse,
+    patch: ModelRowPatch,
+    rethrow = false
+  ): Promise<void> => {
+    const nextRow = applyRowPatch(row, patch);
     if (data) {
       const nextArray = data.map((item) =>
-        item.id === platform.id && item.models_detail
+        item.id === platform.id
           ? {
               ...item,
-              models_detail: item.models_detail.map((row) => (row.model === model ? applyRowPatch(row, patch) : row)),
+              models: item.models.map((candidate) => (candidate.model === row.model ? nextRow : candidate)),
             }
           : item
       );
       void mutate(nextArray, false);
     }
-    return ipcBridge.providerModel.update
-      .invoke({ provider_id: platform.id, model, ...patch })
+    return ipcBridge.providerModel.save
+      .invoke({ provider_id: platform.id, model: providerModelInputFor(nextRow) })
       .then(() => {
         void mutate();
       })
@@ -588,15 +445,32 @@ const ModelModalContent: React.FC = () => {
       });
   };
 
-  /** 行级删除：不再手动清理 5 个 legacy map。 */
+  const updateModelCapabilities = async (
+    platform: IProvider,
+    row: ProviderModelResponse,
+    capabilities: ProviderModelCapabilityInput[]
+  ): Promise<void> => {
+    try {
+      await ipcBridge.providerModel.save.invoke({
+        provider_id: platform.id,
+        model: { ...providerModelInputFor(row), capabilities },
+      });
+      await mutate();
+    } catch (error) {
+      console.error('Failed to save model capabilities:', error);
+      message.error(t('settings.saveModelConfigFailed'));
+      throw error;
+    }
+  };
+
+  /** Delete one canonical model aggregate. */
   const removeModel = (platform: IProvider, model: string) => {
     if (data) {
       const nextArray = data.map((item) =>
         item.id === platform.id
           ? {
               ...item,
-              models: (item.models ?? []).filter((m) => m !== model),
-              ...(item.models_detail ? { models_detail: item.models_detail.filter((row) => row.model !== model) } : {}),
+              models: item.models.filter((row) => row.model !== model),
             }
           : item
       );
@@ -703,8 +577,8 @@ const ModelModalContent: React.FC = () => {
   };
 
   /**
-   * 模型排序：对受影响的行逐条 providerModel.update({sort_order})。
-   * Model reorder persists per-row sort_order updates.
+   * 模型排序：对受影响的行逐条全量 providerModel.save。
+   * Model reorder persists full canonical rows with the new sort order.
    */
   const handleModelDragEnd = (activeData: SortableDragData, overData: SortableDragData) => {
     if (activeData.type !== 'model' || overData.type !== 'model' || activeData.providerId !== overData.providerId) {
@@ -728,8 +602,7 @@ const ModelModalContent: React.FC = () => {
         item.id === platform.id
           ? {
               ...item,
-              models: nextNames,
-              ...(item.models_detail ? { models_detail: nextRows } : {}),
+              models: nextRows,
             }
           : item
       );
@@ -738,10 +611,9 @@ const ModelModalContent: React.FC = () => {
 
     Promise.all(
       changed.map((row) =>
-        ipcBridge.providerModel.update.invoke({
+        ipcBridge.providerModel.save.invoke({
           provider_id: platform.id,
-          model: row.model,
-          sort_order: row.sort_order,
+          model: providerModelInputFor(row),
         })
       )
     )
@@ -792,7 +664,7 @@ const ModelModalContent: React.FC = () => {
       });
   };
 
-  // 供应商启用开关写 provider.enabled 本身（语义修正：不再批量翻转 model_enabled）
+  // 供应商启用开关只写 provider.enabled，不批量改变各模型的启用状态。
   // Provider enable switch writes provider.enabled itself.
   const toggleProviderEnabled = (platform: IProvider) => {
     const enabled = platform.enabled === false;
@@ -815,7 +687,7 @@ const ModelModalContent: React.FC = () => {
   };
 
   // Execute provider/model health check without creating a conversation.
-  const performHealthCheck = async (platform: IProvider, modelName: string, task?: ModelTask) => {
+  const performHealthCheck = async (platform: IProvider, modelName: string, task: ModelTask) => {
     const loadingKey = `${platform.id}-${modelName}`;
     setHealthCheckLoading((prev) => ({ ...prev, [loadingKey]: true }));
 
@@ -831,10 +703,7 @@ const ModelModalContent: React.FC = () => {
       const success = result.status === 'healthy';
       const errorMessage = result.message || t('common.unknownError');
 
-      // 服务端探针已把结果持久化到 provider_models 行；这里只刷新读投影，
-      // 不再 fetch-latest-then-merge 整个 model_health map 回写（冗余写已删除）。
-      // The server-side probe persists the result into the model's catalog row;
-      // refresh the projection instead of PUTting the legacy health map back.
+      // The server persists the task capability result; refresh the projection.
       await mutate();
       if (success) {
         Message.success({
@@ -862,10 +731,9 @@ const ModelModalContent: React.FC = () => {
   };
 
   const [addPlatformModalCtrl, addPlatformModalContext] = AddPlatformModal.useModal({
-    async onSubmit(platform) {
-      await updatePlatform(platform, () => {
-        setCollapseKey((prev) => ({ ...prev, [platform.id]: true }));
-      }, true);
+    onSubmit(platform) {
+      setCollapseKey((prev) => ({ ...prev, [platform.id]: true }));
+      void mutate();
     },
   });
 
@@ -879,16 +747,44 @@ const ModelModalContent: React.FC = () => {
 
   const [addModelModalCtrl, addModelModalContext] = AddModelModal.useModal({
     onSubmit(platform) {
-      updatePlatform(platform, () => {
-        setCollapseKey((prev) => ({ ...prev, [platform.id]: true }));
-        addModelModalCtrl.close();
-      });
+      setCollapseKey((prev) => ({ ...prev, [platform.id]: true }));
+      void mutate();
     },
   });
 
   const [editModalCtrl, editModalContext] = EditModeModal.useModal({
-    onChange(platform) {
-      return updatePlatform(platform, () => undefined, true);
+    async onChange(patch) {
+      const { id, credentials, ...publicPatch } = patch;
+      if (data) {
+        void mutate(
+          data.map((provider) =>
+            provider.id === id
+              ? {
+                  ...provider,
+                  ...publicPatch,
+                  has_credentials:
+                    credentials === undefined
+                      ? provider.has_credentials
+                      : Object.keys(credentials).length > 0,
+                }
+              : provider
+          ),
+          false
+        );
+      }
+      try {
+        await ipcBridge.mode.updateProvider.invoke({
+          provider_id: id,
+          ...publicPatch,
+          ...(credentials === undefined ? {} : { credentials }),
+        });
+        await mutate();
+      } catch (error) {
+        void mutate();
+        console.error('Failed to save provider:', error);
+        message.error(t('settings.saveModelConfigFailed'));
+        throw error;
+      }
     },
   });
 
@@ -975,7 +871,6 @@ const ModelModalContent: React.FC = () => {
               const key = platform.id;
               const isExpanded = collapseKey[platform.id] ?? false;
               const modelRows = modelRowsFor(platform);
-              const hasDetail = Boolean(platform.models_detail && platform.models_detail.length > 0);
               return (
                 <SortableProviderCard key={key} provider={platform}>
                   {({ attributes, listeners, setActivatorNodeRef, isDragging }) => (
@@ -1033,11 +928,16 @@ const ModelModalContent: React.FC = () => {
                               className='cursor-pointer hover:text-t-primary transition-colors'
                               onClick={() => editModalCtrl.open({ data: platform })}
                             >
-                              {t('settings.apiKeyCount')}（{getApiKeyCount(platform.api_key)}）
+                              {platform.has_credentials
+                                ? t('settings.connections.hasCredentials')
+                                : t('settings.connections.noCredentials')}
                             </span>
                           </span>
                           <span className={`text-12px text-t-secondary whitespace-nowrap ${isWide ? 'hidden' : 'inline'}`}>
-                            {modelRows.length} / {getApiKeyCount(platform.api_key)}
+                            {modelRows.length} ·{' '}
+                            {platform.has_credentials
+                              ? t('settings.connections.hasCredentials')
+                              : t('settings.connections.noCredentials')}
                           </span>
                           {/* 供应商启用开关（写 provider.enabled）/ Provider enable switch */}
                           <Switch
@@ -1087,26 +987,15 @@ const ModelModalContent: React.FC = () => {
                     >
                     {modelRows.map((row: ProviderModelResponse, index: number, arr: ProviderModelResponse[]) => {
                       const model = row.model;
-                      const isNewApiProvider = isNewApiPlatform(platform.platform);
-                      const modelProtocol = row.protocol || 'openai';
-                      // 行 health 即权威（legacy 合成行已在 modelRowsFor 里回填），
-                      // 不再直接读 provider.model_health map。
-                      const model_health = row.health;
-                      const healthStatus = model_health?.status || 'unknown';
+                      const unhealthyCapability = row.capabilities.find(
+                        (capability) => capability.health?.status === 'unhealthy'
+                      );
+                      const checkedCapability =
+                        unhealthyCapability ?? row.capabilities.find((capability) => capability.health);
+                      const aggregateCapabilityHealth = checkedCapability?.health;
+                      const healthStatus = aggregateCapabilityHealth?.status || 'unknown';
                       const modelDescription = row.description ?? '';
-                      const modelContextLimit = row.context_limit;
-                      // Prefer the authoritative row's profile; fall back to the
-                      // model-profiles store when the provider has no rows yet.
-                      const modelProfile: ModelProfile | undefined = hasDetail
-                        ? {
-                            provider_id: platform.id,
-                            model,
-                            tasks: row.tasks,
-                            traits: row.traits,
-                            source: row.source,
-                            updated_at: row.updated_at,
-                          }
-                        : profileFor(platform.id, model);
+                      const healthTasks = row.capabilities.map((capability) => capability.task);
 
                       return (
                         <SortableModelRow key={model} providerId={platform.id} model={model}>
@@ -1139,17 +1028,26 @@ const ModelModalContent: React.FC = () => {
                                             {healthStatus === 'healthy' ? t('common.success') : t('common.failed')}
                                           </span>
                                         </div>
-                                        {model_health?.latency && (
+                                        {checkedCapability && (
                                           <div className='text-12px mt-4px'>
-                                            {t('settings.latency')}: {model_health.latency}ms
+                                            {t('settings.modelModality', { defaultValue: '模态能力' })}:{' '}
+                                            {t(`settings.modelTask.${checkedCapability.task}`, {
+                                              defaultValue: checkedCapability.task,
+                                            })}
                                           </div>
                                         )}
-                                        {model_health?.error && (
-                                          <div className='text-12px mt-4px'>{model_health.error}</div>
-                                        )}
-                                        {model_health?.last_check && (
+                                        {aggregateCapabilityHealth?.latency !== undefined && (
                                           <div className='text-12px mt-4px'>
-                                            {t('mcp.lastCheck')}: {new Date(model_health.last_check).toLocaleString()}
+                                            {t('settings.latency')}: {aggregateCapabilityHealth.latency}ms
+                                          </div>
+                                        )}
+                                        {aggregateCapabilityHealth?.error && (
+                                          <div className='text-12px mt-4px'>{aggregateCapabilityHealth.error}</div>
+                                        )}
+                                        {checkedCapability?.health_checked_at && (
+                                          <div className='text-12px mt-4px'>
+                                            {t('mcp.lastCheck')}:{' '}
+                                            {new Date(checkedCapability.health_checked_at).toLocaleString()}
                                           </div>
                                         )}
                                       </div>
@@ -1165,67 +1063,20 @@ const ModelModalContent: React.FC = () => {
                                   {model}
                                 </span>
 
-                                {/* 模态徽章 / Modality badges — all tasks incl. chat (chat neutral, others colored). */}
-                                {visibleModelTaskBadges(modelProfile).map((tk) => (
-                                    <Tag
-                                      key={tk}
-                                      size='small'
-                                      color={tk === 'chat' ? 'gray' : 'purple'}
-                                      bordered
-                                      className='shrink-0 select-none'
-                                    >
-                                      {t(`settings.modelTask.${tk}`)}
-                                    </Tag>
-                                  ))}
+                                {/* Each modality badge reports only that task capability's probe status. */}
+                                {row.capabilities.map((capability) => (
+                                  <CapabilityHealthTag key={capability.task} capability={capability} />
+                                ))}
 
-                                {/* New API 协议标签（点击循环切换，行级写入）/ New API protocol badge (click to cycle, row-level write) */}
-                                {isNewApiProvider && (
-                                  <Tag
-                                    size='small'
-                                    color={getProtocolColor(modelProtocol)}
-                                    className='cursor-pointer select-none shrink-0'
-                                    onClick={() => {
-                                      void updateModelRow(platform, model, { protocol: getNextProtocol(modelProtocol) });
-                                    }}
-                                  >
-                                    {getProtocolLabel(modelProtocol)}
-                                  </Tag>
-                                )}
-
-                                {/* 每模型上下文窗口 / Per-model context window */}
-                                <ModelContextLimitEditor
-                                  value={modelContextLimit}
-                                  onSave={(value) => {
-                                    void updateModelRow(platform, model, {
-                                      context_limit: value && value > 0 ? value : null,
-                                    });
-                                  }}
-                                />
-
-                                {/* 每模型类别编辑 / Per-model modality editor */}
-                                <ModelModalityEditor
-                                  profile={modelProfile}
-                                  onSave={async (tasks, traits) => {
-                                    try {
-                                      await ipcBridge.modelProfile.upsert.invoke(
-                                        buildModelProfileUpsertRequest(platform.id, model, tasks, traits)
-                                      );
-                                      await Promise.all([mutateProfiles(), mutate()]);
-                                    } catch (error) {
-                                      console.error('model profile upsert failed', error);
-                                      message.error(t('settings.saveModelConfigFailed'));
-                                      throw error;
-                                    }
-                                  }}
-                                />
-
-                                {/* 高级：协议/连接档案/params / Advanced: protocol, connection_role, params */}
+                                {/* One editor owns modality, protocol, transport and provider params. */}
                                 <ModelAdvancedEditor
                                   providerId={platform.id}
-                                  protocol={row.protocol}
-                                  connectionRole={row.connection_role}
-                                  params={row.params}
-                                  onSave={(patch) => updateModelRow(platform, model, patch, true)}
+                                  preset={platform.platform}
+                                  providerBaseUrl={platform.base_url}
+                                  providerAuthScheme={platform.auth_scheme}
+                                  model={model}
+                                  capabilities={row.capabilities}
+                                  onSave={(patch) => updateModelCapabilities(platform, row, patch.capabilities)}
                                 />
 
                                 {/* 模型启用开关（行级）/ Model enable switch (row-level) */}
@@ -1234,7 +1085,7 @@ const ModelModalContent: React.FC = () => {
                                   className='shrink-0'
                                   checked={row.enabled}
                                   onChange={(checked) => {
-                                    void updateModelRow(platform, model, { enabled: checked });
+                                    void updateModelRow(platform, row, { enabled: checked });
                                   }}
                                 />
 
@@ -1242,7 +1093,7 @@ const ModelModalContent: React.FC = () => {
                                 <ModelDescriptionEditor
                                   description={modelDescription}
                                   onSave={(text) => {
-                                    void updateModelRow(platform, model, { description: text || null });
+                                    void updateModelRow(platform, row, { description: text || null });
                                   }}
                                 />
                               </div>
@@ -1259,16 +1110,12 @@ const ModelModalContent: React.FC = () => {
                             </div>
 
                             <div className='flex items-center gap-6px shrink-0'>
-                              {/* 心跳检测按钮（携带档案主任务）/ Health check button (probes the profile's primary task) */}
-                              <Tooltip content={t('settings.healthCheck')}>
-                                <Button
-                                  size='mini'
-                                  className='!w-28px !h-28px !min-w-28px !bg-[var(--color-bg-1)] text-t-secondary hover:text-t-primary hover:!bg-[var(--fill-0)]'
-                                  icon={<Heartbeat theme='outline' size='16' />}
-                                  loading={healthCheckLoading[`${platform.id}-${model}`]}
-                                  onClick={() => performHealthCheck(platform, model, primaryModelTask(modelProfile))}
-                                />
-                              </Tooltip>
+                              {/* 单任务一键检测；多任务先选具体模态 / Single task: one click; multi-task: explicit picker. */}
+                              <ModelHealthCheckAction
+                                tasks={healthTasks}
+                                loading={healthCheckLoading[`${platform.id}-${model}`]}
+                                onCheck={(task) => performHealthCheck(platform, model, task)}
+                              />
 
                               <Popconfirm
                                 title={t('settings.deleteModelConfirm')}

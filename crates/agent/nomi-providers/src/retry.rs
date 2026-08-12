@@ -6,6 +6,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use nomi_types::llm::LlmEvent;
+use nomifun_net::secret_redaction::SecretRedactor;
 
 use super::ProviderError;
 use super::anthropic_shared::StreamOutcome;
@@ -73,6 +74,7 @@ pub async fn send_and_check(
     url: &str,
     headers: &HeaderMap,
     body: &Value,
+    redactor: &SecretRedactor,
 ) -> Result<reqwest::Response, ProviderError> {
     let response = client
         .post(url)
@@ -80,11 +82,11 @@ pub async fn send_and_check(
         .json(body)
         .send()
         .await
-        .map_err(|e| ProviderError::Connection(e.to_string()))?;
+        .map_err(ProviderError::from)?;
 
     let status = response.status();
     if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
+        let body_text = redactor.redact(&response.text().await.unwrap_or_default());
         return Err(ProviderError::Api {
             status: status.as_u16(),
             message: body_text,

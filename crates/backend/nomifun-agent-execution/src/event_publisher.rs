@@ -312,21 +312,38 @@ mod tests {
     async fn outbox_drain_targets_installation_owner_and_marks_every_event_published() {
         let database = init_database_memory().await.unwrap();
         let installation_owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
+        let credentials_encrypted = nomifun_common::encrypt_string(
+            r#"{"api_keys":["test-only"]}"#,
+            &[0x42; 32],
+        )
+        .unwrap();
         sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+                provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
                 created_at, updated_at\
              ) VALUES (?1, 'openai', 'provider', 'https://example.invalid', \
-                       'encrypted', 1, 1, 1)",
+                       'bearer', ?2, 1, 1, 1)",
+        )
+        .bind(PROVIDER_ID)
+        .bind(&credentials_encrypted)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_models (\
+                provider_id, model, enabled, sort_order, description, created_at, updated_at\
+             ) VALUES (?1, 'model', 1, 0, NULL, 1, 1)",
         )
         .bind(PROVIDER_ID)
         .execute(database.pool())
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO provider_models (\
-                provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
-             ) VALUES (?1, 'model', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
+            "INSERT INTO provider_model_capabilities (\
+                provider_id, model, task, traits, protocol, connection_role, \
+                allow_cross_origin_credentials, provider_params, created_at, updated_at\
+             ) VALUES (?1, 'model', 'chat', '[]', 'openai.chat_text', 'default', \
+                       0, '{}', 1, 1)",
         )
         .bind(PROVIDER_ID)
         .execute(database.pool())

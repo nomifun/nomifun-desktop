@@ -38,7 +38,10 @@ async fn test_bedrock(
     body: Result<Json<TestBedrockConnectionRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.service.test_bedrock_connection(req.bedrock_config).await?;
+    state
+        .service
+        .test_bedrock_connection(req.bedrock_config, req.credentials)
+        .await?;
     Ok(Json(ApiResponse::message("Connection successful")))
 }
 

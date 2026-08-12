@@ -8,6 +8,9 @@
 //! - `siliconflow.video_jobs`: `POST /v1/video/submit` returns `requestId`,
 //!   then `POST /v1/video/status` (also JSON) is polled until it returns a
 //!   video URL.
+//! - `siliconflow.audio_speech`: `POST /v1/audio/speech` accepts provider-native
+//!   JSON and returns a raw (optionally streamed) audio body.  SiliconFlow voice
+//!   ids are model-scoped; this adapter never invents OpenAI's `alloy` voice.
 
 use std::time::Duration;
 
@@ -16,78 +19,42 @@ use nomifun_api_types::ModelTask;
 use serde_json::{Map, Value, json};
 
 use crate::adapter::ProtocolAdapter;
-use crate::call::{ResolvedCall, ResolvedConnection};
+use crate::call::{ResolvedCall, resolve_endpoint};
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{encode_b64, error_from_response, post_json};
+use crate::transport::{MAX_ARTIFACT_BYTES, encode_b64, error_from_response, post_json, read_body_capped};
 use crate::types::{
     ImageEditRequest, ImageGenRequest, JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest,
-    TaskResult, VideoGenRequest,
+    TaskResult, TtsRequest, VideoGenRequest,
 };
 
-use super::has_endpoint_override;
+use super::json_request_body;
 
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_TIMEOUT: Duration = Duration::from_secs(60);
+pub const AUDIO_SPEECH_ADAPTER_ID: &str = "siliconflow.audio_speech";
 const VIDEO_ADAPTER_ID: &str = "siliconflow.video_jobs";
 
-/// Build a native SiliconFlow `/v1` endpoint while accepting configured bases
-/// with or without a trailing `/v1`.
-fn siliconflow_v1_url(connection: &ResolvedConnection, path: &str) -> String {
-    let base = connection.base_url.trim().trim_end_matches('/');
-    if connection.is_full_url {
-        return base.to_string();
-    }
-    let root = base.strip_suffix("/v1").unwrap_or(base);
-    format!("{root}/v1{path}")
+fn audio_speech_url(call: &ResolvedCall) -> Result<String, InvokeError> {
+    call.endpoint_url()
 }
 
-fn image_url(call: &ResolvedCall) -> String {
-    if has_endpoint_override(&call.model_params) {
-        call.dispatch_target().url
-    } else {
-        siliconflow_v1_url(&call.connection, "/images/generations")
-    }
+fn image_url(call: &ResolvedCall) -> Result<String, InvokeError> {
+    call.endpoint_url()
 }
 
-fn video_submit_url(call: &ResolvedCall) -> String {
-    if has_endpoint_override(&call.model_params) {
-        call.dispatch_target().url
-    } else {
-        siliconflow_v1_url(&call.connection, "/video/submit")
-    }
+fn video_submit_url(call: &ResolvedCall) -> Result<String, InvokeError> {
+    call.endpoint_url()
 }
 
-fn video_status_url(call: &ResolvedCall) -> String {
-    if let Some(endpoint) = call
+fn video_status_url(call: &ResolvedCall) -> Result<String, InvokeError> {
+    let endpoint = call
         .model_params
         .get("poll_endpoint")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
-        if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-            return endpoint.to_string();
-        }
-        let base = call.connection.base_url.trim().trim_end_matches('/');
-        if endpoint.starts_with('/') {
-            if let Ok(mut parsed) = reqwest::Url::parse(base) {
-                parsed.set_path(endpoint);
-                parsed.set_query(None);
-                parsed.set_fragment(None);
-                return parsed.to_string().trim_end_matches('/').to_string();
-            }
-        }
-        return format!("{base}/{}", endpoint.trim_start_matches('/'));
-    }
-
-    if has_endpoint_override(&call.model_params) || call.connection.is_full_url {
-        let submit = video_submit_url(call);
-        let no_query = submit.split('?').next().unwrap_or(submit.as_str()).trim_end_matches('/');
-        if let Some(prefix) = no_query.strip_suffix("/submit") {
-            return format!("{prefix}/status");
-        }
-    }
-    siliconflow_v1_url(&call.connection, "/video/status")
+        .ok_or_else(|| InvokeError::config("siliconflow.video_jobs requires an injected status endpoint"))?;
+    Ok(resolve_endpoint(&call.connection.base_url, endpoint))
 }
 
 /// Merge whitelisted provider-native optional parameters. Connection/model
@@ -129,6 +96,230 @@ fn data_uri(mime: &str, bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// siliconflow.audio_speech
+// ---------------------------------------------------------------------------
+
+/// SiliconFlow JSON `/v1/audio/speech` protocol for both the `.cn` and `.com`
+/// services.  The response is raw audio (`application/audio` in the official
+/// schema), not JSON or SSE framing.
+pub struct SiliconFlowAudioSpeechAdapter;
+
+#[async_trait]
+impl ProtocolAdapter for SiliconFlowAudioSpeechAdapter {
+    fn id(&self) -> &'static str {
+        AUDIO_SPEECH_ADAPTER_ID
+    }
+
+    fn supports(&self, task: ModelTask) -> bool {
+        task == ModelTask::SpeechSynthesis
+    }
+
+    async fn submit(&self, http: &reqwest::Client, call: &ResolvedCall) -> Result<TaskOutcome, InvokeError> {
+        let TaskRequest::SpeechSynthesis(req) = &call.request else {
+            return Err(InvokeError::new(
+                InvokeErrorKind::UnsupportedTask,
+                format!("{AUDIO_SPEECH_ADAPTER_ID} cannot serve task {:?}", call.request.task()),
+            ));
+        };
+
+        let body = build_audio_speech_body(call, req)?;
+        let url = audio_speech_url(call)?;
+        let resp = post_json(http, &url, SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
+        if !resp.status().is_success() {
+            return Err(error_from_response(resp).await);
+        }
+
+        // SiliconFlow documents `application/audio`, so the official response
+        // header alone does not identify mp3/opus/wav/pcm.  An explicit request
+        // format is authoritative; otherwise the provider default is mp3.  A
+        // more specific audio/* header is still preserved when one is supplied.
+        let response_content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.split(';').next().unwrap_or(value).trim().to_ascii_lowercase());
+        let requested_format = body.get("response_format").and_then(Value::as_str);
+        let mime = requested_format
+            .map(siliconflow_speech_mime)
+            .map(str::to_owned)
+            .or_else(|| response_content_type.filter(|value| value.starts_with("audio/")))
+            .unwrap_or_else(|| "audio/mpeg".to_owned());
+        let bytes = read_body_capped(resp, MAX_ARTIFACT_BYTES).await?;
+
+        Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
+            data: ProducedData::Bytes(bytes),
+            mime: Some(mime),
+        }])))
+    }
+}
+
+const SILICONFLOW_TTS_OPTIONAL_FIELDS: &[&str] = &[
+    "stream",
+    "sample_rate",
+    "speed",
+    "gain",
+    "max_tokens",
+    "references",
+];
+
+fn invalid_tts_param(message: impl Into<String>) -> InvokeError {
+    InvokeError::new(InvokeErrorKind::InvalidParams, message)
+}
+
+fn validate_audio_speech_options(body: &Map<String, Value>) -> Result<(), InvokeError> {
+    if let Some(voice) = body.get("voice").and_then(Value::as_str)
+        && !voice.contains(':')
+    {
+        return Err(invalid_tts_param(format!(
+            "SiliconFlow TTS voice {voice:?} must be a provider voice id such as '<model>:<voice>' or 'speech:<voice-id>'; unscoped OpenAI voice ids are not supported"
+        )));
+    }
+
+    if let Some(value) = body.get("stream")
+        && !value.is_boolean()
+    {
+        return Err(invalid_tts_param("SiliconFlow TTS field 'stream' must be a boolean"));
+    }
+
+    if let Some(value) = body.get("sample_rate") {
+        let sample_rate = value
+            .as_u64()
+            .ok_or_else(|| invalid_tts_param("SiliconFlow TTS field 'sample_rate' must be an integer"))?;
+        let format = body.get("response_format").and_then(Value::as_str).unwrap_or("mp3");
+        let allowed = match format {
+            "opus" => sample_rate == 48_000,
+            "wav" | "pcm" => matches!(sample_rate, 8_000 | 16_000 | 24_000 | 32_000 | 44_100),
+            // SiliconFlow defaults to mp3 when response_format is omitted.
+            _ => matches!(sample_rate, 32_000 | 44_100),
+        };
+        if !allowed {
+            return Err(invalid_tts_param(format!(
+                "SiliconFlow TTS sample_rate {sample_rate} is not supported for response_format {format:?}"
+            )));
+        }
+    }
+
+    for (field, min, max) in [("speed", 0.25, 4.0), ("gain", -10.0, 10.0)] {
+        if let Some(value) = body.get(field) {
+            let number = value
+                .as_f64()
+                .ok_or_else(|| invalid_tts_param(format!("SiliconFlow TTS field '{field}' must be a number")))?;
+            if !(min..=max).contains(&number) {
+                return Err(invalid_tts_param(format!(
+                    "SiliconFlow TTS field '{field}' must be between {min} and {max}"
+                )));
+            }
+        }
+    }
+
+    if let Some(value) = body.get("max_tokens")
+        && value.as_u64().filter(|tokens| *tokens > 0).is_none()
+    {
+        return Err(invalid_tts_param(
+            "SiliconFlow TTS field 'max_tokens' must be a positive integer",
+        ));
+    }
+
+    if let Some(value) = body.get("references") {
+        let references = value
+            .as_array()
+            .filter(|references| !references.is_empty())
+            .ok_or_else(|| invalid_tts_param("SiliconFlow TTS field 'references' must be a non-empty array"))?;
+        for (index, reference) in references.iter().enumerate() {
+            let reference = reference.as_object().ok_or_else(|| {
+                invalid_tts_param(format!("SiliconFlow TTS references[{index}] must be an object"))
+            })?;
+            for field in ["audio", "text"] {
+                if reference
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                {
+                    return Err(invalid_tts_param(format!(
+                        "SiliconFlow TTS references[{index}].{field} must be a non-empty string"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn configured_string<'a>(model_params: &'a Value, extra: &'a Value, key: &str) -> Result<Option<&'a str>, InvokeError> {
+    let Some(value) = extra.get(key).or_else(|| model_params.get(key)) else {
+        return Ok(None);
+    };
+    value
+        .as_str()
+        .map(str::trim)
+        .map(|value| (!value.is_empty()).then_some(value))
+        .ok_or_else(|| invalid_tts_param(format!("SiliconFlow TTS field '{key}' must be a string")))
+}
+
+fn build_audio_speech_body(call: &ResolvedCall, req: &TtsRequest) -> Result<Value, InvokeError> {
+    if req.text.trim().is_empty() {
+        return Err(invalid_tts_param("SiliconFlow TTS input must not be empty"));
+    }
+
+    let mut body = Map::from_iter([
+        ("model".into(), Value::String(call.model.clone())),
+        ("input".into(), Value::String(req.text.clone())),
+    ]);
+    merge_optional(
+        &mut body,
+        &call.model_params,
+        &req.extra,
+        SILICONFLOW_TTS_OPTIONAL_FIELDS,
+    );
+
+    // A typed request voice wins over a configured default.  Absence stays
+    // absent: unlike the OpenAI adapter, this must never synthesize `alloy`.
+    let voice = match req.voice.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(voice) => Some(voice),
+        None => configured_string(&call.model_params, &req.extra, "voice")?,
+    };
+    if let Some(voice) = voice {
+        body.insert("voice".into(), Value::String(voice.to_owned()));
+    }
+
+    let format = match req.format.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(format) => Some(format),
+        None => configured_string(&call.model_params, &req.extra, "response_format")?,
+    };
+    if let Some(format) = format {
+        if !matches!(format, "mp3" | "opus" | "wav" | "pcm") {
+            return Err(invalid_tts_param(format!(
+                "SiliconFlow TTS response_format {format:?} must be mp3, opus, wav, or pcm"
+            )));
+        }
+        body.insert("response_format".into(), Value::String(format.to_owned()));
+    }
+
+    let body = json_request_body(&call.model_params, &req.extra, Value::Object(body))?;
+    let body = body
+        .as_object()
+        .expect("shared JSON body helper always returns an object");
+    validate_audio_speech_options(body)?;
+    if body.contains_key("voice") && body.contains_key("references") {
+        return Err(invalid_tts_param(
+            "SiliconFlow TTS fields 'voice' and 'references' are mutually exclusive",
+        ));
+    }
+    Ok(Value::Object(body.clone()))
+}
+
+fn siliconflow_speech_mime(format: &str) -> &'static str {
+    match format {
+        "opus" => "audio/ogg",
+        "wav" => "audio/wav",
+        "pcm" => "audio/pcm",
+        _ => "audio/mpeg",
+    }
+}
+
+// ---------------------------------------------------------------------------
 // siliconflow.images
 // ---------------------------------------------------------------------------
 
@@ -146,7 +337,7 @@ impl ProtocolAdapter for SiliconFlowImagesAdapter {
 
     async fn submit(&self, http: &reqwest::Client, call: &ResolvedCall) -> Result<TaskOutcome, InvokeError> {
         let body = match &call.request {
-            TaskRequest::ImageGeneration(req) => build_image_generation_body(call, req),
+            TaskRequest::ImageGeneration(req) => build_image_generation_body(call, req)?,
             TaskRequest::ImageEdit(req) => build_image_edit_body(call, req)?,
             other => {
                 return Err(InvokeError::new(
@@ -156,19 +347,19 @@ impl ProtocolAdapter for SiliconFlowImagesAdapter {
             }
         };
 
-        let resp = post_json(http, &image_url(call), SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
+        let resp = post_json(http, &image_url(call)?, SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
         let value: Value = resp
             .json()
             .await
-            .map_err(|e| InvokeError::parse(format!("invalid SiliconFlow images JSON: {e}")))?;
+            .map_err(|e| InvokeError::response_json("invalid SiliconFlow images JSON", &e))?;
         Ok(TaskOutcome::Done(TaskResult::Assets(parse_images(&value)?)))
     }
 }
 
-fn build_image_generation_body(call: &ResolvedCall, req: &ImageGenRequest) -> Value {
+fn build_image_generation_body(call: &ResolvedCall, req: &ImageGenRequest) -> Result<Value, InvokeError> {
     let mut body = Map::from_iter([
         ("model".into(), Value::String(call.model.clone())),
         ("prompt".into(), Value::String(req.prompt.clone())),
@@ -183,7 +374,7 @@ fn build_image_generation_body(call: &ResolvedCall, req: &ImageGenRequest) -> Va
     if let Some(size) = &req.size {
         body.insert("image_size".into(), Value::String(size.clone()));
     }
-    Value::Object(body)
+    json_request_body(&call.model_params, &req.extra, Value::Object(body))
 }
 
 fn build_image_edit_body(call: &ResolvedCall, req: &ImageEditRequest) -> Result<Value, InvokeError> {
@@ -215,7 +406,7 @@ fn build_image_edit_body(call: &ResolvedCall, req: &ImageEditRequest) -> Result<
         let field = if index == 0 { "image".to_string() } else { format!("image{}", index + 1) };
         body.insert(field, Value::String(data_uri(&input.mime, &input.bytes)));
     }
-    Ok(Value::Object(body))
+    json_request_body(&call.model_params, &req.extra, Value::Object(body))
 }
 
 fn parse_images(value: &Value) -> Result<Vec<ProducedAsset>, InvokeError> {
@@ -262,15 +453,15 @@ impl ProtocolAdapter for SiliconFlowVideoJobsAdapter {
                 format!("siliconflow.video_jobs cannot serve task {:?}", call.request.task()),
             ));
         };
-        let body = build_video_submit_body(call, req);
-        let resp = post_json(http, &video_submit_url(call), SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
+        let body = build_video_submit_body(call, req)?;
+        let resp = post_json(http, &video_submit_url(call)?, SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
         let value: Value = resp
             .json()
             .await
-            .map_err(|e| InvokeError::parse(format!("invalid SiliconFlow video submit JSON: {e}")))?;
+            .map_err(|e| InvokeError::response_json("invalid SiliconFlow video submit JSON", &e))?;
         let request_id = value
             .get("requestId")
             .and_then(Value::as_str)
@@ -278,6 +469,7 @@ impl ProtocolAdapter for SiliconFlowVideoJobsAdapter {
             .ok_or_else(|| InvokeError::parse("SiliconFlow video submit response missing 'requestId'"))?;
         Ok(TaskOutcome::Pending(JobHandle {
             adapter_id: VIDEO_ADAPTER_ID.into(),
+            config_revision: call.config_revision,
             remote_id: request_id.to_string(),
             poll_state: json!({}),
         }))
@@ -290,18 +482,20 @@ impl ProtocolAdapter for SiliconFlowVideoJobsAdapter {
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
         let body = json!({"requestId": job.remote_id});
-        let resp = post_json(http, &video_status_url(call), POLL_TIMEOUT, &call.connection.auth, &body).await?;
+        let status_url = call.credentialed_http_url(&video_status_url(call)?, "poll_endpoint")?;
+        let resp = post_json(http, &status_url, POLL_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
         let value: Value = resp
             .json()
             .await
-            .map_err(|e| InvokeError::parse(format!("invalid SiliconFlow video status JSON: {e}")))?;
+            .map_err(|e| InvokeError::response_json("invalid SiliconFlow video status JSON", &e))?;
 
         match parse_video_status(&value)? {
             SiliconFlowVideoState::Pending => Ok(TaskOutcome::Pending(JobHandle {
                 adapter_id: VIDEO_ADAPTER_ID.into(),
+                config_revision: call.config_revision,
                 remote_id: job.remote_id.clone(),
                 poll_state: json!({}),
             })),
@@ -317,7 +511,7 @@ impl ProtocolAdapter for SiliconFlowVideoJobsAdapter {
     }
 }
 
-fn build_video_submit_body(call: &ResolvedCall, req: &VideoGenRequest) -> Value {
+fn build_video_submit_body(call: &ResolvedCall, req: &VideoGenRequest) -> Result<Value, InvokeError> {
     let mut body = Map::from_iter([
         ("model".into(), Value::String(call.model.clone())),
         ("prompt".into(), Value::String(req.prompt.clone())),
@@ -334,7 +528,7 @@ fn build_video_submit_body(call: &ResolvedCall, req: &VideoGenRequest) -> Value 
     if let Some(input) = req.inputs.first() {
         body.insert("image".into(), Value::String(data_uri(&input.mime, &input.bytes)));
     }
-    Value::Object(body)
+    json_request_body(&call.model_params, &req.extra, Value::Object(body))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -393,12 +587,59 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::adapters::test_support::call;
+    use crate::adapters::test_support::call_with_endpoint;
     use crate::types::InputAsset;
 
-    fn siliconflow_call(base: &str, model: &str, request: TaskRequest) -> ResolvedCall {
-        let mut call = call(base, model, request);
+    fn siliconflow_base(base: &str) -> String {
+        let base = base.trim_end_matches('/');
+        if base.ends_with("/v1") {
+            base.to_owned()
+        } else {
+            format!("{base}/v1")
+        }
+    }
+
+    fn siliconflow_call_with_endpoint(
+        base: &str,
+        model: &str,
+        protocol: &str,
+        endpoint: &str,
+        request: TaskRequest,
+    ) -> ResolvedCall {
+        let mut call = call_with_endpoint(base, model, protocol, endpoint, request);
         call.platform = "siliconflow".into();
+        call
+    }
+
+    fn audio_call(base: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        siliconflow_call_with_endpoint(
+            &siliconflow_base(base),
+            model,
+            AUDIO_SPEECH_ADAPTER_ID,
+            "/audio/speech",
+            request,
+        )
+    }
+
+    fn image_call(base: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        siliconflow_call_with_endpoint(
+            &siliconflow_base(base),
+            model,
+            "siliconflow.images",
+            "/images/generations",
+            request,
+        )
+    }
+
+    fn video_call(base: &str, model: &str, request: TaskRequest) -> ResolvedCall {
+        let mut call = siliconflow_call_with_endpoint(
+            &siliconflow_base(base),
+            model,
+            VIDEO_ADAPTER_ID,
+            "/video/submit",
+            request,
+        );
+        call.model_params["poll_endpoint"] = Value::String("/video/status".into());
         call
     }
 
@@ -417,11 +658,156 @@ mod tests {
     }
 
     fn job(id: &str) -> JobHandle {
-        JobHandle { adapter_id: VIDEO_ADAPTER_ID.into(), remote_id: id.into(), poll_state: json!({}) }
+        JobHandle { adapter_id: VIDEO_ADAPTER_ID.into(), config_revision: 1, remote_id: id.into(), poll_state: json!({}) }
     }
 
     fn test_http() -> reqwest::Client {
         reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    fn tts_request(voice: Option<&str>, format: Option<&str>, extra: Value) -> TaskRequest {
+        TaskRequest::SpeechSynthesis(TtsRequest {
+            text: "你好，SiliconFlow".into(),
+            voice: voice.map(str::to_owned),
+            format: format.map(str::to_owned),
+            extra,
+        })
+    }
+
+    #[test]
+    fn audio_speech_uses_the_official_cn_and_global_paths() {
+        for (base, expected) in [
+            (
+                "https://api.siliconflow.cn/v1",
+                "https://api.siliconflow.cn/v1/audio/speech",
+            ),
+            (
+                "https://api.siliconflow.com/v1",
+                "https://api.siliconflow.com/v1/audio/speech",
+            ),
+        ] {
+            let call = audio_call(base, "FunAudioLLM/CosyVoice2-0.5B", tts_request(None, None, json!({})));
+            assert_eq!(audio_speech_url(&call).unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_speech_forwards_open_provider_fields_and_returns_raw_audio() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(header("authorization", "Bearer sk-test"))
+            .and(header("content-type", "application/json"))
+            .and(body_partial_json(json!({
+                "model": "FunAudioLLM/CosyVoice2-0.5B",
+                "input": "你好，SiliconFlow",
+                "voice": "FunAudioLLM/CosyVoice2-0.5B:alex",
+                "response_format": "mp3",
+                "stream": true,
+                "sample_rate": 32000,
+                "speed": 1.25,
+                "gain": 1,
+                "max_tokens": 128,
+                "future_option": "enabled"
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/audio")
+                    .set_body_bytes(b"ID3siliconflow".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let request = tts_request(
+            Some("FunAudioLLM/CosyVoice2-0.5B:alex"),
+            Some("mp3"),
+            json!({
+                "stream": true,
+                "speed": 1.25,
+                "future_option": "enabled",
+                "response_format": 42
+            }),
+        );
+        let mut call = audio_call(&format!("{}/v1", server.uri()), "FunAudioLLM/CosyVoice2-0.5B", request);
+        call.model_params = json!({
+            "endpoint": "/audio/speech",
+            "stream": false,
+            "sample_rate": 32000,
+            "speed": 1.0,
+            "gain": 1,
+            "max_tokens": 128,
+            "voice": 42,
+            "future_option": "model-default"
+        });
+
+        let out = SiliconFlowAudioSpeechAdapter.submit(&test_http(), &call).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected audio asset") };
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].mime.as_deref(), Some("audio/mpeg"));
+        assert!(matches!(&assets[0].data, ProducedData::Bytes(bytes) if bytes == b"ID3siliconflow"));
+
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["future_option"], "enabled");
+        assert_eq!(body["stream"], json!(true), "request extras override model defaults");
+        assert_eq!(body["response_format"], json!("mp3"), "typed format wins over raw params");
+    }
+
+    #[test]
+    fn audio_speech_never_invents_alloy_and_rejects_voice_with_references() {
+        let references = json!([{
+            "audio": "data:audio/wav;base64,UklGRg==",
+            "text": "参考音频文本"
+        }]);
+        let call = audio_call(
+            "https://api.siliconflow.cn/v1",
+            "fnlp/MOSS-TTSD-v0.5",
+            tts_request(None, Some("wav"), json!({"references": references.clone()})),
+        );
+        let body = build_audio_speech_body(
+            &call,
+            match &call.request {
+                TaskRequest::SpeechSynthesis(req) => req,
+                _ => unreachable!(),
+            },
+        )
+        .unwrap();
+        assert!(body.get("voice").is_none());
+        assert!(!body.to_string().contains("alloy"));
+        assert_eq!(body["references"], references);
+
+        let conflicting = audio_call(
+            "https://api.siliconflow.cn/v1",
+            "fnlp/MOSS-TTSD-v0.5",
+            tts_request(Some("fnlp/MOSS-TTSD-v0.5:alex"), None, json!({"references": references})),
+        );
+        let error = build_audio_speech_body(
+            &conflicting,
+            match &conflicting.request {
+                TaskRequest::SpeechSynthesis(req) => req,
+                _ => unreachable!(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        assert!(error.message.contains("mutually exclusive"));
+
+        let openai_voice = audio_call(
+            "https://api.siliconflow.com/v1",
+            "FunAudioLLM/CosyVoice2-0.5B",
+            tts_request(Some("alloy"), None, json!({})),
+        );
+        let error = build_audio_speech_body(
+            &openai_voice,
+            match &openai_voice.request {
+                TaskRequest::SpeechSynthesis(req) => req,
+                _ => unreachable!(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        assert!(error.message.contains("unscoped OpenAI voice ids"));
     }
 
     #[tokio::test]
@@ -452,8 +838,12 @@ mod tests {
             quality: None,
             extra: json!({"guidance_scale": 6.5}),
         });
-        let mut call = siliconflow_call(&format!("{}/v1", server.uri()), "Kwai-Kolors/Kolors", request);
-        call.model_params = json!({"num_inference_steps": 30, "guidance_scale": 7.5});
+        let mut call = image_call(&format!("{}/v1", server.uri()), "Kwai-Kolors/Kolors", request);
+        call.model_params = json!({
+            "endpoint": "/images/generations",
+            "num_inference_steps": 30,
+            "guidance_scale": 7.5
+        });
         let out = SiliconFlowImagesAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected assets") };
         assert_eq!(assets.len(), 2);
@@ -486,7 +876,7 @@ mod tests {
             inputs: vec![image_input(b"hi"), image_input(b"two")],
             extra: json!({"num_inference_steps": 22}),
         });
-        let call = siliconflow_call(&server.uri(), "Qwen/Qwen-Image-Edit-2509", request);
+        let call = image_call(&server.uri(), "Qwen/Qwen-Image-Edit-2509", request);
         let out = SiliconFlowImagesAdapter.submit(&test_http(), &call).await.unwrap();
         assert!(matches!(out, TaskOutcome::Done(TaskResult::Assets(assets)) if assets.len() == 1));
 
@@ -514,7 +904,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = siliconflow_call(&server.uri(), "Wan-AI/Wan2.2-I2V-A14B", video_request());
+        let call = video_call(&server.uri(), "Wan-AI/Wan2.2-I2V-A14B", video_request());
         let out = SiliconFlowVideoJobsAdapter.submit(&test_http(), &call).await.unwrap();
         let TaskOutcome::Pending(handle) = out else { panic!("expected pending") };
         assert_eq!(handle.adapter_id, VIDEO_ADAPTER_ID);
@@ -541,13 +931,49 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = siliconflow_call(&server.uri(), "Wan-AI/Wan2.2-I2V-A14B", video_request());
+        let call = video_call(&server.uri(), "Wan-AI/Wan2.2-I2V-A14B", video_request());
         let http = test_http();
         let pending = SiliconFlowVideoJobsAdapter.poll(&http, &call, &job("req-1")).await.unwrap();
         let TaskOutcome::Pending(handle) = pending else { panic!("expected pending") };
         let done = SiliconFlowVideoJobsAdapter.poll(&http, &call, &handle).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = done else { panic!("expected assets") };
         assert!(matches!(&assets[0].data, ProducedData::Url(url) if url == "https://cdn.test/video.mp4"));
+    }
+
+    #[tokio::test]
+    async fn credentialed_cross_origin_poll_requires_explicit_authorization() {
+        let selected = MockServer::start().await;
+        let foreign = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/video/status"))
+            .and(body_partial_json(json!({"requestId": "req-foreign"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "Succeed",
+                "results": {"videos": [{"url": "https://cdn.test/video.mp4"}]}
+            })))
+            .expect(1)
+            .mount(&foreign)
+            .await;
+
+        let mut call = video_call(&selected.uri(), "Wan-AI/Wan2.2-T2V-A14B", video_request());
+        call.model_params = json!({
+            "endpoint": "/video/submit",
+            "poll_endpoint": format!("{}/video/status", foreign.uri())
+        });
+        let error = SiliconFlowVideoJobsAdapter
+            .poll(&test_http(), &call, &job("req-foreign"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::Config);
+        assert!(error.message.contains("allow_cross_origin_credentials"));
+        assert!(foreign.received_requests().await.unwrap().is_empty());
+
+        call.model_params["allow_cross_origin_credentials"] = Value::Bool(true);
+        let result = SiliconFlowVideoJobsAdapter
+            .poll(&test_http(), &call, &job("req-foreign"))
+            .await
+            .unwrap();
+        assert!(matches!(result, TaskOutcome::Done(TaskResult::Assets(_))));
     }
 
     #[tokio::test]
@@ -561,7 +987,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = siliconflow_call(&server.uri(), "Wan-AI/Wan2.2-T2V-A14B", video_request());
+        let call = video_call(&server.uri(), "Wan-AI/Wan2.2-T2V-A14B", video_request());
         let error = SiliconFlowVideoJobsAdapter
             .poll(&test_http(), &call, &job("req-2"))
             .await

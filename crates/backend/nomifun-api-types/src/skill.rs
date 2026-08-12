@@ -422,7 +422,10 @@ mod tests {
         let item: SkillListItemResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(item.name, "cron");
         assert!(!item.is_custom);
-        assert_eq!(item.relative_location.as_deref(), Some("auto-inject/cron/SKILL.md"));
+        assert_eq!(
+            item.relative_location.as_deref(),
+            Some("auto-inject/cron/SKILL.md")
+        );
     }
 
     #[test]
@@ -500,7 +503,10 @@ mod tests {
         assert_eq!(skills.len(), 2);
         // Project-wide wire contract: snake_case fields on the wire.
         assert_eq!(skills[0]["name"], "cron");
-        assert_eq!(skills[0]["source_path"], "/tmp/builtin-skills/auto-inject/cron");
+        assert_eq!(
+            skills[0]["source_path"],
+            "/tmp/builtin-skills/auto-inject/cron"
+        );
         assert!(skills[0].get("sourcePath").is_none());
     }
 
@@ -514,7 +520,10 @@ mod tests {
         let resp: MaterializeSkillsResponse = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(resp.skills.len(), 1);
         assert_eq!(resp.skills[0].name, "cron");
-        assert_eq!(resp.skills[0].source_path, "/tmp/builtin-skills/auto-inject/cron");
+        assert_eq!(
+            resp.skills[0].source_path,
+            "/tmp/builtin-skills/auto-inject/cron"
+        );
         assert_eq!(serde_json::to_value(&resp).unwrap(), raw);
     }
 
@@ -573,7 +582,10 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["skill_name"], "imported-skill");
-        assert_eq!(json["skill_names"], json!(["imported-skill", "second-skill"]));
+        assert_eq!(
+            json["skill_names"],
+            json!(["imported-skill", "second-skill"])
+        );
         assert!(json.get("skillName").is_none());
     }
 
@@ -797,7 +809,10 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["fetched_at"], 123);
         assert!(json.get("fetchedAt").is_none());
-        assert_eq!(json["items"][0]["install_command"], "openclaw skills install @owner/demo");
+        assert_eq!(
+            json["items"][0]["install_command"],
+            "openclaw skills install @owner/demo"
+        );
         assert!(json["items"][0].get("installCommand").is_none());
         assert!(json.get("errors").is_none());
     }

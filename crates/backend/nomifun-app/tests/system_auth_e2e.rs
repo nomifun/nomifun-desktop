@@ -103,21 +103,6 @@ async fn auth_required_check_update() {
 }
 
 #[tokio::test]
-async fn auth_required_detect_protocol() {
-    let (app, _) = build_app().await;
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/providers/detect-protocol")
-        .header("content-type", "application/json")
-        .body(Body::from(
-            r#"{"base_url":"https://api.example.com","api_key":"sk-test"}"#,
-        ))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
 async fn auth_required_fetch_models() {
     let (app, _) = build_app().await;
     let req = Request::builder()

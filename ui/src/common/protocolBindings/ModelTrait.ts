@@ -3,4 +3,4 @@
 /**
  * Within-task refinement of a model's abilities. Mostly modifies [`ModelTask::Chat`].
  */
-export type ModelTrait = "vision_input" | "function_calling" | "reasoning" | "web_search";
+export type ModelTrait = "vision_input" | "function_calling" | "reasoning" | "web_search" | "audio_input" | "audio_output" | "video_input" | "realtime" | "streaming";

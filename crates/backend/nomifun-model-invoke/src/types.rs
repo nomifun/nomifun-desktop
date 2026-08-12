@@ -97,14 +97,6 @@ pub struct RerankResult {
     pub document: Option<String>,
 }
 
-/// Single-turn text chat (probe / simple text generation path).
-#[derive(Clone)]
-pub struct ChatTextRequest {
-    pub prompt: String,
-    pub system: Option<String>,
-    pub extra: serde_json::Value,
-}
-
 /// The task-shaped request union the invocation service dispatches on.
 #[derive(Clone)]
 pub enum TaskRequest {
@@ -115,12 +107,12 @@ pub enum TaskRequest {
     SpeechRecognition(AsrRequest),
     Embedding(EmbedRequest),
     Rerank(RerankRequest),
-    ChatText(ChatTextRequest),
 }
 
 impl TaskRequest {
-    /// The [`nomifun_api_types::ModelTask`] this request corresponds to
-    /// (`ChatText` → [`nomifun_api_types::ModelTask::Chat`]).
+    /// The non-agent [`nomifun_api_types::ModelTask`] this request corresponds
+    /// to. Chat and realtime sessions use their dedicated agent/session
+    /// executors and therefore cannot be represented here.
     pub fn task(&self) -> nomifun_api_types::ModelTask {
         use nomifun_api_types::ModelTask;
         match self {
@@ -131,7 +123,6 @@ impl TaskRequest {
             Self::SpeechRecognition(_) => ModelTask::SpeechRecognition,
             Self::Embedding(_) => ModelTask::Embedding,
             Self::Rerank(_) => ModelTask::Rerank,
-            Self::ChatText(_) => ModelTask::Chat,
         }
     }
 }
@@ -161,8 +152,6 @@ pub enum TaskResult {
     Embeddings(Vec<Vec<f32>>),
     /// Documents ranked by relevance to a query.
     Reranked(Vec<RerankResult>),
-    /// Plain text reply (chat).
-    Text(String),
 }
 
 /// The normalized async-job handle (persisted as JSON between submit and poll).
@@ -170,9 +159,15 @@ pub enum TaskResult {
 pub struct JobHandle {
     /// The [`crate::adapter::ProtocolAdapter::id`] that created the job.
     pub adapter_id: String,
+    /// Monotonic revision of the complete provider invocation graph used at
+    /// submit time. This field is required on the wire; resume fails closed if
+    /// protocol or revision no longer matches the current capability.
+    pub config_revision: i64,
     /// Provider-side (or client-generated) job identifier.
     pub remote_id: String,
-    /// Adapter-private poll state (poll endpoint template, reused headers, …).
+    /// Adapter-private non-authority state (for example a provider request id
+    /// echoed separately from `remote_id`). URLs, credentials and protocol
+    /// configuration are always re-resolved from the current capability.
     #[serde(default)]
     pub poll_state: serde_json::Value,
 }
@@ -259,10 +254,6 @@ mod tests {
                 }),
                 ModelTask::Rerank,
             ),
-            (
-                TaskRequest::ChatText(ChatTextRequest { prompt: "hi".into(), system: None, extra: json!({}) }),
-                ModelTask::Chat,
-            ),
         ];
         for (req, want) in cases {
             assert_eq!(req.task(), want);
@@ -271,16 +262,21 @@ mod tests {
 
     #[test]
     fn job_handle_roundtrips_and_defaults_poll_state() {
-        let job = JobHandle { adapter_id: "ark.video_jobs".into(), remote_id: "j1".into(), poll_state: json!({"k": 1}) };
+        let job = JobHandle { adapter_id: "ark.video_jobs".into(), config_revision: 7, remote_id: "j1".into(), poll_state: json!({"k": 1}) };
         let s = serde_json::to_string(&job).unwrap();
         let back: JobHandle = serde_json::from_str(&s).unwrap();
         assert_eq!(back.adapter_id, "ark.video_jobs");
+        assert_eq!(back.config_revision, 7);
         assert_eq!(back.remote_id, "j1");
         assert_eq!(back.poll_state, json!({"k": 1}));
 
-        // poll_state is optional on the wire (older/foreign writers).
-        let bare: JobHandle =
-            serde_json::from_str(r#"{"adapter_id":"a","remote_id":"r"}"#).unwrap();
+        // Adapter-private state is optional, but the invocation-graph revision
+        // is deliberately not compatible with older naked handles.
+        let bare: JobHandle = serde_json::from_str(
+            r#"{"adapter_id":"a","config_revision":4,"remote_id":"r"}"#,
+        )
+        .unwrap();
         assert_eq!(bare.poll_state, serde_json::Value::Null);
+        assert!(serde_json::from_str::<JobHandle>(r#"{"adapter_id":"a","remote_id":"r"}"#).is_err());
     }
 }

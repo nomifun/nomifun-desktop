@@ -13,7 +13,8 @@ use dashmap::DashMap;
 use futures_util::future::BoxFuture;
 use nomi_agent::session::SessionManager;
 use nomifun_common::{
-    AgentKillReason, AgentType, AppError, ConversationStatus, ErrorChain, OnConversationDelete, TimestampMs, now_ms,
+    AgentKillReason, AgentType, AppError, ConversationStatus, ErrorChain, OnConversationDelete,
+    ProviderWithModel, TimestampMs, now_ms,
 };
 use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 use tokio_util::sync::CancellationToken;
@@ -31,6 +32,26 @@ use crate::types::AgentRuntimeBuildOptions;
 /// object-safe for DI.
 pub type AgentRuntimeFactory =
     Arc<dyn Fn(AgentRuntimeBuildOptions) -> BoxFuture<'static, Result<AgentRuntimeHandle, AppError>> + Send + Sync>;
+
+/// Non-secret identity of the exact provider invocation graph a long-lived
+/// Nomi runtime was built from. The provider-level revision changes whenever
+/// credentials, connection roots or task capabilities change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeModelConfigBinding {
+    pub provider_id: String,
+    pub model: String,
+    pub config_revision: i64,
+}
+
+/// Resolve the current exact Chat binding for one selected Nomi model. Product
+/// composition supplies the ModelInvoke-backed implementation; keeping the
+/// closure async lets the registry validate every admission under its existing
+/// per-conversation lifecycle gate.
+pub type AgentRuntimeModelConfigResolver = Arc<
+    dyn Fn(ProviderWithModel) -> BoxFuture<'static, Result<RuntimeModelConfigBinding, AppError>>
+        + Send
+        + Sync,
+>;
 
 /// Manages the lifecycle of active per-conversation Agent runtimes.
 ///
@@ -229,6 +250,12 @@ struct RuntimeTurnAdmission {
 struct RuntimeWorkspaceBinding {
     slot: RuntimeSlot,
     lease: nomifun_knowledge::WorkspaceBindingLease,
+}
+
+#[derive(Clone)]
+struct RuntimeModelBinding {
+    slot: RuntimeSlot,
+    binding: RuntimeModelConfigBinding,
 }
 
 fn options_carry_knowledge_metadata(extra: &serde_json::Value) -> bool {
@@ -454,11 +481,15 @@ pub struct InMemoryAgentRuntimeRegistry {
     /// conversation cannot reconfigure `.nomi/knowledge` while the old
     /// process may still be alive.
     workspace_bindings: Arc<DashMap<String, RuntimeWorkspaceBinding>>,
+    /// Exact provider graph attached to each live Nomi runtime slot. A slot is
+    /// reusable only while a fresh resolver read returns the same binding.
+    model_config_bindings: Arc<DashMap<String, RuntimeModelBinding>>,
     /// Serializes build and awaitable teardown for each conversation. The gate
     /// intentionally outlives a removed runtime slot so no replacement factory
     /// can start while the old agent is still unwinding.
     lifecycle_gates: Arc<DashMap<String, Weak<AsyncMutex<()>>>>,
     factory: AgentRuntimeFactory,
+    model_config_resolver: Option<AgentRuntimeModelConfigResolver>,
     /// Optional only for source-compatible custom/test construction. Product
     /// composition configures this to `{data_dir}/nomi-sessions`; reset fails
     /// closed while it is absent.
@@ -480,12 +511,26 @@ impl InMemoryAgentRuntimeRegistry {
             teardown_quarantine: Arc::new(DashMap::new()),
             turn_admissions: Arc::new(DashMap::new()),
             workspace_bindings: Arc::new(DashMap::new()),
+            model_config_bindings: Arc::new(DashMap::new()),
             lifecycle_gates: Arc::new(DashMap::new()),
             factory,
+            model_config_resolver: None,
             nomi_session_persistence: None,
             governor: Arc::new(RestartGovernor::default()),
             counted_crash_slots: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Bind long-lived Nomi runtime reuse to the exact ModelInvoke Chat
+    /// capability revision. Desktop product composition must install this;
+    /// registries hosting only external/non-provider-managed agents may omit
+    /// it because no provider secret or endpoint is cached in those runtimes.
+    pub fn with_model_config_resolver(
+        mut self,
+        resolver: AgentRuntimeModelConfigResolver,
+    ) -> Self {
+        self.model_config_resolver = Some(resolver);
+        self
     }
 
     /// Configure the exact directory shared with Nomi's `SessionManager`.
@@ -505,7 +550,23 @@ impl InMemoryAgentRuntimeRegistry {
         if self.slot_is_quarantined(conversation_id, &slot) {
             return None;
         }
-        slot.get().cloned().filter(AgentRuntimeHandle::is_transport_healthy)
+        let runtime = slot
+            .get()
+            .cloned()
+            .filter(AgentRuntimeHandle::is_transport_healthy)?;
+        // `OnceCell` becomes visible immediately after the factory returns,
+        // before the admission path performs its post-build revision check.
+        // Do not expose a product Nomi runtime through `get_runtime` during
+        // that window (or if its binding bookkeeping is ever lost).
+        if self.model_config_resolver.is_some()
+            && runtime.agent_type() == AgentType::Nomi
+            && self
+                .model_config_binding_for_slot(conversation_id, &slot)
+                .is_none()
+        {
+            return None;
+        }
+        Some(runtime)
     }
 
     fn lifecycle_gate(&self, conversation_id: &str) -> Arc<AsyncMutex<()>> {
@@ -615,6 +676,80 @@ impl InMemoryAgentRuntimeRegistry {
             .remove_if(conversation_id, |_, binding| Arc::ptr_eq(&binding.slot, slot));
     }
 
+    fn clear_model_config_binding_if_matches(
+        &self,
+        conversation_id: &str,
+        slot: &RuntimeSlot,
+    ) {
+        self.model_config_bindings
+            .remove_if(conversation_id, |_, binding| Arc::ptr_eq(&binding.slot, slot));
+    }
+
+    fn model_config_binding_for_slot(
+        &self,
+        conversation_id: &str,
+        slot: &RuntimeSlot,
+    ) -> Option<RuntimeModelConfigBinding> {
+        self.model_config_bindings
+            .get(conversation_id)
+            .filter(|binding| Arc::ptr_eq(&binding.slot, slot))
+            .map(|binding| binding.binding.clone())
+    }
+
+    fn slot_has_active_turn(&self, conversation_id: &str, slot: &RuntimeSlot) -> bool {
+        self.turn_admissions
+            .get(conversation_id)
+            .is_some_and(|admission| Arc::ptr_eq(&admission.slot, slot))
+    }
+
+    fn attach_model_config_binding(
+        &self,
+        conversation_id: &str,
+        slot: &RuntimeSlot,
+        binding: RuntimeModelConfigBinding,
+    ) -> Result<(), AppError> {
+        match self.model_config_bindings.entry(conversation_id.to_owned()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if !Arc::ptr_eq(&entry.get().slot, slot) {
+                    return Err(AppError::Conflict(format!(
+                        "conversation {conversation_id} has model configuration bound to a different runtime generation"
+                    )));
+                }
+                entry.insert(RuntimeModelBinding {
+                    slot: Arc::clone(slot),
+                    binding,
+                });
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(RuntimeModelBinding {
+                    slot: Arc::clone(slot),
+                    binding,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn resolve_model_config_binding(
+        &self,
+        agent_type: AgentType,
+        model: Option<&ProviderWithModel>,
+    ) -> Result<Option<RuntimeModelConfigBinding>, AppError> {
+        if agent_type != AgentType::Nomi {
+            return Ok(None);
+        }
+        let Some(resolver) = self.model_config_resolver.as_ref() else {
+            // Standalone and integration-test registries may host factories
+            // that do not cache provider transport state. Product composition
+            // always supplies the ModelInvoke-backed resolver.
+            return Ok(None);
+        };
+        let model = model.cloned().ok_or_else(|| {
+            AppError::BadRequest("Nomi runtime requires a provider and model".to_owned())
+        })?;
+        resolver(model).await.map(Some)
+    }
+
     /// Attach a pre-acquired physical workspace binding to `slot`.
     ///
     /// An initialized runtime with no exact attachment has unknown authority:
@@ -716,6 +851,7 @@ impl InMemoryAgentRuntimeRegistry {
             self.clear_quarantine_if_matches(conversation_id, &slot);
             self.clear_turn_admission_if_matches(conversation_id, &slot);
             self.clear_workspace_binding_if_matches(conversation_id, &slot);
+            self.clear_model_config_binding_if_matches(conversation_id, &slot);
             return Ok(());
         };
 
@@ -739,6 +875,7 @@ impl InMemoryAgentRuntimeRegistry {
                 // teardown keeps this exact slot quarantined and deliberately
                 // retains its physical workspace binding below.
                 self.clear_workspace_binding_if_matches(conversation_id, &slot);
+                self.clear_model_config_binding_if_matches(conversation_id, &slot);
                 Ok(())
             }
             Err(error) => {
@@ -901,6 +1038,36 @@ impl InMemoryAgentRuntimeRegistry {
             self.ensure_turn_generation_available(conversation_id, turn_generation)?;
         }
 
+        let requested_agent_type = options.agent_type;
+        let requested_model = options.model.clone();
+        let requested_binding_result = self
+            .resolve_model_config_binding(requested_agent_type, requested_model.as_ref())
+            .await;
+        let mut requested_model_binding = match requested_binding_result {
+            Ok(binding) => binding,
+            Err(error) => {
+                // An invalid/disabled replacement graph is still a
+                // configuration change. Once no turn owns the cached slot,
+                // erase the runtime carrying the old key/endpoint before
+                // surfacing the new configuration error.
+                if let Some(slot) = self
+                    .runtimes
+                    .get(conversation_id)
+                    .map(|entry| entry.value().clone())
+                    && !self.slot_has_active_turn(conversation_id, &slot)
+                {
+                    self.teardown_slot_under_gate(
+                        conversation_id,
+                        slot,
+                        Some(AgentKillReason::ConfigurationChanged),
+                        None,
+                    )
+                    .await?;
+                }
+                return Err(error);
+            }
+        };
+
         let slot: RuntimeSlot = loop {
             let slot = self
                 .runtimes
@@ -944,6 +1111,42 @@ impl InMemoryAgentRuntimeRegistry {
                 continue;
             }
             if runtime.is_transport_healthy() {
+                let cached_model_binding =
+                    self.model_config_binding_for_slot(conversation_id, &slot);
+                if self.model_config_resolver.is_some()
+                    && cached_model_binding != requested_model_binding
+                {
+                    // A runtime that is still serving an admitted turn owns
+                    // that exact provider snapshot until the turn reaches its
+                    // terminal boundary. Never kill it from a concurrent
+                    // preparation/send; fail closed and let the next attempt
+                    // recycle after release.
+                    if self.slot_has_active_turn(conversation_id, &slot) {
+                        return Err(AppError::Conflict(format!(
+                            "Agent runtime provider configuration changed during an active turn for conversation {conversation_id}; retry after the turn reaches a terminal boundary"
+                        )));
+                    }
+                    info!(
+                        conversation_id,
+                        "Recycling Agent runtime because its provider configuration revision changed"
+                    );
+                    self.teardown_slot_under_gate(
+                        conversation_id,
+                        slot,
+                        Some(AgentKillReason::ConfigurationChanged),
+                        None,
+                    )
+                    .await?;
+                    // Teardown can take long enough for another provider edit.
+                    // Refresh before any replacement factory is admitted.
+                    requested_model_binding = self
+                        .resolve_model_config_binding(
+                            requested_agent_type,
+                            requested_model.as_ref(),
+                        )
+                        .await?;
+                    continue;
+                }
                 self.attach_workspace_binding(
                     conversation_id,
                     &slot,
@@ -1152,6 +1355,53 @@ impl InMemoryAgentRuntimeRegistry {
             return Err(AppError::Conflict(format!(
                 "Agent runtime for conversation {conversation_id} was terminated while initializing"
             )));
+        }
+
+        // The factory resolves provider configuration independently. A save
+        // that commits while it is building must therefore invalidate this
+        // brand-new runtime before it can admit a turn; otherwise the process
+        // could cache a stale key or endpoint despite the reuse check above.
+        let confirmed_model_binding = match self
+            .resolve_model_config_binding(requested_agent_type, requested_model.as_ref())
+            .await
+        {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.teardown_slot_under_gate(
+                    conversation_id,
+                    Arc::clone(&slot),
+                    Some(AgentKillReason::ConfigurationChanged),
+                    None,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+        if confirmed_model_binding != requested_model_binding {
+            self.teardown_slot_under_gate(
+                conversation_id,
+                Arc::clone(&slot),
+                Some(AgentKillReason::ConfigurationChanged),
+                None,
+            )
+            .await?;
+            return Err(AppError::Conflict(format!(
+                "Agent runtime provider configuration changed while initializing for conversation {conversation_id}; retry to build from the current configuration"
+            )));
+        }
+        if let Some(binding) = confirmed_model_binding {
+            if let Err(error) =
+                self.attach_model_config_binding(conversation_id, &slot, binding)
+            {
+                self.teardown_slot_under_gate(
+                    conversation_id,
+                    Arc::clone(&slot),
+                    Some(AgentKillReason::ConfigurationChanged),
+                    None,
+                )
+                .await?;
+                return Err(error);
+            }
         }
         if let Some(turn_generation) = turn_generation {
             if let Err(error) =
@@ -1407,6 +1657,7 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
         self.runtimes.contains_key(conversation_id)
             || self.teardown_quarantine.contains_key(conversation_id)
             || self.workspace_bindings.contains_key(conversation_id)
+            || self.model_config_bindings.contains_key(conversation_id)
     }
 
     fn collect_idle_runtimes(&self, idle_threshold_ms: TimestampMs) -> Vec<String> {
@@ -1745,6 +1996,108 @@ mod tests {
     fn get_runtime_returns_none_when_empty() {
         let registry = make_registry();
         assert!(registry.get_runtime("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_config_revision_change_recycles_nomi_runtime_before_next_turn() {
+        const CONVERSATION_ID: &str = "conv-provider-revision";
+        const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000042";
+
+        let revision = Arc::new(AtomicI64::new(1));
+        let resolver_revision = Arc::clone(&revision);
+        let resolver: AgentRuntimeModelConfigResolver = Arc::new(move |selection| {
+            let revision = resolver_revision.load(Ordering::SeqCst);
+            async move {
+                Ok(RuntimeModelConfigBinding {
+                    provider_id: selection.provider_id,
+                    model: selection.use_model.unwrap_or(selection.model),
+                    config_revision: revision,
+                })
+            }
+            .boxed()
+        });
+
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let kill_reasons = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = Arc::clone(&factory_calls);
+        let factory_kill_reasons = Arc::clone(&kill_reasons);
+        let factory: AgentRuntimeFactory = Arc::new(move |options| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let kill_reasons = Arc::clone(&factory_kill_reasons);
+            async move {
+                Ok(mock_runtime(
+                    MockAgent::new(&options.conversation_id, None)
+                        .with_agent_type(AgentType::Nomi)
+                        .with_kill_reasons(kill_reasons),
+                ))
+            }
+            .boxed()
+        });
+        let registry = InMemoryAgentRuntimeRegistry::new(factory)
+            .with_model_config_resolver(resolver);
+
+        let options = || {
+            let mut options = make_runtime_options(CONVERSATION_ID);
+            options.agent_type = AgentType::Nomi;
+            options.model = Some(ProviderWithModel {
+                provider_id: PROVIDER_ID.to_owned(),
+                model: "chat-model".to_owned(),
+                use_model: None,
+            });
+            options
+        };
+
+        let first = registry
+            .get_or_create_runtime_for_turn(
+                CONVERSATION_ID,
+                1,
+                CancellationToken::new(),
+                options(),
+            )
+            .await
+            .unwrap();
+        revision.store(2, Ordering::SeqCst);
+
+        let active_conflict = registry
+            .get_or_create_runtime_for_preparation(
+                CONVERSATION_ID,
+                CancellationToken::new(),
+                options(),
+            )
+            .await;
+        assert!(matches!(
+            active_conflict,
+            Err(AppError::Conflict(message)) if message.contains("active turn")
+        ));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+        assert!(kill_reasons.lock().unwrap().is_empty());
+
+        registry.release_runtime_turn(CONVERSATION_ID, 1).await.unwrap();
+        let second = registry
+            .get_or_create_runtime_for_turn(
+                CONVERSATION_ID,
+                2,
+                CancellationToken::new(),
+                options(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!same_mock(&first, &second));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            kill_reasons.lock().unwrap().as_slice(),
+            &[Some(AgentKillReason::ConfigurationChanged)]
+        );
+        assert_eq!(
+            registry
+                .model_config_bindings
+                .get(CONVERSATION_ID)
+                .unwrap()
+                .binding
+                .config_revision,
+            2
+        );
     }
 
     #[tokio::test]

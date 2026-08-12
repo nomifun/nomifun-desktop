@@ -15,19 +15,25 @@ const src = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 const SECTIONS = [
   'models',
   'chat',
+  'realtime',
   'asr',
   'tts',
   'vision',
   'image',
+  'image-edit',
   'video',
   'embedding',
+  'rerank',
   'free',
   'failover',
 ] as const;
 
 const GROUPS = [
   { key: 'access', sections: ['models'] },
-  { key: 'capability', sections: ['chat', 'asr', 'tts', 'vision', 'image', 'video', 'embedding'] },
+  {
+    key: 'capability',
+    sections: ['chat', 'realtime', 'asr', 'tts', 'vision', 'image', 'image-edit', 'video', 'embedding', 'rerank'],
+  },
   { key: 'advanced', sections: ['free', 'failover'] },
 ] as const;
 
@@ -35,10 +41,10 @@ const hubOf = (locale: unknown): Record<string, string> =>
   (locale as { modelHub: Record<string, string> }).modelHub;
 
 describe('model hub is a capability-first view', () => {
-  test('the ten sections exist in the designed order', () => {
+  test('all nine tasks plus the vision trait projection exist independently', () => {
     const start = src.indexOf('const SECTION_KEYS');
     const list = src.slice(start, src.indexOf('];', start));
-    const keys = [...list.matchAll(/'([a-z]+)'/g)].map((m) => m[1]);
+    const keys = [...list.matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
     expect(keys).toEqual([...SECTIONS]);
   });
 
@@ -49,7 +55,7 @@ describe('model hub is a capability-first view', () => {
     // Group order, and the section order inside each group, both matter.
     const groupKeys = [...groupSrc.matchAll(/^ {4}key: '([a-z]+)',$/gm)].map((m) => m[1]);
     expect(groupKeys).toEqual(GROUPS.map((g) => g.key));
-    const sectionKeys = [...groupSrc.matchAll(/^ {8}key: '([a-z]+)',$/gm)].map((m) => m[1]);
+    const sectionKeys = [...groupSrc.matchAll(/^ {8}key: '([a-z-]+)',$/gm)].map((m) => m[1]);
     expect(sectionKeys).toEqual([...SECTIONS]);
   });
 
@@ -90,7 +96,8 @@ describe('model hub is a capability-first view', () => {
   });
 
   test('every section and group has a label in both locales', () => {
-    const labelKey = (s: string) => `section${s[0].toUpperCase()}${s.slice(1)}`;
+    const labelKey = (s: string) =>
+      `section${s.split('-').map((part) => `${part[0].toUpperCase()}${part.slice(1)}`).join('')}`;
     const groupKey = (g: string) => `group${g[0].toUpperCase()}${g.slice(1)}`;
     for (const locale of [zhSettings, enSettings]) {
       const hub = hubOf(locale);

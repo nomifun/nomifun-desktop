@@ -579,7 +579,9 @@ mod tests {
     #[test]
     fn test_connection_request_allows_missing_or_null_id() {
         for id_fragment in ["", r#""mcp_server_id":null,"#] {
-            let body = format!(r#"{{{id_fragment}"name":"test-server","transport":{{"type":"http","url":"https://example.com/mcp"}}}}"#);
+            let body = format!(
+                r#"{{{id_fragment}"name":"test-server","transport":{{"type":"http","url":"https://example.com/mcp"}}}}"#
+            );
             let req: TestMcpConnectionRequest = serde_json::from_str(&body).unwrap();
             assert!(req.mcp_server_id.is_none());
         }
@@ -608,7 +610,9 @@ mod tests {
 
     #[test]
     fn test_oauth_status_response() {
-        let resp = OAuthStatusResponse { authenticated: true };
+        let resp = OAuthStatusResponse {
+            authenticated: true,
+        };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["authenticated"], true);
     }
@@ -642,7 +646,10 @@ mod tests {
         let entry = DetectedMcpServerEntry {
             name: "test".into(),
             description: None,
-            transport: McpTransport::Http { url: "https://example.com/mcp".into(), headers: HashMap::new() },
+            transport: McpTransport::Http {
+                url: "https://example.com/mcp".into(),
+                headers: HashMap::new(),
+            },
             original_json: None,
             importable: false,
             import_skip_reason: Some("Needs authentication".into()),

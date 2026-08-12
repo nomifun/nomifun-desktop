@@ -270,6 +270,20 @@
     "subtitle": "A knowledge base is a directory of Markdown documents you can mount into any session as an extended knowledge source.",
     "title": "Start managing your own knowledge"
   },
+  "retrieval": {
+    "description": "Choose each retrieval stage independently. Remote stages use the exact configured task capability and fail closed; Local never sends knowledge text to a model provider.",
+    "embeddingEmpty": "Add and enable a model with an Embedding capability first.",
+    "embeddingHint": "Local uses keyword relevance. Remote embeds the query and a bounded document candidate set at search time, then ranks by cosine similarity; it does not claim a persistent vector index.",
+    "embeddingTitle": "Candidate retrieval",
+    "local": "Local / no remote model",
+    "open": "Retrieval models",
+    "remote": "Remote model",
+    "rerankEmpty": "Add and enable a model with a Rerank capability first.",
+    "rerankHint": "Local keeps the candidate order from the previous stage. Remote sends those candidates to the selected rerank model and strictly applies its returned indices.",
+    "rerankTitle": "Candidate reranking",
+    "saved": "Knowledge retrieval settings saved",
+    "title": "Knowledge retrieval models"
+  },
   "retry": "Retry",
   "rootMissing": "Directory missing",
   "rootPathLabel": "Directory",

@@ -46,7 +46,10 @@ const ContinueBox: React.FC<{ onSubmit: (v: string) => void }> = ({ onSubmit }) 
     setDraft('');
   };
   return (
-    <div className='flex items-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px focus-within:border-primary-6'>
+    <div
+      data-workshop-continue-edit
+      className='flex items-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px focus-within:border-primary-6'
+    >
       <input
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -274,7 +277,7 @@ const ResultView: React.FC<ResultViewProps> = ({ mode, resultAssetIds, batch, on
           total={orderedIds.length}
         />
       ))}
-      <ContinueBox onSubmit={onContinueEdit} />
+      {mode === 'image' && <ContinueBox onSubmit={onContinueEdit} />}
     </div>
   );
 };

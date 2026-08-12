@@ -7,6 +7,7 @@ edition.workspace = true
 nomifun-common.workspace = true
 nomifun-db.workspace = true
 nomifun-api-types.workspace = true
+nomifun-model-invoke.workspace = true
 nomifun-realtime.workspace = true
 nomifun-auth.workspace = true
 nomifun-net.workspace = true

@@ -338,6 +338,54 @@ async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbEr
     .await
 }
 
+fn encrypted_bearer_credentials() -> String {
+    nomifun_common::encrypt_string(r#"{"api_keys":["test-only"]}"#, &[0x42; 32]).unwrap()
+}
+
+async fn seed_openai_chat_model(
+    pool: &nomifun_db::SqlitePool,
+    provider_id: &str,
+    provider_name: &str,
+    model: &str,
+    sort_order: i64,
+) {
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers (\
+            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
+            created_at, updated_at\
+         ) VALUES (?, 'openai', ?, 'https://example.invalid', 'bearer', \
+                   ?, 1, 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(provider_name)
+    .bind(encrypted_bearer_credentials())
+    .execute(pool)
+    .await
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO provider_models (\
+            provider_id, model, enabled, sort_order, description, created_at, updated_at\
+         ) VALUES (?, ?, 1, ?, NULL, 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(model)
+    .bind(sort_order)
+    .execute(pool)
+    .await
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO provider_model_capabilities (\
+            provider_id, model, task, traits, protocol, connection_role, \
+            allow_cross_origin_credentials, provider_params, created_at, updated_at\
+         ) VALUES (?, ?, 'chat', '[]', 'openai.chat_text', 'default', 0, '{}', 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(model)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 #[derive(Clone, Debug)]
 struct SkillLinkCall {
     workspace: PathBuf,
@@ -1704,40 +1752,12 @@ async fn preset_resolved_nomi_model_does_not_bypass_explicit_template_authority(
     const PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-000000000202";
 
     let database = init_database_memory().await.unwrap();
-    for (provider_id, models) in [
-        (PROVIDER_ID_1, r#"["request-model"]"#),
-        (PROVIDER_ID_2, r#"["preset-model"]"#),
-        (PROVIDER_ID_3, r#"["collaborator-model"]"#),
+    for (provider_id, model) in [
+        (PROVIDER_ID_1, "request-model"),
+        (PROVIDER_ID_2, "preset-model"),
+        (PROVIDER_ID_3, "collaborator-model"),
     ] {
-        nomifun_db::sqlx::query(
-            "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-                created_at, updated_at\
-             ) VALUES (?, 'openai', ?, 'https://example.invalid', \
-                       'encrypted', 1, 1, 1)",
-        )
-        .bind(provider_id)
-        .bind(provider_id)
-        .execute(database.pool())
-        .await
-        .unwrap();
-        for (index, model) in serde_json::from_str::<Vec<String>>(models)
-            .unwrap()
-            .into_iter()
-            .enumerate()
-        {
-            nomifun_db::sqlx::query(
-                "INSERT INTO provider_models \
-                 (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
-                 VALUES (?, ?, 1, ?, '[]', '[]', '{}', 'inferred', 1, 1)",
-            )
-            .bind(provider_id)
-            .bind(model)
-            .bind(index as i64)
-            .execute(database.pool())
-            .await
-            .unwrap();
-        }
+        seed_openai_chat_model(database.pool(), provider_id, provider_id, model, 0).await;
     }
     nomifun_db::sqlx::query(
         "INSERT INTO presets \
@@ -2830,26 +2850,7 @@ async fn delete_rejects_soft_deleted_execution_attempt_transcript() {
     const USER_ID: &str = SQLITE_TEST_OWNER;
 
     let database = init_database_memory().await.unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            created_at, updated_at\
-         ) VALUES (?1, 'openai', 'test', 'https://example.invalid', \
-                   'encrypted', 1, 1, 1)",
-    )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO provider_models (\
-            provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
-         ) VALUES (?1, 'model_test', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
-    )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
+    seed_openai_chat_model(database.pool(), PROVIDER_ID_1, "test", "model_test", 0).await;
     let conversation_repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
     let execution_repo = Arc::new(SqliteAgentExecutionRepository::new(database.pool().clone()));
     let broadcaster = Arc::new(MockBroadcaster::new());
@@ -7530,26 +7531,7 @@ async fn agent_execution_admission_cutpoint_fixture(
     behavior: ControlledExecutionClaimBehavior,
 ) -> AgentExecutionAdmissionCutpointFixture {
     let database = init_database_memory().await.unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            created_at, updated_at\
-         ) VALUES (?1, 'openai', 'test', 'https://example.invalid', \
-                   'encrypted', 1, 1, 1)",
-    )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO provider_models (\
-            provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
-         ) VALUES (?1, 'model_test', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
-    )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
+    seed_openai_chat_model(database.pool(), PROVIDER_ID_1, "test", "model_test", 0).await;
     let repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
     let execution_repo = Arc::new(SqliteAgentExecutionRepository::new(database.pool().clone()));
     let repository_boundary: Arc<dyn crate::ExecutionConversationBoundary> =
@@ -11740,26 +11722,14 @@ async fn slow_turn_writeback_completes_turn_immediately_and_never_blocks_next_se
     const SECOND_KEY: &str = "slow-turn-final-writeback-second";
 
     let database = init_database_memory().await.unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            created_at, updated_at\
-         ) VALUES (?1, 'openai', 'writeback fixture', 'https://example.invalid', \
-                   'encrypted', 1, 1, 1)",
+    seed_openai_chat_model(
+        database.pool(),
+        PROVIDER_ID_1,
+        "writeback fixture",
+        "m1",
+        0,
     )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO provider_models (\
-            provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
-         ) VALUES (?1, 'm1', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
-    )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
+    .await;
     let repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
     let broadcaster = Arc::new(MockBroadcaster::new());
     let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
@@ -14064,26 +14034,7 @@ async fn edit_resubmit_rebuilds_a_missing_terminal_runtime_before_rewind() {
     const USER_ID: &str = SQLITE_TEST_OWNER;
     const EDIT_KEY: &str = "edit-cold-runtime";
     let database = init_database_memory().await.unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            created_at, updated_at\
-         ) VALUES (?1, 'openai', 'edit fixture', 'https://example.invalid', \
-                   'encrypted', 1, 1, 1)",
-    )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO provider_models (\
-            provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
-         ) VALUES (?1, 'm1', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
-    )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
+    seed_openai_chat_model(database.pool(), PROVIDER_ID_1, "edit fixture", "m1", 0).await;
     let repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
     let registry = Arc::new(MockAgentRuntimeRegistry::new());
     let runtime_registry: Arc<dyn AgentRuntimeRegistry> = registry.clone();
@@ -14244,26 +14195,7 @@ async fn edit_rewind_then_transcript_delete_failure_quarantines_runtime_before_f
     const USER_ID: &str = SQLITE_TEST_OWNER;
     const EDIT_KEY: &str = "edit-delete-failure";
     let database = init_database_memory().await.unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            created_at, updated_at\
-         ) VALUES (?1, 'openai', 'edit fixture', 'https://example.invalid', \
-                   'encrypted', 1, 1, 1)",
-    )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO provider_models (\
-            provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
-         ) VALUES (?1, 'm1', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
-    )
-    .bind(PROVIDER_ID_1)
-    .execute(database.pool())
-    .await
-    .unwrap();
+    seed_openai_chat_model(database.pool(), PROVIDER_ID_1, "edit fixture", "m1", 0).await;
     let repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
     let broadcaster = Arc::new(MockBroadcaster::new());
     let registry = Arc::new(MockAgentRuntimeRegistry::new());
@@ -14596,7 +14528,8 @@ async fn view_warmup_of_finished_writeback_session_never_builds_or_reconciles_mo
     let (writeback_provider, writeback_rows) = test_provider(PROVIDER_ID_1, &["knowledge-model"]);
     svc.with_failover_deps(
         Arc::new(StubProviderRepo::new(vec![writeback_provider])),
-        Arc::new(StubProviderModelRepo::new(writeback_rows)),
+        Arc::new(StubProviderModelRepo::new(writeback_rows.clone())),
+        Arc::new(StubProviderModelCapabilityRepo::for_models(&writeback_rows)),
         Arc::new(FixedClientPrefRepo {
             preferences: vec![ClientPreference {
                 id: 1,
@@ -15763,8 +15696,9 @@ async fn update_allows_other_extra_fields() {
 // emits a (pre-response) provider-fault terminal error, the seam picks the next
 // queued model, rebuilds, and resends the SAME content. We assert on the
 // `sent_contents` of a PERSISTENT scripted agent (returned across rebuilds), the
-// model column written to the row, the termination count, and the provider repo's
-// recorded health stamp.
+// model column written to the row and the termination count. Long-lived health
+// is written only by an explicit task probe carrying a configuration revision;
+// a live-turn failure is not authoritative health evidence for a newer graph.
 
 use nomifun_common::ProviderWithModel;
 use nomifun_db::models::{ClientPreference, Provider};
@@ -15792,10 +15726,11 @@ fn test_provider(id: &str, models: &[&str]) -> (Provider, Vec<nomifun_db::Provid
         platform: "openai".into(),
         name: id.into(),
         base_url: "https://example.com".into(),
-        api_key_encrypted: "x".into(),
+        auth_scheme: "bearer".into(),
+        credentials_encrypted: encrypted_bearer_credentials(),
         enabled: true,
+        config_revision: 0,
         bedrock_config: None,
-        is_full_url: false,
         sort_order: 0,
         created_at: 0,
         updated_at: 0,
@@ -15809,16 +15744,7 @@ fn test_provider(id: &str, models: &[&str]) -> (Provider, Vec<nomifun_db::Provid
             model: (*model).into(),
             enabled: true,
             sort_order: index as i64,
-            tasks: "[]".into(),
-            traits: "[]".into(),
-            protocol: None,
-            connection_role: None,
-            params: "{}".into(),
-            context_limit: None,
             description: None,
-            source: "inferred".into(),
-            health: None,
-            health_checked_at: None,
             created_at: 0,
             updated_at: 0,
         })
@@ -15838,10 +15764,20 @@ impl IProviderRepository for StubProviderRepo {
             .find(|p| p.provider_id == id)
             .cloned())
     }
-    async fn create(&self, _params: CreateProviderParams<'_>) -> Result<Provider, DbError> {
+    async fn create(
+        &self,
+        _params: CreateProviderParams<'_>,
+        _initial_model: &nomifun_db::NewProviderModel<'_>,
+        _connections: &[nomifun_db::UpsertProviderConnectionParams<'_>],
+    ) -> Result<(Provider, nomifun_db::ProviderModelRow), DbError> {
         unimplemented!("not used in failover tests")
     }
-    async fn update(&self, id: &str, _params: UpdateProviderParams<'_>) -> Result<Provider, DbError> {
+    async fn update(
+        &self,
+        id: &str,
+        _expected_config_revision: i64,
+        _params: UpdateProviderParams<'_>,
+    ) -> Result<Provider, DbError> {
         Ok(self
             .providers
             .iter()
@@ -15849,28 +15785,33 @@ impl IProviderRepository for StubProviderRepo {
             .cloned()
             .ok_or_else(|| DbError::NotFound(format!("provider {id}")))?)
     }
+    async fn clone_graph(
+        &self,
+        _source_provider_id: &str,
+        _clone_name: &str,
+    ) -> Result<Provider, DbError> {
+        unimplemented!("not used in failover tests")
+    }
+    async fn save_managed_graph(
+        &self,
+        _params: CreateProviderParams<'_>,
+        _models: &[nomifun_db::NewProviderModel<'_>],
+    ) -> Result<Provider, DbError> {
+        unimplemented!("not used in failover tests")
+    }
     async fn delete(&self, _id: &str) -> Result<(), DbError> {
         Ok(())
     }
 }
 
-/// Provider-model row stub: serves the fixed per-model catalog to the picker
-/// and records `set_health` writes so a test can assert the unhealthy stamp.
+/// Provider-model row stub: serves the fixed model catalog to the picker.
 struct StubProviderModelRepo {
     rows: Vec<nomifun_db::ProviderModelRow>,
-    health_writes: Mutex<Vec<(String, String, String)>>,
 }
 
 impl StubProviderModelRepo {
     fn new(rows: Vec<nomifun_db::ProviderModelRow>) -> Self {
-        Self {
-            rows,
-            health_writes: Mutex::new(vec![]),
-        }
-    }
-
-    fn health_writes(&self) -> Vec<(String, String, String)> {
-        self.health_writes.lock().unwrap().clone()
+        Self { rows }
     }
 }
 
@@ -15901,46 +15842,112 @@ impl nomifun_db::IProviderModelRepository for StubProviderModelRepo {
             .find(|row| row.provider_id == provider_id && row.model == model)
             .cloned())
     }
-    async fn create(
+    async fn save(
         &self,
         _provider_id: &str,
+        _expected_config_revision: i64,
         _row: &nomifun_db::NewProviderModel<'_>,
     ) -> Result<nomifun_db::ProviderModelRow, DbError> {
         unimplemented!("not used in failover tests")
-    }
-    async fn insert_if_absent(
-        &self,
-        _provider_id: &str,
-        _row: &nomifun_db::NewProviderModel<'_>,
-    ) -> Result<bool, DbError> {
-        unimplemented!("not used in failover tests")
-    }
-    async fn update(
-        &self,
-        _provider_id: &str,
-        _model: &str,
-        _update: &nomifun_db::ProviderModelUpdate<'_>,
-    ) -> Result<nomifun_db::ProviderModelRow, DbError> {
-        unimplemented!("not used in failover tests")
-    }
-    async fn set_health(
-        &self,
-        provider_id: &str,
-        model: &str,
-        health_json: Option<&str>,
-    ) -> Result<bool, DbError> {
-        self.health_writes.lock().unwrap().push((
-            provider_id.to_owned(),
-            model.to_owned(),
-            health_json.unwrap_or_default().to_owned(),
-        ));
-        Ok(self
-            .rows
-            .iter()
-            .any(|row| row.provider_id == provider_id && row.model == model))
     }
     async fn delete(&self, _provider_id: &str, _model: &str) -> Result<bool, DbError> {
         unimplemented!("not used in failover tests")
+    }
+}
+
+/// Task capabilities are a separate authority from model identity. The stub
+/// gives every test model a Chat capability and fails if failover attempts a
+/// health write: only the explicit revision-bound probe owns durable health.
+struct StubProviderModelCapabilityRepo {
+    rows: Vec<nomifun_db::ProviderModelCapabilityRow>,
+}
+
+impl StubProviderModelCapabilityRepo {
+    fn for_models(models: &[nomifun_db::ProviderModelRow]) -> Self {
+        Self {
+            rows: models
+                .iter()
+                .map(|model| nomifun_db::ProviderModelCapabilityRow {
+                    id: 0,
+                    provider_id: model.provider_id.clone(),
+                    model: model.model.clone(),
+                    task: "chat".into(),
+                    traits: "[]".into(),
+                    protocol: "openai.chat_text".into(),
+                    connection_role: "default".into(),
+                    base_url_override: None,
+                    endpoint: None,
+                    poll_endpoint: None,
+                    content_endpoint: None,
+                    realtime_endpoint: None,
+                    allow_cross_origin_credentials: false,
+                    provider_params: "{}".into(),
+                    context_limit: None,
+                    health: None,
+                    health_checked_at: None,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_db::IProviderModelCapabilityRepository for StubProviderModelCapabilityRepo {
+    async fn list(&self) -> Result<Vec<nomifun_db::ProviderModelCapabilityRow>, DbError> {
+        Ok(self.rows.clone())
+    }
+
+    async fn list_for_provider(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<nomifun_db::ProviderModelCapabilityRow>, DbError> {
+        Ok(self
+            .rows
+            .iter()
+            .filter(|row| row.provider_id == provider_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_for_model(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<Vec<nomifun_db::ProviderModelCapabilityRow>, DbError> {
+        Ok(self
+            .rows
+            .iter()
+            .filter(|row| row.provider_id == provider_id && row.model == model)
+            .cloned()
+            .collect())
+    }
+
+    async fn get(
+        &self,
+        provider_id: &str,
+        model: &str,
+        task: &str,
+    ) -> Result<Option<nomifun_db::ProviderModelCapabilityRow>, DbError> {
+        Ok(self
+            .rows
+            .iter()
+            .find(|row| {
+                row.provider_id == provider_id && row.model == model && row.task == task
+            })
+            .cloned())
+    }
+
+    async fn set_health(
+        &self,
+        _provider_id: &str,
+        _expected_config_revision: i64,
+        _model: &str,
+        _task: &str,
+        _health_json: Option<&str>,
+    ) -> Result<bool, DbError> {
+        unreachable!("model failover must not persist capability health")
     }
 }
 
@@ -16000,7 +16007,8 @@ async fn explicit_knowledge_model_preference_overrides_the_conversation_model() 
     let (writeback_provider, writeback_rows) = test_provider(PROVIDER_ID_2, &["knowledge-model"]);
     svc.with_failover_deps(
         Arc::new(StubProviderRepo::new(vec![writeback_provider])),
-        Arc::new(StubProviderModelRepo::new(writeback_rows)),
+        Arc::new(StubProviderModelRepo::new(writeback_rows.clone())),
+        Arc::new(StubProviderModelCapabilityRepo::for_models(&writeback_rows)),
         Arc::new(FixedClientPrefRepo {
             preferences: vec![ClientPreference {
                 id: 1,
@@ -16038,7 +16046,8 @@ async fn invalid_explicit_knowledge_model_never_falls_back_to_session_model() {
     let (writeback_provider, writeback_rows) = test_provider(PROVIDER_ID_1, &["session-model"]);
     svc.with_failover_deps(
         Arc::new(StubProviderRepo::new(vec![writeback_provider])),
-        Arc::new(StubProviderModelRepo::new(writeback_rows)),
+        Arc::new(StubProviderModelRepo::new(writeback_rows.clone())),
+        Arc::new(StubProviderModelCapabilityRepo::for_models(&writeback_rows)),
         Arc::new(FixedClientPrefRepo {
             preferences: vec![ClientPreference {
                 id: 1,
@@ -16183,7 +16192,7 @@ fn make_failover_service(
     ConversationService,
     Arc<MockBroadcaster>,
     Arc<MockRepo>,
-    Arc<StubProviderModelRepo>,
+    Arc<StubProviderModelCapabilityRepo>,
 ) {
     let repo = Arc::new(MockRepo::new());
     let broadcaster = Arc::new(MockBroadcaster::new());
@@ -16193,6 +16202,9 @@ fn make_failover_service(
     let provider_repo = Arc::new(StubProviderRepo::new(provider_rows));
     let provider_model_repo = Arc::new(StubProviderModelRepo::new(
         model_rows.into_iter().flatten().collect(),
+    ));
+    let capability_repo = Arc::new(StubProviderModelCapabilityRepo::for_models(
+        &provider_model_repo.rows,
     ));
     let svc = ConversationService::new(
         Arc::<str>::from(TEST_USER_1),
@@ -16208,9 +16220,10 @@ fn make_failover_service(
     svc.with_failover_deps(
         provider_repo.clone(),
         provider_model_repo.clone(),
+        capability_repo.clone(),
         Arc::new(StubClientPrefRepo),
     );
-    (svc, broadcaster, repo, provider_model_repo)
+    (svc, broadcaster, repo, capability_repo)
 }
 
 fn provider_fault_then_finish_agent(conv_id: &str) -> Arc<ScriptedAgent> {
@@ -16238,7 +16251,7 @@ fn provider_fault_then_finish_agent(conv_id: &str) -> Arc<ScriptedAgent> {
 
 #[tokio::test]
 async fn failover_pre_response_fault_rebuilds_with_next_model_and_resends() {
-    let (svc, _broadcaster, repo, provider_repo) =
+    let (svc, _broadcaster, repo, _capability_repo) =
         make_failover_service(vec![test_provider(PROVIDER_ID_1, &["m1"]), test_provider(PROVIDER_ID_2, &["m2"])]);
     let conv_id = seed_nomi_failover_conversation(
         &repo,
@@ -16278,12 +16291,6 @@ async fn failover_pre_response_fault_rebuilds_with_next_model_and_resends() {
     assert_eq!(model.provider_id, PROVIDER_ID_2);
     assert_eq!(model.model, "m2");
 
-    // stamp_unhealthy defaults to true → failed model row stamped.
-    let writes = provider_repo.health_writes();
-    assert_eq!(writes.len(), 1);
-    assert_eq!(writes[0].0, PROVIDER_ID_1);
-    assert_eq!(writes[0].1, "m1", "failed model must be the stamped row");
-    assert!(writes[0].2.contains("unhealthy"));
 }
 
 #[tokio::test]
@@ -16686,10 +16693,10 @@ async fn failover_send_loop_excludes_acp_conversation() {
     // provider fault must NOT be failed over — ACP self-manages its model. With
     // failover deps wired + an enabled queue, the seam still stands down because
     // the conversation is ACP-typed: no resend (one send only), no model write,
-    // and no unhealthy stamp. (The ACP terminal-error eviction path legitimately
+    // The ACP terminal-error eviction path legitimately
     // terminates and recreates the runtime; that is unrelated to the failover seam, so we
     // assert the failover-specific facts rather than termination_count.)
-    let (svc, _broadcaster, repo, provider_repo) =
+    let (svc, _broadcaster, repo, _capability_repo) =
         make_failover_service(vec![test_provider(PROVIDER_ID_1, &["m1"]), test_provider(PROVIDER_ID_2, &["m2"])]);
     let conv_id = seed_acp_failover_conversation(
         &repo,
@@ -16732,11 +16739,6 @@ async fn failover_send_loop_excludes_acp_conversation() {
     let row = repo.get(&conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, PROVIDER_ID_1, "ACP model must be untouched by failover");
-    // The failover unhealthy-stamp never ran.
-    assert!(
-        provider_repo.health_writes().is_empty(),
-        "ACP exclusion: failover must not stamp any provider unhealthy"
-    );
 }
 
 #[tokio::test]
@@ -16744,7 +16746,7 @@ async fn idmm_failover_conversation_returns_false_for_acp_conversation() {
     // IDMM is an observer, not the active turn owner. Even a fully-live
     // observation must be declined so only the send-loop can switch and
     // re-drive the exact current turn.
-    let (svc, _broadcaster, repo, provider_repo) =
+    let (svc, _broadcaster, repo, _capability_repo) =
         make_failover_service(vec![test_provider(PROVIDER_ID_1, &["m1"]), test_provider(PROVIDER_ID_2, &["m2"])]);
     let conv_id = seed_acp_failover_conversation(
         &repo,
@@ -16799,7 +16801,6 @@ async fn idmm_failover_conversation_returns_false_for_acp_conversation() {
     let row = repo.get(&conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, PROVIDER_ID_1, "ACP model must be untouched");
-    assert!(provider_repo.health_writes().is_empty());
     assert!(
         repo.get_messages(&conv_id, 1, 20, SortOrder::Asc)
             .await
@@ -16813,7 +16814,7 @@ async fn idmm_failover_conversation_returns_false_for_acp_conversation() {
 
 #[tokio::test]
 async fn idmm_failover_on_finished_conversation_cannot_build_or_send() {
-    let (svc, broadcaster, repo, provider_repo) =
+    let (svc, broadcaster, repo, _capability_repo) =
         make_failover_service(vec![test_provider(PROVIDER_ID_1, &["m1"]), test_provider(PROVIDER_ID_2, &["m2"])]);
     let conv_id = seed_acp_failover_conversation(
         &repo,
@@ -16857,7 +16858,6 @@ async fn idmm_failover_on_finished_conversation_cannot_build_or_send() {
             .items
             .is_empty()
     );
-    assert!(provider_repo.health_writes().is_empty());
     assert!(
         broadcaster
             .take_events()
@@ -16873,7 +16873,7 @@ async fn idmm_failover_on_finished_conversation_cannot_build_or_send() {
 async fn perform_model_failover_returns_none_for_acp_conversation() {
     // review #11(2): calling the bottleneck directly on a non-nomi conversation
     // returns None (the review #9 ACP gate), with no termination and no model write.
-    let (svc, _broadcaster, repo, provider_repo) =
+    let (svc, _broadcaster, repo, _capability_repo) =
         make_failover_service(vec![test_provider(PROVIDER_ID_1, &["m1"]), test_provider(PROVIDER_ID_2, &["m2"])]);
     let conv_id = seed_acp_failover_conversation(
         &repo,
@@ -16898,7 +16898,6 @@ async fn perform_model_failover_returns_none_for_acp_conversation() {
     let row = repo.get(&conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, PROVIDER_ID_1);
-    assert!(provider_repo.health_writes().is_empty());
 }
 
 // ── edit_and_resubmit tests ─────────────────────────────────────

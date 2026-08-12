@@ -8,6 +8,6 @@ pub mod speech;
 
 pub use dispatcher::{RobotConversationBackend, RobotDispatcher};
 pub use speech::{
-    CompanionSlotReader, PreferenceReader, ProviderCredentials, ProviderRowReader, RobotSpeech,
-    VISION_TIMEOUT_SECS,
+    CompanionSlotReader, PreferenceReader, RobotSpeech, VISION_TIMEOUT_SECS,
+    VisionCompletionExecutor, VisionCompletionRequest,
 };

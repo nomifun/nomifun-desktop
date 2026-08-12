@@ -33,8 +33,8 @@ export const useNomiModelSelection = ({
   }, [initialModel?.id, initialModel?.use_model]);
 
   const { formatModelLabel } = useModelProviderList();
-  // Unified chat catalog — the model list comes from the backend resolve
-  // (profiles + inference), not from frontend name heuristics.
+  // Unified Chat catalog from enabled models with an exact persisted Chat
+  // capability; frontend model-name heuristics never grant eligibility.
   const { groups } = useModelsForTask('chat');
 
   // Nomicore does not support Google Auth — filter it out

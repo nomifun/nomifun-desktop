@@ -7,6 +7,8 @@
 import { useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ipcBridge } from '@/common';
+import { MODEL_TASK_ORDER } from '@/common/modelCapabilities';
+import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 
 /**
  * Deep link event payload from main process
@@ -18,9 +20,10 @@ export type DeepLinkPayload = {
 
 export type DeepLinkAddProviderDetail = {
   base_url?: string;
-  api_key?: string;
   name?: string;
   platform?: string;
+  model?: string;
+  task?: ModelTask;
 };
 
 /** Pending deep link data for the add-provider action. Read-once: consumed by ModelModalContent on mount. */
@@ -40,7 +43,7 @@ export const consumePendingDeepLink = (): DeepLinkAddProviderDetail | null => {
  * Allowed route patterns for the navigate deep link action.
  * Only routes matching these patterns are permitted.
  */
-const ALLOWED_NAVIGATE_PATTERNS = [/^\/conversation\/[^/]+$/];
+const ALLOWED_NAVIGATE_PATTERNS = [/^\/conversation\/[^/?#]+$/];
 
 /**
  * Hook to listen for nomifun:// deep link events from main process.
@@ -56,11 +59,13 @@ export const useDeepLink = () => {
     (payload: DeepLinkPayload) => {
       // Support both formats: "add-provider" and "provider/add" (one-api style)
       if (payload.action === 'add-provider' || payload.action === 'provider/add') {
+        const task = MODEL_TASK_ORDER.find((candidate) => candidate === payload.params.task);
         pendingDeepLinkData = {
           base_url: payload.params.base_url,
-          api_key: payload.params.api_key || payload.params.key,
           name: payload.params.name,
           platform: payload.params.platform,
+          model: payload.params.model,
+          task,
         };
 
         // Navigate to model settings page; ModelModalContent will pick up the pending data

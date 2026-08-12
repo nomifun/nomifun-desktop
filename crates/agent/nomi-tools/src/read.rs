@@ -29,7 +29,7 @@ const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// maximum-size image.
 const MAX_BATCH_IMAGE_DATA_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
-/// Amazon Bedrock Converse, the strictest supported provider, accepts at most
+/// Amazon Bedrock Claude Anthropic Messages, the strictest supported provider, accepts at most
 /// 20 images in one request.
 const MAX_BATCH_IMAGES: usize = 20;
 

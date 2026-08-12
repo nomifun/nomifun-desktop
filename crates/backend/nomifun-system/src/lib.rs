@@ -3,8 +3,6 @@ pub mod bedrock_probe;
 pub mod client_pref;
 pub mod managed_model;
 pub mod model_fetcher;
-pub mod model_profile;
-pub mod protocol;
 pub mod provider;
 pub mod provider_connection;
 pub mod provider_deletion;
@@ -23,8 +21,6 @@ pub use managed_model::{
     start_and_provision_free_model_with_preferences,
 };
 pub use model_fetcher::ModelFetchService;
-pub use model_profile::{ModelProfileService, seed_inferred_provider_models, seed_missing_inferred_profiles};
-pub use protocol::ProtocolDetectionService;
 pub use provider::ProviderService;
 pub use provider_connection::ProviderConnectionService;
 pub use provider_deletion::{ProviderDeletionCoordinator, SharedProviderDeletionCoordinator};

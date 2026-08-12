@@ -27,7 +27,8 @@ pub struct BedrockProvider {
     compat: ProviderCompat,
 }
 
-#[derive(Debug, Clone)]
+// Deliberately not `Debug`: the explicit variant contains live AWS secrets.
+#[derive(Clone)]
 pub enum AwsCredentials {
     Explicit {
         access_key_id: String,
@@ -36,6 +37,19 @@ pub enum AwsCredentials {
     },
     Profile(String),
     Environment,
+}
+
+fn credentials_redactor(
+    credentials: &Credentials,
+) -> nomifun_net::secret_redaction::SecretRedactor {
+    let mut secrets = vec![
+        credentials.access_key_id(),
+        credentials.secret_access_key(),
+    ];
+    if let Some(session_token) = credentials.session_token() {
+        secrets.push(session_token);
+    }
+    nomifun_net::secret_redaction::SecretRedactor::new(secrets)
 }
 
 impl BedrockProvider {
@@ -95,6 +109,21 @@ impl BedrockProvider {
             });
         }
 
+        let mut body = crate::request_body_with_extra(&self.compat, body);
+        let object = body
+            .as_object_mut()
+            .expect("typed Bedrock Anthropic request body is an object");
+        // The model is a typed URL path component for InvokeModel, never a
+        // native Anthropic request-body field. Empty optional typed fields also
+        // override opaque extras rather than letting provider_params inject
+        // tools/thinking that were not present in the LlmRequest.
+        object.remove("model");
+        if request.tools.is_empty() {
+            object.remove("tools");
+        }
+        if request.thinking.is_none() {
+            object.remove("thinking");
+        }
         body
     }
 
@@ -251,6 +280,7 @@ impl LlmProvider for BedrockProvider {
             .map_err(|e| ProviderError::Connection(format!("JSON serialize error: {}", e)))?;
 
         let credentials = self.resolve_credentials()?;
+        let stream_redactor = credentials_redactor(&credentials);
         let client = crate::http_client();
 
         // Each attempt re-signs: SigV4 signatures embed a timestamp and are only
@@ -270,6 +300,7 @@ impl LlmProvider for BedrockProvider {
             let body_bytes = body_bytes.to_vec();
             let credentials = credentials.clone();
             async move {
+                let redactor = credentials_redactor(&credentials);
                 let mut headers = HeaderMap::new();
                 headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
                 let signed = Self::sign_bedrock_request(
@@ -281,12 +312,13 @@ impl LlmProvider for BedrockProvider {
                     .body(body_bytes.clone())
                     .send()
                     .await
-                    .map_err(|e| ProviderError::Connection(e.to_string()))?;
+                    .map_err(ProviderError::from)?;
                 let status = response.status();
                 if !status.is_success() {
                     let retry_after_ms =
                         crate::parse_retry_after_ms(response.headers()).unwrap_or(5000);
-                    let body_text = response.text().await.unwrap_or_default();
+                    let body_text =
+                        redactor.redact(&response.text().await.unwrap_or_default());
                     if status.as_u16() == 429 {
                         return Err(ProviderError::RateLimited {
                             retry_after_ms,
@@ -319,12 +351,18 @@ impl LlmProvider for BedrockProvider {
 
         // AWS event stream uses binary framing.
         tokio::spawn(async move {
-            let outcome = process_aws_event_stream(response, &tx).await;
+            let outcome = process_aws_event_stream(response, &tx, &stream_redactor)
+                .await
+                .redacted(&stream_redactor);
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,
                 || send_signed(&region, &client, &url_owned, &body_bytes, &credentials),
-                |resp| process_aws_event_stream(resp, &tx),
+                |resp| async {
+                    process_aws_event_stream(resp, &tx, &stream_redactor)
+                        .await
+                        .redacted(&stream_redactor)
+                },
             )
             .await;
         });
@@ -337,6 +375,7 @@ impl LlmProvider for BedrockProvider {
 async fn process_aws_event_stream(
     response: reqwest::Response,
     tx: &mpsc::Sender<LlmEvent>,
+    redactor: &nomifun_net::secret_redaction::SecretRedactor,
 ) -> anthropic_shared::StreamOutcome {
     use futures::StreamExt;
 
@@ -349,7 +388,7 @@ async fn process_aws_event_stream(
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
-                let err = ProviderError::Connection(e.to_string());
+                let err = ProviderError::from(e);
                 return if emitted_content {
                     anthropic_shared::StreamOutcome::FailedPartial(err)
                 } else {
@@ -413,7 +452,10 @@ async fn process_aws_event_stream(
                         );
                     }
                 };
-                tracing::debug!(target: "nomi_providers", chunk = %inner, "bedrock event chunk");
+                // Do not log raw model event bodies. AWS/provider errors may
+                // echo signed header material and normal events contain user
+                // conversation data.
+                tracing::debug!(target: "nomi_providers", "bedrock event received");
                 let json_val = match serde_json::from_str::<Value>(&inner) {
                     Ok(value) => value,
                     Err(error) => {
@@ -433,6 +475,12 @@ async fn process_aws_event_stream(
                 };
                 let events = anthropic_shared::parse_sse_data(event_type, &inner, &mut state);
                 for event in events {
+                    let event = match event {
+                        LlmEvent::Error(message) => {
+                            LlmEvent::Error(redactor.redact(&message))
+                        }
+                        event => event,
+                    };
                     if matches!(
                         event,
                         LlmEvent::TextDelta(_)
@@ -708,6 +756,83 @@ mod tests {
         assert!(schema.get("oneOf").is_none());
     }
 
+    #[test]
+    fn bedrock_extra_body_preserves_native_fields_and_typed_fields_win() {
+        let mut compat = ProviderCompat::bedrock_defaults();
+        compat.extra_body = Some(
+            json!({
+                "anthropic_version": "must-not-win",
+                "max_tokens": 1,
+                "system": "must-not-win",
+                "messages": [{"role":"assistant","content":"must-not-win"}],
+                "model": "must-not-enter-body",
+                "tools": [{"name":"must-not-survive"}],
+                "thinking": {"type":"enabled","budget_tokens":999},
+                "temperature": 0.2,
+                "top_k": 7,
+                "stop_sequences": ["END"],
+                "future": {"nested": true}
+            })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let provider = BedrockProvider::new(
+            "us-east-1",
+            AwsCredentials::Environment,
+            false,
+            compat,
+        );
+        let request = LlmRequest {
+            model: "anthropic.claude-test".into(),
+            system: "typed system".into(),
+            messages: vec![Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "typed message".into(),
+                }],
+            )],
+            tools: vec![],
+            max_tokens: 64,
+            thinking: None,
+            reasoning_effort: None,
+        };
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["anthropic_version"], "bedrock-2023-05-31");
+        assert_eq!(body["max_tokens"], 64);
+        assert_eq!(body["system"], "typed system");
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"][0]["text"], "typed message");
+        assert!(body.get("model").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["top_k"], 7);
+        assert_eq!(body["stop_sequences"], json!(["END"]));
+        assert_eq!(body["future"]["nested"], true);
+    }
+
+    #[test]
+    fn bedrock_config_preserves_optional_sts_session_token_for_signing() {
+        let config = nomi_config::config::BedrockConfig {
+            region: Some("us-east-1".into()),
+            access_key_id: Some("AKIA_TEST".into()),
+            secret_access_key: Some("secret".into()),
+            session_token: Some("sts-session".into()),
+            profile: None,
+        };
+        assert!(matches!(
+            credentials_from_config(&config),
+            AwsCredentials::Explicit {
+                access_key_id,
+                secret_access_key,
+                session_token: Some(session_token),
+            } if access_key_id == "AKIA_TEST"
+                && secret_access_key == "secret"
+                && session_token == "sts-session"
+        ));
+    }
+
     #[tokio::test]
     async fn bedrock_tool_call_is_committed_once_only_after_message_stop() {
         let response = bedrock_response(&[
@@ -720,7 +845,8 @@ mod tests {
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
-        let outcome = process_aws_event_stream(response, &tx).await;
+        let redactor = nomifun_net::secret_redaction::SecretRedactor::default();
+        let outcome = process_aws_event_stream(response, &tx, &redactor).await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -763,7 +889,8 @@ mod tests {
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
-        let outcome = process_aws_event_stream(response, &tx).await;
+        let redactor = nomifun_net::secret_redaction::SecretRedactor::default();
+        let outcome = process_aws_event_stream(response, &tx, &redactor).await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -791,7 +918,8 @@ mod tests {
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
-        let outcome = process_aws_event_stream(response, &tx).await;
+        let redactor = nomifun_net::secret_redaction::SecretRedactor::default();
+        let outcome = process_aws_event_stream(response, &tx, &redactor).await;
         drop(tx);
 
         assert!(matches!(outcome, anthropic_shared::StreamOutcome::FailedEmpty(_)));
@@ -810,7 +938,8 @@ mod tests {
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
-        let outcome = process_aws_event_stream(response, &tx).await;
+        let redactor = nomifun_net::secret_redaction::SecretRedactor::default();
+        let outcome = process_aws_event_stream(response, &tx, &redactor).await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -835,7 +964,8 @@ mod tests {
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
-        let outcome = process_aws_event_stream(response, &tx).await;
+        let redactor = nomifun_net::secret_redaction::SecretRedactor::default();
+        let outcome = process_aws_event_stream(response, &tx, &redactor).await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {

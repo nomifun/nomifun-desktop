@@ -269,6 +269,11 @@ pub async fn create_router(services: &AppServices) -> Router {
         provider_model_repo: Arc::new(nomifun_db::SqliteProviderModelRepository::new(
             services.database.pool().clone(),
         )),
+        provider_model_capability_repo: Arc::new(
+            nomifun_db::SqliteProviderModelCapabilityRepository::new(
+                services.database.pool().clone(),
+            ),
+        ),
         idmm_service: states.idmm.service.clone(),
         knowledge_service: services.knowledge_service.clone(),
         // 创意工坊 canvas index: a fresh repo over the same pool the workshop

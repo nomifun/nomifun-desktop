@@ -521,8 +521,14 @@ mod tests {
 
     #[test]
     fn snapshot_mode_serialization() {
-        assert_eq!(serde_json::to_value(SnapshotMode::GitRepo).unwrap(), "git-repo");
-        assert_eq!(serde_json::to_value(SnapshotMode::Snapshot).unwrap(), "snapshot");
+        assert_eq!(
+            serde_json::to_value(SnapshotMode::GitRepo).unwrap(),
+            "git-repo"
+        );
+        assert_eq!(
+            serde_json::to_value(SnapshotMode::Snapshot).unwrap(),
+            "snapshot"
+        );
     }
 
     #[test]

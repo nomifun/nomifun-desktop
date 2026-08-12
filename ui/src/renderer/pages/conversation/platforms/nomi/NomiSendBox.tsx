@@ -62,7 +62,7 @@ import {
   warmupConversationForPassiveMount,
 } from '@/renderer/pages/conversation/utils/warmupConversation';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
-import { allSupportedExts, imageExts } from '@/renderer/services/FileService';
+import { allSupportedExts } from '@/renderer/services/FileService';
 import { iconColors } from '@/renderer/styles/colors';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
@@ -77,11 +77,8 @@ import NomiModelSelector from './NomiModelSelector';
 import { ContextUsageRing } from './ContextUsageRing';
 import type { NomiModelSelection } from './useNomiModelSelection';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
-import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
-import type { ModelTrait } from '@/common/config/storage';
-
-/** Trait refinement for the vision guard (stable identity for the SWR key). */
-const VISION_INPUT_TRAITS: ModelTrait[] = ['vision_input'];
+import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
+import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -171,38 +168,39 @@ const NomiSendBox: React.FC<{
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
 
-  // ── Vision guard ──────────────────────────────────────────────────────────
-  // Chat models that accept image input, from the unified catalog resolve.
-  // When the user sends image attachments through a model that is NOT in this
-  // set, warn once per model selection — never block the send (the backend
-  // returns a typed error if the model truly cannot take images).
   const {
-    groups: visionGroups,
-    isLoading: isVisionCatalogLoading,
-    error: visionCatalogError,
-  } = useModelsForTask('chat', VISION_INPUT_TRAITS);
-  const warnedVisionModelKeyRef = useRef<string | null>(null);
-  const maybeWarnNonVisionModel = useCallback(
+    data: providerGraph,
+    isLoading: isProviderGraphLoading,
+    error: providerGraphError,
+  } = useProvidersQuery();
+  const canSendFiles = useCallback(
     (files: string[]) => {
-      if (!current_model?.id || !current_model.use_model) return;
-      // Unresolved/failed catalog: never emit a false-positive warning.
-      if (isVisionCatalogLoading || visionCatalogError) return;
-      const hasImageAttachment = files.some((file) => {
-        const lower = file.toLowerCase();
-        return imageExts.some((ext) => lower.endsWith(ext));
+      const decision = evaluateNomiVisionSend({
+        files,
+        providers: providerGraph ?? [],
+        providerGraphResolved:
+          !isProviderGraphLoading && !providerGraphError && Array.isArray(providerGraph),
+        providerId: current_model?.id,
+        model: current_model?.use_model,
       });
-      if (!hasImageAttachment) return;
-      const supportsVision = visionGroups.some(
-        (group) =>
-          group.provider.id === current_model.id && group.models.includes(current_model.use_model)
+      if (decision.allowed) return true;
+      Message.warning(
+        decision.reason === 'capability_unavailable'
+          ? t('conversation.chat.visionCapabilityUnavailable')
+          : t('conversation.chat.visionModelBlocked', {
+              model: current_model?.use_model ?? '',
+            })
       );
-      if (supportsVision) return;
-      const selectionKey = `${current_model.id}:${current_model.use_model}`;
-      if (warnedVisionModelKeyRef.current === selectionKey) return;
-      warnedVisionModelKeyRef.current = selectionKey;
-      Message.warning(t('conversation.chat.visionModelHint', { model: current_model.use_model }));
+      return false;
     },
-    [current_model?.id, current_model?.use_model, isVisionCatalogLoading, visionCatalogError, visionGroups, t]
+    [
+      current_model?.id,
+      current_model?.use_model,
+      isProviderGraphLoading,
+      providerGraph,
+      providerGraphError,
+      t,
+    ]
   );
 
   const {
@@ -333,6 +331,9 @@ const NomiSendBox: React.FC<{
         Message.warning(t('conversation.chat.noModelSelected'));
         throw new Error('No model selected');
       }
+      if (!canSendFiles(files)) {
+        throw new Error('Image send blocked by the selected chat capability');
+      }
 
       // Persisted queue/recovery deliveries start behind an idle fence. Only
       // the atomic first-delivery winner may open a new local turn.
@@ -400,6 +401,7 @@ const NomiSendBox: React.FC<{
     [
       addOrUpdateMessage,
       checkAndUpdateTitle,
+      canSendFiles,
       conversation_id,
       current_model?.use_model,
       markTurnAccepted,
@@ -502,7 +504,7 @@ const NomiSendBox: React.FC<{
 
   const onSendHandler = async (message: string) => {
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
-    maybeWarnNonVisionModel(filesToSend);
+    if (!canSendFiles(filesToSend)) return;
     clearFiles();
     emitter.emit('nomi.selected.file.clear');
 
@@ -525,7 +527,7 @@ const NomiSendBox: React.FC<{
   const handleEditResubmit = useCallback(
     async (msgId: MessageId, createdAt: number, message: string) => {
       const filesToSend = collectSelectedFiles(uploadFile, atPath);
-      maybeWarnNonVisionModel(filesToSend);
+      if (!canSendFiles(filesToSend)) return;
       const oldSuffixLocalIds = snapshotEditSuffixLocalIds(
         messageListRef.current,
         msgId,
@@ -579,7 +581,7 @@ const NomiSendBox: React.FC<{
       workspacePath,
       clearFiles,
       markTurnAccepted,
-      maybeWarnNonVisionModel,
+      canSendFiles,
       reconcilePublicDeliveryReplay,
       messageListRef,
       removeMessagesByLocalIds,
@@ -658,7 +660,7 @@ const NomiSendBox: React.FC<{
 
   const onSteerHandler = async (message: string) => {
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
-    maybeWarnNonVisionModel(filesToSend);
+    if (!canSendFiles(filesToSend)) return;
     clearFiles();
     emitter.emit('nomi.selected.file.clear');
     await executeSteer({ input: message, files: filesToSend });

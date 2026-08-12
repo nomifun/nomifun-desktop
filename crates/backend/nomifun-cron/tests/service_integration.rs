@@ -74,6 +74,40 @@ async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbEr
     .await
 }
 
+fn encrypted_bearer_credentials() -> String {
+    nomifun_common::encrypt_string(r#"{"api_keys":["test-only"]}"#, &[0x42; 32]).unwrap()
+}
+
+async fn seed_chat_model(
+    pool: &sqlx::SqlitePool,
+    provider_id: &str,
+    model: &str,
+    sort_order: i64,
+) {
+    sqlx::query(
+        "INSERT INTO provider_models (\
+            provider_id, model, enabled, sort_order, description, created_at, updated_at\
+         ) VALUES (?, ?, 1, ?, NULL, 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(model)
+    .bind(sort_order)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO provider_model_capabilities (\
+            provider_id, model, task, traits, protocol, connection_role, \
+            allow_cross_origin_credentials, provider_params, created_at, updated_at\
+         ) VALUES (?, ?, 'chat', '[]', 'openai.chat_text', 'default', 0, '{}', 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(model)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// Disk-level assertion helper: whether a saved SKILL.md exists for `job_id`
 /// under the canonical cron skills directory.
 async fn has_skill_file(data_dir: &std::path::Path, job_id: &str) -> std::io::Result<bool> {
@@ -792,6 +826,7 @@ async fn setup_with_conv_repo() -> (
         .await
         .unwrap();
 
+    let credentials_encrypted = encrypted_bearer_credentials();
     for (provider_id, name) in [
         (SAFE_PROVIDER_ID, "safe"),
         (GEMINI_PROVIDER_ID, "gemini"),
@@ -801,13 +836,14 @@ async fn setup_with_conv_repo() -> (
     ] {
         sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+                provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
                 created_at, updated_at\
-             ) VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', \
+             ) VALUES (?, 'openai', ?, 'https://example.invalid', 'bearer', ?, \
                        1, 1, 1)",
         )
         .bind(provider_id)
         .bind(name)
+        .bind(&credentials_encrypted)
         .execute(&pool)
         .await
         .unwrap();
@@ -815,17 +851,7 @@ async fn setup_with_conv_repo() -> (
             .iter()
             .enumerate()
         {
-            sqlx::query(
-                "INSERT INTO provider_models (\
-                    provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
-                 ) VALUES (?, ?, 1, ?, '[]', '[]', '{}', 'inferred', 1, 1)",
-            )
-            .bind(provider_id)
-            .bind(model)
-            .bind(index as i64)
-            .execute(&pool)
-            .await
-            .unwrap();
+            seed_chat_model(&pool, provider_id, model, index as i64).await;
         }
     }
 
@@ -1771,26 +1797,26 @@ async fn cj1_private_job_events_are_scoped_to_each_conversation_owner() {
         .await
         .unwrap();
     }
+    let credentials_encrypted = encrypted_bearer_credentials();
     sqlx::query(
         "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
             created_at, updated_at\
          ) VALUES ('0190f5fe-7c00-7a00-8000-000000000008', 'openai', 'multiuser', \
-                   'https://example.invalid', 'encrypted', \
+                   'https://example.invalid', 'bearer', ?, \
                    1, 1, 1)",
     )
+        .bind(&credentials_encrypted)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO provider_models (\
-            provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
-         ) VALUES ('0190f5fe-7c00-7a00-8000-000000000008', 'model-multiuser', 1, 0, \
-                   '[]', '[]', '{}', 'inferred', 1, 1)",
+    seed_chat_model(
+        &pool,
+        "0190f5fe-7c00-7a00-8000-000000000008",
+        "model-multiuser",
+        0,
     )
-        .execute(&pool)
-        .await
-        .unwrap();
+    .await;
     // Conversation ownership is immutable in the v3 contract. Replace the
     // setup's installation-owner seed rows with legal model-only rows instead
     // of rewriting `user_id` in place.

@@ -2,26 +2,40 @@ mod fetchers;
 mod url_fixer;
 
 use std::sync::Arc;
-use std::collections::HashMap;
 
 use nomifun_api_types::{
     BedrockConfig, FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse,
-    FetchedModelProfile, ModelInfo, derive_tasks_and_traits,
+    ModelInfo, infer_catalog_tasks_and_traits,
 };
-use nomifun_common::{AppError, ProviderId, decrypt_string};
+use nomifun_common::{AppError, ProviderId};
 use nomifun_db::IProviderRepository;
+use nomifun_model_invoke::{AuthMaterial, AuthScheme};
 
-use crate::provider::deserialize_opt;
+use crate::provider::{deserialize_opt, validate_provider_auth, validate_provider_base_url};
+use crate::provider_connection::decrypt_credentials;
 
 type HttpClientFactory = Arc<dyn Fn() -> reqwest::Client + Send + Sync>;
 
 /// Internal configuration extracted from a provider row for model fetching.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct FetchConfig {
     pub platform: String,
     pub base_url: String,
-    pub api_key: String,
+    pub auth: AuthMaterial,
     pub bedrock_config: Option<BedrockConfig>,
+}
+
+impl std::fmt::Debug for FetchConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FetchConfig")
+            .field("platform", &self.platform)
+            .field("base_url", &self.base_url)
+            .field("auth_scheme", &self.auth.scheme)
+            .field("credentials", &"<redacted>")
+            .field("bedrock_config", &self.bedrock_config)
+            .finish()
+    }
 }
 
 /// Service for fetching model lists from remote provider APIs.
@@ -88,7 +102,10 @@ impl ModelFetchService {
         let config = FetchConfig {
             platform: req.platform.clone(),
             base_url: req.base_url.clone(),
-            api_key: req.api_key.clone(),
+            auth: AuthMaterial {
+                scheme: parse_auth_scheme(&req.auth_scheme)?,
+                credentials: req.credentials.clone(),
+            },
             bedrock_config: req.bedrock_config.clone(),
         };
         self.fetch_with_config(&config, req.try_fix).await
@@ -101,7 +118,6 @@ impl ModelFetchService {
         config: &FetchConfig,
         try_fix: bool,
     ) -> Result<FetchModelsResponse, AppError> {
-        let config = config.with_primary_api_key()?;
         let http_client = self.http_client();
         match fetchers::fetch_for_platform(&http_client, &config).await {
             Ok(models) => Ok(fetch_models_response(&config.platform, models, None)),
@@ -113,7 +129,7 @@ impl ModelFetchService {
                 url_fixer::try_fix_url(&http_client, &config)
                     .await
                     .map(|mut response| {
-                        response.model_profiles = model_profiles(&config.platform, &response.models);
+                        enrich_model_suggestions(&config.platform, &mut response.models);
                         response
                     })
                     .map_err(|_| err)
@@ -136,79 +152,95 @@ impl ModelFetchService {
             ));
         }
 
-        let api_key = decrypt_string(&row.api_key_encrypted, &self.encryption_key)?;
-        if api_key.trim().is_empty() {
-            return Err(AppError::BadRequest("API key is empty".into()));
-        }
+        let credentials =
+            decrypt_credentials(&row.credentials_encrypted, &self.encryption_key)?;
 
         let bedrock_config: Option<BedrockConfig> =
             deserialize_opt(&row.bedrock_config, "bedrock_config")?;
+        validate_provider_auth(
+            &row.platform,
+            &row.auth_scheme,
+            &credentials,
+            bedrock_config.as_ref(),
+        )?;
 
         Ok(FetchConfig {
             platform: row.platform,
             base_url: row.base_url,
-            api_key,
+            auth: AuthMaterial {
+                scheme: parse_auth_scheme(&row.auth_scheme)?,
+                credentials,
+            },
             bedrock_config,
         })
     }
 }
 
-fn model_profiles(platform: &str, models: &[ModelInfo]) -> HashMap<String, FetchedModelProfile> {
-    models
-        .iter()
-        .map(|model| {
-            let (tasks, traits) = derive_tasks_and_traits(platform, &model.id);
-            (model.id.clone(), FetchedModelProfile { tasks, traits })
-        })
-        .collect()
+fn enrich_model_suggestions(platform: &str, models: &mut [ModelInfo]) {
+    for model in models {
+        // Bedrock catalog rows are authoritative at the protocol-family
+        // boundary: only Anthropic/Claude entries can use the implemented
+        // `bedrock.anthropic_messages` adapter. Leaving every other family
+        // taskless prevents the generic name fallback from claiming Chat.
+        if platform.eq_ignore_ascii_case("bedrock") && model.tasks.is_empty() {
+            continue;
+        }
+        let (tasks, traits) = infer_catalog_tasks_and_traits(platform, &model.id);
+        if model.tasks.is_empty() {
+            model.tasks = tasks;
+        }
+        if model.traits.is_empty() {
+            model.traits = traits;
+        }
+    }
 }
 
 fn fetch_models_response(
     platform: &str,
-    models: Vec<ModelInfo>,
+    mut models: Vec<ModelInfo>,
     fixed_base_url: Option<String>,
 ) -> FetchModelsResponse {
-    let model_profiles = model_profiles(platform, &models);
-    FetchModelsResponse { models, model_profiles, fixed_base_url }
+    enrich_model_suggestions(platform, &mut models);
+    FetchModelsResponse { models, fixed_base_url }
 }
 
 impl FetchConfig {
-    fn with_primary_api_key(&self) -> Result<Self, AppError> {
-        if self.platform == "bedrock" {
-            return Ok(self.clone());
-        }
-
-        let api_key = primary_api_key(&self.api_key)
-            .ok_or_else(|| AppError::BadRequest("apiKey is required".into()))?;
-
-        Ok(Self {
-            api_key,
-            ..self.clone()
-        })
+    fn primary_secret(&self) -> Result<String, AppError> {
+        self.auth
+            .primary_secret()
+            .map_err(|error| AppError::BadRequest(error.to_string()))
     }
 }
 
-/// Validate a `FetchModelsAnonymousRequest` — platform / base_url / api_key
-/// must all be non-empty after trim.
+/// Validate the full anonymous default-connection proposal before network I/O.
 fn validate_anonymous_request(req: &FetchModelsAnonymousRequest) -> Result<(), AppError> {
     if req.platform.trim().is_empty() {
         return Err(AppError::BadRequest("platform is required".into()));
     }
-    if req.base_url.trim().is_empty() {
-        return Err(AppError::BadRequest("baseUrl is required".into()));
-    }
-    // Bedrock uses bedrock_config for credentials; empty api_key is allowed there.
-    if req.platform != "bedrock" && req.api_key.trim().is_empty() {
-        return Err(AppError::BadRequest("apiKey is required".into()));
-    }
+    validate_provider_base_url(&req.platform, &req.base_url)?;
+    validate_provider_auth(
+        &req.platform,
+        &req.auth_scheme,
+        &req.credentials,
+        req.bedrock_config.as_ref(),
+    )?;
     Ok(())
 }
 
-fn primary_api_key(raw: &str) -> Option<String> {
-    raw.split([',', '\n'])
-        .map(str::trim)
-        .find(|key| !key.is_empty())
-        .map(str::to_owned)
+fn parse_auth_scheme(raw: &str) -> Result<AuthScheme, AppError> {
+    AuthScheme::parse(raw).map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
+pub(crate) fn apply_catalog_auth(
+    request: reqwest::RequestBuilder,
+    auth: &AuthMaterial,
+) -> Result<reqwest::RequestBuilder, AppError> {
+    auth
+        .validate_credentials()
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    auth
+        .apply(request)
+        .map_err(|error| AppError::BadRequest(error.to_string()))
 }
 
 /// Platforms that support URL auto-fix (OpenAI-compatible).
@@ -218,6 +250,7 @@ fn supports_url_fix(platform: &str) -> bool {
         "anthropic"
             | "claude"
             | "gemini"
+            | "deepgram"
             | "bedrock"
             | "vertex-ai"
             | "mimo"
@@ -253,8 +286,13 @@ fn is_url_fix_candidate(error: &AppError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::encrypt_string;
-    use nomifun_db::{CreateProviderParams, SqliteProviderRepository, init_database_memory};
+    use crate::provider_connection::encrypt_credentials;
+    use nomifun_db::{
+        CreateProviderParams, NewProviderModel, NewProviderModelCapability,
+        SqliteProviderRepository, init_database_memory,
+    };
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
 
@@ -272,24 +310,34 @@ mod tests {
         api_key: &str,
     ) -> String {
         let repo = SqliteProviderRepository::new(db.pool().clone());
-        let encrypted = encrypt_string(api_key, &TEST_KEY).unwrap();
-        let row = repo
+        let encrypted =
+            encrypt_credentials(&serde_json::json!({"api_keys":[api_key]}), &TEST_KEY).unwrap();
+        let capabilities = [NewProviderModelCapability {
+            task: "chat",
+            traits: "[]",
+            protocol: "openai.chat_text",
+            connection_role: "default",
+            provider_params: "{}",
+            ..Default::default()
+        }];
+        let initial_model = NewProviderModel {
+            model: "test-model",
+            enabled: true,
+            capabilities: &capabilities,
+            ..Default::default()
+        };
+        let (row, _) = repo
             .create(CreateProviderParams {
                 provider_id: None,
                 platform,
                 name: "Test",
                 base_url,
-                api_key_encrypted: &encrypted,
-                models: "[]",
+                auth_scheme: if platform == "deepgram" { "token" } else { "bearer" },
+                credentials_encrypted: &encrypted,
                 enabled: true,
-                model_context_limits: None,
-                model_protocols: None,
-                model_descriptions: None,
-                model_enabled: None,
                 bedrock_config: None,
-                is_full_url: false,
                 sort_order: None,
-            })
+            }, &initial_model, &[])
             .await
             .unwrap();
         row.provider_id
@@ -307,6 +355,7 @@ mod tests {
         assert!(!supports_url_fix("anthropic"));
         assert!(!supports_url_fix("claude"));
         assert!(!supports_url_fix("gemini"));
+        assert!(!supports_url_fix("deepgram"));
         assert!(!supports_url_fix("bedrock"));
         assert!(!supports_url_fix("vertex-ai"));
         assert!(!supports_url_fix("mimo"));
@@ -365,7 +414,7 @@ mod tests {
         let (svc, db) = setup().await;
         let id = create_provider(&db, "openai", "https://api.openai.com", "sk-test-key").await;
         let config = svc.load_provider_config(&id).await.unwrap();
-        assert_eq!(config.api_key, "sk-test-key");
+        assert_eq!(config.auth.primary_secret().unwrap(), "sk-test-key");
         assert_eq!(config.platform, "openai");
         assert_eq!(config.base_url, "https://api.openai.com");
         assert!(config.bedrock_config.is_none());
@@ -386,13 +435,7 @@ mod tests {
         let id = create_provider(&db, "minimax", "https://unused", "fake-key").await;
         let req = FetchModelsRequest { try_fix: false };
         let resp = svc.fetch_models(&id, &req).await.unwrap();
-        assert!(
-            resp.models
-                .contains(&nomifun_api_types::ModelInfo {
-                    id: "MiniMax-M3".into(),
-                    name: None,
-                })
-        );
+        assert!(resp.models.iter().any(|model| model.id == "MiniMax-M3"));
         assert!(!resp.models.iter().any(|model| model.id == "MiniMax-Text-01"));
     }
 
@@ -439,7 +482,8 @@ mod tests {
             .fetch_models_anonymous(&FetchModelsAnonymousRequest {
                 platform: crate::managed_model::FREE_MODEL_PLATFORM.into(),
                 base_url: "https://example.com".into(),
-                api_key: "secret".into(),
+                auth_scheme: "bearer".into(),
+                credentials: serde_json::json!({"api_keys":["secret"]}),
                 bedrock_config: None,
                 try_fix: false,
             })
@@ -454,20 +498,59 @@ mod tests {
         let req = FetchModelsAnonymousRequest {
             platform: "minimax".into(),
             base_url: "https://unused".into(),
-            api_key: "fake-key".into(),
+            auth_scheme: "bearer".into(),
+            credentials: serde_json::json!({"api_keys":["fake-key"]}),
             bedrock_config: None,
             try_fix: false,
         };
         let resp = svc.fetch_models_anonymous(&req).await.unwrap();
-        assert!(
-            resp.models
-                .contains(&nomifun_api_types::ModelInfo {
-                    id: "MiniMax-M3".into(),
-                    name: None,
-                })
-        );
+        assert!(resp.models.iter().any(|model| model.id == "MiniMax-M3"));
         assert!(!resp.models.iter().any(|model| model.id == "MiniMax-Text-01"));
         assert!(resp.fixed_base_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn deepgram_anonymous_fetch_returns_native_source_profiles() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Token first-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "stt": [{"canonical_name": "opaque-one"}],
+                "tts": [{"canonical_name": "opaque-two"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let db = init_database_memory().await.unwrap();
+        let svc = ModelFetchService::new(
+            Arc::new(SqliteProviderRepository::new(db.pool().clone())),
+            TEST_KEY,
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+        let response = svc
+            .fetch_models_anonymous(&FetchModelsAnonymousRequest {
+                platform: "deepgram".into(),
+                base_url: server.uri(),
+                auth_scheme: "token".into(),
+                // Model fetching deliberately uses the first configured key.
+                credentials: serde_json::json!({"api_keys":["first-key","second-key"]}),
+                bedrock_config: None,
+                try_fix: true,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.models.iter().find(|model| model.id == "opaque-one").unwrap().tasks,
+            vec![nomifun_api_types::ModelTask::SpeechRecognition]
+        );
+        assert_eq!(
+            response.models.iter().find(|model| model.id == "opaque-two").unwrap().tasks,
+            vec![nomifun_api_types::ModelTask::SpeechSynthesis]
+        );
+        assert!(response.fixed_base_url.is_none());
     }
 
     #[tokio::test]
@@ -476,12 +559,30 @@ mod tests {
         let req = FetchModelsAnonymousRequest {
             platform: "openai".into(),
             base_url: "https://api.openai.com".into(),
-            api_key: "   ".into(),
+            auth_scheme: "bearer".into(),
+            credentials: serde_json::json!({"api_keys":["   "]}),
             bedrock_config: None,
             try_fix: false,
         };
         let err = svc.fetch_models_anonymous(&req).await.unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn native_catalog_rejects_an_incompatible_auth_scheme_before_network() {
+        let (svc, _db) = setup().await;
+        let error = svc
+            .fetch_models_anonymous(&FetchModelsAnonymousRequest {
+                platform: "deepgram".into(),
+                base_url: "https://api.deepgram.com".into(),
+                auth_scheme: "bearer".into(),
+                credentials: serde_json::json!({"api_keys":["secret"]}),
+                bedrock_config: None,
+                try_fix: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(message) if message.contains("expected")));
     }
 
     #[tokio::test]
@@ -490,7 +591,8 @@ mod tests {
         let req = FetchModelsAnonymousRequest {
             platform: "".into(),
             base_url: "https://api.openai.com".into(),
-            api_key: "sk-test".into(),
+            auth_scheme: "bearer".into(),
+            credentials: serde_json::json!({"api_keys":["sk-test"]}),
             bedrock_config: None,
             try_fix: false,
         };
@@ -499,18 +601,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_models_anonymous_bedrock_allows_empty_api_key() {
-        // Bedrock uses bedrock_config for credentials, not api_key.
-        // With no bedrock_config attached the fetcher itself will fail,
-        // but validate_anonymous_request must not reject up-front.
+    async fn fetch_models_anonymous_bedrock_profile_accepts_empty_credentials() {
         let (_svc, _db) = setup().await;
         let req = FetchModelsAnonymousRequest {
             platform: "bedrock".into(),
-            base_url: "https://bedrock.example".into(),
-            api_key: "".into(),
-            bedrock_config: None,
+            base_url: "".into(),
+            auth_scheme: "bedrock".into(),
+            credentials: serde_json::json!({}),
+            bedrock_config: Some(BedrockConfig {
+                auth_method: nomifun_api_types::BedrockAuthMethod::Profile,
+                region: "us-east-1".into(),
+                profile: Some("work".into()),
+            }),
             try_fix: false,
         };
         assert!(validate_anonymous_request(&req).is_ok());
+    }
+
+    #[test]
+    fn bedrock_non_anthropic_catalog_rows_do_not_gain_generic_chat() {
+        let mut models = vec![
+            ModelInfo {
+                id: "amazon.nova-pro-v1:0".into(),
+                name: Some("Nova Pro".into()),
+                tasks: Vec::new(),
+                traits: Vec::new(),
+            },
+            ModelInfo {
+                id: "us.anthropic.claude-sonnet-4-v1:0".into(),
+                name: Some("Claude Sonnet".into()),
+                tasks: vec![nomifun_api_types::ModelTask::Chat],
+                traits: Vec::new(),
+            },
+        ];
+        enrich_model_suggestions("bedrock", &mut models);
+        assert!(models[0].tasks.is_empty());
+        assert_eq!(models[1].tasks, vec![nomifun_api_types::ModelTask::Chat]);
     }
 }

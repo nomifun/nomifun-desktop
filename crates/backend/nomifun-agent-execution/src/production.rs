@@ -18,6 +18,7 @@ use nomifun_db::{
 };
 use nomifun_preset::PresetService;
 use nomifun_realtime::UserEventSink;
+use nomifun_model_invoke::ModelInvokeService;
 
 use crate::attempt_runner::ConversationAttemptRunner;
 use crate::engine::{AgentExecutionEngine, AgentExecutionEngineDeps};
@@ -35,11 +36,13 @@ pub struct AgentExecutionEngineConfig {
     pub template_repository: Arc<dyn IAgentExecutionTemplateRepository>,
     pub provider_repository: Arc<dyn IProviderRepository>,
     pub provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository>,
+    pub provider_model_capability_repository:
+        Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
     pub preset_service: Arc<PresetService>,
     pub realtime: Arc<dyn UserEventSink>,
     pub conversation: ConversationService,
     pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-    pub encryption_key: [u8; 32],
+    pub model_invoke: Arc<ModelInvokeService>,
     pub workspace_root: PathBuf,
 }
 
@@ -132,9 +135,8 @@ impl AgentExecutionEngine {
         // The immutable participant snapshot supplies the actual lead model;
         // absence stays typed and fails explicitly in the planner.
         let planner: Arc<dyn PlanProducer> = Arc::new(LlmPlanProducer::new(
-            config.provider_repository.clone(),
             config.provider_model_repository.clone(),
-            config.encryption_key,
+            config.model_invoke,
             config.workspace_root.clone(),
         ));
         let execution_port = config
@@ -150,6 +152,7 @@ impl AgentExecutionEngine {
             config.template_repository,
             config.provider_repository,
             config.provider_model_repository,
+            config.provider_model_capability_repository,
             config.preset_service,
             planner,
             attempt_runner,
