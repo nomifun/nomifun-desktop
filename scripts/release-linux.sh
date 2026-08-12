@@ -249,7 +249,7 @@ gh_bin="$(command -v gh || true)"
 [[ -n "$gh_bin" ]] || fail "未找到 gh CLI。安装：https://cli.github.com/"
 [[ -f "$KeyFile" ]] || fail "缺少 updater 私钥 $KeyFile（从密钥库拷入，keyID F3AA272E60AA7952）。"
 [[ -f "$UpdaterConf" ]] || fail "缺少 updater overlay 配置 $UpdaterConf。"
-[[ -x "$BuildLinuxScript" ]] || fail "缺少可执行 Linux 构建脚本 $BuildLinuxScript。"
+[[ -f "$BuildLinuxScript" ]] || fail "缺少 Linux 构建脚本 $BuildLinuxScript。"
 
 CurVer="$(read_workspace_version || true)"
 [[ -n "$CurVer" ]] || fail "无法从 Cargo.toml 读取 [workspace.package].version。"
