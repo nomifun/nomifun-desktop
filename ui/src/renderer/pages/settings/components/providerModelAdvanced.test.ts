@@ -8,9 +8,11 @@ import { describe, expect, test } from 'bun:test';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import {
   addCapabilityTask,
-  applyCatalogSuggestion,
+  applyCatalogSuggestionForTask,
+  catalogSuggestionsForTask,
   capabilityDraftFromResponse,
   capabilityInputsFromDefinition,
+  changePrimaryModelTask,
   changeCapabilityProtocol,
   effectiveBaseUrl,
   emptyCapabilityDraft,
@@ -19,6 +21,7 @@ import {
   normalizeModelId,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
+  resolveModelInputChange,
   requiresCrossOriginConsent,
   validateModelDefinition,
   type ModelCapabilityDraft,
@@ -83,7 +86,42 @@ const manifest = (
 });
 
 describe('model definition capability selection', () => {
-  test('selecting a catalog model replaces old task drafts with clean model-scoped capabilities', () => {
+  test('keeps free-text changes separate from the catalog onChange then onSelect event sequence', () => {
+    let definition = { model: '', capabilities: [emptyCapabilityDraft('chat')] };
+
+    const manualInput = resolveModelInputChange('vendor/custom-chat');
+    if (manualInput !== undefined) definition = { ...definition, model: manualInput };
+    expect(definition.model).toBe('vendor/custom-chat');
+
+    const catalogInputChange = resolveModelInputChange('catalog/chat', { value: 'catalog/chat' });
+    if (catalogInputChange !== undefined) definition = { ...definition, model: catalogInputChange };
+    expect(definition.model).toBe('vendor/custom-chat');
+
+    definition = applyCatalogSuggestionForTask(
+      definition,
+      { model: 'catalog/chat', tasks: ['chat', 'embedding'], traits: ['reasoning'] },
+      'chat'
+    );
+    expect(definition).toEqual({
+      model: 'catalog/chat',
+      capabilities: [{ ...emptyCapabilityDraft('chat'), traits: ['reasoning'] }],
+    });
+  });
+
+  test('filters catalog suggestions by the selected task without treating taskless models as universal', () => {
+    const suggestions = [
+      { model: 'chat-only', tasks: ['chat'] as ModelTask[], traits: [] },
+      { model: 'shared', tasks: ['chat', 'speech_synthesis'] as ModelTask[], traits: [] },
+      { model: 'unknown', tasks: [] as ModelTask[], traits: [] },
+    ];
+
+    expect(catalogSuggestionsForTask(suggestions, 'speech_synthesis').map((item) => item.model)).toEqual([
+      'shared',
+    ]);
+    expect(catalogSuggestionsForTask(suggestions, undefined)).toEqual([]);
+  });
+
+  test('selecting a catalog model initializes only the previously selected primary task', () => {
     const oldChat: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('chat'),
       traits: ['reasoning'],
@@ -91,7 +129,7 @@ describe('model definition capability selection', () => {
       endpoint: '/old/chat',
       providerParamsJson: '{"old":true}',
     };
-    const applied = applyCatalogSuggestion(
+    const applied = applyCatalogSuggestionForTask(
       { model: 'old/model', capabilities: [oldChat] },
       {
         model: 'catalog/model',
@@ -104,23 +142,14 @@ describe('model definition capability selection', () => {
           'streaming',
           'audio_input',
         ],
-      }
+      },
+      'speech_synthesis'
     );
     expect(applied.model).toBe('catalog/model');
-    expect(applied.capabilities).toEqual([
-      {
-        ...emptyCapabilityDraft('chat'),
-        traits: ['vision_input', 'audio_input', 'audio_output', 'streaming', 'web_search'],
-      },
-      {
-        ...emptyCapabilityDraft('realtime_conversation'),
-        traits: ['audio_input', 'audio_output', 'realtime', 'streaming'],
-      },
-      emptyCapabilityDraft('speech_synthesis'),
-    ]);
+    expect(applied.capabilities).toEqual([emptyCapabilityDraft('speech_synthesis')]);
   });
 
-  test('keeps an empty catalog task list empty instead of retaining the previous model draft', () => {
+  test('does not apply catalog traits when the selected type is absent from the entry', () => {
     const oldSpeech = {
       ...emptyCapabilityDraft('speech_synthesis'),
       protocol: 'old.speech',
@@ -128,11 +157,37 @@ describe('model definition capability selection', () => {
     };
 
     expect(
-      applyCatalogSuggestion(
+      applyCatalogSuggestionForTask(
         { model: 'old/model', capabilities: [oldSpeech] },
-        { model: 'catalog/unknown', tasks: [], traits: ['audio_output'] }
+        { model: 'catalog/unknown', tasks: [], traits: ['audio_output'] },
+        'speech_synthesis'
       )
-    ).toEqual({ model: 'catalog/unknown', capabilities: [] });
+    ).toEqual({ model: 'catalog/unknown', capabilities: [emptyCapabilityDraft('speech_synthesis')] });
+  });
+
+  test('preserves a deep-link model id when choosing its first primary type', () => {
+    expect(changePrimaryModelTask({ model: 'prefilled/model', capabilities: [] }, 'chat')).toEqual({
+      model: 'prefilled/model',
+      capabilities: [emptyCapabilityDraft('chat')],
+    });
+  });
+
+  test('switching an existing primary type clears the model and all task-specific configuration', () => {
+    const changed = changePrimaryModelTask(
+      {
+        model: 'catalog/chat-model',
+        capabilities: [
+          { ...emptyCapabilityDraft('chat'), protocol: 'openai.chat_text', endpoint: '/old-chat' },
+          { ...emptyCapabilityDraft('embedding'), protocol: 'openai.embeddings' },
+        ],
+      },
+      'image_generation'
+    );
+
+    expect(changed).toEqual({
+      model: '',
+      capabilities: [emptyCapabilityDraft('image_generation')],
+    });
   });
 
   test('adds and removes task capabilities without changing unrelated drafts', () => {
