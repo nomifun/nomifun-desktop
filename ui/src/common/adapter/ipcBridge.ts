@@ -36,6 +36,13 @@ import {
   tauriWebuiGetStatus,
   tauriWebuiStart,
   tauriWebuiStop,
+  tauriRelayPairingBootstrap,
+  tauriRelayPairingDisconnect,
+  tauriRelayPairingGetStatus,
+  tauriRelayPairingRestart,
+  tauriRelayPairingStop,
+  type TauriRelayPairingBootstrapRequest,
+  type TauriRelayPairingStatus,
   tauriWindowClose,
   tauriWindowIsMaximized,
   tauriWindowMaximize,
@@ -2757,6 +2764,32 @@ export const webui = {
       (p) => `/api/webui/companions/${encodeURIComponent(p.companionId)}/access-token`
     ),
   },
+};
+
+export type IRelayPairingStatus = TauriRelayPairingStatus;
+export type IRelayPairingBootstrapRequest = TauriRelayPairingBootstrapRequest;
+
+export const relayPairing = {
+  bootstrap: shellProvider<IRelayPairingStatus, IRelayPairingBootstrapRequest>(
+    (request) => tauriRelayPairingBootstrap(request),
+    { state: 'disconnected' }
+  ),
+  getStatus: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingGetStatus(),
+    { state: 'disconnected' }
+  ),
+  stop: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingStop(),
+    { state: 'disconnected' }
+  ),
+  restart: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingRestart(),
+    { state: 'disconnected' }
+  ),
+  disconnect: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingDisconnect(),
+    { state: 'disconnected' }
+  ),
 };
 
 // ---------------------------------------------------------------------------

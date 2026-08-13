@@ -15,6 +15,7 @@ import { Copy, Earth, EditTwo, Info, Refresh } from '@icon-park/react';
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { buildWebuiQrLoginUrl, getWebuiQrBaseUrls } from './webuiQrLinks';
+import RelayPairingPanel from './RelayPairingPanel';
 
 const QRCodeSVGLazy = React.lazy(async () => {
   const mod = await import('qrcode.react');
@@ -295,6 +296,8 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
       <div className='rd-10px border border-solid border-arco-2 bg-fill-1 px-10px py-8px text-12px text-t-secondary leading-relaxed'>
         {t('settings.webui.featureRemoteDesc')}
       </div>
+
+      {lifecycleSupported ? <RelayPairingPanel /> : null}
 
       {/* 桌面端生命周期未实现提示 / Desktop lifecycle-unavailable notice */}
       {!lifecycleSupported && (
