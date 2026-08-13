@@ -214,7 +214,7 @@ const CsChannelBotsSection: React.FC<{ csAgentId: CsAgentId }> = ({ csAgentId })
                 />
                 <span className='min-w-[120px] flex-1 basis-[160px] truncate'>{bot.name}</span>
                 <Tag size='small' className='shrink-0'>
-                  {bot.type}
+                  {platform ? t(platform.titleKey, platform.fallback) : bot.type}
                 </Tag>
                 {statusTag(bot)}
                 {binding.kind === 'boundToOther' && (

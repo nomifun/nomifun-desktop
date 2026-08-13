@@ -31,6 +31,8 @@ import TwitchConfigForm from '@/renderer/components/settings/SettingsModal/conte
 import TelegramConfigForm from '@/renderer/components/settings/SettingsModal/contents/channels/TelegramConfigForm';
 import WecomConfigForm from '@/renderer/components/settings/SettingsModal/contents/channels/WecomConfigForm';
 import WeixinConfigForm from '@/renderer/components/settings/SettingsModal/contents/channels/WeixinConfigForm';
+import GroupAccessControl from '@/renderer/components/settings/SettingsModal/contents/channels/GroupAccessControl';
+import { supportsGroupAccess } from '@/renderer/components/settings/SettingsModal/contents/channels/groupAccessPlatforms';
 import { Message, Switch } from '@arco-design/web-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -228,6 +230,19 @@ export const PlatformConfigBody: React.FC<{
       <div className='text-12px text-t-tertiary bg-fill-2 rd-10px px-14px py-10px'>
         {'机器人使用该伙伴的对话模型,在「对话」页配置'}
       </div>
+
+      {status && supportsGroupAccess(platform) && (
+        <GroupAccessControl
+          pluginId={status.plugin_id}
+          value={status.groupAccessMode}
+          onSaved={(groupAccessMode) => {
+            // Keep the modal immediately consistent while the durable status
+            // refresh catches up with the just-saved backend policy.
+            onStatusChange({ ...status, groupAccessMode });
+            void refreshStatuses();
+          }}
+        />
+      )}
 
       {platform === 'telegram' && (
         <TelegramConfigForm

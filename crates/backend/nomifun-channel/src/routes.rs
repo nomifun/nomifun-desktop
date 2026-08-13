@@ -9,8 +9,8 @@ use tracing::warn;
 use nomifun_api_types::{
     ApiResponse, ApprovePairingRequest, BridgeResponse, ChannelSessionResponse, ChannelUserResponse,
     DisablePluginRequest, EnablePluginRequest, EnablePluginResponse, PairingRequestResponse,
-    PluginStatusResponse, RejectPairingRequest, RevokeUserRequest, SyncChannelSettingsRequest,
-    TestPluginRequest, TestPluginResponse,
+    GroupAccessMode, PluginStatusResponse, RejectPairingRequest, RevokeUserRequest,
+    SetGroupAccessRequest, SyncChannelSettingsRequest, TestPluginRequest, TestPluginResponse,
 };
 use nomifun_common::{
     AppError, ChannelPluginId, CompanionId, ConversationId, UuidV7Error,
@@ -55,7 +55,8 @@ pub struct ChannelRouterState {
 
 /// Build the channel router with all `/api/channel/*` routes.
 ///
-/// All routes require authentication (applied by the caller).
+/// All routes require installation-owner authorization (applied by the
+/// nomifun-app caller through `protect_instance_owner`).
 pub fn channel_routes(state: ChannelRouterState) -> Router {
     let router = Router::new()
         // Plugin management
@@ -75,6 +76,12 @@ pub fn channel_routes(state: ChannelRouterState) -> Router {
         .route("/api/channel/sessions", get(get_active_sessions))
         // Settings sync
         .route("/api/channel/settings/sync", post(sync_channel_settings))
+        // Per-bot group access control (the whole channel router is mounted
+        // behind the installation-owner gate by nomifun-app).
+        .route(
+            "/api/channel/settings/group-access",
+            post(set_group_access),
+        )
         // Channel companion binding (persist + session reset in one step)
         .route("/api/channel/settings/companion", post(set_channel_companion));
 
@@ -169,6 +176,7 @@ struct ChannelPluginStatusView {
     /// Owning domain (`companion` | `customer_service`), used by the UI to
     /// keep the two pools disjoint.
     owner_domain: String,
+    group_access_mode: GroupAccessMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -212,6 +220,7 @@ impl ChannelPluginStatusView {
             companion_id: status.companion_id,
             bot_key: status.bot_key,
             owner_domain: status.owner_domain,
+            group_access_mode: status.group_access_mode,
             created_at: Some(status.created_at),
             updated_at: Some(status.updated_at),
             connected: status.connected,
@@ -556,14 +565,7 @@ async fn revoke_user(
 ) -> Result<Json<ApiResponse<BridgeResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    // Clean up sessions first
-    state
-        .session_manager
-        .cleanup_user_sessions(&req.channel_user_id)
-        .await?;
-
-    // Delete user record
-    state.repo.delete_user(&req.channel_user_id).await?;
+    state.pairing_service.revoke_user(&req.channel_user_id).await?;
 
     Ok(Json(ApiResponse::ok(BridgeResponse {
         success: true,
@@ -628,6 +630,35 @@ async fn sync_channel_settings(
     Ok(Json(ApiResponse::ok(BridgeResponse {
         success: true,
         message: Some(format!("Sessions cleared for {}", req.platform)),
+        error: None,
+    })))
+}
+
+/// `POST /api/channel/settings/group-access` — update the group-chat admission
+/// policy for exactly one persisted bot.
+///
+/// This route accepts no channel credentials and does not restart the live
+/// connection. The manager persists the policy independently, retires prior
+/// channel sessions and queued prompts, and broadcasts a fresh status
+/// projection to the installation owner.
+async fn set_group_access(
+    State(state): State<ChannelRouterState>,
+    body: Result<Json<SetGroupAccessRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<BridgeResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    state
+        .manager
+        .set_group_access_mode(&req.plugin_id, req.group_access_mode)
+        .await?;
+
+    Ok(Json(ApiResponse::ok(BridgeResponse {
+        success: true,
+        message: Some(format!(
+            "Group access for channel {} set to {}; channel sessions cleared",
+            req.plugin_id,
+            req.group_access_mode.as_str()
+        )),
         error: None,
     })))
 }
@@ -927,7 +958,143 @@ fn field_default_entry(value: &serde_json::Value) -> Option<(&str, serde_json::V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::TestPluginExtraConfig;
+    use nomifun_api_types::{GroupAccessMode, TestPluginExtraConfig};
+
+    async fn group_access_route_state() -> (ChannelRouterState, String) {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let repo: Arc<dyn IChannelRepository> = Arc::new(
+            nomifun_db::SqliteChannelRepository::new(db.pool().clone()),
+        );
+        let event_bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(8));
+        let (message_tx, _message_rx) = tokio::sync::mpsc::channel(1);
+        let manager = Arc::new(ChannelManager::new(
+            Arc::clone(&repo),
+            event_bus.clone(),
+            "018f1234-5678-7abc-8def-012345678900",
+            [0x51; 32],
+            message_tx,
+        ));
+        let pairing_service = Arc::new(PairingService::new(
+            Arc::clone(&repo),
+            event_bus.clone(),
+            "018f1234-5678-7abc-8def-012345678900",
+        ));
+        let session_manager = Arc::new(SessionManager::new(Arc::clone(&repo)));
+        let pref_repo = Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
+            db.pool().clone(),
+        ));
+        let settings_service = Arc::new(ChannelSettingsService::new(pref_repo));
+        let extension_registry = ExtensionRegistry::new(
+            nomifun_extension::ExtensionStateStore::new(std::path::PathBuf::from(
+                "unused-channel-route-test-extension-state.json",
+            )),
+            event_bus,
+            "test".into(),
+        );
+        let plugin_factory: Arc<PluginFactory> = Arc::new(Box::new(|_| None));
+
+        let now = nomifun_common::now_ms();
+        let row = repo
+            .create_plugin(&nomifun_db::models::NewChannelPluginRow {
+                r#type: "lark".into(),
+                name: "Lark Bot".into(),
+                enabled: true,
+                config: "opaque-encrypted-config".into(),
+                status: Some("running".into()),
+                last_connected: Some(now),
+                companion_id: None,
+                bot_key: Some("cli_test".into()),
+                owner_domain: "companion".into(),
+                group_access_mode: "allowlist".into(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        (
+            ChannelRouterState {
+                manager,
+                pairing_service,
+                session_manager,
+                repo,
+                plugin_factory,
+                settings_service,
+                channel_agent_profile: None,
+                extension_registry,
+            },
+            row.channel_plugin_id,
+        )
+    }
+
+    #[tokio::test]
+    async fn group_access_route_updates_one_bot_without_credentials_or_restart() {
+        let (state, plugin_id) = group_access_route_state().await;
+        let response = set_group_access(
+            State(state.clone()),
+            Ok(Json(SetGroupAccessRequest {
+                plugin_id: plugin_id.clone(),
+                group_access_mode: GroupAccessMode::AllMembers,
+            })),
+        )
+        .await
+        .unwrap();
+
+        assert!(response.0.success);
+        assert!(response.0.data.unwrap().success);
+        let row = state.repo.get_plugin(&plugin_id).await.unwrap().unwrap();
+        assert_eq!(row.group_access_mode, "all_members");
+        assert_eq!(row.config, "opaque-encrypted-config");
+    }
+
+    #[tokio::test]
+    async fn group_access_route_reports_missing_bot() {
+        let (state, _) = group_access_route_state().await;
+        let missing_id = ChannelPluginId::new().into_string();
+        let error = set_group_access(
+            State(state),
+            Ok(Json(SetGroupAccessRequest {
+                plugin_id: missing_id.clone(),
+                group_access_mode: GroupAccessMode::Disabled,
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::NotFound(message) if message == missing_id));
+    }
+
+    #[test]
+    fn group_access_status_view_projects_mode_without_credentials() {
+        let plugin_id = nomifun_common::ChannelPluginId::new().into_string();
+        let view = ChannelPluginStatusView::from_manager_status(
+            PluginStatusResponse {
+                plugin_id,
+                plugin_type: "lark".into(),
+                name: "Lark Bot".into(),
+                enabled: true,
+                status: Some("running".into()),
+                last_connected: Some(1),
+                companion_id: None,
+                bot_key: Some("cli_public_bot_key".into()),
+                owner_domain: "companion".into(),
+                group_access_mode: GroupAccessMode::AllMembers,
+                created_at: 1,
+                updated_at: 2,
+                connected: true,
+                has_token: true,
+                bot_username: None,
+                active_users: 0,
+            },
+            None,
+        );
+
+        let json = serde_json::to_value(view).unwrap();
+        assert_eq!(json["group_access_mode"], "all_members");
+        assert!(json.get("config").is_none());
+        assert!(json.get("credentials").is_none());
+        assert!(json.get("token").is_none());
+    }
 
     #[test]
     fn build_test_config_telegram() {

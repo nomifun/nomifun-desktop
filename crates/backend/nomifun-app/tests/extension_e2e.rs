@@ -621,6 +621,7 @@ async fn eq19_channel_status_merges_extension_meta_for_persisted_row() {
         companion_id: None,
         bot_key: None,
         owner_domain: "companion".into(),
+        group_access_mode: "allowlist".into(),
         created_at: now,
         updated_at: now,
         })

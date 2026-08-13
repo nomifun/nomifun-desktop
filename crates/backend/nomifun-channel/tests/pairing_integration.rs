@@ -8,8 +8,14 @@ use std::sync::{Arc, Mutex};
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_common::{TimestampMs, now_ms};
-use nomifun_db::models::{NewChannelPairingCodeRow, NewChannelPluginRow};
-use nomifun_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
+use nomifun_db::models::{
+    CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST, CHANNEL_USER_AUTHORIZATION_APPROVED,
+    CHANNEL_USER_AUTHORIZATION_AUTO_GROUP, NewChannelPairingCodeRow,
+    NewChannelPendingPromptRow, NewChannelPluginRow, NewChannelSessionRow,
+};
+use nomifun_db::{
+    IChannelRepository, PendingPromptEnqueue, SqliteChannelRepository, init_database_memory,
+};
 use nomifun_realtime::UserEventSink;
 
 use nomifun_channel::constants::{PAIRING_CODE_LENGTH, PAIRING_CODE_TTL};
@@ -72,6 +78,7 @@ async fn setup() -> (PairingService, Arc<dyn IChannelRepository>, Arc<MockBroadc
                 companion_id: None,
                 bot_key: None,
                 owner_domain: "companion".into(),
+                group_access_mode: CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.into(),
                 created_at: now_ms(),
                 updated_at: now_ms(),
             })
@@ -107,6 +114,49 @@ fn new_pairing(
         expires_at,
         status: "pending".to_owned(),
     }
+}
+
+async fn create_session_and_prompt(
+    repo: &Arc<dyn IChannelRepository>,
+    channel_user_id: &str,
+    chat_id: &str,
+    chat_kind: &str,
+) -> (String, String) {
+    let now = now_ms();
+    let session = repo
+        .get_or_create_session(
+            channel_user_id,
+            chat_id,
+            CH_TG,
+            &NewChannelSessionRow {
+                channel_session_id: nomifun_common::ChannelSessionId::new().into_string(),
+                channel_user_id: channel_user_id.to_owned(),
+                agent_type: "acp".into(),
+                conversation_id: None,
+                workspace: None,
+                chat_id: Some(chat_id.to_owned()),
+                channel_plugin_id: Some(CH_TG.to_owned()),
+                chat_kind: chat_kind.to_owned(),
+                created_at: now,
+                last_activity: now,
+            },
+        )
+        .await
+        .unwrap();
+    let conversation_id = nomifun_common::ConversationId::new().into_string();
+    let prompt = NewChannelPendingPromptRow {
+        channel_plugin_id: CH_TG.to_owned(),
+        chat_id: chat_id.to_owned(),
+        channel_session_id: session.channel_session_id.clone(),
+        conversation_id: conversation_id.clone(),
+        text: format!("queued {chat_kind} prompt"),
+        idempotency_key: format!("pairing-security:{chat_kind}:{chat_id}"),
+    };
+    assert!(matches!(
+        repo.enqueue_pending_prompt(&prompt, now).await.unwrap(),
+        PendingPromptEnqueue::Queued { .. }
+    ));
+    (session.channel_session_id, conversation_id)
 }
 
 // ── PG-1: Generated code is 6 digits ───────────────────────────────
@@ -214,6 +264,94 @@ async fn ap2_dc2_approved_user_in_authorized_list() {
     assert_eq!(users[0].platform_user_id, "tg_42");
     assert_eq!(users[0].platform_type, "telegram");
     assert_eq!(users[0].display_name.as_deref(), Some("Alice"));
+}
+
+#[tokio::test]
+async fn promotion_retires_guest_group_queue_but_preserves_direct_queue() {
+    let (svc, repo, _bc) = setup().await;
+    let guest = svc
+        .ensure_auto_group_user("tg_guest", "telegram", CH_TG, "Guest")
+        .await
+        .unwrap();
+    assert_eq!(
+        guest.authorization_kind,
+        CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
+    );
+
+    let (group_session, group_conversation) =
+        create_session_and_prompt(&repo, &guest.channel_user_id, "group-chat", "group").await;
+    let (unknown_session, unknown_conversation) =
+        create_session_and_prompt(&repo, &guest.channel_user_id, "legacy-chat", "unknown").await;
+    let (direct_session, direct_conversation) =
+        create_session_and_prompt(&repo, &guest.channel_user_id, "direct-chat", "direct").await;
+
+    let code = svc
+        .request_pairing("tg_guest", "telegram", CH_TG, Some("Approved Guest"))
+        .await
+        .unwrap();
+    svc.approve_pairing(&code).await.unwrap();
+
+    let promoted = repo
+        .get_user_by_platform("tg_guest", "telegram", CH_TG)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(promoted.channel_user_id, guest.channel_user_id);
+    assert_eq!(
+        promoted.authorization_kind,
+        CHANNEL_USER_AUTHORIZATION_APPROVED
+    );
+    assert!(repo.get_session(&group_session).await.unwrap().is_none());
+    assert!(repo.get_session(&unknown_session).await.unwrap().is_none());
+    assert!(repo.get_session(&direct_session).await.unwrap().is_some());
+    assert!(repo.peek_next_queued(&group_conversation).await.unwrap().is_none());
+    assert!(
+        repo.peek_next_queued(&unknown_conversation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        repo.peek_next_queued(&direct_conversation)
+            .await
+            .unwrap()
+            .unwrap()
+            .channel_session_id,
+        direct_session
+    );
+}
+
+#[tokio::test]
+async fn revoke_cancels_queued_prompts_for_every_chat_kind() {
+    let (svc, repo, _bc) = setup().await;
+    let code = svc
+        .request_pairing("tg_revoke", "telegram", CH_TG, Some("Revoked"))
+        .await
+        .unwrap();
+    svc.approve_pairing(&code).await.unwrap();
+    let user = repo
+        .get_user_by_platform("tg_revoke", "telegram", CH_TG)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut scopes = Vec::new();
+    for (chat_id, chat_kind) in [
+        ("revoke-group", "group"),
+        ("revoke-legacy", "unknown"),
+        ("revoke-direct", "direct"),
+    ] {
+        scopes.push(
+            create_session_and_prompt(&repo, &user.channel_user_id, chat_id, chat_kind).await,
+        );
+    }
+
+    svc.revoke_user(&user.channel_user_id).await.unwrap();
+    assert!(repo.get_user(&user.channel_user_id).await.unwrap().is_none());
+    for (session_id, conversation_id) in scopes {
+        assert!(repo.get_session(&session_id).await.unwrap().is_none());
+        assert!(repo.peek_next_queued(&conversation_id).await.unwrap().is_none());
+    }
 }
 
 // ── AP-3: Approve nonexistent code ─────────────────────────────────
@@ -440,6 +578,7 @@ async fn two_lark_bots_pair_independently() {
             companion_id: None,
             bot_key: None,
             owner_domain: "companion".into(),
+            group_access_mode: CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         })

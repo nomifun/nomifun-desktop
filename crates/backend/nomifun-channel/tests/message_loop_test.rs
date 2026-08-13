@@ -24,7 +24,10 @@ use nomifun_common::{
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::runtime_state::ConversationRuntimeStateService;
 use nomifun_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
-use nomifun_db::models::{NewChannelPluginRow, NewChannelUserRow};
+use nomifun_db::models::{
+    CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST, CHANNEL_USER_AUTHORIZATION_APPROVED,
+    NewChannelPluginRow, NewChannelUserRow,
+};
 use nomifun_db::{
     CreateProviderParams, IChannelRepository, IClientPreferenceRepository, IProviderRepository,
     NewProviderModel, NewProviderModelCapability, SqliteAcpSessionRepository,
@@ -55,6 +58,9 @@ fn make_text_message(user_id: &str, chat_id: &str, text: &str) -> UnifiedIncomin
         ),
         platform: PluginType::Telegram,
         chat_id: chat_id.into(),
+        // The integration harness models Telegram private-chat delivery.
+        chat_kind: nomifun_channel::types::ChatKind::Direct,
+        mention_state: nomifun_channel::types::MentionState::Unknown,
         user: UnifiedUser {
             id: user_id.into(),
             username: None,
@@ -82,6 +88,10 @@ fn make_chat_action_message(user_id: &str, chat_id: &str, action_name: &str) -> 
         ),
         platform: PluginType::Telegram,
         chat_id: chat_id.into(),
+        // These fixtures model action callbacks from a private chat. Unknown
+        // callback scope is intentionally rejected before authorization.
+        chat_kind: nomifun_channel::types::ChatKind::Direct,
+        mention_state: nomifun_channel::types::MentionState::Unknown,
         user: UnifiedUser {
             id: user_id.into(),
             username: None,
@@ -139,6 +149,7 @@ async fn unauthorized_user_gets_pairing_response() {
         companion_id: None,
         bot_key: None,
         owner_domain: "companion".into(),
+        group_access_mode: CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.into(),
         created_at: now_ms(),
         updated_at: now_ms(),
     })
@@ -395,6 +406,7 @@ async fn build_harness() -> Harness {
             companion_id: None,
             bot_key: None,
             owner_domain: "companion".into(),
+            group_access_mode: CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         })
@@ -408,6 +420,7 @@ async fn build_harness() -> Harness {
             platform_type: "telegram".into(),
             channel_plugin_id: Some(plugin.channel_plugin_id.clone()),
             display_name: Some("Test".into()),
+            authorization_kind: CHANNEL_USER_AUTHORIZATION_APPROVED.into(),
             authorized_at: now_ms(),
             last_active: None,
         })

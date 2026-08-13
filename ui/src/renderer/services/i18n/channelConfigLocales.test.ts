@@ -60,6 +60,18 @@ const CHANNEL_SETTINGS_KEYS = [
   'channels.revokeAccess',
   'channels.userRevoked',
   'channels.copyCode',
+  'channels.groupAccessTitle',
+  'channels.groupAccessDescription',
+  'channels.groupAccessAllMembers',
+  'channels.groupAccessAllMembersDesc',
+  'channels.groupAccessAllowlist',
+  'channels.groupAccessAllowlistDesc',
+  'channels.groupAccessDisabled',
+  'channels.groupAccessDisabledDesc',
+  'channels.groupAccessMentionHint',
+  'channels.groupAccessTrustedGroupsHint',
+  'channels.groupAccessSaved',
+  'channels.groupAccessSaveFailed',
   'discord.botToken',
   'discord.botTokenDesc',
   'discord.tokenRequired',
@@ -304,6 +316,21 @@ describe('channel configuration locale coverage', () => {
 
   test('settings channel forms have complete zh-CN copy', () => {
     assertStringKeys('zh-CN settings', zhSettings, CHANNEL_SETTINGS_KEYS);
+  });
+
+  test('zh-CN identifies Lark by its Chinese product name', () => {
+    expect(zhSettings['channels.larkTitle']).toBe('飞书（Lark）');
+  });
+
+  test('zh-CN presents the requested partial-member group policy', () => {
+    expect(zhSettings['channels.groupAccessAllowlist']).toBe(
+      '\u5bf9\u7fa4\u90e8\u5206\u6210\u5458\u5f00\u653e\uff08\u63a8\u8350\uff09'
+    );
+    expect(
+      zhSettings['channels.groupAccessTrustedGroupsHint'].includes(
+        '\u4e0d\u4f1a\u83b7\u5f97\u79c1\u804a\u6216\u5de5\u5177\u6743\u9650'
+      )
+    ).toBe(true);
   });
 
   test('customer service surfaces have complete locale copy', () => {

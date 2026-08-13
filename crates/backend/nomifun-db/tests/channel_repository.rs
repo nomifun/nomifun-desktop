@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use nomifun_db::models::{
-    ChannelPluginRow, ChannelUserRow, NewChannelPairingCodeRow, NewChannelPluginRow,
-    NewChannelSessionRow, NewChannelUserRow,
+    ChannelPendingPromptRow, ChannelPluginRow, ChannelSessionRow, ChannelUserRow,
+    NewChannelPairingCodeRow, NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow,
 };
 use nomifun_db::{
-    DbError, IChannelRepository, SqliteChannelRepository, UpdatePluginStatusParams,
+    DbError, IChannelRepository, PairingApprovalOutcome, SqliteChannelRepository,
+    UpdatePluginStatusParams,
     init_database_memory,
 };
 
@@ -90,6 +91,7 @@ fn plugin_fixture(plugin_type: &str, bot_key: &str) -> NewChannelPluginRow {
         companion_id: None,
         bot_key: Some(bot_key.into()),
         owner_domain: nomifun_db::models::default_owner_domain(),
+        group_access_mode: nomifun_db::models::default_group_access_mode(),
         created_at: now,
         updated_at: now,
     }
@@ -116,6 +118,7 @@ fn user_fixture(
         platform_type: platform_type.into(),
         channel_plugin_id: Some(channel_plugin_id.to_owned()),
         display_name: Some(format!("User {platform_user_id}")),
+        authorization_kind: nomifun_db::models::default_channel_user_authorization_kind(),
         authorized_at: now,
         last_active: None,
     }
@@ -149,9 +152,52 @@ fn session_fixture(
         workspace: None,
         chat_id: Some(chat_id.into()),
         channel_plugin_id: Some(channel_plugin_id.to_owned()),
+        chat_kind: nomifun_db::models::default_channel_chat_kind(),
         created_at: now,
         last_activity: now,
     }
+}
+
+async fn create_session_with_kind(
+    repo: &Arc<dyn IChannelRepository>,
+    user: &ChannelUserRow,
+    plugin: &ChannelPluginRow,
+    chat_id: &str,
+    chat_kind: &str,
+) -> ChannelSessionRow {
+    let mut fixture = session_fixture(&user.channel_user_id, &plugin.channel_plugin_id, chat_id);
+    fixture.chat_kind = chat_kind.to_owned();
+    repo.get_or_create_session(
+        &user.channel_user_id,
+        chat_id,
+        &plugin.channel_plugin_id,
+        &fixture,
+    )
+    .await
+    .unwrap()
+}
+
+async fn enqueue_session_prompt(
+    repo: &Arc<dyn IChannelRepository>,
+    plugin: &ChannelPluginRow,
+    session: &ChannelSessionRow,
+    text: &str,
+) -> ChannelPendingPromptRow {
+    let mut prompt = pending_prompt_fixture(
+        &nomifun_common::ConversationId::new().into_string(),
+        session.chat_id.as_deref().unwrap(),
+        text,
+    );
+    prompt.channel_plugin_id = plugin.channel_plugin_id.clone();
+    prompt.channel_session_id = session.channel_session_id.clone();
+    let nomifun_db::PendingPromptEnqueue::Queued { row, .. } = repo
+        .enqueue_pending_prompt(&prompt, nomifun_common::now_ms())
+        .await
+        .unwrap()
+    else {
+        panic!("fixture prompt must be queued");
+    };
+    row
 }
 
 fn pairing_fixture(
@@ -209,6 +255,158 @@ async fn duplicate_platform_user_is_rejected_within_one_plugin() {
     let duplicate = user_fixture(&plugin.channel_plugin_id, "tg_100", "telegram");
     assert!(matches!(
         repo.create_user(&duplicate).await,
+        Err(DbError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn plugin_group_access_mode_roundtrips_and_rejects_unknown_values() {
+    let (repo, _db) = repo().await;
+    let plugin = create_plugin(&repo, "lark", "lark-bot").await;
+    assert_eq!(plugin.group_access_mode, "allowlist");
+
+    // Simulate a full-row writer that loaded the plugin before the dedicated
+    // policy update. Its stale policy field must not overwrite the newer value.
+    let mut stale_full_row = plugin.clone();
+
+    repo.update_plugin_group_access_mode_and_clear_non_direct_sessions(
+        &plugin.channel_plugin_id,
+        "all_members",
+    )
+    .await
+    .unwrap();
+
+    stale_full_row.name = "renamed by stale full-row writer".into();
+    stale_full_row.group_access_mode = "stale-invalid-policy".into();
+    stale_full_row.updated_at += 1;
+    let after_full_update = repo.update_plugin(&stale_full_row).await.unwrap();
+    assert_eq!(after_full_update.name, "renamed by stale full-row writer");
+    assert_eq!(after_full_update.group_access_mode, "all_members");
+
+    assert_eq!(
+        repo.get_plugin(&plugin.channel_plugin_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .group_access_mode,
+        "all_members"
+    );
+
+    assert!(matches!(
+        repo.update_plugin_group_access_mode_and_clear_non_direct_sessions(
+            &plugin.channel_plugin_id,
+            "members",
+        )
+        .await,
+        Err(DbError::Conflict(_))
+    ));
+    assert_eq!(
+        repo.get_plugin(&plugin.channel_plugin_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .group_access_mode,
+        "all_members"
+    );
+}
+
+#[tokio::test]
+async fn auto_group_identity_is_idempotent_hidden_and_promotable() {
+    let (repo, _db) = repo().await;
+    let plugin = create_plugin(&repo, "lark", "lark-bot").await;
+    let mut automatic = user_fixture(&plugin.channel_plugin_id, "ou_group", "lark");
+    automatic.authorization_kind = "auto_group".into();
+    assert!(matches!(
+        repo.create_user(&automatic).await,
+        Err(DbError::Conflict(_))
+    ));
+
+    let first = repo.ensure_auto_group_user(&automatic).await.unwrap();
+    let replay = repo.ensure_auto_group_user(&automatic).await.unwrap();
+    assert_eq!(replay.channel_user_id, first.channel_user_id);
+    assert_eq!(first.authorization_kind, "auto_group");
+    assert!(repo.get_all_users().await.unwrap().is_empty());
+    assert_eq!(
+        repo.get_user(&first.channel_user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .authorization_kind,
+        "auto_group"
+    );
+
+    let mut approval = automatic.clone();
+    approval.authorization_kind = "approved".into();
+    approval.authorized_at += 1;
+    let approved = repo.create_user(&approval).await.unwrap();
+    assert_eq!(approved.channel_user_id, first.channel_user_id);
+    assert_eq!(approved.authorization_kind, "approved");
+    assert_eq!(repo.get_all_users().await.unwrap().len(), 1);
+
+    // Seeing the approved user in another open-group event never downgrades it.
+    let replay_after_approval = repo.ensure_auto_group_user(&automatic).await.unwrap();
+    assert_eq!(replay_after_approval.channel_user_id, first.channel_user_id);
+    assert_eq!(replay_after_approval.authorization_kind, "approved");
+}
+
+#[tokio::test]
+async fn classifying_legacy_session_clears_conversation_atomically() {
+    let (repo, db) = repo().await;
+    let plugin = create_plugin(&repo, "lark", "lark-bot").await;
+    let user = create_user(&repo, &plugin.channel_plugin_id, "ou_group").await;
+    let legacy = repo
+        .get_or_create_session(
+            &user.channel_user_id,
+            "oc_group",
+            &plugin.channel_plugin_id,
+            &session_fixture(
+                &user.channel_user_id,
+                &plugin.channel_plugin_id,
+                "oc_group",
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy.chat_kind, "unknown");
+
+    sqlx::query(
+        "UPDATE channel_sessions SET conversation_id = ? WHERE channel_session_id = ?",
+    )
+    .bind("0190f5fe-7c00-7a00-8abc-0123456789dd")
+    .bind(&legacy.channel_session_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let mut classified = session_fixture(
+        &user.channel_user_id,
+        &plugin.channel_plugin_id,
+        "oc_group",
+    );
+    classified.chat_kind = "group".into();
+    let group_session = repo
+        .get_or_create_session(
+            &user.channel_user_id,
+            "oc_group",
+            &plugin.channel_plugin_id,
+            &classified,
+        )
+        .await
+        .unwrap();
+    assert_eq!(group_session.channel_session_id, legacy.channel_session_id);
+    assert_eq!(group_session.chat_kind, "group");
+    assert!(group_session.conversation_id.is_none());
+
+    let mut conflicting = classified;
+    conflicting.chat_kind = "direct".into();
+    assert!(matches!(
+        repo.get_or_create_session(
+            &user.channel_user_id,
+            "oc_group",
+            &plugin.channel_plugin_id,
+            &conflicting,
+        )
+        .await,
         Err(DbError::Conflict(_))
     ));
 }
@@ -302,6 +500,619 @@ async fn session_identity_is_scoped_by_plugin_user_and_chat() {
     assert_eq!(a1.channel_session_id, a1_replayed.channel_session_id);
     assert_ne!(a1.channel_session_id, a2.channel_session_id);
     assert_ne!(a1.channel_session_id, b1.channel_session_id);
+}
+
+#[tokio::test]
+async fn deleting_group_sessions_cancels_only_their_queued_prompts() {
+    let (repo, db) = repo().await;
+    let first_plugin = create_plugin(&repo, "telegram", "telegram-bot-a").await;
+    let second_plugin = create_plugin(&repo, "telegram", "telegram-bot-b").await;
+    let first_user = create_user(&repo, &first_plugin.channel_plugin_id, "tg_1").await;
+    let second_user = create_user(&repo, &second_plugin.channel_plugin_id, "tg_2").await;
+
+    let mut group_fixture = session_fixture(
+        &first_user.channel_user_id,
+        &first_plugin.channel_plugin_id,
+        "group-a",
+    );
+    group_fixture.chat_kind = "group".into();
+    let group_session = repo
+        .get_or_create_session(
+            &first_user.channel_user_id,
+            "group-a",
+            &first_plugin.channel_plugin_id,
+            &group_fixture,
+        )
+        .await
+        .unwrap();
+
+    let mut direct_fixture = session_fixture(
+        &first_user.channel_user_id,
+        &first_plugin.channel_plugin_id,
+        "direct-a",
+    );
+    direct_fixture.chat_kind = "direct".into();
+    let direct_session = repo
+        .get_or_create_session(
+            &first_user.channel_user_id,
+            "direct-a",
+            &first_plugin.channel_plugin_id,
+            &direct_fixture,
+        )
+        .await
+        .unwrap();
+
+    let unknown_session = repo
+        .get_or_create_session(
+            &first_user.channel_user_id,
+            "unknown-a",
+            &first_plugin.channel_plugin_id,
+            &session_fixture(
+                &first_user.channel_user_id,
+                &first_plugin.channel_plugin_id,
+                "unknown-a",
+            ),
+        )
+        .await
+        .unwrap();
+
+    let mut other_group_fixture = session_fixture(
+        &second_user.channel_user_id,
+        &second_plugin.channel_plugin_id,
+        "group-b",
+    );
+    other_group_fixture.chat_kind = "group".into();
+    let other_group_session = repo
+        .get_or_create_session(
+            &second_user.channel_user_id,
+            "group-b",
+            &second_plugin.channel_plugin_id,
+            &other_group_fixture,
+        )
+        .await
+        .unwrap();
+
+    let now = nomifun_common::now_ms();
+    let mut queued = Vec::new();
+    for (plugin_id, chat_id, session_id, text) in [
+        (
+            first_plugin.channel_plugin_id.as_str(),
+            "group-a",
+            group_session.channel_session_id.as_str(),
+            "group prompt",
+        ),
+        (
+            first_plugin.channel_plugin_id.as_str(),
+            "direct-a",
+            direct_session.channel_session_id.as_str(),
+            "direct prompt",
+        ),
+        (
+            first_plugin.channel_plugin_id.as_str(),
+            "unknown-a",
+            unknown_session.channel_session_id.as_str(),
+            "unknown prompt",
+        ),
+        (
+            second_plugin.channel_plugin_id.as_str(),
+            "group-b",
+            other_group_session.channel_session_id.as_str(),
+            "other plugin prompt",
+        ),
+    ] {
+        let mut prompt = pending_prompt_fixture(
+            &nomifun_common::ConversationId::new().into_string(),
+            chat_id,
+            text,
+        );
+        prompt.channel_plugin_id = plugin_id.to_owned();
+        prompt.channel_session_id = session_id.to_owned();
+        let nomifun_db::PendingPromptEnqueue::Queued { row, .. } =
+            repo.enqueue_pending_prompt(&prompt, now).await.unwrap()
+        else {
+            panic!("fixture prompt must be queued");
+        };
+        queued.push(row);
+    }
+
+    repo.delete_group_sessions_by_channel(&first_plugin.channel_plugin_id)
+        .await
+        .unwrap();
+
+    assert!(repo.get_session(&group_session.channel_session_id).await.unwrap().is_none());
+    for retained in [&direct_session, &unknown_session, &other_group_session] {
+        assert!(
+            repo.get_session(&retained.channel_session_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "non-target session {} must be retained",
+            retained.channel_session_id
+        );
+    }
+
+    let states: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT prompt_id, state, settled_at FROM channel_pending_prompts ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(states.len(), 4);
+    assert_eq!(states[0].0, queued[0].prompt_id);
+    assert_eq!(states[0].1, "cancelled");
+    assert!(states[0].2.is_some());
+    for (index, retained) in states.iter().enumerate().skip(1) {
+        assert_eq!(retained.0, queued[index].prompt_id);
+        assert_eq!(retained.1, "queued");
+        assert!(retained.2.is_none());
+    }
+}
+
+#[tokio::test]
+async fn atomic_group_access_update_rolls_back_then_clears_non_direct_sessions() {
+    let (repo, db) = repo().await;
+    let target_plugin = create_plugin(&repo, "lark", "lark-bot-a").await;
+    let other_plugin = create_plugin(&repo, "lark", "lark-bot-b").await;
+    let target_user = create_user(&repo, &target_plugin.channel_plugin_id, "ou_target").await;
+    let other_user = create_user(&repo, &other_plugin.channel_plugin_id, "ou_other").await;
+
+    let mut target_group_fixture = session_fixture(
+        &target_user.channel_user_id,
+        &target_plugin.channel_plugin_id,
+        "target-group",
+    );
+    target_group_fixture.chat_kind = "group".into();
+    let target_group = repo
+        .get_or_create_session(
+            &target_user.channel_user_id,
+            "target-group",
+            &target_plugin.channel_plugin_id,
+            &target_group_fixture,
+        )
+        .await
+        .unwrap();
+
+    let target_unknown = repo
+        .get_or_create_session(
+            &target_user.channel_user_id,
+            "target-unknown",
+            &target_plugin.channel_plugin_id,
+            &session_fixture(
+                &target_user.channel_user_id,
+                &target_plugin.channel_plugin_id,
+                "target-unknown",
+            ),
+        )
+        .await
+        .unwrap();
+
+    let mut target_direct_fixture = session_fixture(
+        &target_user.channel_user_id,
+        &target_plugin.channel_plugin_id,
+        "target-direct",
+    );
+    target_direct_fixture.chat_kind = "direct".into();
+    let target_direct = repo
+        .get_or_create_session(
+            &target_user.channel_user_id,
+            "target-direct",
+            &target_plugin.channel_plugin_id,
+            &target_direct_fixture,
+        )
+        .await
+        .unwrap();
+
+    let mut other_group_fixture = session_fixture(
+        &other_user.channel_user_id,
+        &other_plugin.channel_plugin_id,
+        "other-group",
+    );
+    other_group_fixture.chat_kind = "group".into();
+    let other_group = repo
+        .get_or_create_session(
+            &other_user.channel_user_id,
+            "other-group",
+            &other_plugin.channel_plugin_id,
+            &other_group_fixture,
+        )
+        .await
+        .unwrap();
+
+    let now = nomifun_common::now_ms();
+    let mut queued = Vec::new();
+    for (plugin_id, session, text) in [
+        (
+            target_plugin.channel_plugin_id.as_str(),
+            &target_group,
+            "target group prompt",
+        ),
+        (
+            target_plugin.channel_plugin_id.as_str(),
+            &target_unknown,
+            "target unknown prompt",
+        ),
+        (
+            target_plugin.channel_plugin_id.as_str(),
+            &target_direct,
+            "target direct prompt",
+        ),
+        (
+            other_plugin.channel_plugin_id.as_str(),
+            &other_group,
+            "other group prompt",
+        ),
+    ] {
+        let mut prompt = pending_prompt_fixture(
+            &nomifun_common::ConversationId::new().into_string(),
+            session.chat_id.as_deref().unwrap(),
+            text,
+        );
+        prompt.channel_plugin_id = plugin_id.to_owned();
+        prompt.channel_session_id = session.channel_session_id.clone();
+        let nomifun_db::PendingPromptEnqueue::Queued { row, .. } =
+            repo.enqueue_pending_prompt(&prompt, now).await.unwrap()
+        else {
+            panic!("fixture prompt must be queued");
+        };
+        queued.push(row);
+    }
+
+    // Force the final session deletion to fail after the policy write, queue
+    // cancellation and binding deletion. Every earlier mutation must roll back.
+    let trigger_sql = format!(
+        "CREATE TRIGGER fail_non_direct_channel_session_delete \
+         BEFORE DELETE ON channel_sessions \
+         WHEN OLD.channel_plugin_id = '{}' \
+           AND OLD.chat_kind IN ('group', 'unknown') \
+         BEGIN \
+             SELECT RAISE(ABORT, 'forced non-direct cleanup failure'); \
+         END",
+        target_plugin.channel_plugin_id
+    );
+    sqlx::query(&trigger_sql)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        repo.update_plugin_group_access_mode_and_clear_non_direct_sessions(
+            &target_plugin.channel_plugin_id,
+            "all_members",
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        repo.get_plugin(&target_plugin.channel_plugin_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .group_access_mode,
+        "allowlist"
+    );
+    for session in [&target_group, &target_unknown, &target_direct, &other_group] {
+        assert!(
+            repo.get_session(&session.channel_session_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "failed transaction must retain session {}",
+            session.channel_session_id
+        );
+    }
+    let rolled_back_states: Vec<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT state, settled_at FROM channel_pending_prompts ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert!(
+        rolled_back_states
+            .iter()
+            .all(|(state, settled_at)| state == "queued" && settled_at.is_none())
+    );
+
+    sqlx::query("DROP TRIGGER fail_non_direct_channel_session_delete")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    repo.update_plugin_group_access_mode_and_clear_non_direct_sessions(
+        &target_plugin.channel_plugin_id,
+        "all_members",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo.get_plugin(&target_plugin.channel_plugin_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .group_access_mode,
+        "all_members"
+    );
+    for removed in [&target_group, &target_unknown] {
+        assert!(
+            repo.get_session(&removed.channel_session_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "target non-direct session {} must be retired",
+            removed.channel_session_id
+        );
+    }
+    for retained in [&target_direct, &other_group] {
+        assert!(
+            repo.get_session(&retained.channel_session_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "direct or other-plugin session {} must be retained",
+            retained.channel_session_id
+        );
+    }
+
+    let states: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT prompt_id, state, settled_at FROM channel_pending_prompts ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(states.len(), 4);
+    for index in [0_usize, 1] {
+        assert_eq!(states[index].0, queued[index].prompt_id);
+        assert_eq!(states[index].1, "cancelled");
+        assert!(states[index].2.is_some());
+    }
+    for index in [2_usize, 3] {
+        assert_eq!(states[index].0, queued[index].prompt_id);
+        assert_eq!(states[index].1, "queued");
+        assert!(states[index].2.is_none());
+    }
+
+    let missing = nomifun_common::ChannelPluginId::new().into_string();
+    assert!(matches!(
+        repo.update_plugin_group_access_mode_and_clear_non_direct_sessions(
+            &missing,
+            "disabled"
+        )
+        .await,
+        Err(DbError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn pairing_approval_atomically_retires_guest_non_direct_authority() {
+    let (repo, db) = repo().await;
+    let plugin = create_plugin(&repo, "telegram", "pairing-promotion-bot").await;
+    let other_plugin = create_plugin(&repo, "telegram", "pairing-other-bot").await;
+    let mut guest_fixture = user_fixture(
+        &plugin.channel_plugin_id,
+        "tg_guest_promotion",
+        "telegram",
+    );
+    guest_fixture.authorization_kind = "auto_group".into();
+    let guest = repo.ensure_auto_group_user(&guest_fixture).await.unwrap();
+    let other_user = create_user(&repo, &other_plugin.channel_plugin_id, "tg_other").await;
+
+    let group = create_session_with_kind(&repo, &guest, &plugin, "promotion-group", "group").await;
+    let unknown =
+        create_session_with_kind(&repo, &guest, &plugin, "promotion-unknown", "unknown").await;
+    let direct =
+        create_session_with_kind(&repo, &guest, &plugin, "promotion-direct", "direct").await;
+    let other =
+        create_session_with_kind(&repo, &other_user, &other_plugin, "other-group", "group").await;
+    let prompts = vec![
+        enqueue_session_prompt(&repo, &plugin, &group, "promotion group").await,
+        enqueue_session_prompt(&repo, &plugin, &unknown, "promotion unknown").await,
+        enqueue_session_prompt(&repo, &plugin, &direct, "promotion direct").await,
+        enqueue_session_prompt(&repo, &other_plugin, &other, "other user").await,
+    ];
+
+    let now = nomifun_common::now_ms();
+    let code = "730001";
+    repo.create_pairing(&NewChannelPairingCodeRow {
+        code: code.into(),
+        platform_user_id: guest.platform_user_id.clone(),
+        platform_type: guest.platform_type.clone(),
+        channel_plugin_id: Some(plugin.channel_plugin_id.clone()),
+        display_name: Some("Approved guest".into()),
+        requested_at: now,
+        expires_at: now + 60_000,
+        status: "pending".into(),
+    })
+    .await
+    .unwrap();
+
+    // Abort late in the transition, after the user/status/queue writes. The
+    // transaction must restore the original guest authority and queued work.
+    let trigger_sql = format!(
+        "CREATE TRIGGER fail_pairing_session_retirement \
+         BEFORE DELETE ON channel_sessions \
+         WHEN OLD.channel_user_id = '{}' \
+           AND OLD.chat_kind IN ('group', 'unknown') \
+         BEGIN \
+             SELECT RAISE(ABORT, 'forced pairing retirement failure'); \
+         END",
+        guest.channel_user_id
+    );
+    sqlx::query(&trigger_sql)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(
+        repo.approve_pairing_and_retire_non_direct_sessions(code, now + 1)
+            .await
+            .is_err()
+    );
+    let rolled_back_user = repo
+        .get_user(&guest.channel_user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rolled_back_user.authorization_kind, "auto_group");
+    assert_eq!(
+        repo.get_pairing_by_code(code)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+    for session in [&group, &unknown, &direct, &other] {
+        assert!(
+            repo.get_session(&session.channel_session_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    let rolled_back_states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM channel_pending_prompts ORDER BY id")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(rolled_back_states, vec!["queued"; 4]);
+
+    sqlx::query("DROP TRIGGER fail_pairing_session_retirement")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let PairingApprovalOutcome::Approved(promoted) = repo
+        .approve_pairing_and_retire_non_direct_sessions(code, now + 2)
+        .await
+        .unwrap()
+    else {
+        panic!("valid pending pairing must be approved");
+    };
+    assert_eq!(promoted.channel_user_id, guest.channel_user_id);
+    assert_eq!(promoted.authorization_kind, "approved");
+    assert_eq!(
+        repo.get_pairing_by_code(code)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "approved"
+    );
+    for removed in [&group, &unknown] {
+        assert!(
+            repo.get_session(&removed.channel_session_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    for retained in [&direct, &other] {
+        assert!(
+            repo.get_session(&retained.channel_session_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    let states: Vec<(String, String)> = sqlx::query_as(
+        "SELECT prompt_id, state FROM channel_pending_prompts ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    for index in [0_usize, 1] {
+        assert_eq!(states[index], (prompts[index].prompt_id.clone(), "cancelled".into()));
+    }
+    for index in [2_usize, 3] {
+        assert_eq!(states[index], (prompts[index].prompt_id.clone(), "queued".into()));
+    }
+}
+
+#[tokio::test]
+async fn user_revocation_atomically_cancels_every_chat_kind_and_preserves_others() {
+    let (repo, db) = repo().await;
+    let plugin = create_plugin(&repo, "lark", "revocation-bot").await;
+    let target = create_user(&repo, &plugin.channel_plugin_id, "ou_revoked").await;
+    let other = create_user(&repo, &plugin.channel_plugin_id, "ou_retained").await;
+
+    let group = create_session_with_kind(&repo, &target, &plugin, "revoke-group", "group").await;
+    let unknown =
+        create_session_with_kind(&repo, &target, &plugin, "revoke-unknown", "unknown").await;
+    let direct = create_session_with_kind(&repo, &target, &plugin, "revoke-direct", "direct").await;
+    let other_direct =
+        create_session_with_kind(&repo, &other, &plugin, "other-direct", "direct").await;
+    let prompts = vec![
+        enqueue_session_prompt(&repo, &plugin, &group, "revoke group").await,
+        enqueue_session_prompt(&repo, &plugin, &unknown, "revoke unknown").await,
+        enqueue_session_prompt(&repo, &plugin, &direct, "revoke direct").await,
+        enqueue_session_prompt(&repo, &plugin, &other_direct, "other direct").await,
+    ];
+
+    let trigger_sql = format!(
+        "CREATE TRIGGER fail_channel_user_revocation \
+         BEFORE DELETE ON channel_users \
+         WHEN OLD.channel_user_id = '{}' \
+         BEGIN \
+             SELECT RAISE(ABORT, 'forced user revocation failure'); \
+         END",
+        target.channel_user_id
+    );
+    sqlx::query(&trigger_sql)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(
+        repo.revoke_user_and_cancel_pending(&target.channel_user_id, nomifun_common::now_ms())
+            .await
+            .is_err()
+    );
+    assert!(repo.get_user(&target.channel_user_id).await.unwrap().is_some());
+    for session in [&group, &unknown, &direct, &other_direct] {
+        assert!(
+            repo.get_session(&session.channel_session_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    let rolled_back_states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM channel_pending_prompts ORDER BY id")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(rolled_back_states, vec!["queued"; 4]);
+
+    sqlx::query("DROP TRIGGER fail_channel_user_revocation")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    repo.revoke_user_and_cancel_pending(&target.channel_user_id, nomifun_common::now_ms())
+        .await
+        .unwrap();
+    assert!(repo.get_user(&target.channel_user_id).await.unwrap().is_none());
+    assert!(repo.get_user(&other.channel_user_id).await.unwrap().is_some());
+    for removed in [&group, &unknown, &direct] {
+        assert!(
+            repo.get_session(&removed.channel_session_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(
+        repo.get_session(&other_direct.channel_session_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let states: Vec<(String, String)> = sqlx::query_as(
+        "SELECT prompt_id, state FROM channel_pending_prompts ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    for index in [0_usize, 1, 2] {
+        assert_eq!(states[index], (prompts[index].prompt_id.clone(), "cancelled".into()));
+    }
+    assert_eq!(states[3], (prompts[3].prompt_id.clone(), "queued".into()));
 }
 
 #[tokio::test]

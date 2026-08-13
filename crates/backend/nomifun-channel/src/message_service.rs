@@ -7,7 +7,10 @@ use nomifun_api_types::{
 use nomifun_common::{AgentType, ConversationSource, MessagePosition, MessageType};
 use nomifun_conversation::ConversationService;
 use nomifun_db::IChannelRepository;
-use nomifun_db::models::ChannelSessionRow;
+use nomifun_db::models::{
+    CHANNEL_CHAT_KIND_DIRECT, CHANNEL_CHAT_KIND_GROUP, CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE,
+    CHANNEL_USER_AUTHORIZATION_AUTO_GROUP, ChannelSessionRow,
+};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -141,9 +144,14 @@ impl ChannelMessageService {
     }
 
     /// The customer-service agent bound to `channel_plugin_id`, if the seam is
-    /// wired and a binding exists. The message loop uses this to skip the
-    /// conversation-based busy guard (客服域自己管并发).
+    /// wired, the bot belongs to the customer-service domain, and a binding
+    /// exists. A stray binding on a companion bot is ignored. The message loop
+    /// uses this to skip the conversation-based busy guard (客服域自己管并发).
     pub async fn cs_bound_agent(&self, channel_plugin_id: &str) -> Option<String> {
+        let plugin = self.repo.get_plugin(channel_plugin_id).await.ok()??;
+        if plugin.owner_domain != CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE {
+            return None;
+        }
         let routing = self.cs_routing.as_ref()?;
         routing.binding_for(channel_plugin_id).await
     }
@@ -159,6 +167,9 @@ impl ChannelMessageService {
         chat_id: &str,
         text: &str,
     ) -> Result<String, String> {
+        if self.cs_bound_agent(channel_plugin_id).await.as_deref() != Some(cs_agent_id) {
+            return Err("customer-service bot binding is unavailable".to_owned());
+        }
         let Some(routing) = self.cs_routing.as_ref() else {
             return Err("customer-service routing not configured".to_owned());
         };
@@ -346,27 +357,66 @@ impl ChannelMessageService {
         // routed in the message loop BEFORE this method — its turns must never
         // create or touch a Conversation. If a caller still lands here with a
         // bound bot, refuse instead of leaking a conversation.
-        if let Some(channel_plugin_id) = session.channel_plugin_id.as_deref()
-            && self.cs_bound_agent(channel_plugin_id).await.is_some()
+        if let Some(channel_plugin_id) = session.channel_plugin_id.as_deref() {
+            let plugin = self
+                .repo
+                .get_plugin(channel_plugin_id)
+                .await?
+                .ok_or_else(|| ChannelError::PluginNotFound(channel_plugin_id.to_owned()))?;
+            if plugin.owner_domain == CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE {
+                return Err(ChannelError::MessageSendFailed(
+                    "customer-service bot must not enter the conversation path".into(),
+                ));
+            }
+        }
+
+        // Admission normally rejects ambiguous provider events before a
+        // session can dispatch. Keep the same fail-closed boundary here for
+        // stale queue rows and internal callers that bypass admission: an
+        // unknown scope must never be treated as direct or gain a fallback
+        // dedicated conversation. Plugin identity is validated first above so
+        // every scoped session also fails closed when its bot row is missing.
+        if session.chat_kind != CHANNEL_CHAT_KIND_DIRECT
+            && session.chat_kind != CHANNEL_CHAT_KIND_GROUP
         {
-            return Err(ChannelError::MessageSendFailed(
-                "customer-service bound bot must not enter the conversation path".into(),
+            return Err(ChannelError::UserNotAuthorized(
+                "channel chat kind is unknown; dispatch refused".into(),
             ));
         }
 
-        // Resolve the target conversation. A nomi channel turn bound to a
-        // companion is routed into that companion's ONE persistent session, so
-        // the desktop bubble, the chat tab, and every IM chat share a single
-        // transcript (no more separate per-chat channel conversation
-        // leaking into the homepage work list). Non-companion / ACP / unbound
-        // channels keep a dedicated per-session conversation.
+        // Resolve the target conversation. A DIRECT Nomi turn bound to a
+        // companion uses that companion's one private persistent session.
+        // Every GROUP turn is forced into a dedicated channel conversation so
+        // group members can never read or pollute the owner's private transcript.
+        // Non-companion / ACP / unbound channels are dedicated as before.
         let agent_type = parse_agent_type(&session.agent_type);
+        let is_direct = session.chat_kind == CHANNEL_CHAT_KIND_DIRECT;
+        let is_group = session.chat_kind == CHANNEL_CHAT_KIND_GROUP;
+        let auto_group_guest = if is_group {
+            let user = self
+                .repo
+                .get_user(&session.channel_user_id)
+                .await?
+                .ok_or_else(|| ChannelError::UserNotFound(session.channel_user_id.clone()))?;
+            user.authorization_kind == CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
+        } else {
+            false
+        };
+        if auto_group_guest && agent_type != AgentType::Nomi {
+            return Err(ChannelError::UserNotAuthorized(
+                "open-group guests may only use the restricted Nomi agent".into(),
+            ));
+        }
         let companion_id = if agent_type == AgentType::Nomi {
             self.resolve_session_companion(session, platform).await
         } else {
             None
         };
-        let conversation_id = if let Some(cid) = companion_id.as_deref() {
+        let uses_shared_companion_session = is_direct && companion_id.is_some();
+        let conversation_id = if uses_shared_companion_session {
+            let cid = companion_id
+                .as_deref()
+                .expect("shared companion session requires a companion id");
             match self.channel_agent_profile.as_ref() {
                 Some(profile) => match profile.ensure_companion_session(cid).await {
                     Some(id) => id,
@@ -386,9 +436,15 @@ impl ChannelMessageService {
                 }
             }
         } else {
-            match &session.conversation_id {
-                Some(cid) => cid.clone(),
-                None => self.create_conversation_for_session(session, platform).await?,
+            match self
+                .reusable_session_conversation(session, auto_group_guest)
+                .await?
+            {
+                Some(cid) => cid,
+                None => {
+                    self.create_conversation_for_session(session, platform, auto_group_guest)
+                        .await?
+                }
             }
         };
 
@@ -398,7 +454,7 @@ impl ChannelMessageService {
         // is what lets the floating window render it as a remote IM turn.
         // Dedicated per-chat channel conversations keep their extra-derived marker
         // (marker None → send_message falls back to extra).
-        let channel_platform = companion_id.as_ref().map(|_| platform.to_string());
+        let channel_platform = uses_shared_companion_session.then(|| platform.to_string());
         self.dispatch_to_conversation(
             &session.channel_session_id,
             conversation_id,
@@ -498,6 +554,62 @@ impl ChannelMessageService {
         })
     }
 
+    /// A group session may only reuse a conversation created for that exact
+    /// group chat and authorization tier. This is a defensive backstop for
+    /// legacy/stale bindings: a row that still points at the companion owner's
+    /// private conversation, or an unrestricted conversation attached to an
+    /// `auto_group` identity, is never dispatched into.
+    async fn reusable_session_conversation(
+        &self,
+        session: &ChannelSessionRow,
+        auto_group_guest: bool,
+    ) -> Result<Option<String>, ChannelError> {
+        let Some(conversation_id) = session.conversation_id.as_deref() else {
+            return Ok(None);
+        };
+        if session.chat_kind == CHANNEL_CHAT_KIND_DIRECT {
+            return Ok(Some(conversation_id.to_owned()));
+        }
+        if session.chat_kind != CHANNEL_CHAT_KIND_GROUP {
+            warn!(
+                channel_session_id = %session.channel_session_id,
+                conversation_id,
+                "discarding conversation binding for unknown chat kind"
+            );
+            return Ok(None);
+        }
+
+        let conversation = match self
+            .conversation_svc
+            .get(&self.owner_user_id, conversation_id)
+            .await
+        {
+            Ok(conversation) => conversation,
+            Err(nomifun_common::AppError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(ChannelError::MessageSendFailed(error.to_string())),
+        };
+        let belongs_to_group = session.chat_id.is_some()
+            && conversation.channel_chat_id.as_deref() == session.chat_id.as_deref();
+        let is_group_guest = conversation
+            .extra
+            .get("channel_group_guest")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !belongs_to_group || is_group_guest != auto_group_guest {
+            warn!(
+                channel_session_id = %session.channel_session_id,
+                conversation_id,
+                belongs_to_group,
+                expected_group_guest = auto_group_guest,
+                actual_group_guest = is_group_guest,
+                "discarding unsafe or stale group conversation binding"
+            );
+            return Ok(None);
+        }
+
+        Ok(Some(conversation_id.to_owned()))
+    }
+
     /// Creates a new conversation for a channel session.
     ///
     /// Sets `source` to the appropriate platform and `channel_chat_id`
@@ -506,6 +618,7 @@ impl ChannelMessageService {
         &self,
         session: &ChannelSessionRow,
         platform: PluginType,
+        auto_group_guest: bool,
     ) -> Result<String, ChannelError> {
         let source = platform_to_source(platform);
         let agent_type = parse_agent_type(&session.agent_type);
@@ -544,6 +657,9 @@ impl ChannelMessageService {
         }
 
         let mut extra = Self::build_channel_extra(agent_config.backend.as_deref());
+        if auto_group_guest {
+            extra["channel_group_guest"] = serde_json::Value::Bool(true);
+        }
         apply_channel_agent_context(&mut extra, agent_type, platform, channel_companion_id.as_deref());
         let name = channel_conversation_name(
             platform,
@@ -581,11 +697,16 @@ impl ChannelMessageService {
             extra,
         };
 
-        let creation_key = channel_creation_key(
-            &self.owner_user_id,
-            session,
-            "dedicated",
-        );
+        let creation_scope = if session.chat_kind == CHANNEL_CHAT_KIND_GROUP {
+            if auto_group_guest {
+                "dedicated-group-guest"
+            } else {
+                "dedicated-group-approved"
+            }
+        } else {
+            "dedicated"
+        };
+        let creation_key = channel_creation_key(&self.owner_user_id, session, creation_scope);
         let response = self
             .conversation_svc
             .create_idempotent(&self.owner_user_id, req, &creation_key)

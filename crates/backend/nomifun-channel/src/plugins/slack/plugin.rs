@@ -6,11 +6,12 @@
 //! - `stop`: signal shutdown, wait for loop exit
 //! - `send_message` / `edit_message`: REST via `chat.postMessage` / `chat.update`
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::Client;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -20,9 +21,8 @@ use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_err
 use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::plugins::callback::{format_callback_data, parse_callback_data};
 use crate::types::{
-    ActionContext, BotInfo, MessageContentType, PluginConfig, PluginStatus,
-    PluginType, UnifiedAction, UnifiedIncomingMessage, UnifiedMessageContent,
-    UnifiedOutgoingMessage, UnifiedUser,
+    ActionContext, BotInfo, ChatKind, MentionState, MessageContentType, PluginConfig, PluginStatus, PluginType,
+    UnifiedAction, UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
 };
 
 use super::api::SlackApi;
@@ -30,6 +30,20 @@ use super::types::{
     ActionsBlock, ButtonElement, EventsApiPayload, InteractivePayload, PlainTextObject,
     PostMessageRequest, SocketAck, SocketEnvelope, UpdateMessageRequest,
 };
+
+/// Callback payloads omit `channel_type`, so retain the last structured
+/// message observation for a bounded period. Unknown chats deliberately stay
+/// unknown and are rejected by the core admission layer.
+const CHAT_KIND_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const CHAT_KIND_CACHE_CAPACITY: usize = 2_048;
+
+#[derive(Clone, Copy)]
+struct CachedChatKind {
+    kind: ChatKind,
+    observed_at: Instant,
+}
+
+type ChatKindCache = Arc<Mutex<HashMap<String, CachedChatKind>>>;
 
 /// Slack channel plugin implementing Socket Mode (fully outbound WebSocket).
 pub struct SlackPlugin {
@@ -43,6 +57,8 @@ pub struct SlackPlugin {
     shutdown_tx: Option<watch::Sender<bool>>,
     /// The bot's own user ID (for self-loop guard + mention gating).
     bot_user_id: Option<String>,
+    /// Chat scope learned only from normalized Slack message events.
+    chat_kind_cache: ChatKindCache,
 }
 
 impl Default for SlackPlugin {
@@ -56,6 +72,7 @@ impl Default for SlackPlugin {
             ws_handle: None,
             shutdown_tx: None,
             bot_user_id: None,
+            chat_kind_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -70,6 +87,7 @@ impl SlackPlugin {
 impl ChannelPlugin for SlackPlugin {
     async fn initialize(&mut self, config: PluginConfig, callbacks: PluginCallbacks) -> Result<(), ChannelError> {
         self.status.set(PluginStatus::Initializing);
+        self.chat_kind_cache.lock().await.clear();
 
         let bot_token = config
             .credentials
@@ -152,6 +170,7 @@ impl ChannelPlugin for SlackPlugin {
             .clone()
             .ok_or_else(|| ChannelError::PlatformApi("Slack callbacks not initialized".into()))?;
         let bot_user_id = self.bot_user_id.clone().unwrap_or_default();
+        let chat_kind_cache = Arc::clone(&self.chat_kind_cache);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         self.shutdown_tx = Some(shutdown_tx);
@@ -162,6 +181,7 @@ impl ChannelPlugin for SlackPlugin {
             self.status.clone(),
             shutdown_rx,
             bot_user_id,
+            chat_kind_cache,
         )));
 
         self.status.set(PluginStatus::Running);
@@ -281,6 +301,7 @@ async fn socket_mode_loop(
     status: SharedPluginStatus,
     mut shutdown_rx: watch::Receiver<bool>,
     bot_user_id: String,
+    chat_kind_cache: ChatKindCache,
 ) {
     let mut consecutive_errors: u32 = 0;
 
@@ -325,6 +346,7 @@ async fn socket_mode_loop(
             &message_tx,
             &mut shutdown_rx,
             &bot_user_id,
+            &chat_kind_cache,
         )
         .await
         {
@@ -369,6 +391,7 @@ async fn connect_and_listen(
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
     shutdown_rx: &mut watch::Receiver<bool>,
     bot_user_id: &str,
+    chat_kind_cache: &ChatKindCache,
 ) -> Result<(), ChannelError> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::connect_async_tls_with_config;
@@ -420,7 +443,7 @@ async fn connect_and_listen(
                                 if let Some(payload_val) = envelope.payload {
                                     if let Ok(payload) = serde_json::from_value::<EventsApiPayload>(payload_val) {
                                         if let Some(event) = payload.event {
-                                            handle_event(&event, message_tx, bot_user_id).await;
+                                            handle_event(&event, message_tx, bot_user_id, chat_kind_cache).await;
                                         }
                                     }
                                 }
@@ -435,6 +458,7 @@ async fn connect_and_listen(
                                                 &payload,
                                                 stable_envelope_id,
                                                 message_tx,
+                                                chat_kind_cache,
                                             )
                                             .await;
                                         } else {
@@ -510,6 +534,7 @@ async fn handle_event(
     event: &super::types::SlackEvent,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
     bot_user_id: &str,
+    chat_kind_cache: &ChatKindCache,
 ) {
     let event_type = event.event_type.as_deref().unwrap_or("");
     if event_type != "message" {
@@ -542,13 +567,31 @@ async fn handle_event(
         warn!(channel, "Slack message event missing stable ts; dropping event");
         return;
     }
+    if channel.trim().is_empty() || user_id.trim().is_empty() {
+        warn!("Slack message event missing channel or user identity; dropping event");
+        return;
+    }
 
     let timestamp = parse_slack_ts(ts);
+
+    let chat_kind = if channel_type == "im" {
+        ChatKind::Direct
+    } else {
+        ChatKind::Group
+    };
 
     let unified = UnifiedIncomingMessage {
         id: ts.to_string(),
         platform: PluginType::Slack,
         chat_id: channel.to_string(),
+        chat_kind,
+        // Non-IM messages reach normalization only after the structured Slack
+        // user-id mention token gate above succeeds.
+        mention_state: if channel_type == "im" {
+            MentionState::Unknown
+        } else {
+            MentionState::Mentioned
+        },
         user: UnifiedUser {
             id: user_id.to_string(),
             username: None,
@@ -566,6 +609,7 @@ async fn handle_event(
         raw: None,
     };
 
+    remember_chat_kind(chat_kind_cache, channel, chat_kind).await;
     let _ = message_tx.send(unified).await;
 }
 
@@ -574,6 +618,7 @@ async fn handle_interactive(
     payload: &InteractivePayload,
     envelope_id: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
+    chat_kind_cache: &ChatKindCache,
 ) {
     let envelope_id = envelope_id.trim();
     if envelope_id.is_empty() {
@@ -602,10 +647,15 @@ async fn handle_interactive(
         .as_ref()
         .and_then(|u| u.id.as_deref())
         .unwrap_or("");
+    if chat_id.trim().is_empty() || user_id.trim().is_empty() {
+        warn!("Slack interactive payload missing channel or user identity; dropping callback");
+        return;
+    }
     let message_ts = payload
         .message
         .as_ref()
         .and_then(|m| m.ts.as_deref());
+    let chat_kind = cached_chat_kind(chat_kind_cache, chat_id).await;
 
     for (action_index, action) in actions.iter().enumerate() {
         // Use action_id as the primary callback data source, fall back to value
@@ -615,12 +665,19 @@ async fn handle_interactive(
             .or(action.value.as_deref())
             .unwrap_or("");
 
-        let parsed = parse_callback_data(callback_data);
+        let Some(parsed) = parse_callback_data(callback_data) else {
+            warn!(action_index, "Slack interactive action has invalid callback data; dropping action");
+            continue;
+        };
+        if parsed.action.trim().is_empty() {
+            warn!(action_index, "Slack interactive action has an empty action name; dropping action");
+            continue;
+        }
 
-        let unified_action = parsed.map(|a| UnifiedAction {
-            action: a.action,
-            category: a.category,
-            params: a.params,
+        let unified_action = UnifiedAction {
+            action: parsed.action,
+            category: parsed.category,
+            params: parsed.params,
             context: ActionContext {
                 platform: PluginType::Slack,
                 user_id: user_id.to_string(),
@@ -628,12 +685,16 @@ async fn handle_interactive(
                 message_id: message_ts.map(|s| s.to_string()),
                 session_id: None,
             },
-        });
+        };
 
         let msg = UnifiedIncomingMessage {
             id: format!("{envelope_id}:{action_index}"),
             platform: PluginType::Slack,
             chat_id: chat_id.to_string(),
+            // Interactive payloads do not carry `channel_type`; use only a
+            // recent observation from a normalized message in this chat.
+            chat_kind,
+            mention_state: MentionState::Mentioned,
             user: UnifiedUser {
                 id: user_id.to_string(),
                 username: None,
@@ -647,11 +708,59 @@ async fn handle_interactive(
             },
             timestamp: chrono_now(),
             reply_to_message_id: None,
-            action: unified_action,
+            action: Some(unified_action),
             raw: None,
         };
 
         let _ = message_tx.send(msg).await;
+    }
+}
+
+async fn remember_chat_kind(cache: &ChatKindCache, chat_id: &str, kind: ChatKind) {
+    let chat_id = chat_id.trim();
+    if chat_id.is_empty() || kind == ChatKind::Unknown {
+        return;
+    }
+
+    let now = Instant::now();
+    let mut entries = cache.lock().await;
+    entries.retain(|_, value| now.saturating_duration_since(value.observed_at) <= CHAT_KIND_CACHE_TTL);
+
+    if !entries.contains_key(chat_id)
+        && entries.len() >= CHAT_KIND_CACHE_CAPACITY
+        && let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, value)| value.observed_at)
+            .map(|(key, _)| key.clone())
+    {
+        entries.remove(&oldest);
+    }
+
+    entries.insert(
+        chat_id.to_owned(),
+        CachedChatKind {
+            kind,
+            observed_at: now,
+        },
+    );
+}
+
+async fn cached_chat_kind(cache: &ChatKindCache, chat_id: &str) -> ChatKind {
+    let chat_id = chat_id.trim();
+    if chat_id.is_empty() {
+        return ChatKind::Unknown;
+    }
+
+    let now = Instant::now();
+    let mut entries = cache.lock().await;
+    let Some(observation) = entries.get(chat_id).copied() else {
+        return ChatKind::Unknown;
+    };
+    if now.saturating_duration_since(observation.observed_at) <= CHAT_KIND_CACHE_TTL {
+        observation.kind
+    } else {
+        entries.remove(chat_id);
+        ChatKind::Unknown
     }
 }
 
@@ -917,6 +1026,7 @@ mod tests {
     #[tokio::test]
     async fn handle_event_dm_normalizes() {
         let (tx, mut rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let event = super::super::types::SlackEvent {
             event_type: Some("message".into()),
             channel: Some("D12345".into()),
@@ -928,7 +1038,7 @@ mod tests {
             subtype: None,
             bot_id: None,
         };
-        handle_event(&event, &tx, "U00000").await;
+        handle_event(&event, &tx, "U00000", &chat_kind_cache).await;
         let msg = rx.try_recv().unwrap();
         assert_eq!(msg.platform, PluginType::Slack);
         assert_eq!(msg.chat_id, "D12345");
@@ -937,11 +1047,38 @@ mod tests {
         assert_eq!(msg.content.content_type, MessageContentType::Text);
         assert_eq!(msg.timestamp, 1700000000);
         assert_eq!(msg.id, "1700000000.000100");
+        assert_eq!(msg.chat_kind, ChatKind::Direct);
+        assert_eq!(msg.mention_state, MentionState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn handle_event_without_channel_or_user_identity_is_dropped() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut event = super::super::types::SlackEvent {
+            event_type: Some("message".into()),
+            channel: Some(" ".into()),
+            channel_type: Some("im".into()),
+            user: Some("U99999".into()),
+            text: Some("hi".into()),
+            ts: Some("1700000000.000100".into()),
+            thread_ts: None,
+            subtype: None,
+            bot_id: None,
+        };
+        handle_event(&event, &tx, "U00000", &chat_kind_cache).await;
+
+        event.channel = Some("D12345".into());
+        event.user = Some("\t".into());
+        handle_event(&event, &tx, "U00000", &chat_kind_cache).await;
+
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn handle_event_channel_with_mention() {
         let (tx, mut rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let event = super::super::types::SlackEvent {
             event_type: Some("message".into()),
             channel: Some("C12345".into()),
@@ -953,10 +1090,12 @@ mod tests {
             subtype: None,
             bot_id: None,
         };
-        handle_event(&event, &tx, "U00000").await;
+        handle_event(&event, &tx, "U00000", &chat_kind_cache).await;
         let msg = rx.try_recv().unwrap();
         assert_eq!(msg.chat_id, "C12345");
         assert_eq!(msg.content.text, "hey <@U00000> help me");
+        assert_eq!(msg.chat_kind, ChatKind::Group);
+        assert_eq!(msg.mention_state, MentionState::Mentioned);
         assert_eq!(
             msg.reply_to_message_id.as_deref(),
             Some("1700000000.000100")
@@ -966,6 +1105,7 @@ mod tests {
     #[tokio::test]
     async fn handle_event_channel_without_mention_skipped() {
         let (tx, mut rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let event = super::super::types::SlackEvent {
             event_type: Some("message".into()),
             channel: Some("C12345".into()),
@@ -977,13 +1117,14 @@ mod tests {
             subtype: None,
             bot_id: None,
         };
-        handle_event(&event, &tx, "U00000").await;
+        handle_event(&event, &tx, "U00000", &chat_kind_cache).await;
         assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn handle_event_bot_message_skipped() {
         let (tx, mut rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let event = super::super::types::SlackEvent {
             event_type: Some("message".into()),
             channel: Some("D12345".into()),
@@ -995,13 +1136,14 @@ mod tests {
             subtype: None,
             bot_id: Some("B12345".into()),
         };
-        handle_event(&event, &tx, "U00000").await;
+        handle_event(&event, &tx, "U00000", &chat_kind_cache).await;
         assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn handle_event_self_message_skipped() {
         let (tx, mut rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let event = super::super::types::SlackEvent {
             event_type: Some("message".into()),
             channel: Some("D12345".into()),
@@ -1013,13 +1155,14 @@ mod tests {
             subtype: None,
             bot_id: None,
         };
-        handle_event(&event, &tx, "U00000").await;
+        handle_event(&event, &tx, "U00000", &chat_kind_cache).await;
         assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn handle_event_non_message_skipped() {
         let (tx, mut rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let event = super::super::types::SlackEvent {
             event_type: Some("reaction_added".into()),
             channel: Some("D12345".into()),
@@ -1031,7 +1174,7 @@ mod tests {
             subtype: None,
             bot_id: None,
         };
-        handle_event(&event, &tx, "U00000").await;
+        handle_event(&event, &tx, "U00000", &chat_kind_cache).await;
         assert!(rx.try_recv().is_err());
     }
 
@@ -1040,6 +1183,7 @@ mod tests {
     #[tokio::test]
     async fn handle_interactive_block_actions() {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = InteractivePayload {
             interaction_type: Some("block_actions".into()),
@@ -1058,7 +1202,7 @@ mod tests {
             }),
         };
 
-        handle_interactive(&payload, "env-interactive-1", &msg_tx).await;
+        handle_interactive(&payload, "env-interactive-1", &msg_tx, &chat_kind_cache).await;
         let msg = msg_rx.try_recv().unwrap();
         assert_eq!(msg.id, "env-interactive-1:0");
         assert_eq!(msg.platform, PluginType::Slack);
@@ -1066,13 +1210,99 @@ mod tests {
         assert_eq!(msg.user.id, "U99999");
         assert_eq!(msg.content.content_type, MessageContentType::Action);
         assert_eq!(msg.content.text, "system:session.new");
+        assert_eq!(msg.chat_kind, ChatKind::Unknown);
         let action = msg.action.unwrap();
         assert_eq!(action.action, "session.new");
     }
 
     #[tokio::test]
+    async fn handle_interactive_without_channel_or_user_identity_is_dropped() {
+        let (msg_tx, mut msg_rx) = mpsc::channel(2);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut payload = InteractivePayload {
+            interaction_type: Some("block_actions".into()),
+            actions: Some(vec![super::super::types::BlockAction {
+                action_id: Some("system:session.new".into()),
+                value: None,
+            }]),
+            channel: Some(super::super::types::InteractiveChannel {
+                id: Some(" ".into()),
+            }),
+            user: Some(super::super::types::InteractiveUser {
+                id: Some("U99999".into()),
+            }),
+            message: None,
+        };
+        handle_interactive(&payload, "env-missing-channel", &msg_tx, &chat_kind_cache).await;
+
+        payload.channel = Some(super::super::types::InteractiveChannel {
+            id: Some("C12345".into()),
+        });
+        payload.user = Some(super::super::types::InteractiveUser { id: Some("\t".into()) });
+        handle_interactive(&payload, "env-missing-user", &msg_tx, &chat_kind_cache).await;
+
+        assert!(msg_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn interactive_reuses_direct_scope_from_verified_message() {
+        let (msg_tx, mut msg_rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let event = super::super::types::SlackEvent {
+            event_type: Some("message".into()),
+            channel: Some("D_SCOPE".into()),
+            channel_type: Some("im".into()),
+            user: Some("U99999".into()),
+            text: Some("hi".into()),
+            ts: Some("1700000000.000100".into()),
+            thread_ts: None,
+            subtype: None,
+            bot_id: None,
+        };
+        handle_event(&event, &msg_tx, "U00000", &chat_kind_cache).await;
+        assert_eq!(msg_rx.try_recv().unwrap().chat_kind, ChatKind::Direct);
+
+        let payload = interactive_payload("D_SCOPE", "system:session.new");
+        handle_interactive(&payload, "env-direct", &msg_tx, &chat_kind_cache).await;
+        assert_eq!(msg_rx.try_recv().unwrap().chat_kind, ChatKind::Direct);
+    }
+
+    #[tokio::test]
+    async fn interactive_reuses_group_scope_from_verified_message() {
+        let (msg_tx, mut msg_rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let event = super::super::types::SlackEvent {
+            event_type: Some("message".into()),
+            channel: Some("C_SCOPE".into()),
+            channel_type: Some("channel".into()),
+            user: Some("U99999".into()),
+            text: Some("<@U00000> hi".into()),
+            ts: Some("1700000001.000100".into()),
+            thread_ts: None,
+            subtype: None,
+            bot_id: None,
+        };
+        handle_event(&event, &msg_tx, "U00000", &chat_kind_cache).await;
+        assert_eq!(msg_rx.try_recv().unwrap().chat_kind, ChatKind::Group);
+
+        let payload = interactive_payload("C_SCOPE", "system:session.new");
+        handle_interactive(&payload, "env-group", &msg_tx, &chat_kind_cache).await;
+        assert_eq!(msg_rx.try_recv().unwrap().chat_kind, ChatKind::Group);
+    }
+
+    #[tokio::test]
+    async fn malformed_interactive_action_is_not_dispatched() {
+        let (msg_tx, mut msg_rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let payload = interactive_payload("C_UNKNOWN", "not-a-callback");
+        handle_interactive(&payload, "env-invalid", &msg_tx, &chat_kind_cache).await;
+        assert!(msg_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn handle_interactive_non_block_actions_skipped() {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = InteractivePayload {
             interaction_type: Some("view_submission".into()),
@@ -1082,13 +1312,14 @@ mod tests {
             message: None,
         };
 
-        handle_interactive(&payload, "env-view-1", &msg_tx).await;
+        handle_interactive(&payload, "env-view-1", &msg_tx, &chat_kind_cache).await;
         assert!(msg_rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn handle_interactive_uses_action_index_for_unique_stable_ids() {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let payload = InteractivePayload {
             interaction_type: Some("block_actions".into()),
             actions: Some(vec![
@@ -1110,7 +1341,7 @@ mod tests {
             message: None,
         };
 
-        handle_interactive(&payload, "env-multi-1", &msg_tx).await;
+        handle_interactive(&payload, "env-multi-1", &msg_tx, &chat_kind_cache).await;
 
         assert_eq!(msg_rx.try_recv().unwrap().id, "env-multi-1:0");
         assert_eq!(msg_rx.try_recv().unwrap().id, "env-multi-1:1");
@@ -1119,6 +1350,7 @@ mod tests {
     #[tokio::test]
     async fn handle_interactive_without_envelope_id_is_dropped() {
         let (msg_tx, mut msg_rx) = mpsc::channel(16);
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let payload = InteractivePayload {
             interaction_type: Some("block_actions".into()),
             actions: Some(vec![super::super::types::BlockAction {
@@ -1130,7 +1362,7 @@ mod tests {
             message: None,
         };
 
-        handle_interactive(&payload, "  ", &msg_tx).await;
+        handle_interactive(&payload, "  ", &msg_tx, &chat_kind_cache).await;
 
         assert!(msg_rx.try_recv().is_err());
     }
@@ -1153,6 +1385,25 @@ mod tests {
             thread_ts: None,
             subtype: subtype.map(String::from),
             bot_id: bot_id.map(String::from),
+        }
+    }
+
+    fn interactive_payload(chat_id: &str, action_id: &str) -> InteractivePayload {
+        InteractivePayload {
+            interaction_type: Some("block_actions".into()),
+            actions: Some(vec![super::super::types::BlockAction {
+                action_id: Some(action_id.into()),
+                value: None,
+            }]),
+            channel: Some(super::super::types::InteractiveChannel {
+                id: Some(chat_id.into()),
+            }),
+            user: Some(super::super::types::InteractiveUser {
+                id: Some("U99999".into()),
+            }),
+            message: Some(super::super::types::InteractiveMessage {
+                ts: Some("1700000000.000100".into()),
+            }),
         }
     }
 

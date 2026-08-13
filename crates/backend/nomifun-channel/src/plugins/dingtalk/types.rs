@@ -206,7 +206,7 @@ pub(crate) struct AtUser {
 }
 
 // ---------------------------------------------------------------------------
-// Interactive card callback (card.action.trigger)
+// Interactive card callback (/v1.0/card/instances/callback)
 // ---------------------------------------------------------------------------
 
 /// Callback payload for interactive card button clicks.
@@ -214,18 +214,26 @@ pub(crate) struct AtUser {
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub(crate) struct CardActionCallback {
-    /// The card's outgoing callback value JSON.
-    #[serde(default)]
-    pub card_private_data: Option<CardPrivateData>,
     /// User who clicked the button.
     #[serde(default)]
     pub user_id: Option<String>,
-    /// Open conversation ID.
+    /// DingTalk card space ID. For `IM_GROUP`, this is the conversation ID.
     #[serde(default)]
-    pub open_conversation_id: Option<String>,
-    /// Content (JSON string from the button action).
+    pub space_id: Option<String>,
+    /// DingTalk card space type (`IM_GROUP` or `IM_ROBOT`).
+    #[serde(default)]
+    pub space_type: Option<String>,
+    /// JSON string containing `cardPrivateData` (the official Stream SDK wire shape).
     #[serde(default)]
     pub content: Option<String>,
+}
+
+/// Decoded contents of [`CardActionCallback::content`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CardActionContent {
+    #[serde(default)]
+    pub card_private_data: Option<CardPrivateData>,
 }
 
 /// Private data in a card action callback.
@@ -236,7 +244,7 @@ pub(crate) struct CardPrivateData {
     #[serde(default)]
     pub action_ids: Option<Vec<String>>,
     #[serde(default)]
-    pub params: Option<serde_json::Value>,
+    pub params: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -701,18 +709,23 @@ mod tests {
     #[test]
     fn card_action_callback_parses() {
         let raw = json!({
-            "cardPrivateData": {
-                "actionIds": ["btn_1"],
-                "params": { "action": "system:session.new" }
-            },
             "userId": "user_123",
-            "openConversationId": "conv_abc",
-            "content": "{\"action\":\"system:session.new\"}"
+            "spaceId": "conv_abc",
+            "spaceType": "IM_GROUP",
+            "content": "{\"cardPrivateData\":{\"actionIds\":[\"btn_1\"],\"params\":{\"action\":\"system:session.new\"}}}"
         });
         let cb: CardActionCallback = serde_json::from_value(raw).unwrap();
         assert_eq!(cb.user_id.as_deref(), Some("user_123"));
-        assert_eq!(cb.open_conversation_id.as_deref(), Some("conv_abc"));
-        assert!(cb.content.is_some());
+        assert_eq!(cb.space_id.as_deref(), Some("conv_abc"));
+        assert_eq!(cb.space_type.as_deref(), Some("IM_GROUP"));
+
+        let content: CardActionContent = serde_json::from_str(cb.content.as_deref().unwrap()).unwrap();
+        let private_data = content.card_private_data.unwrap();
+        assert_eq!(private_data.action_ids.unwrap(), ["btn_1"]);
+        assert_eq!(
+            private_data.params.unwrap()["action"],
+            json!("system:session.new")
+        );
     }
 
     // -- CreateCardInstanceResponse -------------------------------------------

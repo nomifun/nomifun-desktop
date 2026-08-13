@@ -121,7 +121,7 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
         {t('settings.qqbot.intentNote', 'In the QQ Open Platform console → bot management → permissions, apply for the "GROUP_AND_C2C" intent, otherwise the bot cannot receive group/private messages.')}
       </div>
 
-      {pluginStatus?.enabled && authorizedUsers.length === 0 && (
+      {pluginStatus?.enabled && (
         <PendingPairingList
           pairings={pendingPairings}
           loading={pairingLoading}

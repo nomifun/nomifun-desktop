@@ -345,12 +345,43 @@ pub struct BotInfo {
 // F. Unified Incoming Message
 // ---------------------------------------------------------------------------
 
+/// Normalized conversation kind for an inbound platform message.
+///
+/// `Unknown` is deliberately the default so older serialized messages and
+/// adapters whose protocols do not expose reliable room semantics fail closed
+/// instead of being guessed from provider-specific chat-id shapes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatKind {
+    #[default]
+    Unknown,
+    Direct,
+    Group,
+}
+
+/// Whether an inbound message explicitly addressed the bot.
+///
+/// Adapters must derive this from structured provider metadata (event type,
+/// mention ids, or a provider contract), never by scanning ordinary text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MentionState {
+    #[default]
+    Unknown,
+    Mentioned,
+    NotMentioned,
+}
+
 /// Message received from an IM platform, normalized to a common format.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UnifiedIncomingMessage {
     pub id: String,
     pub platform: PluginType,
     pub chat_id: String,
+    #[serde(default)]
+    pub chat_kind: ChatKind,
+    #[serde(default)]
+    pub mention_state: MentionState,
     pub user: UnifiedUser,
     pub content: UnifiedMessageContent,
     pub timestamp: i64,
@@ -886,6 +917,8 @@ mod tests {
             id: "msg_1".into(),
             platform: PluginType::Telegram,
             chat_id: "chat_42".into(),
+            chat_kind: ChatKind::Direct,
+            mention_state: MentionState::Unknown,
             user: UnifiedUser {
                 id: "user_1".into(),
                 username: Some("alice".into()),
@@ -1139,6 +1172,8 @@ mod tests {
             id: "m1".into(),
             platform: PluginType::Lark,
             chat_id: "c1".into(),
+            chat_kind: ChatKind::Group,
+            mention_state: MentionState::Mentioned,
             user: UnifiedUser {
                 id: "u1".into(),
                 username: None,
@@ -1158,6 +1193,32 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: UnifiedIncomingMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn incoming_message_defaults_group_context_for_legacy_payloads() {
+        let parsed: UnifiedIncomingMessage = serde_json::from_value(serde_json::json!({
+            "id": "m1",
+            "platform": "lark",
+            "chat_id": "oc_1",
+            "user": { "id": "ou_1", "display_name": "Alice" },
+            "content": { "type": "text", "text": "hello" },
+            "timestamp": 1000
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.chat_kind, ChatKind::Unknown);
+        assert_eq!(parsed.mention_state, MentionState::Unknown);
+    }
+
+    #[test]
+    fn group_context_uses_snake_case_wire_values() {
+        assert_eq!(serde_json::to_string(&ChatKind::Direct).unwrap(), "\"direct\"");
+        assert_eq!(serde_json::to_string(&ChatKind::Group).unwrap(), "\"group\"");
+        assert_eq!(
+            serde_json::to_string(&MentionState::NotMentioned).unwrap(),
+            "\"not_mentioned\""
+        );
     }
 
     #[test]

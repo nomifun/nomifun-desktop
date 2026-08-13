@@ -265,8 +265,8 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
         </div>
       )}
 
-      {/* Pending Pairings - show when bot is enabled and no authorized users yet */}
-      {pluginStatus?.enabled && authorizedUsers.length === 0 && (
+      {/* Pending pairings stay visible after the first approval so more users can be authorized. */}
+      {pluginStatus?.enabled && (
         <PendingPairingList
           pairings={pendingPairings}
           loading={pairingLoading}

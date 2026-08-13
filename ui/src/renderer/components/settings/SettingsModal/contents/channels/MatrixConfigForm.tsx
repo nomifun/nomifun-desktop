@@ -103,7 +103,7 @@ const MatrixConfigForm: React.FC<MatrixConfigFormProps> = ({ pluginStatus, chann
         </div>
       </div>
 
-      {pluginStatus?.enabled && authorizedUsers.length === 0 && (
+      {pluginStatus?.enabled && (
         <PendingPairingList
           pairings={pendingPairings}
           loading={pairingLoading}

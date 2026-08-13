@@ -22,6 +22,7 @@ use nomifun_realtime::UserEventEnvelope;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
+use crate::group_policy::GroupPolicyFence;
 use crate::message_service::ChannelMessageService;
 use crate::session::SessionManager;
 use crate::stream_relay::{ChannelSender, ChannelStreamRelay, RelayConfig};
@@ -43,6 +44,7 @@ pub struct QueueDrain {
     message_service: Arc<ChannelMessageService>,
     session_manager: Arc<SessionManager>,
     sender: Arc<dyn ChannelSender>,
+    group_policy_fence: Arc<GroupPolicyFence>,
     retry_backoff: [Duration; 2],
     sweep_interval: Duration,
     /// In-memory retry gate: prompt_id → earliest next attempt. Deliberately
@@ -67,11 +69,18 @@ impl QueueDrain {
             message_service,
             session_manager,
             sender,
+            group_policy_fence: Arc::new(GroupPolicyFence::default()),
             retry_backoff: DEFAULT_RETRY_BACKOFF,
             sweep_interval: DEFAULT_SWEEP_INTERVAL,
             retry_not_before: Mutex::new(HashMap::new()),
             draining: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Share the manager-owned group-policy fence with queued delivery.
+    pub fn with_group_policy_fence(mut self, fence: Arc<GroupPolicyFence>) -> Self {
+        self.group_policy_fence = fence;
+        self
     }
 
     /// Test-only knob: shrink the spec 30s/120s backoff and the sweep period
@@ -184,11 +193,29 @@ impl QueueDrain {
 
     async fn drain_conversation_inner(&self, conversation_id: &str) {
         loop {
-            let head = match self.repo.peek_next_queued(conversation_id).await {
+            let candidate = match self.repo.peek_next_queued(conversation_id).await {
                 Ok(Some(row)) => row,
                 Ok(None) => return,
                 Err(error) => {
                     error!(error = %error, conversation_id, "queue drain peek failed");
+                    return;
+                }
+            };
+
+            // The first peek is only a candidate used to select the bot gate.
+            // Once inside the read-side critical section, re-peek before any
+            // delivery side effect: a policy writer may have cancelled this
+            // row and deleted its session while we were waiting for the gate.
+            let _policy_permit = self
+                .group_policy_fence
+                .read(&candidate.channel_plugin_id)
+                .await;
+            let head = match self.repo.peek_next_queued(conversation_id).await {
+                Ok(Some(row)) if row.prompt_id == candidate.prompt_id => row,
+                Ok(Some(_)) => continue,
+                Ok(None) => return,
+                Err(error) => {
+                    error!(error = %error, conversation_id, "queue drain fenced re-peek failed");
                     return;
                 }
             };
@@ -319,6 +346,27 @@ impl QueueDrain {
                 return true; // transient: retry on the next signal
             }
         };
+        if session.channel_plugin_id.as_deref() != Some(head.channel_plugin_id.as_str()) {
+            warn!(
+                prompt_id = %head.prompt_id,
+                session_id = %session.channel_session_id,
+                "queued prompt/session channel scope mismatch; cancelling without dispatch"
+            );
+            self.settle(head, "cancelled").await;
+            return false;
+        }
+        // Unknown is not a weaker form of Direct. Old/malformed queued rows
+        // with an unproven chat scope are permanently retired and can never be
+        // handed to the agent, even when no policy update happens concurrently.
+        if !is_dispatchable_session_chat_kind(&session.chat_kind) {
+            warn!(
+                prompt_id = %head.prompt_id,
+                chat_kind = %session.chat_kind,
+                "queued prompt has unsafe chat scope; cancelling without dispatch"
+            );
+            self.settle(head, "cancelled").await;
+            return false;
+        }
         let platform = match self.repo.get_plugin(&head.channel_plugin_id).await {
             Ok(Some(plugin)) => match PluginType::from_str_opt(&plugin.r#type) {
                 Some(platform) => platform,
@@ -433,6 +481,10 @@ impl QueueDrain {
     }
 }
 
+fn is_dispatchable_session_chat_kind(chat_kind: &str) -> bool {
+    matches!(chat_kind, "direct" | "group")
+}
+
 /// Idempotency key of the CURRENT delivery attempt.
 ///
 /// Attempt 0 reuses the key minted at enqueue time (the exact key an
@@ -462,6 +514,15 @@ fn snippet(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_delivery_permanently_rejects_unknown_chat_scope() {
+        assert!(is_dispatchable_session_chat_kind("direct"));
+        assert!(is_dispatchable_session_chat_kind("group"));
+        assert!(!is_dispatchable_session_chat_kind("unknown"));
+        assert!(!is_dispatchable_session_chat_kind(""));
+        assert!(!is_dispatchable_session_chat_kind("future_kind"));
+    }
 
     fn row(attempts: i64) -> ChannelPendingPromptRow {
         ChannelPendingPromptRow {

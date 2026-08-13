@@ -994,12 +994,16 @@ pub async fn build_channel_state(
         encryption_key,
         message_tx,
     ));
+    let group_policy_fence = manager.group_policy_fence();
 
-    let pairing_service = Arc::new(nomifun_channel::pairing::PairingService::new(
-        repo.clone(),
-        services.event_bus.clone(),
-        owner_user_id.clone(),
-    ));
+    let pairing_service = Arc::new(
+        nomifun_channel::pairing::PairingService::new(
+            repo.clone(),
+            services.event_bus.clone(),
+            owner_user_id.clone(),
+        )
+        .with_group_policy_fence(Arc::clone(&group_policy_fence)),
+    );
 
     // Expired pairing codes are purged only by this background sweep —the
     // timer existed but had no caller, so stale codes lingered in the DB
@@ -1149,7 +1153,8 @@ pub async fn build_channel_state(
         Arc::clone(&message_service),
         Arc::clone(&session_manager),
         manager.clone() as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
-    );
+    )
+    .with_group_policy_fence(group_policy_fence);
 
     let state = ChannelRouterState {
         manager: Arc::clone(&manager),

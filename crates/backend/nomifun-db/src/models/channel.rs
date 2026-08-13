@@ -28,6 +28,9 @@ pub struct ChannelPluginRow {
     /// customer-service bot never carries a `companion_id` (DB trigger +
     /// application validation).
     pub owner_domain: String,
+    /// Group-chat admission policy (`all_members` | `allowlist` | `disabled`).
+    #[serde(default = "default_group_access_mode")]
+    pub group_access_mode: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
@@ -50,6 +53,9 @@ pub struct NewChannelPluginRow {
     /// legacy companion pool when omitted on the wire.
     #[serde(default = "default_owner_domain")]
     pub owner_domain: String,
+    /// Group-chat admission policy. Defaults fail closed to explicit approval.
+    #[serde(default = "default_group_access_mode")]
+    pub group_access_mode: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
@@ -64,9 +70,20 @@ pub const CHANNEL_OWNER_DOMAIN_COMPANION: &str = "companion";
 /// `channel_plugins.owner_domain` value for customer-service bots.
 pub const CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE: &str = "customer_service";
 
+/// The safe default for group-chat admission.
+pub fn default_group_access_mode() -> String {
+    CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.to_owned()
+}
+
+pub const CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS: &str = "all_members";
+pub const CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST: &str = "allowlist";
+pub const CHANNEL_GROUP_ACCESS_MODE_DISABLED: &str = "disabled";
+
 /// Row mapping for the `channel_users` table.
 ///
-/// Represents an IM user authorized to chat with the Agent.
+/// Represents a stable IM identity known to one channel bot. The
+/// `authorization_kind` distinguishes explicitly approved users from
+/// automatically admitted, non-approved guests.
 /// UNIQUE constraint on (platform_user_id, platform_type, channel_plugin_id).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ChannelUserRow {
@@ -77,6 +94,11 @@ pub struct ChannelUserRow {
     /// this authorization. `None` means the authorization is not plugin-scoped.
     pub channel_plugin_id: Option<String>,
     pub display_name: Option<String>,
+    /// `approved` users may use direct and allowlisted group chats;
+    /// `auto_group` users are automatically admitted guests that have not
+    /// received explicit approval (open-group or customer-service visitors).
+    #[serde(default = "default_channel_user_authorization_kind")]
+    pub authorization_kind: String,
     pub authorized_at: TimestampMs,
     pub last_active: Option<TimestampMs>,
 }
@@ -88,9 +110,18 @@ pub struct NewChannelUserRow {
     pub platform_type: String,
     pub channel_plugin_id: Option<String>,
     pub display_name: Option<String>,
+    #[serde(default = "default_channel_user_authorization_kind")]
+    pub authorization_kind: String,
     pub authorized_at: TimestampMs,
     pub last_active: Option<TimestampMs>,
 }
+
+pub fn default_channel_user_authorization_kind() -> String {
+    CHANNEL_USER_AUTHORIZATION_APPROVED.to_owned()
+}
+
+pub const CHANNEL_USER_AUTHORIZATION_APPROVED: &str = "approved";
+pub const CHANNEL_USER_AUTHORIZATION_AUTO_GROUP: &str = "auto_group";
 
 /// Row mapping for the `channel_sessions` table.
 ///
@@ -107,6 +138,9 @@ pub struct ChannelSessionRow {
     /// The `channel_plugins` business identity this session arrived through. Two bots
     /// in the same chat get isolated sessions.
     pub channel_plugin_id: Option<String>,
+    /// Provider-classified chat scope (`unknown` | `direct` | `group`).
+    #[serde(default = "default_channel_chat_kind")]
+    pub chat_kind: String,
     pub created_at: TimestampMs,
     pub last_activity: TimestampMs,
 }
@@ -121,9 +155,19 @@ pub struct NewChannelSessionRow {
     pub workspace: Option<String>,
     pub chat_id: Option<String>,
     pub channel_plugin_id: Option<String>,
+    #[serde(default = "default_channel_chat_kind")]
+    pub chat_kind: String,
     pub created_at: TimestampMs,
     pub last_activity: TimestampMs,
 }
+
+pub fn default_channel_chat_kind() -> String {
+    CHANNEL_CHAT_KIND_UNKNOWN.to_owned()
+}
+
+pub const CHANNEL_CHAT_KIND_UNKNOWN: &str = "unknown";
+pub const CHANNEL_CHAT_KIND_DIRECT: &str = "direct";
+pub const CHANNEL_CHAT_KIND_GROUP: &str = "group";
 
 /// Durable at-most-once admission record for one provider-owned inbound event.
 ///
@@ -235,4 +279,3 @@ pub struct NewChannelPendingPromptRow {
     pub text: String,
     pub idempotency_key: String,
 }
-

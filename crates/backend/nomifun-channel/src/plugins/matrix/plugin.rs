@@ -19,7 +19,7 @@ use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
-    BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType,
+    BotInfo, ChatKind, MentionState, MessageContentType, PluginConfig, PluginStatus, PluginType,
     UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
 };
 
@@ -449,6 +449,11 @@ async fn handle_timeline_event(
                 id: event_id.to_owned(),
                 platform: PluginType::Matrix,
                 chat_id: room_id.to_owned(),
+                // A room id alone does not distinguish a DM from a group.
+                // Correct classification needs m.direct/member-state data,
+                // neither of which is retained by the current sync model.
+                chat_kind: ChatKind::Unknown,
+                mention_state: MentionState::Unknown,
                 user: UnifiedUser {
                     id: sender.to_owned(),
                     username: Some(sender.to_owned()),

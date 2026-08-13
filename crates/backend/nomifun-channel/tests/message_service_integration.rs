@@ -12,10 +12,15 @@ use nomifun_channel::types::PluginType;
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs};
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
-use nomifun_db::models::{ChannelSessionRow, NewChannelPluginRow};
+use nomifun_db::models::{
+    CHANNEL_CHAT_KIND_DIRECT, CHANNEL_CHAT_KIND_GROUP, CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST,
+    CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE, CHANNEL_USER_AUTHORIZATION_AUTO_GROUP,
+    ChannelSessionRow, NewChannelPluginRow, NewChannelUserRow,
+};
 use nomifun_db::{
-    CreateProviderParams, IClientPreferenceRepository, IProviderModelRepository,
-    IProviderRepository, NewProviderModel, NewProviderModelCapability,
+    CreateProviderParams, IChannelRepository, IClientPreferenceRepository,
+    IConversationRepository, IProviderModelRepository, IProviderRepository, NewProviderModel,
+    NewProviderModelCapability,
     SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteChannelRepository,
     SqliteClientPreferenceRepository, SqliteConversationRepository, SqliteProviderModelRepository,
     SqliteProviderRepository, init_database_memory,
@@ -302,6 +307,7 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
         workspace: None,
         chat_id: Some("7088048016".to_owned()),
         channel_plugin_id: None,
+        chat_kind: CHANNEL_CHAT_KIND_DIRECT.to_owned(),
         created_at: 1,
         last_activity: 1,
     };
@@ -387,6 +393,7 @@ fn make_session(conversation_id: Option<String>) -> ChannelSessionRow {
         workspace: None,
         chat_id: Some("7088048016".to_owned()),
         channel_plugin_id: None,
+        chat_kind: CHANNEL_CHAT_KIND_DIRECT.to_owned(),
         created_at: 1,
         last_activity: 1,
     }
@@ -716,6 +723,7 @@ async fn bind_channel_to_companion(
         companion_id: Some(companion_id.to_owned()),
         bot_key: Some("42".to_owned()),
         owner_domain: "companion".into(),
+        group_access_mode: CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.to_owned(),
         created_at: now,
         updated_at: now,
     })
@@ -839,6 +847,155 @@ async fn companion_im_turns_share_one_session() {
     assert_eq!(b.conversation_id, conv_x, "both IM chats must share the companion's single session");
 }
 
+#[tokio::test]
+async fn open_group_guest_uses_restricted_dedicated_conversation() {
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let companion_conversation = seed_companion_session(
+        &stack.conversation_svc,
+        &stack.installation_owner,
+        COMPANION_X,
+    )
+    .await;
+    let profile = Arc::new(StubProfile::new(std::collections::HashMap::from([(
+        COMPANION_X.to_owned(),
+        companion_conversation.clone(),
+    )])));
+    let message_svc = stack
+        .message_svc
+        .with_channel_agent_profile(profile.clone());
+    let channel_plugin_id = bind_channel_to_companion(&stack.channel_repo, COMPANION_X).await;
+    let now = nomifun_common::now_ms();
+    let guest = stack
+        .channel_repo
+        .ensure_auto_group_user(&NewChannelUserRow {
+            platform_user_id: "group-member-1".into(),
+            platform_type: "telegram".into(),
+            channel_plugin_id: Some(channel_plugin_id.clone()),
+            display_name: Some("Group Member".into()),
+            authorization_kind: CHANNEL_USER_AUTHORIZATION_AUTO_GROUP.into(),
+            authorized_at: now,
+            last_active: None,
+        })
+        .await
+        .unwrap();
+
+    let mut group = make_session(None);
+    group.channel_user_id = guest.channel_user_id;
+    group.channel_plugin_id = Some(channel_plugin_id);
+    group.chat_id = Some("group-chat-1".into());
+    group.chat_kind = CHANNEL_CHAT_KIND_GROUP.into();
+    // A stale legacy binding must not let the group reuse the companion
+    // owner's private conversation.
+    group.conversation_id = Some(companion_conversation.clone());
+    let sent = message_svc
+        .send_to_agent(
+            &group,
+            "hello from the group",
+            PluginType::Telegram,
+            "test:group-guest:dedicated",
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(sent.conversation_id, companion_conversation);
+    assert!(
+        profile.calls.lock().unwrap().is_empty(),
+        "a group turn must never enter the companion's private shared session"
+    );
+    let row = SqliteConversationRepository::new(db.pool().clone())
+        .get(&sent.conversation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.channel_chat_id.as_deref(), Some("group-chat-1"));
+    let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap();
+    assert_eq!(extra["channel_group_guest"], true);
+    assert_eq!(extra["companion_id"], COMPANION_X);
+}
+
+#[tokio::test]
+async fn open_group_guest_cannot_select_host_agent() {
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let channel_plugin_id = create_plain_channel(&stack.channel_repo).await;
+    let guest = stack
+        .channel_repo
+        .ensure_auto_group_user(&NewChannelUserRow {
+            platform_user_id: "group-member-acp".into(),
+            platform_type: "telegram".into(),
+            channel_plugin_id: Some(channel_plugin_id.clone()),
+            display_name: Some("Group Member".into()),
+            authorization_kind: CHANNEL_USER_AUTHORIZATION_AUTO_GROUP.into(),
+            authorized_at: nomifun_common::now_ms(),
+            last_active: None,
+        })
+        .await
+        .unwrap();
+    let mut session = make_session(None);
+    session.channel_user_id = guest.channel_user_id;
+    session.channel_plugin_id = Some(channel_plugin_id);
+    session.chat_kind = CHANNEL_CHAT_KIND_GROUP.into();
+    session.agent_type = "acp".into();
+
+    let error = stack
+        .message_svc
+        .send_to_agent(
+            &session,
+            "run a host command",
+            PluginType::Telegram,
+            "test:group-guest:reject-acp",
+        )
+        .await
+        .expect_err("auto-group identities must not use host agents");
+    assert!(matches!(
+        error,
+        nomifun_channel::error::ChannelError::UserNotAuthorized(_)
+    ));
+}
+
+#[tokio::test]
+async fn unknown_chat_is_rejected_before_any_companion_or_conversation_use() {
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let companion_conversation = seed_companion_session(
+        &stack.conversation_svc,
+        &stack.installation_owner,
+        COMPANION_X,
+    )
+    .await;
+    let profile = Arc::new(StubProfile::new(std::collections::HashMap::from([(
+        COMPANION_X.to_owned(),
+        companion_conversation.clone(),
+    )])));
+    let message_svc = stack
+        .message_svc
+        .with_channel_agent_profile(profile.clone());
+    let channel_plugin_id = bind_channel_to_companion(&stack.channel_repo, COMPANION_X).await;
+    let mut ambiguous = make_session(Some(companion_conversation.clone()));
+    ambiguous.channel_plugin_id = Some(channel_plugin_id);
+    ambiguous.chat_kind = nomifun_db::models::CHANNEL_CHAT_KIND_UNKNOWN.into();
+
+    let error = message_svc
+        .send_to_agent(
+            &ambiguous,
+            "an ambiguous provider message",
+            PluginType::Telegram,
+            "test:unknown-chat:dedicated",
+        )
+        .await
+        .expect_err("Unknown chat scope must fail closed at the service boundary");
+
+    assert!(matches!(
+        error,
+        nomifun_channel::error::ChannelError::UserNotAuthorized(_)
+    ));
+    assert!(
+        profile.calls.lock().unwrap().is_empty(),
+        "Unknown must never enter the companion's private shared session"
+    );
+}
+
 /// A companion with no chat model (ensure returns None) refuses the turn with a
 /// distinct error instead of silently minting a separate channel conversation.
 #[tokio::test]
@@ -882,6 +1039,7 @@ async fn create_plain_channel(repo: &Arc<SqliteChannelRepository>) -> String {
         companion_id: None,
         bot_key: Some("43".to_owned()),
         owner_domain: "companion".into(),
+        group_access_mode: CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.to_owned(),
         created_at: now,
         updated_at: now,
     })
@@ -932,6 +1090,14 @@ async fn cs_bound_bot_routes_to_seam_not_conversation() {
     let db = init_database_memory().await.unwrap();
     let stack = build_stack(db.pool().clone()).await;
     let channel_plugin_id = create_plain_channel(&stack.channel_repo).await;
+    let mut plugin = stack
+        .channel_repo
+        .get_plugin(&channel_plugin_id)
+        .await
+        .unwrap()
+        .unwrap();
+    plugin.owner_domain = CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into();
+    stack.channel_repo.update_plugin(&plugin).await.unwrap();
 
     let routing = Arc::new(RecordingCsRouting {
         bound_plugin: channel_plugin_id.clone(),
@@ -968,6 +1134,93 @@ async fn cs_bound_bot_routes_to_seam_not_conversation() {
         .await
         .expect_err("cs-bound bot must never enter the conversation path");
     assert!(matches!(err, ChannelError::MessageSendFailed(_)));
+}
+
+#[tokio::test]
+async fn missing_channel_plugin_refuses_conversation_dispatch() {
+    use nomifun_channel::error::ChannelError;
+
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let mut session = make_session(None);
+    session.channel_plugin_id = Some("missing-channel-plugin".into());
+
+    let error = stack
+        .message_svc
+        .send_to_agent(
+            &session,
+            "must fail closed",
+            PluginType::Telegram,
+            "test:missing-plugin:refuse",
+        )
+        .await
+        .expect_err("a missing bot row must never dispatch a conversation turn");
+
+    assert!(matches!(
+        error,
+        ChannelError::PluginNotFound(ref plugin_id) if plugin_id == "missing-channel-plugin"
+    ));
+}
+
+#[tokio::test]
+async fn customer_service_binding_on_companion_bot_is_ignored() {
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let channel_plugin_id = create_plain_channel(&stack.channel_repo).await;
+    let routing = Arc::new(RecordingCsRouting {
+        bound_plugin: channel_plugin_id.clone(),
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let message_svc = stack.message_svc.with_cs_routing(routing.clone());
+
+    assert!(message_svc.cs_bound_agent(&channel_plugin_id).await.is_none());
+    let mut session = make_session(None);
+    session.channel_plugin_id = Some(channel_plugin_id);
+    let sent = message_svc
+        .send_to_agent(
+            &session,
+            "normal companion turn",
+            PluginType::Telegram,
+            "test:companion-stray-cs-binding:normal",
+        )
+        .await
+        .unwrap();
+
+    wait_until_idle(&stack.conversation_svc, &sent.conversation_id).await;
+    assert!(routing.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn customer_service_owned_bot_without_binding_refuses_conversation_path() {
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let channel_plugin_id = create_plain_channel(&stack.channel_repo).await;
+    let mut plugin = stack
+        .channel_repo
+        .get_plugin(&channel_plugin_id)
+        .await
+        .unwrap()
+        .unwrap();
+    plugin.owner_domain = CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into();
+    stack.channel_repo.update_plugin(&plugin).await.unwrap();
+
+    let mut session = make_session(None);
+    session.channel_plugin_id = Some(channel_plugin_id);
+    let error = stack
+        .message_svc
+        .send_to_agent(
+            &session,
+            "must not fall back to Nomi",
+            PluginType::Telegram,
+            "test:cs-owned-unbound:refuse",
+        )
+        .await
+        .expect_err("customer-service owned bot must require its routing binding");
+
+    assert!(matches!(
+        error,
+        nomifun_channel::error::ChannelError::MessageSendFailed(_)
+    ));
 }
 
 /// (b) With the seam wired but the bot UNBOUND, the dedicated per-chat path

@@ -985,6 +985,28 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
         ));
     }
 
+    // Group-chat authorization metadata (migration 033) defaults to the
+    // backward-compatible, least-privilege interpretation for each row type.
+    for (table, column, expected_default) in [
+        ("channel_plugins", "group_access_mode", "'allowlist'"),
+        ("channel_users", "authorization_kind", "'approved'"),
+        ("channel_sessions", "chat_kind", "'unknown'"),
+    ] {
+        require_column(pool, table, column, "TEXT", true).await?;
+        let column_default: Option<String> = sqlx::query_scalar(&format!(
+            "SELECT dflt_value FROM pragma_table_info('{table}') WHERE name = ?"
+        ))
+        .bind(column)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+        if column_default.as_deref() != Some(expected_default) {
+            return Err(DbError::Init(format!(
+                "v3 schema {table}.{column} must default to {expected_default}"
+            )));
+        }
+    }
+
     validate_logical_reference_registry(pool).await?;
     validate_logical_reference_coverage(pool).await?;
     validate_json_logical_reference_registry(pool).await?;

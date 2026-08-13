@@ -17,8 +17,8 @@ use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::plugins::util::backoff_delay;
 use crate::types::{
-    BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType, UnifiedIncomingMessage,
-    UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
+    BotInfo, ChatKind, MentionState, MessageContentType, PluginConfig, PluginStatus, PluginType,
+    UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
 };
 
 use super::crypto;
@@ -556,6 +556,8 @@ async fn handle_dm_event(
         id: event.id.clone(),
         platform: PluginType::Nostr,
         chat_id: sender_pk_hex.clone(),
+        chat_kind: ChatKind::Direct,
+        mention_state: MentionState::Unknown,
         user: UnifiedUser {
             id: sender_pk_hex,
             username: None,

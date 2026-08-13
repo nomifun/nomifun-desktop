@@ -89,6 +89,12 @@ fn build_inbound_operation(
     if message.chat_id.len() > 512 {
         return Err("provider chat id exceeds 512 bytes".to_owned());
     }
+    if message.user.id.trim().is_empty() {
+        return Err("provider sender id is empty".to_owned());
+    }
+    if message.user.id.len() > 512 {
+        return Err("provider sender id exceeds 512 bytes".to_owned());
+    }
 
     let platform = message.platform.to_string();
     let scope = serde_json::json!([
@@ -109,6 +115,8 @@ fn build_inbound_operation(
     let payload = serde_json::json!({
         "platform": platform.as_str(),
         "chat_id": &message.chat_id,
+        "chat_kind": message.chat_kind,
+        "mention_state": message.mention_state,
         "user_id": &message.user.id,
         "content": &message.content,
         "reply_to_message_id": &message.reply_to_message_id,
@@ -263,6 +271,7 @@ impl ChannelMessageLoop {
         }
 
         let executor = Arc::clone(&self.action_executor);
+        let group_policy_fence = executor.group_policy_fence();
         let msg_svc = Arc::clone(&self.message_service);
         let session_mgr = Arc::clone(&self.session_manager);
         let sender = Arc::clone(&self.sender);
@@ -272,7 +281,20 @@ impl ChannelMessageLoop {
                 outcome_json: Some(serde_json::json!({ "kind": "unknown" }).to_string()),
                 ..Default::default()
             };
-            let status = match executor.handle_incoming_message(&msg, &plugin_id).await {
+            // Hold admission's read permit across the complete durable handoff,
+            // not merely ActionExecutor's policy read/session creation. This
+            // also covers busy-queue insertion and send_to_agent admission.
+            let policy_permit = group_policy_fence.read(&plugin_id).await;
+            let status = match executor
+                .handle_incoming_message_with_policy_permit(&msg, &plugin_id, &policy_permit)
+                .await
+            {
+                Ok(MessageResult::Ignored { reason }) => {
+                    info!(channel_plugin_id = %plugin_id, chat_id = %chat_id, reason, "channel inbound ignored by admission policy");
+                    settlement.outcome_json =
+                        Some(serde_json::json!({ "kind": "ignored", "reason": reason }).to_string());
+                    "completed"
+                }
                 Ok(MessageResult::Action(response)) => {
                     match send_action_response(&sender, &plugin_id, &chat_id, &response).await {
                         Ok(()) => {
@@ -395,6 +417,10 @@ impl ChannelMessageLoop {
                     "failed"
                 }
             };
+            // Relays and model completion are intentionally outside the
+            // critical section: send_to_agent has already made the durable
+            // turn admission decision. The setter waits only for that handoff.
+            drop(policy_permit);
             if let Err(error) = session_mgr
                 .settle_inbound(
                     &receipt.operation_key,
@@ -927,6 +953,8 @@ mod tests {
             id: id.into(),
             platform: PluginType::Telegram,
             chat_id: chat_id.into(),
+            chat_kind: crate::types::ChatKind::Unknown,
+            mention_state: crate::types::MentionState::Unknown,
             user: UnifiedUser {
                 id: "provider-user".into(),
                 username: Some("alice".into()),
@@ -981,6 +1009,10 @@ mod tests {
         changed_text.content.text = "different".into();
         let mut changed_reply = redelivery.clone();
         changed_reply.reply_to_message_id = Some("reply-target".into());
+        let mut changed_chat_kind = redelivery.clone();
+        changed_chat_kind.chat_kind = crate::types::ChatKind::Group;
+        let mut changed_mention_state = redelivery.clone();
+        changed_mention_state.mention_state = crate::types::MentionState::Mentioned;
 
         let original =
             build_inbound_operation(owner.as_str(), plugin.as_str(), &original).unwrap();
@@ -990,12 +1022,26 @@ mod tests {
             build_inbound_operation(owner.as_str(), plugin.as_str(), &changed_text).unwrap();
         let changed_reply =
             build_inbound_operation(owner.as_str(), plugin.as_str(), &changed_reply).unwrap();
+        let changed_chat_kind =
+            build_inbound_operation(owner.as_str(), plugin.as_str(), &changed_chat_kind).unwrap();
+        let changed_mention_state =
+            build_inbound_operation(owner.as_str(), plugin.as_str(), &changed_mention_state).unwrap();
 
         assert_eq!(original.receipt.operation_key, redelivery.receipt.operation_key);
         assert_eq!(original.receipt.payload_hash, redelivery.receipt.payload_hash);
         assert_eq!(original.receipt.operation_key, changed_text.receipt.operation_key);
         assert_ne!(original.receipt.payload_hash, changed_text.receipt.payload_hash);
         assert_ne!(original.receipt.payload_hash, changed_reply.receipt.payload_hash);
+        assert_eq!(original.receipt.operation_key, changed_chat_kind.receipt.operation_key);
+        assert_ne!(original.receipt.payload_hash, changed_chat_kind.receipt.payload_hash);
+        assert_eq!(
+            original.receipt.operation_key,
+            changed_mention_state.receipt.operation_key
+        );
+        assert_ne!(
+            original.receipt.payload_hash,
+            changed_mention_state.receipt.payload_hash
+        );
     }
 
     #[test]
@@ -1010,6 +1056,13 @@ mod tests {
             )
             .is_err()
         );
+        let mut empty_sender = sample_inbound("provider-event-1", "chat-a", "hello");
+        empty_sender.user.id = "   ".into();
+        assert!(build_inbound_operation(owner.as_str(), plugin.as_str(), &empty_sender).is_err());
+
+        let mut oversized_sender = sample_inbound("provider-event-1", "chat-a", "hello");
+        oversized_sender.user.id = "x".repeat(513);
+        assert!(build_inbound_operation(owner.as_str(), plugin.as_str(), &oversized_sender).is_err());
     }
 
     #[tokio::test]

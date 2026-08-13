@@ -135,7 +135,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
       </div>
 
       {/* Pending Pairings */}
-      {pluginStatus?.enabled && authorizedUsers.length === 0 && (
+      {pluginStatus?.enabled && (
         <PendingPairingList
           pairings={pendingPairings}
           loading={pairingLoading}

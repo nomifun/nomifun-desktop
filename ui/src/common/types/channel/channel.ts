@@ -12,6 +12,40 @@ import type {
  */
 export type ChannelOwnerDomain = 'companion' | 'customer_service';
 
+/**
+ * Per-bot group-chat access policy.
+ *
+ * Direct messages keep using the existing pairing flow regardless of this
+ * value. Unknown or missing wire values must fail closed to `disabled` via
+ * {@link normalizeGroupAccessMode}.
+ */
+export const GROUP_ACCESS_MODES = ['all_members', 'allowlist', 'disabled'] as const;
+export type GroupAccessMode = (typeof GROUP_ACCESS_MODES)[number];
+
+export const DEFAULT_GROUP_ACCESS_MODE: GroupAccessMode = 'disabled';
+
+export function normalizeGroupAccessMode(value: unknown): GroupAccessMode {
+  return typeof value === 'string' && (GROUP_ACCESS_MODES as readonly string[]).includes(value)
+    ? (value as GroupAccessMode)
+    : DEFAULT_GROUP_ACCESS_MODE;
+}
+
+export interface SetGroupAccessRequest {
+  plugin_id: ChannelPluginId;
+  group_access_mode: GroupAccessMode;
+}
+
+/** Build the exact wire request while keeping unknown UI values fail-closed. */
+export function buildSetGroupAccessRequest(
+  pluginId: ChannelPluginId,
+  value: unknown
+): SetGroupAccessRequest {
+  return {
+    plugin_id: pluginId,
+    group_access_mode: normalizeGroupAccessMode(value),
+  };
+}
+
 export interface IChannelPluginStatus {
   /** Stable `channel_plugins.channel_plugin_id` business identity. */
   plugin_id: ChannelPluginId;
@@ -23,6 +57,8 @@ export interface IChannelPluginStatus {
   last_connected?: number;
   error?: string;
   activeUsers: number;
+  /** Group-chat policy; missing/unknown backend values normalize to `disabled`. */
+  groupAccessMode: GroupAccessMode;
   botUsername?: string;
   hasToken?: boolean;
   /** 所有权分域；`customer_service` 域的 bot 绝不携带 companionId（后端触发器互斥）。 */

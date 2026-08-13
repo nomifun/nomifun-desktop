@@ -96,7 +96,7 @@ const TwitchConfigForm: React.FC<TwitchConfigFormProps> = ({ pluginStatus, chann
         </div>
       </div>
 
-      {pluginStatus?.enabled && authorizedUsers.length === 0 && (
+      {pluginStatus?.enabled && (
         <PendingPairingList
           pairings={pendingPairings}
           loading={pairingLoading}

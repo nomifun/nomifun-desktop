@@ -85,9 +85,9 @@ pub use channel::{
     ApprovePairingRequest, BridgeResponse, CHANNEL_OWNER_DOMAIN_COMPANION,
     CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE, ChannelSessionResponse, ChannelUserResponse,
     DisablePluginRequest, EnablePluginRequest, EnablePluginResponse, PairingRequestResponse,
-    PairingRequestedPayload, PluginStatusChangedPayload, PluginStatusResponse,
-    RejectPairingRequest, RevokeUserRequest, SyncChannelSettingsRequest, TestPluginExtraConfig,
-    TestPluginRequest, TestPluginResponse, UserAuthorizedPayload,
+    GroupAccessMode, PairingRequestedPayload, PluginStatusChangedPayload, PluginStatusResponse,
+    RejectPairingRequest, RevokeUserRequest, SetGroupAccessRequest, SyncChannelSettingsRequest,
+    TestPluginExtraConfig, TestPluginRequest, TestPluginResponse, UserAuthorizedPayload,
 };
 pub use confirmation::{
     ApprovalCheckQuery, ApprovalCheckResponse, ConfirmRequest, ConfirmationListResponse,

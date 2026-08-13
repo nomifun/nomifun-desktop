@@ -20,7 +20,7 @@ use crate::plugin::{SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::plugins::util::backoff_delay;
 use crate::plugins::callback::parse_callback_data;
 use crate::types::{
-    ActionContext, MessageContentType, PluginType, UnifiedAction, UnifiedIncomingMessage,
+    ActionContext, ChatKind, MentionState, MessageContentType, PluginType, UnifiedAction, UnifiedIncomingMessage,
     UnifiedMessageContent, UnifiedUser,
 };
 
@@ -179,18 +179,31 @@ fn stable_provider_event_id<'a>(id: &'a str, event_kind: &str) -> Option<&'a str
     }
 }
 
+fn required_provider_identity<'a>(id: &'a str, event_kind: &str, identity_field: &str) -> Option<&'a str> {
+    let id = id.trim();
+    if id.is_empty() {
+        warn!(event_kind, identity_field, "QQBot inbound event missing required identity; dropping event");
+        None
+    } else {
+        Some(id)
+    }
+}
+
 /// Normalize a C2C_MESSAGE_CREATE into a UnifiedIncomingMessage.
 pub(crate) fn normalize_c2c_message(msg: &C2cMessageCreate) -> Option<UnifiedIncomingMessage> {
     let stable_event_id = stable_provider_event_id(&msg.id, "C2C_MESSAGE_CREATE")?;
-    let user_openid = msg.author.user_openid.as_deref().unwrap_or_default();
-    if user_openid.is_empty() {
-        return None;
-    }
+    let user_openid = required_provider_identity(
+        msg.author.user_openid.as_deref().unwrap_or_default(),
+        "C2C_MESSAGE_CREATE",
+        "author.user_openid",
+    )?;
     let chat_id = build_chat_id(ChatTarget::C2c, user_openid);
     Some(UnifiedIncomingMessage {
         id: stable_event_id.to_owned(),
         platform: PluginType::Qqbot,
         chat_id,
+        chat_kind: ChatKind::Direct,
+        mention_state: MentionState::Unknown,
         user: UnifiedUser {
             id: user_openid.to_string(),
             username: None,
@@ -211,19 +224,33 @@ pub(crate) fn normalize_c2c_message(msg: &C2cMessageCreate) -> Option<UnifiedInc
 
 /// Normalize a GROUP_AT_MESSAGE_CREATE / GROUP_MESSAGE_CREATE.
 /// Bot-loop guard: skip if author.bot is true.
-pub(crate) fn normalize_group_message(msg: &GroupMessageCreate) -> Option<UnifiedIncomingMessage> {
+pub(crate) fn normalize_group_message(
+    msg: &GroupMessageCreate,
+    mention_state: MentionState,
+) -> Option<UnifiedIncomingMessage> {
     // Bot-loop guard.
     if msg.author.bot {
         return None;
     }
     let stable_event_id =
         stable_provider_event_id(&msg.id, "GROUP_AT_MESSAGE_CREATE/GROUP_MESSAGE_CREATE")?;
-    let member_openid = msg.author.member_openid.as_deref().unwrap_or_default();
-    let chat_id = build_chat_id(ChatTarget::Group, &msg.group_openid);
+    let group_openid = required_provider_identity(
+        &msg.group_openid,
+        "GROUP_AT_MESSAGE_CREATE/GROUP_MESSAGE_CREATE",
+        "group_openid",
+    )?;
+    let member_openid = required_provider_identity(
+        msg.author.member_openid.as_deref().unwrap_or_default(),
+        "GROUP_AT_MESSAGE_CREATE/GROUP_MESSAGE_CREATE",
+        "author.member_openid",
+    )?;
+    let chat_id = build_chat_id(ChatTarget::Group, group_openid);
     Some(UnifiedIncomingMessage {
         id: stable_event_id.to_owned(),
         platform: PluginType::Qqbot,
         chat_id,
+        chat_kind: ChatKind::Group,
+        mention_state,
         user: UnifiedUser {
             id: member_openid.to_string(),
             username: None,
@@ -242,6 +269,14 @@ pub(crate) fn normalize_group_message(msg: &GroupMessageCreate) -> Option<Unifie
     })
 }
 
+fn group_message_mention_state(event_type: &str) -> MentionState {
+    match event_type {
+        "GROUP_AT_MESSAGE_CREATE" => MentionState::Mentioned,
+        "GROUP_MESSAGE_CREATE" => MentionState::NotMentioned,
+        _ => MentionState::Unknown,
+    }
+}
+
 /// Normalize an AT_MESSAGE_CREATE (guild public channel).
 /// Bot-loop guard: skip if author.bot is true.
 pub(crate) fn normalize_channel_message(msg: &ChannelMessageCreate) -> Option<UnifiedIncomingMessage> {
@@ -249,12 +284,20 @@ pub(crate) fn normalize_channel_message(msg: &ChannelMessageCreate) -> Option<Un
         return None;
     }
     let stable_event_id = stable_provider_event_id(&msg.id, "AT_MESSAGE_CREATE")?;
-    let author_id = msg.author.id.as_deref().unwrap_or_default();
-    let chat_id = build_chat_id(ChatTarget::Channel, &msg.channel_id);
+    let author_id = required_provider_identity(
+        msg.author.id.as_deref().unwrap_or_default(),
+        "AT_MESSAGE_CREATE",
+        "author.id",
+    )?;
+    let channel_id = required_provider_identity(&msg.channel_id, "AT_MESSAGE_CREATE", "channel_id")?;
+    let chat_id = build_chat_id(ChatTarget::Channel, channel_id);
     Some(UnifiedIncomingMessage {
         id: stable_event_id.to_owned(),
         platform: PluginType::Qqbot,
         chat_id,
+        chat_kind: ChatKind::Group,
+        // This normalizer is only called for AT_MESSAGE_CREATE.
+        mention_state: MentionState::Mentioned,
         user: UnifiedUser {
             id: author_id.to_string(),
             username: msg.author.username.clone(),
@@ -284,12 +327,19 @@ pub(crate) fn normalize_direct_message(msg: &DirectMessageCreate) -> Option<Unif
         return None;
     }
     let stable_event_id = stable_provider_event_id(&msg.id, "DIRECT_MESSAGE_CREATE")?;
-    let author_id = msg.author.id.as_deref().unwrap_or_default();
-    let chat_id = build_chat_id(ChatTarget::Dm, &msg.guild_id);
+    let author_id = required_provider_identity(
+        msg.author.id.as_deref().unwrap_or_default(),
+        "DIRECT_MESSAGE_CREATE",
+        "author.id",
+    )?;
+    let guild_id = required_provider_identity(&msg.guild_id, "DIRECT_MESSAGE_CREATE", "guild_id")?;
+    let chat_id = build_chat_id(ChatTarget::Dm, guild_id);
     Some(UnifiedIncomingMessage {
         id: stable_event_id.to_owned(),
         platform: PluginType::Qqbot,
         chat_id,
+        chat_kind: ChatKind::Direct,
+        mention_state: MentionState::Unknown,
         user: UnifiedUser {
             id: author_id.to_string(),
             username: msg.author.username.clone(),
@@ -324,20 +374,50 @@ pub(crate) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
         .and_then(|d| d.resolved.as_ref())
         .and_then(|r| r.button_id.clone())?;
 
-    let user_id = interaction
-        .user_openid
-        .as_deref()
-        .or(interaction.group_member_openid.as_deref())
-        .unwrap_or_default()
-        .to_string();
-
-    let chat_id = if let Some(gid) = &interaction.group_openid {
-        build_chat_id(ChatTarget::Group, gid)
-    } else if let Some(cid) = &interaction.channel_id {
-        build_chat_id(ChatTarget::Channel, cid)
+    let (chat_id, chat_kind, user_id) = if let Some(gid) = interaction.group_openid.as_deref() {
+        let gid = required_provider_identity(gid, "INTERACTION_CREATE", "group_openid")?;
+        let user_id = required_provider_identity(
+            interaction.group_member_openid.as_deref().unwrap_or_default(),
+            "INTERACTION_CREATE",
+            "group_member_openid",
+        )?;
+        (
+            build_chat_id(ChatTarget::Group, gid),
+            ChatKind::Group,
+            user_id.to_owned(),
+        )
+    } else if let Some(cid) = interaction.channel_id.as_deref() {
+        let cid = required_provider_identity(cid, "INTERACTION_CREATE", "channel_id")?;
+        let user_id = interaction
+            .user_openid
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                interaction
+                    .group_member_openid
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+            })
+            .and_then(|id| required_provider_identity(id, "INTERACTION_CREATE", "actor id"))?;
+        (
+            build_chat_id(ChatTarget::Channel, cid),
+            ChatKind::Group,
+            user_id.to_owned(),
+        )
     } else {
         // C2C interaction: use user_openid.
-        build_chat_id(ChatTarget::C2c, &user_id)
+        let user_id = required_provider_identity(
+            interaction.user_openid.as_deref().unwrap_or_default(),
+            "INTERACTION_CREATE",
+            "user_openid",
+        )?;
+        (
+            build_chat_id(ChatTarget::C2c, user_id),
+            ChatKind::Direct,
+            user_id.to_owned(),
+        )
     };
 
     let parsed = parse_callback_data(&button_id);
@@ -358,6 +438,10 @@ pub(crate) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
         id: stable_event_id.to_owned(),
         platform: PluginType::Qqbot,
         chat_id,
+        chat_kind,
+        // A component interaction on the bot's own message explicitly targets
+        // the bot even when it originated in a group or guild channel.
+        mention_state: MentionState::Mentioned,
         user: UnifiedUser {
             id: user_id,
             username: None,
@@ -684,7 +768,8 @@ async fn connect_once(
                                     "GROUP_AT_MESSAGE_CREATE" | "GROUP_MESSAGE_CREATE" => {
                                         match serde_json::from_value::<GroupMessageCreate>(payload.d) {
                                             Ok(msg) => {
-                                                if let Some(unified) = normalize_group_message(&msg) {
+                                                let mention_state = group_message_mention_state(t);
+                                                if let Some(unified) = normalize_group_message(&msg, mention_state) {
                                                     record_inbound_msg_id(
                                                         reply_map,
                                                         &unified.chat_id,
@@ -990,6 +1075,8 @@ mod tests {
         assert_eq!(unified.user.id, "uid1");
         assert_eq!(unified.content.text, "hello");
         assert_eq!(unified.content.content_type, MessageContentType::Text);
+        assert_eq!(unified.chat_kind, ChatKind::Direct);
+        assert_eq!(unified.mention_state, MentionState::Unknown);
     }
 
     #[test]
@@ -1041,7 +1128,7 @@ mod tests {
         };
 
         assert!(normalize_c2c_message(&c2c).is_none());
-        assert!(normalize_group_message(&group).is_none());
+        assert!(normalize_group_message(&group, MentionState::Mentioned).is_none());
         assert!(normalize_channel_message(&channel).is_none());
         assert!(normalize_direct_message(&dm).is_none());
     }
@@ -1055,9 +1142,48 @@ mod tests {
             author: group_author("mid1", false),
             timestamp: String::new(),
         };
-        let unified = normalize_group_message(&msg).expect("should normalize");
+        let unified = normalize_group_message(&msg, MentionState::Mentioned).expect("should normalize");
         assert_eq!(unified.chat_id, "group:g1");
         assert_eq!(unified.user.id, "mid1");
+        assert_eq!(unified.chat_kind, ChatKind::Group);
+        assert_eq!(unified.mention_state, MentionState::Mentioned);
+
+        let without_at = normalize_group_message(&msg, MentionState::NotMentioned).expect("should normalize");
+        assert_eq!(without_at.mention_state, MentionState::NotMentioned);
+    }
+
+    #[test]
+    fn normalize_group_requires_nonempty_group_and_member_openids() {
+        let missing_group = GroupMessageCreate {
+            id: "msg_group_missing_group".into(),
+            group_openid: "  ".into(),
+            content: "hello".into(),
+            author: group_author("mid1", false),
+            timestamp: String::new(),
+        };
+        let missing_member = GroupMessageCreate {
+            id: "msg_group_missing_member".into(),
+            group_openid: "g1".into(),
+            content: "hello".into(),
+            author: group_author(" ", false),
+            timestamp: String::new(),
+        };
+
+        assert!(normalize_group_message(&missing_group, MentionState::Mentioned).is_none());
+        assert!(normalize_group_message(&missing_member, MentionState::Mentioned).is_none());
+    }
+
+    #[test]
+    fn group_gateway_event_type_preserves_mention_difference() {
+        assert_eq!(
+            group_message_mention_state("GROUP_AT_MESSAGE_CREATE"),
+            MentionState::Mentioned
+        );
+        assert_eq!(
+            group_message_mention_state("GROUP_MESSAGE_CREATE"),
+            MentionState::NotMentioned
+        );
+        assert_eq!(group_message_mention_state("OTHER"), MentionState::Unknown);
     }
 
     #[test]
@@ -1069,7 +1195,7 @@ mod tests {
             author: group_author("mid1", true),
             timestamp: String::new(),
         };
-        assert!(normalize_group_message(&msg).is_none());
+        assert!(normalize_group_message(&msg, MentionState::Mentioned).is_none());
     }
 
     #[test]
@@ -1086,6 +1212,31 @@ mod tests {
         assert_eq!(unified.chat_id, "channel:ch1");
         assert_eq!(unified.user.id, "u1");
         assert_eq!(unified.user.display_name, "alice");
+        assert_eq!(unified.chat_kind, ChatKind::Group);
+        assert_eq!(unified.mention_state, MentionState::Mentioned);
+    }
+
+    #[test]
+    fn normalize_channel_requires_nonempty_channel_and_author_ids() {
+        let missing_channel = ChannelMessageCreate {
+            id: "msg_channel_missing_channel".into(),
+            channel_id: " ".into(),
+            guild_id: Some("g1".into()),
+            content: "hello".into(),
+            author: guild_author("u1", "alice", false),
+            timestamp: String::new(),
+        };
+        let missing_author = ChannelMessageCreate {
+            id: "msg_channel_missing_author".into(),
+            channel_id: "ch1".into(),
+            guild_id: Some("g1".into()),
+            content: "hello".into(),
+            author: guild_author(" ", "alice", false),
+            timestamp: String::new(),
+        };
+
+        assert!(normalize_channel_message(&missing_channel).is_none());
+        assert!(normalize_channel_message(&missing_author).is_none());
     }
 
     #[test]
@@ -1114,6 +1265,29 @@ mod tests {
         assert_eq!(unified.chat_id, "dm:g2");
         assert_eq!(unified.user.id, "u2");
         assert_eq!(unified.user.display_name, "bob");
+        assert_eq!(unified.chat_kind, ChatKind::Direct);
+        assert_eq!(unified.mention_state, MentionState::Unknown);
+    }
+
+    #[test]
+    fn normalize_dm_requires_nonempty_guild_and_author_ids() {
+        let missing_guild = DirectMessageCreate {
+            id: "msg_dm_missing_guild".into(),
+            guild_id: " ".into(),
+            content: "hello".into(),
+            author: guild_author("u1", "alice", false),
+            timestamp: String::new(),
+        };
+        let missing_author = DirectMessageCreate {
+            id: "msg_dm_missing_author".into(),
+            guild_id: "g1".into(),
+            content: "hello".into(),
+            author: guild_author(" ", "alice", false),
+            timestamp: String::new(),
+        };
+
+        assert!(normalize_direct_message(&missing_guild).is_none());
+        assert!(normalize_direct_message(&missing_author).is_none());
     }
 
     #[test]
@@ -1174,6 +1348,46 @@ mod tests {
         let unified = normalize_interaction(&interaction).expect("should normalize");
         assert_eq!(unified.chat_id, "group:g1");
         assert_eq!(unified.user.id, "mid1");
+    }
+
+    #[test]
+    fn normalize_interaction_requires_nonempty_target_and_actor_ids() {
+        let make_interaction = || InteractionCreate {
+            id: "int_missing_identity".into(),
+            interaction_type: INTERACTION_TYPE_BUTTON,
+            data: Some(super::super::types::InteractionData {
+                resolved: Some(super::super::types::InteractionResolved {
+                    button_id: Some("system:session.new".into()),
+                    button_data: None,
+                }),
+            }),
+            channel_id: None,
+            guild_id: None,
+            group_openid: Some("g1".into()),
+            user_openid: None,
+            group_member_openid: Some("mid1".into()),
+            chat_type: None,
+        };
+
+        let mut missing_group = make_interaction();
+        missing_group.group_openid = Some(" ".into());
+        assert!(normalize_interaction(&missing_group).is_none());
+
+        let mut missing_group_member = make_interaction();
+        missing_group_member.group_member_openid = Some(" ".into());
+        assert!(normalize_interaction(&missing_group_member).is_none());
+
+        let mut missing_channel = make_interaction();
+        missing_channel.group_openid = None;
+        missing_channel.channel_id = Some(" ".into());
+        missing_channel.user_openid = Some("u1".into());
+        assert!(normalize_interaction(&missing_channel).is_none());
+
+        let mut missing_direct_user = make_interaction();
+        missing_direct_user.group_openid = None;
+        missing_direct_user.user_openid = Some(" ".into());
+        missing_direct_user.group_member_openid = None;
+        assert!(normalize_interaction(&missing_direct_user).is_none());
     }
 
     #[test]

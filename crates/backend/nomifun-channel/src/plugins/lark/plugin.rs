@@ -12,8 +12,9 @@ use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
-    ActionCategory, ActionContext, BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType, UnifiedAction,
-    UnifiedAttachment, UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
+    ActionCategory, ActionContext, BotInfo, ChatKind, MentionState, MessageContentType, PluginConfig, PluginStatus,
+    PluginType, UnifiedAction, UnifiedAttachment, UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage,
+    UnifiedUser,
 };
 
 use super::api::LarkApi;
@@ -25,6 +26,18 @@ use super::ws_session::{FragmentCache, parse_pong_config};
 
 /// Interval between event dedup cache cleanup sweeps.
 const DEDUP_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+/// Card callbacks omit `chat_type`; remember only structured message
+/// observations and fail closed when a chat has not been observed recently.
+const CHAT_KIND_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const CHAT_KIND_CACHE_CAPACITY: usize = 2_048;
+
+#[derive(Clone, Copy)]
+struct CachedChatKind {
+    kind: ChatKind,
+    observed_at: Instant,
+}
+
+type ChatKindCache = Arc<Mutex<HashMap<String, CachedChatKind>>>;
 
 /// Lark (Feishu) platform plugin.
 ///
@@ -41,8 +54,10 @@ pub struct LarkPlugin {
     ws_handle: Option<JoinHandle<()>>,
     cleanup_handle: Option<JoinHandle<()>>,
     shutdown_tx: Option<watch::Sender<bool>>,
-    /// Shared event deduplication cache: event_id → received_at.
+    /// Shared event deduplication cache: event_id -> received_at.
     dedup_cache: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Chat scope learned only from normalized Lark message events.
+    chat_kind_cache: ChatKindCache,
 }
 
 impl Default for LarkPlugin {
@@ -57,6 +72,7 @@ impl Default for LarkPlugin {
             cleanup_handle: None,
             shutdown_tx: None,
             dedup_cache: Arc::new(Mutex::new(HashMap::new())),
+            chat_kind_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -71,6 +87,7 @@ impl LarkPlugin {
 impl ChannelPlugin for LarkPlugin {
     async fn initialize(&mut self, config: PluginConfig, callbacks: PluginCallbacks) -> Result<(), ChannelError> {
         self.status.set(PluginStatus::Initializing);
+        self.chat_kind_cache.lock().await.clear();
 
         let app_id = config
             .credentials
@@ -145,12 +162,16 @@ impl ChannelPlugin for LarkPlugin {
         // Spawn the WebSocket connection loop
         let api_clone = Arc::clone(self.api.as_ref().expect("api set in initialize"));
         let dedup_cache = Arc::clone(&self.dedup_cache);
+        let chat_kind_cache = Arc::clone(&self.chat_kind_cache);
+        let bot_open_id = self.bot_info.as_ref().map(|bot| bot.id.clone()).unwrap_or_default();
         self.ws_handle = Some(tokio::spawn(ws_loop(
             api_clone,
             callbacks.message_tx,
             dedup_cache.clone(),
             self.status.clone(),
             shutdown_rx,
+            bot_open_id,
+            chat_kind_cache,
         )));
 
         // Spawn the dedup cache cleanup task
@@ -280,6 +301,8 @@ async fn ws_loop(
     dedup_cache: Arc<Mutex<HashMap<String, Instant>>>,
     status: SharedPluginStatus,
     mut shutdown_rx: watch::Receiver<bool>,
+    bot_open_id: String,
+    chat_kind_cache: ChatKindCache,
 ) {
     let mut consecutive_errors: u32 = 0;
 
@@ -323,6 +346,8 @@ async fn ws_loop(
             &message_tx,
             &dedup_cache,
             &mut shutdown_rx,
+            &bot_open_id,
+            &chat_kind_cache,
         )
         .await
         {
@@ -349,7 +374,7 @@ async fn ws_loop(
     // The loop exits on shutdown, reconnect exhaustion, or a server-side
     // clean close (which the loop does not currently re-dial). For any
     // non-shutdown exit the connection is gone while the facade still says
-    // Running — flip the shared status to Error so the manager watchdog can
+    // Running -- flip the shared status to Error so the manager watchdog can
     // persist/broadcast the real state and attempt a restart.
     mark_error_on_unexpected_exit(&status, &shutdown_rx, "lark");
 
@@ -364,6 +389,8 @@ async fn connect_and_listen(
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
     dedup_cache: &Arc<Mutex<HashMap<String, Instant>>>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    bot_open_id: &str,
+    chat_kind_cache: &ChatKindCache,
 ) -> Result<(), ChannelError> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::connect_async_tls_with_config;
@@ -427,7 +454,15 @@ async fn connect_and_listen(
                                             } else {
                                                 Some(message_id.as_str())
                                             };
-                                            handle_ws_text(&text, msg_type, dedup_id, message_tx, dedup_cache)
+                                            handle_ws_text(
+                                                &text,
+                                                msg_type,
+                                                dedup_id,
+                                                message_tx,
+                                                dedup_cache,
+                                                bot_open_id,
+                                                chat_kind_cache,
+                                            )
                                                 .await;
                                         } else {
                                             warn!("Lark frame payload is not valid UTF-8");
@@ -505,7 +540,7 @@ fn handle_control_frame(frame: &super::frame::PbFrame) -> Option<Duration> {
 /// `dedup_id` is the transport frame's `message_id` header. The `event`
 /// branch dedups on the payload's own `event_id`; the `card` branch has no
 /// stable id in its payload (its `token`/`open_message_id` are not reliably
-/// unique-per-click), so it dedups on this frame id instead — a WS
+/// unique-per-click), so it dedups on this frame id instead -- a WS
 /// re-delivery of the same click carries the same frame `message_id`,
 /// preventing a duplicate `chat.regenerate`/`chat.continue` from re-firing.
 async fn handle_ws_text(
@@ -514,6 +549,8 @@ async fn handle_ws_text(
     dedup_id: Option<&str>,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
     dedup_cache: &Arc<Mutex<HashMap<String, Instant>>>,
+    bot_open_id: &str,
+    chat_kind_cache: &ChatKindCache,
 ) {
     match frame_type {
         "event" => {
@@ -547,7 +584,7 @@ async fn handle_ws_text(
             match event_type {
                 "im.message.receive_v1" => {
                     if let Some(event_data) = envelope.get("event").cloned() {
-                        handle_message_event(event_data, message_tx).await;
+                        handle_message_event(event_data, message_tx, bot_open_id, chat_kind_cache).await;
                     }
                 }
                 "application.bot.menu_v6" => {
@@ -579,7 +616,7 @@ async fn handle_ws_text(
                     return;
                 }
             };
-            handle_card_action(data, stable_event_id, message_tx).await;
+            handle_card_action(data, stable_event_id, message_tx, chat_kind_cache).await;
         }
         _ => {
             debug!(frame_type, "Lark unhandled payload type");
@@ -592,7 +629,12 @@ async fn handle_ws_text(
 // ---------------------------------------------------------------------------
 
 /// Handle an `im.message.receive_v1` event.
-async fn handle_message_event(event_data: serde_json::Value, message_tx: &mpsc::Sender<UnifiedIncomingMessage>) {
+async fn handle_message_event(
+    event_data: serde_json::Value,
+    message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
+    bot_open_id: &str,
+    chat_kind_cache: &ChatKindCache,
+) {
     let evt: MessageEvent = match serde_json::from_value(event_data.clone()) {
         Ok(e) => e,
         Err(e) => {
@@ -607,10 +649,21 @@ async fn handle_message_event(event_data: serde_json::Value, message_tx: &mpsc::
         return;
     }
 
+    let sender_open_id = evt.sender.sender_id.open_id.trim();
+    if sender_open_id.is_empty() {
+        warn!("Lark message event missing sender open_id; dropping event");
+        return;
+    }
+    let chat_id = evt.message.chat_id.trim();
+    if chat_id.is_empty() {
+        warn!("Lark message event missing chat_id; dropping event");
+        return;
+    }
+
     let user = UnifiedUser {
-        id: evt.sender.sender_id.open_id.clone(),
+        id: sender_open_id.to_owned(),
         username: None,
-        display_name: evt.sender.sender_id.open_id.clone(),
+        display_name: sender_open_id.to_owned(),
         avatar_url: None,
     };
 
@@ -628,10 +681,31 @@ async fn handle_message_event(event_data: serde_json::Value, message_tx: &mpsc::
         .map(|ms| ms / 1000)
         .unwrap_or_else(chrono_now);
 
+    let chat_kind = match evt.message.chat_type.as_str() {
+        "p2p" => ChatKind::Direct,
+        "group" => ChatKind::Group,
+        _ => ChatKind::Unknown,
+    };
+
     let unified = UnifiedIncomingMessage {
         id: stable_event_id.to_owned(),
         platform: PluginType::Lark,
-        chat_id: evt.message.chat_id.clone(),
+        chat_id: chat_id.to_owned(),
+        chat_kind,
+        mention_state: if bot_open_id.is_empty() {
+            MentionState::Unknown
+        } else if evt
+            .message
+            .mentions
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|mention| mention.id.open_id == bot_open_id)
+        {
+            MentionState::Mentioned
+        } else {
+            MentionState::NotMentioned
+        },
         user,
         content: UnifiedMessageContent {
             content_type,
@@ -644,6 +718,7 @@ async fn handle_message_event(event_data: serde_json::Value, message_tx: &mpsc::
         raw: None,
     };
 
+    remember_chat_kind(chat_kind_cache, chat_id, chat_kind).await;
     let _ = message_tx.send(unified).await;
 }
 
@@ -652,6 +727,7 @@ async fn handle_card_action(
     data: serde_json::Value,
     stable_event_id: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
+    chat_kind_cache: &ChatKindCache,
 ) {
     if stable_event_id.trim().is_empty() {
         warn!("Lark card action missing stable frame message_id; dropping callback");
@@ -675,43 +751,63 @@ async fn handle_card_action(
         .and_then(|a| a.as_str())
         .unwrap_or("");
 
-    let parsed = parse_lark_callback(action_str);
+    let Some((cat_str, action, params)) = parse_lark_callback(action_str) else {
+        warn!("Lark card action has invalid callback data; dropping action");
+        return;
+    };
+    if action.trim().is_empty() {
+        warn!("Lark card action has an empty action name; dropping action");
+        return;
+    }
 
-    let chat_id = evt.open_chat_id.as_deref().unwrap_or("").to_string();
+    let Some(chat_id) = evt.open_chat_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
+        warn!("Lark card action missing open_chat_id; dropping callback");
+        return;
+    };
+    let operator_open_id = evt.operator.open_id.trim();
+    if operator_open_id.is_empty() {
+        warn!("Lark card action missing operator open_id; dropping callback");
+        return;
+    }
+    let chat_id = chat_id.to_owned();
 
     let message_id = evt.open_message_id.clone();
 
     let user = UnifiedUser {
-        id: evt.operator.open_id.clone(),
+        id: operator_open_id.to_owned(),
         username: None,
-        display_name: evt.operator.open_id.clone(),
+        display_name: operator_open_id.to_owned(),
         avatar_url: None,
     };
 
-    let unified_action = parsed.map(|(cat_str, action, params)| {
-        let category = match cat_str.as_str() {
-            "platform" => ActionCategory::Platform,
-            "chat" => ActionCategory::Chat,
-            _ => ActionCategory::System,
-        };
-        UnifiedAction {
-            action,
-            category,
-            params,
-            context: ActionContext {
-                platform: PluginType::Lark,
-                user_id: evt.operator.open_id.clone(),
-                chat_id: chat_id.clone(),
-                message_id: message_id.clone(),
-                session_id: None,
-            },
-        }
-    });
+    let category = match cat_str.as_str() {
+        "platform" => ActionCategory::Platform,
+        "chat" => ActionCategory::Chat,
+        _ => ActionCategory::System,
+    };
+    let unified_action = UnifiedAction {
+        action,
+        category,
+        params,
+        context: ActionContext {
+            platform: PluginType::Lark,
+            user_id: operator_open_id.to_owned(),
+            chat_id: chat_id.clone(),
+            message_id: message_id.clone(),
+            session_id: None,
+        },
+    };
+    let chat_kind = cached_chat_kind(chat_kind_cache, &chat_id).await;
 
     let msg = UnifiedIncomingMessage {
         id: stable_event_id.to_owned(),
         platform: PluginType::Lark,
         chat_id,
+        // Card callbacks do not include `chat_type`; use only a recent
+        // observation from a normalized message in this chat.
+        chat_kind,
+        // A structured click on the bot's own card explicitly targets it.
+        mention_state: MentionState::Mentioned,
         user,
         content: UnifiedMessageContent {
             content_type: MessageContentType::Action,
@@ -720,11 +816,59 @@ async fn handle_card_action(
         },
         timestamp: chrono_now(),
         reply_to_message_id: None,
-        action: unified_action,
+        action: Some(unified_action),
         raw: None,
     };
 
     let _ = message_tx.send(msg).await;
+}
+
+async fn remember_chat_kind(cache: &ChatKindCache, chat_id: &str, kind: ChatKind) {
+    let chat_id = chat_id.trim();
+    if chat_id.is_empty() || kind == ChatKind::Unknown {
+        return;
+    }
+
+    let now = Instant::now();
+    let mut entries = cache.lock().await;
+    entries.retain(|_, value| now.saturating_duration_since(value.observed_at) <= CHAT_KIND_CACHE_TTL);
+
+    if !entries.contains_key(chat_id)
+        && entries.len() >= CHAT_KIND_CACHE_CAPACITY
+        && let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, value)| value.observed_at)
+            .map(|(key, _)| key.clone())
+    {
+        entries.remove(&oldest);
+    }
+
+    entries.insert(
+        chat_id.to_owned(),
+        CachedChatKind {
+            kind,
+            observed_at: now,
+        },
+    );
+}
+
+async fn cached_chat_kind(cache: &ChatKindCache, chat_id: &str) -> ChatKind {
+    let chat_id = chat_id.trim();
+    if chat_id.is_empty() {
+        return ChatKind::Unknown;
+    }
+
+    let now = Instant::now();
+    let mut entries = cache.lock().await;
+    let Some(observation) = entries.get(chat_id).copied() else {
+        return ChatKind::Unknown;
+    };
+    if now.saturating_duration_since(observation.observed_at) <= CHAT_KIND_CACHE_TTL {
+        observation.kind
+    } else {
+        entries.remove(chat_id);
+        ChatKind::Unknown
+    }
 }
 
 /// Handle an `application.bot.menu_v6` event.
@@ -746,17 +890,25 @@ async fn handle_bot_menu_event(
         }
     };
 
+    let operator_open_id = evt.operator.operator_id.open_id.trim();
+    if operator_open_id.is_empty() {
+        warn!("Lark bot menu event missing operator open_id; dropping event");
+        return;
+    }
+
     let user = UnifiedUser {
-        id: evt.operator.operator_id.open_id.clone(),
+        id: operator_open_id.to_owned(),
         username: None,
-        display_name: evt.operator.operator_id.open_id.clone(),
+        display_name: operator_open_id.to_owned(),
         avatar_url: None,
     };
 
     let msg = UnifiedIncomingMessage {
         id: stable_event_id.to_owned(),
         platform: PluginType::Lark,
-        chat_id: evt.operator.operator_id.open_id.clone(),
+        chat_id: operator_open_id.to_owned(),
+        chat_kind: ChatKind::Direct,
+        mention_state: MentionState::Mentioned,
         user,
         content: UnifiedMessageContent {
             content_type: MessageContentType::Command,
@@ -843,7 +995,7 @@ fn extract_message_content(
             (MessageContentType::Audio, String::new(), Some(attachments))
         }
         _ => {
-            // Unsupported type — treat as text with the raw JSON
+            // Unsupported type -- treat as text with the raw JSON
             (
                 MessageContentType::Text,
                 format!("[Unsupported message type: {message_type}]"),
@@ -892,7 +1044,7 @@ fn chrono_now() -> i64 {
 
 /// Build a TLS connector for WebSocket connections.
 ///
-/// Explicitly sets ALPN to `http/1.1` only — WebSocket requires an HTTP/1.1
+/// Explicitly sets ALPN to `http/1.1` only -- WebSocket requires an HTTP/1.1
 /// upgrade handshake and is incompatible with h2. Without this, some servers
 /// negotiate h2 via ALPN and the WebSocket upgrade never completes.
 fn build_ws_tls_connector() -> Result<tokio_tungstenite::Connector, ChannelError> {
@@ -1135,6 +1287,7 @@ mod tests {
     async fn ws_text_event_dispatches_message() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
             "header": {
@@ -1157,7 +1310,7 @@ mod tests {
             }
         }"#;
 
-        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
 
         let msg = message_rx.try_recv().unwrap();
         assert_eq!(msg.id, "msg_test_1");
@@ -1165,12 +1318,102 @@ mod tests {
         assert_eq!(msg.content.text, "Hello bot");
         assert_eq!(msg.user.id, "ou_user1");
         assert_eq!(msg.platform, PluginType::Lark);
+        assert_eq!(msg.chat_kind, ChatKind::Direct);
+        assert_eq!(msg.mention_state, MentionState::NotMentioned);
+    }
+
+    #[tokio::test]
+    async fn ws_text_event_without_sender_or_chat_id_is_dropped() {
+        let (message_tx, mut message_rx) = mpsc::channel(16);
+        let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let missing_sender = r#"{
+            "header": { "event_id": "ev_missing_sender", "event_type": "im.message.receive_v1" },
+            "event": {
+                "sender": { "sender_id": { "open_id": " " } },
+                "message": {
+                    "message_id": "msg_missing_sender", "chat_id": "oc_1",
+                    "chat_type": "p2p", "message_type": "text", "content": "{\"text\":\"hi\"}"
+                }
+            }
+        }"#;
+        let missing_chat = r#"{
+            "header": { "event_id": "ev_missing_chat", "event_type": "im.message.receive_v1" },
+            "event": {
+                "sender": { "sender_id": { "open_id": "ou_actor" } },
+                "message": {
+                    "message_id": "msg_missing_chat", "chat_id": " ",
+                    "chat_type": "p2p", "message_type": "text", "content": "{\"text\":\"hi\"}"
+                }
+            }
+        }"#;
+
+        handle_ws_text(
+            missing_sender,
+            "event",
+            None,
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+        handle_ws_text(
+            missing_chat,
+            "event",
+            None,
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+
+        assert!(message_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ws_text_group_tracks_bot_mention_by_open_id() {
+        let (message_tx, mut message_rx) = mpsc::channel(16);
+        let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let payload = r#"{
+            "header": {
+                "event_id": "ev_group_1",
+                "event_type": "im.message.receive_v1"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": { "open_id": "ou_user2" }
+                },
+                "message": {
+                    "message_id": "msg_group_1",
+                    "chat_id": "oc_group1",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": "{\"text\":\"@_user_1 Hello\"}",
+                    "mentions": [{
+                        "key": "@_user_1",
+                        "id": { "open_id": "ou_bot" },
+                        "name": "Nomi"
+                    }]
+                }
+            }
+        }"#;
+
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
+
+        let msg = message_rx.try_recv().unwrap();
+        assert_eq!(msg.chat_kind, ChatKind::Group);
+        assert_eq!(msg.mention_state, MentionState::Mentioned);
+        assert_eq!(msg.content.text, "Hello");
     }
 
     #[tokio::test]
     async fn ws_text_event_deduplicates() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
             "header": {
@@ -1193,8 +1436,8 @@ mod tests {
             }
         }"#;
 
-        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
-        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
 
         assert!(message_rx.try_recv().is_ok());
         assert!(message_rx.try_recv().is_err());
@@ -1204,6 +1447,7 @@ mod tests {
     async fn ws_text_card_dispatches_action() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
             "operator": { "open_id": "ou_actor", "user_id": null },
@@ -1212,15 +1456,179 @@ mod tests {
             "open_chat_id": "oc_chat2"
         }"#;
 
-        handle_ws_text(payload, "card", Some("card_frame_1"), &message_tx, &dedup_cache).await;
+        handle_ws_text(
+            payload,
+            "card",
+            Some("card_frame_1"),
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
 
         let msg = message_rx.try_recv().unwrap();
         assert_eq!(msg.id, "card_frame_1");
         assert_eq!(msg.chat_id, "oc_chat2");
         assert_eq!(msg.user.id, "ou_actor");
+        assert_eq!(msg.chat_kind, ChatKind::Unknown);
         assert!(msg.action.is_some());
         let action = msg.action.unwrap();
         assert_eq!(action.action, "help.show");
+    }
+
+    #[tokio::test]
+    async fn ws_text_card_without_actor_or_chat_id_is_dropped() {
+        let (message_tx, mut message_rx) = mpsc::channel(16);
+        let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let missing_actor = r#"{
+            "operator": { "open_id": " " },
+            "action": { "tag": "button", "value": {"action": "chat:help.show"} },
+            "open_message_id": "om_1", "open_chat_id": "oc_1"
+        }"#;
+        let missing_chat = r#"{
+            "operator": { "open_id": "ou_actor" },
+            "action": { "tag": "button", "value": {"action": "chat:help.show"} },
+            "open_message_id": "om_2", "open_chat_id": " "
+        }"#;
+
+        handle_ws_text(
+            missing_actor,
+            "card",
+            Some("frame_missing_actor"),
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+        handle_ws_text(
+            missing_chat,
+            "card",
+            Some("frame_missing_chat"),
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+
+        assert!(message_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn card_callback_reuses_direct_scope_from_verified_message() {
+        let (message_tx, mut message_rx) = mpsc::channel(16);
+        let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let message = r#"{
+            "header": { "event_id": "ev_direct_scope", "event_type": "im.message.receive_v1" },
+            "event": {
+                "sender": { "sender_id": { "open_id": "ou_actor" } },
+                "message": {
+                    "message_id": "msg_direct_scope", "chat_id": "oc_direct_scope",
+                    "chat_type": "p2p", "message_type": "text", "content": "{\"text\":\"hi\"}"
+                }
+            }
+        }"#;
+        handle_ws_text(
+            message,
+            "event",
+            None,
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+        assert_eq!(message_rx.try_recv().unwrap().chat_kind, ChatKind::Direct);
+
+        let callback = r#"{
+            "operator": { "open_id": "ou_actor" },
+            "action": { "tag": "button", "value": {"action": "chat:help.show"} },
+            "open_message_id": "om_direct_scope", "open_chat_id": "oc_direct_scope"
+        }"#;
+        handle_ws_text(
+            callback,
+            "card",
+            Some("frame_direct_scope"),
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+        assert_eq!(message_rx.try_recv().unwrap().chat_kind, ChatKind::Direct);
+    }
+
+    #[tokio::test]
+    async fn card_callback_reuses_group_scope_from_verified_message() {
+        let (message_tx, mut message_rx) = mpsc::channel(16);
+        let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let message = r#"{
+            "header": { "event_id": "ev_group_scope", "event_type": "im.message.receive_v1" },
+            "event": {
+                "sender": { "sender_id": { "open_id": "ou_actor" } },
+                "message": {
+                    "message_id": "msg_group_scope", "chat_id": "oc_group_scope",
+                    "chat_type": "group", "message_type": "text", "content": "{\"text\":\"hi\"}",
+                    "mentions": [{ "key": "@_user_1", "id": { "open_id": "ou_bot" }, "name": "Nomi" }]
+                }
+            }
+        }"#;
+        handle_ws_text(
+            message,
+            "event",
+            None,
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+        assert_eq!(message_rx.try_recv().unwrap().chat_kind, ChatKind::Group);
+
+        let callback = r#"{
+            "operator": { "open_id": "ou_actor" },
+            "action": { "tag": "button", "value": {"action": "chat:help.show"} },
+            "open_message_id": "om_group_scope", "open_chat_id": "oc_group_scope"
+        }"#;
+        handle_ws_text(
+            callback,
+            "card",
+            Some("frame_group_scope"),
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+        assert_eq!(message_rx.try_recv().unwrap().chat_kind, ChatKind::Group);
+    }
+
+    #[tokio::test]
+    async fn malformed_card_callback_is_not_dispatched() {
+        let (message_tx, mut message_rx) = mpsc::channel(16);
+        let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let payload = r#"{
+            "operator": { "open_id": "ou_actor" },
+            "action": { "tag": "button", "value": {"action": "not-a-callback"} },
+            "open_message_id": "om_invalid", "open_chat_id": "oc_invalid"
+        }"#;
+        handle_ws_text(
+            payload,
+            "card",
+            Some("frame_invalid"),
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+        assert!(message_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1230,6 +1638,7 @@ mod tests {
         // chat.regenerate/chat.continue cannot re-fire.
         let (message_tx, mut message_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
             "operator": { "open_id": "ou_actor", "user_id": null },
@@ -1238,8 +1647,26 @@ mod tests {
             "open_chat_id": "oc_chat_dup"
         }"#;
 
-        handle_ws_text(payload, "card", Some("card_frame_dup"), &message_tx, &dedup_cache).await;
-        handle_ws_text(payload, "card", Some("card_frame_dup"), &message_tx, &dedup_cache).await;
+        handle_ws_text(
+            payload,
+            "card",
+            Some("card_frame_dup"),
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
+        handle_ws_text(
+            payload,
+            "card",
+            Some("card_frame_dup"),
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
 
         assert!(message_rx.try_recv().is_ok(), "first card frame dispatches");
         assert!(message_rx.try_recv().is_err(), "duplicate card frame is dropped");
@@ -1249,6 +1676,7 @@ mod tests {
     async fn ws_text_card_without_frame_id_is_dropped() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
 
         let payload = r#"{
             "operator": { "open_id": "ou_actor" },
@@ -1257,7 +1685,7 @@ mod tests {
             "open_chat_id": "oc_1"
         }"#;
 
-        handle_ws_text(payload, "card", None, &message_tx, &dedup_cache).await;
+        handle_ws_text(payload, "card", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
 
         assert!(message_rx.try_recv().is_err());
     }
@@ -1266,6 +1694,7 @@ mod tests {
     async fn ws_text_bot_menu_uses_header_event_id() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let payload = r#"{
             "header": {
                 "event_id": "ev_menu_1",
@@ -1279,7 +1708,7 @@ mod tests {
             }
         }"#;
 
-        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
 
         let msg = message_rx.try_recv().unwrap();
         assert_eq!(msg.id, "ev_menu_1");
@@ -1287,9 +1716,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws_text_bot_menu_without_operator_id_is_dropped() {
+        let (message_tx, mut message_rx) = mpsc::channel(16);
+        let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+        let payload = r#"{
+            "header": {
+                "event_id": "ev_menu_missing_operator",
+                "event_type": "application.bot.menu_v6"
+            },
+            "event": {
+                "operator": { "operator_id": { "open_id": " " } },
+                "event_key": "help"
+            }
+        }"#;
+
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
+
+        assert!(message_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn ws_text_bot_menu_without_header_event_id_is_dropped() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
         let payload = r#"{
             "header": {
                 "event_type": "application.bot.menu_v6"
@@ -1302,7 +1753,7 @@ mod tests {
             }
         }"#;
 
-        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache).await;
+        handle_ws_text(payload, "event", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
 
         assert!(message_rx.try_recv().is_err());
     }
@@ -1311,8 +1762,9 @@ mod tests {
     async fn ws_text_unknown_type_does_not_dispatch() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
         let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
 
-        handle_ws_text("{}", "unknown_type", None, &message_tx, &dedup_cache).await;
+        handle_ws_text("{}", "unknown_type", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
 
         assert!(message_rx.try_recv().is_err());
     }

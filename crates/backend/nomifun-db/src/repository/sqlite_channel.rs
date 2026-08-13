@@ -11,7 +11,7 @@ use crate::models::{
     NewChannelPendingPromptRow, NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow,
 };
 use crate::repository::channel::{
-    ChannelInboundClaim, IChannelRepository, PendingPromptEnqueue,
+    ChannelInboundClaim, IChannelRepository, PairingApprovalOutcome, PendingPromptEnqueue,
     SettleChannelInboundReceiptParams, UpdatePluginStatusParams,
 };
 
@@ -108,6 +108,51 @@ fn validate_owner_domain(owner_domain: &str) -> Result<(), DbError> {
     }
 }
 
+fn validate_group_access_mode(group_access_mode: &str) -> Result<(), DbError> {
+    match group_access_mode {
+        crate::models::CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS
+        | crate::models::CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST
+        | crate::models::CHANNEL_GROUP_ACCESS_MODE_DISABLED => Ok(()),
+        _ => Err(DbError::Conflict(format!(
+            "channel plugin group_access_mode '{group_access_mode}' is not supported"
+        ))),
+    }
+}
+
+fn validate_authorization_kind(authorization_kind: &str) -> Result<(), DbError> {
+    match authorization_kind {
+        crate::models::CHANNEL_USER_AUTHORIZATION_APPROVED
+        | crate::models::CHANNEL_USER_AUTHORIZATION_AUTO_GROUP => Ok(()),
+        _ => Err(DbError::Conflict(format!(
+            "channel user authorization_kind '{authorization_kind}' is not supported"
+        ))),
+    }
+}
+
+fn validate_chat_kind(chat_kind: &str) -> Result<(), DbError> {
+    match chat_kind {
+        crate::models::CHANNEL_CHAT_KIND_UNKNOWN
+        | crate::models::CHANNEL_CHAT_KIND_DIRECT
+        | crate::models::CHANNEL_CHAT_KIND_GROUP => Ok(()),
+        _ => Err(DbError::Conflict(format!(
+            "channel session chat_kind '{chat_kind}' is not supported"
+        ))),
+    }
+}
+
+fn merge_chat_kind(existing: &str, incoming: &str) -> Result<String, DbError> {
+    validate_chat_kind(existing)?;
+    validate_chat_kind(incoming)?;
+    match (existing, incoming) {
+        (crate::models::CHANNEL_CHAT_KIND_UNKNOWN, value) => Ok(value.to_owned()),
+        (value, crate::models::CHANNEL_CHAT_KIND_UNKNOWN) => Ok(value.to_owned()),
+        (left, right) if left == right => Ok(left.to_owned()),
+        (left, right) => Err(DbError::Conflict(format!(
+            "channel session chat_kind cannot change from '{left}' to '{right}'"
+        ))),
+    }
+}
+
 fn validate_agent_type(agent_type: &str, context: &str) -> Result<(), DbError> {
     match agent_type {
         "acp" | "openclaw-gateway" | "nanobot" | "remote" | "nomi" => Ok(()),
@@ -159,11 +204,12 @@ impl IChannelRepository for SqliteChannelRepository {
         let channel_plugin_id = ChannelPluginId::new().into_string();
         let companion_id = canonical_plugin_companion_id(row.companion_id.as_deref())?;
         validate_owner_domain(&row.owner_domain)?;
+        validate_group_access_mode(&row.group_access_mode)?;
         sqlx::query_as::<_, ChannelPluginRow>(
             "INSERT INTO channel_plugins \
                 (channel_plugin_id, type, name, enabled, config, status, last_connected, \
-                 companion_id, bot_key, owner_domain, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 companion_id, bot_key, owner_domain, group_access_mode, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              RETURNING *",
         )
         .bind(channel_plugin_id)
@@ -176,6 +222,7 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(&companion_id)
         .bind(&row.bot_key)
         .bind(&row.owner_domain)
+        .bind(&row.group_access_mode)
         .bind(row.created_at)
         .bind(row.updated_at)
         .fetch_one(&self.pool)
@@ -244,6 +291,75 @@ impl IChannelRepository for SqliteChannelRepository {
                 row.channel_plugin_id
             ))
         })
+    }
+
+    async fn update_plugin_group_access_mode_and_clear_non_direct_sessions(
+        &self,
+        channel_plugin_id: &str,
+        group_access_mode: &str,
+    ) -> Result<(), DbError> {
+        validate_group_access_mode(group_access_mode)?;
+        let mut tx = self.pool.begin().await?;
+        let now = nomifun_common::now_ms();
+
+        let updated = sqlx::query(
+            "UPDATE channel_plugins \
+             SET group_access_mode = ?, updated_at = ? \
+             WHERE channel_plugin_id = ?",
+        )
+        .bind(group_access_mode)
+        .bind(now)
+        .bind(channel_plugin_id)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!(
+                "Plugin '{channel_plugin_id}' not found"
+            )));
+        }
+
+        sqlx::query(
+            "UPDATE channel_pending_prompts AS prompt \
+             SET state = 'cancelled', settled_at = ? \
+             WHERE prompt.channel_plugin_id = ? AND prompt.state = 'queued' \
+               AND EXISTS ( \
+                   SELECT 1 FROM channel_sessions AS session \
+                   WHERE session.channel_session_id = prompt.channel_session_id \
+                     AND session.channel_plugin_id = ? \
+                     AND session.chat_kind IN ('group', 'unknown') \
+               )",
+        )
+        .bind(now)
+        .bind(channel_plugin_id)
+        .bind(channel_plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "DELETE FROM channel_session_bindings \
+             WHERE channel_plugin_id = ? \
+               AND channel_session_id IN ( \
+                   SELECT channel_session_id FROM channel_sessions \
+                   WHERE channel_plugin_id = ? \
+                     AND chat_kind IN ('group', 'unknown') \
+               )",
+        )
+        .bind(channel_plugin_id)
+        .bind(channel_plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "DELETE FROM channel_sessions \
+             WHERE channel_plugin_id = ? \
+               AND chat_kind IN ('group', 'unknown')",
+        )
+        .bind(channel_plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn update_plugin_status(
@@ -447,10 +563,26 @@ impl IChannelRepository for SqliteChannelRepository {
     // -- User CRUD ----------------------------------------------------
 
     async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError> {
-        let rows = sqlx::query_as::<_, ChannelUserRow>("SELECT * FROM channel_users ORDER BY authorized_at DESC")
+        let rows = sqlx::query_as::<_, ChannelUserRow>(
+            "SELECT * FROM channel_users \
+             WHERE authorization_kind = 'approved' ORDER BY authorized_at DESC",
+        )
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)
+    }
+
+    async fn get_user(
+        &self,
+        channel_user_id: &str,
+    ) -> Result<Option<ChannelUserRow>, DbError> {
+        let row = sqlx::query_as::<_, ChannelUserRow>(
+            "SELECT * FROM channel_users WHERE channel_user_id = ?",
+        )
+        .bind(channel_user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     async fn get_user_by_platform(
@@ -472,6 +604,13 @@ impl IChannelRepository for SqliteChannelRepository {
     }
 
     async fn create_user(&self, row: &NewChannelUserRow) -> Result<ChannelUserRow, DbError> {
+        validate_authorization_kind(&row.authorization_kind)?;
+        if row.authorization_kind != crate::models::CHANNEL_USER_AUTHORIZATION_APPROVED {
+            return Err(DbError::Conflict(
+                "create_user requires authorization_kind 'approved'; use ensure_auto_group_user for group-learned identities"
+                    .to_owned(),
+            ));
+        }
         let mut tx = self.pool.begin().await?;
         lock_channel_plugin(
             &mut tx,
@@ -483,8 +622,15 @@ impl IChannelRepository for SqliteChannelRepository {
         let inserted = sqlx::query_as::<_, ChannelUserRow>(
             "INSERT INTO channel_users \
                 (channel_user_id, platform_user_id, platform_type, channel_plugin_id, \
-                 display_name, authorized_at, last_active) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 display_name, authorization_kind, authorized_at, last_active) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(platform_user_id, platform_type, channel_plugin_id) DO UPDATE SET \
+                 display_name = COALESCE(excluded.display_name, channel_users.display_name), \
+                 authorization_kind = 'approved', \
+                 authorized_at = excluded.authorized_at, \
+                 last_active = COALESCE(excluded.last_active, channel_users.last_active) \
+             WHERE channel_users.authorization_kind = 'auto_group' \
+               AND excluded.authorization_kind = 'approved' \
              RETURNING *",
         )
         .bind(channel_user_id)
@@ -492,9 +638,10 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(&row.platform_type)
         .bind(&row.channel_plugin_id)
         .bind(&row.display_name)
+        .bind(&row.authorization_kind)
         .bind(row.authorized_at)
         .bind(row.last_active)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| {
             if is_unique_violation(&e) {
@@ -505,9 +652,61 @@ impl IChannelRepository for SqliteChannelRepository {
             } else {
                 DbError::Query(e)
             }
+        })?
+        .ok_or_else(|| {
+            DbError::Conflict(format!(
+                "User '{}' on platform '{}' already exists",
+                row.platform_user_id, row.platform_type
+            ))
         })?;
         tx.commit().await?;
         Ok(inserted)
+    }
+
+    async fn ensure_auto_group_user(
+        &self,
+        row: &NewChannelUserRow,
+    ) -> Result<ChannelUserRow, DbError> {
+        validate_authorization_kind(&row.authorization_kind)?;
+        if row.authorization_kind != crate::models::CHANNEL_USER_AUTHORIZATION_AUTO_GROUP {
+            return Err(DbError::Conflict(
+                "ensure_auto_group_user requires authorization_kind 'auto_group'".to_owned(),
+            ));
+        }
+        let channel_plugin_id = row.channel_plugin_id.as_deref().ok_or_else(|| {
+            DbError::Conflict("auto-group channel users must be scoped to a plugin".to_owned())
+        })?;
+        let mut tx = self.pool.begin().await?;
+        lock_channel_plugin(&mut tx, Some(channel_plugin_id), "auto-group channel user").await?;
+        let channel_user_id = ChannelUserId::new().into_string();
+        let user = sqlx::query_as::<_, ChannelUserRow>(
+            "INSERT INTO channel_users \
+                (channel_user_id, platform_user_id, platform_type, channel_plugin_id, \
+                 display_name, authorization_kind, authorized_at, last_active) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(platform_user_id, platform_type, channel_plugin_id) DO UPDATE SET \
+                 display_name = COALESCE(channel_users.display_name, excluded.display_name), \
+                 last_active = CASE \
+                     WHEN excluded.last_active IS NULL THEN channel_users.last_active \
+                     WHEN channel_users.last_active IS NULL \
+                          OR excluded.last_active > channel_users.last_active \
+                     THEN excluded.last_active \
+                     ELSE channel_users.last_active \
+                 END \
+             RETURNING *",
+        )
+        .bind(channel_user_id)
+        .bind(&row.platform_user_id)
+        .bind(&row.platform_type)
+        .bind(&row.channel_plugin_id)
+        .bind(&row.display_name)
+        .bind(&row.authorization_kind)
+        .bind(row.authorized_at)
+        .bind(row.last_active)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(user)
     }
 
     async fn update_user_last_active(
@@ -562,6 +761,61 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(())
     }
 
+    async fn revoke_user_and_cancel_pending(
+        &self,
+        channel_user_id: &str,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        let locked = sqlx::query(
+            "UPDATE channel_users \
+             SET display_name = display_name \
+             WHERE channel_user_id = ?",
+        )
+        .bind(channel_user_id)
+        .execute(&mut *tx)
+        .await?;
+        if locked.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!(
+                "User '{channel_user_id}' not found"
+            )));
+        }
+
+        // A queued turn carries the authority of the user who originally
+        // admitted it. Revocation therefore cancels all of that user's queued
+        // turns, including Direct; otherwise a later drain could execute an
+        // already-revoked host-capability prompt.
+        sqlx::query(
+            "UPDATE channel_pending_prompts AS prompt \
+             SET state = 'cancelled', settled_at = ? \
+             WHERE prompt.state = 'queued' \
+               AND EXISTS ( \
+                   SELECT 1 FROM channel_sessions AS session \
+                   WHERE session.channel_session_id = prompt.channel_session_id \
+                     AND session.channel_user_id = ? \
+               )",
+        )
+        .bind(now)
+        .bind(channel_user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("DELETE FROM channel_session_bindings WHERE channel_user_id = ?")
+            .bind(channel_user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM channel_sessions WHERE channel_user_id = ?")
+            .bind(channel_user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM channel_users WHERE channel_user_id = ?")
+            .bind(channel_user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     // -- Session CRUD -----------------------------------------------------
 
     async fn get_all_sessions(&self) -> Result<Vec<ChannelSessionRow>, DbError> {
@@ -590,6 +844,7 @@ impl IChannelRepository for SqliteChannelRepository {
         new_row: &NewChannelSessionRow,
     ) -> Result<ChannelSessionRow, DbError> {
         validate_agent_type(&new_row.agent_type, "channel session")?;
+        validate_chat_kind(&new_row.chat_kind)?;
         if new_row.channel_user_id != channel_user_id
             || new_row.chat_id.as_deref() != Some(chat_id)
             || new_row.channel_plugin_id.as_deref() != Some(channel_plugin_id)
@@ -669,16 +924,33 @@ impl IChannelRepository for SqliteChannelRepository {
             })?;
             // Touch last_activity.
             let now = nomifun_common::now_ms();
+            let chat_kind = merge_chat_kind(&row.chat_kind, &new_row.chat_kind)?;
+            // Legacy sessions could point at a private/shared conversation
+            // before chat scope was persisted. Reclassification must sever
+            // that link atomically so a group cannot inherit private context.
+            let conversation_id = if row.chat_kind == crate::models::CHANNEL_CHAT_KIND_UNKNOWN
+                && chat_kind != crate::models::CHANNEL_CHAT_KIND_UNKNOWN
+            {
+                None
+            } else {
+                row.conversation_id.clone()
+            };
             sqlx::query(
-                "UPDATE channel_sessions SET last_activity = ? WHERE channel_session_id = ?",
+                "UPDATE channel_sessions \
+                 SET last_activity = ?, chat_kind = ?, conversation_id = ? \
+                 WHERE channel_session_id = ?",
             )
                 .bind(now)
+                .bind(&chat_kind)
+                .bind(&conversation_id)
                 .bind(&row.channel_session_id)
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
             return Ok(ChannelSessionRow {
                 last_activity: now,
+                chat_kind,
+                conversation_id,
                 ..row
             });
         }
@@ -710,16 +982,30 @@ impl IChannelRepository for SqliteChannelRepository {
             .execute(&mut *tx)
             .await?;
             let now = nomifun_common::now_ms();
+            let chat_kind = merge_chat_kind(&row.chat_kind, &new_row.chat_kind)?;
+            let conversation_id = if row.chat_kind == crate::models::CHANNEL_CHAT_KIND_UNKNOWN
+                && chat_kind != crate::models::CHANNEL_CHAT_KIND_UNKNOWN
+            {
+                None
+            } else {
+                row.conversation_id.clone()
+            };
             sqlx::query(
-                "UPDATE channel_sessions SET last_activity = ? WHERE channel_session_id = ?",
+                "UPDATE channel_sessions \
+                 SET last_activity = ?, chat_kind = ?, conversation_id = ? \
+                 WHERE channel_session_id = ?",
             )
             .bind(now)
+            .bind(&chat_kind)
+            .bind(&conversation_id)
             .bind(&row.channel_session_id)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
             return Ok(ChannelSessionRow {
                 last_activity: now,
+                chat_kind,
+                conversation_id,
                 ..row
             });
         }
@@ -728,8 +1014,8 @@ impl IChannelRepository for SqliteChannelRepository {
         let inserted = sqlx::query_as::<_, ChannelSessionRow>(
             "INSERT INTO channel_sessions \
                 (channel_session_id, channel_user_id, agent_type, conversation_id, workspace, \
-                 chat_id, channel_plugin_id, created_at, last_activity) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 chat_id, channel_plugin_id, chat_kind, created_at, last_activity) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              RETURNING *",
         )
         .bind(session_id.as_str())
@@ -739,6 +1025,7 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(&new_row.workspace)
         .bind(&new_row.chat_id)
         .bind(&new_row.channel_plugin_id)
+        .bind(&new_row.chat_kind)
         .bind(new_row.created_at)
         .bind(new_row.last_activity)
         .fetch_one(&mut *tx)
@@ -839,6 +1126,15 @@ impl IChannelRepository for SqliteChannelRepository {
         channel_plugin_id: &str,
     ) -> Result<(), DbError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE channel_pending_prompts \
+             SET state = 'cancelled', settled_at = ? \
+             WHERE channel_plugin_id = ? AND state = 'queued'",
+        )
+        .bind(nomifun_common::now_ms())
+        .bind(channel_plugin_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("DELETE FROM channel_session_bindings WHERE channel_plugin_id = ?")
             .bind(channel_plugin_id)
             .execute(&mut *tx)
@@ -847,6 +1143,55 @@ impl IChannelRepository for SqliteChannelRepository {
             .bind(channel_plugin_id)
             .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn delete_group_sessions_by_channel(
+        &self,
+        channel_plugin_id: &str,
+    ) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        let now = nomifun_common::now_ms();
+
+        sqlx::query(
+            "UPDATE channel_pending_prompts AS prompt \
+             SET state = 'cancelled', settled_at = ? \
+             WHERE prompt.channel_plugin_id = ? AND prompt.state = 'queued' \
+               AND EXISTS ( \
+                   SELECT 1 FROM channel_sessions AS session \
+                   WHERE session.channel_session_id = prompt.channel_session_id \
+                     AND session.channel_plugin_id = ? \
+                     AND session.chat_kind = 'group' \
+               )",
+        )
+        .bind(now)
+        .bind(channel_plugin_id)
+        .bind(channel_plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "DELETE FROM channel_session_bindings \
+             WHERE channel_plugin_id = ? \
+               AND channel_session_id IN ( \
+                   SELECT channel_session_id FROM channel_sessions \
+                   WHERE channel_plugin_id = ? AND chat_kind = 'group' \
+               )",
+        )
+        .bind(channel_plugin_id)
+        .bind(channel_plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "DELETE FROM channel_sessions \
+             WHERE channel_plugin_id = ? AND chat_kind = 'group'",
+        )
+        .bind(channel_plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
         tx.commit().await?;
         Ok(())
     }
@@ -1200,6 +1545,148 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(())
     }
 
+    async fn approve_pairing_and_retire_non_direct_sessions(
+        &self,
+        code: &str,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<PairingApprovalOutcome, DbError> {
+        let mut tx = self.pool.begin().await?;
+        let pairing = sqlx::query_as::<_, ChannelPairingCodeRow>(
+            "SELECT * FROM channel_pairing_codes WHERE code = ?",
+        )
+        .bind(code)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(pairing) = pairing else {
+            return Ok(PairingApprovalOutcome::NotFound);
+        };
+        if pairing.status != "pending" {
+            return Ok(PairingApprovalOutcome::AlreadyProcessed);
+        }
+        if pairing.expires_at <= now {
+            sqlx::query(
+                "UPDATE channel_pairing_codes SET status = 'expired' \
+                 WHERE code = ? AND status = 'pending' AND expires_at <= ?",
+            )
+            .bind(code)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(PairingApprovalOutcome::Expired);
+        }
+
+        let channel_plugin_id = pairing.channel_plugin_id.as_deref().ok_or_else(|| {
+            DbError::Conflict(format!(
+                "Pairing code '{code}' is not scoped to a channel plugin"
+            ))
+        })?;
+        lock_channel_plugin(&mut tx, Some(channel_plugin_id), "pairing approval").await?;
+
+        // The upsert deliberately promotes only auto_group. A second pairing
+        // for an already-approved identity preserves the existing conflict
+        // semantics and rolls the entire transition back.
+        let channel_user_id = ChannelUserId::new().into_string();
+        let user = sqlx::query_as::<_, ChannelUserRow>(
+            "INSERT INTO channel_users \
+                (channel_user_id, platform_user_id, platform_type, channel_plugin_id, \
+                 display_name, authorization_kind, authorized_at, last_active) \
+             VALUES (?, ?, ?, ?, ?, 'approved', ?, NULL) \
+             ON CONFLICT(platform_user_id, platform_type, channel_plugin_id) DO UPDATE SET \
+                 display_name = COALESCE(excluded.display_name, channel_users.display_name), \
+                 authorization_kind = 'approved', \
+                 authorized_at = excluded.authorized_at \
+             WHERE channel_users.authorization_kind = 'auto_group' \
+             RETURNING *",
+        )
+        .bind(channel_user_id)
+        .bind(&pairing.platform_user_id)
+        .bind(&pairing.platform_type)
+        .bind(channel_plugin_id)
+        .bind(&pairing.display_name)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| {
+            if is_unique_violation(&error) {
+                DbError::Conflict(format!(
+                    "User '{}' on platform '{}' already exists",
+                    pairing.platform_user_id, pairing.platform_type
+                ))
+            } else {
+                DbError::Query(error)
+            }
+        })?
+        .ok_or_else(|| {
+            DbError::Conflict(format!(
+                "User '{}' on platform '{}' already exists",
+                pairing.platform_user_id, pairing.platform_type
+            ))
+        })?;
+
+        let pairing_update = sqlx::query(
+            "UPDATE channel_pairing_codes SET status = 'approved' \
+             WHERE code = ? AND status = 'pending' AND expires_at > ?",
+        )
+        .bind(code)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        if pairing_update.rows_affected() != 1 {
+            return Err(DbError::Conflict(format!(
+                "Pairing code '{code}' changed during approval"
+            )));
+        }
+
+        sqlx::query(
+            "UPDATE channel_pending_prompts AS prompt \
+             SET state = 'cancelled', settled_at = ? \
+             WHERE prompt.channel_plugin_id = ? AND prompt.state = 'queued' \
+               AND EXISTS ( \
+                   SELECT 1 FROM channel_sessions AS session \
+                   WHERE session.channel_session_id = prompt.channel_session_id \
+                     AND session.channel_plugin_id = ? \
+                     AND session.channel_user_id = ? \
+                     AND session.chat_kind IN ('group', 'unknown') \
+               )",
+        )
+        .bind(now)
+        .bind(channel_plugin_id)
+        .bind(channel_plugin_id)
+        .bind(&user.channel_user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "DELETE FROM channel_session_bindings \
+             WHERE channel_plugin_id = ? AND channel_user_id = ? \
+               AND channel_session_id IN ( \
+                   SELECT channel_session_id FROM channel_sessions \
+                   WHERE channel_plugin_id = ? AND channel_user_id = ? \
+                     AND chat_kind IN ('group', 'unknown') \
+               )",
+        )
+        .bind(channel_plugin_id)
+        .bind(&user.channel_user_id)
+        .bind(channel_plugin_id)
+        .bind(&user.channel_user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "DELETE FROM channel_sessions \
+             WHERE channel_plugin_id = ? AND channel_user_id = ? \
+               AND chat_kind IN ('group', 'unknown')",
+        )
+        .bind(channel_plugin_id)
+        .bind(&user.channel_user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(PairingApprovalOutcome::Approved(user))
+    }
+
     async fn cleanup_expired_pairings(&self, now: nomifun_common::TimestampMs) -> Result<u64, DbError> {
         let result = sqlx::query(
             "UPDATE channel_pairing_codes \
@@ -1456,6 +1943,7 @@ mod tests {
             companion_id: None,
             bot_key: None,
             owner_domain: crate::models::default_owner_domain(),
+            group_access_mode: crate::models::default_group_access_mode(),
             created_at: now,
             updated_at: now,
         }
@@ -1468,6 +1956,7 @@ mod tests {
             platform_type: "telegram".into(),
             channel_plugin_id: Some(channel_plugin_id.to_owned()),
             display_name: Some("Alice".into()),
+            authorization_kind: crate::models::default_channel_user_authorization_kind(),
             authorized_at: now,
             last_active: None,
         }
@@ -1487,6 +1976,7 @@ mod tests {
             workspace: None,
             chat_id: Some(chat_id.into()),
             channel_plugin_id: Some(channel_plugin_id.to_owned()),
+            chat_kind: crate::models::default_channel_chat_kind(),
             created_at: now,
             last_activity: now,
         }
@@ -1623,6 +2113,7 @@ mod tests {
             companion_id: None,
             bot_key: None,
             owner_domain: crate::models::default_owner_domain(),
+            group_access_mode: crate::models::default_group_access_mode(),
             created_at: now,
             updated_at: now,
         };
@@ -1801,6 +2292,7 @@ mod tests {
             companion_id: Some(companion.into()),
             bot_key: Some("cli_same_app".into()),
             owner_domain: crate::models::default_owner_domain(),
+            group_access_mode: crate::models::default_group_access_mode(),
             created_at: now,
             updated_at: now,
         };
@@ -1841,6 +2333,7 @@ mod tests {
                 companion_id: None,
                 bot_key: Some(key.into()),
                 owner_domain: crate::models::default_owner_domain(),
+                group_access_mode: crate::models::default_group_access_mode(),
                 created_at: now,
                 updated_at: now,
             })
@@ -2090,6 +2583,7 @@ mod tests {
             platform_type: "lark".into(),
             channel_plugin_id: Some(channel_plugin_id.to_owned()),
             display_name: None,
+            authorization_kind: crate::models::default_channel_user_authorization_kind(),
             authorized_at: nomifun_common::now_ms(),
             last_active: None,
         };
@@ -2129,6 +2623,7 @@ mod tests {
                 platform_type: "lark".into(),
                 channel_plugin_id: Some(plugin.channel_plugin_id.clone()),
                 display_name: None,
+                authorization_kind: crate::models::default_channel_user_authorization_kind(),
                 authorized_at: nomifun_common::now_ms(),
                 last_active: None,
             })
@@ -2849,7 +3344,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_sessions_by_channel_only_hits_that_channel() {
-        let (repo, _db) = setup().await;
+        let (repo, db) = setup().await;
         let first_plugin = seed_channel(&repo, "Telegram Stub A").await;
         let second_plugin = seed_channel(&repo, "Telegram Stub B").await;
         let mut unscoped = sample_user(first_plugin.channel_plugin_id.as_str());
@@ -2865,6 +3360,43 @@ mod tests {
             .await
             .unwrap();
 
+        for (prompt_id, plugin_id, session_id, state) in [
+            (
+                "0190f5fe-7c00-7a00-8abc-0123456789d1",
+                first_plugin.channel_plugin_id.as_str(),
+                s1.channel_session_id.as_str(),
+                "queued",
+            ),
+            (
+                "0190f5fe-7c00-7a00-8abc-0123456789d2",
+                first_plugin.channel_plugin_id.as_str(),
+                s1.channel_session_id.as_str(),
+                "delivered",
+            ),
+            (
+                "0190f5fe-7c00-7a00-8abc-0123456789d3",
+                second_plugin.channel_plugin_id.as_str(),
+                s2.channel_session_id.as_str(),
+                "queued",
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO channel_pending_prompts \
+                    (prompt_id, channel_plugin_id, chat_id, channel_session_id, conversation_id, \
+                     text, idempotency_key, state, queued_at) \
+                 VALUES (?, ?, 'chat-abc', ?, '0190f5fe-7c00-7a00-8abc-0123456789ee', \
+                         'text', ?, ?, 1)",
+            )
+            .bind(prompt_id)
+            .bind(plugin_id)
+            .bind(session_id)
+            .bind(format!("key-{prompt_id}"))
+            .bind(state)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
         repo.delete_sessions_by_channel(first_plugin.channel_plugin_id.as_str())
             .await
             .unwrap();
@@ -2875,6 +3407,16 @@ mod tests {
             remaining[0].channel_plugin_id,
             Some(second_plugin.channel_plugin_id.clone())
         );
+        let prompt_states: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+            "SELECT prompt_id, state, settled_at FROM channel_pending_prompts ORDER BY prompt_id",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(prompt_states[0].1, "cancelled");
+        assert!(prompt_states[0].2.is_some());
+        assert_eq!(prompt_states[1].1, "delivered");
+        assert_eq!(prompt_states[2].1, "queued");
     }
 
     // -- Pairing tests ------------------------------------------------
