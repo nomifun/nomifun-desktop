@@ -63,9 +63,17 @@
  *   bun scripts/prune-build.mjs --cap 40    # override hard cap (GB)
  */
 import { execSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, statfsSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  statfsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -296,6 +304,65 @@ function nukeProfileAllOrNothing(profileDir, label) {
   try { rmSync(join(profileDir, '.fingerprint'), { recursive: true, force: true }); } catch { /* ignore */ }
   log(`  WARN: ${label} only partially removed (a process still holds a lock).`);
   log('  WARN: close the dev app / editor and rebuild; run `cargo clean` if the build errors.');
+}
+
+/**
+ * Cargo build-script metadata contains absolute paths to each generated `out`
+ * directory. Those paths remain fingerprint-valid after a checkout is moved or
+ * renamed, but Tauri then tries to load generated permission files from the old
+ * checkout and fails before it can rebuild anything. Detect that relocation via
+ * Cargo's `build/<unit>/root-output` receipts and retire the affected profile once.
+ *
+ * Clearing the whole profile is intentional: build-script outputs, fingerprints
+ * and dependent crate metadata form one cache unit. Removing only the Tauri
+ * directory can leave another dependency exporting a stale absolute path.
+ */
+function retireRelocatedBuildProfiles(profiles) {
+  const roots = [BUILD_DIR, TARGET_DIR];
+  for (const rootDir of [BUILD_DIR, TARGET_DIR]) {
+    for (const { dir } of knownTripleDirs(rootDir)) roots.push(dir);
+  }
+
+  for (const rootDir of roots) {
+    for (const profile of profiles) {
+      const profileDir = join(rootDir, profile);
+      const buildScriptsDir = join(profileDir, 'build');
+      let entries;
+      try { entries = readdirSync(buildScriptsDir, { withFileTypes: true }); } catch { continue; }
+
+      const expectedPrefix = comparablePath(profileDir);
+      let staleReceipt;
+      for (const ent of entries) {
+        if (!ent.isDirectory()) continue;
+        const receipt = join(buildScriptsDir, ent.name, 'root-output');
+        let recordedRoot;
+        try { recordedRoot = readFileSync(receipt, 'utf8').trim(); } catch { continue; }
+        if (!recordedRoot) continue;
+
+        const recordedPath = comparablePath(recordedRoot);
+        if (recordedPath !== expectedPrefix && !recordedPath.startsWith(`${expectedPrefix}${sep}`)) {
+          staleReceipt = { receipt, recordedRoot };
+          break;
+        }
+      }
+
+      if (!staleReceipt) continue;
+      log(`  detected relocated Cargo ${relPath(profileDir)} cache`);
+      log(`  stale build output: ${staleReceipt.recordedRoot}`);
+      killStaleLockers();
+      nukeProfileAllOrNothing(profileDir, `${relPath(profileDir)} (relocated checkout)`);
+    }
+  }
+}
+
+function comparablePath(path) {
+  let value = resolve(path);
+  if (isWin) {
+    const devicePathPrefix = '\\\\?\\';
+    if (value.startsWith(devicePathPrefix)) value = value.slice(devicePathPrefix.length);
+    value = value.toLowerCase();
+  }
+  return value;
 }
 
 /**
@@ -553,6 +620,13 @@ try {
   const mode = isPre ? ' [pre]' : isPost ? ' [post]' : isRelease ? ' [release]' : '';
   log(`start: ${fmtGB(beforeGB)} total (build.noindex + target)${mode}`);
   let afterSizes;
+
+  // A repository move invalidates absolute build-script outputs even when
+  // Cargo's ordinary fingerprints still look fresh. Repair that cache before
+  // Tauri consumes its generated permission paths.
+  if (!isPost) {
+    retireRelocatedBuildProfiles(isPre ? ['release'] : isRelease ? ['debug', 'release'] : ['debug']);
+  }
 
   if (isPre) {
     // Cheap pre-build step (tauri beforeBuildCommand): clean output + junk only,
