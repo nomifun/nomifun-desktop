@@ -326,7 +326,7 @@ const WecomConfigForm: React.FC<WecomConfigFormProps> = ({
       )}
 
       {/* Pending Pairings */}
-      {pluginStatus?.enabled && authorizedUsers.length === 0 && (
+      {pluginStatus?.enabled && (
         <PendingPairingList
           pairings={pendingPairings}
           loading={pairingLoading}

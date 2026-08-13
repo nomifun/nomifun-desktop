@@ -29,6 +29,19 @@ pub enum PendingPromptEnqueue {
     QueueFull,
 }
 
+/// Result of the atomic pairing-approval state transition.
+///
+/// Expected stale-code outcomes are values rather than database errors so the
+/// channel layer can preserve its public not-found / expired / already-used
+/// error semantics even when the state changes after its initial read.
+#[derive(Debug, Clone)]
+pub enum PairingApprovalOutcome {
+    Approved(ChannelUserRow),
+    NotFound,
+    AlreadyProcessed,
+    Expired,
+}
+
 impl ChannelInboundClaim {
     pub fn receipt(&self) -> &ChannelInboundReceiptRow {
         match self {
@@ -88,6 +101,23 @@ pub trait IChannelRepository: Send + Sync {
     /// Updates an existing plugin by its business id.
     async fn update_plugin(&self, row: &ChannelPluginRow) -> Result<ChannelPluginRow, DbError>;
 
+    /// Atomically updates one plugin's group policy and retires every
+    /// non-direct session admitted under the previous policy.
+    ///
+    /// Queued prompts bound to `group` or legacy `unknown` sessions must be
+    /// cancelled in the same transaction before their bindings and sessions
+    /// are removed. Direct sessions are retained. The default fails closed so
+    /// test or alternative repositories cannot emulate this with split calls.
+    async fn update_plugin_group_access_mode_and_clear_non_direct_sessions(
+        &self,
+        _channel_plugin_id: &str,
+        _group_access_mode: &str,
+    ) -> Result<(), DbError> {
+        Err(DbError::Conflict(
+            "atomic channel group-access update is not supported by this repository".to_owned(),
+        ))
+    }
+
     /// Updates only the `status` and `last_connected` of a plugin.
     async fn update_plugin_status(
         &self,
@@ -117,6 +147,9 @@ pub trait IChannelRepository: Send + Sync {
     /// Returns all authorized users.
     async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError>;
 
+    /// Returns a user by stable business id, including its authorization kind.
+    async fn get_user(&self, channel_user_id: &str) -> Result<Option<ChannelUserRow>, DbError>;
+
     /// Finds a user by platform identity scoped to one bot channel.
     async fn get_user_by_platform(
         &self,
@@ -126,7 +159,18 @@ pub trait IChannelRepository: Send + Sync {
     ) -> Result<Option<ChannelUserRow>, DbError>;
 
     /// Creates an authorized user and returns its generated UUIDv7.
+    /// If the same identity already exists as an automatically admitted guest
+    /// (open group or customer-service visitor), this atomically promotes it
+    /// to `approved` while retaining its stable user id.
     async fn create_user(&self, row: &NewChannelUserRow) -> Result<ChannelUserRow, DbError>;
+
+    /// Atomically creates or returns an automatically admitted, non-approved
+    /// guest identity (open group or customer-service visitor). An
+    /// already-approved identity is never downgraded.
+    async fn ensure_auto_group_user(
+        &self,
+        row: &NewChannelUserRow,
+    ) -> Result<ChannelUserRow, DbError>;
 
     /// Updates `last_active` timestamp for a user.
     async fn update_user_last_active(
@@ -138,6 +182,23 @@ pub trait IChannelRepository: Send + Sync {
     /// Deletes a user and its associated sessions transactionally by business
     /// id. Returns `DbError::NotFound` if absent.
     async fn delete_user(&self, channel_user_id: &str) -> Result<(), DbError>;
+
+    /// Atomically revokes a user and retires every queued turn that was
+    /// admitted under that user's authority.
+    ///
+    /// Every queued prompt bound to the user's sessions (including direct
+    /// chats) must be cancelled before session bindings, sessions, and the
+    /// user row are deleted. The default fails closed so authorization
+    /// revocation cannot be emulated with split cleanup/delete calls.
+    async fn revoke_user_and_cancel_pending(
+        &self,
+        _channel_user_id: &str,
+        _now: TimestampMs,
+    ) -> Result<(), DbError> {
+        Err(DbError::Conflict(
+            "atomic channel user revocation is not supported by this repository".to_owned(),
+        ))
+    }
 
     // ── Session CRUD ─────────────────────────────────────────────────
 
@@ -172,6 +233,20 @@ pub trait IChannelRepository: Send + Sync {
 
     /// Deletes all sessions that arrived through a channel row.
     async fn delete_sessions_by_channel(&self, channel_plugin_id: &str) -> Result<(), DbError>;
+
+    /// Deletes only group-chat sessions that arrived through a channel row.
+    ///
+    /// Implementations must atomically cancel queued prompts bound to those
+    /// group sessions before removing their bindings and session rows. Direct
+    /// and unknown-kind sessions (and their queues) are retained.
+    async fn delete_group_sessions_by_channel(
+        &self,
+        _channel_plugin_id: &str,
+    ) -> Result<(), DbError> {
+        Err(DbError::Conflict(
+            "group-only channel session retirement is not supported by this repository".to_owned(),
+        ))
+    }
 
     /// Deletes the session for a specific channel + user + chat triple.
     async fn delete_session_by_user_chat(
@@ -327,6 +402,28 @@ pub trait IChannelRepository: Send + Sync {
     /// Updates the status of a pairing code.
     /// Returns `DbError::NotFound` if the code doesn't exist.
     async fn update_pairing_status(&self, code: &str, status: &str) -> Result<(), DbError>;
+
+    /// Atomically approves a pending pairing and retires the identity's old
+    /// non-direct execution authority.
+    ///
+    /// A successful implementation must, in one transaction:
+    /// - create an approved user or promote the matching `auto_group` identity
+    ///   without changing its `channel_user_id`;
+    /// - mark the pairing `approved`;
+    /// - cancel queued prompts bound to that user's `group`/`unknown` sessions;
+    /// - delete those session bindings and sessions while retaining Direct.
+    ///
+    /// The default fails closed so alternative stores and mocks cannot silently
+    /// regress to split user/status writes.
+    async fn approve_pairing_and_retire_non_direct_sessions(
+        &self,
+        _code: &str,
+        _now: TimestampMs,
+    ) -> Result<PairingApprovalOutcome, DbError> {
+        Err(DbError::Conflict(
+            "atomic channel pairing approval is not supported by this repository".to_owned(),
+        ))
+    }
 
     /// Marks all expired-but-still-pending pairing codes as 'expired'.
     /// `now` is the current timestamp in milliseconds.

@@ -19,6 +19,14 @@ describe('ipc bridge wire ID contracts', () => {
     expect(source.includes('revokeUser: httpPost<void, { user_id:')).toBe(false);
   });
 
+  test('group access maps fail-closed status and posts the independent policy payload', () => {
+    expect(source.includes('groupAccessMode: normalizeGroupAccessMode(raw.group_access_mode)')).toBe(
+      true
+    );
+    expect(source.includes('setGroupAccess: httpPost<void, SetGroupAccessRequest>')).toBe(true);
+    expect(source.includes("'/api/channel/settings/group-access'")).toBe(true);
+  });
+
   test('channel disable and delete reject HTTP-200 business failures', () => {
     expect(source.includes('function requireSuccessfulChannelResponse')).toBe(true);
     expect(source.includes('disablePlugin: withResponseMap(')).toBe(true);

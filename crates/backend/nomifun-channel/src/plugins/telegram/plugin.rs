@@ -12,9 +12,9 @@ use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_err
 use crate::plugins::callback::{format_callback_data, parse_callback_data};
 use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
-    ActionContext, BotInfo, MessageContentType, ParseMode, PluginConfig, PluginStatus,
-    PluginType, UnifiedAction, UnifiedAttachment, UnifiedIncomingMessage, UnifiedMessageContent,
-    UnifiedOutgoingMessage, UnifiedUser,
+    ActionContext, BotInfo, ChatKind, MentionState, MessageContentType, ParseMode, PluginConfig, PluginStatus,
+    PluginType, UnifiedAction, UnifiedAttachment, UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage,
+    UnifiedUser,
 };
 
 use super::api::TelegramApi;
@@ -426,12 +426,20 @@ async fn handle_callback_query(
         return;
     }
 
+    let Some(message) = cb.message.as_ref() else {
+        // Telegram also emits callback queries for inline-mode messages. Those
+        // do not carry a trustworthy chat target, so acknowledge the UI event
+        // but never infer a chat scope from the actor id or enqueue an action.
+        warn!("Ignoring Telegram callback query without a source message/chat target");
+        acknowledge_callback_query(api, &cb.id).await;
+        return;
+    };
+
     let data = cb.data.as_deref().unwrap_or("");
     let parsed = parse_callback_data(data);
 
-    let chat_id = cb.message.as_ref().map(|m| m.chat.id).unwrap_or(cb.from.id);
-
-    let message_id = cb.message.as_ref().map(|m| m.message_id.to_string());
+    let chat_id = message.chat.id;
+    let message_id = Some(message.message_id.to_string());
 
     let user = UnifiedUser {
         id: cb.from.id.to_string(),
@@ -457,6 +465,15 @@ async fn handle_callback_query(
         id: cb.id.clone(),
         platform: PluginType::Telegram,
         chat_id: chat_id.to_string(),
+        chat_kind: match message.chat.chat_type.as_str() {
+            "private" => ChatKind::Direct,
+            // Telegram button callbacks identify an explicit bot interaction,
+            // but the first group-policy rollout intentionally leaves Telegram
+            // group chat classification unknown until message entities are
+            // normalized consistently.
+            _ => ChatKind::Unknown,
+        },
+        mention_state: MentionState::Mentioned,
         user,
         content: UnifiedMessageContent {
             content_type: MessageContentType::Action,
@@ -471,9 +488,12 @@ async fn handle_callback_query(
 
     let _ = message_tx.send(msg).await;
 
-    // Acknowledge the callback query
+    acknowledge_callback_query(api, &cb.id).await;
+}
+
+async fn acknowledge_callback_query(api: &TelegramApi, callback_query_id: &str) {
     let ack = AnswerCallbackQueryRequest {
-        callback_query_id: cb.id.clone(),
+        callback_query_id: callback_query_id.to_owned(),
         text: None,
         show_alert: None,
     };
@@ -502,6 +522,16 @@ async fn handle_message(msg: &TgMessage, message_tx: &mpsc::Sender<UnifiedIncomi
         id: msg.message_id.to_string(),
         platform: PluginType::Telegram,
         chat_id: msg.chat.id.to_string(),
+        // Private chats are reliable. Group/supergroup kind is deliberately
+        // left unknown for now because this adapter does not yet retain the
+        // structured message entities required to prove a bot mention; marking
+        // it Group would make the central mention gate reject existing traffic.
+        chat_kind: if msg.chat.chat_type == "private" {
+            ChatKind::Direct
+        } else {
+            ChatKind::Unknown
+        },
+        mention_state: MentionState::Unknown,
         user,
         content: UnifiedMessageContent {
             content_type,
@@ -736,6 +766,33 @@ mod tests {
             },
             message: None,
             data: Some("system:system.confirm:callId=call-1,value=yes".into()),
+        };
+
+        handle_callback_query(&api, &callback, &message_tx).await;
+
+        assert!(message_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn callback_without_source_message_is_acknowledged_but_not_enqueued() {
+        let client = Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .timeout(std::time::Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let api = TelegramApi::new(client, "unused-test-token");
+        let (message_tx, mut message_rx) = mpsc::channel(1);
+        let callback = TgCallbackQuery {
+            id: "callback-valid-1".into(),
+            from: super::super::types::TgUser {
+                id: 42,
+                is_bot: false,
+                first_name: "Alice".into(),
+                last_name: None,
+                username: Some("alice".into()),
+            },
+            message: None,
+            data: Some("system:session.new".into()),
         };
 
         handle_callback_query(&api, &callback, &message_tx).await;

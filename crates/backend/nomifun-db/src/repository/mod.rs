@@ -71,7 +71,8 @@ pub use agent_execution_template::*;
 pub use attachment::IAttachmentRepository;
 pub use channel::{
     ChannelInboundClaim, IChannelRepository, PENDING_PROMPT_EXPIRY_MS,
-    PENDING_PROMPT_QUEUE_LIMIT, PendingPromptEnqueue, SettleChannelInboundReceiptParams,
+    PENDING_PROMPT_QUEUE_LIMIT, PairingApprovalOutcome, PendingPromptEnqueue,
+    SettleChannelInboundReceiptParams,
 };
 pub use client_preference::{IClientPreferenceRepository, KNOWLEDGE_RETRIEVAL_KEY};
 pub(crate) use client_preference::{

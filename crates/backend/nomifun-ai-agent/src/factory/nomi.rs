@@ -53,6 +53,17 @@ fn apply_model_only_ceiling(overrides: &mut NomiBuildExtra) {
     overrides.summon = None;
 }
 
+/// Effective host authority for a Nomi runtime. Channel conversations are
+/// physically owned by the installation owner, so the principal alone is not
+/// enough: an automatically admitted group member must lower that authority at
+/// the same single ceiling used for secondary users.
+fn has_effective_host_authority(
+    authority: ExecutionAuthority,
+    channel_group_guest: bool,
+) -> bool {
+    authority.controls_host() && !channel_group_guest
+}
+
 fn retarget_resumed_session(session: &mut Session, provider: &str, model: &str) -> bool {
     let changed = session.provider != provider || session.model != model;
     session.provider = provider.to_owned();
@@ -113,7 +124,8 @@ pub(super) async fn build(
     // The first-class conversation field is authoritative. Never let an
     // open-ended extra payload override execution policy.
     overrides.delegation_policy = options.delegation_policy;
-    let is_instance_owner = authority.controls_host();
+    let is_instance_owner =
+        has_effective_host_authority(authority, overrides.channel_group_guest);
 
     // Gateway entitlement is derived from the immutable principal, never from
     // persisted/open JSON. Process-owned config is injected only after the
@@ -1652,6 +1664,76 @@ mod tests {
         assert_eq!(overrides.allowed_tools, vec!["update_plan"]);
         assert_eq!(overrides.session_mode.as_deref(), Some("default"));
         assert_eq!(overrides.max_turns, Some(1));
+        assert_eq!(overrides.delegation_policy, DelegationPolicy::Disabled);
+    }
+
+    #[test]
+    fn owner_backed_group_guest_is_still_model_only() {
+        let authority = ExecutionAuthority::resolve("owner", "owner");
+        assert!(authority.controls_host());
+        assert!(!has_effective_host_authority(authority, true));
+        assert!(has_effective_host_authority(authority, false));
+
+        let mcp_server_id = McpServerId::new();
+        let mut overrides = NomiBuildExtra {
+            channel_group_guest: true,
+            channel_platform: Some("lark".into()),
+            computer_use: Some(true),
+            browser_use: Some(true),
+            gateway_mcp_config: Some(gateway_config(41237, "/usr/bin/nomicore", "owner")),
+            mcp_server_ids: Some(vec![mcp_server_id.clone()]),
+            session_mcp_servers: vec![SessionMcpServer {
+                mcp_server_id,
+                name: "guest-mcp".into(),
+                transport: SessionMcpTransport::Stdio {
+                    command: "server".into(),
+                    args: Vec::new(),
+                    env: Default::default(),
+                },
+            }],
+            companion: true,
+            companion_id: Some("0190f5fe-7c00-7a00-8abc-012345678967".into()),
+            knowledge_mounts: vec![nomifun_api_types::KnowledgeMountInfo {
+                knowledge_base_id: nomifun_common::KnowledgeBaseId::new(),
+                name: "private knowledge".into(),
+                description: "must not remain mounted for a group guest".into(),
+                rel_path: ".nomi/knowledge/private".into(),
+                toc: Vec::new(),
+                summary: None,
+                live_sources: Vec::new(),
+            }],
+            knowledge_writeback: true,
+            knowledge_channel_write_enabled: true,
+            summon: Some(nomifun_api_types::SummonConfig {
+                companion_id: "0190f5fe-7c00-7a00-8abc-012345678969".into(),
+                memory_ids: vec![],
+                skill_exclusions: vec![],
+                summoned_at: 1,
+            }),
+            goal: Some(nomifun_api_types::NomiGoalSpec {
+                objective: "persist autonomous work".into(),
+                max_auto_continuations: None,
+            }),
+            delegation_policy: DelegationPolicy::Automatic,
+            ..Default::default()
+        };
+
+        apply_model_only_ceiling(&mut overrides);
+
+        assert!(overrides.gateway_mcp_config.is_none());
+        assert_eq!(overrides.computer_use, Some(false));
+        assert_eq!(overrides.browser_use, Some(false));
+        assert!(overrides.mcp_server_ids.is_none());
+        assert!(overrides.session_mcp_servers.is_empty());
+        assert!(!overrides.companion && overrides.companion_id.is_none());
+        assert!(overrides.channel_platform.is_none());
+        assert!(overrides.knowledge_mounts.is_empty());
+        assert!(!overrides.knowledge_writeback);
+        assert!(!overrides.knowledge_channel_write_enabled);
+        assert!(overrides.summon.is_none());
+        assert_eq!(overrides.allowed_tools, vec!["update_plan"]);
+        assert_eq!(overrides.max_turns, Some(1));
+        assert!(overrides.goal.is_none());
         assert_eq!(overrides.delegation_policy, DelegationPolicy::Disabled);
     }
 

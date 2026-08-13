@@ -279,6 +279,11 @@ mod tests {
                 companion_id: None,
                 bot_key: None,
                 owner_domain: owner_domain.into(),
+                group_access_mode: nomifun_api_types::GroupAccessMode::default_for_owner_domain(
+                    owner_domain,
+                )
+                .as_str()
+                .into(),
                 created_at: now,
                 updated_at: now,
             })
@@ -355,6 +360,17 @@ mod tests {
         let agent_a = seed_agent(&state).await;
         let agent_b = seed_agent(&state).await;
         let cs_bot = seed_bot(&state, "CS Bot", "customer_service").await;
+        assert_eq!(
+            state
+                .channel_repo
+                .get_plugin(&cs_bot)
+                .await
+                .unwrap()
+                .unwrap()
+                .group_access_mode,
+            "all_members",
+            "new customer-service bots default open to group members"
+        );
 
         let bound = put_bindings(&state, &agent_a, vec![cs_bot.clone()]).await.unwrap();
         assert_eq!(bound.0.data.as_ref().unwrap().len(), 1);

@@ -11,8 +11,8 @@ use crate::constants::{WEIXIN_MAX_RETRIES, WEIXIN_POLL_TIMEOUT, WEIXIN_RETRY_DEL
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::types::{
-    BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType, UnifiedIncomingMessage, UnifiedMessageContent,
-    UnifiedOutgoingMessage, UnifiedUser,
+    BotInfo, ChatKind, MentionState, MessageContentType, PluginConfig, PluginStatus, PluginType,
+    UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
 };
 
 use super::api::WeixinApi;
@@ -396,6 +396,8 @@ async fn handle_message(
         id: stable_event_id,
         platform: PluginType::Weixin,
         chat_id: from_user_id.clone(),
+        chat_kind: ChatKind::Direct,
+        mention_state: MentionState::Unknown,
         user: UnifiedUser {
             id: from_user_id,
             username: None,
@@ -634,6 +636,8 @@ mod tests {
         assert_eq!(unified.id, "message:9007199254740993");
         assert_eq!(unified.chat_id, "wx_user_1");
         assert_eq!(unified.timestamp, 1_700_000_000);
+        assert_eq!(unified.chat_kind, ChatKind::Direct);
+        assert_eq!(unified.mention_state, MentionState::Unknown);
         assert_eq!(
             context_tokens.get("wx_user_1").as_deref().map(String::as_str),
             Some("ctx_1")

@@ -499,19 +499,10 @@ async fn list_users(deps: Arc<GatewayDeps>, _p: ListUsersParams) -> Value {
 }
 
 async fn revoke_user(deps: Arc<GatewayDeps>, p: RevokeUserParams) -> Value {
-    // Clean up sessions first, then delete the user record.
-    if let Err(e) = deps
-        .channel_state
-        .session_manager
-        .cleanup_user_sessions(p.channel_user_id.as_str())
-        .await
-    {
-        return json!({ "error": format!("failed to clean sessions: {}", e) });
-    }
     match deps
         .channel_state
-        .repo
-        .delete_user(p.channel_user_id.as_str())
+        .pairing_service
+        .revoke_user(p.channel_user_id.as_str())
         .await
     {
         Ok(()) => json!({ "result": format!("user {} revoked", p.channel_user_id) }),

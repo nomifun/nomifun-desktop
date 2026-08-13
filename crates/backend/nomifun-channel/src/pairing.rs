@@ -2,9 +2,11 @@ use std::sync::Arc;
 
 use nomifun_api_types::{PairingRequestedPayload, UserAuthorizedPayload, WebSocketMessage};
 use nomifun_common::{TimestampMs, now_ms};
-use nomifun_db::IChannelRepository;
+use nomifun_db::{IChannelRepository, PairingApprovalOutcome};
 use nomifun_db::models::{
-    ChannelPairingCodeRow, NewChannelPairingCodeRow, NewChannelUserRow,
+    CHANNEL_USER_AUTHORIZATION_APPROVED, CHANNEL_USER_AUTHORIZATION_AUTO_GROUP,
+    ChannelPairingCodeRow, ChannelPluginRow, ChannelUserRow, NewChannelPairingCodeRow,
+    NewChannelUserRow,
 };
 use nomifun_realtime::UserEventSink;
 use tokio::task::JoinHandle;
@@ -12,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::constants::{PAIRING_CLEANUP_INTERVAL, PAIRING_CODE_LENGTH, PAIRING_CODE_TTL};
 use crate::error::ChannelError;
+use crate::group_policy::GroupPolicyFence;
 use crate::types::PairingStatus;
 
 /// Generates a random numeric pairing code of the configured length.
@@ -36,6 +39,8 @@ pub struct PairingService {
     repo: Arc<dyn IChannelRepository>,
     owner_id: Arc<str>,
     user_events: Arc<dyn UserEventSink>,
+    pending_group_request_lock: tokio::sync::Mutex<()>,
+    group_policy_fence: Arc<GroupPolicyFence>,
 }
 
 impl PairingService {
@@ -48,7 +53,27 @@ impl PairingService {
             repo,
             owner_id: owner_id.into(),
             user_events,
+            pending_group_request_lock: tokio::sync::Mutex::new(()),
+            group_policy_fence: Arc::new(GroupPolicyFence::default()),
         }
+    }
+
+    /// Share the manager-owned policy fence with pairing promotion.
+    pub fn with_group_policy_fence(mut self, fence: Arc<GroupPolicyFence>) -> Self {
+        self.group_policy_fence = fence;
+        self
+    }
+
+    pub(crate) fn group_policy_fence(&self) -> Arc<GroupPolicyFence> {
+        Arc::clone(&self.group_policy_fence)
+    }
+
+    /// Returns the bot row whose access policy governs an inbound message.
+    pub async fn get_plugin(
+        &self,
+        channel_plugin_id: &str,
+    ) -> Result<Option<ChannelPluginRow>, ChannelError> {
+        Ok(self.repo.get_plugin(channel_plugin_id).await?)
     }
 
     /// Creates a pairing request for an IM user.
@@ -114,6 +139,51 @@ impl PairingService {
         Ok(code)
     }
 
+    /// Return the sender's still-valid pending request for this bot, creating
+    /// and broadcasting one only when none exists. Group allowlist admission
+    /// uses this path so repeated mentions do not rotate a hidden code or spam
+    /// the owner's approval UI. Direct-message pairing deliberately continues
+    /// to use [`Self::request_pairing`] and retains its refresh semantics.
+    pub async fn request_or_reuse_pending(
+        &self,
+        platform_user_id: &str,
+        platform_type: &str,
+        channel_plugin_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<String, ChannelError> {
+        let _guard = self.pending_group_request_lock.lock().await;
+        let now = now_ms();
+        if let Some(existing) = self
+            .repo
+            .get_pending_pairings()
+            .await?
+            .into_iter()
+            .find(|row| {
+                row.platform_user_id == platform_user_id
+                    && row.platform_type == platform_type
+                    && row.channel_plugin_id.as_deref() == Some(channel_plugin_id)
+                    && row.status == PairingStatus::Pending.to_string()
+                    && row.expires_at > now
+            })
+        {
+            debug!(
+                platform_user_id,
+                platform_type,
+                channel_plugin_id,
+                "reusing pending group allowlist request"
+            );
+            return Ok(existing.code);
+        }
+
+        self.request_pairing(
+            platform_user_id,
+            platform_type,
+            channel_plugin_id,
+            display_name,
+        )
+        .await
+    }
+
     /// Approves a pending pairing code.
     ///
     /// - Validates the code exists and is still pending + not expired
@@ -122,24 +192,34 @@ impl PairingService {
     /// - Broadcasts a `channel.user-authorized` event
     pub async fn approve_pairing(&self, code: &str) -> Result<(), ChannelError> {
         let row = self.get_valid_pending_pairing(code).await?;
+        let channel_plugin_id = row.channel_plugin_id.as_deref().ok_or_else(|| {
+            ChannelError::InvalidConfig(format!(
+                "pairing code '{code}' is not scoped to a channel plugin"
+            ))
+        })?;
+
+        // Promotion changes what this identity may execute. Take the same
+        // write-side fence as policy mutation so every old guest admission and
+        // queued delivery completes or quiesces before the privilege change.
+        let promotion_writer = self.group_policy_fence.write(channel_plugin_id).await;
         let now = now_ms();
-
-        // The repository owns the technical row id; the returned UUIDv7 is the
-        // only identity used by subsequent session and event operations.
-        let user_row = NewChannelUserRow {
-            platform_user_id: row.platform_user_id.clone(),
-            platform_type: row.platform_type.clone(),
-            channel_plugin_id: row.channel_plugin_id.clone(),
-            display_name: row.display_name.clone(),
-            authorized_at: now,
-            last_active: None,
+        let user = match self
+            .repo
+            .approve_pairing_and_retire_non_direct_sessions(code, now)
+            .await?
+        {
+            PairingApprovalOutcome::Approved(user) => user,
+            PairingApprovalOutcome::NotFound => {
+                return Err(ChannelError::PairingNotFound(code.to_owned()));
+            }
+            PairingApprovalOutcome::AlreadyProcessed => {
+                return Err(ChannelError::PairingAlreadyProcessed(code.to_owned()));
+            }
+            PairingApprovalOutcome::Expired => {
+                return Err(ChannelError::PairingExpired(code.to_owned()));
+            }
         };
-        let user = self.repo.create_user(&user_row).await?;
-
-        // Update pairing status
-        self.repo
-            .update_pairing_status(code, &PairingStatus::Approved.to_string())
-            .await?;
+        drop(promotion_writer);
 
         info!(
             code = %code,
@@ -163,6 +243,35 @@ impl PairingService {
             WebSocketMessage::new("channel.user-authorized", value),
         );
 
+        Ok(())
+    }
+
+    /// Revokes one authorized identity behind the same per-plugin fence used
+    /// by inbound admission, queue drain, policy changes, and promotion.
+    ///
+    /// The repository transition cancels every queued prompt belonging to the
+    /// user and deletes its sessions/user in one transaction. Keeping the
+    /// writer until commit means a successful return is a hard authority
+    /// boundary: no admission begun under the old user grant can finish later.
+    pub async fn revoke_user(&self, channel_user_id: &str) -> Result<(), ChannelError> {
+        let user = self
+            .repo
+            .get_user(channel_user_id)
+            .await?
+            .ok_or_else(|| ChannelError::UserNotFound(channel_user_id.to_owned()))?;
+        let channel_plugin_id = user.channel_plugin_id.as_deref().ok_or_else(|| {
+            ChannelError::InvalidConfig(format!(
+                "channel user '{channel_user_id}' is not scoped to a channel plugin"
+            ))
+        })?;
+
+        let revocation_writer = self.group_policy_fence.write(channel_plugin_id).await;
+        self.repo
+            .revoke_user_and_cancel_pending(channel_user_id, now_ms())
+            .await?;
+        drop(revocation_writer);
+
+        info!(channel_user_id, channel_plugin_id, "channel user revoked");
         Ok(())
     }
 
@@ -201,7 +310,9 @@ impl PairingService {
             .repo
             .get_user_by_platform(platform_user_id, platform_type, channel_plugin_id)
             .await?;
-        Ok(user.is_some())
+        Ok(user.is_some_and(|user| {
+            user.authorization_kind == CHANNEL_USER_AUTHORIZATION_APPROVED
+        }))
     }
 
     /// Looks up the internal user ID for a platform user on this bot channel.
@@ -217,16 +328,58 @@ impl PairingService {
             .repo
             .get_user_by_platform(platform_user_id, platform_type, channel_plugin_id)
             .await?;
-        Ok(user.map(|u| u.channel_user_id))
+        Ok(user
+            .filter(|user| user.authorization_kind == CHANNEL_USER_AUTHORIZATION_APPROVED)
+            .map(|user| user.channel_user_id))
     }
 
-    /// Get or create the `channel_users.channel_user_id` for a platform sender
-    /// on this bot channel, WITHOUT a pairing code — used by the
-    /// customer-service auto-serve path (a bot bound to a customer-service
-    /// agent serves strangers directly because the one-shot session's
-    /// read-only tool whitelist is the boundary). Idempotent: a returning
-    /// stranger reuses their row. NOT used for companion/unbound bots — those
-    /// still require explicit pairing approval.
+    /// Returns the complete platform identity row, including its authorization
+    /// kind. Admission owns the decision about which kinds are valid for a
+    /// direct, allowlisted-group, or open-group message.
+    pub async fn get_channel_user(
+        &self,
+        platform_user_id: &str,
+        platform_type: &str,
+        channel_plugin_id: &str,
+    ) -> Result<Option<ChannelUserRow>, ChannelError> {
+        Ok(self
+            .repo
+            .get_user_by_platform(platform_user_id, platform_type, channel_plugin_id)
+            .await?)
+    }
+
+    /// Atomically creates or reuses an automatically admitted guest identity.
+    /// Ensures a stable, non-approved guest identity for automatic-admission
+    /// paths (open groups and customer-service direct messages). The repository
+    /// never downgrades an already-approved user.
+    pub async fn ensure_auto_group_user(
+        &self,
+        platform_user_id: &str,
+        platform_type: &str,
+        channel_plugin_id: &str,
+        display_name: &str,
+    ) -> Result<ChannelUserRow, ChannelError> {
+        let user = self
+            .repo
+            .ensure_auto_group_user(&NewChannelUserRow {
+                platform_user_id: platform_user_id.to_owned(),
+                platform_type: platform_type.to_owned(),
+                channel_plugin_id: Some(channel_plugin_id.to_owned()),
+                display_name: Some(display_name.to_owned()),
+                authorization_kind: CHANNEL_USER_AUTHORIZATION_AUTO_GROUP.to_owned(),
+                authorized_at: now_ms(),
+                last_active: None,
+            })
+            .await?;
+        Ok(user)
+    }
+
+    /// Get or create a stable guest identity for an automatic-admission path.
+    ///
+    /// This compatibility wrapper never grants pairing approval. The repository
+    /// preserves an existing approved identity and otherwise creates/reuses an
+    /// `auto_group` guest; new callers should prefer
+    /// [`Self::ensure_auto_group_user`] so that distinction is explicit.
     pub async fn ensure_channel_user(
         &self,
         platform_user_id: &str,
@@ -234,27 +387,20 @@ impl PairingService {
         channel_plugin_id: &str,
         display_name: &str,
     ) -> Result<String, ChannelError> {
-        if let Some(user) = self
-            .repo
-            .get_user_by_platform(platform_user_id, platform_type, channel_plugin_id)
-            .await?
-        {
-            return Ok(user.channel_user_id);
-        }
-        let user_row = NewChannelUserRow {
-            platform_user_id: platform_user_id.to_owned(),
-            platform_type: platform_type.to_owned(),
-            channel_plugin_id: Some(channel_plugin_id.to_owned()),
-            display_name: Some(display_name.to_owned()),
-            authorized_at: now_ms(),
-            last_active: None,
-        };
-        let user = self.repo.create_user(&user_row).await?;
+        let user = self
+            .ensure_auto_group_user(
+                platform_user_id,
+                platform_type,
+                channel_plugin_id,
+                display_name,
+            )
+            .await?;
         info!(
             channel_user_id = %user.channel_user_id,
             platform_user_id = %platform_user_id,
             channel_plugin_id,
-            "customer-service channel auto-registered a stranger (no pairing)"
+            authorization_kind = %user.authorization_kind,
+            "automatic-admission channel identity ensured without pairing approval"
         );
         Ok(user.channel_user_id)
     }
@@ -424,6 +570,7 @@ mod tests {
                 companion_id: row.companion_id.clone(),
                 bot_key: row.bot_key.clone(),
                 owner_domain: row.owner_domain.clone(),
+                group_access_mode: row.group_access_mode.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             })
@@ -462,6 +609,16 @@ mod tests {
             Ok(self.users.lock().unwrap().clone())
         }
 
+        async fn get_user(&self, channel_user_id: &str) -> Result<Option<ChannelUserRow>, DbError> {
+            Ok(self
+                .users
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|user| user.channel_user_id == channel_user_id)
+                .cloned())
+        }
+
         async fn get_user_by_platform(
             &self,
             platform_user_id: &str,
@@ -481,12 +638,18 @@ mod tests {
 
         async fn create_user(&self, row: &NewChannelUserRow) -> Result<ChannelUserRow, DbError> {
             let mut users = self.users.lock().unwrap();
-            if users.iter().any(|u| {
+            if let Some(existing) = users.iter_mut().find(|u| {
                 u.platform_user_id == row.platform_user_id
                     && u.platform_type == row.platform_type
                     && u.channel_plugin_id == row.channel_plugin_id
             }) {
-                return Err(DbError::Conflict("user already exists".into()));
+                if row.authorization_kind == CHANNEL_USER_AUTHORIZATION_APPROVED {
+                    existing.authorization_kind = CHANNEL_USER_AUTHORIZATION_APPROVED.to_owned();
+                    existing.display_name = row.display_name.clone();
+                    existing.authorized_at = row.authorized_at;
+                    existing.last_active = row.last_active;
+                }
+                return Ok(existing.clone());
             }
             let user = ChannelUserRow {
                 channel_user_id: nomifun_common::generate_id(),
@@ -494,6 +657,34 @@ mod tests {
                 platform_type: row.platform_type.clone(),
                 channel_plugin_id: row.channel_plugin_id.clone(),
                 display_name: row.display_name.clone(),
+                authorization_kind: row.authorization_kind.clone(),
+                authorized_at: row.authorized_at,
+                last_active: row.last_active,
+            };
+            users.push(user.clone());
+            Ok(user)
+        }
+
+        async fn ensure_auto_group_user(
+            &self,
+            row: &NewChannelUserRow,
+        ) -> Result<ChannelUserRow, DbError> {
+            let mut users = self.users.lock().unwrap();
+            if let Some(existing) = users.iter().find(|u| {
+                u.platform_user_id == row.platform_user_id
+                    && u.platform_type == row.platform_type
+                    && u.channel_plugin_id == row.channel_plugin_id
+            }) {
+                return Ok(existing.clone());
+            }
+
+            let user = ChannelUserRow {
+                channel_user_id: nomifun_common::generate_id(),
+                platform_user_id: row.platform_user_id.clone(),
+                platform_type: row.platform_type.clone(),
+                channel_plugin_id: row.channel_plugin_id.clone(),
+                display_name: row.display_name.clone(),
+                authorization_kind: CHANNEL_USER_AUTHORIZATION_AUTO_GROUP.to_owned(),
                 authorized_at: row.authorized_at,
                 last_active: row.last_active,
             };
@@ -529,6 +720,14 @@ mod tests {
             }
         }
 
+        async fn revoke_user_and_cancel_pending(
+            &self,
+            channel_user_id: &str,
+            _now: TimestampMs,
+        ) -> Result<(), DbError> {
+            self.delete_user(channel_user_id).await
+        }
+
         // -- Session CRUD (unused stubs) --
 
         async fn get_all_sessions(&self) -> Result<Vec<ChannelSessionRow>, DbError> {
@@ -552,6 +751,7 @@ mod tests {
                 workspace: new_row.workspace.clone(),
                 chat_id: new_row.chat_id.clone(),
                 channel_plugin_id: new_row.channel_plugin_id.clone(),
+                chat_kind: new_row.chat_kind.clone(),
                 created_at: new_row.created_at,
                 last_activity: new_row.last_activity,
             })
@@ -619,6 +819,60 @@ mod tests {
             } else {
                 Err(DbError::NotFound(code.into()))
             }
+        }
+
+        async fn approve_pairing_and_retire_non_direct_sessions(
+            &self,
+            code: &str,
+            now: TimestampMs,
+        ) -> Result<PairingApprovalOutcome, DbError> {
+            let mut pairings = self.pairings.lock().unwrap();
+            let Some(pairing) = pairings.iter_mut().find(|pairing| pairing.code == code) else {
+                return Ok(PairingApprovalOutcome::NotFound);
+            };
+            if pairing.status != "pending" {
+                return Ok(PairingApprovalOutcome::AlreadyProcessed);
+            }
+            if pairing.expires_at <= now {
+                pairing.status = "expired".into();
+                return Ok(PairingApprovalOutcome::Expired);
+            }
+
+            let mut users = self.users.lock().unwrap();
+            let user = if let Some(existing) = users.iter_mut().find(|user| {
+                user.platform_user_id == pairing.platform_user_id
+                    && user.platform_type == pairing.platform_type
+                    && user.channel_plugin_id == pairing.channel_plugin_id
+            }) {
+                if existing.authorization_kind != CHANNEL_USER_AUTHORIZATION_AUTO_GROUP {
+                    return Err(DbError::Conflict(format!(
+                        "User '{}' on platform '{}' already exists",
+                        pairing.platform_user_id, pairing.platform_type
+                    )));
+                }
+                existing.authorization_kind = CHANNEL_USER_AUTHORIZATION_APPROVED.into();
+                existing.display_name = pairing
+                    .display_name
+                    .clone()
+                    .or_else(|| existing.display_name.clone());
+                existing.authorized_at = now;
+                existing.clone()
+            } else {
+                let user = ChannelUserRow {
+                    channel_user_id: nomifun_common::ChannelUserId::new().into_string(),
+                    platform_user_id: pairing.platform_user_id.clone(),
+                    platform_type: pairing.platform_type.clone(),
+                    channel_plugin_id: pairing.channel_plugin_id.clone(),
+                    display_name: pairing.display_name.clone(),
+                    authorization_kind: CHANNEL_USER_AUTHORIZATION_APPROVED.into(),
+                    authorized_at: now,
+                    last_active: None,
+                };
+                users.push(user.clone());
+                user
+            };
+            pairing.status = "approved".into();
+            Ok(PairingApprovalOutcome::Approved(user))
         }
 
         async fn cleanup_expired_pairings(&self, now: TimestampMs) -> Result<u64, DbError> {
@@ -715,6 +969,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn group_pending_request_is_reused_even_when_mentions_race() {
+        let (svc, repo, bc) = make_service();
+        let (first, second) = tokio::join!(
+            svc.request_or_reuse_pending(
+                "tg_42",
+                "telegram",
+                TEST_CHANNEL_PLUGIN_ID,
+                Some("Alice"),
+            ),
+            svc.request_or_reuse_pending(
+                "tg_42",
+                "telegram",
+                TEST_CHANNEL_PLUGIN_ID,
+                Some("Alice"),
+            ),
+        );
+
+        assert_eq!(first.unwrap(), second.unwrap());
+        assert_eq!(repo.get_pairings().len(), 1);
+        assert_eq!(bc.take_events().len(), 1);
+        assert_eq!(bc.take_owners(), vec!["owner-a"]);
+    }
+
+    #[tokio::test]
     async fn request_pairing_sets_correct_expiry() {
         let (svc, repo, _bc) = make_service();
         let before = now_ms();
@@ -785,6 +1063,152 @@ mod tests {
         assert_eq!(users[0].platform_user_id, "tg_42");
         assert_eq!(users[0].platform_type, "telegram");
         assert_eq!(users[0].display_name.as_deref(), Some("Alice"));
+    }
+
+    #[tokio::test]
+    async fn approve_promotes_auto_group_user_without_changing_identity() {
+        let (svc, repo, _bc) = make_service();
+        let auto_group = svc
+            .ensure_auto_group_user(
+                "tg_42",
+                "telegram",
+                TEST_CHANNEL_PLUGIN_ID,
+                "Group Alice",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            auto_group.authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
+        );
+
+        let code = svc
+            .request_pairing(
+                "tg_42",
+                "telegram",
+                TEST_CHANNEL_PLUGIN_ID,
+                Some("Alice"),
+            )
+            .await
+            .unwrap();
+        svc.approve_pairing(&code).await.unwrap();
+
+        let users = repo.get_users();
+        assert_eq!(users.len(), 1, "approval must promote instead of duplicating");
+        assert_eq!(users[0].channel_user_id, auto_group.channel_user_id);
+        assert_eq!(
+            users[0].authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_APPROVED
+        );
+        assert_eq!(users[0].display_name.as_deref(), Some("Alice"));
+        assert!(
+            svc.is_user_authorized("tg_42", "telegram", TEST_CHANNEL_PLUGIN_ID)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn promotion_waits_for_old_admission_before_changing_authority() {
+        let (svc, repo, _bc) = make_service();
+        let svc = Arc::new(svc);
+        let auto_group = svc
+            .ensure_auto_group_user(
+                "tg_waiting",
+                "telegram",
+                TEST_CHANNEL_PLUGIN_ID,
+                "Waiting guest",
+            )
+            .await
+            .unwrap();
+        let code = svc
+            .request_pairing(
+                "tg_waiting",
+                "telegram",
+                TEST_CHANNEL_PLUGIN_ID,
+                Some("Approved user"),
+            )
+            .await
+            .unwrap();
+
+        let admission = svc
+            .group_policy_fence()
+            .read(TEST_CHANNEL_PLUGIN_ID)
+            .await;
+        let approving = {
+            let svc = Arc::clone(&svc);
+            let code = code.clone();
+            tokio::spawn(async move { svc.approve_pairing(&code).await })
+        };
+        let mut approving = approving;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut approving)
+                .await
+                .is_err(),
+            "promotion must wait for an admission holding the old guest authority"
+        );
+        assert_eq!(
+            repo.get_users()[0].authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
+        );
+        assert_eq!(repo.get_pairings()[0].status, "pending");
+
+        drop(admission);
+        tokio::time::timeout(std::time::Duration::from_secs(1), approving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let users = repo.get_users();
+        assert_eq!(users[0].channel_user_id, auto_group.channel_user_id);
+        assert_eq!(
+            users[0].authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_APPROVED
+        );
+        assert_eq!(repo.get_pairings()[0].status, "approved");
+    }
+
+    #[tokio::test]
+    async fn revocation_waits_for_old_admission_and_then_removes_user() {
+        let (svc, repo, _bc) = make_service();
+        let svc = Arc::new(svc);
+        let code = svc
+            .request_pairing(
+                "tg_revoked",
+                "telegram",
+                TEST_CHANNEL_PLUGIN_ID,
+                Some("Revoked user"),
+            )
+            .await
+            .unwrap();
+        svc.approve_pairing(&code).await.unwrap();
+        let user_id = repo.get_users()[0].channel_user_id.clone();
+
+        let admission = svc
+            .group_policy_fence()
+            .read(TEST_CHANNEL_PLUGIN_ID)
+            .await;
+        let revoking = {
+            let svc = Arc::clone(&svc);
+            let user_id = user_id.clone();
+            tokio::spawn(async move { svc.revoke_user(&user_id).await })
+        };
+        let mut revoking = revoking;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut revoking)
+                .await
+                .is_err(),
+            "revocation must wait for an admission holding the old user grant"
+        );
+        assert_eq!(repo.get_users().len(), 1);
+
+        drop(admission);
+        tokio::time::timeout(std::time::Duration::from_secs(1), revoking)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(repo.get_users().is_empty());
     }
 
     #[tokio::test]
@@ -932,6 +1356,59 @@ mod tests {
             .await
             .unwrap();
         assert!(!authorized);
+    }
+
+    #[tokio::test]
+    async fn auto_group_user_is_idempotent_but_not_directly_authorized() {
+        let (svc, repo, _bc) = make_service();
+        let first = svc
+            .ensure_auto_group_user("tg_42", "telegram", TEST_CHANNEL_PLUGIN_ID, "Alice")
+            .await
+            .unwrap();
+        let second = svc
+            .ensure_auto_group_user("tg_42", "telegram", TEST_CHANNEL_PLUGIN_ID, "Alice")
+            .await
+            .unwrap();
+
+        assert_eq!(first.channel_user_id, second.channel_user_id);
+        assert_eq!(repo.get_users().len(), 1);
+        assert_eq!(
+            first.authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
+        );
+        assert!(
+            !svc.is_user_authorized("tg_42", "telegram", TEST_CHANNEL_PLUGIN_ID)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            svc.get_internal_user_id("tg_42", "telegram", TEST_CHANNEL_PLUGIN_ID)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn compatibility_auto_admission_wrapper_never_approves_a_stranger() {
+        let (svc, repo, _bc) = make_service();
+        let channel_user_id = svc
+            .ensure_channel_user("cs_visitor", "lark", TEST_CHANNEL_PLUGIN_ID, "Visitor")
+            .await
+            .unwrap();
+
+        let users = repo.get_users();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].channel_user_id, channel_user_id);
+        assert_eq!(
+            users[0].authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
+        );
+        assert!(
+            !svc.is_user_authorized("cs_visitor", "lark", TEST_CHANNEL_PLUGIN_ID)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

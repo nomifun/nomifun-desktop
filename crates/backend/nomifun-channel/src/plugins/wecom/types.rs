@@ -23,7 +23,10 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::warn;
 
-use crate::types::{MessageContentType, PluginType, UnifiedIncomingMessage, UnifiedMessageContent, UnifiedUser};
+use crate::types::{
+    ChatKind, MentionState, MessageContentType, PluginType, UnifiedIncomingMessage, UnifiedMessageContent,
+    UnifiedUser,
+};
 
 /// Long-connection subscribe endpoint (single connection per bot; a new
 /// connection kicks the previous one, which then receives `disconnected_event`).
@@ -121,10 +124,10 @@ pub fn parse_envelope(text: &str) -> Option<WecomEnvelope> {
 /// The stable per-conversation key: `chatid` for groups, else the sender
 /// `userid`. This doubles as the `aibot_send_msg` `chatid` at reply time.
 pub fn chat_id_for(chattype: &str, chatid: &str, userid: &str) -> String {
-    if chattype == "group" && !chatid.is_empty() {
-        chatid.to_owned()
+    if chattype == "group" {
+        chatid.trim().to_owned()
     } else {
-        userid.to_owned()
+        userid.trim().to_owned()
     }
 }
 
@@ -153,11 +156,17 @@ pub fn decode_msg_callback(env: &WecomEnvelope, now: i64) -> Option<DecodedMessa
         return None;
     }
 
-    let userid = body.from.userid.clone();
-    let chat_id = chat_id_for(&body.chattype, &body.chatid, &userid);
-    if chat_id.is_empty() {
+    let userid = body.from.userid.trim();
+    if userid.is_empty() {
+        warn!("WeCom message callback missing from.userid; dropping event");
         return None;
     }
+    let chat_id = chat_id_for(&body.chattype, &body.chatid, userid).trim().to_owned();
+    if chat_id.is_empty() {
+        warn!("WeCom message callback missing chat identity; dropping event");
+        return None;
+    }
+    let userid = userid.to_owned();
 
     let stable_event_id = {
         let msgid = body.msgid.trim();
@@ -176,7 +185,7 @@ pub fn decode_msg_callback(env: &WecomEnvelope, now: i64) -> Option<DecodedMessa
     let user = UnifiedUser {
         id: userid.clone(),
         username: None,
-        display_name: if userid.is_empty() { "unknown".to_owned() } else { userid.clone() },
+        display_name: userid.clone(),
         avatar_url: None,
     };
 
@@ -190,6 +199,19 @@ pub fn decode_msg_callback(env: &WecomEnvelope, now: i64) -> Option<DecodedMessa
         id: stable_event_id.to_owned(),
         platform: PluginType::Wecom,
         chat_id,
+        chat_kind: match body.chattype.as_str() {
+            "single" => ChatKind::Direct,
+            "group" => ChatKind::Group,
+            _ => ChatKind::Unknown,
+        },
+        // The official WeCom intelligent-bot group callback is delivered only
+        // for messages that address the bot.  This is provider-contract
+        // metadata, not a guess based on the message text.
+        mention_state: if body.chattype == "group" {
+            MentionState::Mentioned
+        } else {
+            MentionState::Unknown
+        },
         user,
         content: UnifiedMessageContent {
             content_type,
@@ -272,8 +294,8 @@ mod tests {
     }
 
     #[test]
-    fn chat_id_group_without_chatid_falls_back_to_userid() {
-        assert_eq!(chat_id_for("group", "", "u1"), "u1");
+    fn chat_id_group_without_chatid_stays_empty_for_fail_closed_decode() {
+        assert_eq!(chat_id_for("group", "", "u1"), "");
     }
 
     #[test]
@@ -312,6 +334,8 @@ mod tests {
         assert_eq!(decoded.unified.content.text, "hello robot");
         assert_eq!(decoded.unified.platform, PluginType::Wecom);
         assert_eq!(decoded.unified.content.content_type, MessageContentType::Text);
+        assert_eq!(decoded.unified.chat_kind, ChatKind::Direct);
+        assert_eq!(decoded.unified.mention_state, MentionState::Unknown);
         assert_eq!(decoded.event_id, "m1");
     }
 
@@ -327,6 +351,34 @@ mod tests {
         let decoded = decode_msg_callback(&env, 2000).unwrap();
         assert_eq!(decoded.unified.chat_id, "grp42");
         assert_eq!(decoded.unified.user.id, "li");
+        assert_eq!(decoded.unified.chat_kind, ChatKind::Group);
+        assert_eq!(decoded.unified.mention_state, MentionState::Mentioned);
+    }
+
+    #[test]
+    fn decode_group_chat_without_sender_is_skipped() {
+        let env = parse_envelope(
+            r#"{"cmd":"aibot_msg_callback","headers":{"req_id":"r"},
+                "body":{"msgid":"m_missing_sender","chattype":"group","chatid":"grp42",
+                        "from":{"userid":"  "},"msgtype":"text",
+                        "text":{"content":"@Robot hi"}}}"#,
+        )
+        .unwrap();
+
+        assert!(decode_msg_callback(&env, 2000).is_none());
+    }
+
+    #[test]
+    fn decode_group_chat_without_chat_id_is_skipped() {
+        let env = parse_envelope(
+            r#"{"cmd":"aibot_msg_callback","headers":{"req_id":"r"},
+                "body":{"msgid":"m_missing_chat","chattype":"group","chatid":"  ",
+                        "from":{"userid":"li"},"msgtype":"text",
+                        "text":{"content":"@Robot hi"}}}"#,
+        )
+        .unwrap();
+
+        assert!(decode_msg_callback(&env, 2000).is_none());
     }
 
     #[test]

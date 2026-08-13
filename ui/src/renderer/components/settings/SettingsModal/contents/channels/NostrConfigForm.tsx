@@ -98,7 +98,7 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
         </div>
       </div>
 
-      {pluginStatus?.enabled && authorizedUsers.length === 0 && (
+      {pluginStatus?.enabled && (
         <PendingPairingList
           pairings={pendingPairings}
           loading={pairingLoading}

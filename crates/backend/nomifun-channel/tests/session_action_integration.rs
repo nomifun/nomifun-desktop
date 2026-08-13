@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_common::now_ms;
-use nomifun_db::models::{NewChannelPluginRow, NewChannelUserRow};
+use nomifun_db::models::{
+    CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST, CHANNEL_USER_AUTHORIZATION_APPROVED,
+    NewChannelPluginRow, NewChannelUserRow,
+};
 use nomifun_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
 use nomifun_realtime::UserEventSink;
 
@@ -79,6 +82,7 @@ async fn setup() -> (
         companion_id: None,
         bot_key: None,
         owner_domain: "companion".into(),
+        group_access_mode: CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.into(),
         created_at: now_ms(),
         updated_at: now_ms(),
         })
@@ -108,6 +112,7 @@ async fn create_user(
         platform_type: platform_type.to_owned(),
         channel_plugin_id: Some(channel_plugin_id.to_owned()),
         display_name: Some("Test User".into()),
+        authorization_kind: CHANNEL_USER_AUTHORIZATION_APPROVED.into(),
         authorized_at: now_ms(),
         last_active: None,
     };
@@ -119,6 +124,8 @@ fn make_text_message(user_id: &str, chat_id: &str, text: &str) -> UnifiedIncomin
         id: format!("msg_{}", now_ms()),
         platform: PluginType::Telegram,
         chat_id: chat_id.into(),
+        chat_kind: nomifun_channel::types::ChatKind::Direct,
+        mention_state: nomifun_channel::types::MentionState::Unknown,
         user: UnifiedUser {
             id: user_id.into(),
             username: None,
@@ -147,6 +154,8 @@ fn make_action_message(
         id: format!("msg_{}", now_ms()),
         platform: PluginType::Telegram,
         chat_id: chat_id.into(),
+        chat_kind: nomifun_channel::types::ChatKind::Direct,
+        mention_state: nomifun_channel::types::MentionState::Unknown,
         user: UnifiedUser {
             id: user_id.into(),
             username: None,
@@ -502,6 +511,8 @@ async fn action_agent_select_persists() {
         id: format!("msg_{}", now_ms()),
         platform: PluginType::Telegram,
         chat_id: "chat1".into(),
+        chat_kind: nomifun_channel::types::ChatKind::Direct,
+        mention_state: nomifun_channel::types::MentionState::Unknown,
         user: UnifiedUser {
             id: "tg_42".into(),
             username: None,

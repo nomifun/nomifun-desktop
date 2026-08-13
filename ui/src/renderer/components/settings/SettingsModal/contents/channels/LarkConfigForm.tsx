@@ -409,7 +409,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
         </>
       )}
 
-      {/* Test Connection Button - only show when not connected or no existing users */}
+      {/* Test Connection Button - only show while this bot row is not connected. */}
       {!pluginStatus?.connected && (
         <div className='flex justify-end'>
           {pluginStatus?.hasToken && !appId.trim() && !appSecret.trim() ? (
@@ -483,7 +483,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
       )}
 
       {/* Pending Pairings */}
-      {pluginStatus?.enabled && authorizedUsers.length === 0 && (
+      {pluginStatus?.enabled && (
         <PendingPairingList
           pairings={pendingPairings}
           loading={pairingLoading}
