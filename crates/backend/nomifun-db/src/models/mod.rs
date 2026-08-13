@@ -39,10 +39,15 @@ pub use agent_execution::*;
 pub use agent_execution_template::*;
 pub use attachment::AttachmentRow;
 pub use channel::{
+    CHANNEL_CHAT_KIND_DIRECT, CHANNEL_CHAT_KIND_GROUP, CHANNEL_CHAT_KIND_UNKNOWN,
+    CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS, CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST,
+    CHANNEL_GROUP_ACCESS_MODE_DISABLED,
     CHANNEL_OWNER_DOMAIN_COMPANION, CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE,
+    CHANNEL_USER_AUTHORIZATION_APPROVED, CHANNEL_USER_AUTHORIZATION_AUTO_GROUP,
     ChannelInboundReceiptRow, ChannelPairingCodeRow, ChannelPendingPromptRow, ChannelPluginRow,
     ChannelSessionRow, ChannelUserRow, NewChannelInboundReceiptRow, NewChannelPairingCodeRow,
     NewChannelPendingPromptRow, NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow,
+    default_channel_chat_kind, default_channel_user_authorization_kind, default_group_access_mode,
     default_owner_domain,
 };
 pub use client_preference::ClientPreference;

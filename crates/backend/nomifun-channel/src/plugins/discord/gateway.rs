@@ -17,8 +17,8 @@ use crate::plugin::{SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::plugins::util::backoff_delay;
 use crate::plugins::callback::parse_callback_data;
 use crate::types::{
-    ActionContext, MessageContentType, PluginType, UnifiedAction, UnifiedAttachment, UnifiedIncomingMessage,
-    UnifiedMessageContent, UnifiedUser,
+    ActionContext, ChatKind, MentionState, MessageContentType, PluginType, UnifiedAction, UnifiedAttachment,
+    UnifiedIncomingMessage, UnifiedMessageContent, UnifiedUser,
 };
 
 use super::api::DiscordApi;
@@ -274,6 +274,16 @@ pub(super) fn normalize_message_create(msg: &MessageCreate, self_bot_id: &str) -
     if msg.author.bot {
         return None;
     }
+    let author_id = msg.author.id.trim();
+    if author_id.is_empty() {
+        warn!("Ignoring Discord message without an author ID");
+        return None;
+    }
+    let channel_id = msg.channel_id.trim();
+    if channel_id.is_empty() {
+        warn!("Ignoring Discord message without a channel ID");
+        return None;
+    }
     // Guild mention gating: a guild message must mention the bot. DMs (no
     // guild_id) are always processed.
     if msg.guild_id.is_some() {
@@ -285,7 +295,7 @@ pub(super) fn normalize_message_create(msg: &MessageCreate, self_bot_id: &str) -
 
     let (content_type, attachments) = extract_attachments(msg);
     let user = UnifiedUser {
-        id: msg.author.id.clone(),
+        id: author_id.to_owned(),
         username: Some(msg.author.username.clone()),
         display_name: msg.author.display(),
         avatar_url: None,
@@ -294,7 +304,19 @@ pub(super) fn normalize_message_create(msg: &MessageCreate, self_bot_id: &str) -
     Some(UnifiedIncomingMessage {
         id: msg.id.clone(),
         platform: PluginType::Discord,
-        chat_id: msg.channel_id.clone(),
+        chat_id: channel_id.to_owned(),
+        chat_kind: if msg.guild_id.is_some() {
+            ChatKind::Group
+        } else {
+            ChatKind::Direct
+        },
+        // Guild messages reach this point only after the structured mentions
+        // array contains the bot id.  DMs do not carry a mention requirement.
+        mention_state: if msg.guild_id.is_some() {
+            MentionState::Mentioned
+        } else {
+            MentionState::Unknown
+        },
         user,
         content: UnifiedMessageContent {
             content_type,
@@ -346,7 +368,22 @@ pub(super) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
     }
     let custom_id = interaction.data.as_ref().and_then(|d| d.custom_id.clone())?;
     let user = interaction.acting_user()?;
-    let chat_id = interaction.channel_id.clone().unwrap_or_default();
+    let user_id = user.id.trim();
+    if user_id.is_empty() {
+        warn!("Ignoring Discord interaction without an actor ID");
+        return None;
+    }
+    let chat_id = interaction.channel_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+    let Some(chat_id) = chat_id else {
+        warn!("Ignoring Discord interaction without a channel ID");
+        return None;
+    };
+    let chat_kind = if interaction.member.is_some() {
+        ChatKind::Group
+    } else {
+        ChatKind::Direct
+    };
+    let chat_id = chat_id.to_owned();
     let message_id = interaction.message.as_ref().map(|m| m.id.clone());
 
     let parsed = parse_callback_data(&custom_id);
@@ -356,7 +393,7 @@ pub(super) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
         params: p.params,
         context: ActionContext {
             platform: PluginType::Discord,
-            user_id: user.id.clone(),
+            user_id: user_id.to_owned(),
             chat_id: chat_id.clone(),
             message_id: message_id.clone(),
             session_id: None,
@@ -367,8 +404,10 @@ pub(super) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
         id: interaction.id.clone(),
         platform: PluginType::Discord,
         chat_id,
+        chat_kind,
+        mention_state: MentionState::Mentioned,
         user: UnifiedUser {
-            id: user.id.clone(),
+            id: user_id.to_owned(),
             username: Some(user.username.clone()),
             display_name: user.display(),
             avatar_url: None,
@@ -453,6 +492,8 @@ mod tests {
         assert_eq!(unified.content.text, "hello");
         assert_eq!(unified.content.content_type, MessageContentType::Text);
         assert_eq!(unified.user.id, "42");
+        assert_eq!(unified.chat_kind, ChatKind::Direct);
+        assert_eq!(unified.mention_state, MentionState::Unknown);
     }
 
     #[test]
@@ -460,6 +501,17 @@ mod tests {
         let mut msg = dm_message("hello");
         msg.id = " \t".into();
         assert!(normalize_message_create(&msg, "selfbot").is_none());
+    }
+
+    #[test]
+    fn message_without_author_or_channel_id_is_rejected() {
+        let mut missing_author = dm_message("hello");
+        missing_author.author = user(" ", false);
+        assert!(normalize_message_create(&missing_author, "selfbot").is_none());
+
+        let mut missing_channel = dm_message("hello");
+        missing_channel.channel_id = " \t".into();
+        assert!(normalize_message_create(&missing_channel, "selfbot").is_none());
     }
 
     #[test]
@@ -477,7 +529,9 @@ mod tests {
         assert!(normalize_message_create(&msg, "selfbot").is_none());
         // Mentioned -> passes.
         msg.mentions = vec![user("selfbot", false)];
-        assert!(normalize_message_create(&msg, "selfbot").is_some());
+        let unified = normalize_message_create(&msg, "selfbot").unwrap();
+        assert_eq!(unified.chat_kind, ChatKind::Group);
+        assert_eq!(unified.mention_state, MentionState::Mentioned);
     }
 
     #[test]
@@ -539,6 +593,30 @@ mod tests {
         assert_eq!(action.action, "chat.regenerate");
         assert_eq!(action.context.chat_id, "chan1");
         assert_eq!(unified.reply_to_message_id.as_deref(), Some("msg9"));
+    }
+
+    #[test]
+    fn interaction_without_actor_or_channel_id_is_rejected() {
+        let make_interaction = || InteractionCreate {
+            id: "175928847299117063".into(),
+            token: "tok".into(),
+            interaction_type: INTERACTION_TYPE_MESSAGE_COMPONENT,
+            data: Some(InteractionData {
+                custom_id: Some("chat:chat.regenerate".into()),
+            }),
+            channel_id: Some("chan1".into()),
+            member: None,
+            user: Some(user("7", false)),
+            message: Some(InteractionMessage { id: "msg9".into() }),
+        };
+
+        let mut missing_actor = make_interaction();
+        missing_actor.user = Some(user(" ", false));
+        assert!(normalize_interaction(&missing_actor).is_none());
+
+        let mut missing_channel = make_interaction();
+        missing_channel.channel_id = Some(" ".into());
+        assert!(normalize_interaction(&missing_channel).is_none());
     }
 
     #[test]

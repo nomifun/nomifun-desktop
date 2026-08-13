@@ -26,7 +26,7 @@ use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
-    BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType,
+    BotInfo, ChatKind, MentionState, MessageContentType, PluginConfig, PluginStatus, PluginType,
     UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
 };
 
@@ -484,17 +484,29 @@ async fn handle_ws_text(
         warn!("Ignoring Mattermost post without a provider post ID");
         return;
     }
-
-    // Bot-loop guard: skip own messages
-    if post.user_id == bot_user_id {
+    let user_id = post.user_id.trim();
+    if user_id.is_empty() {
+        warn!("Ignoring Mattermost post without a user ID");
         return;
     }
+    let channel_id = post.channel_id.trim();
+    if channel_id.is_empty() {
+        warn!("Ignoring Mattermost post without a channel ID");
+        return;
+    }
+
+    // Bot-loop guard: skip own messages
+    if user_id == bot_user_id {
+        return;
+    }
+    let user_id = user_id.to_owned();
+    let channel_id = channel_id.to_owned();
 
     let channel_type = data.channel_type.as_deref().unwrap_or("");
 
     // Mention gating: for non-DM channels, only process if the bot is mentioned
     if channel_type != "D" {
-        if !is_bot_mentioned(&data.mentions, &post.message, bot_user_id) {
+        if !is_bot_mentioned(&data.mentions, bot_user_id) {
             return;
         }
     }
@@ -515,9 +527,21 @@ async fn handle_ws_text(
     let unified = UnifiedIncomingMessage {
         id: post.id,
         platform: PluginType::Mattermost,
-        chat_id: post.channel_id,
+        chat_id: channel_id,
+        chat_kind: if channel_type == "D" {
+            ChatKind::Direct
+        } else {
+            ChatKind::Group
+        },
+        // Every non-DM post reaching this point passed the provider mentions
+        // array gate above; no ordinary-text inference is performed here.
+        mention_state: if channel_type == "D" {
+            MentionState::Unknown
+        } else {
+            MentionState::Mentioned
+        },
         user: UnifiedUser {
-            id: post.user_id,
+            id: user_id,
             username: Some(sender_name.clone()),
             display_name: sender_name,
             avatar_url: None,
@@ -558,15 +582,10 @@ pub(crate) fn derive_ws_url(server_url: &str) -> String {
 
 /// Check if the bot is mentioned in a `"posted"` event.
 ///
-/// Returns `true` if:
-/// - The `data.mentions` JSON array contains the bot's user id, OR
-/// - The post message text contains `@<bot_username>` (not checked here — the
-///   caller should use `bot_info.username`; we rely on the server-side mentions
-///   array which is the canonical source).
-///
-/// For robustness we also accept `@<bot_user_id>` in the text, though
-/// Mattermost normally uses username-based mentions.
-pub(crate) fn is_bot_mentioned(mentions_json: &Option<String>, message: &str, bot_user_id: &str) -> bool {
+/// Returns `true` only when the `data.mentions` JSON array contains the bot's
+/// user id. Ordinary message text is deliberately not scanned for `@...`
+/// tokens because those are not reliable structured mention metadata.
+pub(crate) fn is_bot_mentioned(mentions_json: &Option<String>, bot_user_id: &str) -> bool {
     // Primary: check the mentions array from the WS event data
     if let Some(mentions_str) = mentions_json {
         if let Ok(ids) = serde_json::from_str::<Vec<String>>(mentions_str) {
@@ -574,11 +593,6 @@ pub(crate) fn is_bot_mentioned(mentions_json: &Option<String>, message: &str, bo
                 return true;
             }
         }
-    }
-
-    // Fallback: check if message contains @bot_user_id (edge case)
-    if message.contains(&format!("@{bot_user_id}")) {
-        return true;
     }
 
     false
@@ -665,43 +679,41 @@ mod tests {
     #[test]
     fn mentioned_in_mentions_array() {
         let mentions = Some(r#"["user1","bot123","user2"]"#.to_string());
-        assert!(is_bot_mentioned(&mentions, "hello", "bot123"));
+        assert!(is_bot_mentioned(&mentions, "bot123"));
     }
 
     #[test]
     fn not_mentioned_in_mentions_array() {
         let mentions = Some(r#"["user1","user2"]"#.to_string());
-        assert!(!is_bot_mentioned(&mentions, "hello", "bot123"));
+        assert!(!is_bot_mentioned(&mentions, "bot123"));
     }
 
     #[test]
     fn mentioned_no_mentions_field() {
-        assert!(!is_bot_mentioned(&None, "hello", "bot123"));
+        assert!(!is_bot_mentioned(&None, "bot123"));
     }
 
     #[test]
-    fn mentioned_via_message_text_fallback() {
-        assert!(is_bot_mentioned(&None, "hey @bot123 help", "bot123"));
+    fn ordinary_message_text_is_not_a_mention_signal() {
+        assert!(!is_bot_mentioned(&None, "bot123"));
     }
 
     #[test]
     fn not_mentioned_anywhere() {
         let mentions = Some(r#"["user1"]"#.to_string());
-        assert!(!is_bot_mentioned(&mentions, "hello world", "bot123"));
+        assert!(!is_bot_mentioned(&mentions, "bot123"));
     }
 
     #[test]
-    fn mentioned_empty_mentions_but_in_text() {
+    fn empty_mentions_is_not_mentioned() {
         let mentions = Some(r#"[]"#.to_string());
-        assert!(is_bot_mentioned(&mentions, "cc @bot123", "bot123"));
+        assert!(!is_bot_mentioned(&mentions, "bot123"));
     }
 
     #[test]
     fn mentioned_malformed_mentions_json() {
         let mentions = Some("not-json".to_string());
-        // Falls through to text check
-        assert!(is_bot_mentioned(&mentions, "@bot123", "bot123"));
-        assert!(!is_bot_mentioned(&mentions, "hello", "bot123"));
+        assert!(!is_bot_mentioned(&mentions, "bot123"));
     }
 
     // -- truncate_message ----------------------------------------------------
@@ -756,6 +768,8 @@ mod tests {
         assert_eq!(msg.user.username.as_deref(), Some("alice"));
         assert_eq!(msg.content.text, "Hello bot");
         assert_eq!(msg.platform, PluginType::Mattermost);
+        assert_eq!(msg.chat_kind, ChatKind::Direct);
+        assert_eq!(msg.mention_state, MentionState::Unknown);
     }
 
     #[tokio::test]
@@ -781,6 +795,41 @@ mod tests {
             &tx,
         )
         .await;
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_posted_event_without_user_or_channel_id_is_rejected() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let missing_user = serde_json::json!({
+            "id": "post_missing_user",
+            "channel_id": "chan1",
+            "user_id": " ",
+            "message": "must not be enqueued"
+        });
+        let missing_channel = serde_json::json!({
+            "id": "post_missing_channel",
+            "channel_id": "\t",
+            "user_id": "user1",
+            "message": "must not be enqueued"
+        });
+
+        for post in [missing_user, missing_channel] {
+            let event = serde_json::json!({
+                "event": "posted",
+                "data": {
+                    "post": serde_json::to_string(&post).unwrap(),
+                    "channel_type": "D"
+                }
+            });
+            handle_ws_text(
+                &serde_json::to_string(&event).unwrap(),
+                "bot_id",
+                &tx,
+            )
+            .await;
+        }
 
         assert!(rx.try_recv().is_err());
     }
@@ -869,6 +918,8 @@ mod tests {
 
         let msg = rx.try_recv().unwrap();
         assert_eq!(msg.id, "post4");
+        assert_eq!(msg.chat_kind, ChatKind::Group);
+        assert_eq!(msg.mention_state, MentionState::Mentioned);
     }
 
     #[tokio::test]

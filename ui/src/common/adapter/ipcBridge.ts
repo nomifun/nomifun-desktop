@@ -3607,7 +3607,9 @@ import type {
   IChannelPluginStatus,
   IChannelSession,
   IChannelUser,
+  SetGroupAccessRequest,
 } from '@/common/types/channel/channel';
+import { normalizeGroupAccessMode } from '@/common/types/channel/channel';
 
 type RawPluginStatus = Record<string, unknown>;
 type RawPairing = Record<string, unknown>;
@@ -3642,6 +3644,8 @@ function toPluginStatus(raw: RawPluginStatus): IChannelPluginStatus {
     status: raw.status as string | undefined,
     last_connected: raw.last_connected as number | undefined,
     activeUsers: (raw.active_users ?? 0) as number,
+    // Fail closed while talking to an older backend or receiving a future value.
+    groupAccessMode: normalizeGroupAccessMode(raw.group_access_mode),
     botUsername: raw.bot_username as string | undefined,
     hasToken: (raw.has_token ?? false) as boolean,
     // 所有权分域：缺省（过渡期后端未透出）按 companion 处理，与 DB DEFAULT 一致。
@@ -3751,6 +3755,8 @@ export const channel = {
   revokeUser: httpPost<void, { channel_user_id: import('../types/ids').ChannelUserId }>(
     '/api/channel/users/revoke'
   ),
+  /** Update one bot row's group-chat policy; direct-message pairing is unchanged. */
+  setGroupAccess: httpPost<void, SetGroupAccessRequest>('/api/channel/settings/group-access'),
   getActiveSessions: withResponseMap(httpGet<RawSession[], void>('/api/channel/sessions'), (raw) =>
     raw.map(toChannelSession)
   ),

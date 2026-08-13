@@ -5,10 +5,17 @@ use tracing::{debug, info, warn};
 
 use crate::channel_settings::ChannelSettingsService;
 use crate::error::ChannelError;
+use crate::group_policy::{GroupPolicyFence, GroupPolicyReadPermit};
 use crate::pairing::PairingService;
 use crate::session::SessionManager;
 use crate::types::{
-    ActionBehavior, ActionButton, ActionCategory, ActionResponse, UnifiedAction, UnifiedIncomingMessage,
+    ActionBehavior, ActionButton, ActionCategory, ActionResponse, ChatKind, MentionState,
+    MessageContentType, UnifiedAction, UnifiedIncomingMessage,
+};
+use nomifun_db::models::{
+    CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS, CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST,
+    CHANNEL_GROUP_ACCESS_MODE_DISABLED, CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE,
+    CHANNEL_USER_AUTHORIZATION_APPROVED,
 };
 
 /// User text synthesized for the `chat.continue` button. Sent to the agent
@@ -22,6 +29,8 @@ pub const CONTINUE_PROMPT: &str = "继续";
 /// back to the IM platform.
 #[derive(Debug, Clone)]
 pub enum MessageResult {
+    /// A durable no-op: settle the inbound receipt without sending a reply.
+    Ignored { reason: &'static str },
     /// An action response to send/edit on the platform.
     Action(ActionResponse),
     /// Message was dispatched to the AI Agent. The caller should send
@@ -70,6 +79,7 @@ pub struct ActionExecutor {
     /// customer-service bound bot. `None` keeps the pairing approval gate for
     /// every bot.
     cs_routing: Option<Arc<dyn crate::message_service::CsRouting>>,
+    group_policy_fence: Arc<GroupPolicyFence>,
 }
 
 /// Derive a requirement `(title, content)` from an inbound message's text:
@@ -95,6 +105,7 @@ impl ActionExecutor {
         settings: Arc<ChannelSettingsService>,
         default_agent_type: &str,
     ) -> Self {
+        let group_policy_fence = pairing.group_policy_fence();
         Self {
             pairing,
             session_mgr,
@@ -102,7 +113,12 @@ impl ActionExecutor {
             default_agent_type: default_agent_type.to_owned(),
             requirement_creator: None,
             cs_routing: None,
+            group_policy_fence,
         }
+    }
+
+    pub(crate) fn group_policy_fence(&self) -> Arc<GroupPolicyFence> {
+        Arc::clone(&self.group_policy_fence)
     }
 
     /// Enable the opt-in IM → requirement pipeline (channel inbound → tracked
@@ -141,19 +157,124 @@ impl ActionExecutor {
         msg: &UnifiedIncomingMessage,
         channel_plugin_id: &str,
     ) -> Result<MessageResult, ChannelError> {
+        let permit = self.group_policy_fence.read(channel_plugin_id).await;
+        self.handle_incoming_message_with_policy_permit(msg, channel_plugin_id, &permit)
+            .await
+    }
+
+    /// Admission under a caller-owned permit. The message loop uses this form
+    /// so the same permit remains alive through session/queue/turn handoff.
+    pub(crate) async fn handle_incoming_message_with_policy_permit(
+        &self,
+        msg: &UnifiedIncomingMessage,
+        channel_plugin_id: &str,
+        permit: &GroupPolicyReadPermit,
+    ) -> Result<MessageResult, ChannelError> {
+        if !permit.is_for(channel_plugin_id) {
+            return Err(ChannelError::InvalidConfig(
+                "group policy permit does not match channel_plugin_id".into(),
+            ));
+        }
         let platform_type = msg.platform.to_string();
         let user_id = &msg.user.id;
         let chat_id = &msg.chat_id;
 
         // 1. Authorization check — resolve platform user → internal user ID
-        let internal_user_id = self
+        let plugin = self
             .pairing
-            .get_internal_user_id(user_id, &platform_type, channel_plugin_id)
-            .await?;
+            .get_plugin(channel_plugin_id)
+            .await?
+            .ok_or_else(|| ChannelError::PluginNotFound(channel_plugin_id.to_owned()))?;
+        // A provider-labelled action must contain a parsed action. Treating a
+        // malformed callback as ordinary text would bypass action admission
+        // and create/dispatch a session.
+        if msg.content.content_type == MessageContentType::Action && msg.action.is_none() {
+            return Ok(MessageResult::Ignored {
+                reason: "callback_action_missing",
+            });
+        }
+        // Some providers cannot prove whether an event came from a direct or
+        // group chat. Never guess: Unknown cannot safely inherit Direct's
+        // authorization or companion-session behavior. This also prevents an
+        // old group card from bypassing a newly-disabled group policy.
+        if msg.chat_kind == ChatKind::Unknown {
+            return Ok(MessageResult::Ignored {
+                reason: if msg.action.is_some() {
+                    "callback_chat_kind_unknown"
+                } else {
+                    "chat_kind_unknown"
+                },
+            });
+        }
+        if msg.chat_kind == ChatKind::Group {
+            if msg.mention_state != MentionState::Mentioned {
+                return Ok(MessageResult::Ignored {
+                    reason: "group_message_did_not_mention_bot",
+                });
+            }
+            if plugin.group_access_mode == CHANNEL_GROUP_ACCESS_MODE_DISABLED {
+                return Ok(MessageResult::Ignored {
+                    reason: "group_chat_disabled",
+                });
+            }
+        }
 
-        let internal_user_id = match internal_user_id {
-            Some(id) => id,
-            None => {
+        let existing_user = self
+            .pairing
+            .get_channel_user(user_id, &platform_type, channel_plugin_id)
+            .await?;
+        let approved_user_id = existing_user
+            .as_ref()
+            .filter(|user| user.authorization_kind == CHANNEL_USER_AUTHORIZATION_APPROVED)
+            .map(|user| user.channel_user_id.clone());
+        let cs_binding_exists = match &self.cs_routing {
+            Some(routing) => routing.binding_for(channel_plugin_id).await.is_some(),
+            None => false,
+        };
+        let cs_auto_serve = plugin.owner_domain == CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE
+            && cs_binding_exists;
+        if plugin.owner_domain == CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE && !cs_binding_exists {
+            return Ok(MessageResult::Ignored {
+                reason: "customer_service_binding_unavailable",
+            });
+        }
+
+        let (internal_user_id, auto_group_guest) = match (msg.chat_kind, plugin.group_access_mode.as_str()) {
+            (ChatKind::Group, CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS) => {
+                let user = self
+                    .pairing
+                    .ensure_auto_group_user(
+                        user_id,
+                        &platform_type,
+                        channel_plugin_id,
+                        &msg.user.display_name,
+                    )
+                    .await?;
+                let is_guest = user.authorization_kind != CHANNEL_USER_AUTHORIZATION_APPROVED;
+                (user.channel_user_id, is_guest)
+            }
+            (ChatKind::Group, CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST) => match approved_user_id {
+                Some(id) => (id, false),
+                None => {
+                    self.pairing
+                        .request_or_reuse_pending(
+                            user_id,
+                            &platform_type,
+                            channel_plugin_id,
+                            Some(&msg.user.display_name),
+                        )
+                        .await?;
+                    return Ok(MessageResult::Action(build_group_approval_pending_response()));
+                }
+            },
+            (ChatKind::Group, _) => {
+                return Ok(MessageResult::Ignored {
+                    reason: "invalid_group_access_mode",
+                });
+            }
+            _ => match approved_user_id {
+                Some(id) => (id, false),
+                None => {
                 // 客服自动接待 (SECURITY-CRITICAL): a bot bound to a
                 // CUSTOMER-SERVICE agent auto-serves unknown senders with NO
                 // pairing code — the customer-service turn runs in a disposable
@@ -161,22 +282,21 @@ impl ActionExecutor {
                 // construction to three read-only tools, which is the boundary.
                 // Auto-served strangers get a channel-user row so the dialogue
                 // lane resolves its logical parent. This bypass is gated
-                // STRICTLY on the BOT (cs_channel_bindings, keyed by the
-                // arriving `channel_plugin_id`) — companion-bound and unbound
-                // bots keep the pairing approval gate UNCHANGED.
-                let cs_bound = match &self.cs_routing {
-                    Some(routing) => routing.binding_for(channel_plugin_id).await.is_some(),
-                    None => false,
-                };
-                if cs_bound {
-                    self.pairing
-                        .ensure_channel_user(
+                // STRICTLY on BOTH the bot's customer-service owner domain and
+                // its binding (keyed by the arriving `channel_plugin_id`). A
+                // stray binding on a companion bot cannot bypass pairing.
+                if cs_auto_serve && msg.chat_kind == ChatKind::Direct {
+                    let user = self.pairing
+                        .ensure_auto_group_user(
                             user_id,
                             &platform_type,
                             channel_plugin_id,
                             &msg.user.display_name,
                         )
-                        .await?
+                        .await?;
+                    let is_guest =
+                        user.authorization_kind != CHANNEL_USER_AUTHORIZATION_APPROVED;
+                    (user.channel_user_id, is_guest)
                 } else {
                     let response = self
                         .handle_unauthorized(
@@ -188,13 +308,39 @@ impl ActionExecutor {
                         .await?;
                     return Ok(MessageResult::Action(response));
                 }
-            }
+                }
+            },
         };
+
+        if auto_group_guest
+            && !cs_auto_serve
+            && self.settings.get_agent_config(msg.platform).await?.agent_type != "nomi"
+        {
+            return Err(ChannelError::UserNotAuthorized(
+                "open-group guests may only use the restricted Nomi agent".into(),
+            ));
+        }
 
         // 2. Button callback → action routing
         if let Some(action) = &msg.action {
+            // Customer-service bots own a separate, deliberately constrained
+            // execution domain. Their cards must never route into the normal
+            // channel host-action table (including agent/session mutations),
+            // even when the platform sender has previously been approved.
+            if plugin.owner_domain == CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE {
+                return Ok(MessageResult::Ignored {
+                    reason: "customer_service_action_unsupported",
+                });
+            }
+            if auto_group_guest
+                && matches!(action.action.as_str(), "agent.show" | "agent.select")
+            {
+                return Err(ChannelError::UserNotAuthorized(
+                    "open-group guests cannot select host agents".into(),
+                ));
+            }
             return self
-                .route_action(action, &internal_user_id, channel_plugin_id)
+                .route_action(action, &internal_user_id, channel_plugin_id, msg.chat_kind)
                 .await;
         }
 
@@ -202,6 +348,8 @@ impl ActionExecutor {
         // (which AutoWork executes) instead of dispatching an immediate AI reply.
         // Gated by a per-platform setting; default off → the normal path runs.
         if let Some(creator) = &self.requirement_creator
+            && !auto_group_guest
+            && plugin.owner_domain != CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE
             && self.settings.get_route_to_requirement(msg.platform).await?
         {
             let (title, content) = message_to_requirement(&msg.content.text);
@@ -242,11 +390,12 @@ impl ActionExecutor {
         let agent_config = self.settings.get_agent_config(msg.platform).await?;
         let session = self
             .session_mgr
-            .get_or_create_session(
+            .get_or_create_session_for_chat(
                 &internal_user_id,
                 chat_id,
                 channel_plugin_id,
                 &agent_config.agent_type,
+                msg.chat_kind,
                 None,
             )
             .await?;
@@ -303,17 +452,19 @@ impl ActionExecutor {
         action: &UnifiedAction,
         internal_user_id: &str,
         channel_plugin_id: &str,
+        chat_kind: ChatKind,
     ) -> Result<MessageResult, ChannelError> {
         match action.category {
             ActionCategory::Platform => Ok(MessageResult::Action(
-                self.handle_platform_action(action, channel_plugin_id).await?,
+                self.handle_platform_action(action, channel_plugin_id, chat_kind)
+                    .await?,
             )),
             ActionCategory::System => Ok(MessageResult::Action(
-                self.handle_system_action(action, internal_user_id, channel_plugin_id)
+                self.handle_system_action(action, internal_user_id, channel_plugin_id, chat_kind)
                     .await?,
             )),
             ActionCategory::Chat => {
-                self.handle_chat_action(action, internal_user_id, channel_plugin_id)
+                self.handle_chat_action(action, internal_user_id, channel_plugin_id, chat_kind)
                     .await
             }
         }
@@ -325,6 +476,7 @@ impl ActionExecutor {
         &self,
         action: &UnifiedAction,
         channel_plugin_id: &str,
+        chat_kind: ChatKind,
     ) -> Result<ActionResponse, ChannelError> {
         match action.action.as_str() {
             "pairing.show" | "pairing.refresh" => {
@@ -337,7 +489,11 @@ impl ActionExecutor {
                         None,
                     )
                     .await?;
-                Ok(build_pairing_response(&code))
+                if chat_kind == ChatKind::Group {
+                    Ok(build_group_approval_pending_response())
+                } else {
+                    Ok(build_pairing_response(&code))
+                }
             }
             "pairing.check" => {
                 let authorized = self
@@ -411,6 +567,7 @@ impl ActionExecutor {
         action: &UnifiedAction,
         internal_user_id: &str,
         channel_plugin_id: &str,
+        chat_kind: ChatKind,
     ) -> Result<ActionResponse, ChannelError> {
         match action.action.as_str() {
             "session.new" => {
@@ -419,11 +576,12 @@ impl ActionExecutor {
                 let agent_config = self.settings.get_agent_config(action.context.platform).await?;
                 let session = self
                     .session_mgr
-                    .reset_session(
+                    .reset_session_for_chat(
                         user_id,
                         chat_id,
                         channel_plugin_id,
                         &agent_config.agent_type,
+                        chat_kind,
                         None,
                     )
                     .await?;
@@ -452,11 +610,12 @@ impl ActionExecutor {
                 let agent_config = self.settings.get_agent_config(action.context.platform).await?;
                 let session = self
                     .session_mgr
-                    .get_or_create_session(
+                    .get_or_create_session_for_chat(
                         user_id,
                         chat_id,
                         channel_plugin_id,
                         &agent_config.agent_type,
+                        chat_kind,
                         None,
                     )
                     .await?;
@@ -564,11 +723,12 @@ impl ActionExecutor {
                 let chat_id = &action.context.chat_id;
                 let session = self
                     .session_mgr
-                    .get_or_create_session(
+                    .get_or_create_session_for_chat(
                         internal_user_id,
                         chat_id,
                         channel_plugin_id,
                         agent_type,
+                        chat_kind,
                         None,
                     )
                     .await?;
@@ -600,6 +760,7 @@ impl ActionExecutor {
         action: &UnifiedAction,
         internal_user_id: &str,
         channel_plugin_id: &str,
+        chat_kind: ChatKind,
     ) -> Result<MessageResult, ChannelError> {
         match action.action.as_str() {
             "chat.continue" => {
@@ -607,7 +768,7 @@ impl ActionExecutor {
                 // prompt so the agent resumes its previous answer. The
                 // message loop handles streaming exactly like a typed message.
                 let session = self
-                    .resolve_action_session(action, internal_user_id, channel_plugin_id)
+                    .resolve_action_session(action, internal_user_id, channel_plugin_id, chat_kind)
                     .await?;
                 Ok(MessageResult::DispatchedText {
                     session_id: session.channel_session_id,
@@ -620,7 +781,7 @@ impl ActionExecutor {
                 // only ChannelMessageService can read — hand the lookup to
                 // the message loop instead of growing this executor's deps.
                 let session = self
-                    .resolve_action_session(action, internal_user_id, channel_plugin_id)
+                    .resolve_action_session(action, internal_user_id, channel_plugin_id, chat_kind)
                     .await?;
                 Ok(MessageResult::RegenerateRequested {
                     session_id: session.channel_session_id,
@@ -689,14 +850,16 @@ impl ActionExecutor {
         action: &UnifiedAction,
         internal_user_id: &str,
         channel_plugin_id: &str,
+        chat_kind: ChatKind,
     ) -> Result<nomifun_db::models::ChannelSessionRow, ChannelError> {
         let agent_config = self.settings.get_agent_config(action.context.platform).await?;
         self.session_mgr
-            .get_or_create_session(
+            .get_or_create_session_for_chat(
                 internal_user_id,
                 &action.context.chat_id,
                 channel_plugin_id,
                 &agent_config.agent_type,
+                chat_kind,
                 None,
             )
             .await
@@ -743,6 +906,21 @@ fn build_pairing_response(code: &str) -> ActionResponse {
                 params: None,
             },
         ]]),
+        keyboard: None,
+        behavior: ActionBehavior::Send,
+        toast: None,
+        edit_message_id: None,
+    }
+}
+
+/// Shared-group response for an allowlist miss. The reusable approval code is
+/// intentionally omitted; the owner receives it through the private control
+/// plane and can approve the pending member there.
+fn build_group_approval_pending_response() -> ActionResponse {
+    ActionResponse {
+        text: Some("Your request is waiting for the bot administrator's approval.".into()),
+        parse_mode: None,
+        buttons: None,
         keyboard: None,
         behavior: ActionBehavior::Send,
         toast: None,
@@ -835,13 +1013,19 @@ mod tests {
 #[cfg(test)]
 mod action_tests {
     use super::*;
-    use crate::types::{ActionContext, MessageContentType, PluginType, UnifiedMessageContent, UnifiedUser};
+    use crate::types::{
+        ActionContext, ChatKind, MentionState, MessageContentType, PluginType,
+        UnifiedMessageContent, UnifiedUser,
+    };
     use nomifun_api_types::WebSocketMessage;
     use nomifun_common::{TimestampMs, now_ms};
     use nomifun_db::models::{
         ChannelPairingCodeRow, ChannelPluginRow, ChannelSessionRow, ChannelUserRow,
         ClientPreference, NewChannelPairingCodeRow, NewChannelPluginRow,
         NewChannelSessionRow, NewChannelUserRow,
+        CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS, CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST,
+        CHANNEL_GROUP_ACCESS_MODE_DISABLED, CHANNEL_USER_AUTHORIZATION_APPROVED,
+        CHANNEL_USER_AUTHORIZATION_AUTO_GROUP,
     };
     use nomifun_db::{DbError, IChannelRepository, IClientPreferenceRepository, UpdatePluginStatusParams};
     use nomifun_realtime::UserEventSink;
@@ -857,6 +1041,30 @@ mod action_tests {
 
     impl UserEventSink for MockBroadcaster {
         fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
+    }
+
+    #[derive(Default)]
+    struct RecordingRequirementCreator {
+        calls: Mutex<Vec<(String, String, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl nomifun_common::RequirementCreator for RecordingRequirementCreator {
+        async fn create_from_message(
+            &self,
+            title: &str,
+            content: &str,
+            tag: &str,
+            created_by: &str,
+        ) -> Result<String, String> {
+            self.calls.lock().unwrap().push((
+                title.to_owned(),
+                content.to_owned(),
+                tag.to_owned(),
+                created_by.to_owned(),
+            ));
+            Ok(nomifun_common::generate_id())
+        }
     }
 
     // ── Mock IChannelRepository ────────────────────────────────────────
@@ -878,27 +1086,56 @@ mod action_tests {
             }
         }
 
-        fn add_authorized_user(&self, platform_user_id: &str, platform_type: &str) {
+        fn add_user(
+            &self,
+            platform_user_id: &str,
+            platform_type: &str,
+            authorization_kind: &str,
+        ) {
             let channel_user_id = match platform_user_id {
-                "tg_42" => TEST_CHANNEL_USER_ID,
-                "tg_99" => ALT_CHANNEL_USER_ID,
-                _ => panic!("missing canonical channel user fixture for {platform_user_id}"),
+                "tg_42" => TEST_CHANNEL_USER_ID.to_owned(),
+                "tg_99" => ALT_CHANNEL_USER_ID.to_owned(),
+                _ => nomifun_common::generate_id(),
             };
             let user = ChannelUserRow {
-                channel_user_id: channel_user_id.to_owned(),
+                channel_user_id,
                 platform_user_id: platform_user_id.to_owned(),
                 platform_type: platform_type.to_owned(),
                 channel_plugin_id: Some(TEST_CHANNEL_PLUGIN_ID.to_owned()),
                 display_name: Some("Test User".into()),
+                authorization_kind: authorization_kind.to_owned(),
                 authorized_at: now_ms(),
                 last_active: None,
             };
             self.users.lock().unwrap().push(user);
         }
 
+        fn add_authorized_user(&self, platform_user_id: &str, platform_type: &str) {
+            self.add_user(
+                platform_user_id,
+                platform_type,
+                CHANNEL_USER_AUTHORIZATION_APPROVED,
+            );
+        }
+
         /// Seeds a bot channel row, so the arriving plugin id resolves a row.
         fn add_channel_row(&self, channel_plugin_id: &str) {
-            self.plugins.lock().unwrap().push(ChannelPluginRow {
+            self.add_channel_row_with_mode(
+                channel_plugin_id,
+                CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST,
+            );
+        }
+
+        fn add_channel_row_with_mode(&self, channel_plugin_id: &str, group_access_mode: &str) {
+            let mut plugins = self.plugins.lock().unwrap();
+            if let Some(existing) = plugins
+                .iter_mut()
+                .find(|plugin| plugin.channel_plugin_id == channel_plugin_id)
+            {
+                existing.group_access_mode = group_access_mode.to_owned();
+                return;
+            }
+            plugins.push(ChannelPluginRow {
                 channel_plugin_id: channel_plugin_id.to_owned(),
                 r#type: "telegram".to_owned(),
                 name: "Telegram Bot".to_owned(),
@@ -909,6 +1146,7 @@ mod action_tests {
                 companion_id: None,
                 bot_key: None,
                 owner_domain: "companion".into(),
+                group_access_mode: group_access_mode.to_owned(),
                 created_at: now_ms(),
                 updated_at: now_ms(),
             });
@@ -942,6 +1180,7 @@ mod action_tests {
                 companion_id: row.companion_id.clone(),
                 bot_key: row.bot_key.clone(),
                 owner_domain: row.owner_domain.clone(),
+                group_access_mode: row.group_access_mode.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             };
@@ -986,6 +1225,15 @@ mod action_tests {
         async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError> {
             Ok(self.users.lock().unwrap().clone())
         }
+        async fn get_user(&self, channel_user_id: &str) -> Result<Option<ChannelUserRow>, DbError> {
+            Ok(self
+                .users
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|user| user.channel_user_id == channel_user_id)
+                .cloned())
+        }
         async fn get_user_by_platform(
             &self,
             platform_user_id: &str,
@@ -1004,12 +1252,50 @@ mod action_tests {
         }
         async fn create_user(&self, row: &NewChannelUserRow) -> Result<ChannelUserRow, DbError> {
             let mut users = self.users.lock().unwrap();
+            if let Some(existing) = users.iter_mut().find(|user| {
+                user.platform_user_id == row.platform_user_id
+                    && user.platform_type == row.platform_type
+                    && user.channel_plugin_id == row.channel_plugin_id
+            }) {
+                if row.authorization_kind == CHANNEL_USER_AUTHORIZATION_APPROVED {
+                    existing.authorization_kind = CHANNEL_USER_AUTHORIZATION_APPROVED.to_owned();
+                    existing.display_name = row.display_name.clone();
+                    existing.authorized_at = row.authorized_at;
+                }
+                return Ok(existing.clone());
+            }
             let persisted = ChannelUserRow {
                 channel_user_id: nomifun_common::generate_id(),
                 platform_user_id: row.platform_user_id.clone(),
                 platform_type: row.platform_type.clone(),
                 channel_plugin_id: row.channel_plugin_id.clone(),
                 display_name: row.display_name.clone(),
+                authorization_kind: row.authorization_kind.clone(),
+                authorized_at: row.authorized_at,
+                last_active: row.last_active,
+            };
+            users.push(persisted.clone());
+            Ok(persisted)
+        }
+        async fn ensure_auto_group_user(
+            &self,
+            row: &NewChannelUserRow,
+        ) -> Result<ChannelUserRow, DbError> {
+            let mut users = self.users.lock().unwrap();
+            if let Some(existing) = users.iter().find(|user| {
+                user.platform_user_id == row.platform_user_id
+                    && user.platform_type == row.platform_type
+                    && user.channel_plugin_id == row.channel_plugin_id
+            }) {
+                return Ok(existing.clone());
+            }
+            let persisted = ChannelUserRow {
+                channel_user_id: nomifun_common::generate_id(),
+                platform_user_id: row.platform_user_id.clone(),
+                platform_type: row.platform_type.clone(),
+                channel_plugin_id: row.channel_plugin_id.clone(),
+                display_name: row.display_name.clone(),
+                authorization_kind: CHANNEL_USER_AUTHORIZATION_AUTO_GROUP.to_owned(),
                 authorized_at: row.authorized_at,
                 last_active: row.last_active,
             };
@@ -1061,6 +1347,7 @@ mod action_tests {
                 workspace: new_row.workspace.clone(),
                 chat_id: new_row.chat_id.clone(),
                 channel_plugin_id: new_row.channel_plugin_id.clone(),
+                chat_kind: new_row.chat_kind.clone(),
                 created_at: new_row.created_at,
                 last_activity: new_row.last_activity,
             };
@@ -1226,6 +1513,7 @@ mod action_tests {
 
     fn setup() -> (ActionExecutor, Arc<MockRepo>) {
         let repo = Arc::new(MockRepo::new());
+        repo.add_channel_row(TEST_CHANNEL_PLUGIN_ID);
         let broadcaster = Arc::new(MockBroadcaster);
         let pairing = Arc::new(PairingService::new(repo.clone(), broadcaster, "owner-a"));
         let session_mgr = Arc::new(SessionManager::new(repo.clone()));
@@ -1239,6 +1527,7 @@ mod action_tests {
     /// rows (used to bind a platform to a companion).
     fn setup_with_prefs(entries: &[(&str, &str)]) -> (ActionExecutor, Arc<MockRepo>) {
         let repo = Arc::new(MockRepo::new());
+        repo.add_channel_row(TEST_CHANNEL_PLUGIN_ID);
         let broadcaster = Arc::new(MockBroadcaster);
         let pairing = Arc::new(PairingService::new(repo.clone(), broadcaster, "owner-a"));
         let session_mgr = Arc::new(SessionManager::new(repo.clone()));
@@ -1249,10 +1538,47 @@ mod action_tests {
     }
 
     fn make_text_message(user_id: &str, chat_id: &str, text: &str, platform: PluginType) -> UnifiedIncomingMessage {
+        make_text_message_with_context(
+            user_id,
+            chat_id,
+            text,
+            platform,
+            ChatKind::Direct,
+            MentionState::Unknown,
+        )
+    }
+
+    fn make_group_text_message(
+        user_id: &str,
+        chat_id: &str,
+        text: &str,
+        platform: PluginType,
+        mention_state: MentionState,
+    ) -> UnifiedIncomingMessage {
+        make_text_message_with_context(
+            user_id,
+            chat_id,
+            text,
+            platform,
+            ChatKind::Group,
+            mention_state,
+        )
+    }
+
+    fn make_text_message_with_context(
+        user_id: &str,
+        chat_id: &str,
+        text: &str,
+        platform: PluginType,
+        chat_kind: ChatKind,
+        mention_state: MentionState,
+    ) -> UnifiedIncomingMessage {
         UnifiedIncomingMessage {
             id: "msg_1".into(),
             platform,
             chat_id: chat_id.into(),
+            chat_kind,
+            mention_state,
             user: UnifiedUser {
                 id: user_id.into(),
                 username: None,
@@ -1283,6 +1609,8 @@ mod action_tests {
             id: "msg_1".into(),
             platform,
             chat_id: chat_id.into(),
+            chat_kind: ChatKind::Direct,
+            mention_state: MentionState::Unknown,
             user: UnifiedUser {
                 id: user_id.into(),
                 username: None,
@@ -1313,6 +1641,356 @@ mod action_tests {
     }
 
     // ── Authorization tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn group_message_without_mention_is_ignored_before_side_effects() {
+        let (executor, repo) = setup();
+        repo.add_channel_row_with_mode(
+            TEST_CHANNEL_PLUGIN_ID,
+            CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS,
+        );
+        let msg = make_group_text_message(
+            "tg_stranger",
+            "group_1",
+            "Hello",
+            PluginType::Telegram,
+            MentionState::NotMentioned,
+        );
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            MessageResult::Ignored {
+                reason: "group_message_did_not_mention_bot"
+            }
+        ));
+        assert!(repo.users.lock().unwrap().is_empty());
+        assert!(repo.pairings.lock().unwrap().is_empty());
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabled_group_chat_is_ignored_without_side_effects() {
+        let (executor, repo) = setup();
+        repo.add_channel_row_with_mode(
+            TEST_CHANNEL_PLUGIN_ID,
+            CHANNEL_GROUP_ACCESS_MODE_DISABLED,
+        );
+        let msg = make_group_text_message(
+            "tg_stranger",
+            "group_1",
+            "Hello",
+            PluginType::Telegram,
+            MentionState::Mentioned,
+        );
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            MessageResult::Ignored {
+                reason: "group_chat_disabled"
+            }
+        ));
+        assert!(repo.users.lock().unwrap().is_empty());
+        assert!(repo.pairings.lock().unwrap().is_empty());
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_scope_callback_is_ignored_before_authorization_or_pairing() {
+        let (executor, repo) = setup();
+        repo.add_authorized_user("tg_42", "telegram");
+        repo.add_channel_row_with_mode(
+            TEST_CHANNEL_PLUGIN_ID,
+            CHANNEL_GROUP_ACCESS_MODE_DISABLED,
+        );
+        let mut msg = make_action_message(
+            "tg_42",
+            "possibly-a-group",
+            "session.new",
+            ActionCategory::System,
+            PluginType::Telegram,
+            None,
+        );
+        msg.chat_kind = ChatKind::Unknown;
+        msg.mention_state = MentionState::Mentioned;
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            MessageResult::Ignored {
+                reason: "callback_chat_kind_unknown"
+            }
+        ));
+        assert!(repo.pairings.lock().unwrap().is_empty());
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_scope_text_is_ignored_before_authorization_or_session() {
+        let (executor, repo) = setup();
+        repo.add_authorized_user("tg_42", "telegram");
+        let msg = make_text_message_with_context(
+            "tg_42",
+            "ambiguous-chat",
+            "do not guess this is a direct message",
+            PluginType::Telegram,
+            ChatKind::Unknown,
+            MentionState::Unknown,
+        );
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            MessageResult::Ignored {
+                reason: "chat_kind_unknown"
+            }
+        ));
+        assert!(repo.pairings.lock().unwrap().is_empty());
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_action_is_ignored_before_authorization_or_session() {
+        let (executor, repo) = setup();
+        repo.add_authorized_user("tg_42", "telegram");
+        let mut msg = make_text_message_with_context(
+            "tg_42",
+            "direct-chat",
+            "malformed callback",
+            PluginType::Telegram,
+            ChatKind::Direct,
+            MentionState::Unknown,
+        );
+        msg.content.content_type = MessageContentType::Action;
+        msg.action = None;
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            MessageResult::Ignored {
+                reason: "callback_action_missing"
+            }
+        ));
+        assert!(repo.pairings.lock().unwrap().is_empty());
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn allowlisted_group_pending_response_never_leaks_pairing_code() {
+        let (executor, repo) = setup();
+        let msg = make_group_text_message(
+            "tg_stranger",
+            "group_1",
+            "Hello",
+            PluginType::Telegram,
+            MentionState::Mentioned,
+        );
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+        let pending_code = repo
+            .pairings
+            .lock()
+            .unwrap()
+            .first()
+            .expect("allowlist miss must create a private pending approval")
+            .code
+            .clone();
+
+        let repeated = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+        assert!(matches!(repeated, MessageResult::Action(_)));
+        let pairings = repo.pairings.lock().unwrap();
+        assert_eq!(pairings.len(), 1, "a repeated group mention must reuse pending approval");
+        assert_eq!(pairings[0].code, pending_code);
+        drop(pairings);
+
+        match result {
+            MessageResult::Action(response) => {
+                let text = response.text.expect("group pending response has text");
+                assert!(!text.contains(&pending_code), "shared group response leaked pairing code");
+                assert!(!text.contains("pairing code"));
+                assert!(response.buttons.is_none());
+            }
+            other => panic!("allowlist miss must wait for approval, got {other:?}"),
+        }
+        assert!(repo.users.lock().unwrap().is_empty());
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn all_members_group_creates_auto_group_identity_and_dispatches() {
+        let (executor, repo) = setup();
+        repo.add_channel_row_with_mode(
+            TEST_CHANNEL_PLUGIN_ID,
+            CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS,
+        );
+        let msg = make_group_text_message(
+            "tg_stranger",
+            "group_1",
+            "Hello",
+            PluginType::Telegram,
+            MentionState::Mentioned,
+        );
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MessageResult::Dispatched { .. }));
+        let users = repo.users.lock().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(
+            users[0].authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
+        );
+        drop(users);
+        assert!(repo.pairings.lock().unwrap().is_empty());
+        let sessions = repo.sessions.lock().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].chat_kind, "group");
+    }
+
+    #[tokio::test]
+    async fn auto_group_guest_cannot_create_requirement_when_route_is_enabled() {
+        let (executor, repo) = setup_with_prefs(&[(
+            "channels.telegram.routeToRequirement",
+            "true",
+        )]);
+        repo.add_channel_row_with_mode(
+            TEST_CHANNEL_PLUGIN_ID,
+            CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS,
+        );
+        let creator = Arc::new(RecordingRequirementCreator::default());
+        let executor = executor.with_requirement_creator(Some(creator.clone()));
+        let msg = make_group_text_message(
+            "tg_stranger",
+            "group_1",
+            "Create a privileged requirement",
+            PluginType::Telegram,
+            MentionState::Mentioned,
+        );
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MessageResult::Dispatched { .. }));
+        assert_eq!(creator.calls.lock().unwrap().len(), 0);
+        assert_eq!(
+            repo.users.lock().unwrap()[0].authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_group_guest_cannot_switch_the_session_to_a_host_agent() {
+        let (executor, repo) = setup();
+        repo.add_channel_row_with_mode(
+            TEST_CHANNEL_PLUGIN_ID,
+            CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS,
+        );
+        let mut msg = make_action_message(
+            "tg_stranger",
+            "group_1",
+            "agent.select",
+            ActionCategory::System,
+            PluginType::Telegram,
+            Some(HashMap::from([("agentType".into(), "acp".into())])),
+        );
+        msg.chat_kind = ChatKind::Group;
+        msg.mention_state = MentionState::Mentioned;
+
+        let error = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .expect_err("open-group guests must not select a host-capable agent");
+
+        assert!(matches!(error, ChannelError::UserNotAuthorized(_)));
+        assert!(repo.sessions.lock().unwrap().is_empty());
+        assert_eq!(
+            repo.users.lock().unwrap()[0].authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_group_identity_cannot_authorize_a_direct_message() {
+        let (executor, repo) = setup();
+        repo.add_user(
+            "tg_42",
+            "telegram",
+            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP,
+        );
+        let msg = make_text_message("tg_42", "direct_1", "Hello", PluginType::Telegram);
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        match result {
+            MessageResult::Action(response) => {
+                assert!(response.text.unwrap().contains("pairing code"));
+            }
+            other => panic!("auto-group identity must fail closed in DM, got {other:?}"),
+        }
+        assert_eq!(repo.users.lock().unwrap().len(), 1);
+        assert_eq!(repo.pairings.lock().unwrap().len(), 1);
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn customer_service_binding_cannot_bypass_group_allowlist() {
+        let (executor, repo) = setup();
+        let executor = executor.with_cs_routing(Some(Arc::new(StubCsRouting {
+            bound_plugin: TEST_CHANNEL_PLUGIN_ID.to_owned(),
+        })));
+        let msg = make_group_text_message(
+            "tg_stranger",
+            "group_1",
+            "Hello",
+            PluginType::Telegram,
+            MentionState::Mentioned,
+        );
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MessageResult::Action(_)));
+        assert!(repo.users.lock().unwrap().is_empty());
+        assert_eq!(repo.pairings.lock().unwrap().len(), 1);
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn unauthorized_user_gets_pairing_response() {
@@ -1386,7 +2064,8 @@ mod action_tests {
     async fn cs_bound_platform_auto_serves_unknown_sender() {
         // No authorized user; the bot (channel `tg-1`) is bound to a customer-service agent.
         let (executor, repo) = setup();
-        repo.add_channel_row(TEST_CHANNEL_PLUGIN_ID);
+        repo.plugins.lock().unwrap()[0].owner_domain =
+            CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into();
         let executor = executor.with_cs_routing(Some(Arc::new(StubCsRouting {
             bound_plugin: TEST_CHANNEL_PLUGIN_ID.to_owned(),
         })));
@@ -1407,22 +2086,151 @@ mod action_tests {
         // authoritative logical relation.
         // The earlier bug returned the owner's `users` id (not a channel_users
         // id), which violated the FK on session creation.
-        assert!(
-            repo.get_user_by_platform(
+        let visitor = repo
+            .get_user_by_platform(
                 "tg_stranger",
                 "telegram",
                 TEST_CHANNEL_PLUGIN_ID,
             )
-                .await
-                .unwrap()
-                .is_some(),
-            "auto-served stranger must be auto-registered as the channel session's logical parent"
+            .await
+            .unwrap()
+            .expect(
+                "auto-served stranger must be registered as the channel session's logical parent",
+            );
+        assert_eq!(
+            visitor.authorization_kind,
+            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP,
+            "customer-service auto-serve must not grant allowlist approval"
         );
+
+        let group_msg = make_group_text_message(
+            "tg_stranger",
+            "group_1",
+            "now try the group",
+            PluginType::Telegram,
+            MentionState::Mentioned,
+        );
+        let group_result = executor
+            .handle_incoming_message(&group_msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+        assert!(matches!(group_result, MessageResult::Action(_)));
+        assert_eq!(repo.pairings.lock().unwrap().len(), 1);
     }
 
-    /// The bypass is STRICTLY gated on the customer-service binding: a
-    /// COMPANION-bound bot still gates unknown senders behind pairing
-    /// (never loosened).
+    #[tokio::test]
+    async fn customer_service_owned_bot_without_binding_fails_closed() {
+        let (executor, repo) = setup();
+        repo.plugins.lock().unwrap()[0].owner_domain =
+            CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into();
+        let msg = make_text_message("tg_stranger", "chat_1", "hi", PluginType::Telegram);
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            MessageResult::Ignored {
+                reason: "customer_service_binding_unavailable"
+            }
+        ));
+        assert!(repo.users.lock().unwrap().is_empty());
+        assert!(repo.pairings.lock().unwrap().is_empty());
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn approved_customer_service_user_never_routes_message_to_requirement() {
+        let (executor, repo) = setup_with_prefs(&[(
+            "channels.telegram.routeToRequirement",
+            "true",
+        )]);
+        repo.plugins.lock().unwrap()[0].owner_domain =
+            CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into();
+        repo.add_authorized_user("tg_approved", "telegram");
+        let creator = Arc::new(RecordingRequirementCreator::default());
+        let executor = executor
+            .with_cs_routing(Some(Arc::new(StubCsRouting {
+                bound_plugin: TEST_CHANNEL_PLUGIN_ID.to_owned(),
+            })))
+            .with_requirement_creator(Some(creator.clone()));
+        let msg = make_text_message(
+            "tg_approved",
+            "chat_1",
+            "do not create a global requirement",
+            PluginType::Telegram,
+        );
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MessageResult::Dispatched { .. }));
+        assert!(creator.calls.lock().unwrap().is_empty());
+        assert_eq!(repo.sessions.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn approved_customer_service_user_cannot_enter_host_action_router() {
+        let (executor, repo) = setup();
+        repo.plugins.lock().unwrap()[0].owner_domain =
+            CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into();
+        repo.add_authorized_user("tg_approved", "telegram");
+        let executor = executor.with_cs_routing(Some(Arc::new(StubCsRouting {
+            bound_plugin: TEST_CHANNEL_PLUGIN_ID.to_owned(),
+        })));
+        let msg = make_action_message(
+            "tg_approved",
+            "chat_1",
+            "agent.select",
+            ActionCategory::System,
+            PluginType::Telegram,
+            Some(HashMap::from([("agentType".into(), "acp".into())])),
+        );
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            MessageResult::Ignored {
+                reason: "customer_service_action_unsupported"
+            }
+        ));
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn customer_service_binding_on_companion_bot_does_not_bypass_pairing() {
+        let (executor, repo) = setup();
+        assert_ne!(
+            repo.plugins.lock().unwrap()[0].owner_domain,
+            CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE
+        );
+        let executor = executor.with_cs_routing(Some(Arc::new(StubCsRouting {
+            bound_plugin: TEST_CHANNEL_PLUGIN_ID.to_owned(),
+        })));
+        let msg = make_text_message("tg_stranger", "chat_1", "hi", PluginType::Telegram);
+
+        let result = executor
+            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MessageResult::Action(_)));
+        assert_eq!(repo.pairings.lock().unwrap().len(), 1);
+        assert!(repo.users.lock().unwrap().is_empty());
+        assert!(repo.sessions.lock().unwrap().is_empty());
+    }
+
+    /// The bypass is STRICTLY gated on both customer-service ownership and its
+    /// binding: a companion-domain bot still gates unknown senders behind
+    /// pairing (never loosened).
     #[tokio::test]
     async fn companion_bound_platform_still_gates_unknown_sender() {
         // Companion bound, but NO customer-service binding for the bot →

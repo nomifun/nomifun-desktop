@@ -30,6 +30,7 @@ const status = (patch: Partial<IChannelPluginStatus> = {}): IChannelPluginStatus
   connected: true,
   status: 'running',
   activeUsers: 0,
+  groupAccessMode: 'allowlist',
   hasToken: true,
   owner_domain: 'companion',
   ...patch,

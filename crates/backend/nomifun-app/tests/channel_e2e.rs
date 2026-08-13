@@ -31,12 +31,42 @@ async fn seed_telegram_channel(
         companion_id: None,
         bot_key: None,
         owner_domain: "companion".into(),
+        group_access_mode: "allowlist".into(),
         created_at: now_ms(),
         updated_at: now_ms(),
         })
         .await
         .unwrap();
     row.channel_plugin_id
+}
+
+/// Seed a bot with an explicit group policy so settings tests can prove that
+/// one bot's update never leaks into another bot on the same platform.
+async fn seed_channel_with_group_access(
+    repo: &std::sync::Arc<dyn nomifun_db::IChannelRepository>,
+    name: &str,
+    group_access_mode: &str,
+) -> String {
+    use nomifun_common::now_ms;
+    use nomifun_db::models::NewChannelPluginRow;
+
+    repo.create_plugin(&NewChannelPluginRow {
+        r#type: "telegram".into(),
+        name: name.into(),
+        enabled: true,
+        config: "{}".into(),
+        status: None,
+        last_connected: None,
+        companion_id: None,
+        bot_key: None,
+        owner_domain: "companion".into(),
+        group_access_mode: group_access_mode.into(),
+        created_at: now_ms(),
+        updated_at: now_ms(),
+    })
+    .await
+    .unwrap()
+    .channel_plugin_id
 }
 
 // ===========================================================================
@@ -393,6 +423,79 @@ async fn sync_settings_invalid_platform() {
 // ===========================================================================
 // Full pairing → user → session lifecycle
 // ===========================================================================
+
+// GA-1/2/3: all three policies are accepted for a canonical bot id, projected
+// by plugin status, and isolated from another bot on the same platform.
+#[tokio::test]
+async fn set_group_access_projects_each_mode_and_isolates_bots() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let repo: std::sync::Arc<dyn nomifun_db::IChannelRepository> = std::sync::Arc::new(
+        nomifun_db::SqliteChannelRepository::new(services.database.pool().clone()),
+    );
+    let target_id = seed_channel_with_group_access(&repo, "Target Bot", "allowlist").await;
+    let isolated_id = seed_channel_with_group_access(&repo, "Isolated Bot", "disabled").await;
+
+    assert!(nomifun_common::validate_uuidv7(&target_id).is_ok());
+    assert!(nomifun_common::validate_uuidv7(&isolated_id).is_ok());
+
+    for mode in ["all_members", "allowlist", "disabled"] {
+        let req = json_with_token(
+            "POST",
+            "/api/channel/settings/group-access",
+            json!({
+                "plugin_id": target_id,
+                "group_access_mode": mode,
+            }),
+            &token,
+            &csrf,
+        );
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "mode={mode}");
+        let body = body_json(resp).await;
+        assert_eq!(body["data"]["success"], true, "mode={mode}");
+
+        let resp = app
+            .clone()
+            .oneshot(get_with_token("/api/channel/plugins", &token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let plugins = body["data"].as_array().unwrap();
+        let target = plugins
+            .iter()
+            .find(|plugin| plugin["plugin_id"] == target_id)
+            .expect("target bot must remain in status projection");
+        let isolated = plugins
+            .iter()
+            .find(|plugin| plugin["plugin_id"] == isolated_id)
+            .expect("isolated bot must remain in status projection");
+        assert_eq!(target["group_access_mode"], mode, "mode={mode}");
+        assert_eq!(isolated["group_access_mode"], "disabled", "mode={mode}");
+    }
+}
+
+// GA-4: the settings endpoint is bot-addressed; implementation aliases such
+// as a platform key are never accepted in place of the canonical UUIDv7 id.
+#[tokio::test]
+async fn set_group_access_rejects_noncanonical_plugin_id() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    let req = json_with_token(
+        "POST",
+        "/api/channel/settings/group-access",
+        json!({
+            "plugin_id": "telegram",
+            "group_access_mode": "all_members",
+        }),
+        &token,
+        &csrf,
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
 
 /// Test the complete pairing flow using direct DB access for the parts
 /// that normally come from IM platform (pairing request).

@@ -10,6 +10,58 @@ fn default_owner_domain() -> String {
     CHANNEL_OWNER_DOMAIN_COMPANION.to_owned()
 }
 
+/// Group-chat admission policy for one channel bot.
+///
+/// This is deliberately separate from platform credentials so the control
+/// plane can change it without resubmitting secrets or restarting the channel
+/// connection.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupAccessMode {
+    /// Any valid member may use the bot in a group chat.
+    AllMembers,
+    /// Only explicitly approved channel users may use the bot in a group.
+    Allowlist,
+    /// Group-chat input is rejected. This is also the fail-closed fallback for
+    /// missing or unrecognised persisted values.
+    #[default]
+    Disabled,
+}
+
+impl GroupAccessMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AllMembers => "all_members",
+            Self::Allowlist => "allowlist",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// Converts a storage value into its public policy projection.
+    ///
+    /// Older or corrupt rows must never become open merely because their value
+    /// is absent or unknown.
+    pub fn from_persisted(value: Option<&str>) -> Self {
+        match value {
+            Some("all_members") => Self::AllMembers,
+            Some("allowlist") => Self::Allowlist,
+            Some("disabled") => Self::Disabled,
+            _ => Self::Disabled,
+        }
+    }
+
+    /// Default for a newly created bot. This mirrors the migration contract:
+    /// customer-service bots retain their open-to-strangers semantics, while
+    /// companion bots require explicit approval.
+    pub fn default_for_owner_domain(owner_domain: &str) -> Self {
+        if owner_domain == CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE {
+            Self::AllMembers
+        } else {
+            Self::Allowlist
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // A. Plugin management — Request DTOs
 // ---------------------------------------------------------------------------
@@ -144,6 +196,18 @@ pub struct SyncChannelSettingsRequest {
     pub platform: String,
 }
 
+/// Request body for `POST /api/channel/settings/group-access`.
+///
+/// The canonical plugin id addresses exactly one persisted bot. Credentials
+/// are intentionally not accepted by this endpoint.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetGroupAccessRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_channel_plugin_id")]
+    pub plugin_id: String,
+    pub group_access_mode: GroupAccessMode,
+}
+
 // ---------------------------------------------------------------------------
 // E. Plugin management — Response DTOs
 // ---------------------------------------------------------------------------
@@ -179,6 +243,10 @@ pub struct PluginStatusResponse {
     /// `customer_service` (customer-service self-managed pool).
     #[serde(default = "default_owner_domain")]
     pub owner_domain: String,
+    /// Group-chat admission mode. Missing values from older peers deserialize
+    /// to `disabled`, never to an open policy.
+    #[serde(default)]
+    pub group_access_mode: GroupAccessMode,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
     pub connected: bool,
@@ -561,6 +629,69 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_group_access_mode_wire_values() {
+        for (mode, wire) in [
+            (GroupAccessMode::AllMembers, "all_members"),
+            (GroupAccessMode::Allowlist, "allowlist"),
+            (GroupAccessMode::Disabled, "disabled"),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), json!(wire));
+            assert_eq!(serde_json::from_value::<GroupAccessMode>(json!(wire)).unwrap(), mode);
+            assert_eq!(mode.as_str(), wire);
+        }
+        assert!(serde_json::from_value::<GroupAccessMode>(json!("open")).is_err());
+        assert!(serde_json::from_value::<GroupAccessMode>(json!(null)).is_err());
+    }
+
+    #[test]
+    fn test_set_group_access_request_requires_canonical_id_and_rejects_credentials() {
+        let req: SetGroupAccessRequest = serde_json::from_value(json!({
+            "plugin_id": CHANNEL_ID,
+            "group_access_mode": "all_members"
+        }))
+        .unwrap();
+        assert_eq!(req.plugin_id, CHANNEL_ID);
+        assert_eq!(req.group_access_mode, GroupAccessMode::AllMembers);
+
+        assert!(
+            serde_json::from_value::<SetGroupAccessRequest>(json!({
+                "plugin_id": CHANNEL_ID
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SetGroupAccessRequest>(json!({
+                "plugin_id": "lark",
+                "group_access_mode": "allowlist"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SetGroupAccessRequest>(json!({
+                "plugin_id": CHANNEL_ID,
+                "group_access_mode": "allowlist",
+                "credentials": { "token": "must-not-be-accepted" }
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_group_access_storage_and_owner_defaults_fail_closed() {
+        assert_eq!(GroupAccessMode::from_persisted(None), GroupAccessMode::Disabled);
+        assert_eq!(GroupAccessMode::from_persisted(Some("")), GroupAccessMode::Disabled);
+        assert_eq!(GroupAccessMode::from_persisted(Some("open")), GroupAccessMode::Disabled);
+        assert_eq!(
+            GroupAccessMode::default_for_owner_domain(CHANNEL_OWNER_DOMAIN_COMPANION),
+            GroupAccessMode::Allowlist
+        );
+        assert_eq!(
+            GroupAccessMode::default_for_owner_domain(CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE),
+            GroupAccessMode::AllMembers
+        );
+    }
+
     // -- E. Plugin status response --------------------------------------------
 
     #[test]
@@ -575,6 +706,7 @@ mod tests {
             companion_id: Some(COMPANION_ID.into()),
             bot_key: Some("123456".into()),
             owner_domain: "companion".into(),
+            group_access_mode: GroupAccessMode::Allowlist,
             created_at: 1699000000000,
             updated_at: 1700000000000,
             connected: true,
@@ -587,6 +719,7 @@ mod tests {
         assert_eq!(json["companion_id"], COMPANION_ID);
         assert_eq!(json["bot_key"], "123456");
         assert_eq!(json["owner_domain"], "companion");
+        assert_eq!(json["group_access_mode"], "allowlist");
         assert_eq!(json["type"], "telegram");
         assert_eq!(json["name"], "Telegram Bot");
         assert_eq!(json["enabled"], true);
@@ -612,6 +745,7 @@ mod tests {
             companion_id: None,
             bot_key: None,
             owner_domain: "customer_service".into(),
+            group_access_mode: GroupAccessMode::AllMembers,
             created_at: 1699000000000,
             updated_at: 1699000000000,
             connected: false,
@@ -626,6 +760,7 @@ mod tests {
         assert!(json.get("bot_key").is_none());
         assert!(json.get("bot_username").is_none());
         assert_eq!(json["owner_domain"], "customer_service");
+        assert_eq!(json["group_access_mode"], "all_members");
     }
 
     #[test]
@@ -644,6 +779,7 @@ mod tests {
         });
         let resp: PluginStatusResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(resp.owner_domain, CHANNEL_OWNER_DOMAIN_COMPANION);
+        assert_eq!(resp.group_access_mode, GroupAccessMode::Disabled);
     }
 
     // -- E. Test plugin response ----------------------------------------------
@@ -897,6 +1033,7 @@ mod tests {
                 companion_id: None,
                 bot_key: None,
                 owner_domain: "companion".into(),
+                group_access_mode: GroupAccessMode::Allowlist,
                 created_at: 1699000000000,
                 updated_at: 1700000000000,
                 connected: false,
@@ -960,6 +1097,7 @@ mod tests {
             companion_id: Some(COMPANION_ID.into()),
             bot_key: Some("cli_app".into()),
             owner_domain: "companion".into(),
+            group_access_mode: GroupAccessMode::Disabled,
             created_at: 1699000000000,
             updated_at: 1699000000000,
             connected: false,

@@ -92,7 +92,7 @@ pub use repository::{
     CreateAcpSessionParams, CreateTerminalParams, IAcpSessionRepository,
     IAgentMetadataRepository, IAttachmentRepository, ChannelInboundClaim,
     IChannelRepository, PENDING_PROMPT_EXPIRY_MS, PENDING_PROMPT_QUEUE_LIMIT,
-    PendingPromptEnqueue, SettleChannelInboundReceiptParams,
+    PairingApprovalOutcome, PendingPromptEnqueue, SettleChannelInboundReceiptParams,
     IClientPreferenceRepository, ICompanionTokenRepository, KNOWLEDGE_RETRIEVAL_KEY,
     IConversationRepository, ICronRepository, IIdmmInterventionRepository,
     IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,

@@ -11,13 +11,14 @@ use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
-    ActionCategory, ActionContext, BotInfo, MessageContentType, OutgoingMessageType, PluginConfig, PluginStatus,
-    PluginType, UnifiedAction, UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
+    ActionCategory, ActionContext, BotInfo, ChatKind, MentionState, MessageContentType, OutgoingMessageType,
+    PluginConfig, PluginStatus, PluginType, UnifiedAction, UnifiedIncomingMessage, UnifiedMessageContent,
+    UnifiedOutgoingMessage, UnifiedUser,
 };
 
 use super::api::DingtalkApi;
 use super::types::{
-    BotMessageCallback, CardActionCallback, CardData, CreateCardInstanceRequest, DeliverCardRequest,
+    BotMessageCallback, CardActionCallback, CardActionContent, CardData, CreateCardInstanceRequest, DeliverCardRequest,
     ImGroupDeliverModel, ImRobotDeliverModel, SendRobotMessageRequest, SpaceModel, StreamAck, StreamFrame,
     StreamingWriteRequest, SystemEvent, UpdateCardRequest, build_open_space_id, decode_chat_id, encode_chat_id,
     format_dingtalk_callback, parse_dingtalk_callback,
@@ -675,14 +676,21 @@ async fn handle_bot_message(
     let sender_staff_id = cb
         .sender_staff_id
         .as_deref()
-        .or(cb.sender_id.as_deref())
-        .unwrap_or("unknown");
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .or_else(|| cb.sender_id.as_deref().map(str::trim).filter(|id| !id.is_empty()));
+    let Some(sender_staff_id) = sender_staff_id else {
+        warn!("DingTalk bot callback missing senderStaffId/senderId; dropping event");
+        return;
+    };
 
-    let chat_id = encode_chat_id(
-        cb.conversation_type.as_deref(),
-        cb.conversation_id.as_deref(),
-        sender_staff_id,
-    );
+    let conversation_id = cb.conversation_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+    if cb.conversation_type.as_deref() == Some("2") && conversation_id.is_none() {
+        warn!("DingTalk group callback missing conversationId; dropping event");
+        return;
+    }
+
+    let chat_id = encode_chat_id(cb.conversation_type.as_deref(), conversation_id, sender_staff_id);
 
     let user = UnifiedUser {
         id: sender_staff_id.to_string(),
@@ -699,6 +707,16 @@ async fn handle_bot_message(
         id: stable_event_id.to_owned(),
         platform: PluginType::Dingtalk,
         chat_id,
+        chat_kind: match cb.conversation_type.as_deref() {
+            Some("1") => ChatKind::Direct,
+            Some("2") => ChatKind::Group,
+            _ => ChatKind::Unknown,
+        },
+        mention_state: match cb.is_in_at_list {
+            Some(true) => MentionState::Mentioned,
+            Some(false) => MentionState::NotMentioned,
+            None => MentionState::Unknown,
+        },
         user,
         content: UnifiedMessageContent {
             content_type,
@@ -739,21 +757,80 @@ async fn handle_card_action(
         "DingTalk card action received"
     );
 
-    // Extract action string from content field
-    let action_str = cb
-        .content
-        .as_deref()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
-        .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(String::from))
-        .unwrap_or_default();
-
-    let parsed = parse_dingtalk_callback(&action_str);
-
-    let user_id = cb.user_id.clone().unwrap_or_default();
-    let chat_id = match cb.open_conversation_id.as_deref() {
-        Some(cid) if !cid.is_empty() => format!("group:{cid}"),
-        _ => format!("user:{}", user_id),
+    let user_id = cb.user_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+    let Some(user_id) = user_id else {
+        warn!("DingTalk card callback missing userId; dropping callback");
+        return;
     };
+
+    let (chat_id, chat_kind) = match cb.space_type.as_deref().map(str::trim) {
+        Some("IM_GROUP") => {
+            let Some(space_id) = cb.space_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
+                warn!("DingTalk IM_GROUP card callback missing spaceId; dropping callback");
+                return;
+            };
+            (format!("group:{space_id}"), ChatKind::Group)
+        }
+        Some("IM_ROBOT") => {
+            let Some(space_id) = cb
+                .space_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                warn!("DingTalk IM_ROBOT card callback missing spaceId; dropping callback");
+                return;
+            };
+            if space_id != user_id {
+                warn!("DingTalk IM_ROBOT card callback spaceId does not match userId; dropping callback");
+                return;
+            }
+            (format!("user:{user_id}"), ChatKind::Direct)
+        }
+        other => {
+            warn!(space_type = other.unwrap_or(""), "DingTalk card callback has unknown spaceType; dropping callback");
+            return;
+        }
+    };
+
+    let Some(content_str) = cb.content.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
+        warn!("DingTalk card callback missing content; dropping callback");
+        return;
+    };
+    let content: CardActionContent = match serde_json::from_str(content_str) {
+        Ok(content) => content,
+        Err(error) => {
+            warn!(%error, "Failed to parse DingTalk card callback content");
+            return;
+        }
+    };
+    let Some(callback_params) = content.card_private_data.and_then(|data| data.params) else {
+        warn!("DingTalk card callback missing cardPrivateData.params; dropping callback");
+        return;
+    };
+    let Some(action_str) = callback_params
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+        .map(str::to_owned)
+    else {
+        warn!("DingTalk card callback missing cardPrivateData.params.action; dropping callback");
+        return;
+    };
+    let Some((cat_str, action, mut params)) = parse_dingtalk_callback(&action_str) else {
+        warn!("DingTalk card callback contains an invalid action; dropping callback");
+        return;
+    };
+    for (key, value) in callback_params {
+        if key == "action" {
+            continue;
+        }
+        if let Some(value) = value.as_str() {
+            params.get_or_insert_with(Default::default).entry(key).or_insert_with(|| value.to_owned());
+        }
+    }
+    let user_id = user_id.to_owned();
 
     let user = UnifiedUser {
         id: user_id.clone(),
@@ -762,30 +839,32 @@ async fn handle_card_action(
         avatar_url: None,
     };
 
-    let unified_action = parsed.map(|(cat_str, action, params)| {
-        let category = match cat_str.as_str() {
-            "platform" => ActionCategory::Platform,
-            "chat" => ActionCategory::Chat,
-            _ => ActionCategory::System,
-        };
-        UnifiedAction {
-            action,
-            category,
-            params,
-            context: ActionContext {
-                platform: PluginType::Dingtalk,
-                user_id: user_id.clone(),
-                chat_id: chat_id.clone(),
-                message_id: None,
-                session_id: None,
-            },
-        }
-    });
+    let category = match cat_str.as_str() {
+        "platform" => ActionCategory::Platform,
+        "chat" => ActionCategory::Chat,
+        _ => ActionCategory::System,
+    };
+    let unified_action = UnifiedAction {
+        action,
+        category,
+        params,
+        context: ActionContext {
+            platform: PluginType::Dingtalk,
+            user_id: user_id.clone(),
+            chat_id: chat_id.clone(),
+            message_id: None,
+            session_id: None,
+        },
+    };
 
     let msg = UnifiedIncomingMessage {
         id: stable_event_id.to_owned(),
         platform: PluginType::Dingtalk,
         chat_id,
+        chat_kind,
+        // Clicking a component on the bot's own card is an explicit structured
+        // address even though DingTalk does not repeat `isInAtList` here.
+        mention_state: MentionState::Mentioned,
         user,
         content: UnifiedMessageContent {
             content_type: MessageContentType::Action,
@@ -794,7 +873,7 @@ async fn handle_card_action(
         },
         timestamp: chrono_now(),
         reply_to_message_id: None,
-        action: unified_action,
+        action: Some(unified_action),
         raw: None,
     };
 
@@ -1155,6 +1234,111 @@ mod tests {
         assert_eq!(msg.content.text, "hello bot");
         assert_eq!(msg.user.display_name, "Alice");
         assert_eq!(msg.platform, PluginType::Dingtalk);
+        assert_eq!(msg.chat_kind, ChatKind::Direct);
+        assert_eq!(msg.mention_state, MentionState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_group_preserves_structured_mention_state() {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+        let callback_frame = serde_json::json!({
+            "type": "CALLBACK",
+            "headers": {
+                "messageId": "cb_group_001",
+                "topic": "/v1.0/im/bot/messages/get"
+            },
+            "data": serde_json::json!({
+                "msgId": "dt_group_123",
+                "msgtype": "text",
+                "text": { "content": "hello group" },
+                "senderStaffId": "staff_group",
+                "senderNick": "Bob",
+                "conversationId": "cid_group",
+                "conversationType": "2",
+                "isInAtList": false
+            }).to_string()
+        });
+
+        handle_stream_frame(&callback_frame.to_string(), &msg_tx).await;
+
+        let msg = msg_rx.try_recv().unwrap();
+        assert_eq!(msg.chat_id, "group:cid_group");
+        assert_eq!(msg.chat_kind, ChatKind::Group);
+        assert_eq!(msg.mention_state, MentionState::NotMentioned);
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_callback_without_sender_id_is_dropped() {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+        let callback_frame = serde_json::json!({
+            "type": "CALLBACK",
+            "headers": {
+                "messageId": "cb_missing_sender",
+                "topic": "/v1.0/im/bot/messages/get"
+            },
+            "data": serde_json::json!({
+                "msgId": "dt_missing_sender",
+                "msgtype": "text",
+                "text": { "content": "hello" },
+                "senderStaffId": "  ",
+                "conversationType": "1"
+            }).to_string()
+        });
+
+        handle_stream_frame(&callback_frame.to_string(), &msg_tx).await;
+
+        assert!(msg_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_callback_uses_sender_id_when_staff_id_is_blank() {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+        let callback_frame = serde_json::json!({
+            "type": "CALLBACK",
+            "headers": {
+                "messageId": "cb_sender_fallback",
+                "topic": "/v1.0/im/bot/messages/get"
+            },
+            "data": serde_json::json!({
+                "msgId": "dt_sender_fallback",
+                "msgtype": "text",
+                "text": { "content": "hello" },
+                "senderStaffId": " ",
+                "senderId": "sender_fallback",
+                "conversationType": "1"
+            }).to_string()
+        });
+
+        handle_stream_frame(&callback_frame.to_string(), &msg_tx).await;
+
+        let msg = msg_rx.try_recv().unwrap();
+        assert_eq!(msg.user.id, "sender_fallback");
+        assert_eq!(msg.chat_id, "user:sender_fallback");
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_group_without_conversation_id_is_dropped() {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+        let callback_frame = serde_json::json!({
+            "type": "CALLBACK",
+            "headers": {
+                "messageId": "cb_missing_group",
+                "topic": "/v1.0/im/bot/messages/get"
+            },
+            "data": serde_json::json!({
+                "msgId": "dt_missing_group",
+                "msgtype": "text",
+                "text": { "content": "hello" },
+                "senderStaffId": "staff_group",
+                "conversationId": " ",
+                "conversationType": "2",
+                "isInAtList": true
+            }).to_string()
+        });
+
+        handle_stream_frame(&callback_frame.to_string(), &msg_tx).await;
+
+        assert!(msg_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1206,7 +1390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_stream_frame_card_action_emits_message() {
+    async fn handle_stream_frame_official_group_card_action_emits_message() {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
 
         let card_frame = serde_json::json!({
@@ -1218,8 +1402,9 @@ mod tests {
             },
             "data": serde_json::json!({
                 "userId": "user_xyz",
-                "openConversationId": "",
-                "content": r#"{"action":"chat:system.confirm:callId=call_123,value=yes"}"#
+                "spaceId": "conv_group",
+                "spaceType": "IM_GROUP",
+                "content": r#"{"cardPrivateData":{"actionIds":["btn_confirm"],"params":{"action":"chat:system.confirm:callId=call_123,value=yes","source":"card"}}}"#
             }).to_string()
         });
 
@@ -1227,7 +1412,108 @@ mod tests {
 
         assert!(result.is_some());
 
-        assert_eq!(msg_rx.try_recv().unwrap().id, "cb_card_001");
+        let msg = msg_rx.try_recv().unwrap();
+        assert_eq!(msg.id, "cb_card_001");
+        assert_eq!(msg.chat_id, "group:conv_group");
+        assert_eq!(msg.chat_kind, ChatKind::Group);
+        assert_eq!(msg.mention_state, MentionState::Mentioned);
+        let action = msg.action.unwrap();
+        assert_eq!(action.action, "system.confirm");
+        assert_eq!(action.params.as_ref().unwrap()["callId"], "call_123");
+        assert_eq!(action.params.as_ref().unwrap()["value"], "yes");
+        assert_eq!(action.params.as_ref().unwrap()["source"], "card");
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_official_direct_card_action_emits_message() {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+        let card_frame = serde_json::json!({
+            "type": "CALLBACK",
+            "headers": {
+                "messageId": "cb_card_direct",
+                "topic": "/v1.0/card/instances/callback"
+            },
+            "data": serde_json::json!({
+                "userId": "user_direct",
+                "spaceId": "user_direct",
+                "spaceType": "IM_ROBOT",
+                "content": r#"{"cardPrivateData":{"params":{"action":"system:session.new"}}}"#
+            }).to_string()
+        });
+
+        handle_stream_frame(&card_frame.to_string(), &msg_tx).await;
+
+        let msg = msg_rx.try_recv().unwrap();
+        assert_eq!(msg.chat_id, "user:user_direct");
+        assert_eq!(msg.chat_kind, ChatKind::Direct);
+        assert_eq!(msg.action.unwrap().action, "session.new");
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_card_with_unknown_scope_is_dropped() {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+        let card_frame = serde_json::json!({
+            "type": "CALLBACK",
+            "headers": {
+                "messageId": "cb_card_unknown_scope",
+                "topic": "/v1.0/card/instances/callback"
+            },
+            "data": serde_json::json!({
+                "userId": "user_xyz",
+                "openConversationId": "legacy_group_must_not_be_inferred",
+                "content": r#"{"cardPrivateData":{"params":{"action":"system:session.new"}}}"#
+            }).to_string()
+        });
+
+        handle_stream_frame(&card_frame.to_string(), &msg_tx).await;
+
+        assert!(msg_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_direct_card_with_untrusted_space_id_is_dropped() {
+        for space_id in [serde_json::Value::Null, serde_json::json!(" "), serde_json::json!("other_user")] {
+            let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+            let card_frame = serde_json::json!({
+                "type": "CALLBACK",
+                "headers": {
+                    "messageId": "cb_card_bad_direct_space",
+                    "topic": "/v1.0/card/instances/callback"
+                },
+                "data": serde_json::json!({
+                    "userId": "user_direct",
+                    "spaceId": space_id,
+                    "spaceType": "IM_ROBOT",
+                    "content": r#"{"cardPrivateData":{"params":{"action":"system:session.new"}}}"#
+                }).to_string()
+            });
+
+            handle_stream_frame(&card_frame.to_string(), &msg_tx).await;
+
+            assert!(msg_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_group_card_without_space_id_is_dropped() {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+        let card_frame = serde_json::json!({
+            "type": "CALLBACK",
+            "headers": {
+                "messageId": "cb_card_empty_space",
+                "topic": "/v1.0/card/instances/callback"
+            },
+            "data": serde_json::json!({
+                "userId": "user_xyz",
+                "spaceId": " ",
+                "spaceType": "IM_GROUP",
+                "content": r#"{"cardPrivateData":{"params":{"action":"system:session.new"}}}"#
+            }).to_string()
+        });
+
+        handle_stream_frame(&card_frame.to_string(), &msg_tx).await;
+
+        assert!(msg_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1242,7 +1528,31 @@ mod tests {
             },
             "data": serde_json::json!({
                 "userId": "user_xyz",
-                "content": r#"{"action":"chat:system.confirm:callId=call_123,value=yes"}"#
+                "spaceId": "user_xyz",
+                "spaceType": "IM_ROBOT",
+                "content": r#"{"cardPrivateData":{"params":{"action":"chat:system.confirm:callId=call_123,value=yes"}}}"#
+            }).to_string()
+        });
+
+        handle_stream_frame(&card_frame.to_string(), &msg_tx).await;
+
+        assert!(msg_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_card_without_user_id_is_dropped() {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+        let card_frame = serde_json::json!({
+            "type": "CALLBACK",
+            "headers": {
+                "messageId": "cb_card_missing_user",
+                "topic": "/v1.0/card/instances/callback"
+            },
+            "data": serde_json::json!({
+                "userId": " ",
+                "spaceId": "conv_abc",
+                "spaceType": "IM_GROUP",
+                "content": r#"{"cardPrivateData":{"params":{"action":"system:session.new"}}}"#
             }).to_string()
         });
 

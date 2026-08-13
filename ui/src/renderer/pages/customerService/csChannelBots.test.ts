@@ -22,6 +22,7 @@ const row = (patch: Partial<IChannelPluginStatus>): IChannelPluginStatus => ({
   enabled: true,
   connected: true,
   activeUsers: 0,
+  groupAccessMode: 'allowlist',
   hasToken: true,
   owner_domain: 'customer_service',
   ...patch,

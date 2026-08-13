@@ -11,6 +11,15 @@ use nomifun_db::models::{
 use tracing::{debug, info};
 
 use crate::error::ChannelError;
+use crate::types::ChatKind;
+
+fn persisted_chat_kind(chat_kind: ChatKind) -> &'static str {
+    match chat_kind {
+        ChatKind::Unknown => nomifun_db::models::CHANNEL_CHAT_KIND_UNKNOWN,
+        ChatKind::Direct => nomifun_db::models::CHANNEL_CHAT_KIND_DIRECT,
+        ChatKind::Group => nomifun_db::models::CHANNEL_CHAT_KIND_GROUP,
+    }
+}
 
 /// Manages per-chat session isolation for channel users.
 ///
@@ -45,6 +54,28 @@ impl SessionManager {
         agent_type: &str,
         workspace: Option<&str>,
     ) -> Result<ChannelSessionRow, ChannelError> {
+        self.get_or_create_session_for_chat(
+            channel_user_id,
+            chat_id,
+            channel_plugin_id,
+            agent_type,
+            ChatKind::Unknown,
+            workspace,
+        )
+        .await
+    }
+
+    /// Chat-kind-aware form used by normalized inbound messages. The legacy
+    /// wrapper remains for internal callers that do not possess provider scope.
+    pub async fn get_or_create_session_for_chat(
+        &self,
+        channel_user_id: &str,
+        chat_id: &str,
+        channel_plugin_id: &str,
+        agent_type: &str,
+        chat_kind: ChatKind,
+        workspace: Option<&str>,
+    ) -> Result<ChannelSessionRow, ChannelError> {
         let now = now_ms();
         let new_row = NewChannelSessionRow {
             channel_session_id: ChannelSessionId::new().into_string(),
@@ -54,6 +85,7 @@ impl SessionManager {
             workspace: workspace.map(String::from),
             chat_id: Some(chat_id.to_owned()),
             channel_plugin_id: Some(channel_plugin_id.to_owned()),
+            chat_kind: persisted_chat_kind(chat_kind).to_owned(),
             created_at: now,
             last_activity: now,
         };
@@ -92,6 +124,28 @@ impl SessionManager {
         agent_type: &str,
         workspace: Option<&str>,
     ) -> Result<ChannelSessionRow, ChannelError> {
+        self.reset_session_for_chat(
+            channel_user_id,
+            chat_id,
+            channel_plugin_id,
+            agent_type,
+            ChatKind::Unknown,
+            workspace,
+        )
+        .await
+    }
+
+    /// Chat-kind-aware reset used by action callbacks originating in a known
+    /// direct or group conversation.
+    pub async fn reset_session_for_chat(
+        &self,
+        channel_user_id: &str,
+        chat_id: &str,
+        channel_plugin_id: &str,
+        agent_type: &str,
+        chat_kind: ChatKind,
+        workspace: Option<&str>,
+    ) -> Result<ChannelSessionRow, ChannelError> {
         // Delete old session if it exists
         self.repo
             .delete_session_by_user_chat(channel_user_id, chat_id, channel_plugin_id)
@@ -107,6 +161,7 @@ impl SessionManager {
             workspace: workspace.map(String::from),
             chat_id: Some(chat_id.to_owned()),
             channel_plugin_id: Some(channel_plugin_id.to_owned()),
+            chat_kind: persisted_chat_kind(chat_kind).to_owned(),
             created_at: now,
             last_activity: now,
         };
@@ -297,6 +352,7 @@ mod tests {
                 companion_id: row.companion_id.clone(),
                 bot_key: row.bot_key.clone(),
                 owner_domain: row.owner_domain.clone(),
+                group_access_mode: row.group_access_mode.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             })
@@ -333,6 +389,9 @@ mod tests {
         async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError> {
             Ok(vec![])
         }
+        async fn get_user(&self, _channel_user_id: &str) -> Result<Option<ChannelUserRow>, DbError> {
+            Ok(None)
+        }
         async fn get_user_by_platform(
             &self,
             _platform_user_id: &str,
@@ -348,6 +407,22 @@ mod tests {
                 platform_type: row.platform_type.clone(),
                 channel_plugin_id: row.channel_plugin_id.clone(),
                 display_name: row.display_name.clone(),
+                authorization_kind: row.authorization_kind.clone(),
+                authorized_at: row.authorized_at,
+                last_active: row.last_active,
+            })
+        }
+        async fn ensure_auto_group_user(
+            &self,
+            row: &NewChannelUserRow,
+        ) -> Result<ChannelUserRow, DbError> {
+            Ok(ChannelUserRow {
+                channel_user_id: nomifun_common::generate_id(),
+                platform_user_id: row.platform_user_id.clone(),
+                platform_type: row.platform_type.clone(),
+                channel_plugin_id: row.channel_plugin_id.clone(),
+                display_name: row.display_name.clone(),
+                authorization_kind: row.authorization_kind.clone(),
                 authorized_at: row.authorized_at,
                 last_active: row.last_active,
             })
@@ -404,6 +479,7 @@ mod tests {
                 workspace: new_row.workspace.clone(),
                 chat_id: new_row.chat_id.clone(),
                 channel_plugin_id: new_row.channel_plugin_id.clone(),
+                chat_kind: new_row.chat_kind.clone(),
                 created_at: new_row.created_at,
                 last_activity: new_row.last_activity,
             };
@@ -542,6 +618,31 @@ mod tests {
 
         let all = repo.get_sessions();
         assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_session_for_chat_persists_group_chat_kind() {
+        let (mgr, repo) = make_manager();
+        let session = mgr
+            .get_or_create_session_for_chat(
+                USER_1,
+                "group-chat-1",
+                PLUGIN_1,
+                "acp",
+                ChatKind::Group,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            session.chat_kind,
+            nomifun_db::models::CHANNEL_CHAT_KIND_GROUP
+        );
+        assert_eq!(
+            repo.get_sessions()[0].chat_kind,
+            nomifun_db::models::CHANNEL_CHAT_KIND_GROUP
+        );
     }
 
     #[tokio::test]

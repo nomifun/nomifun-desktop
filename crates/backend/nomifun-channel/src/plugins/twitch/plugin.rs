@@ -19,8 +19,8 @@ use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
-    BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType, UnifiedIncomingMessage,
-    UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
+    BotInfo, ChatKind, MentionState, MessageContentType, PluginConfig, PluginStatus, PluginType,
+    UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
 };
 
 use super::api::TwitchApi;
@@ -551,6 +551,11 @@ fn privmsg_to_unified(msg: &ParsedPrivmsg) -> Option<UnifiedIncomingMessage> {
         id: stable_event_id.to_owned(),
         platform: PluginType::Twitch,
         chat_id: msg.channel.clone(),
+        // Twitch IRC channels are not included in the IM-group access policy.
+        // The adapter has no structured mention metadata, so keep both values
+        // unknown rather than text-matching an @name or blocking all chat.
+        chat_kind: ChatKind::Unknown,
+        mention_state: MentionState::Unknown,
         user: UnifiedUser {
             id: msg.nick.clone(),
             username: Some(msg.nick.clone()),

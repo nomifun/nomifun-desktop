@@ -353,6 +353,7 @@ async fn bind_channel_session(stack: &Stack, conversation_id: &str) {
             companion_id: None,
             bot_key: Some("notify".to_owned()),
             owner_domain: "companion".into(),
+            group_access_mode: "allowlist".into(),
             created_at: now,
             updated_at: now,
         })
@@ -365,6 +366,7 @@ async fn bind_channel_session(stack: &Stack, conversation_id: &str) {
             platform_type: "telegram".to_owned(),
             channel_plugin_id: Some(plugin.channel_plugin_id.clone()),
             display_name: Some("Notify".to_owned()),
+            authorization_kind: "approved".to_owned(),
             authorized_at: now,
             last_active: None,
         })
@@ -384,6 +386,7 @@ async fn bind_channel_session(stack: &Stack, conversation_id: &str) {
                 workspace: None,
                 chat_id: Some("chat-notify".to_owned()),
                 channel_plugin_id: Some(plugin.channel_plugin_id.clone()),
+                chat_kind: "direct".to_owned(),
                 created_at: now,
                 last_activity: now,
             },

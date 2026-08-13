@@ -1,11 +1,11 @@
 # Channels
 
 A **channel** lets you operate a NomiFun agent from an external chat app —
-Telegram, Lark / 飞书, DingTalk, WeChat — instead of sitting in front of
-the desktop window. You enable a plugin, paste in its credentials,
-authorize a chat user with a one-time code, and from then on messages
-to your bot are dispatched to the agent and its replies come back into
-the same thread.
+Telegram, Feishu (Lark), DingTalk, WeChat, WeCom, QQ Bot, and others — instead
+of sitting in front of the desktop window. You connect one or more bots to a
+companion or customer-service agent, then decide who may use each bot in
+private and group chats. Private chats keep the existing pairing flow; group
+access is a simple per-bot policy.
 
 Channels are useful when:
 
@@ -14,10 +14,12 @@ Channels are useful when:
 - you want long-running tasks ([AutoWork](./autowork-requirements.md))
   to be kickable from outside the desktop without spinning up the WebUI.
 
-> Each platform plugin is a Cargo feature on `nomifun-channel`
-> (`telegram`, `lark`, `dingtalk`, `weixin`). The default NomiFun build
-> ships with all of them on; if you build the backend yourself with a
-> non-default feature set, the corresponding tab simply disappears.
+> Built-in adapters are Cargo features on `nomifun-channel`: `telegram`,
+> `lark`, `dingtalk`, `weixin`, `wecom`, `discord`, `matrix`, `mattermost`,
+> `slack`, `twitch`, `nostr`, and `qqbot`. The default `nomifun-app` build
+> enables all of them. A custom build may omit adapters, in which case those
+> connectors are unavailable. The user-facing name is **Feishu (Lark)**;
+> its protocol and configuration key remains `lark` for compatibility.
 
 ![Channels settings overview](../images/channels-01-overview.png)
 
@@ -25,24 +27,28 @@ Channels are useful when:
 
 Open the Nomi page (`/nomi`), select a companion, and switch to the
 **Remote** tab (`/nomi?companion=<id>&tab=remote`). That tab lists the
-remote connectors for the selected companion — built-in (Telegram,
-Lark, DingTalk, WeChat, WeCom, Slack, Discord, extensions). For each
-plugin you'll see:
+remote connectors for the selected companion — including Telegram, Feishu
+(Lark), DingTalk, WeChat, WeCom, QQ Bot, Slack, Discord, Matrix, Mattermost,
+Twitch, Nostr, and extensions. For each connected bot you'll see:
 
 - a status pill (`stopped` / `connected`),
 - the bot username once connected,
-- the number of currently authorised users,
-- a per-channel **default agent** + **default model** selector.
+- the number of currently authorised users;
+- transport credentials and the companion or customer-service binding;
+- on adapters with reliable group metadata, a per-bot **Group access**
+  selector.
 
-Slack / Discord / WeCom appear as built-in placeholders today — the
-backend wiring is feature-gated and still being built out for those
-two; Telegram / Lark / DingTalk / WeChat are the ones you can run
-today.
+WeCom and QQ Bot are runnable built-in adapters, not placeholder cards. WeCom
+uses the Intelligent Bot long-connection protocol; QQ Bot uses the official
+Gateway WebSocket and REST API.
 
 ## How a channel works
 
 ```
 external IM ──▶ plugin (long-poll / WebSocket)
+                    │
+                    ▼
+          chat scope + structured @ gate
                     │
                     ▼
             ChannelManager  ◀─▶  PairingService
@@ -51,18 +57,62 @@ external IM ──▶ plugin (long-poll / WebSocket)
               SessionManager  ──▶  agent / conversation
 ```
 
-- **Plugin** owns the platform-specific connection (Telegram long-poll
-  with exponential backoff, Lark / DingTalk WebSocket, WeChat QR-code
-  login over SSE).
-- **PairingService** turns "I'm John on Telegram, let me in" into a
-  6-digit code that you approve from the desktop UI.
-- **SessionManager** maps `(platform_user, chat_id)` to an agent
-  conversation, so each external chat is a stable session and follow-up
-  messages land in the same agent.
+- **Plugin** owns the platform-specific connection (Telegram long-poll;
+  Feishu, DingTalk, WeCom, and QQ Bot WebSocket; WeChat QR-code login).
+- **Scope gate** classifies the event as direct or group, verifies a real
+  platform `@` mention for group messages, and applies that bot's group access
+  mode before pairing or session creation.
+- **PairingService** turns a first contact into a request that you approve from
+  the desktop UI. Direct messages keep the existing 6-digit-code flow; group
+  allowlists reuse the same Pending and Authorised user records.
+- **SessionManager** keeps follow-up messages stable while isolating each group
+  from private chats, the owner's desktop transcript, and other groups.
 - **Message loop** plumbs incoming messages into the agent stream and
-  the agent's replies back out as edits to the same IM message
-  (everything except WeChat supports message editing — WeChat falls
-  back to sending follow-up replies).
+  the agent's replies back out. It edits the in-flight message where the
+  platform supports editing; adapters such as WeChat and WeCom fall back to
+  follow-up replies.
+
+## Private chat and group access
+
+Group access is stored on each bot row as `group_access_mode`; it is not a
+platform-wide switch. This matters when, for example, two Feishu apps on the
+same NomiFun instance are bound to different companions.
+
+| Setting | Wire value | Group-chat behaviour |
+| ------- | ---------- | -------------------- |
+| **All group members** | `all_members` | Any member may use a structured `@bot` mention without pairing. This is group-only admission and does **not** authorise that person for direct messages. |
+| **Selected members** | `allowlist` | Only this bot's Authorised users may use it. A structured mention from somebody else creates or reuses a Pending request for the owner to approve. |
+| **Disable group chat** | `disabled` | Ignore every group message, including messages from the owner and already-authorised users. Direct messages are unchanged. |
+
+`allowlist` is the safe default for new companion bots and the migration value
+for existing non-customer-service bots. Customer-service bots default to
+`all_members`, and existing customer-service rows are backfilled to that value,
+so an upgrade does not silently stop serving their groups. Owners can change
+the mode afterwards.
+
+Every accepted group message must contain the platform's **structured mention
+of this bot**. Text that merely looks like `@bot`, quoted content, and ordinary
+unmentioned group traffic do not count. Such messages are ignored before a
+pairing request or session can be created. Missing or unknown chat scope,
+sender identity, or mention data also fails closed.
+
+Group turns use a dedicated session scoped to that bot and group. They never
+enter the owner's/private Conversation, and two groups never share a group
+session. Selecting **All group members** grants no private-chat permission: if
+the same person later sends the companion bot a direct message, normal pairing
+still applies. For stable routing, NomiFun records such a member internally as
+an `auto_group` identity, but hides it from Authorised users and fences its Nomi
+runtime to a model-only reply. It receives no cron, AutoWork, requirement,
+memory, cross-conversation, terminal, browser, computer-use, custom MCP, or
+platform Gateway tools. An explicitly `approved` identity admitted by
+`allowlist` retains the existing authorised channel capabilities.
+
+The selector is shown only when an adapter can reliably report both group
+scope and structured mentions. The initial supported set is Feishu, DingTalk,
+WeCom, QQ Bot, Discord, Slack, and Mattermost. Matrix currently cannot classify
+direct and group rooms consistently, while Telegram has not yet normalised
+structured message-entity mentions, so neither shows the selector. Direct-only
+adapters likewise omit it.
 
 ## Setting up each platform
 
@@ -82,19 +132,20 @@ code into **Nomi → Remote → Pending pairings** on the desktop
 and click **Approve**. From then on that Telegram user can chat with
 the agent.
 
-### Lark / Feishu
+### Feishu (Lark)
 
-1. Create a custom app in the Lark developer console with the events
+1. Create a custom app in the Feishu/Lark developer console with the events
    you need (text message, card action, bot menu).
 2. Copy the **App ID**, **App Secret**, and (optional) **Encrypt key /
    Verification token**.
-3. Paste them into the Lark form in the Channels tab and click
+3. Paste them into the **Feishu (Lark)** form in the Channels tab and click
    **Enable**.
 
-The Lark plugin connects via Lark's WebSocket long-connection (no
+The Feishu adapter connects via the platform's WebSocket long-connection (no
 public webhook needed), with a 60-second event-dedup cleanup loop and
 fragment reassembly. Replies are sent as **interactive cards** because
-Lark's API only supports editing card messages.
+the API only supports editing card messages. The internal protocol key remains
+`lark`; existing deployment settings do not need to be renamed.
 
 ### DingTalk
 
@@ -106,11 +157,33 @@ Lark's API only supports editing card messages.
 The DingTalk plugin opens a WebSocket using the standard DingTalk
 stream-mode handshake; pairing flow is identical to Telegram.
 
+### WeCom
+
+1. In WeCom, create an **Intelligent Bot** and select **Long Connection
+   (WebSocket)** mode.
+2. Copy its **Bot ID** and **Secret** into the WeCom form.
+3. Test the credentials, enable the bot, and keep NomiFun running to maintain
+   the outbound WebSocket.
+
+This mode does not require a callback URL, callback domain, or public IP.
+
+### QQ Bot
+
+1. Create a bot on the [QQ Open Platform](https://q.qq.com/) and copy its
+   **AppID** and **ClientSecret**.
+2. In the platform console, apply for the `GROUP_AND_C2C` intent; without it,
+   QQ cannot deliver group or C2C messages to the bot.
+3. Paste the credentials into the **QQ Bot** form, test, and enable it.
+
+The adapter receives events over the official Gateway WebSocket and sends
+replies through the official REST API.
+
 ### WeChat
 
 1. WeChat is QR-code login. Click **Enable** on the WeChat plugin —
-   the backend opens an SSE stream (`POST /api/channel/weixin/login/start`)
-   that pushes QR-code refresh events.
+   `POST /api/channel/weixin/login/start` starts the login, and the backend
+   publishes QR-code refresh events to the desktop over the existing app
+   WebSocket.
 2. Scan the QR with the WeChat app, confirm the login, and the plugin
    transitions to `connected`.
 
@@ -119,44 +192,65 @@ new messages in the same chat instead of in-place edits.
 
 ## Pairing and authorising users
 
-A pairing request comes in two ways:
+For a companion-bound bot, a first **direct message** from an unknown user
+creates a Pending request and returns a 6-digit code with a 10-minute TTL. The
+owner approves or rejects it in **Nomi → Remote → Pending pairings**, or through
+`POST /api/channel/pairings/approve` and
+`POST /api/channel/pairings/reject`.
 
-1. The platform user messages the bot for the first time (Telegram
-   /Lark / DingTalk). The plugin auto-creates a pending request and
-   replies to the user with the code.
-2. You can approve / reject the pending request from
-   **Nomi → Remote → Pending pairings** or programmatically
-   via `POST /api/channel/pairings/approve` and
-   `POST /api/channel/pairings/reject`.
+In a group using **Selected members** (`allowlist`), an unknown member's valid
+structured mention creates or reuses the same per-bot Pending record. NomiFun
+does not post the pairing code publicly into the group; the owner reviews the
+request in the existing Pending list. Approved identities appear in that bot's
+**Authorised users** list, so no separate member directory or group ACL needs
+to be maintained.
 
-Approved users are listed in **Authorised users**, with `last active`.
-You can revoke at any time (`POST /api/channel/users/revoke`); the
-service also cleans up that user's open sessions so the next message
-re-pairs from scratch.
+**All group members** does not create pairing requests. It creates or reuses a
+hidden, per-bot `auto_group` identity only to keep group routing stable; that
+identity is not added to Authorised users and cannot authorise a direct message.
+Customer-service-bound bots keep their existing direct-message service
+semantics instead of being forced into the companion pairing flow.
+
+You can revoke an approved user at any time
+(`POST /api/channel/users/revoke`). The service cleans up that user's open
+sessions. Their next companion-bot direct message must pair again; their group
+access then follows the bot's current `group_access_mode`.
 
 ![Pairing approval](../images/channels-02-pairing.png)
 
 ## Channel Agent integration
 
 Channel messaging uses the same Agent and Conversation runtime as the desktop;
-it is not a separate Agent type or a switchable mode. When a bot is bound to a
-desktop companion and uses Nomi, inbound turns are routed into that companion's
-single persistent Conversation. The channel Agent context supplies the
-companion persona and memory context and wires the **platform Gateway** tools,
-so the desktop and IM surfaces share one transcript and one runtime identity.
-That authority is never stored in Conversation metadata: after validating the
-local instance owner, the Agent factory injects a scoped, expiring claim signed
-by a process-private root.
+it is not a separate Agent type or a switchable mode. For a companion-bound
+Nomi bot, an authorised direct turn keeps the existing private Conversation
+behaviour. An admitted group turn instead uses a dedicated group-scoped
+session. An explicitly approved `allowlist` member keeps the existing
+authorised channel capabilities. An automatically admitted but unapproved
+`all_members` guest gets model-only replies without loading the owner's private
+companion context, and no group turn is appended to the owner's or any member's
+private transcript.
 
-The obsolete per-platform on/off preference has been removed; there is no
-legacy off-state. A bot bound to a customer-service agent follows the
-customer-service policy instead: every inbound message is handed to the
-customer-service domain (no Conversation at all) and answered by a disposable
-one-shot engine session whose tool table is fixed at construction to three
-read-only tools — it never receives the platform Gateway claim.
+Conversation metadata never stores owner authority. After validating the local
+instance owner, the Agent factory injects any platform Gateway capability as a
+scoped, expiring claim signed by a process-private root. Group admission — even
+under `all_members` — is not owner authorisation and never promotes the sender
+to private-message access. An `auto_group` Nomi runtime is forcibly model-only;
+an explicitly `approved` allowlist user keeps the capabilities already provided
+to authorised channel users.
 
-What the gateway tools (all prefixed `nomi_*`, 32 of them today) let the
-remote agent do on your behalf:
+The bot lifecycle enable/disable switch and `group_access_mode` are separate:
+disabling the bot stops its connection, while `disabled` as a group mode only
+turns off group processing. A bot bound to a customer-service agent still runs
+the group gate first. Admitted messages remain entirely in the
+customer-service domain (no companion Conversation) and are answered by a
+disposable one-shot engine session whose tool table is fixed at construction
+to three read-only tools (knowledge search, knowledge read, and customer-service
+note search). It never receives the platform Gateway claim. Direct messages
+retain the existing customer-service auto-service semantics.
+
+When an owner-authorised Nomi channel context receives the gateway tools (all
+prefixed `nomi_*`, 32 of them today), they let the remote agent do the
+following on your behalf:
 
 - **Conversations** — list every conversation with its runtime state,
   inspect one (status plus the latest messages, including an in-flight
@@ -194,7 +288,8 @@ remote agent do on your behalf:
   (`nomi_list_providers`).
 
 So *"move my daily-report cron to 9 am and tell me what's running
-right now"* is a single Lark message.
+right now"* can be a single Feishu message from an appropriately authorised
+context.
 
 **Choosing which companion greets the channel.** With [multiple companions](./companions.md),
 bots are bound to companions **per channel row**: each row of
@@ -237,9 +332,12 @@ The platform-agnostic abstraction (`UnifiedIncomingMessage`,
   are edited into the in-flight bot message (not on WeChat).
 - **Action buttons** — confirmation prompts, retry actions, etc.,
   rendered as inline keyboards (Telegram), interactive-card buttons
-  (Lark), or platform equivalents.
-- **Bot mention / require-mention** — group chats can be configured
-  to only respond when the bot is `@`-mentioned.
+  (Feishu), or platform equivalents.
+- **Safe group access** — supported group-aware adapters always require a
+  structured mention of the bot, then apply `all_members`, `allowlist`, or
+  `disabled`. This mention requirement is not an optional toggle.
+- **Group isolation** — admitted group turns continue in that bot-and-group's
+  session without sharing a private or different group's transcript.
 
 What you don't get from the IM side (yet):
 
@@ -256,6 +354,7 @@ What you don't get from the IM side (yet):
 | List plugins / status           | `GET /api/channel/plugins`                              |
 | Enable / disable                | `POST /api/channel/plugins/enable`, `…/disable`         |
 | Test credentials                | `POST /api/channel/plugins/test`                        |
+| Group access                    | `POST /api/channel/settings/group-access`               |
 | Pending pairings                | `GET /api/channel/pairings`                             |
 | Approve / reject pairing        | `POST /api/channel/pairings/approve`, `…/reject`        |
 | Authorised users                | `GET /api/channel/users`, `POST .../users/revoke`       |
@@ -270,24 +369,29 @@ What you don't get from the IM side (yet):
   `Created → Initializing → Ready → Starting → Running → Stopping → Stopped`,
   with any step able to transition to `Error`. The status pill in the
   UI is this enum.
-- A revoked user's session is torn down before the user row is
-  deleted. The next message from that platform user will trigger a new
-  pairing code.
+- A revoked user's session is torn down before the user row is deleted. Their
+  next companion-bot direct message triggers pairing again; group messages
+  follow the bot's current group mode.
+- Changing group access atomically updates the mode and retires group/unknown
+  sessions plus their pending queue while preserving direct sessions. New
+  messages use the new mode after the API returns; a turn that already reached
+  durable admission may finish its one reply.
 - Pairing codes are 6 digits, generated with `getrandom`, with a
   10-minute TTL. The pairing service runs a periodic sweep that
   expires pending codes whose TTL has passed.
-- WeChat is feature-gated separately because its dependency tree is
-  heavier (QR / login / auth flow). If you build with
-  `--no-default-features`, you'll see the placeholder card but no
-  enable button.
+- Adapters are feature-gated. A custom `--no-default-features` build must
+  explicitly enable every connector it intends to expose.
 
 ## Related
 
+- [Channel group access contract](../specs/2026-08-13-channel-group-access.zh.md) —
+  the normative per-bot policy, identity ceiling, migration, and adapter
+  capability matrix (Chinese).
 - [Companions](./companions.md) — multi-companion management, per-companion
   memory, and the
   per-companion knowledge bindings that ride on channel conversations.
 - [AutoWork & Requirements](./autowork-requirements.md) — file a
   requirement from a chat, get notified when it lands via a webhook to
-  Lark / HTTP / Slack (configured at **需求平台 → 扩展能力 → 通知**).
+  Feishu / HTTP / Slack (configured at **需求平台 → 扩展能力 → 通知**).
 - [Web Server Deployment](./web-server-deployment.md) — exposes the
   same channels when you self-host the backend on a server.

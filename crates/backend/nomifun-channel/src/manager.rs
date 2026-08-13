@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use nomifun_api_types::{PluginStatusChangedPayload, PluginStatusResponse, WebSocketMessage};
+use nomifun_api_types::{
+    GroupAccessMode, PluginStatusChangedPayload, PluginStatusResponse, WebSocketMessage,
+};
 use nomifun_common::{
     ChannelPluginId, CompanionId, decrypt_string, encrypt_string, now_ms,
 };
@@ -18,6 +20,7 @@ use crate::constants::{
     WATCHDOG_BACKOFF_BASE, WATCHDOG_MAX_RESTARTS_PER_WINDOW, WATCHDOG_RESTART_WINDOW, WATCHDOG_SWEEP_INTERVAL,
 };
 use crate::error::{ChannelError, ChannelOwner};
+use crate::group_policy::GroupPolicyFence;
 use crate::plugin::{ChannelPlugin, PluginCallbacks};
 use crate::types::{ChannelIncoming, PluginConfig, PluginStatus, PluginType, UnifiedIncomingMessage, bot_key_for};
 
@@ -46,6 +49,10 @@ pub struct ChannelManager {
     /// Sender for incoming messages from all plugins, stamped with their
     /// channel UUIDv7. The `ChannelMessageLoop` holds the receiving end.
     message_tx: mpsc::Sender<ChannelIncoming>,
+    /// Shared linearization point for group admission, queued delivery, and
+    /// policy mutation. The application injects this same instance into the
+    /// action executor and queue drain.
+    group_policy_fence: Arc<GroupPolicyFence>,
 }
 
 /// Factory function type for creating plugin instances.
@@ -190,7 +197,14 @@ impl ChannelManager {
             encryption_key,
             plugins: DashMap::new(),
             message_tx,
+            group_policy_fence: Arc::new(GroupPolicyFence::default()),
         }
+    }
+
+    /// Returns the process-local group-policy fence for dependent channel
+    /// components. Every admission path must share this exact instance.
+    pub fn group_policy_fence(&self) -> Arc<GroupPolicyFence> {
+        Arc::clone(&self.group_policy_fence)
     }
 
     /// Returns the status of all registered plugins from the database.
@@ -209,6 +223,49 @@ impl ChannelManager {
             })
             .collect();
         Ok(statuses)
+    }
+
+    /// Updates one bot's group-chat admission policy without touching its
+    /// encrypted configuration or restarting its live platform connection.
+    /// Existing channel sessions (and their queued prompts, as enforced by the
+    /// repository delete contract) are retired so a tightened policy cannot
+    /// retain an already-admitted group context.
+    pub async fn set_group_access_mode(
+        &self,
+        plugin_id: &str,
+        mode: GroupAccessMode,
+    ) -> Result<(), ChannelError> {
+        Self::validate_channel_id(plugin_id)?;
+        // Serialize setters and wait for every old-policy admission/queue
+        // handoff to leave its read-side critical section before committing.
+        let policy_writer = self.group_policy_fence.write(plugin_id).await;
+        let row = self
+            .repo
+            .get_plugin(plugin_id)
+            .await?
+            .ok_or_else(|| ChannelError::PluginNotFound(plugin_id.to_owned()))?;
+        Self::validate_persisted_row(&row)?;
+
+        // One repository transaction is also the crash-consistent fence: the
+        // new policy and retirement of group/unknown sessions and their queued
+        // prompts become visible together. Direct sessions are unaffected.
+        self.repo
+            .update_plugin_group_access_mode_and_clear_non_direct_sessions(
+                plugin_id,
+                mode.as_str(),
+            )
+            .await?;
+        drop(policy_writer);
+
+        // The connection is intentionally left untouched. A status event lets
+        // the control surface reflect the durable value immediately.
+        self.broadcast_status_change(plugin_id).await;
+        info!(
+            plugin_id = %plugin_id,
+            group_access_mode = mode.as_str(),
+            "channel group access updated; non-direct channel sessions cleared"
+        );
+        Ok(())
     }
 
     /// Enables a bot channel: validates config, enforces bot identity
@@ -270,6 +327,7 @@ impl ChannelManager {
             mut created_at,
             mut prior_companion,
             mut owner_domain,
+            mut group_access_mode,
         ) = match (&existing, spec.plugin_id.as_deref()) {
             (Some(row), _) => {
                 let pt = PluginType::from_str_opt(&row.r#type)
@@ -280,6 +338,7 @@ impl ChannelManager {
                     row.created_at,
                     row.companion_id.clone(),
                     row.owner_domain.clone(),
+                    GroupAccessMode::from_persisted(Some(&row.group_access_mode)),
                 )
             }
             (None, Some(id)) => {
@@ -296,6 +355,9 @@ impl ChannelManager {
                     now_ms(),
                     None,
                     spec_owner_domain.unwrap_or("companion").to_owned(),
+                    GroupAccessMode::default_for_owner_domain(
+                        spec_owner_domain.unwrap_or("companion"),
+                    ),
                 )
             }
             (None, None) => {
@@ -309,6 +371,9 @@ impl ChannelManager {
                     now_ms(),
                     None,
                     spec_owner_domain.unwrap_or("companion").to_owned(),
+                    GroupAccessMode::default_for_owner_domain(
+                        spec_owner_domain.unwrap_or("companion"),
+                    ),
                 )
             }
         };
@@ -348,6 +413,8 @@ impl ChannelManager {
                     created_at = other.created_at;
                     prior_companion = other.companion_id;
                     owner_domain = other.owner_domain;
+                    group_access_mode =
+                        GroupAccessMode::from_persisted(Some(&other.group_access_mode));
                 } else {
                     let owner = Self::bound_owner(&other).ok_or_else(|| {
                         ChannelError::InvalidConfig(format!(
@@ -412,6 +479,7 @@ impl ChannelManager {
                     companion_id,
                     bot_key,
                     owner_domain,
+                    group_access_mode: group_access_mode.as_str().to_owned(),
                     created_at,
                     updated_at: now,
                 })
@@ -428,6 +496,7 @@ impl ChannelManager {
                     companion_id,
                     bot_key,
                     owner_domain,
+                    group_access_mode: group_access_mode.as_str().to_owned(),
                     created_at,
                     updated_at: now,
                 })
@@ -520,6 +589,11 @@ impl ChannelManager {
                     companion_id: existing.companion_id.clone(),
                     bot_key: existing.bot_key.clone(),
                     owner_domain: existing.owner_domain.clone(),
+                    group_access_mode: GroupAccessMode::from_persisted(Some(
+                        &existing.group_access_mode,
+                    ))
+                    .as_str()
+                    .to_owned(),
                     created_at: existing.created_at,
                     updated_at: now,
                 })
@@ -536,6 +610,7 @@ impl ChannelManager {
                     companion_id: None,
                     bot_key: None,
                     owner_domain: nomifun_db::models::default_owner_domain(),
+                    group_access_mode: GroupAccessMode::Allowlist.as_str().to_owned(),
                     created_at: now,
                     updated_at: now,
                 })
@@ -1271,6 +1346,15 @@ impl ChannelManager {
         // "running" value without a live instance must also remain disconnected.
         let connected = row.enabled && live_status.as_deref() == Some("running");
         let status = live_status.or_else(|| row.status.clone());
+        let group_access_mode =
+            GroupAccessMode::from_persisted(Some(row.group_access_mode.as_str()));
+        if row.group_access_mode != group_access_mode.as_str() {
+            warn!(
+                plugin_id = %row.channel_plugin_id,
+                stored_group_access_mode = %row.group_access_mode,
+                "invalid stored group access mode; projecting disabled"
+            );
+        }
         PluginStatusResponse {
             plugin_id: row.channel_plugin_id.clone(),
             plugin_type: row.r#type.clone(),
@@ -1281,6 +1365,7 @@ impl ChannelManager {
             companion_id: row.companion_id.clone(),
             bot_key: row.bot_key.clone(),
             owner_domain: row.owner_domain.clone(),
+            group_access_mode,
             created_at: row.created_at,
             updated_at: row.updated_at,
             connected,
@@ -1450,6 +1535,7 @@ mod tests {
                 companion_id: row.companion_id.clone(),
                 bot_key: row.bot_key.clone(),
                 owner_domain: row.owner_domain.clone(),
+                group_access_mode: row.group_access_mode.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             };
@@ -1463,8 +1549,32 @@ mod tests {
                 .iter_mut()
                 .find(|plugin| plugin.channel_plugin_id == row.channel_plugin_id)
                 .ok_or_else(|| DbError::NotFound(row.channel_plugin_id.clone()))?;
+            let group_access_mode = existing.group_access_mode.clone();
             *existing = row.clone();
+            // Mirrors SQLite: generic config updates cannot overwrite the
+            // dedicated group-policy column with a stale full-row snapshot.
+            existing.group_access_mode = group_access_mode;
             Ok(existing.clone())
+        }
+
+        async fn update_plugin_group_access_mode_and_clear_non_direct_sessions(
+            &self,
+            channel_plugin_id: &str,
+            group_access_mode: &str,
+        ) -> Result<(), DbError> {
+            let mut plugins = self.plugins.lock().unwrap();
+            let plugin = plugins
+                .iter_mut()
+                .find(|plugin| plugin.channel_plugin_id == channel_plugin_id)
+                .ok_or_else(|| DbError::NotFound(channel_plugin_id.to_owned()))?;
+            plugin.group_access_mode = group_access_mode.to_owned();
+            plugin.updated_at = now_ms();
+            drop(plugins);
+            self.cleared_session_channels
+                .lock()
+                .unwrap()
+                .push(channel_plugin_id.to_owned());
+            Ok(())
         }
 
         async fn update_plugin_status(
@@ -1544,6 +1654,9 @@ mod tests {
         async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError> {
             Ok(vec![])
         }
+        async fn get_user(&self, _channel_user_id: &str) -> Result<Option<ChannelUserRow>, DbError> {
+            Ok(None)
+        }
         async fn get_user_by_platform(
             &self,
             _pid: &str,
@@ -1559,9 +1672,13 @@ mod tests {
                 platform_type: row.platform_type.clone(),
                 channel_plugin_id: row.channel_plugin_id.clone(),
                 display_name: row.display_name.clone(),
+                authorization_kind: row.authorization_kind.clone(),
                 authorized_at: row.authorized_at,
                 last_active: row.last_active,
             })
+        }
+        async fn ensure_auto_group_user(&self, row: &NewChannelUserRow) -> Result<ChannelUserRow, DbError> {
+            self.create_user(row).await
         }
         async fn update_user_last_active(
             &self,
@@ -1596,6 +1713,7 @@ mod tests {
                 workspace: new_row.workspace.clone(),
                 chat_id: new_row.chat_id.clone(),
                 channel_plugin_id: new_row.channel_plugin_id.clone(),
+                chat_kind: new_row.chat_kind.clone(),
                 created_at: new_row.created_at,
                 last_activity: new_row.last_activity,
             })
@@ -1889,6 +2007,7 @@ mod tests {
             companion_id: None,
             bot_key: None,
             owner_domain: "companion".into(),
+            group_access_mode: "allowlist".into(),
             created_at: now,
             updated_at: now,
         });
@@ -1950,6 +2069,7 @@ mod tests {
             companion_id: Some(COMPANION_A.into()),
             bot_key: None,
             owner_domain: "companion".into(),
+            group_access_mode: "allowlist".into(),
             created_at: now,
             updated_at: now,
         });
@@ -1961,6 +2081,131 @@ mod tests {
         let statuses = mgr.get_plugin_status().await.unwrap();
         assert_eq!(statuses[0].status.as_deref(), Some("error"));
         assert!(!statuses[0].connected);
+    }
+
+    #[tokio::test]
+    async fn invalid_stored_group_access_mode_projects_disabled() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
+            .await
+            .unwrap();
+        repo.plugins
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|row| row.channel_plugin_id == channel_id)
+            .unwrap()
+            .group_access_mode = String::new();
+
+        let statuses = mgr.get_plugin_status().await.unwrap();
+        assert_eq!(statuses[0].group_access_mode, GroupAccessMode::Disabled);
+    }
+
+    #[tokio::test]
+    async fn set_group_access_updates_one_bot_clears_sessions_and_keeps_connection() {
+        let (mgr, repo, bc) = make_manager();
+        let factory = make_factory();
+        let first_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
+            .await
+            .unwrap();
+        let second_id = mgr
+            .enable_plugin(&platform_spec("lark"), &make_test_config(), &factory)
+            .await
+            .unwrap();
+        let original_config = repo
+            .get_plugins()
+            .into_iter()
+            .find(|row| row.channel_plugin_id == first_id)
+            .unwrap()
+            .config;
+        bc.take_events();
+
+        mgr.set_group_access_mode(&first_id, GroupAccessMode::AllMembers)
+            .await
+            .unwrap();
+
+        let rows = repo.get_plugins();
+        let first = rows
+            .iter()
+            .find(|row| row.channel_plugin_id == first_id)
+            .unwrap();
+        let second = rows
+            .iter()
+            .find(|row| row.channel_plugin_id == second_id)
+            .unwrap();
+        assert_eq!(first.group_access_mode, "all_members");
+        assert_eq!(first.config, original_config, "credentials/config are untouched");
+        assert_eq!(second.group_access_mode, "allowlist");
+        assert_eq!(repo.cleared_channels(), vec![first_id.clone()]);
+        assert!(mgr.is_plugin_running(&first_id));
+        assert!(mgr.is_plugin_running(&second_id));
+
+        let events = bc.take_events();
+        let last = events.last().unwrap();
+        assert_eq!(last.name, "channel.plugin-status-changed");
+        assert_eq!(last.data["status"]["group_access_mode"], "all_members");
+    }
+
+    #[tokio::test]
+    async fn set_group_access_waits_for_old_admission_before_commit_and_cleanup() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+        let plugin_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
+            .await
+            .unwrap();
+        let mgr = Arc::new(mgr);
+        let old_admission = mgr.group_policy_fence().read(&plugin_id).await;
+
+        let setter_mgr = Arc::clone(&mgr);
+        let setter_plugin_id = plugin_id.clone();
+        let mut setter = tokio::spawn(async move {
+            setter_mgr
+                .set_group_access_mode(&setter_plugin_id, GroupAccessMode::Disabled)
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut setter)
+                .await
+                .is_err(),
+            "policy setter returned while an old-policy admission still held its permit"
+        );
+        assert_eq!(
+            repo.get_plugins()[0].group_access_mode,
+            "allowlist",
+            "the durable policy must not commit before old admission quiesces"
+        );
+
+        drop(old_admission);
+        tokio::time::timeout(Duration::from_secs(1), setter)
+            .await
+            .expect("policy setter stayed blocked after admission released")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(repo.get_plugins()[0].group_access_mode, "disabled");
+        assert_eq!(repo.cleared_channels(), vec![plugin_id]);
+    }
+
+    #[tokio::test]
+    async fn set_group_access_rejects_invalid_or_missing_plugin_id() {
+        let (mgr, _repo, _bc) = make_manager();
+        let invalid = mgr
+            .set_group_access_mode("telegram", GroupAccessMode::Allowlist)
+            .await
+            .unwrap_err();
+        assert!(matches!(invalid, ChannelError::InvalidConfig(_)));
+
+        let missing_id = test_channel_id();
+        let missing = mgr
+            .set_group_access_mode(&missing_id, GroupAccessMode::Disabled)
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, ChannelError::PluginNotFound(id) if id == missing_id));
     }
 
     // ── enable_plugin ──────────────────────────────────────────────────
@@ -2194,6 +2439,7 @@ mod tests {
             companion_id: None,
             bot_key: None,
             owner_domain: "companion".into(),
+            group_access_mode: "allowlist".into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         });
@@ -2274,6 +2520,7 @@ mod tests {
             companion_id: None,
             bot_key: None,
             owner_domain: "companion".into(),
+            group_access_mode: "allowlist".into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         });
@@ -2302,6 +2549,7 @@ mod tests {
             companion_id: None,
             bot_key: None,
             owner_domain: "companion".into(),
+            group_access_mode: "allowlist".into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         });
@@ -2334,6 +2582,7 @@ mod tests {
                 companion_id: None,
                 bot_key: None,
                 owner_domain: "companion".into(),
+                group_access_mode: "allowlist".into(),
                 created_at: now_ms(),
                 updated_at: now_ms(),
             });
@@ -2348,6 +2597,7 @@ mod tests {
                 companion_id: None,
                 bot_key: None,
                 owner_domain: "companion".into(),
+                group_access_mode: "allowlist".into(),
                 created_at: now_ms(),
                 updated_at: now_ms(),
             });
@@ -2536,6 +2786,8 @@ mod tests {
             id: id.into(),
             platform: PluginType::Telegram,
             chat_id: "chat_1".into(),
+            chat_kind: crate::types::ChatKind::Unknown,
+            mention_state: crate::types::MentionState::Unknown,
             user: UnifiedUser {
                 id: "u1".into(),
                 username: None,
@@ -3276,11 +3528,13 @@ mod tests {
 
         let plugins = repo.get_plugins();
         assert_eq!(plugins[0].owner_domain, "customer_service");
+        assert_eq!(plugins[0].group_access_mode, "all_members");
         assert!(plugins[0].companion_id.is_none());
 
         let statuses = mgr.get_plugin_status().await.unwrap();
         assert_eq!(statuses[0].plugin_id, channel_id);
         assert_eq!(statuses[0].owner_domain, "customer_service");
+        assert_eq!(statuses[0].group_access_mode, GroupAccessMode::AllMembers);
     }
 
     #[tokio::test]

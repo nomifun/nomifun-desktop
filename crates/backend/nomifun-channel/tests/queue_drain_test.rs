@@ -349,6 +349,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
             companion_id: None,
             bot_key: Some("drain".to_owned()),
             owner_domain: "companion".into(),
+            group_access_mode: nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.to_owned(),
             created_at: now,
             updated_at: now,
         })
@@ -360,6 +361,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
             platform_type: "telegram".to_owned(),
             channel_plugin_id: Some(plugin.channel_plugin_id.clone()),
             display_name: Some("Drain".to_owned()),
+            authorization_kind: nomifun_db::models::CHANNEL_USER_AUTHORIZATION_APPROVED.to_owned(),
             authorized_at: now,
             last_active: None,
         })
@@ -378,6 +380,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
                 workspace: None,
                 chat_id: Some("chat-drain".to_owned()),
                 channel_plugin_id: Some(plugin.channel_plugin_id.clone()),
+                chat_kind: nomifun_db::models::CHANNEL_CHAT_KIND_DIRECT.to_owned(),
                 created_at: now,
                 last_activity: now,
             },
