@@ -16,4 +16,11 @@ describe('pending confirmations reconnect recovery', () => {
     expect(source.includes('const recoverPendingConfirmations = ')).toBe(true);
     expect(source.includes('ipcBridge.conversation.reconnected.on')).toBe(true);
   });
+
+  test('cleans only the completed turn and refreshes turnless recovery cards', () => {
+    expect(source.includes('ipcBridge.conversation.turnCompleted.on')).toBe(true);
+    expect(source.includes('removePermissionMessagesForTurn(list, event.turn_id)')).toBe(true);
+    expect(source.includes('recoverPendingConfirmations();')).toBe(true);
+    expect(source.includes('sequence !== recoverySequence')).toBe(true);
+  });
 });

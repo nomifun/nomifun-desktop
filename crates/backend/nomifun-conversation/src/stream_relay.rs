@@ -2062,7 +2062,7 @@ impl StreamRelay {
             .map(AgentTurnCancellation::try_claim_terminal_surface)
             .unwrap_or(true);
         if terminal_claimed {
-            self.forward_to_websocket(&event);
+            self.forward_terminal_without_projection(&self.msg_id, &event);
             if let Some(cancellation) = self.cancellation.as_ref() {
                 cancellation.mark_terminal_observed();
             }
@@ -2240,12 +2240,12 @@ impl StreamRelay {
             return false;
         }
         if cancellation.is_cancelled() {
-            self.forward_to_websocket(&Self::cancelled_finish_event());
+            self.forward_terminal_without_projection(&self.msg_id, &Self::cancelled_finish_event());
             cancellation.mark_terminal_observed();
             return false;
         }
         let error_message_id = ConversationService::mint_msg_id();
-        self.forward_to_websocket_with_msg_id(&error_message_id, event);
+        self.forward_terminal_without_projection(&error_message_id, event);
         // This projection belongs to the still-authoritative turn owner.  Do
         // not detach or time out the insert: cancelling an in-flight database
         // future can make its commit result ambiguous and lets a later turn
@@ -2887,7 +2887,27 @@ impl StreamRelay {
                             // Error/Finish, so a receipt retraction sent after it
                             // would leave stale success visible.
                             if terminal_claimed {
-                                self.forward_to_websocket_with_msg_id(&terminal_message_id, &event);
+                                if Self::is_cancelled_finish(&event)
+                                    || matches!(event, AgentStreamEvent::Error(_))
+                                {
+                                    // A cancelled or failed terminal preserves
+                                    // the raw/error rows, but it does not prove
+                                    // that the normal final-text middleware
+                                    // projection ran. In particular, never let
+                                    // a partial Error response advertise
+                                    // authority and suppress a future legacy
+                                    // compatibility path.
+                                    self.forward_terminal_without_projection(
+                                        &terminal_message_id,
+                                        &event,
+                                    );
+                                } else {
+                                    self.forward_terminal_to_websocket(
+                                        &terminal_message_id,
+                                        &event,
+                                        outcome.final_text_msg_id.as_deref(),
+                                    );
+                                }
                             }
                             outcome
                             };
@@ -3702,7 +3722,13 @@ impl StreamRelay {
                             )
                             .await;
                         if terminal_claimed {
-                            self.forward_to_websocket_with_msg_id(&terminal_message_id, &terminal_event);
+                            // A channel close is a recovery/error boundary, not
+                            // proof that the normal final-text projection
+                            // completed.
+                            self.forward_terminal_without_projection(
+                                &terminal_message_id,
+                                &terminal_event,
+                            );
                         }
                         outcome
                     };
@@ -3815,7 +3841,7 @@ impl StreamRelay {
         if !cancellation.try_claim_terminal_surface() {
             return false;
         }
-        self.forward_to_websocket(&Self::cancelled_finish_event());
+        self.forward_terminal_without_projection(&self.msg_id, &Self::cancelled_finish_event());
         cancellation.mark_terminal_observed();
         true
     }
@@ -3840,11 +3866,64 @@ impl StreamRelay {
         self.forward_to_websocket_with_msg_id_and_visibility(msg_id, event, false);
     }
 
+    /// Forward a terminal event together with the durable visible text row that
+    /// owns any terminal post-processing projection.
+    ///
+    /// `msg_id` remains the terminal/wire identity.  It is deliberately not
+    /// overloaded with the text segment identity because a logical turn may
+    /// contain thinking, tool, continuation, or multiple text segments.
+    fn forward_terminal_to_websocket(
+        &self,
+        msg_id: &str,
+        event: &AgentStreamEvent,
+        final_text_msg_id: Option<&str>,
+    ) {
+        self.forward_to_websocket_with_msg_id_and_visibility_and_metadata(
+            msg_id,
+            event,
+            false,
+            final_text_msg_id,
+            true,
+        );
+    }
+
+    /// Forward a terminal surface that did not pass through `finalize`.
+    ///
+    /// Recovery/cancellation paths still need a terminal wire boundary, but
+    /// they must not claim that the backend's final-text middleware projection
+    /// is authoritative when no such projection was completed.
+    fn forward_terminal_without_projection(&self, msg_id: &str, event: &AgentStreamEvent) {
+        self.forward_to_websocket_with_msg_id_and_visibility_and_metadata(
+            msg_id,
+            event,
+            false,
+            None,
+            false,
+        );
+    }
+
     fn forward_to_websocket_with_msg_id_and_visibility(
         &self,
         msg_id: &str,
         event: &AgentStreamEvent,
         hidden: bool,
+    ) {
+        self.forward_to_websocket_with_msg_id_and_visibility_and_metadata(
+            msg_id,
+            event,
+            hidden,
+            None,
+            false,
+        );
+    }
+
+    fn forward_to_websocket_with_msg_id_and_visibility_and_metadata(
+        &self,
+        msg_id: &str,
+        event: &AgentStreamEvent,
+        hidden: bool,
+        final_text_msg_id: Option<&str>,
+        terminal_authoritative: bool,
     ) {
         let mut event_data = match serde_json::to_value(event) {
             Ok(v) => v,
@@ -3858,13 +3937,40 @@ impl StreamRelay {
         // wire contract stays uniform.
         normalize_keys_to_snake_case(&mut event_data);
 
-        let payload = json!({
+        let mut payload = json!({
             "conversation_id": self.conv_id(),
             "msg_id": msg_id,
             "type": event_data.get("type").cloned().unwrap_or(json!("unknown")),
             "data": event_data.get("data").cloned().unwrap_or(json!({})),
             "hidden": hidden,
         });
+        if terminal_authoritative {
+            if let Some(final_text_msg_id) = final_text_msg_id {
+                if let Some(object) = payload.as_object_mut() {
+                    object.insert(
+                        "final_text_msg_id".to_owned(),
+                        json!(final_text_msg_id),
+                    );
+                }
+            }
+            if let Some(object) = payload.as_object_mut() {
+                // This terminal is emitted only after `finalize` has completed
+                // its repository-backed middleware projection. Consumers must
+                // not race it with an independent local rewrite; absence of a
+                // `final_text_msg_id` can mean empty/hidden text or a
+                // deliberately failed durable rewrite, not permission to
+                // invent another view.
+                object.insert("final_text_authoritative".to_owned(), json!(true));
+            }
+        } else if final_text_msg_id.is_some() {
+            // `final_text_msg_id` is a terminal-only association. Keep this
+            // branch fail-closed if a future caller accidentally supplies one
+            // to an ordinary frame rather than leaking misleading metadata.
+            warn!(
+                msg_id,
+                "Ignoring final_text_msg_id on a non-terminal stream frame"
+            );
+        }
 
         self.broadcast_stream_payload(payload);
     }
@@ -4082,6 +4188,7 @@ impl StreamRelay {
             committed_artifact_count,
         };
         let cancelled = Self::is_cancelled_finish(event);
+        let failed_terminal = matches!(event, AgentStreamEvent::Error(_)) || cancelled;
         let status = if matches!(event, AgentStreamEvent::Error(_)) || cancelled {
             "error"
         } else {
@@ -4108,18 +4215,18 @@ impl StreamRelay {
                 );
                 return outcome;
             }
-            let processed = if cancelled {
-                // A cancelled partial response is data to preserve, never a
-                // completed instruction stream. In particular, do not execute
-                // embedded cron commands or produce continuation responses.
-                MiddlewareResult {
-                    message: text.to_owned(),
-                    display_message: None,
-                    system_responses: Vec::new(),
+            if failed_terminal {
+                // Error/cancelled partial output is evidence of an interrupted
+                // response, not a completed instruction stream. Preserve the
+                // already-durable raw text row with status=error, but do not
+                // strip/execute embedded cron commands, emit continuations, or
+                // expose it as final-text/writeback material.
+                if suppress_error {
+                    outcome.suppressed_error = Some(event.clone());
                 }
-            } else {
-                self.process_final_text(text).await
-            };
+                return outcome;
+            }
+            let processed = self.process_final_text(text).await;
             let final_text = processed.message.trim().to_owned();
             let hidden = final_text.is_empty();
             if !hidden {
@@ -4203,7 +4310,9 @@ impl StreamRelay {
                     created_at: now_ms(),
                 };
                 match self.repo.insert_message(&row).await {
-                    Ok(()) => outcome.final_text_msg_id = Some(row.message_id.clone()),
+                    Ok(()) => {
+                        outcome.final_text_msg_id = Some(row.message_id.clone());
+                    }
                     Err(e) => {
                         outcome.final_text = None;
                         error!(error = %ErrorChain(&e), "Failed to create final fallback message");
@@ -9006,6 +9115,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn error_partial_text_skips_middleware_and_does_not_claim_final_projection() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let mut ws_rx = bus.subscribe();
+        let (tx, _) = broadcast::channel(64);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus,
+            Some(Arc::new(MockCronService)),
+        );
+        let rx = tx.subscribe();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "partial [CRON_LIST]".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Error(ErrorEventData::legacy(
+            "provider failed after partial output",
+            None,
+        )))
+        .unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert!(outcome.final_text.is_none());
+        assert!(outcome.final_text_msg_id.is_none());
+        assert!(outcome.system_responses.is_empty());
+
+        let inserts = repo.take_inserts();
+        let text = inserts
+            .iter()
+            .find(|row| row.r#type == "text")
+            .expect("raw partial text row");
+        let persisted: Value = serde_json::from_str(&text.content).unwrap();
+        assert_eq!(text.status.as_deref(), Some("error"));
+        assert_eq!(persisted["content"], "partial [CRON_LIST]");
+
+        let terminal = std::iter::from_fn(|| ws_rx.try_recv().ok())
+            .find(|event| event.name == "message.stream" && event.data["type"] == "error")
+            .expect("partial provider error terminal");
+        assert!(
+            terminal.data.get("final_text_authoritative").is_none(),
+            "an Error terminal must not claim a completed middleware projection"
+        );
+        assert!(terminal.data.get("final_text_msg_id").is_none());
+    }
+
+    #[tokio::test]
     async fn run_tool_call_then_error_is_post_response() {        // Plan D4 (review #4): a turn that forwarded/persisted a ToolCall and
         // THEN hit a provider fault must report `emitted_response == true`, so
         // the failover seam refuses to switch — re-running the turn would
@@ -10994,7 +11152,9 @@ mod tests {
 
         let mut text_msg_ids = Vec::new();
         let mut thinking_done_ids = Vec::new();
+        let mut ws_events = Vec::new();
         while let Ok(evt) = ws_rx.try_recv() {
+            ws_events.push(evt.clone());
             if evt.name != "message.stream" {
                 continue;
             }
@@ -11014,6 +11174,18 @@ mod tests {
             Some(text_msg_ids[0].as_str()),
             "turn-final post-processing should target the final assistant text segment, not the thinking segment"
         );
+
+        let terminal = ws_events
+            .iter()
+            .find(|event| event.name == "message.stream" && event.data["type"] == "finish")
+            .unwrap_or_else(|| panic!("terminal finish frame; events={ws_events:?}"));
+        assert_eq!(terminal.data["msg_id"], TEST_ASSISTANT_MESSAGE_ID);
+        assert_eq!(
+            terminal.data["final_text_msg_id"],
+            text_msg_ids[0].as_str(),
+            "terminal wire identity and final text segment identity are distinct"
+        );
+        assert_eq!(terminal.data["final_text_authoritative"], true);
     }
 
     #[tokio::test]
@@ -11064,6 +11236,11 @@ mod tests {
             .find(|event| event.name == "message.stream" && event.data["type"] == "error")
             .expect("unexpected channel closure must be visible as a terminal error");
         assert_eq!(live_error.data["msg_id"], error.message_id);
+        assert!(
+            live_error.data.get("final_text_authoritative").is_none(),
+            "channel closure must not claim a completed final-text projection"
+        );
+        assert!(live_error.data.get("final_text_msg_id").is_none());
     }
 
     #[tokio::test]
@@ -11097,6 +11274,16 @@ mod tests {
         while let Ok(evt) = ws_rx.try_recv() {
             ws_events.push(evt);
         }
+
+        let finish = ws_events
+            .iter()
+            .find(|event| event.name == "message.stream" && event.data["type"] == "finish")
+            .expect("normal finish terminal");
+        assert_eq!(finish.data["final_text_authoritative"], true);
+        assert!(
+            finish.data.get("final_text_msg_id").is_none(),
+            "an empty successful response has no visible final-text owner"
+        );
 
         // Should have turn.completed event
         let turn_event = ws_events.iter().find(|e| e.name == "turn.completed");
@@ -11176,6 +11363,14 @@ mod tests {
             .find(|event| event.name == "message.stream" && event.data["type"] == "finish")
             .expect("cancel must surface a terminal stream event");
         assert_eq!(finish.data["data"]["stop_reason"], "cancelled");
+        assert!(
+            finish.data.get("final_text_authoritative").is_none(),
+            "a cancellation terminal must not claim backend final-text authority"
+        );
+        assert!(
+            finish.data.get("final_text_msg_id").is_none(),
+            "a cancellation terminal must not point at a projected final-text row"
+        );
         assert!(
             ws_events
                 .iter()

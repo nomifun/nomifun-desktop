@@ -222,9 +222,10 @@ async fn tc_5_4_06_replace_all_updates_cache() {
 // TC-5.4-W: WriteTool cache update
 // ==========================================================================
 
-/// TC-5.4-W01: Write then Read returns "unchanged" (Write populates cache).
+/// TC-5.4-W01: Write then Read exposes the new content once. The cache update
+/// made by Write protects later edits, but it is not model-visible content.
 #[tokio::test]
-async fn tc_5_4_w01_write_then_read_dedup() {
+async fn tc_5_4_w01_write_then_read_returns_new_content_once() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("write_read.txt");
 
@@ -240,16 +241,21 @@ async fn tc_5_4_w01_write_then_read_dedup() {
     let wr = write_tool.execute(write_input).await;
     assert!(!wr.is_error, "write failed: {}", wr.content);
 
-    // Read immediately after: should return "unchanged" because Write
-    // already cached the content with the correct mtime.
+    // Read immediately after must expose the content created by Write.
     let read_input = json!({ "file_path": file.to_str().unwrap() });
     let rr = read_tool.execute(read_input).await;
     assert!(!rr.is_error);
     assert!(
-        rr.content.contains(UNCHANGED_MARKER),
-        "Read after Write should return unchanged stub, got: {}",
+        rr.content.contains("written content") && !rr.content.contains(UNCHANGED_MARKER),
+        "Read after Write must return the new content, got: {}",
         rr.content
     );
+
+    // Once that revision has crossed the Read boundary, dedup is valid.
+    let rr2 = read_tool
+        .execute(json!({ "file_path": file.to_str().unwrap() }))
+        .await;
+    assert!(rr2.content.contains(UNCHANGED_MARKER));
 }
 
 /// TC-5.4-W02: Write then Edit succeeds (Write populates cache for Edit guard).
@@ -310,16 +316,14 @@ async fn tc_5_4_w03_write_overwrite_then_read() {
     });
     write_tool.execute(w2).await;
 
-    // Read: cache was updated by second Write, so should see "unchanged"
-    // (cache content matches disk content with matching mtime).
+    // Read must expose the second revision even though Write refreshed the
+    // stale-write guard cache internally.
     let read_input = json!({ "file_path": file.to_str().unwrap() });
     let rr = read_tool.execute(read_input).await;
     assert!(!rr.is_error);
-    // The cache was updated by the second Write with the new content,
-    // so Read should hit the dedup path.
     assert!(
-        rr.content.contains(UNCHANGED_MARKER),
-        "Read after second Write should dedup, got: {}",
+        rr.content.contains("version 2") && !rr.content.contains(UNCHANGED_MARKER),
+        "Read after second Write must return version 2, got: {}",
         rr.content
     );
 
@@ -333,7 +337,7 @@ async fn tc_5_4_w03_write_overwrite_then_read() {
 
 /// Read → Edit → Read should dedup (Edit updated the cache).
 #[tokio::test]
-async fn read_edit_read_dedup() {
+async fn read_edit_read_returns_edited_content_once() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("cross.txt");
     std::fs::write(&file, "alpha beta").unwrap();
@@ -354,13 +358,13 @@ async fn read_edit_read_dedup() {
     let er = edit_tool.execute(edit_input).await;
     assert!(!er.is_error);
 
-    // Read again: Edit updated the cache, so Read should see "unchanged".
+    // Read again: the refreshed guard cache is not model-visible content.
     let read_input = json!({ "file_path": file.to_str().unwrap() });
     let rr = read_tool.execute(read_input).await;
     assert!(!rr.is_error);
     assert!(
-        rr.content.contains(UNCHANGED_MARKER),
-        "Read after Edit should dedup, got: {}",
+        rr.content.contains("ALPHA beta") && !rr.content.contains(UNCHANGED_MARKER),
+        "Read after Edit must return the edited content, got: {}",
         rr.content
     );
 }

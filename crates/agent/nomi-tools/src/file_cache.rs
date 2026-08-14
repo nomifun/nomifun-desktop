@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +20,11 @@ use nomi_types::file_state::FileState;
 /// so `std::sync::RwLock` is preferred over `tokio::sync::RwLock`.
 pub struct FileStateCache {
     entries: LruCache<PathBuf, FileState>,
+    /// Paths whose current disk contents were produced by a mutating tool but
+    /// have not yet been returned by Read. Edit/Write still need the refreshed
+    /// state for stale-write protection; Read must not mistake that internal
+    /// refresh for content the model has actually seen.
+    unseen_after_write: HashSet<PathBuf>,
     max_size_bytes: usize,
     current_size_bytes: usize,
 }
@@ -32,6 +38,7 @@ impl FileStateCache {
             .unwrap_or(NonZeroUsize::new(100).expect("100 is non-zero"));
         Self {
             entries: LruCache::new(cap),
+            unseen_after_write: HashSet::new(),
             max_size_bytes: config.max_size_bytes,
             current_size_bytes: 0,
         }
@@ -49,6 +56,9 @@ impl FileStateCache {
     /// entry-count limit would be exceeded.
     pub fn insert(&mut self, path: PathBuf, state: FileState) {
         let normalized = normalize_path(&path);
+        // The ordinary insert path is used after a successful Read, so this
+        // exact revision is now visible to the model and can be deduplicated.
+        self.unseen_after_write.remove(&normalized);
         let new_size = state.content_bytes();
 
         // Remove existing entry for this key first (simplifies size accounting).
@@ -58,13 +68,15 @@ impl FileStateCache {
 
         // Evict LRU entries until byte-size budget is available.
         while self.current_size_bytes + new_size > self.max_size_bytes && !self.entries.is_empty() {
-            if let Some((_k, v)) = self.entries.pop_lru() {
+            if let Some((key, v)) = self.entries.pop_lru() {
+                self.unseen_after_write.remove(&key);
                 self.current_size_bytes = self.current_size_bytes.saturating_sub(v.content_bytes());
             }
         }
 
         // push() returns evicted (key, value) if entry-count capacity is reached.
-        if let Some((_evicted_key, evicted_val)) = self.entries.push(normalized, state) {
+        if let Some((evicted_key, evicted_val)) = self.entries.push(normalized, state) {
+            self.unseen_after_write.remove(&evicted_key);
             self.current_size_bytes = self
                 .current_size_bytes
                 .saturating_sub(evicted_val.content_bytes());
@@ -72,9 +84,23 @@ impl FileStateCache {
         self.current_size_bytes += new_size;
     }
 
+    /// Insert the post-mutation state used by Edit/Write guards while forcing
+    /// the next Read to return the new content once.
+    pub fn insert_after_write(&mut self, path: PathBuf, state: FileState) {
+        let normalized = normalize_path(&path);
+        self.insert(path, state);
+        self.unseen_after_write.insert(normalized);
+    }
+
+    /// Whether the cached revision has not yet crossed the Read tool boundary.
+    pub fn needs_model_refresh(&self, path: &Path) -> bool {
+        self.unseen_after_write.contains(&normalize_path(path))
+    }
+
     /// Remove a specific entry by path.
     pub fn remove(&mut self, path: &Path) -> Option<FileState> {
         let normalized = normalize_path(path);
+        self.unseen_after_write.remove(&normalized);
         let removed = self.entries.pop(&normalized);
         if let Some(ref v) = removed {
             self.current_size_bytes = self.current_size_bytes.saturating_sub(v.content_bytes());
@@ -85,6 +111,7 @@ impl FileStateCache {
     /// Remove all entries.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.unseen_after_write.clear();
         self.current_size_bytes = 0;
     }
 
@@ -125,13 +152,14 @@ pub fn update_cache_after_write(
         .enumerate()
         .map(|(i, line)| format!("{:>6}\t{}", i + 1, line))
         .collect();
-    cache.insert(
+    cache.insert_after_write(
         path.to_path_buf(),
         FileState {
             content: numbered.join("\n"),
             mtime_ms: new_mtime,
             offset: None,
             limit: None,
+            dedup_eligible: false,
         },
     );
 }
@@ -156,8 +184,9 @@ pub fn file_mtime_ms(path: &Path) -> Option<u64> {
 /// - `a/./b/../c`   -> `a/c`
 /// - `/../b`        -> `/b` (can't go above root)
 fn normalize_path(path: &Path) -> PathBuf {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut components: Vec<Component> = Vec::new();
-    for component in path.components() {
+    for component in resolved.components() {
         match component {
             Component::ParentDir => match components.last() {
                 Some(Component::Normal(_)) => {
@@ -179,6 +208,11 @@ fn normalize_path(path: &Path) -> PathBuf {
     for c in &components {
         result.push(c);
     }
+    #[cfg(windows)]
+    {
+        return PathBuf::from(result.to_string_lossy().to_lowercase());
+    }
+    #[cfg(not(windows))]
     result
 }
 
@@ -200,6 +234,7 @@ mod tests {
             mtime_ms,
             offset: None,
             limit: None,
+            dedup_eligible: true,
         }
     }
 
@@ -418,6 +453,7 @@ mod tests {
             mtime_ms: 500,
             offset: Some(10),
             limit: Some(20),
+            dedup_eligible: true,
         };
         cache.insert(PathBuf::from("/file"), state);
         let got = cache.get(Path::new("/file")).unwrap();

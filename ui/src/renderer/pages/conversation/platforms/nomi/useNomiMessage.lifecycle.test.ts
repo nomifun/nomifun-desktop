@@ -20,15 +20,18 @@ describe('useNomiMessage terminal lifecycle fence', () => {
     const pendingFenceIndex = source.indexOf(
       'const pendingHydrationFence = getNomiHydrationLifecycleFence(false);'
     );
-    const hydrateRequestIndex = source.indexOf('void getConversationOrNull(conversation_id).then');
+    const hydrateRequestIndex = source.indexOf(
+      'void reconcileConversationAuthoritativeRuntime(conversation_id, {',
+      pendingFenceIndex
+    );
 
     expect(resetIndex).toBeGreaterThanOrEqual(0);
     expect(pendingFenceIndex).toBeGreaterThan(resetIndex);
     expect(hydrateRequestIndex).toBeGreaterThan(pendingFenceIndex);
     expect(source.includes('shouldApplyNomiStreamEventToTurn({')).toBe(true);
-    expect(source.includes("dispatchTurn({ type: 'hydrate', isRunning, settleIdle: true });")).toBe(
-      true
-    );
+    expect(
+      source.includes("dispatchTurn({ type: 'hydrate', isRunning: false, settleIdle: true });")
+    ).toBe(true);
   });
 
   test('fresh idle hydration keeps late prior-turn stream events projection-only', () => {
