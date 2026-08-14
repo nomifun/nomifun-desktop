@@ -121,11 +121,10 @@ pub async fn build_companion_system_prompt(
     };
     let flavor = crate::prompt::persona_flavor(&profile.persona.preset);
     // NOTE: the persona prompt deliberately does NOT pin a reply language. The
-    // companion must answer in the app's UI language, which is decided live at
-    // agent-build time and appended as a final directive in
-    // `nomifun-ai-agent::factory::nomi` (read from system settings). Re-adding a
-    // hardcoded 「用中文」 here would freeze the language into the persisted prompt
-    // and reintroduce the always-Chinese bug.
+    // final directive in `nomifun-ai-agent::factory::nomi` makes the companion
+    // follow the language of each current user request. Re-adding a hardcoded
+    // 「用中文」 here would freeze the persisted prompt and reintroduce the
+    // always-Chinese bug.
     let mut system = format!(
         "你是 {name}，一只住在主人电脑里的电子伙伴伙伴。{flavor}\n\
          你和主人对话时语气符合你的人格；回复简洁直接，先结论后细节。\n\
@@ -1448,9 +1447,9 @@ mod tests {
     async fn companion_system_prompt_does_not_force_a_reply_language() {
         // Regression (always-Chinese bug): the persona prompt must NOT pin a
         // reply language. The old hardcoded 「你和主人对话时用中文」 made the
-        // companion answer in Chinese regardless of the app language. Reply
-        // language is now decided at agent-build time from the app setting
-        // (nomifun-ai-agent::factory::nomi), so baking it here would freeze it
+        // companion answer in Chinese regardless of the user's request. Reply
+        // language is decided from each current request by
+        // nomifun-ai-agent::factory::nomi, so baking it here would freeze it
         // into the persisted prompt and reintroduce the bug.
         let store = CompanionStore::open_memory().await.unwrap();
         let profile = CompanionProfileConfig::new("毛球", "ink", 1);

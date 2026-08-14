@@ -131,7 +131,7 @@ $ bun run build
 ├── logs/                     # nomicore.log
 ├── companion/                # 伙伴 + 记忆数据库（整机一个文件，每行记忆各归其主）
 ├── knowledge/                # 受管理的知识库
-├── runtime/                  # 解压出的 Bun 运行时缓存（可再生）
+├── runtime/                  # 可再生运行时缓存（Bun、按需下载的 nfagent）
 └── server.lock               # 后端运行期间持有的排他锁
 ```
 

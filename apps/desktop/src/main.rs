@@ -2617,10 +2617,6 @@ fn main() -> std::process::ExitCode {
                 nomifun_app::browser_resource::BUNDLED_CHROME_DIR_ENV,
                 resource_dir.join("chrome-for-testing"),
             );
-            // Relay pairing uses the same authoritative Tauri resource root
-            // for the packaged nfagent. Development can still override this
-            // with NOMIFUN_NFAGENT_PATH.
-            std::env::set_var("NOMIFUN_RESOURCE_DIR", resource_dir);
         }
     }
 

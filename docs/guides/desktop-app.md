@@ -134,7 +134,7 @@ To start fresh, **quit the app** and delete that directory. To migrate, copy the
 ├── logs/                     # nomicore.log
 ├── companion/                # companions + their memory database (one file, per-companion rows)
 ├── knowledge/                # managed knowledge bases
-├── runtime/                  # extracted Bun runtime cache (regenerable)
+├── runtime/                  # regenerable runtimes (Bun and on-demand nfagent)
 └── server.lock               # exclusive lock held while a backend is running
 ```
 
