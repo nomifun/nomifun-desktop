@@ -1,19 +1,11 @@
 {
-  "version": "0.6.1",
-  "notes": "# NomiFun v0.6.1\n\nWindows first release for v0.6.1.\n\n## Highlights\n\n- Adds verified native image generation, including durable image artifact delivery and conversation-side rendering for generated image outputs.\n- Reworks model and provider management around protocol manifests, explicit provider connections, model capabilities, and task-specific model selection.\n- Expands multimodal provider support across image generation/editing, realtime, rerank, speech, video, and embeddings, with new Gemini and StepFun protocol coverage.\n- Improves Model Hub and settings workflows for editing model definitions, credentials, health checks, capability disclosure, and serialized writes.\n- Unifies browser lifecycle and browser-use settings management, with related presentation and localization refinements.\n- Fixes startup issues and improves model type/catalog selection interactions.",
-  "pub_date": "2026-08-12T05:47:23.906Z",
+  "version": "0.6.3",
+  "notes": "## Highlights\n\n- Added mini-apps: generate, preview, publish, run, iterate, rename, delete, and import self-contained H5 apps from ordinary Nomi conversations.\n- Mini-app publishing now separates working copies from published snapshots, so unfinished edits cannot overwrite the app users rely on.\n- The mini-app runner and live preview share a sandboxed rendering policy, with explicit controls for publish, continue iteration, refresh, open in browser, rename, and delete.\n- Imported mini-apps are validated with concrete rule-by-rule feedback, and invalid apps can be sent into a conversation for repair.\n- UI/API contract version moved from 16 to 18 for the new mini-app routes and DTOs.\n\n## macOS\n\n- First `v0.6.3` desktop release for macOS, built for Apple Silicon.\n- Includes signed updater artifacts and a notarized manual DMG installer.",
+  "pub_date": "2026-08-14T17:19:11.191Z",
   "platforms": {
-    "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHkzeXJFeFJwenZGbVVmZWovR1JuWHJ4QmFuQ3hXUjdLRDhBK29XZlJqMnRacU5NL3ZCLytZbmxkQzg5OGY4WmVuL2ZuNE9lc3QxRUlQSWo0dHRDY0FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NTEyMDEwCWZpbGU6Tm9taUZ1bl8wLjYuMV94NjQtc2V0dXAuZXhlClFYRXRnUEZndUJrS0lkOC9lYnE2NHBXT3d0emxrRDdLc1pRSjBtbkFaYStLQnZKaXdiT3pSTUs3a1ZKVUlrZGNnOWJoRUt3NEtYcEhZWVFwRm8vQ0RnPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.1/NomiFun_0.6.1_x64-setup.exe"
-    },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHhELzBHQzRnWjUwWmlXY2hUVVFBZXRTYUYvbkxJYzhEbzY3VGY1ajlYdG90TUZYdG0vVUVObW1ZR0tGU2dDZjd0SGhDU3hRSi9hUWdpVXNwZDV2V1FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NTEyOTE1CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CklwU2ZhbmdadXpBM1JTMEpybEJGVzBIZTR2TWdwNldNdGx3V2VyQWdpbFlXb2dPRFU5cVhFak1QYkpBMHU5Z3loSHlKL1pEVjNZOEZ5NUE3TU9JR0NRPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.1/NomiFun.app.tar.gz"
-    },
-    "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNkeVk4aVFyZVh1TVJ3V1hEcHYzZXQvUHhXZWxYYklWZGtXa0hScEJxa0VmcS9XOFJZUjZBVjhnTUo4S3RIaGNjMTNwaElkQjFlQlJVTFVqRWgxT2drPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NTEzNjQzCWZpbGU6Tm9taUZ1bl8wLjYuMV9hbWQ2NC5BcHBJbWFnZQpoY0dDK3RtWEE2STVRMTRjYlJSZE5GTjZyQUNhMVhHblpoWU1Na09qTmtxQ0x6ZTNrZHJnYUNPNnhGSlUzTHJ2TDZONHhha0ErZG0wWEhQZVJ1Y1NBQT09Cg==",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.1/NomiFun_0.6.1_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODd0OXJ4MXYxZTlsK0FjRlFqN3hjTFpQYlluK01NOFZsYlpDdk8wcVU1OWFJQVF3bmx6Nm1VVFhzTUdUMnJmV2hDYmc1eUdpaHUwTVZseE41blRIa2c0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NzI3ODcwCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CklZT1RiRnYzb0pOcDdEUU5GTlRLb1RLTEFpV3RyOHZSbkxjYXRtcVNSM3ZwM3h3M0lpSWRaV0xJUE13T1dlaUFtbGt2SVZlUXdVaGRnb0wraUlEZEJBPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.3/NomiFun.app.tar.gz"
     }
   }
 }
