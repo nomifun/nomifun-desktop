@@ -32,6 +32,75 @@ pub struct ToolCallOutcome {
     pub modifiers: Vec<Option<ContextModifier>>,
 }
 
+/// Keeps the diagnostic `started`/`completed` lifecycle paired even when an
+/// in-flight tool future is dropped by turn cancellation. Protocol/UI terminal
+/// events remain owned by the surrounding turn machinery; this guard only
+/// closes the structured log span used to diagnose stuck tool calls.
+struct ToolExecutionLog<'a> {
+    tool: &'a str,
+    call_id: &'a str,
+    started: std::time::Instant,
+    stage: &'static str,
+    finished: bool,
+}
+
+impl<'a> ToolExecutionLog<'a> {
+    fn start(tool: &'a str, call_id: &'a str) -> Self {
+        tracing::info!(
+            target: "nomi_agent",
+            tool,
+            call_id,
+            "tool execution started"
+        );
+        Self {
+            tool,
+            call_id,
+            started: std::time::Instant::now(),
+            stage: "pre_hook",
+            finished: false,
+        }
+    }
+
+    fn enter(&mut self, stage: &'static str) {
+        self.stage = stage;
+    }
+
+    fn finish(&mut self, success: bool, outcome: &'static str) {
+        let duration_ms = self.started.elapsed().as_millis() as u64;
+        tracing::info!(
+            target: "nomi_agent",
+            tool = self.tool,
+            call_id = self.call_id,
+            stage = self.stage,
+            duration_ms,
+            success,
+            outcome,
+            "tool execution completed"
+        );
+        self.finished = true;
+    }
+}
+
+impl Drop for ToolExecutionLog<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        let duration_ms = self.started.elapsed().as_millis() as u64;
+        tracing::info!(
+            target: "nomi_agent",
+            tool = self.tool,
+            call_id = self.call_id,
+            stage = self.stage,
+            duration_ms,
+            success = false,
+            outcome = "aborted_or_cancelled",
+            "tool execution completed"
+        );
+    }
+}
+
 /// Immutable execution authority captured from the exact tool definitions in
 /// one provider request. It cannot be reconstructed from the live registry:
 /// plan mode, deferred activation, and later dynamic registration can all make
@@ -495,13 +564,13 @@ async fn execute_single_without_deadline(
         unreachable!("execute_single called with non-ToolUse block")
     };
 
-    let start = std::time::Instant::now();
-    tracing::info!(target: "nomi_agent", tool = %name, call_id = %id, "tool execution started");
+    let mut execution_log = ToolExecutionLog::start(name, id);
 
     // Run pre-tool-use hooks
     if let Some(hook_engine) = hooks
         && let Err(e) = hook_engine.run_pre_tool_use(name, input).await
     {
+        execution_log.finish(false, "blocked_by_hook");
         return (
             ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
@@ -513,6 +582,7 @@ async fn execute_single_without_deadline(
         );
     }
 
+    execution_log.enter("tool");
     let (result, modifier) = match registry.get(name) {
         Some(tool) => {
             let max_size = tool.max_result_size();
@@ -579,6 +649,7 @@ async fn execute_single_without_deadline(
 
     // Run post-tool-use hooks
     if let Some(hook_engine) = hooks {
+        execution_log.enter("post_hook");
         let messages = hook_engine
             .run_post_tool_use(name, input, &result.content)
             .await;
@@ -587,8 +658,11 @@ async fn execute_single_without_deadline(
         }
     }
 
-    let duration_ms = start.elapsed().as_millis() as u64;
-    tracing::info!(target: "nomi_agent", duration_ms, success = !result.is_error, "tool execution completed");
+    execution_log.enter("finalize");
+    execution_log.finish(
+        !result.is_error,
+        if result.is_error { "error" } else { "success" },
+    );
 
     // Defense-in-depth: scrub secret patterns (API keys, tokens, PEM blocks)
     // from tool output before it enters the model context / provider request /
@@ -1127,6 +1201,80 @@ fn group_batches(batchable: &[bool]) -> Vec<std::ops::Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer_output = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || LogWriter(Arc::clone(&writer_output)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+
+        let bytes = output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        String::from_utf8(bytes).expect("test tracing output is UTF-8")
+    }
+
+    #[test]
+    fn dropped_tool_future_logs_one_cancelled_completion() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        let logs = capture_logs(|| {
+            let mut future = Box::pin(async {
+                let mut execution_log = ToolExecutionLog::start("Glob", "call_cancelled");
+                execution_log.enter("tool");
+                std::future::pending::<()>().await;
+            });
+            let waker = futures::task::noop_waker();
+            let mut context = Context::from_waker(&waker);
+            assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+            drop(future);
+        });
+
+        assert_eq!(logs.matches("tool execution started").count(), 1, "{logs}");
+        assert_eq!(logs.matches("tool execution completed").count(), 1, "{logs}");
+        assert!(logs.contains("call_cancelled"), "{logs}");
+        assert!(logs.contains("aborted_or_cancelled"), "{logs}");
+        assert!(logs.contains("stage=\"tool\""), "{logs}");
+    }
+
+    #[test]
+    fn explicitly_finished_tool_log_is_not_duplicated_on_drop() {
+        let logs = capture_logs(|| {
+            let mut execution_log = ToolExecutionLog::start("Glob", "call_success");
+            execution_log.enter("finalize");
+            execution_log.finish(true, "success");
+        });
+
+        assert_eq!(logs.matches("tool execution started").count(), 1, "{logs}");
+        assert_eq!(logs.matches("tool execution completed").count(), 1, "{logs}");
+        assert!(logs.contains("call_success"), "{logs}");
+        assert!(logs.contains("outcome=\"success\""), "{logs}");
+        assert!(!logs.contains("aborted_or_cancelled"), "{logs}");
+    }
 
     #[test]
     fn group_batches_groups_consecutive_batchable_and_isolates_rest() {

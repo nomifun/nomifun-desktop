@@ -28,7 +28,7 @@ jsonschema.workspace  = true
 async-trait.workspace = true
 sha2.workspace        = true
 base64.workspace      = true
-glob.workspace        = true
+globset.workspace     = true
 lru.workspace         = true
 libc.workspace        = true
 uuid.workspace        = true
@@ -41,3 +41,6 @@ portable-pty.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"
