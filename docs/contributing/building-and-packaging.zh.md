@@ -72,6 +72,40 @@ OS 的安装包/应用包。
 
 桌面包应在目标 OS 上构建。跨 OS 桌面打包不是当前支持流程。
 
+## `nfagent` 按需运行时
+
+桌面安装包**不内置** `nfagent`。用户第一次使用 NomiRelay 配对、恢复或重启
+Relay agent 时，桌面端才按当前 OS/架构从
+[`apps/desktop/nfagent-runtime.json`](../../apps/desktop/nfagent-runtime.json)
+指定的不可变 HTTPS URL 下载对应二进制。这样普通用户不使用 NomiRelay 时，
+安装包不会额外携带约 6–7 MiB 的 agent。
+
+受管理的运行时安装具有以下约束：
+
+- 每次使用前都校验完整 SHA-256；缓存损坏时会删除并重新下载。
+- 下载体限制为 32 MiB，先写入临时文件，校验成功后再原子发布。
+- 缓存位置为
+  `<data-dir>/runtime/nfagent/<version>/<sha256-prefix>/<asset-name>`，
+  后续启动复用同一份已验证文件。
+- 首次配对会先完成运行时下载和校验，再消费一次性 Relay 邀请，避免网络下载失败
+  使邀请白白失效。
+- 运行时 URL 不允许使用 `latest`、查询参数或 fragment；发布文件名必须与目标平台
+  的固定名称一致。
+
+本地开发或离线调试可以在启动桌面应用前设置：
+
+```text
+NOMIFUN_NFAGENT_PATH=<已存在的 nfagent 绝对路径>
+```
+
+该覆盖路径被视为开发者明确提供的可信文件，不走受管理下载及清单 SHA-256 校验，
+因此不要把它作为普通用户的安装方式。
+
+更新 `nfagent` 时，必须先在 `nomifun-net-infra` 发布新的、不可变的版本化资产，
+再更新 `nfagent-runtime.json` 中的版本、URL 和 SHA-256。所有清单 URL 真正可下载
+之前，不得分发引用它们的桌面安装包。具体手动上传流程见根目录
+[`RELEASING.zh-CN.md`](../../RELEASING.zh-CN.md)。
+
 ## macOS 签名与公证
 
 ad-hoc 签名产物只适合本地测试，不适合发给别人。生成 Developer ID 签名并公证的 DMG：

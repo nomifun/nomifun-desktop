@@ -6,7 +6,7 @@
     "frontendDist": "../../ui/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "bun run --filter=./ui dev",
-    "beforeBuildCommand": "bun scripts/stage-nfagent.mjs && bun scripts/prune-build.mjs --pre && bun run --filter=./ui build"
+    "beforeBuildCommand": "bun scripts/prune-build.mjs --pre && bun run --filter=./ui build"
   },
   "app": {
     "windows": [],
@@ -19,8 +19,7 @@
     "active": true,
     "targets": ["nsis", "app", "dmg", "appimage", "deb", "rpm"],
     "resources": {
-      "../../ui/dist/": "webui-dist/",
-      "./.staged-resources/nfagent/": "nfagent/"
+      "../../ui/dist/": "webui-dist/"
     },
     "icon": [
       "icons/32x32.png",

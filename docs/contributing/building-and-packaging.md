@@ -77,6 +77,45 @@ Product identity comes from `apps/desktop/tauri.conf.json`:
 Tauri desktop bundles are best built on their target OS. Cross-OS desktop
 packaging is not part of the supported workflow.
 
+## On-demand `nfagent` runtime
+
+Desktop installers do **not** bundle `nfagent`. The first NomiRelay pairing,
+restore, or agent restart downloads the binary for the current OS/architecture
+from the immutable HTTPS URL in
+[`apps/desktop/nfagent-runtime.json`](../../apps/desktop/nfagent-runtime.json).
+Users who never use NomiRelay therefore do not carry the extra roughly 6–7 MiB
+agent in the installer.
+
+The managed runtime installation has these constraints:
+
+- The full SHA-256 is checked before every use; a corrupt cache is removed and
+  downloaded again.
+- Downloads are capped at 32 MiB, written to a staging file, verified, and only
+  then published atomically.
+- The cache lives at
+  `<data-dir>/runtime/nfagent/<version>/<sha256-prefix>/<asset-name>` and is
+  reused on later launches.
+- Initial pairing installs the runtime before consuming the one-shot Relay
+  invitation, so a download failure does not waste the invitation.
+- Runtime URLs cannot use `latest`, query parameters, or fragments, and asset
+  names must match the fixed target-platform names.
+
+For local development or offline debugging, set this before launching Desktop:
+
+```text
+NOMIFUN_NFAGENT_PATH=<absolute path to an existing nfagent binary>
+```
+
+An explicit override is treated as a developer-supplied trusted file and does
+not go through the managed manifest SHA-256 check. Do not use it as the normal
+end-user installation path.
+
+When updating `nfagent`, first publish new immutable, versioned assets from
+`nomifun-net-infra`, then update the version, URLs, and SHA-256 values in
+`nfagent-runtime.json`. Do not distribute a Desktop build until every URL in
+the manifest is live. See the root [`RELEASING.md`](../../RELEASING.md) for the
+manual upload runbook.
+
 ## macOS Signing and Notarization
 
 Unsigned/ad-hoc macOS artifacts are useful for local testing but are not suitable

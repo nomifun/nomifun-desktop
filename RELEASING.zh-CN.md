@@ -33,6 +33,79 @@ bun run bump "$VERSION"
 
 tag 统一使用 `vX.Y.Z`，例如 `v0.1.11`。
 
+## `nfagent` 运行时发布
+
+桌面安装包不再内置 `nfagent`。NomiRelay 首次配对、恢复或重启时，桌面端会按
+[`apps/desktop/nfagent-runtime.json`](apps/desktop/nfagent-runtime.json)
+中的固定 URL 下载目标平台资产并校验 SHA-256。因此，**必须先发布 `nfagent`
+资产，再分发引用该清单的桌面版本**。
+
+当前清单对应：
+
+- 运行时版本：`0.1.0`
+- GitHub Release tag：`nfagent-v0.1.0`
+- 源仓库：`nomifun/nomifun-net-infra`
+- 源提交：`3747c420f6895977edcac3614f5924d7fbdd367e`
+- 本地待上传目录：`dist/nfagent-runtime/`（已被 gitignore）
+
+必须上传以下六个固定名称的二进制，以及供人工核对的 `SHA256SUMS`：
+
+```text
+nfagent-windows-amd64.exe
+nfagent-windows-arm64.exe
+nfagent-darwin-amd64
+nfagent-darwin-arm64
+nfagent-linux-amd64
+nfagent-linux-arm64
+SHA256SUMS
+```
+
+### 重新构建
+
+未来升级时，先在同级 `../nomifun-net-infra` checkout 到准备发布的干净提交并跑该仓库
+要求的本地门禁。该仓库禁止 GitHub Actions，构建与验证必须在本机完成：
+
+```bash
+cd ../nomifun-net-infra
+VERSION=<新版本号>
+COMMIT=$(git rev-parse --short HEAD)
+make check
+make dist VERSION="$VERSION" COMMIT="$COMMIT"
+```
+
+`make dist` 会生成更多 NomiRelay 平台产物；桌面清单当前只引用上面列出的六个
+`nfagent` 目标。将它们复制到本仓库的 `dist/nfagent-runtime/`，重新生成
+`SHA256SUMS`，再把新的完整 SHA-256 写入 `nfagent-runtime.json`。不要只改 URL
+而沿用旧 hash。
+
+### 用浏览器手动上传 GitHub
+
+该流程完全由维护者在浏览器中手动执行，不依赖 GitHub Actions 或 `gh`：
+
+1. 打开 `https://github.com/nomifun/nomifun-net-infra/releases/new`。
+2. 在 **Choose a tag** 中输入 `nfagent-v0.1.0` 并创建新 tag；目标提交选择
+   `3747c420f6895977edcac3614f5924d7fbdd367e`。
+3. Release title 建议填写 `nfagent v0.1.0`；说明中记录源提交与
+   `SHA256SUMS`。
+4. 把 `dist/nfagent-runtime/` 中上述七个文件拖入资产区。文件名必须原样保留。
+5. 发布为正式 Release，不能只保存成 draft。
+6. 发布后逐项确认资产存在，并核对固定 URL 形状：
+
+   ```text
+   https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/<文件名>
+   ```
+
+7. 在分发桌面安装包前，至少从 Release 重新下载当前平台资产，核对
+   `SHA256SUMS`，并运行：
+
+   ```powershell
+   .\nfagent-windows-amd64.exe -version
+   ```
+
+发布后不要覆盖同一 tag 下的二进制。任何字节变化都应使用新的运行时版本与 tag，
+重新计算 SHA-256、更新 `nfagent-runtime.json`，再发布新的桌面版本。清单 URL
+不得改用 `latest`、带查询参数的地址或会被替换的通用文件名。
+
 ## macOS 发版
 
 必须在 Mac 上执行。一键脚本会自动判定两种场景：

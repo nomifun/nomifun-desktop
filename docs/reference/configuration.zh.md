@@ -70,6 +70,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | 环境变量 | 读取方 | 作用 |
 |---|---|---|
 | `NOMIFUN_DATA_DIR` | 所有宿主 | 当宿主选择遵循该值时，作为后端数据目录的真值来源。在**每个**宿主上——桌面外壳、独立 Web 宿主与 `nomicore` 二进制——都按**字面值**作为最终数据根（桌面外壳不再附加 `/Nomi`）。未设置时目录为按用户的应用数据默认值（见[下文](#数据目录与工作目录的语义)）。 |
+| `NOMIFUN_NFAGENT_PATH` | 桌面外壳 | 开发/离线调试覆盖：指定一个已存在的 `nfagent` **绝对路径**，跳过 NomiRelay 按需下载。显式文件由设置者负责信任与版本管理；普通用户应使用受 SHA-256 校验的托管运行时。 |
 | `NOMIFUN_WORK_DIR` | `nomicore` | `--work-dir`（按会话区分的工作区根）的回退值。优先级低于 UI 中选择并持久化在 `dir-config.json` 的工作区；若继承到的值指向默认数据根位置或已不存在的目录，会被忽略（防止自动更新重启时残留的自导出值）。 |
 | `JWT_SECRET` | `nomifun-app` | 用于签发会话 JWT 的密钥。解析顺序见 [鉴权密钥解析](#鉴权密钥解析)。 |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | 取真值时，会话与 CSRF cookie 会带上 `Secure` 标记和 `SameSite=Strict`。当应用通过 HTTPS 暴露（TLS 反向代理等）时请打开。默认 `false` → 不带 `Secure` 标记，`SameSite=Lax`。 |
