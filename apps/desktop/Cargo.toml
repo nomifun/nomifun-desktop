@@ -52,6 +52,8 @@ base64.workspace = true
 reqwest.workspace = true
 url.workspace = true
 dunce.workspace = true
+sha2.workspace = true
+hex.workspace = true
 # Required at compile time by `tauri::generate_context!` — the codegen emits
 # `serde_json::...` tokens into this crate (verified: removing it breaks the
 # `generated_tauri_context` expansion in main.rs).

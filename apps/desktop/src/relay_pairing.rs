@@ -5,16 +5,18 @@
 //! - parse and validate the envelope without accepting alternate credential
 //!   shapes;
 //! - bootstrap the fixed Desktop backend through the Relay;
-//! - run the bundled/explicit nfagent with the shared process-runtime owner;
+//! - install/verify the managed nfagent and run it with the shared
+//!   process-runtime owner;
 //! - persist only restart-safe, non-secret state;
 //! - mint the final one-shot `nomi://pair` URL from the Desktop QR endpoint.
 
 use std::fs;
+use std::io::{self, Read};
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -23,6 +25,8 @@ use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 use url::Url;
@@ -38,6 +42,13 @@ const REQUIRED_DESKTOP_PORT: u16 = 25808;
 const AGENT_POLL_TIMEOUT: Duration = Duration::from_secs(45);
 const RESTORE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QR_REFRESH_SKEW_MS: u64 = 30_000;
+const NFAGENT_RUNTIME_DIR_NAME: &str = "runtime";
+const NFAGENT_CACHE_DIR_NAME: &str = "nfagent";
+const NFAGENT_MAX_DOWNLOAD_BYTES: u64 = 32 * 1024 * 1024;
+const NFAGENT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const NFAGENT_RUNTIME_VERSION_MAX_LEN: usize = 64;
+const NFAGENT_FILE_NAME_MAX_LEN: usize = 128;
+const NFAGENT_MANIFEST: &str = include_str!("../nfagent-runtime.json");
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +144,28 @@ struct QrTokenEnvelope {
     message: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NfagentRuntimeManifest {
+    version: String,
+    assets: std::collections::HashMap<String, NfagentRuntimeAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NfagentRuntimeAsset {
+    url: String,
+    sha256: String,
+}
+
+#[derive(Debug, Clone)]
+struct NfagentDownloadSpec {
+    version: String,
+    file_name: String,
+    url: Url,
+    sha256: String,
+}
+
 #[derive(Default)]
 struct PairingRuntime {
     persisted: Option<PersistedPairing>,
@@ -149,6 +182,8 @@ pub struct RelayPairingManager {
     state_path: PathBuf,
     agent_state_dir: PathBuf,
     client: reqwest::Client,
+    download_client: reqwest::Client,
+    nfagent_install_lock: Mutex<()>,
     runtime: Mutex<PairingRuntime>,
 }
 
@@ -164,6 +199,18 @@ impl RelayPairingManager {
             .timeout(Duration::from_secs(10))
             .build()
             .context("build Relay pairing HTTP client")?;
+        let download_client = reqwest::Client::builder()
+            .redirect(https_redirect_policy())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(NFAGENT_DOWNLOAD_TIMEOUT)
+            .no_gzip()
+            .user_agent(concat!(
+                "NomiFun/",
+                env!("CARGO_PKG_VERSION"),
+                " nfagent-runtime"
+            ))
+            .build()
+            .context("build nfagent download HTTP client")?;
 
         let persisted = load_persisted(&state_path)?;
         let mut status = RelayPairingStatus::default();
@@ -182,6 +229,8 @@ impl RelayPairingManager {
             state_path,
             agent_state_dir,
             client,
+            download_client,
+            nfagent_install_lock: Mutex::new(()),
             runtime: Mutex::new(PairingRuntime {
                 persisted,
                 process: None,
@@ -189,10 +238,6 @@ impl RelayPairingManager {
                 generation: 0,
             }),
         })
-    }
-
-    pub fn data_dir(&self) -> &Path {
-        &self.data_dir
     }
 
     /// Restore a previously paired agent after the embedded backend is ready.
@@ -213,7 +258,18 @@ impl RelayPairingManager {
             return;
         }
 
-        if let Err(error) = self.start_agent(state.clone(), None).await {
+        let nfagent_path = match self.ensure_nfagent_installed().await {
+            Ok(path) => path,
+            Err(error) => {
+                self.set_error(format!("恢复 Relay agent 失败：{error:#}"))
+                    .await;
+                return;
+            }
+        };
+        if let Err(error) = self
+            .start_agent(state.clone(), None, nfagent_path)
+            .await
+        {
             self.set_error(format!("恢复 Relay agent 失败：{error:#}")).await;
             return;
         }
@@ -280,8 +336,11 @@ impl RelayPairingManager {
             }
         }
 
-        reset_agent_state_dir(&self.data_dir, &self.agent_state_dir)?;
         self.ensure_webui_port(&server).await?;
+        // Install/verify the runtime before exchanging the one-shot invite.
+        // A failed download must never consume a pairing invitation.
+        let nfagent_path = self.ensure_nfagent_installed().await?;
+        reset_agent_state_dir(&self.data_dir, &self.agent_state_dir)?;
 
         self.set_status(RelayPairingStatus {
             state: "connecting",
@@ -312,7 +371,11 @@ impl RelayPairingManager {
         self.set_status(status_from_persisted(&persisted, "connecting", None))
             .await;
         if let Err(error) = self
-            .start_agent(persisted.clone(), Some(response.enrol_token))
+            .start_agent(
+                persisted.clone(),
+                Some(response.enrol_token),
+                nfagent_path,
+            )
             .await
         {
             self.set_error(format!(
@@ -360,13 +423,16 @@ impl RelayPairingManager {
                 .clone()
                 .context("没有可恢复的 Relay 配对状态")?
         };
+        ensure_child_path(&self.data_dir, &self.agent_state_dir)?;
         prepare_agent_state_dir(&self.agent_state_dir)?;
         if !self.agent_state_dir.join("credential.json").is_file() {
             anyhow::bail!("agent 长期凭据不存在，不能安全重启；请重新配对");
         }
         self.ensure_webui_port(&server).await?;
+        let nfagent_path = self.ensure_nfagent_installed().await?;
         self.stop_agent().await?;
-        self.start_agent(persisted.clone(), None).await?;
+        self.start_agent(persisted.clone(), None, nfagent_path)
+            .await?;
         if let Err(error) = self.wait_for_agent_ready(&persisted).await {
             let _ = self.stop_agent().await;
             self.set_error(format!("重启 Relay agent 后未能恢复连接：{error}"))
@@ -468,12 +534,152 @@ impl RelayPairingManager {
             .context("Relay bootstrap 响应格式无效")
     }
 
+    async fn ensure_nfagent_installed(&self) -> Result<PathBuf> {
+        if let Some(path) = explicit_nfagent_path()? {
+            return Ok(path);
+        }
+
+        let spec = configured_nfagent_download_spec()?;
+        let _install_guard = self.nfagent_install_lock.lock().await;
+        ensure_nfagent_cached(&self.data_dir, &spec, &self.download_client).await
+    }
+}
+
+async fn ensure_nfagent_cached(
+    data_dir: &Path,
+    spec: &NfagentDownloadSpec,
+    client: &reqwest::Client,
+) -> Result<PathBuf> {
+    if !is_sha256_hex(&spec.sha256) {
+        anyhow::bail!("nfagent runtime SHA-256 is invalid");
+    }
+    let install_dir = data_dir
+        .join(NFAGENT_RUNTIME_DIR_NAME)
+        .join(NFAGENT_CACHE_DIR_NAME)
+        .join(cache_component(&spec.version))
+        .join(&spec.sha256[..16]);
+    let destination = install_dir.join(&spec.file_name);
+    ensure_child_path(data_dir, &install_dir)?;
+    ensure_child_path(data_dir, &destination)?;
+
+    if verify_file_sha256(&destination, &spec.sha256)? {
+        ensure_executable(&destination)?;
+        return Ok(destination);
+    }
+    if destination.exists() {
+        fs::remove_file(&destination).with_context(|| {
+            format!(
+                "remove corrupt cached nfagent executable {}",
+                destination.display()
+            )
+        })?;
+    }
+
+    fs::create_dir_all(&install_dir).with_context(|| {
+        format!(
+            "create managed nfagent directory {}",
+            install_dir.display()
+        )
+    })?;
+    let temp_path = install_dir.join(format!(
+        ".{}.{}.part",
+        spec.file_name,
+        unique_install_suffix()
+    ));
+    let result = download_verified_nfagent(client, spec, &temp_path, &destination).await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+    }
+    result?;
+    Ok(destination)
+}
+
+async fn download_verified_nfagent(
+    client: &reqwest::Client,
+    spec: &NfagentDownloadSpec,
+    temp_path: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let mut response = client
+        .get(spec.url.clone())
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .with_context(|| format!("download nfagent from {}", spec.url))?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "nfagent download returned HTTP {} from {}",
+            response.status(),
+            spec.url
+        );
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > NFAGENT_MAX_DOWNLOAD_BYTES)
+    {
+        anyhow::bail!(
+            "nfagent download exceeds the {}-byte limit",
+            NFAGENT_MAX_DOWNLOAD_BYTES
+        );
+    }
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(temp_path)
+        .await
+        .with_context(|| format!("create staged nfagent {}", temp_path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut written = 0_u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .with_context(|| format!("read nfagent response body from {}", spec.url))?
+    {
+        written = written
+            .checked_add(chunk.len() as u64)
+            .context("nfagent download length overflow")?;
+        if written > NFAGENT_MAX_DOWNLOAD_BYTES {
+            anyhow::bail!(
+                "nfagent download exceeds the {}-byte limit",
+                NFAGENT_MAX_DOWNLOAD_BYTES
+            );
+        }
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .await
+            .with_context(|| format!("write staged nfagent {}", temp_path.display()))?;
+    }
+    if written == 0 {
+        anyhow::bail!("nfagent download was empty");
+    }
+    file.flush()
+        .await
+        .with_context(|| format!("flush staged nfagent {}", temp_path.display()))?;
+    file.sync_all()
+        .await
+        .with_context(|| format!("sync staged nfagent {}", temp_path.display()))?;
+    drop(file);
+
+    let actual = hex::encode(hasher.finalize());
+    if !actual.eq_ignore_ascii_case(&spec.sha256) {
+        anyhow::bail!(
+            "nfagent checksum mismatch: expected {}, received {}",
+            spec.sha256,
+            actual
+        );
+    }
+    publish_staged_nfagent(temp_path, destination, &spec.sha256).await
+}
+
+impl RelayPairingManager {
     async fn start_agent(
         self: &Arc<Self>,
         state: PersistedPairing,
         enrol_token: Option<String>,
+        path: PathBuf,
     ) -> Result<()> {
-        let path = resolve_nfagent_path()?;
+        ensure_child_path(&self.data_dir, &self.agent_state_dir)?;
         prepare_agent_state_dir(&self.agent_state_dir)?;
         let mut builder = ChildProcessBuilder::new(path);
         builder
@@ -937,64 +1143,365 @@ fn reset_agent_state_dir(root: &Path, path: &Path) -> Result<()> {
 }
 
 fn ensure_child_path(root: &Path, child: &Path) -> Result<()> {
-    let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let child = dunce::canonicalize(child).unwrap_or_else(|_| child.to_path_buf());
+    let root = dunce::canonicalize(root)
+        .with_context(|| format!("canonicalize data directory {}", root.display()))?;
+    let child = if child.is_absolute() {
+        child.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("resolve relative managed path")?
+            .join(child)
+    };
     if !child.starts_with(&root) || child == root {
         anyhow::bail!("拒绝操作数据目录之外的 agent 状态路径");
+    }
+
+    let relative = child
+        .strip_prefix(&root)
+        .context("resolve managed path relative to data directory")?;
+    let mut current = root.clone();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            anyhow::bail!("managed agent path contains an unsafe path component");
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    anyhow::bail!(
+                        "拒绝通过符号链接或 junction 操作 agent 状态路径 {}",
+                        current.display()
+                    );
+                }
+                let canonical = dunce::canonicalize(&current).with_context(|| {
+                    format!("canonicalize managed agent path {}", current.display())
+                })?;
+                if !canonical.starts_with(&root) {
+                    anyhow::bail!("拒绝操作数据目录之外的 agent 状态路径");
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect managed agent path {}", current.display())
+                });
+            }
+        }
     }
     Ok(())
 }
 
-fn resolve_nfagent_path() -> Result<PathBuf> {
-    if let Ok(raw) = std::env::var("NOMIFUN_NFAGENT_PATH") {
-        let path = PathBuf::from(raw);
-        if path.is_absolute() && path.is_file() {
-            return Ok(path);
-        }
-        anyhow::bail!("NOMIFUN_NFAGENT_PATH 必须是存在的绝对路径");
-    }
-    let exe = std::env::current_exe().context("解析 Desktop 可执行文件路径失败")?;
-    let resource_dir = std::env::var_os("NOMIFUN_RESOURCE_DIR").map(PathBuf::from);
-    resolve_nfagent_from_locations(
-        None,
-        resource_dir.as_deref(),
-        exe.parent(),
-        Some(Path::new(".")),
-    )
+fn explicit_nfagent_path() -> Result<Option<PathBuf>> {
+    let Some(raw) = std::env::var_os("NOMIFUN_NFAGENT_PATH") else {
+        return Ok(None);
+    };
+    Ok(Some(validate_explicit_nfagent_path(&PathBuf::from(raw))?))
 }
 
-fn resolve_nfagent_from_locations(
-    explicit: Option<&Path>,
-    resource_dir: Option<&Path>,
-    exe_dir: Option<&Path>,
-    cwd: Option<&Path>,
-) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        if path.is_absolute() && path.is_file() {
-            return Ok(path.to_path_buf());
-        }
+fn validate_explicit_nfagent_path(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() || !path.is_file() {
         anyhow::bail!("NOMIFUN_NFAGENT_PATH 必须是存在的绝对路径");
     }
-    let candidates = [
-        resource_dir.map(|path| path.join("nfagent").join("nfagent.exe")),
-        resource_dir.map(|path| path.join("nfagent").join("nfagent")),
-        resource_dir.map(|path| path.join("nfagent.exe")),
-        resource_dir.map(|path| path.join("nfagent")),
-        exe_dir.map(|path| path.join("nfagent.exe")),
-        exe_dir.map(|path| path.join("nfagent")),
-        cwd.map(|path| path.join("nfagent.exe")),
-        cwd.map(|path| path.join("nfagent")),
-    ];
-    candidates
+    ensure_executable(path)?;
+    Ok(path.to_path_buf())
+}
+
+fn configured_nfagent_download_spec() -> Result<NfagentDownloadSpec> {
+    let manifest: NfagentRuntimeManifest =
+        serde_json::from_str(NFAGENT_MANIFEST).context("nfagent runtime manifest is invalid")?;
+    nfagent_download_spec_from_manifest(&manifest, nfagent_target_key())
+}
+
+fn nfagent_download_spec_from_manifest(
+    manifest: &NfagentRuntimeManifest,
+    target: &str,
+) -> Result<NfagentDownloadSpec> {
+    validate_runtime_version(&manifest.version)?;
+    let asset = manifest
+        .assets
+        .get(target)
+        .with_context(|| format!("nfagent runtime has no asset for target {target}"))?;
+    let url = Url::parse(&asset.url).context("nfagent runtime URL is invalid")?;
+    validate_nfagent_download_url(&url)?;
+    if !is_sha256_hex(&asset.sha256) {
+        anyhow::bail!("nfagent runtime SHA-256 must be exactly 64 hexadecimal characters");
+    }
+    let file_name = url
+        .path_segments()
+        .and_then(|segments| segments.last())
+        .context("nfagent runtime URL must end in a file name")?
+        .to_owned();
+    validate_nfagent_file_name(&file_name, target)?;
+    Ok(NfagentDownloadSpec {
+        version: manifest.version.clone(),
+        file_name,
+        url,
+        sha256: asset.sha256.to_ascii_lowercase(),
+    })
+}
+
+fn validate_runtime_version(version: &str) -> Result<()> {
+    if version.is_empty() || version.len() > NFAGENT_RUNTIME_VERSION_MAX_LEN {
+        anyhow::bail!(
+            "nfagent runtime version must be 1-{} characters",
+            NFAGENT_RUNTIME_VERSION_MAX_LEN
+        );
+    }
+    if version.eq_ignore_ascii_case("latest")
+        || version
+            .chars()
+            .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_')))
+    {
+        anyhow::bail!("nfagent runtime version must be an immutable safe identifier");
+    }
+    Ok(())
+}
+
+fn validate_nfagent_download_url(url: &Url) -> Result<()> {
+    if url.scheme() != "https" || url.host_str().is_none() {
+        anyhow::bail!("nfagent runtime URL must be an absolute HTTPS URL");
+    }
+    if url.username() != "" || url.password().is_some() {
+        anyhow::bail!("nfagent runtime URL must not contain credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        anyhow::bail!("nfagent runtime URL must not contain a query or fragment");
+    }
+    if url
+        .path_segments()
         .into_iter()
         .flatten()
-        .find(|path| path.is_file())
-        .context("找不到 nfagent；请设置 NOMIFUN_NFAGENT_PATH")
+        .any(|segment| segment.eq_ignore_ascii_case("latest"))
+    {
+        anyhow::bail!("nfagent runtime URL must be immutable and must not use latest");
+    }
+    Ok(())
+}
+
+fn validate_nfagent_file_name(file_name: &str, target: &str) -> Result<()> {
+    if file_name.is_empty()
+        || file_name.len() > NFAGENT_FILE_NAME_MAX_LEN
+        || matches!(file_name, "." | "..")
+        || file_name
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '/' | '\\' | ':'))
+    {
+        anyhow::bail!("nfagent runtime URL must end in a safe file name");
+    }
+    if file_name.to_ascii_lowercase().contains("latest") {
+        anyhow::bail!("nfagent runtime URL must be immutable and must not use latest");
+    }
+    if target.starts_with("windows-") && !file_name.to_ascii_lowercase().ends_with(".exe") {
+        anyhow::bail!("Windows nfagent runtime assets must end in .exe");
+    }
+    let expected = if target.starts_with("windows-") {
+        format!("nfagent-{target}.exe")
+    } else {
+        format!("nfagent-{target}")
+    };
+    if file_name != expected {
+        anyhow::bail!("nfagent runtime asset for {target} must be named {expected}");
+    }
+    Ok(())
+}
+
+fn nfagent_target_key() -> &'static str {
+    if cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") {
+        "windows-amd64"
+    } else if cfg!(target_os = "windows") && cfg!(target_arch = "aarch64") {
+        "windows-arm64"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
+        "darwin-amd64"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        "darwin-arm64"
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        "linux-amd64"
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        "linux-arm64"
+    } else {
+        "unsupported"
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn cache_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn unique_install_suffix() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{}", std::process::id(), nanos)
+}
+
+fn verify_file_sha256(path: &Path, expected: &str) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("open cached nfagent {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read cached nfagent {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()).eq_ignore_ascii_case(expected))
+}
+
+fn ensure_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .with_context(|| format!("stat nfagent {}", path.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("set executable permission on {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+async fn publish_staged_nfagent(
+    temp_path: &Path,
+    destination: &Path,
+    expected_sha256: &str,
+) -> Result<()> {
+    ensure_executable(temp_path)?;
+    match tokio::fs::hard_link(temp_path, destination).await {
+        Ok(()) => {
+            tokio::fs::remove_file(temp_path).await.with_context(|| {
+                format!("remove published staging link {}", temp_path.display())
+            })?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            // A second Desktop instance may have completed the same download
+            // between our cache check and publication. Keep a valid existing
+            // cache and discard only our redundant staged copy.
+            if verify_file_sha256(destination, expected_sha256)? {
+                tokio::fs::remove_file(temp_path).await.with_context(|| {
+                    format!("remove redundant staged nfagent {}", temp_path.display())
+                })?;
+                return Ok(());
+            }
+
+            // The destination is known to be corrupt, so replacing it is safe.
+            tokio::fs::remove_file(destination)
+                .await
+                .with_context(|| {
+                    format!(
+                        "remove corrupt managed nfagent executable {}",
+                        destination.display()
+                    )
+                })?;
+            tokio::fs::hard_link(temp_path, destination)
+                .await
+                .with_context(|| {
+                    format!(
+                        "publish managed nfagent {} -> {}",
+                        temp_path.display(),
+                        destination.display()
+                    )
+                })?;
+            tokio::fs::remove_file(temp_path).await.with_context(|| {
+                format!("remove published staging link {}", temp_path.display())
+            })?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "publish managed nfagent {} -> {}",
+                    temp_path.display(),
+                    destination.display()
+                )
+            });
+        }
+    }
+    ensure_executable(destination)?;
+    Ok(())
+}
+
+fn https_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            attempt.error("too many nfagent download redirects")
+        } else if attempt.url().scheme() == "https" {
+            attempt.follow()
+        } else {
+            attempt.error("nfagent download redirect must remain on HTTPS")
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_manifest(version: &str, target: &str, url: &str, sha256: &str) -> NfagentRuntimeManifest {
+        NfagentRuntimeManifest {
+            version: version.to_owned(),
+            assets: std::collections::HashMap::from([(
+                target.to_owned(),
+                NfagentRuntimeAsset {
+                    url: url.to_owned(),
+                    sha256: sha256.to_owned(),
+                },
+            )]),
+        }
+    }
+
+    fn test_download_spec(url: &str, bytes: &[u8]) -> NfagentDownloadSpec {
+        NfagentDownloadSpec {
+            version: "0.1.0-test".to_owned(),
+            file_name: "nfagent-windows-amd64.exe".to_owned(),
+            url: Url::parse(url).unwrap(),
+            sha256: hex::encode(Sha256::digest(bytes)),
+        }
+    }
+
+    async fn spawn_test_http_server(
+        status: u16,
+        body: &'static [u8],
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+            let reason = if status == 200 { "OK" } else { "Error" };
+            let header = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        (format!("http://{address}/nfagent-windows-amd64.exe"), handle)
+    }
 
     fn envelope(value: Value) -> String {
         let bytes = serde_json::to_vec(&value).unwrap();
@@ -1097,34 +1604,174 @@ mod tests {
     }
 
     #[test]
-    fn nfagent_resolution_prefers_packaged_resource() {
-        let root = tempfile::tempdir().unwrap();
-        let resource_dir = root.path().join("resources");
-        let exe_dir = root.path().join("bin");
-        fs::create_dir_all(resource_dir.join("nfagent")).unwrap();
-        fs::create_dir_all(&exe_dir).unwrap();
-        let bundled = resource_dir.join("nfagent").join("nfagent.exe");
-        let adjacent = exe_dir.join("nfagent.exe");
-        fs::write(&bundled, b"bundled").unwrap();
-        fs::write(&adjacent, b"adjacent").unwrap();
+    fn configured_nfagent_manifest_is_valid_for_this_target() {
+        let spec = configured_nfagent_download_spec().unwrap();
+        assert_eq!(spec.version, "0.1.0");
+        assert_eq!(spec.sha256.len(), 64);
+        assert!(spec.url.as_str().contains("/releases/download/nfagent-v0.1.0/"));
+        assert!(!spec.url.as_str().to_ascii_lowercase().contains("/latest/"));
 
-        let resolved =
-            resolve_nfagent_from_locations(None, Some(&resource_dir), Some(&exe_dir), None)
-                .unwrap();
-        assert_eq!(resolved, bundled);
+        let manifest: NfagentRuntimeManifest = serde_json::from_str(NFAGENT_MANIFEST).unwrap();
+        for target in [
+            "windows-amd64",
+            "windows-arm64",
+            "darwin-amd64",
+            "darwin-arm64",
+            "linux-amd64",
+            "linux-arm64",
+        ] {
+            nfagent_download_spec_from_manifest(&manifest, target).unwrap();
+        }
     }
 
     #[test]
-    fn nfagent_resolution_validates_explicit_override() {
-        let root = tempfile::tempdir().unwrap();
-        let relative = Path::new("nfagent.exe");
+    fn nfagent_manifest_rejects_invalid_hash_urls_versions_and_names() {
+        let hash = "a".repeat(64);
+        let valid_url = "https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/nfagent-windows-amd64.exe";
+
+        for manifest in [
+            runtime_manifest("0.1.0", "windows-amd64", valid_url, "not-a-sha256"),
+            runtime_manifest(
+                "0.1.0",
+                "windows-amd64",
+                "http://example.invalid/nfagent-windows-amd64.exe",
+                &hash,
+            ),
+            runtime_manifest(
+                "0.1.0",
+                "windows-amd64",
+                "https://example.invalid/releases/latest/nfagent-windows-amd64.exe",
+                &hash,
+            ),
+            runtime_manifest(
+                "latest",
+                "windows-amd64",
+                "https://example.invalid/releases/v1/nfagent-windows-amd64.exe",
+                &hash,
+            ),
+            runtime_manifest(
+                "0.1.0",
+                "windows-amd64",
+                "https://example.invalid/releases/v1/nfagent.exe",
+                &hash,
+            ),
+            runtime_manifest(
+                "0.1.0",
+                "windows-amd64",
+                "https://user:password@example.invalid/releases/v1/nfagent-windows-amd64.exe",
+                &hash,
+            ),
+            runtime_manifest(
+                "0.1.0",
+                "windows-amd64",
+                "https://example.invalid/releases/v1/nfagent-windows-amd64.exe?mutable=1",
+                &hash,
+            ),
+        ] {
+            assert!(nfagent_download_spec_from_manifest(&manifest, "windows-amd64").is_err());
+        }
+
         assert!(
-            resolve_nfagent_from_locations(Some(relative), Some(root.path()), None, None).is_err()
+            nfagent_download_spec_from_manifest(
+                &runtime_manifest("0.1.0", "windows-amd64", valid_url, &hash),
+                "linux-amd64",
+            )
+            .is_err()
         );
+    }
+
+    #[test]
+    fn explicit_nfagent_override_requires_an_existing_absolute_file() {
+        let root = tempfile::tempdir().unwrap();
         let explicit = root.path().join("nfagent.exe");
         fs::write(&explicit, b"explicit").unwrap();
-        let resolved =
-            resolve_nfagent_from_locations(Some(&explicit), Some(root.path()), None, None).unwrap();
-        assert_eq!(resolved, explicit);
+        assert_eq!(
+            validate_explicit_nfagent_path(&explicit).unwrap(),
+            explicit
+        );
+
+        let missing = root.path().join("missing.exe");
+        assert!(validate_explicit_nfagent_path(&missing).is_err());
+        assert!(validate_explicit_nfagent_path(Path::new("nfagent.exe")).is_err());
+    }
+
+    #[tokio::test]
+    async fn valid_nfagent_cache_is_reused_without_downloading() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"cached nfagent";
+        let spec = test_download_spec(
+            "http://127.0.0.1:9/nfagent-windows-amd64.exe",
+            bytes,
+        );
+        let destination = root
+            .path()
+            .join(NFAGENT_RUNTIME_DIR_NAME)
+            .join(NFAGENT_CACHE_DIR_NAME)
+            .join(&spec.version)
+            .join(&spec.sha256[..16])
+            .join(&spec.file_name);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, bytes).unwrap();
+
+        let client = reqwest::Client::new();
+        let resolved = ensure_nfagent_cached(root.path(), &spec, &client)
+            .await
+            .unwrap();
+        assert_eq!(resolved, destination);
+        assert_eq!(fs::read(resolved).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn corrupt_nfagent_cache_is_replaced_by_verified_download() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"replacement nfagent";
+        let (url, server) = spawn_test_http_server(200, bytes).await;
+        let spec = test_download_spec(&url, bytes);
+        let destination = root
+            .path()
+            .join(NFAGENT_RUNTIME_DIR_NAME)
+            .join(NFAGENT_CACHE_DIR_NAME)
+            .join(&spec.version)
+            .join(&spec.sha256[..16])
+            .join(&spec.file_name);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"corrupt").unwrap();
+
+        let client = reqwest::Client::new();
+        let resolved = ensure_nfagent_cached(root.path(), &spec, &client)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(resolved, destination);
+        assert_eq!(fs::read(resolved).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn failed_nfagent_download_removes_staging_file() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"unexpected body";
+        let (url, server) = spawn_test_http_server(200, bytes).await;
+        let spec = test_download_spec(&url, b"expected body");
+
+        let client = reqwest::Client::new();
+        assert!(
+            ensure_nfagent_cached(root.path(), &spec, &client)
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+
+        let install_dir = root
+            .path()
+            .join(NFAGENT_RUNTIME_DIR_NAME)
+            .join(NFAGENT_CACHE_DIR_NAME)
+            .join(&spec.version)
+            .join(&spec.sha256[..16]);
+        assert!(!install_dir.join(&spec.file_name).exists());
+        let leftovers = fs::read_dir(install_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "staging files remained: {leftovers:?}");
     }
 }

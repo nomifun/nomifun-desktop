@@ -22,6 +22,85 @@ bun run bump 1.2.3 --tag      # also: git commit + git tag v1.2.3 (needs a clean
 Tags use the `vX.Y.Z` form. The decorative `package.json` / `ui/package.json`
 versions are kept in sync by the script but are not read by any build.
 
+## Releasing the `nfagent` runtime
+
+Desktop installers no longer bundle `nfagent`. On the first NomiRelay pairing,
+restore, or agent restart, Desktop downloads the target-platform asset from the
+fixed URL in
+[`apps/desktop/nfagent-runtime.json`](apps/desktop/nfagent-runtime.json) and
+checks its SHA-256. **Publish the `nfagent` assets before distributing any
+Desktop release that references that manifest.**
+
+The current manifest corresponds to:
+
+- runtime version: `0.1.0`
+- GitHub Release tag: `nfagent-v0.1.0`
+- source repository: `nomifun/nomifun-net-infra`
+- source commit: `3747c420f6895977edcac3614f5924d7fbdd367e`
+- local upload directory: `dist/nfagent-runtime/` (gitignored)
+
+Upload these six fixed binary names plus `SHA256SUMS` for manual verification:
+
+```text
+nfagent-windows-amd64.exe
+nfagent-windows-arm64.exe
+nfagent-darwin-amd64
+nfagent-darwin-arm64
+nfagent-linux-amd64
+nfagent-linux-arm64
+SHA256SUMS
+```
+
+### Rebuilding
+
+For a future runtime update, check out the intended clean commit in the sibling
+`../nomifun-net-infra` repository and run that repository's required local
+gate. GitHub Actions are forbidden there, so builds and checks are local:
+
+```bash
+cd ../nomifun-net-infra
+VERSION=<new-version>
+COMMIT=$(git rev-parse --short HEAD)
+make check
+make dist VERSION="$VERSION" COMMIT="$COMMIT"
+```
+
+`make dist` emits more NomiRelay targets; the Desktop manifest currently uses
+only the six `nfagent` targets listed above. Copy those files into this
+repository's `dist/nfagent-runtime/`, regenerate `SHA256SUMS`, and put each new
+full SHA-256 into `nfagent-runtime.json`. Never change only the URL while
+retaining an old hash.
+
+### Manual browser upload to GitHub
+
+The maintainer should perform the GitHub operation in a browser:
+
+1. Open `https://github.com/nomifun/nomifun-net-infra/releases/new`.
+2. Under **Choose a tag**, enter `nfagent-v0.1.0`, create the new tag, and target
+   commit `3747c420f6895977edcac3614f5924d7fbdd367e`.
+3. Use a title such as `nfagent v0.1.0`; record the source commit and
+   `SHA256SUMS` in the notes.
+4. Drag the seven files listed above from `dist/nfagent-runtime/` into the asset
+   area. Preserve every filename exactly.
+5. Publish a real Release; a draft is not downloadable by normal Desktop users.
+6. Confirm every asset exists and has this fixed URL shape:
+
+   ```text
+   https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/<filename>
+   ```
+
+7. Before distributing Desktop, download at least the current-platform asset
+   back from the Release, verify it against `SHA256SUMS`, and run:
+
+   ```powershell
+   .\nfagent-windows-amd64.exe -version
+   ```
+
+Do not replace binaries under an already published tag. Any byte change requires
+a new runtime version and tag, new SHA-256 values, an updated
+`nfagent-runtime.json`, and then a new Desktop release. Manifest URLs must not
+use `latest`, query strings, or replaceable generic filenames.
+
 ## Before Tagging
 
 1. Update `CHANGELOG.md`.

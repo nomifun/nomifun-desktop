@@ -1,0 +1,29 @@
+{
+  "version": "0.1.0",
+  "assets": {
+    "windows-amd64": {
+      "url": "https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/nfagent-windows-amd64.exe",
+      "sha256": "EFB0E54D532DE0AF8D7F71EEF283E6FD4EEEC39443530726549980D96B9B4422"
+    },
+    "windows-arm64": {
+      "url": "https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/nfagent-windows-arm64.exe",
+      "sha256": "C283E2B9236FA7CFD6A20150A80F66EFB7CEC059C92C8AD4F6285FDBF866C7C2"
+    },
+    "darwin-amd64": {
+      "url": "https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/nfagent-darwin-amd64",
+      "sha256": "BEDDE2E43676BA70EE2EDDC7131B09E8BBED64275580C470EEEC58CBE8C70B0A"
+    },
+    "darwin-arm64": {
+      "url": "https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/nfagent-darwin-arm64",
+      "sha256": "2198BBDC52653494F36833C99CAA88A2441AF401BA497BC840D1D38EBF229A6A"
+    },
+    "linux-amd64": {
+      "url": "https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/nfagent-linux-amd64",
+      "sha256": "FA32383ACD195B4D802CD537B98FC85482DF532F08CA8A06C184DF09274058FD"
+    },
+    "linux-arm64": {
+      "url": "https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/nfagent-linux-arm64",
+      "sha256": "F6E5229C9905F8388CA8EB395B76E5E4545017B85459355FF835FDD54C412359"
+    }
+  }
+}

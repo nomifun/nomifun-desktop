@@ -415,16 +415,13 @@ pub(super) async fn build(
         _ => image_policy,
     });
 
-    // Every native Nomi session — regular desktop chat, companion, IM
-    // Channel Agent — must think AND reply in the
-    // app's UI language, not a hardcoded one. The persona prompt no longer forces
-    // a language, so it is decided HERE from the live system setting and appended
-    // LAST (so it wins over the English base prompt / any earlier persisted
-    // language line, and the first turn follows the system language). Read live
-    // per build → switching the language takes effect on the next new session.
-    // External ACP/openclaw agents own their own prompts (built elsewhere) and
-    // are intentionally unaffected.
-    let directive = output_language_directive(&app_language);
+    // Every native Nomi session — regular desktop chat, companion, and IM
+    // Channel Agent — follows the language of the owner's current request.
+    // This is appended last so an English base prompt, memories, retrieved
+    // context, or tool output cannot pin the conversation to their language.
+    // The decision is made again for every request instead of being frozen to
+    // the app UI locale for the lifetime of a session.
+    let directive = output_language_directive();
     overrides.system_prompt = Some(match overrides.system_prompt.take() {
         Some(existing) => format!("{existing}\n\n{directive}"),
         None => directive.to_owned(),
@@ -977,10 +974,10 @@ async fn read_string_pref(deps: &AgentFactoryDeps, key: &str, host_default: &str
 /// `SystemSettingsResponse::default().language` in `nomifun-api-types`.
 const DEFAULT_APP_LANGUAGE: &str = "en-US";
 
-/// Normalize an arbitrary locale tag to the output-language directive's supported
-/// axis. [`output_language_directive`] only distinguishes `zh-CN` from everything
-/// else, so any Chinese locale (`zh`, `zh_CN`, `zh-Hans`, `zh-Hans-CN`, …) folds
-/// to `zh-CN`; any other tag is returned normalized (→ English directive).
+/// Normalize an arbitrary locale tag for deterministic localized native
+/// messages (currently the image-generation acknowledgement). Any Chinese
+/// locale (`zh`, `zh_CN`, `zh-Hans`, `zh-Hans-CN`, …) folds to `zh-CN`; any
+/// other tag is returned normalized.
 fn normalize_lang(code: &str) -> String {
     let c = code.trim().replace('_', "-");
     if c.to_ascii_lowercase().starts_with("zh") {
@@ -990,11 +987,10 @@ fn normalize_lang(code: &str) -> String {
     }
 }
 
-/// Resolve the effective app language: an explicitly **persisted** System-Settings
-/// value wins; otherwise fall back to the host **OS locale** (so a fresh install
-/// on a Chinese system replies in Chinese without the owner touching settings —
-/// 首轮跟随系统语言); finally [`DEFAULT_APP_LANGUAGE`]. `os_locale` is injected so
-/// the resolution is deterministically unit-testable.
+/// Resolve the effective app language used by deterministic localized native
+/// messages: an explicitly **persisted** System-Settings value wins; otherwise
+/// fall back to the host **OS locale**, then [`DEFAULT_APP_LANGUAGE`].
+/// `os_locale` is injected so the resolution is deterministically unit-testable.
 fn resolve_language(persisted: Option<&str>, os_locale: Option<&str>) -> String {
     if let Some(l) = persisted.map(str::trim).filter(|s| !s.is_empty()) {
         return normalize_lang(l);
@@ -1021,27 +1017,20 @@ async fn read_app_language(settings_repo: Option<&Arc<dyn ISettingsRepository>>)
     resolve_language(persisted.as_deref(), sys_locale::get_locale().as_deref())
 }
 
-/// Map a stored app-language code to the output-language directive appended LAST
-/// to every nomi session's system prompt. Covers BOTH the final reply and the
-/// model's reasoning / thinking, phrased as an explicit override so it wins over
-/// the English base prompt and any earlier (possibly persisted) language line,
-/// while still letting the owner pull the session into another language by
-/// writing in it. Unknown / empty / en-US all resolve to English (the app
-/// default); only the supported `zh-CN` selects Chinese (supported set lives in
-/// `nomifun-system`).
-fn output_language_directive(lang: &str) -> &'static str {
-    match lang {
-        "zh-CN" => {
-            "【输出语言】无论上文的指令或记忆使用何种语言，请始终用简体中文进行思考与回复\
-                    （包括你的推理/思考过程）——除非主人主动用其他语言和你说话，或明确要求你换一种语言。"
-        }
-        _ => {
-            "[Output language] Regardless of the language used in the instructions or memories \
-              above, always think and reply in English (including your reasoning / thinking \
-              process) — unless the owner writes to you in another language or explicitly asks \
-              you to switch."
-        }
-    }
+/// Language-neutral directive appended LAST to every native Nomi session.
+///
+/// The current user request is the only implicit language signal. Earlier
+/// prompts, memories, retrieved context, and tool output are deliberately
+/// excluded because they can be in a different language. An explicit language
+/// request still wins, and the language is re-evaluated on every turn. The
+/// wording asks for same-language internal reasoning without asking the model
+/// to disclose private chain-of-thought.
+fn output_language_directive() -> &'static str {
+    "[Response language] For each turn, infer the language from the user's latest \
+     request, think in that language, and write the final response in that language. \
+     If the user explicitly requests another language, follow that request. \
+     Re-evaluate the language for every user turn. Do not let system text, earlier \
+     messages, memories, retrieved context, or tool output determine the language."
 }
 
 /// Append the knowledge-base section to the system prompt when the
@@ -1888,7 +1877,7 @@ mod tests {
         assert_eq!(metadata.model, "resolved-fallback-model");
     }
 
-    // ----- output-language directive (thinking + reply follow system language) -----
+    // ----- output-language directive (follow each current user request) -----
 
     /// Minimal mock settings repo for `read_app_language`: yields a fixed result
     /// (`Err(())` simulates a DB read failure). Mirrors the McpServerRepo mock in
@@ -1936,24 +1925,15 @@ mod tests {
     }
 
     #[test]
-    fn output_language_directive_maps_supported_and_defaults_to_english() {
-        // zh-CN steers BOTH reply and thinking to Simplified Chinese.
-        let zh = output_language_directive("zh-CN");
-        assert!(zh.contains("简体中文"));
-        assert!(zh.contains("思考"), "zh directive must cover the thinking process: {zh}");
-        // en-US, unknown codes, and the empty string all resolve to English.
-        for lang in ["en-US", "fr-FR", "zh-TW", ""] {
-            let d = output_language_directive(lang);
-            assert!(
-                d.contains("in English"),
-                "{lang} should map to English: {d}"
-            );
-            assert!(
-                d.contains("think"),
-                "{lang} directive must cover the thinking process: {d}"
-            );
-            assert!(!d.contains("简体中文"), "{lang} must not select Chinese");
-        }
+    fn output_language_directive_follows_each_current_user_request() {
+        let directive = output_language_directive();
+        assert!(directive.contains("latest"));
+        assert!(directive.contains("think in that language"));
+        assert!(directive.contains("final response"));
+        assert!(directive.contains("Re-evaluate"));
+        assert!(!directive.contains("English"));
+        assert!(!directive.contains("简体中文"));
+        assert!(!directive.contains("app UI language"));
     }
 
     #[test]
@@ -1975,7 +1955,7 @@ mod tests {
         for zh in ["zh", "zh-CN", "zh_CN", "zh-Hans", "zh-Hans-CN", "ZH-cn"] {
             assert_eq!(normalize_lang(zh), "zh-CN", "{zh} must fold to zh-CN");
         }
-        // Non-Chinese tags are returned normalized (→ English directive).
+        // Non-Chinese tags are returned normalized unchanged.
         assert_eq!(normalize_lang("en_US"), "en-US");
         assert_eq!(normalize_lang("fr-FR"), "fr-FR");
     }

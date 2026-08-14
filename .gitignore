@@ -39,7 +39,6 @@ ui/dist/
 # Tauri
 apps/desktop/gen/
 apps/desktop/target/
-apps/desktop/.staged-resources/
 
 # Tauri updater signing keys — NEVER commit private keys
 apps/desktop/.tauri/
