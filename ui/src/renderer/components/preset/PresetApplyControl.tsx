@@ -6,8 +6,15 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Message } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
-import type { Preset, PresetReference, PresetTarget, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import {
+  presetSupportsTarget,
+  type Preset,
+  type PresetReference,
+  type PresetTarget,
+  type ResolvedPresetSnapshot,
+} from '@/common/types/agent/presetTypes';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
+import { resolvePresetCatalogName } from '@/renderer/utils/model/presetPresentation';
 import useSWR from 'swr';
 import {
   fetchPresetCatalog,
@@ -37,7 +44,7 @@ const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, d
   }, [appliedPreset?.preset_id]);
 
   const availablePresets = useMemo(
-    () => presets.filter((preset) => preset.enabled && preset.targets.includes(target)),
+    () => presets.filter((preset) => preset.enabled && presetSupportsTarget(preset, target)),
     [presets, target]
   );
   const selectedPresetExists = useMemo(
@@ -82,7 +89,7 @@ const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, d
         >
           {availablePresets.map((preset) => (
             <NomiSelect.Option key={preset.preset_id} value={preset.preset_id}>
-              {preset.name_i18n?.[i18n.language] || preset.name}
+              {resolvePresetCatalogName(preset, i18n.language)}
             </NomiSelect.Option>
           ))}
         </NomiSelect>

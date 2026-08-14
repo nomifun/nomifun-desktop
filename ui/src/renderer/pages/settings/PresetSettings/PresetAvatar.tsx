@@ -4,8 +4,8 @@
 import type { PresetListItem } from './types';
 import { Avatar } from '@arco-design/web-react';
 import { Robot } from '@icon-park/react';
-import React from 'react';
-import { isEmoji, resolveAvatarImageSrc } from './presetUtils';
+import React, { useState } from 'react';
+import { isEmoji, resolvePresetAvatarImageSrc } from '@/renderer/utils/model/presetPresentation';
 
 type PresetAvatarProps = {
   preset: PresetListItem;
@@ -16,7 +16,9 @@ type PresetAvatarProps = {
 const PresetAvatar: React.FC<PresetAvatarProps> = ({ preset, size = 32, avatarImageMap }) => {
   const resolvedAvatar = preset.avatar?.trim();
   const hasEmojiAvatar = Boolean(resolvedAvatar && isEmoji(resolvedAvatar));
-  const avatarImage = resolveAvatarImageSrc(resolvedAvatar, avatarImageMap);
+  const resolvedImage = resolvePresetAvatarImageSrc(resolvedAvatar, avatarImageMap);
+  const [failedImage, setFailedImage] = useState<string>();
+  const avatarImage = resolvedImage === failedImage ? undefined : resolvedImage;
   const iconSize = Math.floor(size * 0.5);
   const emojiSize = Math.floor(size * 0.6);
 
@@ -24,7 +26,14 @@ const PresetAvatar: React.FC<PresetAvatarProps> = ({ preset, size = 32, avatarIm
     <Avatar.Group size={size}>
       <Avatar className='border-none' shape='square' style={{ backgroundColor: 'var(--color-fill-2)', border: 'none' }}>
         {avatarImage ? (
-          <img src={avatarImage} alt='' width={emojiSize} height={emojiSize} style={{ objectFit: 'contain' }} />
+          <img
+            src={avatarImage}
+            alt=''
+            width={emojiSize}
+            height={emojiSize}
+            style={{ objectFit: 'contain' }}
+            onError={() => setFailedImage(avatarImage)}
+          />
         ) : hasEmojiAvatar ? (
           <span style={{ fontSize: emojiSize }}>{resolvedAvatar}</span>
         ) : (

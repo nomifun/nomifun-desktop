@@ -35,7 +35,7 @@ describe('preset conversation display identity', () => {
       name_i18n: { 'zh-CN': '当前名称' },
     } as unknown as Preset;
 
-    expect(resolvePresetDisplayName(presetId, null, livePreset, 'zh-CN')).toBe(
+    expect(resolvePresetDisplayName(presetId, null, livePreset, 'zh-Hans')).toBe(
       '当前名称',
     );
   });

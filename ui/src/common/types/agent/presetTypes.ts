@@ -60,6 +60,12 @@ export const parsePresetTagKey = (value: unknown): PresetTagKey => {
 export type PresetSource = 'builtin' | 'user' | 'extension';
 export type PresetTarget = 'conversation' | 'execution_step' | 'companion' | 'cron';
 
+/** Match the backend contract: an empty target list is universal for legacy presets. */
+export const presetSupportsTarget = (
+  preset: Pick<Preset, 'targets'>,
+  target: PresetTarget
+): boolean => preset.targets.length === 0 || preset.targets.includes(target);
+
 export interface AgentPreference {
   agent_id: AgentId;
   required: boolean;

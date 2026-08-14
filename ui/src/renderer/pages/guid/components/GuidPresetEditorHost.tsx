@@ -16,7 +16,7 @@ import { useDetectedAgents, usePresetEditor, usePresetList, usePresetTags } from
 import PresetEditDrawer from '@/renderer/pages/settings/PresetSettings/PresetEditDrawer';
 import DeletePresetModal from '@/renderer/pages/settings/PresetSettings/DeletePresetModal';
 import SkillConfirmModals from '@/renderer/pages/settings/PresetSettings/SkillConfirmModals';
-import { resolveAvatarImageSrc } from '@/renderer/pages/settings/PresetSettings/presetUtils';
+import { resolvePresetAvatarImageSrc } from '@/renderer/utils/model/presetPresentation';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import styles from '../index.module.css';
 import type { AvailableAgent, EffectiveAgentInfo } from '../types';
@@ -69,7 +69,7 @@ const GuidPresetEditorHost: React.FC<GuidPresetEditorHostProps> = ({
     message: agentMessage,
   });
 
-  const editAvatarImage = resolveAvatarImageSrc(editor.editAvatar, avatarImageMap);
+  const editAvatarImage = resolvePresetAvatarImageSrc(editor.editAvatar, avatarImageMap);
 
   // ── openPresetDetails registration ──
   const openPresetDetails = useCallback(() => {
