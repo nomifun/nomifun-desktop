@@ -64,6 +64,13 @@ pub struct McpServerConfig {
     /// Defaults to true when omitted — MCP tools are deferred by default to reduce
     /// input token usage. Set to `false` to send full schemas eagerly.
     pub deferred: Option<bool>,
+    /// Maximum wall-clock time for a single JSON-RPC request to this server.
+    ///
+    /// This covers a complete tool/resource request, not just establishing the
+    /// TCP connection.  An absent value uses Nomi's conservative coding-tool
+    /// default; deployments that run deliberately long MCP tools can opt in to
+    /// a larger bounded value per server.
+    pub request_timeout_secs: Option<u64>,
 }
 
 /// Collection of MCP server configurations

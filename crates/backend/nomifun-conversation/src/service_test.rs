@@ -5189,7 +5189,6 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
         conversation_id: &str,
         mut options: AgentRuntimeBuildOptions,
     ) -> Result<AgentRuntimeHandle, AppError> {
-        self.build_count.fetch_add(1, Ordering::SeqCst);
         let workspace = options.workspace.clone();
         if let Some(requested) = options.workspace_binding_lease.take() {
             let mut bindings = self.workspace_bindings.lock().unwrap();
@@ -5206,6 +5205,7 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
         if let Some(existing) = agents.get(conversation_id) {
             return Ok(existing.clone());
         }
+        self.build_count.fetch_add(1, Ordering::SeqCst);
         let mut agent = MockAgent::new(conversation_id);
         agent.workspace_override = Some(workspace);
         let instance = AgentRuntimeHandle::Mock(Arc::new(agent));
@@ -14191,6 +14191,137 @@ async fn edit_resubmit_rebuilds_a_missing_terminal_runtime_before_rewind() {
         registry.build_count() >= 1,
         "a cold edit must construct or restore the runtime"
     );
+}
+
+#[tokio::test]
+async fn edit_resubmit_reprepares_an_existing_runtime_after_knowledge_binding_change() {
+    const USER_ID: &str = SQLITE_TEST_OWNER;
+    const EDIT_KEY: &str = "edit-existing-runtime-new-knowledge-binding";
+
+    let database = init_database_memory().await.unwrap();
+    seed_openai_chat_model(database.pool(), PROVIDER_ID_1, "edit fixture", "m1", 0).await;
+    let repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
+    let broadcaster = Arc::new(MockBroadcaster::new());
+    let registry = Arc::new(MockAgentRuntimeRegistry::new());
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = registry.clone();
+    let service = ConversationService::new(
+        Arc::<str>::from(USER_ID),
+        std::env::temp_dir(),
+        broadcaster.clone(),
+        Arc::new(FixedSkillResolver { names: vec![] }),
+        runtime_registry.clone(),
+        repo.clone(),
+        Arc::new(StubAgentMetadataRepo),
+        Arc::new(StubAcpSessionRepo::default()),
+        Arc::new(crate::NoExecutionConversationBoundary),
+    );
+
+    let workspace = unique_test_dir("edit-existing-runtime-knowledge");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let knowledge_database = init_database_memory().await.unwrap();
+    let knowledge_repo: Arc<dyn nomifun_db::IKnowledgeRepository> = Arc::new(
+        nomifun_db::SqliteKnowledgeRepository::new(knowledge_database.pool().clone()),
+    );
+    let knowledge_data_dir = unique_test_dir("edit-existing-runtime-knowledge-data");
+    let knowledge = Arc::new(KnowledgeService::new(
+        knowledge_repo,
+        &knowledge_data_dir,
+        KnowledgeEventEmitter::new(broadcaster, Arc::from(USER_ID)),
+    ));
+    service.with_knowledge_service(knowledge.clone());
+
+    let conversation = service
+        .create(
+            USER_ID,
+            serde_json::from_value(json!({
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+                "extra": { "workspace": workspace }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    service
+        .warmup_for_view(
+            USER_ID,
+            &conversation.conversation_id,
+            &runtime_registry,
+        )
+        .await
+        .expect("initial warmup must seed the unbound runtime signature");
+    assert!(registry.get_runtime(&conversation.conversation_id).is_some());
+    assert_eq!(registry.build_count(), 1);
+
+    let target_message_id = MessageId::new().into_string();
+    repo.insert_message(&MessageRow {
+        id: 0,
+        message_id: target_message_id.clone(),
+        conversation_id: conversation.conversation_id.clone(),
+        msg_id: Some(target_message_id.clone()),
+        r#type: "text".to_owned(),
+        content: json!({ "content": "original" }).to_string(),
+        position: Some("right".to_owned()),
+        status: Some("finish".to_owned()),
+        hidden: false,
+        created_at: now_ms(),
+    })
+    .await
+    .unwrap();
+    finish_exact_sqlite_turn_for_test(
+        repo.as_ref(),
+        &conversation.conversation_id,
+        "edit-existing-runtime-knowledge-finished",
+    )
+    .await;
+
+    let knowledge_base = knowledge
+        .create_base("edit binding", "", None, None)
+        .await
+        .unwrap();
+    let workpath_key =
+        nomifun_knowledge::session_workpath_key(&workspace, &std::env::temp_dir());
+    knowledge
+        .set_binding(
+            "workpath",
+            &workpath_key,
+            KnowledgeBinding {
+                enabled: true,
+                kb_ids: vec![knowledge_base.knowledge_base_id],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let delivery = service
+        .edit_and_resubmit_with_idempotency_key(
+            USER_ID,
+            &conversation.conversation_id,
+            &target_message_id,
+            EDIT_KEY,
+            serde_json::from_value(json!({"content": "replacement"})).unwrap(),
+            &runtime_registry,
+        )
+        .await
+        .expect("edit/resubmit must re-run strict runtime preparation");
+    assert!(!delivery.replayed);
+    assert!(
+        registry
+            .termination_records()
+            .into_iter()
+            .any(|(conversation_id, reason)| {
+                conversation_id == conversation.conversation_id
+                    && reason == Some(AgentKillReason::KnowledgeBindingChanged)
+            }),
+        "the stale warmed runtime must be torn down before the changed mount binding is activated"
+    );
+    assert!(
+        registry.build_count() >= 2,
+        "edit/resubmit must pass the existing runtime through preparation and rebuild it"
+    );
+    wait_for_turn_released(&service, &conversation.conversation_id).await;
 }
 
 #[tokio::test]

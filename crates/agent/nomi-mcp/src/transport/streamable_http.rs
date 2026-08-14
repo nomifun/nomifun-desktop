@@ -29,7 +29,7 @@ impl StreamableHttpTransport {
         }
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: super::bounded_http_client()?,
             url: url.to_string(),
             headers: header_map,
             session_id: Mutex::new(None),

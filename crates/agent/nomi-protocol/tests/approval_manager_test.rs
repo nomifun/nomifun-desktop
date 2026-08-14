@@ -42,3 +42,24 @@ async fn resolve_preserves_denial_reason() {
     ));
     assert!(!manager.is_auto_approved("exec"));
 }
+
+#[test]
+fn stale_approval_token_cannot_remove_a_reused_call_id_registration() {
+    let manager = ToolApprovalManager::new();
+    let (_old_rx, old_token) =
+        manager.request_approval_with_token("reused-call", &ToolCategory::Exec);
+    let (new_rx, new_token) =
+        manager.request_approval_with_token("reused-call", &ToolCategory::Exec);
+
+    assert_ne!(old_token, new_token);
+    assert!(
+        !manager.drop_pending_if("reused-call", old_token),
+        "a stale timeout must not remove the replacement request"
+    );
+
+    manager.resolve("reused-call", ToolApprovalResult::Approved);
+    assert!(matches!(
+        new_rx.blocking_recv().expect("replacement approval should resolve"),
+        ToolApprovalResult::Approved
+    ));
+}

@@ -12,6 +12,10 @@ pub struct FileState {
     pub offset: Option<usize>,
     /// Line limit of partial read (None = full read).
     pub limit: Option<usize>,
+    /// Whether this exact version was returned by Read and may therefore use
+    /// the unchanged stub. Writes update the cached content for edit safety but
+    /// clear this flag so the next Read returns the new bytes to the model.
+    pub dedup_eligible: bool,
 }
 
 impl FileState {

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ConversationId, MessageId } from '@/common/types/ids';
+import { parseMessageId, type ConversationId, type MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import { transformMessage, transformUserCreatedEvent } from '@/common/chat/chatLib';
 import { isToolGroupStatusActive, normalizeToolGroupStatus } from '@/common/chat/toolGroupStatus';
@@ -15,15 +15,17 @@ import { uuid } from '@/common/utils';
 import { useAddOrUpdateMessage } from '@/renderer/pages/conversation/Messages/hooks';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import {
-  getConversationRuntimeAuthority,
   isCompleteMessageProjection,
   isConversationProcessing,
 } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ThoughtData } from '../thoughtTypes';
 import {
+  AUTHORITATIVE_RUNTIME_RESYNC_DELAYS_MS,
+  reconcileConversationAuthoritativeRuntime,
   reconcileConversationTurnAfterAcceptedReplay,
   reconcileConversationTurnAfterStreamTerminal,
+  TERMINAL_RECONCILE_DELAYS_MS,
 } from '../reconcileConversationTurnAfterStreamTerminal';
 import {
   classifyAuthoritativeTurnCompletion,
@@ -36,6 +38,31 @@ import {
   getNomiHydrationLifecycleFence,
   shouldApplyNomiStreamEventToTurn,
 } from './nomiLifecycleFence';
+import {
+  NomiMessageBufferStore,
+  isNomiTextReplacement,
+  rememberBoundedNomiCronId,
+  rememberBoundedNomiProcessedVersion,
+} from './nomiMessageBuffer';
+import {
+  createNomiPostProcessState,
+  discardNomiPostProcessTerminal,
+  forgetNomiPostProcessPending,
+  getNomiPostProcessInFlightWaiters,
+  isNomiBackendFinalTextAuthoritative,
+  isNomiInFlightPostProcessCurrent,
+  isNomiPostProcessBufferAssociated,
+  isNomiPostProcessRequestCurrent,
+  markNomiPostProcessWaitingForInFlight,
+  promoteNomiPostProcessObservationsForBuffer,
+  rememberNomiPostProcessObservation,
+  rememberNomiPostProcessPending,
+  shouldHandleNomiTerminalPostProcess,
+  tryRememberNomiInFlightPostProcess,
+  type NomiInFlightPostProcess,
+  type NomiPostProcessState,
+  type NomiTerminalPostProcessRequest,
+} from './nomiPostProcessState';
 import { initialNomiTurnState, isTurnRunning, nomiTurnReducer, type NomiTurnEvent } from './nomiTurnState';
 
 type NomiToolGroupRuntimeTool = {
@@ -100,6 +127,8 @@ export const useNomiMessage = (
   const onConfigChanged = options?.onConfigChanged;
   const readOnly = options?.readOnly === true;
   const onConfigChangedRef = useRef(onConfigChanged);
+  const conversationIdRef = useRef(conversation_id);
+  conversationIdRef.current = conversation_id;
   const addOrUpdateMessage = useAddOrUpdateMessage();
   // Single source of truth for the turn's activity state (design §3.2): a pure
   // reducer over lifecycle events replaces three hand-synced booleans.
@@ -128,9 +157,23 @@ export const useNomiMessage = (
   const turnStartGenerationRef = useRef(0);
   const turnCompletionGenerationRef = useRef(0);
   const turnReconcileSequenceRef = useRef(0);
+  const postProcessGenerationRef = useRef(0);
   const mountedRef = useRef(true);
-  const messageBufferRef = useRef(new Map<string, string>());
-  const processedCronMsgIdsRef = useRef(new Set<string>());
+  const lastSettledTurnIdRef = useRef<MessageId | null>(null);
+  const turnSettledRef = useRef(true);
+  const messageBufferRef = useRef(new NomiMessageBufferStore());
+  const postProcessStateRef = useRef<NomiPostProcessState>(createNomiPostProcessState());
+  const backendTerminalIdsRef = useRef<Set<string>>(new Set());
+  const backendTerminalTurnIdsRef = useRef<Set<string>>(new Set());
+
+  const invalidatePostProcessing = useCallback((clearBuffer = false) => {
+    postProcessGenerationRef.current += 1;
+    postProcessStateRef.current = createNomiPostProcessState();
+    backendTerminalIdsRef.current = new Set();
+    backendTerminalTurnIdsRef.current = new Set();
+    lastSettledTurnIdRef.current = null;
+    if (clearBuffer) messageBufferRef.current.clearAll();
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -138,8 +181,9 @@ export const useNomiMessage = (
       mountedRef.current = false;
       turnLifecycleGenerationRef.current += 1;
       turnReconcileSequenceRef.current += 1;
+      invalidatePostProcessing(true);
     };
-  }, []);
+  }, [invalidatePostProcessing]);
 
   // Mirror the reducer state into a ref so the (non-resubscribing) stream
   // closure can read the current turn state without being a dependency.
@@ -215,32 +259,85 @@ export const useNomiMessage = (
   }, []);
 
   const settleCompletedTurn = useCallback(() => {
+    if (turnSettledRef.current && !rootTurnIdRef.current && !awaitingBackendTurnRef.current) {
+      return;
+    }
     turnLifecycleGenerationRef.current += 1;
     turnCompletionGenerationRef.current += 1;
     turnReconcileSequenceRef.current += 1;
+    if (rootTurnIdRef.current) {
+      lastSettledTurnIdRef.current = rootTurnIdRef.current;
+    }
     rootTurnIdRef.current = null;
     awaitingBackendTurnRef.current = false;
     turnClosedRef.current = true;
     rejectUnannouncedStartRef.current = false;
     verifyUnannouncedStartRuntimeRef.current = true;
     activeMsgIdRef.current = null;
+    turnSettledRef.current = true;
     dispatchTurn({ type: 'finish' });
     setThought({ subject: '', description: '' });
+    // A compatibility finish can race its final text fragment. Do not clear the
+    // bounded buffer or pending fallback at the ordinary idle boundary; stop,
+    // switch, unmount, or the next turn explicitly invalidates them.
   }, []);
 
+  const adoptAuthoritativeProcessing = useCallback((conversation: TChatConversation) => {
+    const activeTurnId = conversation.runtime?.active_turn_id;
+    if (
+      !activeTurnId ||
+      rejectUnannouncedStartRef.current ||
+      cancelledTurnIdsRef.current.has(activeTurnId)
+    ) {
+      return;
+    }
+
+    const changedTurn = rootTurnIdRef.current !== activeTurnId;
+    const shouldRaiseRunning =
+      changedTurn ||
+      turnClosedRef.current ||
+      awaitingBackendTurnRef.current ||
+      !isTurnRunning(turnStateRef.current);
+    if (changedTurn) {
+      invalidatePostProcessing(true);
+      turnStartGenerationRef.current += 1;
+    }
+    rootTurnIdRef.current = activeTurnId;
+    awaitingBackendTurnRef.current = false;
+    turnClosedRef.current = false;
+    rejectUnannouncedStartRef.current = false;
+    verifyUnannouncedStartRuntimeRef.current = false;
+    turnSettledRef.current = false;
+    setStopNotice(null);
+    if (shouldRaiseRunning) dispatchTurn({ type: 'hydrate', isRunning: true });
+    setHasHydratedRunningState(true);
+  }, [invalidatePostProcessing]);
+
+  const startAuthoritativeRuntimeReconciliation = useCallback(
+    ({ immediate = false }: { immediate?: boolean } = {}) => {
+      const generation = turnLifecycleGenerationRef.current;
+      const sequence = turnReconcileSequenceRef.current + 1;
+      turnReconcileSequenceRef.current = sequence;
+      void reconcileConversationAuthoritativeRuntime(conversation_id, {
+        isCurrent: () =>
+          mountedRef.current &&
+          turnLifecycleGenerationRef.current === generation &&
+          turnReconcileSequenceRef.current === sequence,
+        onIdle: settleCompletedTurn,
+        onProcessing: adoptAuthoritativeProcessing,
+        delaysMs: immediate
+          ? AUTHORITATIVE_RUNTIME_RESYNC_DELAYS_MS
+          : TERMINAL_RECONCILE_DELAYS_MS,
+        retryForever: true,
+        logLabel: 'Nomi runtime',
+      });
+    },
+    [adoptAuthoritativeProcessing, conversation_id, settleCompletedTurn]
+  );
+
   const reconcileAfterStreamTerminal = useCallback(() => {
-    const generation = turnLifecycleGenerationRef.current;
-    const sequence = turnReconcileSequenceRef.current + 1;
-    turnReconcileSequenceRef.current = sequence;
-    void reconcileConversationTurnAfterStreamTerminal(
-      conversation_id,
-      () =>
-        mountedRef.current &&
-        turnLifecycleGenerationRef.current === generation &&
-        turnReconcileSequenceRef.current === sequence,
-      settleCompletedTurn
-    );
-  }, [conversation_id, settleCompletedTurn]);
+    startAuthoritativeRuntimeReconciliation();
+  }, [startAuthoritativeRuntimeReconciliation]);
 
   const markTurnAccepted = useCallback(
     () => {
@@ -248,19 +345,10 @@ export const useNomiMessage = (
       if (!verifyUnannouncedStartRuntimeRef.current) turnLifecycleGenerationRef.current += 1;
       rootTurnIdRef.current = null;
       awaitingBackendTurnRef.current = false;
-      const generation = turnLifecycleGenerationRef.current;
-      const sequence = turnReconcileSequenceRef.current + 1;
-      turnReconcileSequenceRef.current = sequence;
-      void reconcileConversationTurnAfterStreamTerminal(
-        conversation_id,
-        () =>
-          mountedRef.current &&
-          turnLifecycleGenerationRef.current === generation &&
-          turnReconcileSequenceRef.current === sequence,
-        settleCompletedTurn
-      );
+      turnSettledRef.current = false;
+      startAuthoritativeRuntimeReconciliation();
     },
-    [conversation_id, settleCompletedTurn]
+    [startAuthoritativeRuntimeReconciliation]
   );
 
   const reconcilePublicDeliveryReplay = useCallback(
@@ -274,9 +362,11 @@ export const useNomiMessage = (
       // reopen this already-accepted delivery.
       turnLifecycleGenerationRef.current += 1;
       turnReconcileSequenceRef.current += 1;
+      invalidatePostProcessing(true);
       rootTurnIdRef.current = null;
       awaitingBackendTurnRef.current = false;
       turnClosedRef.current = true;
+      turnSettledRef.current = true;
       rejectUnannouncedStartRef.current = false;
       verifyUnannouncedStartRuntimeRef.current = true;
       activeMsgIdRef.current = null;
@@ -291,70 +381,402 @@ export const useNomiMessage = (
           mountedRef.current &&
           turnLifecycleGenerationRef.current === generation &&
           turnReconcileSequenceRef.current === sequence,
-        () => {
+        (conversation) => {
           if (observedProcessing) return;
           observedProcessing = true;
-          turnClosedRef.current = false;
-          verifyUnannouncedStartRuntimeRef.current = true;
-          dispatchTurn({ type: 'hydrate', isRunning: true });
+          adoptAuthoritativeProcessing(conversation);
         },
         settleCompletedTurn
       );
     },
-    [conversation_id, settleCompletedTurn]
+    [adoptAuthoritativeProcessing, conversation_id, invalidatePostProcessing, settleCompletedTurn]
   );
 
-  const processCompletedAssistantMessage = useCallback(
-    async (msgId: MessageId) => {
-      if (readOnly || !msgId || processedCronMsgIdsRef.current.has(msgId)) {
-        return;
-      }
+  const isCurrentPostProcessScope = useCallback((request: NomiTerminalPostProcessRequest): boolean => {
+    return isNomiPostProcessRequestCurrent(request, {
+      mounted: mountedRef.current,
+      conversationId: conversationIdRef.current,
+      generation: postProcessGenerationRef.current,
+      turnStartGeneration: turnStartGenerationRef.current,
+      rootTurnId: rootTurnIdRef.current,
+      lastSettledTurnId: lastSettledTurnIdRef.current,
+      cancelledTurnIds: cancelledTurnIdsRef.current,
+      backendTerminalIds: backendTerminalIdsRef.current,
+      backendTerminalTurnIds: backendTerminalTurnIdsRef.current,
+    });
+  }, []);
 
-      const rawContent = messageBufferRef.current.get(msgId) ?? '';
-      if (!rawContent.trim()) {
-        return;
-      }
-
-      processedCronMsgIdsRef.current.add(msgId);
-
-      try {
-        const result = await processLocalCronResponse(conversation_id, rawContent);
-        if (result.displayContent !== undefined && result.displayContent !== rawContent) {
-          addOrUpdateMessage({
-            id: uuid(),
-            msg_id: msgId,
-            type: 'text',
-            position: 'left',
-            conversation_id,
-            created_at: Date.now(),
-            content: {
-              content: result.displayContent,
-              replace: true,
-            },
-          });
+  const isCurrentPostProcess = useCallback(
+    (request: NomiInFlightPostProcess): boolean => {
+      if (!isCurrentPostProcessScope(request)) return false;
+      const current = messageBufferRef.current.get(request.targetMessageId);
+      return isNomiInFlightPostProcessCurrent(
+        postProcessStateRef.current,
+        request,
+        {
+          mounted: mountedRef.current,
+          conversationId: conversationIdRef.current,
+          generation: postProcessGenerationRef.current,
+          turnStartGeneration: turnStartGenerationRef.current,
+          rootTurnId: rootTurnIdRef.current,
+          lastSettledTurnId: lastSettledTurnIdRef.current,
+          cancelledTurnIds: cancelledTurnIdsRef.current,
+          backendTerminalIds: backendTerminalIdsRef.current,
+          backendTerminalTurnIds: backendTerminalTurnIdsRef.current,
+        },
+        {
+          version: current?.version,
+          turnId: current?.turnId,
         }
+      );
+    },
+    [isCurrentPostProcessScope]
+  );
 
-        for (const response of result.systemResponses) {
-          addOrUpdateMessage(
-            {
+  const isPostProcessBufferAssociated = useCallback(
+    (messageId: string | undefined, turnId?: string): boolean => {
+      return isNomiPostProcessBufferAssociated(
+        postProcessStateRef.current,
+        conversationIdRef.current,
+        messageId,
+        turnId
+      );
+    },
+    []
+  );
+
+  const isTerminalPostProcessEligible = useCallback(
+    (
+      message: Pick<
+        IResponseMessage,
+        | 'msg_id'
+        | 'turn_id'
+        | 'final_text_msg_id'
+        | 'final_text_authoritative'
+        | 'type'
+        | 'data'
+      >
+    ): boolean => {
+      return shouldHandleNomiTerminalPostProcess(
+        {
+          type: message.type,
+          data: message.data,
+          msgId: message.msg_id,
+          turnId: message.turn_id,
+          finalTextMsgId: message.final_text_msg_id,
+          finalTextAuthoritative: message.final_text_authoritative,
+        },
+        {
+          rootTurnId: rootTurnIdRef.current,
+          lastSettledTurnId: lastSettledTurnIdRef.current,
+          hasBuffer: (messageId) => messageBufferRef.current.has(messageId),
+          isAssociated: isPostProcessBufferAssociated,
+        }
+      );
+    },
+    [isPostProcessBufferAssociated]
+  );
+
+  const resolveLegacyPostProcessBuffer = useCallback(
+    (
+      request: NomiTerminalPostProcessRequest
+    ):
+      | {
+          messageId: MessageId;
+          content: string;
+          version: number;
+          truncated: boolean;
+        }
+      | undefined => {
+      const matchesTurn = (turnId: string | undefined) =>
+        !request.turnId || !turnId || turnId === request.turnId;
+
+      if (request.targetMessageId) {
+        const buffered = messageBufferRef.current.get(request.targetMessageId);
+        if (buffered && matchesTurn(buffered.turnId)) {
+          return {
+            messageId: request.targetMessageId,
+            content: buffered.content,
+            version: buffered.version,
+            truncated: buffered.truncated,
+          };
+        }
+        return undefined;
+      }
+
+      const terminalBuffer = messageBufferRef.current.get(request.terminalId);
+      if (terminalBuffer && matchesTurn(terminalBuffer.turnId)) {
+        return {
+          messageId: request.terminalId,
+          content: terminalBuffer.content,
+          version: terminalBuffer.version,
+          truncated: terminalBuffer.truncated,
+        };
+      }
+
+      if (request.turnId) {
+        const latest = messageBufferRef.current.findLatestForTurn(request.turnId);
+        if (latest) {
+          return {
+            messageId: parseMessageId(latest.messageId),
+            content: latest.content,
+            version: latest.version,
+            truncated: latest.truncated,
+          };
+        }
+      }
+      return undefined;
+    },
+    []
+  );
+
+  const startLegacyPostProcess = useCallback(
+    (request: NomiTerminalPostProcessRequest): void => {
+      if (
+        readOnly ||
+        !request.terminalId ||
+        request.conversationId !== conversationIdRef.current ||
+        request.generation !== postProcessGenerationRef.current ||
+        request.turnStartGeneration !== turnStartGenerationRef.current ||
+        backendTerminalIdsRef.current.has(request.terminalId) ||
+        (request.turnId && backendTerminalTurnIdsRef.current.has(request.turnId))
+      ) {
+        return;
+      }
+
+      const postProcessState = postProcessStateRef.current;
+      if (postProcessState.inFlight.has(request.terminalId)) return;
+
+      const observed = postProcessState.observed.get(request.terminalId);
+      if (observed) {
+        const observedBuffer = messageBufferRef.current.get(observed.targetMessageId);
+        if (observedBuffer?.version === observed.bufferVersion) {
+          return;
+        }
+        postProcessState.observed.delete(request.terminalId);
+        postProcessState.processed.delete(observed.targetMessageId);
+      }
+      rememberNomiPostProcessPending(postProcessState, request);
+      postProcessState.waitingForInFlight.delete(request.terminalId);
+      const resolved = resolveLegacyPostProcessBuffer(request);
+      if (!resolved) {
+        return;
+      }
+      if (resolved.truncated || !resolved.content.trim()) {
+        // An explicit empty replacement is a real, versioned projection, while
+        // a truncated buffer is deliberately unusable: rewriting from it could
+        // replace a complete rendered message with only the retained prefix.
+        // Keep an exact observation so a later complete replacement can advance
+        // the version and wake a fresh attempt, but do not spin on reconnect.
+        forgetNomiPostProcessPending(postProcessState, request.terminalId);
+        rememberBoundedNomiProcessedVersion(
+          postProcessState.processed,
+          resolved.messageId,
+          resolved.version
+        );
+        rememberNomiPostProcessObservation(postProcessState, {
+          ...request,
+          targetMessageId: resolved.messageId,
+          allowTurnFallback: false,
+          bufferVersion: resolved.version,
+        });
+        return;
+      }
+
+      const duplicateTarget = [...postProcessState.inFlight.values()].some(
+        (inFlight) =>
+          inFlight.targetMessageId === resolved.messageId &&
+          inFlight.turnId === request.turnId
+      );
+      if (duplicateTarget) {
+        markNomiPostProcessWaitingForInFlight(postProcessState, request.terminalId);
+        return;
+      }
+
+      const processedVersion = postProcessState.processed.get(resolved.messageId);
+      if (processedVersion === resolved.version) {
+        forgetNomiPostProcessPending(postProcessState, request.terminalId);
+        return;
+      }
+      if (processedVersion !== undefined) {
+        postProcessState.processed.delete(resolved.messageId);
+      }
+
+      const inFlight: NomiInFlightPostProcess = {
+        ...request,
+        targetMessageId: resolved.messageId,
+        allowTurnFallback: false,
+        bufferVersion: resolved.version,
+      };
+      if (!tryRememberNomiInFlightPostProcess(postProcessState, inFlight)) {
+        return;
+      }
+      forgetNomiPostProcessPending(postProcessState, request.terminalId);
+      void (async () => {
+        let resultApplied = false;
+        let processingFailed = false;
+        try {
+          const result = await processLocalCronResponse(request.conversationId, resolved.content);
+          // Replacement and system responses share one guard. A stop, switch,
+          // new turn, or authoritative backend terminal invalidates both.
+          if (!isCurrentPostProcess(inFlight)) return;
+
+          if (
+            result.displayContent !== undefined &&
+            result.displayContent !== resolved.content
+          ) {
+            addOrUpdateMessage({
               id: uuid(),
-              type: 'tips',
-              position: 'center',
-              conversation_id,
+              msg_id: resolved.messageId,
+              type: 'text',
+              position: 'left',
+              conversation_id: request.conversationId,
               created_at: Date.now(),
               content: {
-                content: response,
-                type: response.startsWith('❌') ? 'error' : 'success',
+                content: result.displayContent,
+                replace: true,
               },
-            },
-            true
+            });
+          }
+
+          for (const response of result.systemResponses) {
+            addOrUpdateMessage(
+              {
+                id: uuid(),
+                type: 'tips',
+                position: 'center',
+                conversation_id: request.conversationId,
+                created_at: Date.now(),
+                content: {
+                  content: response,
+                  type: response.startsWith('❌') ? 'error' : 'success',
+                },
+              },
+              true
+            );
+          }
+          resultApplied = true;
+        } catch {
+          // Keep the buffer available for a later terminal/reconnect retry.
+          processingFailed = true;
+        } finally {
+          // Invalidation swaps the whole state object. A completion from an old
+          // generation must not delete or mark entries owned by the replacement
+          // turn even when terminal/message ids happen to match.
+          if (
+            postProcessStateRef.current !== postProcessState ||
+            postProcessState.inFlight.get(request.terminalId) !== inFlight
+          ) {
+            return;
+          }
+          postProcessState.inFlight.delete(request.terminalId);
+          const pendingBeforeCompletion =
+            getNomiPostProcessInFlightWaiters(postProcessState);
+
+          const current = messageBufferRef.current.get(resolved.messageId);
+          const hasLateFragment =
+            current !== undefined && current.version !== resolved.version;
+          const scopeStillCurrent = isCurrentPostProcessScope(inFlight);
+          if (!resultApplied && !processingFailed && !hasLateFragment) {
+            // The async result became stale because the scope was invalidated
+            // (for example, an authoritative backend terminal won the race).
+            // Do not resurrect a pending fallback after that invalidation.
+            postProcessState.processed.delete(resolved.messageId);
+            return;
+          }
+          if (resultApplied && !hasLateFragment) {
+            rememberBoundedNomiProcessedVersion(
+              postProcessState.processed,
+              resolved.messageId,
+              resolved.version
+            );
+            rememberNomiPostProcessObservation(postProcessState, inFlight);
+          } else {
+            postProcessState.processed.delete(resolved.messageId);
+            rememberNomiPostProcessPending(postProcessState, {
+              ...request,
+              targetMessageId: resolved.messageId,
+              allowTurnFallback: false,
+            });
+          }
+
+          // Releasing any running slot wakes requests that were held in the
+          // bounded pending map because the in-flight cap or a duplicate target
+          // was active. A failed current request is deliberately absent from
+          // this pre-completion snapshot so it does not enter a hot retry loop.
+          // A late fragment is the exception: its advanced version should retry
+          // immediately, preserving the existing deterministic replacement
+          // path.
+          const retryRequests = pendingBeforeCompletion.filter(
+            (pending) => postProcessState.pending.get(pending.terminalId) === pending
           );
+          if (resultApplied || hasLateFragment) {
+            const currentPending = postProcessState.pending.get(request.terminalId);
+            if (currentPending && !retryRequests.includes(currentPending)) {
+              retryRequests.push(currentPending);
+            }
+          }
+          if (scopeStillCurrent && retryRequests.length > 0) {
+            queueMicrotask(() => {
+              if (postProcessStateRef.current !== postProcessState) return;
+              for (const pending of retryRequests) {
+                if (postProcessState.pending.get(pending.terminalId) !== pending) continue;
+                startLegacyPostProcess(pending);
+              }
+            });
+          }
         }
-      } catch {
-        processedCronMsgIdsRef.current.delete(msgId);
-      }
+      })();
     },
-    [addOrUpdateMessage, conversation_id, readOnly]
+    [
+      addOrUpdateMessage,
+      isCurrentPostProcess,
+      isCurrentPostProcessScope,
+      readOnly,
+      resolveLegacyPostProcessBuffer,
+    ]
+  );
+
+  const retryPendingPostProcesses = useCallback(() => {
+    for (const request of [...postProcessStateRef.current.pending.values()]) {
+      startLegacyPostProcess(request);
+    }
+  }, [startLegacyPostProcess]);
+
+  const processCompletedAssistantMessage = useCallback(
+    (message: IResponseMessage): void => {
+      if (message.turn_id) {
+        // Preserve the exact owner across the terminal -> authoritative-idle
+        // gap. The fallback may still be waiting for a final text fragment
+        // after settle clears rootTurnIdRef.
+        lastSettledTurnIdRef.current = message.turn_id;
+      }
+      if (isNomiBackendFinalTextAuthoritative(message.final_text_authoritative)) {
+        rememberBoundedNomiCronId(backendTerminalIdsRef.current, message.msg_id);
+        if (message.turn_id) {
+          rememberBoundedNomiCronId(backendTerminalTurnIdsRef.current, message.turn_id);
+        }
+        const state = postProcessStateRef.current;
+        discardNomiPostProcessTerminal(state, (request) =>
+          request.terminalId === message.msg_id ||
+          (message.turn_id !== undefined && request.turnId === message.turn_id) ||
+          (message.final_text_msg_id !== undefined &&
+            request.targetMessageId === message.final_text_msg_id)
+        );
+        return;
+      }
+
+      startLegacyPostProcess({
+        conversationId: message.conversation_id,
+        terminalId: message.msg_id,
+        targetMessageId: message.final_text_msg_id,
+        turnId: message.turn_id,
+        allowTurnFallback: message.final_text_msg_id === undefined,
+        generation: postProcessGenerationRef.current,
+        turnStartGeneration: turnStartGenerationRef.current,
+      });
+    },
+    [startLegacyPostProcess]
   );
 
   useEffect(() => {
@@ -374,15 +796,65 @@ export const useNomiMessage = (
       // but it cannot reopen a completed turn or mutate a newer accepted turn.
       // Config changes are session-scoped rather than turn-scoped and therefore
       // remain applicable while the conversation is idle.
-      if (
-        message.type !== 'config_changed' &&
-        !shouldApplyNomiStreamEventToTurn({
+      const appliesToTurn =
+        message.type === 'config_changed' ||
+        shouldApplyNomiStreamEventToTurn({
           eventTurnId: message.turn_id,
           activeTurnId: rootTurnIdRef.current,
           turnClosed: turnClosedRef.current,
           awaitingBackendTurn: awaitingBackendTurnRef.current,
-        })
+        });
+      const isTextStreamMessage =
+        !readOnly &&
+        (message.type === 'content' || message.type === 'text') &&
+        Boolean(message.msg_id);
+      const textChunk = isTextStreamMessage ? extractResponseTextChunk(message.data) : '';
+      const replacement = isTextStreamMessage && isNomiTextReplacement(message);
+      const associatedWithPostProcess =
+        isTextStreamMessage &&
+        isPostProcessBufferAssociated(message.msg_id, message.turn_id);
+
+      // A terminal frame may win the WebSocket race before the final text
+      // fragment. Keep only text that is correlated with a pending terminal;
+      // unrelated late output remains projection-only and cannot consume the
+      // bounded fallback buffer.
+      if (
+        isTextStreamMessage &&
+        (appliesToTurn || associatedWithPostProcess) &&
+        (textChunk || replacement)
       ) {
+        messageBufferRef.current[replacement ? 'replace' : 'append'](
+          message.msg_id,
+          textChunk,
+          message.turn_id,
+          (bufferedMessageId, bufferedTurnId) =>
+            isPostProcessBufferAssociated(bufferedMessageId, bufferedTurnId) ||
+            (!turnClosedRef.current &&
+              (rootTurnIdRef.current
+                ? bufferedTurnId === undefined || rootTurnIdRef.current === bufferedTurnId
+                : awaitingBackendTurnRef.current &&
+                (!activeMsgIdRef.current || activeMsgIdRef.current === bufferedMessageId)))
+        );
+        const buffered = messageBufferRef.current.get(message.msg_id);
+        if (buffered) {
+          promoteNomiPostProcessObservationsForBuffer(
+            postProcessStateRef.current,
+            conversationIdRef.current,
+            message.msg_id,
+            buffered.version,
+            message.turn_id
+          );
+        }
+        if (associatedWithPostProcess) retryPendingPostProcesses();
+      }
+
+      if (!appliesToTurn) {
+        if (
+          (message.type === 'finish' || message.type === 'error') &&
+          isTerminalPostProcessEligible(message)
+        ) {
+          processCompletedAssistantMessage(message);
+        }
         addOrUpdateMessage(transformMessage(message));
         return;
       }
@@ -392,15 +864,6 @@ export const useNomiMessage = (
       if (activeMsgIdRef.current && message.msg_id && message.msg_id !== activeMsgIdRef.current) {
         if (message.type === 'thought') {
           return;
-        }
-      }
-
-      if ((message.type === 'content' || message.type === 'text') && message.msg_id) {
-        const chunk = extractResponseTextChunk(message.data);
-
-        if (chunk) {
-          const previous = messageBufferRef.current.get(message.msg_id) ?? '';
-          messageBufferRef.current.set(message.msg_id, previous + chunk);
         }
       }
 
@@ -451,8 +914,8 @@ export const useNomiMessage = (
           {
             // Stream completion can precede backend turn-handle release.
             setThought({ subject: '', description: '' });
-            if (message.msg_id) {
-              void processCompletedAssistantMessage(message.msg_id);
+            if (message.msg_id && isTerminalPostProcessEligible(message)) {
+              processCompletedAssistantMessage(message);
             }
             reconcileAfterStreamTerminal();
           }
@@ -500,6 +963,9 @@ export const useNomiMessage = (
           break;
         default: {
           if (message.type === 'error') {
+            if (isTerminalPostProcessEligible(message)) {
+              processCompletedAssistantMessage(message);
+            }
             setThought({ subject: '', description: '' });
             onError?.(message as IResponseMessage);
             reconcileAfterStreamTerminal();
@@ -524,13 +990,17 @@ export const useNomiMessage = (
     });
     // Note: turn state is read via turnStateRef to avoid re-subscription
   }, [
-    conversation_id,
     addOrUpdateMessage,
+    conversation_id,
     dispatchTurnIfOpen,
+    isNomiTextReplacement,
+    isPostProcessBufferAssociated,
+    isTerminalPostProcessEligible,
     onError,
     processCompletedAssistantMessage,
     readOnly,
     reconcileAfterStreamTerminal,
+    retryPendingPostProcesses,
   ]);
 
   useEffect(() => {
@@ -548,6 +1018,9 @@ export const useNomiMessage = (
       if (startAction === 'ignore') return;
 
       const acceptStart = () => {
+        if (rootTurnIdRef.current !== event.turn_id || turnSettledRef.current) {
+          invalidatePostProcessing(true);
+        }
         turnStartGenerationRef.current += 1;
         turnLifecycleGenerationRef.current += 1;
         rootTurnIdRef.current = event.turn_id;
@@ -555,8 +1028,14 @@ export const useNomiMessage = (
         turnClosedRef.current = false;
         rejectUnannouncedStartRef.current = false;
         verifyUnannouncedStartRuntimeRef.current = false;
+        turnSettledRef.current = false;
         setStopNotice(null);
         dispatchTurn({ type: 'activity' });
+        setHasHydratedRunningState(true);
+        // Accepting turn.started advances the lifecycle generation. Transfer
+        // the authoritative poll to that generation so a later delivery gap
+        // cannot lose the terminal runtime transition.
+        startAuthoritativeRuntimeReconciliation();
       };
 
       if (startAction === 'accept') {
@@ -591,7 +1070,14 @@ export const useNomiMessage = (
       disposed = true;
       unsubscribe();
     };
-  }, [conversation_id]);
+  }, [conversation_id, invalidatePostProcessing, startAuthoritativeRuntimeReconciliation]);
+
+  useEffect(() => {
+    return ipcBridge.conversation.reconnected.on(() => {
+      startAuthoritativeRuntimeReconciliation({ immediate: true });
+      retryPendingPostProcesses();
+    });
+  }, [retryPendingPostProcesses, startAuthoritativeRuntimeReconciliation]);
 
   useEffect(() => {
     let disposed = false;
@@ -650,6 +1136,8 @@ export const useNomiMessage = (
     // races the async query.
     dispatchTurn({ type: 'reset' });
     turnLifecycleGenerationRef.current += 1;
+    invalidatePostProcessing(true);
+    turnSettledRef.current = true;
     const hydrationGeneration = turnLifecycleGenerationRef.current;
     setThought({ subject: '', description: '' });
     setStopNotice(null);
@@ -669,52 +1157,60 @@ export const useNomiMessage = (
 
     // Check actual conversation status from backend before resetting all running states
     // to avoid flicker when switching to a running conversation
-    void getConversationOrNull(conversation_id).then((res) => {
-      if (cancelled) {
-        return;
-      }
-      if (turnLifecycleGenerationRef.current !== hydrationGeneration) {
-        setHasHydratedRunningState(true);
-        return;
-      }
+    const hydrationSequence = turnReconcileSequenceRef.current + 1;
+    turnReconcileSequenceRef.current = hydrationSequence;
 
-      if (!res) {
+    const restoreTokenUsage = (res: TChatConversation | null) => {
+      if (res?.type !== 'nomi' || !res.extra?.last_token_usage) return;
+      const { last_token_usage } = res.extra;
+      if (last_token_usage.total_tokens > 0) setTokenUsage(last_token_usage);
+    };
+
+    // A failed/unknown snapshot is not idle authority. Keep hydration closed
+    // and retry with capped backoff; the shared helper catches transport errors
+    // so this fire-and-forget effect cannot create an unhandled rejection.
+    void reconcileConversationAuthoritativeRuntime(conversation_id, {
+      isCurrent: () =>
+        !cancelled &&
+        mountedRef.current &&
+        turnLifecycleGenerationRef.current === hydrationGeneration &&
+        turnReconcileSequenceRef.current === hydrationSequence,
+      onIdle: (res) => {
         const fence = getNomiHydrationLifecycleFence(false);
+        rootTurnIdRef.current = null;
+        awaitingBackendTurnRef.current = false;
         turnClosedRef.current = fence.turnClosed;
         verifyUnannouncedStartRuntimeRef.current = fence.verifyUnannouncedStartRuntime;
         dispatchTurn({ type: 'hydrate', isRunning: false, settleIdle: true });
-        // No conversation record — retain the closed lifecycle until an
-        // explicit local submit or a runtime-verified external start.
+        restoreTokenUsage(res);
         setHasHydratedRunningState(true);
-        return;
-      }
-      const runtimeAuthority = getConversationRuntimeAuthority(res);
-      const isRunning = runtimeAuthority === 'processing';
-      const fence = getNomiHydrationLifecycleFence(isRunning);
-      turnClosedRef.current = fence.turnClosed;
-      verifyUnannouncedStartRuntimeRef.current = fence.verifyUnannouncedStartRuntime;
-      // The generation check above proves no local submit or accepted
-      // turn.started raced this request. The fresh idle snapshot can therefore
-      // settle activity from a late prior-turn stream. A local submit advances
-      // the generation and never reaches this branch.
-      dispatchTurn({ type: 'hydrate', isRunning, settleIdle: true });
-      // Load persisted token usage stats
-      if (res.type === 'nomi' && res.extra?.last_token_usage) {
-        const { last_token_usage } = res.extra;
-        if (last_token_usage.total_tokens > 0) {
-          setTokenUsage(last_token_usage);
-        }
-      }
-      setHasHydratedRunningState(runtimeAuthority !== 'unknown');
+      },
+      onProcessing: (res) => {
+        restoreTokenUsage(res);
+        adoptAuthoritativeProcessing(res);
+        // Hydration only needs the first complete authority snapshot. Move the
+        // continuing poll to the ordinary lifecycle owner/sequence.
+        startAuthoritativeRuntimeReconciliation();
+      },
+      delaysMs: AUTHORITATIVE_RUNTIME_RESYNC_DELAYS_MS,
+      retryForever: true,
+      announceSettled: false,
+      logLabel: 'Nomi hydration',
     });
-
     return () => {
       cancelled = true;
     };
-  }, [conversation_id]);
+  }, [
+    adoptAuthoritativeProcessing,
+    conversation_id,
+    invalidatePostProcessing,
+    startAuthoritativeRuntimeReconciliation,
+  ]);
 
   const resetState = useCallback(() => {
     turnLifecycleGenerationRef.current += 1;
+    invalidatePostProcessing(true);
+    turnSettledRef.current = true;
     const rootTurnId = rootTurnIdRef.current;
     if (rootTurnId) {
       const cancelled = cancelledTurnIdsRef.current;
@@ -733,11 +1229,12 @@ export const useNomiMessage = (
     setThought({ subject: '', description: '' });
     // Clear active message ID to prevent filtering events from new messages after stop
     activeMsgIdRef.current = null;
-  }, []);
+  }, [invalidatePostProcessing]);
 
   // External setter used by the send box to raise the spinner on submit.
   const setWaitingResponse = useCallback((value: boolean) => {
     turnLifecycleGenerationRef.current += 1;
+    invalidatePostProcessing(true);
     if (value) {
       turnStartGenerationRef.current += 1;
       rootTurnIdRef.current = null;
@@ -745,6 +1242,7 @@ export const useNomiMessage = (
       turnClosedRef.current = false;
       rejectUnannouncedStartRef.current = false;
       verifyUnannouncedStartRuntimeRef.current = true;
+      turnSettledRef.current = false;
       setStopNotice(null);
     } else {
       rootTurnIdRef.current = null;
@@ -752,9 +1250,10 @@ export const useNomiMessage = (
       turnClosedRef.current = true;
       rejectUnannouncedStartRef.current = false;
       verifyUnannouncedStartRuntimeRef.current = true;
+      turnSettledRef.current = true;
     }
     dispatchTurn({ type: 'setWaiting', value });
-  }, []);
+  }, [invalidatePostProcessing]);
 
   const restoreRunningAfterStopFailure = useCallback(() => {
     turnLifecycleGenerationRef.current += 1;
@@ -765,28 +1264,21 @@ export const useNomiMessage = (
     turnClosedRef.current = false;
     rejectUnannouncedStartRef.current = false;
     verifyUnannouncedStartRuntimeRef.current = false;
+    turnSettledRef.current = false;
     dispatchTurn({ type: 'hydrate', isRunning: true });
-    const generation = turnLifecycleGenerationRef.current;
-    const sequence = turnReconcileSequenceRef.current + 1;
-    turnReconcileSequenceRef.current = sequence;
-    void reconcileConversationTurnAfterStreamTerminal(
-      conversation_id,
-      () =>
-        mountedRef.current &&
-        turnLifecycleGenerationRef.current === generation &&
-        turnReconcileSequenceRef.current === sequence,
-      settleCompletedTurn
-    );
-  }, [conversation_id, settleCompletedTurn]);
+    startAuthoritativeRuntimeReconciliation();
+  }, [startAuthoritativeRuntimeReconciliation]);
 
   const confirmStopped = useCallback(() => {
     turnLifecycleGenerationRef.current += 1;
+    invalidatePostProcessing(true);
     rootTurnIdRef.current = null;
     awaitingBackendTurnRef.current = false;
     turnClosedRef.current = true;
     rejectUnannouncedStartRef.current = false;
+    turnSettledRef.current = true;
     dispatchTurn({ type: 'reset' });
-  }, []);
+  }, [invalidatePostProcessing]);
 
   const getTurnStartGeneration = useCallback(() => turnStartGenerationRef.current, []);
   const getTurnCompletionGeneration = useCallback(() => turnCompletionGenerationRef.current, []);

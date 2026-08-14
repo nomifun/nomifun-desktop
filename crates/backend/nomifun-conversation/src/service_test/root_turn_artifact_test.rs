@@ -280,26 +280,14 @@ struct RootTurnFixture {
 impl RootTurnFixture {
     async fn new(label: &str, script: RootTurnScript) -> Self {
         let database = init_database_memory().await.expect("initialize real SQLite fixture");
-        nomifun_db::sqlx::query(
-            "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-                created_at, updated_at\
-             ) VALUES (?1, 'openai', 'root-turn-test', 'https://example.invalid', \
-                       'encrypted', 1, 1, 1)",
+        seed_openai_chat_model(
+            database.pool(),
+            PROVIDER_ID_1,
+            "root-turn-test",
+            "m1",
+            0,
         )
-        .bind(PROVIDER_ID_1)
-        .execute(database.pool())
-        .await
-        .expect("seed the referenced provider");
-        nomifun_db::sqlx::query(
-            "INSERT INTO provider_models (\
-                provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
-             ) VALUES (?1, 'm1', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
-        )
-        .bind(PROVIDER_ID_1)
-        .execute(database.pool())
-        .await
-        .expect("seed the referenced model");
+        .await;
         let repository = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
         let broadcaster = Arc::new(MockBroadcaster::new());
         let registry = Arc::new(MockAgentRuntimeRegistry::new());

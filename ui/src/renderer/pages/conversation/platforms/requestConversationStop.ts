@@ -3,6 +3,7 @@ import type { ConversationId } from '@/common/types/ids';
 import type { TChatConversation } from '@/common/config/storage';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import { reconcileConversationAuthoritativeRuntime } from './reconcileConversationTurnAfterStreamTerminal';
 
 export const CONVERSATION_STOP_TIMEOUT_MS = 8_000;
 export const CONVERSATION_STOP_CONFIRM_TIMEOUT_MS = 8_000;
@@ -36,6 +37,7 @@ const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, timeoutE
 };
 
 export type ConversationTurnReleaseResult = 'released' | 'deleted' | 'processing';
+export type ConversationTurnReleaseWaitResult = 'released' | 'deleted' | 'stale';
 
 const STOP_RELEASE_RECONCILE_DELAYS_MS = [0, 120, 400, 1_200, 3_000] as const;
 
@@ -56,6 +58,41 @@ export const waitForConversationTurnRelease = async (
     if (getConversationRuntimeAuthority(conversation) === 'idle') return 'released';
   }
   return 'processing';
+};
+
+/**
+ * Keep polling after a bounded stop confirmation has returned `processing` or
+ * `unknown`. The caller owns the stop-attempt generation and can invalidate the
+ * poll when a newer turn or conversation scope takes over.
+ *
+ * A stop request timeout is not evidence that the runtime is idle. This helper
+ * therefore has no finite retry count in production; it exits only after an
+ * authoritative idle/deleted snapshot or when the caller's attempt is stale.
+ */
+export const waitForConversationTurnReleaseUntilSettled = async (
+  conversationId: ConversationId,
+  options?: {
+    isCurrent?: () => boolean;
+    getConversation?: typeof getConversationOrNull;
+    delaysMs?: readonly number[];
+    queryTimeoutMs?: number;
+  }
+): Promise<ConversationTurnReleaseWaitResult> => {
+  let settled: Exclude<ConversationTurnReleaseWaitResult, 'stale'> | undefined;
+  const reconciled = await reconcileConversationAuthoritativeRuntime(conversationId, {
+    isCurrent: options?.isCurrent ?? (() => true),
+    onIdle: (conversation) => {
+      settled = conversation ? 'released' : 'deleted';
+    },
+    delaysMs: options?.delaysMs,
+    getConversation: options?.getConversation,
+    queryTimeoutMs: options?.queryTimeoutMs,
+    retryForever: true,
+    announceSettled: false,
+    logLabel: 'stop confirmation',
+  });
+
+  return reconciled && settled ? settled : 'stale';
 };
 
 /** Bound the user-facing stop action even if an HTTP/IPC transport never

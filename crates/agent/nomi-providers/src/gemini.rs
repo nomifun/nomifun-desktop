@@ -196,7 +196,7 @@ impl LlmProvider for GeminiProvider {
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let url = self.build_url(&request.model)?;
         let body = self.build_request_body(request)?;
-        let client = crate::http_client();
+        let client = crate::http_client()?;
         let (response, headers) = crate::send_initial_with_key_rotation(
             &client,
             &url,
@@ -769,7 +769,7 @@ impl GeminiStreamState {
 
     fn terminal_events(&mut self) -> Result<Vec<LlmEvent>, ProviderError> {
         let stop_reason = self.stop_reason.ok_or_else(|| {
-            ProviderError::Connection(
+            ProviderError::StreamTruncated(
                 "Gemini stream ended before a terminal finishReason".to_owned(),
             )
         })?;
@@ -1109,7 +1109,10 @@ mod tests {
         let outcome = process_sse_stream(response, &tx, true).await;
         drop(tx);
 
-        assert!(matches!(outcome, StreamOutcome::FailedEmpty(_)));
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedEmpty(ProviderError::StreamTruncated(_))
+        ));
         assert!(rx.recv().await.is_none());
     }
 

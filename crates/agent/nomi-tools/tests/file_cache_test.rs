@@ -24,6 +24,7 @@ fn make_state(content: &str, mtime_ms: u64) -> FileState {
         mtime_ms,
         offset: None,
         limit: None,
+        dedup_eligible: true,
     }
 }
 
@@ -222,6 +223,7 @@ fn partial_read_state_round_trip() {
         mtime_ms: 999,
         offset: Some(10),
         limit: Some(20),
+        dedup_eligible: true,
     };
     cache.insert(PathBuf::from("/partial"), state);
 

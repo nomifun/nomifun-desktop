@@ -35,7 +35,10 @@ import {
   releaseInitialMessageDelivery,
 } from '@/renderer/pages/conversation/platforms/initialMessageDelivery';
 import { classifyPublicMessageDelivery } from '@/renderer/pages/conversation/platforms/publicMessageDelivery';
-import { stopConversationAndConfirmRelease } from '@/renderer/pages/conversation/platforms/requestConversationStop';
+import {
+  stopConversationAndConfirmRelease,
+  waitForConversationTurnReleaseUntilSettled,
+} from '@/renderer/pages/conversation/platforms/requestConversationStop';
 import { useAuthoritativeTurnLifecycle } from '@/renderer/pages/conversation/platforms/useAuthoritativeTurnLifecycle';
 import {
   shouldReleaseStopInteraction,
@@ -43,7 +46,6 @@ import {
 } from '@/renderer/pages/conversation/platforms/useConversationStopAttemptGuard';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { getConversationRuntimeWorkspaceErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
-import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { allSupportedExts, type FileMetadata } from '@/renderer/services/FileService';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
@@ -224,16 +226,18 @@ const BasicRuntimeSendBox: React.FC<{
     cancelLocalTurn,
     stopOptimistically,
     confirmStopped,
-    restoreAfterStopFailure,
-    hydrateAuthoritativeRuntime,
+    resyncAuthoritativeRuntime,
     acceptsStreamActivity,
     reconcileAfterStreamTerminal,
     getTurnStartGeneration,
     getTurnCompletionGeneration,
-    getTurnLifecycleGeneration,
   } = useAuthoritativeTurnLifecycle(conversation_id, {
     onTurnStarted: () => setAiProcessing(true),
     onTurnCompleted: () => setAiProcessing(false),
+    onAuthoritativeRuntime: (isRunning) => {
+      setAiProcessing(isRunning);
+      setHasHydratedRunningState(true);
+    },
   });
   const { beginStopAttempt, getStopAttemptStatus } = useConversationStopAttemptGuard(
     conversation_id,
@@ -308,39 +312,14 @@ const BasicRuntimeSendBox: React.FC<{
   // switching to a running conversation.
   // 先获取后端状态再重置 aiProcessing，避免切换到运行中的会话时闪烁
   useEffect(() => {
-    let cancelled = false;
-    const hydrationGeneration = getTurnLifecycleGeneration();
-
     setAiProcessing(false);
     setIsStopping(false);
     setHasHydratedRunningState(false);
-
-    void getConversationOrNull(conversation_id).then((res) => {
-      if (cancelled) {
-        return;
-      }
-      if (getTurnLifecycleGeneration() !== hydrationGeneration) {
-        setHasHydratedRunningState(true);
-        return;
-      }
-
-      if (!res) {
-        hydrateAuthoritativeRuntime(false);
-        setAiProcessing(false);
-        setHasHydratedRunningState(true);
-        return;
-      }
-      const runtimeAuthority = getConversationRuntimeAuthority(res);
-      const isRunning = runtimeAuthority === 'processing';
-      hydrateAuthoritativeRuntime(isRunning);
-      setAiProcessing(isRunning);
-      setHasHydratedRunningState(runtimeAuthority !== 'unknown');
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [conversation_id, getTurnLifecycleGeneration, hydrateAuthoritativeRuntime, setAiProcessing]);
+    // This starts with an immediate read, retries BackendRequestError/unknown
+    // snapshots with capped backoff, adopts active_turn_id when processing, and
+    // keeps polling until the runtime is authoritatively idle.
+    resyncAuthoritativeRuntime({ immediate: true });
+  }, [conversation_id, resyncAuthoritativeRuntime, setAiProcessing]);
 
   useEffect(() => {
     const handler = (text: string) => {
@@ -724,14 +703,34 @@ const BasicRuntimeSendBox: React.FC<{
       return;
     }
 
-    console.warn(`${config.logTag} stop request could not be confirmed`, result);
-    restoreAfterStopFailure();
-    setAiProcessing(true);
-    setIsStopping(false);
-    Message.error({
-      content: t('conversation.stop.failed', { defaultValue: 'Failed to stop the current task. Please try again.' }),
+    // A timeout, transport error, or still-processing snapshot is not proof
+    // that the runtime is idle. Keep both the local stop lock and the queue
+    // paused while an independent authoritative poll waits for idle.
+    console.warn(`${config.logTag} stop request needs continued authoritative confirmation`, result);
+    Message.warning({
+      content: t('conversation.stop.confirming', {
+        defaultValue: 'Stop requested. Waiting for the task to finish stopping...',
+      }),
       closable: true,
     });
+    const settled = await waitForConversationTurnReleaseUntilSettled(conversation_id, {
+      isCurrent: () => getStopAttemptStatus(stopAttempt) === 'current',
+    });
+    const settledAttemptStatus = getStopAttemptStatus(stopAttempt);
+    if (settledAttemptStatus !== 'current') {
+      if (shouldReleaseStopInteraction(settledAttemptStatus)) setIsStopping(false);
+      return;
+    }
+    if (settled === 'released' || settled === 'deleted') {
+      confirmStopped();
+      setIsStopping(false);
+      resetActiveExecution('external-reset');
+      return;
+    }
+
+    // The poll only returns `stale` when this stop attempt was superseded.
+    // Keep the conservative lock if that cannot be proven otherwise.
+    console.warn(`${config.logTag} stop confirmation became stale`, result);
   };
 
   // Clear conversation context (release model context); keeps message records.

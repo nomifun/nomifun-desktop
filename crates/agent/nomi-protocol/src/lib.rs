@@ -21,9 +21,18 @@ pub enum ToolApprovalResult {
     Denied { reason: String },
 }
 
+/// Identity of one concrete pending approval registration.
+///
+/// Call IDs come from providers and may be reused.  A timeout cleanup must
+/// therefore remove only the registration that timed out, not a newer request
+/// that happens to use the same ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolApprovalToken(u64);
+
 struct PendingApproval {
     tx: oneshot::Sender<ToolApprovalResult>,
     category: String,
+    token: ToolApprovalToken,
 }
 
 /// Manages pending tool approval requests using oneshot channels.
@@ -38,6 +47,7 @@ pub struct ToolApprovalManager {
     pending: Mutex<HashMap<String, PendingApproval>>,
     auto_approved: Mutex<HashSet<String>>,
     session_mode: Mutex<SessionMode>,
+    next_token: Mutex<u64>,
 }
 
 impl ToolApprovalManager {
@@ -46,6 +56,7 @@ impl ToolApprovalManager {
             pending: Mutex::new(HashMap::new()),
             auto_approved: Mutex::new(HashSet::new()),
             session_mode: Mutex::new(SessionMode::Default),
+            next_token: Mutex::new(0),
         }
     }
 
@@ -54,17 +65,36 @@ impl ToolApprovalManager {
         call_id: &str,
         category: &ToolCategory,
     ) -> oneshot::Receiver<ToolApprovalResult> {
+        self.request_approval_with_token(call_id, category).0
+    }
+
+    /// Register an approval and return both its receiver and an exact
+    /// registration token for conditional cleanup.
+    pub fn request_approval_with_token(
+        &self,
+        call_id: &str,
+        category: &ToolCategory,
+    ) -> (
+        oneshot::Receiver<ToolApprovalResult>,
+        ToolApprovalToken,
+    ) {
         let (tx, rx) = oneshot::channel();
+        let token = {
+            let mut next = self.next_token.lock().unwrap_or_else(|e| e.into_inner());
+            *next = next.wrapping_add(1);
+            ToolApprovalToken(*next)
+        };
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(
                 call_id.to_string(),
                 PendingApproval {
                     tx,
                     category: category.to_string(),
+                    token,
                 },
             );
         }
-        rx
+        (rx, token)
     }
 
     pub fn approve(&self, call_id: &str, scope: ApprovalScope) {
@@ -168,6 +198,22 @@ impl ToolApprovalManager {
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(call_id);
         }
+    }
+
+    /// Remove a pending approval only if it is still the registration
+    /// represented by `token`.
+    pub fn drop_pending_if(&self, call_id: &str, token: ToolApprovalToken) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        let matches = pending
+            .get(call_id)
+            .map(|entry| entry.token == token)
+            .unwrap_or(false);
+        if matches {
+            pending.remove(call_id);
+        }
+        matches
     }
 
     pub fn add_auto_approve(&self, category: &str) {

@@ -172,7 +172,7 @@ impl VertexProvider {
             .map_err(|e| ProviderError::Connection(format!("JWT encode error: {}", e)))?;
 
         // Exchange JWT for access token
-        let client = crate::http_client();
+        let client = crate::http_client()?;
         let resp = client
             .post(&sa.token_uri)
             .form(&[
@@ -209,7 +209,7 @@ impl VertexProvider {
             .map_err(|e| ProviderError::Connection(format!("Failed to parse ADC: {}", e)))?;
 
         // Use refresh token to get access token
-        let client = crate::http_client();
+        let client = crate::http_client()?;
         let resp = client
             .post("https://oauth2.googleapis.com/token")
             .form(&[
@@ -231,7 +231,7 @@ impl VertexProvider {
     }
 
     async fn get_metadata_token(&self) -> Result<(String, u64), ProviderError> {
-        let client = crate::http_client();
+        let client = crate::http_client()?;
         let resp = client
             .get("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token")
             .header("Metadata-Flavor", "Google")
@@ -261,7 +261,7 @@ impl LlmProvider for VertexProvider {
 
         let access_token = self.get_access_token().await?;
         let redactor = nomifun_net::secret_redaction::SecretRedactor::new([&access_token]);
-        let client = crate::http_client();
+        let client = crate::http_client()?;
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

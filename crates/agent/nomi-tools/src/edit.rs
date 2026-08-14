@@ -345,6 +345,33 @@ mod tests {
         Arc::new(RwLock::new(FileStateCache::new(&config)))
     }
 
+    #[tokio::test]
+    async fn read_edit_read_returns_the_new_content() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("cache edit.txt");
+        std::fs::write(&file_path, "before\n").unwrap();
+        let cache = make_cache();
+        let read = crate::read::ReadTool::new(Some(cache.clone()), None);
+        let edit = EditTool::new(Some(cache));
+        let input = json!({ "file_path": file_path.to_str().unwrap() });
+
+        let first = read.execute(input.clone()).await;
+        assert!(first.content.contains("before"), "{}", first.content);
+        let changed = edit
+            .execute(json!({
+                "file_path": file_path.to_str().unwrap(),
+                "old_string": "before",
+                "new_string": "after"
+            }))
+            .await;
+        assert!(!changed.is_error, "{}", changed.content);
+
+        let second = read.execute(input).await;
+        assert!(!second.is_error, "{}", second.content);
+        assert!(second.content.contains("after"), "{}", second.content);
+        assert!(!second.content.contains("unchanged since last read"), "{}", second.content);
+    }
+
     /// Simulate a Read by inserting a cache entry for the given file path.
     fn simulate_read(cache: &Arc<RwLock<FileStateCache>>, path: &Path) {
         let content = std::fs::read_to_string(path).unwrap_or_default();

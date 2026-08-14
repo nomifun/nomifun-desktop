@@ -775,7 +775,7 @@ impl LlmProvider for OpenAIProvider {
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let url = format!("{}{}", self.base_url, self.compat.api_path());
-        let client = crate::http_client();
+        let client = crate::http_client()?;
 
         let mut sanitize_tool_schemas = self.should_sanitize_tool_schemas();
         let mut include_stream_usage = true;
@@ -932,6 +932,12 @@ async fn process_sse_stream(
 
                 let events = parse_sse_chunk(data, &mut state, auto_tool_id);
                 for event in events {
+                    // ToolUseDelta is staged by the parser, but it has already
+                    // crossed this provider boundary. The engine retains its
+                    // preview identity across events, so replaying after one
+                    // has been sent can reconcile a retry against the wrong
+                    // provider call id. Treat it as replay-unsafe until the
+                    // consumer gains an explicit attempt/reset generation.
                     if matches!(
                         event,
                         LlmEvent::TextDelta(_)
@@ -1020,7 +1026,7 @@ async fn process_sse_stream(
         }
         StreamOutcome::Ok
     } else {
-        let error = ProviderError::Connection(
+        let error = ProviderError::StreamTruncated(
             "OpenAI-compatible stream ended before finish_reason".to_string(),
         );
         if emitted_content {
@@ -2304,6 +2310,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stepfun_usage_only_tail_and_done_are_a_valid_terminal_sequence() {
+        use super::{StreamOutcome, process_sse_stream};
+
+        // Captures the wire shape observed from StepFun Step Plan: ordinary
+        // chunks may carry both reasoning aliases and usage, followed by a
+        // choices:[] accounting-only frame and [DONE].
+        let body = concat!(
+            "data: {\"id\":\"stepfun-fixture\",\"model\":\"step-3.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"plan\",\"reasoning_content\":\"plan\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":16,\"completion_tokens\":1,\"total_tokens\":17}}\n\n",
+            "data: {\"id\":\"stepfun-fixture\",\"model\":\"step-3.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":16,\"completion_tokens\":2,\"total_tokens\":18}}\n\n",
+            "data: {\"id\":\"stepfun-fixture\",\"model\":\"step-3.7-flash\",\"choices\":[],\"usage\":{\"prompt_tokens\":16,\"completion_tokens\":2,\"total_tokens\":18}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(body.to_owned())
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let outcome = process_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LlmEvent::ThinkingDelta(delta) if delta == "plan"))
+                .count(),
+            1,
+            "reasoning aliases in one StepFun delta must not duplicate output"
+        );
+        assert!(events.iter().any(|event| matches!(event, LlmEvent::TextDelta(delta) if delta == "OK")));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LlmEvent::Done { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last(),
+            Some(LlmEvent::Done {
+                stop_reason: StopReason::MaxTokens,
+                usage
+            }) if usage.input_tokens == 16 && usage.output_tokens == 2
+        ));
+        assert!(events.iter().all(|event| !matches!(event, LlmEvent::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn zero_content_body_reset_is_retried_and_can_recover() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use futures::stream;
+
+        tokio::time::pause();
+        let reset = std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "fixture reset before first SSE event",
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(reqwest::Body::wrap_stream(stream::iter(vec![Err::<
+                    Vec<u8>,
+                    std::io::Error,
+                >(reset)])))
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let outcome = process_sse_stream(response, &tx, false).await;
+        match &outcome {
+            StreamOutcome::FailedEmpty(error @ ProviderError::Http(reqwest_error)) => {
+                assert!(reqwest_error.is_body() || reqwest_error.is_decode());
+                assert!(error.is_retryable());
+            }
+            _ => panic!("expected an empty HTTP body failure"),
+        }
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let successful_body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .to_owned();
+        crate::retry::finish_stream_with_retry(
+            outcome,
+            &tx,
+            || {
+                let attempts = Arc::clone(&attempts);
+                let successful_body = successful_body.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(reqwest::Response::from(
+                        http::Response::builder()
+                            .status(200)
+                            .body(successful_body)
+                            .unwrap(),
+                    ))
+                }
+            },
+            |response| process_sse_stream(response, &tx, false),
+        )
+        .await;
+        drop(tx);
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(|event| matches!(event, LlmEvent::TextDelta(delta) if delta == "recovered")));
+        assert_eq!(events.iter().filter(|event| matches!(event, LlmEvent::Done { .. })).count(), 1);
+        assert!(events.iter().all(|event| !matches!(event, LlmEvent::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn partial_clean_eof_emits_one_error_without_replay() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(body.to_owned())
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let outcome = process_sse_stream(response, &tx, false).await;
+        assert!(matches!(
+            &outcome,
+            StreamOutcome::FailedPartial(ProviderError::StreamTruncated(_))
+        ));
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        crate::retry::finish_stream_with_retry(
+            outcome,
+            &tx,
+            || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(reqwest::Response::from(
+                        http::Response::builder()
+                            .status(200)
+                            .body(String::new())
+                            .unwrap(),
+                    ))
+                }
+            },
+            |response| process_sse_stream(response, &tx, false),
+        )
+        .await;
+        drop(tx);
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "partial output must not be replayed");
+        assert_eq!(events.iter().filter(|event| matches!(event, LlmEvent::TextDelta(delta) if delta == "partial")).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, LlmEvent::Error(_))).count(), 1);
+        assert!(events.iter().any(|event| matches!(event, LlmEvent::Error(message) if message.contains("Provider stream truncated"))));
+        assert!(events.iter().all(|event| !matches!(event, LlmEvent::Done { .. })));
+    }
+
+    #[tokio::test]
     async fn utf8_scalar_split_across_http_chunks_round_trips_exactly() {
         use super::{StreamOutcome, process_sse_stream};
         use futures::stream;
@@ -2974,6 +3154,29 @@ mod tests {
         let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas(), true);
         assert_eq!(body["max_completion_tokens"], 2048);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn stepfun_explicit_reasoning_effort_is_forwarded_and_none_is_omitted() {
+        let provider = OpenAIProvider::new("key", "http://localhost", openai_compat());
+        let mut request = simple_request();
+        request.model = "step-3.7-flash".into();
+        request.reasoning_effort = Some("low".into());
+
+        let explicit = provider.build_request_body(
+            &request,
+            provider.should_sanitize_tool_schemas(),
+            true,
+        );
+        assert_eq!(explicit["reasoning_effort"], "low");
+
+        request.reasoning_effort = None;
+        let provider_default = provider.build_request_body(
+            &request,
+            provider.should_sanitize_tool_schemas(),
+            true,
+        );
+        assert!(provider_default.get("reasoning_effort").is_none());
     }
 
     // --- merge_assistant_messages ---
