@@ -1,33 +1,5 @@
-import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
 import type { PresetListItem } from './types';
 import type { PresetTagId } from '@/common/types/ids';
-
-/**
- * Check if a string is an emoji (simple check for common emoji patterns).
- */
-export const isEmoji = (str: string): boolean => {
-  if (!str) return false;
-  const emojiRegex = /^(?:\p{Emoji_Presentation}|\p{Emoji}️)(?:‍(?:\p{Emoji_Presentation}|\p{Emoji}️))*$/u;
-  return emojiRegex.test(str);
-};
-
-/**
- * Resolve an avatar string to an image src URL, or undefined if it is not an image.
- */
-export const resolveAvatarImageSrc = (
-  avatar: string | undefined,
-  avatarImageMap: Record<string, string>
-): string | undefined => {
-  const value = avatar?.trim();
-  if (!value) return undefined;
-
-  const mapped = avatarImageMap[value];
-  if (mapped) return mapped;
-
-  const resolved = resolveExtensionAssetUrl(value) || value;
-  const isImage = /\.(svg|png|jpe?g|webp|gif)$/i.test(resolved) || /^(https?:|file:\/\/|data:|\/)/i.test(resolved);
-  return isImage ? resolved : undefined;
-};
 
 /**
  * Sort presets by sortOrder. The backend already returns sorted lists; this
