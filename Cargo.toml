@@ -144,6 +144,7 @@ rust-embed = "8"
 fs2 = "0.4"
 zstd = "0.13"
 glob = "0.3"
+globset = "0.4"
 # Windows path de-UNC-ing: `dunce::simplified` strips the `\\?\` verbatim
 # prefix whenever the path is losslessly representable without it. Used at
 # every canonicalization boundary that feeds persisted markers, env exports,
