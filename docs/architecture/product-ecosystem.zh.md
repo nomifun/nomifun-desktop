@@ -6,13 +6,14 @@
 
 English: [product-ecosystem.md](product-ecosystem.md)
 
-## 三个相互关联的开源产品
+## 四个相互关联的开源项目
 
 | 产品 | 核心职责 | 文档入口 |
 |---|---|---|
 | [NomiFun Desktop](https://github.com/nomifun/nomifun-desktop) | 数据、模型、Agent、任务、工具、Skill、知识库、伙伴和小程序的本地事实源与执行中枢 | [架构总览](overview.zh.md) · [WebUI 远程访问](../guides/webui-remote-access.zh.md) · [小智接入](../guides/xiaozhi-robot.zh.md) |
 | [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | 直连已授权 Desktop 实例的 Android / iOS / H5 交互端 | [Mobile README](https://github.com/nomifun/nomifun-mobile#readme) |
 | [NomiFun 小智云台](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | 为 Desktop 伙伴提供语音、屏幕、运动和设备工具的 ESP32-S3 硬件端 | [固件 README](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop 接入指南](../guides/xiaozhi-robot.zh.md) |
+| [NomiFun Net Infra](https://github.com/nomifun/nomifun-net-infra) | 可选的自托管 NomiRelay 网络承载，把 NAT 后的 Desktop 或其他服务提供给跨网络客户端 | [产品页](https://www.nomifun.com/zh/products/net-infra/) · [门户接入文档](https://www.nomifun.com/zh/docs/guides/net-infra/) · [中继接入文档](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
 
 ## 「一个本地中枢，多个交互界面」
 
@@ -54,6 +55,16 @@ Agent 配置，约束工具与知识库范围，并真正执行任务。其他�
 局域网监听器本身不内置 TLS。请仅在可信局域网或可信专用 VPN 中使用，保持操作系统
 防火墙开启，也不要把端口直接暴露到公网。完整威胁模型与操作步骤见
 [WebUI 远程访问](../guides/webui-remote-access.zh.md)。
+
+### Net Infra 是可选网络承载层，不是另一套业务后端
+
+Mobile 无法通过可信局域网访问 Desktop 时，部署者可以自行运行 NomiRelay，并在能访问
+Desktop WebUI 监听器的机器上运行 `nfagent`。Mobile 随后只连接 Relay 的业务入口，
+不会持有中继管理员凭据或调用控制台 API。Relay 负责承载 HTTP/WebSocket 字节流和执行
+网络策略，Desktop 仍然是应用数据与执行权威端。准确的部署和公网验收边界请以
+[NomiRelay 接入文档](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration)和
+[Mobile Relay 指南](https://github.com/nomifun/nomifun-mobile/blob/main/docs/RELAY-INTEGRATION.md)
+为准。
 
 ### 小智是伙伴的硬件交互界面
 

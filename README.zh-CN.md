@@ -57,8 +57,9 @@
 
 ## NomiFun 开源产品家族
 
-NomiFun 由三个相互关联的开源产品组成。**Desktop 是本地数据、模型、Agent、任务与
-工具中枢**；Mobile 和小智机器人接入你在 Desktop 中显式开放的能力。Desktop 还承载
+NomiFun 由四个相互关联的开源项目组成。**Desktop 是本地数据、模型、Agent、任务与
+工具中枢**；Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Infra 则提供
+可选的自托管跨网中继。Desktop 还承载
 Agent 小程序，让 Agent 创建的应用继续复用同一套本地运行时与受治理能力，而不是沦为
 一个割裂的演示页面。
 
@@ -67,22 +68,26 @@ Agent 小程序，让 Agent 创建的应用继续复用同一套本地运行时�
 | **[NomiFun Desktop](https://github.com/nomifun/nomifun-desktop)**（本仓库） | 数据、模型、Agent、任务、Skill、知识库、小程序、WebUI、REST 与 MCP 的本地事实源和执行中枢 | [下载](https://github.com/nomifun/nomifun-desktop/releases) · [Desktop 文档](https://www.nomifun.com/zh/docs/) · [WebUI 远程访问](docs/guides/webui-remote-access.zh.md) |
 | [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | 直接复用 Desktop 会话、任务、需求、伙伴与管理能力的 Android / iOS / H5 客户端 | [Mobile 文档](https://github.com/nomifun/nomifun-mobile#readme) · 在 Desktop 开启**远程与开放 → WebUI 访问**后扫描一次性二维码 |
 | [NomiFun 小智云台](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | 为伙伴提供语音、运动、屏幕和设备侧多模态交互的 ESP32-S3 机器人与云台 | [小智文档](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop 接入指南](docs/guides/xiaozhi-robot.zh.md) |
+| [NomiFun Net Infra](https://github.com/nomifun/nomifun-net-infra) | 自托管的 NomiRelay 网络中继，把 NAT 后的 Desktop 或其他 HTTP/WebSocket/TCP/UDP 服务提供给跨网络手机与 IoT 设备 | [产品页](https://www.nomifun.com/zh/products/net-infra/) · [门户接入文档](https://www.nomifun.com/zh/docs/guides/net-infra/) · [中继文档](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
 
-### 三个项目如何接入
+### 四个项目如何接入
 
 1. 运行 Desktop，配置需要的模型和伙伴；Desktop 保留主数据集并实际执行任务。
 2. Mobile 在 Desktop 的**远程与开放 → WebUI 访问**页面开启监听，然后扫描短时效、
    一次性的二维码。局域网内 Mobile **直连 Desktop，不经过 NomiFun 云中转**；手机是
    已认证客户端，Desktop 是权威服务器，所以无需把模型密钥和持久数据复制到手机。
 3. 小智云台刷入固件后，在伙伴的**远程控制 → 机器人连接**页面完成绑定。
+4. 需要跨网络访问时，自行部署 NomiRelay 与 `nfagent`，再让 Mobile 连接 Relay 的
+   业务入口。Mobile 不持有中继管理员凭据，Desktop 仍然是业务数据与执行权威端。
 
 请仅在可信网络中开启远程接口。认证、局域网暴露和部署边界以相应指南为准。
 
 ### 一个本地中枢，多种交互界面
 
-这不是三个恰好使用同一 Logo 的独立客户端。Desktop 保存持久状态并执行模型、Agent、
+这不是几个恰好使用同一 Logo 的独立客户端。Desktop 保存持久状态并执行模型、Agent、
 需求、工具、知识库、伙伴记忆和 Skill；Mobile 是局域网直连的移动控制界面；小智是
-语音与运动硬件界面；小程序则是同一 Desktop 安装创建并托管的软件交互界面。它们共享
+语音与运动硬件界面；小程序则是同一 Desktop 安装创建并托管的软件交互界面；Net Infra
+是可选网络承载层，而不是另一套业务后端。它们共享
 一张受治理的能力图，而不是各自创建云账号、凭据和用户数据副本。
 
 信任边界、通信模型、架构创新与产品里程碑详见
