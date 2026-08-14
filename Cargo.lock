@@ -5599,6 +5599,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 
@@ -5881,8 +5882,9 @@ version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "glob",
+ "globset",
  "jsonschema",
+ "junction",
  "libc",
  "lru",
  "nomi-config",
