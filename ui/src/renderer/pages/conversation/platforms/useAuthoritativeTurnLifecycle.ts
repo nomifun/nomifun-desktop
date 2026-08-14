@@ -1,11 +1,15 @@
 import { ipcBridge } from '@/common';
+import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { useCallback, useEffect, useRef } from 'react';
 import {
+  AUTHORITATIVE_RUNTIME_RESYNC_DELAYS_MS,
   reconcileConversationTurnAfterAcceptedReplay,
+  reconcileConversationAuthoritativeRuntime,
   reconcileConversationTurnAfterStreamTerminal,
+  TERMINAL_RECONCILE_DELAYS_MS,
 } from './reconcileConversationTurnAfterStreamTerminal';
 import {
   classifyAuthoritativeTurnCompletion,
@@ -17,6 +21,10 @@ import {
 type AuthoritativeTurnLifecycleOptions = {
   onTurnStarted?: () => void;
   onTurnCompleted: () => void;
+  onAuthoritativeRuntime?: (
+    isRunning: boolean,
+    conversation: TChatConversation | null
+  ) => void;
 };
 
 export type AuthoritativeHydrationFence = {
@@ -57,10 +65,15 @@ export const shouldAcceptAuthoritativeStreamActivity = ({
  */
 export const useAuthoritativeTurnLifecycle = (
   conversationId: ConversationId,
-  { onTurnStarted, onTurnCompleted }: AuthoritativeTurnLifecycleOptions
+  {
+    onTurnStarted,
+    onTurnCompleted,
+    onAuthoritativeRuntime,
+  }: AuthoritativeTurnLifecycleOptions
 ) => {
   const onTurnStartedRef = useRef(onTurnStarted);
   const onTurnCompletedRef = useRef(onTurnCompleted);
+  const onAuthoritativeRuntimeRef = useRef(onAuthoritativeRuntime);
   const rootTurnIdRef = useRef<MessageId | null>(null);
   const awaitingBackendTurnRef = useRef(false);
   const closedRef = useRef(true);
@@ -85,7 +98,8 @@ export const useAuthoritativeTurnLifecycle = (
   useEffect(() => {
     onTurnStartedRef.current = onTurnStarted;
     onTurnCompletedRef.current = onTurnCompleted;
-  }, [onTurnCompleted, onTurnStarted]);
+    onAuthoritativeRuntimeRef.current = onAuthoritativeRuntime;
+  }, [onAuthoritativeRuntime, onTurnCompleted, onTurnStarted]);
 
   useEffect(() => {
     rootTurnIdRef.current = null;
@@ -154,7 +168,7 @@ export const useAuthoritativeTurnLifecycle = (
     []
   );
 
-  const settle = useCallback((expectedGeneration: number) => {
+  const settle = useCallback((expectedGeneration: number, conversation: TChatConversation | null = null) => {
     if (!mountedRef.current || generationRef.current !== expectedGeneration) return;
     generationRef.current += 1;
     turnCompletionGenerationRef.current += 1;
@@ -165,6 +179,7 @@ export const useAuthoritativeTurnLifecycle = (
     rejectUnannouncedStartRef.current = false;
     verifyUnannouncedStartRuntimeRef.current = true;
     onTurnCompletedRef.current();
+    onAuthoritativeRuntimeRef.current?.(false, conversation);
   }, []);
 
   const confirmStopped = useCallback(() => {
@@ -193,22 +208,77 @@ export const useAuthoritativeTurnLifecycle = (
     verifyUnannouncedStartRuntimeRef.current = fence.verifyUnannouncedStartRuntime;
   }, []);
 
+  const adoptAuthoritativeProcessing = useCallback((conversation: TChatConversation) => {
+    const activeTurnId = conversation.runtime?.active_turn_id;
+    if (
+      !activeTurnId ||
+      rejectUnannouncedStartRef.current ||
+      cancelledTurnIdsRef.current.has(activeTurnId)
+    ) {
+      return false;
+    }
+
+    const changedTurn = rootTurnIdRef.current !== activeTurnId;
+    const shouldRaiseRunning =
+      changedTurn || closedRef.current || awaitingBackendTurnRef.current;
+    if (changedTurn) turnStartGenerationRef.current += 1;
+    rootTurnIdRef.current = activeTurnId;
+    awaitingBackendTurnRef.current = false;
+    closedRef.current = false;
+    rejectUnannouncedStartRef.current = false;
+    verifyUnannouncedStartRuntimeRef.current = false;
+    if (shouldRaiseRunning) onTurnStartedRef.current?.();
+    onAuthoritativeRuntimeRef.current?.(true, conversation);
+    return true;
+  }, []);
+
   const reconcileGeneration = useCallback(
-    (generation: number, delaysMs?: readonly number[], isExpected: () => boolean = () => true) => {
+    (
+      generation: number,
+      delaysMs: readonly number[] = TERMINAL_RECONCILE_DELAYS_MS,
+      isExpected: () => boolean = () => true,
+      announceSettled = true
+    ) => {
       const sequence = reconcileSequenceRef.current + 1;
       reconcileSequenceRef.current = sequence;
-      void reconcileConversationTurnAfterStreamTerminal(
-        conversationId,
-        () =>
+      let transferredAuthority = false;
+      void reconcileConversationAuthoritativeRuntime(conversationId, {
+        isCurrent: () =>
           mountedRef.current &&
           generationRef.current === generation &&
           reconcileSequenceRef.current === sequence &&
-          isExpected(),
-        () => settle(generation),
-        delaysMs
+          (transferredAuthority || isExpected()),
+        onIdle: (conversation) => settle(generation, conversation),
+        onProcessing: (conversation) => {
+          transferredAuthority =
+            adoptAuthoritativeProcessing(conversation) || transferredAuthority;
+        },
+        delaysMs,
+        retryForever: true,
+        announceSettled,
+      });
+    },
+    [adoptAuthoritativeProcessing, conversationId, settle]
+  );
+
+  const resyncAuthoritativeRuntime = useCallback(
+    ({
+      immediate = false,
+      announceSettled = true,
+    }: {
+      immediate?: boolean;
+      announceSettled?: boolean;
+    } = {}) => {
+      reconcileGeneration(
+        generationRef.current,
+        immediate
+          ? AUTHORITATIVE_RUNTIME_RESYNC_DELAYS_MS
+          : TERMINAL_RECONCILE_DELAYS_MS,
+        () => true,
+        announceSettled
       );
     },
-    [conversationId, settle]
+    [reconcileGeneration]
   );
 
   const restoreAfterStopFailure = useCallback(() => {
@@ -278,17 +348,14 @@ export const useAuthoritativeTurnLifecycle = (
           mountedRef.current &&
           generationRef.current === generation &&
           reconcileSequenceRef.current === sequence,
-        () => {
+        (conversation) => {
           if (observedProcessing) return;
-          observedProcessing = true;
-          closedRef.current = false;
-          verifyUnannouncedStartRuntimeRef.current = true;
-          onTurnStartedRef.current?.();
+          observedProcessing = adoptAuthoritativeProcessing(conversation);
         },
         () => settle(generation)
       );
     },
-    [conversationId, settle]
+    [adoptAuthoritativeProcessing, conversationId, settle]
   );
 
   useEffect(() => {
@@ -315,6 +382,9 @@ export const useAuthoritativeTurnLifecycle = (
         rejectUnannouncedStartRef.current = false;
         verifyUnannouncedStartRuntimeRef.current = false;
         onTurnStartedRef.current?.();
+        // turn.started advances the generation, so explicitly transfer
+        // authoritative polling ownership to that new generation.
+        reconcileGeneration(generationRef.current);
       };
 
       if (startAction === 'accept') {
@@ -349,7 +419,15 @@ export const useAuthoritativeTurnLifecycle = (
       disposed = true;
       unsubscribe();
     };
-  }, [conversationId]);
+  }, [conversationId, reconcileGeneration]);
+
+  useEffect(() => {
+    return ipcBridge.conversation.reconnected.on(() => {
+      // The server has no event replay. Snapshot immediately and either adopt
+      // the exact active turn or settle a terminal event lost in the gap.
+      resyncAuthoritativeRuntime({ immediate: true });
+    });
+  }, [resyncAuthoritativeRuntime]);
 
   useEffect(() => {
     const unsubscribe = ipcBridge.conversation.turnCompleted.on((event) => {
@@ -404,6 +482,7 @@ export const useAuthoritativeTurnLifecycle = (
     confirmStopped,
     restoreAfterStopFailure,
     hydrateAuthoritativeRuntime,
+    resyncAuthoritativeRuntime,
     acceptsStreamActivity,
     reconcileAfterStreamTerminal,
     getTurnStartGeneration,

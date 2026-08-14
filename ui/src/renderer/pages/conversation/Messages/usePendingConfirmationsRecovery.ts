@@ -3,7 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { ConversationId } from '@/common/types/ids';
+import type { ConversationId, MessageId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import type { IConfirmation, IMessagePermission, TMessage } from '@/common/chat/chatLib';
@@ -27,16 +27,34 @@ export function buildPendingConfirmationMessage(
 }
 
 export function hasPermissionMessageForCallId(list: TMessage[], callId: string): boolean {
-  return list.some((message) => message.type === 'permission' && message.content?.call_id === callId);
+  return list.some((message) => getPermissionMessageCallId(message) === callId);
+}
+
+export function getPermissionMessageCallId(message: TMessage): string | undefined {
+  if (message.type === 'permission') return message.content?.call_id;
+  if (message.type === 'acp_permission') return message.content?.tool_call?.tool_call_id;
+  return undefined;
 }
 
 export function removePermissionMessage(list: TMessage[], target: { id?: string; call_id?: string }): TMessage[] {
   return list.filter((message) => {
-    if (message.type !== 'permission') return true;
-    if (target.id && message.content.id === target.id) return false;
-    if (target.call_id && message.content.call_id === target.call_id) return false;
+    if (message.type !== 'permission' && message.type !== 'acp_permission') return true;
+    if (target.id && message.type === 'permission' && message.content.id === target.id) return false;
+    if (target.call_id && getPermissionMessageCallId(message) === target.call_id) return false;
     return true;
   });
+}
+
+export function removePermissionMessagesForTurn(
+  list: TMessage[],
+  turnId: MessageId | undefined
+): TMessage[] {
+  if (!turnId) return list;
+  return list.filter(
+    (message) =>
+      (message.type !== 'permission' && message.type !== 'acp_permission') ||
+      message.turn_id !== turnId
+  );
 }
 
 function errorMessage(error: unknown): string {
@@ -50,12 +68,17 @@ export function usePendingConfirmationsRecovery(conversation_id: ConversationId,
   useEffect(() => {
     if (!enabled || !conversation_id) return;
     let cancelled = false;
+    let recoverySequence = 0;
 
     const recoverPendingConfirmations = () => {
+      const sequence = ++recoverySequence;
       void ipcBridge.conversation.confirmation.list
         .invoke({ conversation_id })
         .then((confirmations) => {
-          if (cancelled) return;
+          // Reconnect and turn-completed recovery can overlap. Never let an
+          // older HTTP snapshot arrive last and resurrect a confirmation card
+          // that the latest authoritative fetch already retired.
+          if (cancelled || sequence !== recoverySequence) return;
           const pending = confirmations ?? [];
           const pendingCallIds = new Set(pending.map((confirmation) => confirmation.call_id));
           updateMessageList((list) => {
@@ -101,10 +124,23 @@ export function usePendingConfirmationsRecovery(conversation_id: ConversationId,
       updateMessageList((list) => removePermissionMessage(list, { id: event.id, call_id: event.id }));
     });
 
+    const offTurnCompleted = ipcBridge.conversation.turnCompleted.on((event) => {
+      if (event.conversation_id !== conversation_id) return;
+
+      // ACP permission watchdog expiry removes the durable pending item but has
+      // no protocol-level `confirmation.remove` frame. Clear only cards owned
+      // by the completed turn so a delayed terminal cannot erase a newer
+      // turn's prompt, then re-fetch to retire turnless `confirmation:*`
+      // recovery cards from the authoritative pending snapshot.
+      updateMessageList((list) => removePermissionMessagesForTurn(list, event.turn_id));
+      recoverPendingConfirmations();
+    });
+
     return () => {
       cancelled = true;
       offReconnected();
       off();
+      offTurnCompleted();
     };
   }, [conversation_id, enabled, updateMessageList]);
 }

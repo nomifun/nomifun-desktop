@@ -71,6 +71,12 @@ pub enum ProviderError {
     PromptTooLong(String),
     #[error("Connection error: {0}")]
     Connection(String),
+    /// The HTTP transport closed cleanly, but the provider never emitted the
+    /// protocol's commit marker. This is retryable only while no replay-unsafe
+    /// content has crossed the provider boundary; the stream outcome carries
+    /// that separate empty/partial distinction.
+    #[error("Provider stream truncated: {0}")]
+    StreamTruncated(String),
 }
 
 impl ProviderError {
@@ -93,12 +99,27 @@ impl ProviderError {
             },
             Self::PromptTooLong(message) => Self::PromptTooLong(redactor.redact(&message)),
             Self::Connection(message) => Self::Connection(redactor.redact(&message)),
+            Self::StreamTruncated(message) => {
+                Self::StreamTruncated(redactor.redact(&message))
+            }
         }
     }
 
     pub fn is_retryable(&self) -> bool {
         match self {
-            ProviderError::RateLimited { .. } | ProviderError::Connection(_) => true,
+            ProviderError::Http(error) => {
+                error.is_connect()
+                    || error.is_timeout()
+                    || error.is_body()
+                    // `Response::bytes_stream` can wrap a transport body reset
+                    // in an outer reqwest Decode error (the inner source is
+                    // still Body). On an empty stream this is safe to retry.
+                    || error.is_decode()
+                    || error.is_request()
+            }
+            ProviderError::RateLimited { .. }
+            | ProviderError::Connection(_)
+            | ProviderError::StreamTruncated(_) => true,
             // Transient server-side faults (500/502/503/504) from an overloaded
             // gateway are the most common spurious failure and are safe to retry
             // on the pre-response / empty-content paths. 4xx are terminal.
@@ -448,10 +469,9 @@ pub(crate) fn http_client_build_count() -> usize {
 /// converts into `LlmEvent::Error` (surfaced as `Nomi agent error: ...`) instead
 /// of an indefinite hang. The detected proxy is captured at first build; a
 /// runtime proxy change takes effect on the next app start.
-pub(crate) fn http_client() -> reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
+pub(crate) fn http_client() -> Result<reqwest::Client, ProviderError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    match CLIENT.get_or_init(|| {
             #[cfg(test)]
             HTTP_CLIENT_BUILD_COUNT.fetch_add(1, Ordering::SeqCst);
 
@@ -460,9 +480,11 @@ pub(crate) fn http_client() -> reqwest::Client {
                 .read_timeout(HTTP_READ_TIMEOUT);
             nomifun_net::proxy::apply_detected_proxy(builder)
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new())
-        })
-        .clone()
+                .map_err(|error| format!("Failed to build bounded provider HTTP client: {error}"))
+        }) {
+        Ok(client) => Ok(client.clone()),
+        Err(message) => Err(ProviderError::Connection(message.clone())),
+    }
 }
 
 pub(crate) fn non_empty_rate_limit_message(body: String) -> String {
@@ -669,6 +691,7 @@ mod retryable_tests {
             .is_retryable()
         );
         assert!(ProviderError::Connection("x".to_string()).is_retryable());
+        assert!(ProviderError::StreamTruncated("x".to_string()).is_retryable());
         assert!(!ProviderError::PromptTooLong("x".to_string()).is_retryable());
         assert!(!ProviderError::Parse("x".to_string()).is_retryable());
     }

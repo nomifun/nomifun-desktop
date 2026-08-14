@@ -50,6 +50,15 @@ struct McpServer {
     tools: Vec<McpToolDef>,
     /// Whether the server declared resources capability in its initialize response
     supports_resources: bool,
+    /// Hard wall-clock deadline for every request sent to this server.
+    request_timeout: Duration,
+    /// Serialize one complete request + timeout cleanup transaction.
+    ///
+    /// Stateful transports such as stdio cannot let a second request enter
+    /// between cancellation of the first request future and `abort_request`;
+    /// otherwise the second request could consume a late response belonging to
+    /// the timed-out call.
+    request_gate: tokio::sync::Mutex<()>,
 }
 
 /// Manages connections to multiple MCP servers
@@ -77,6 +86,13 @@ pub type TestMcpServerWithTools<'a> = (
 /// any Conversation that injects that server — indefinitely, with no error
 /// surfaced to the user.
 const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// A coding-tool call may need to run a formatter, test suite, or a short
+/// repository search. Ninety seconds is long enough for that common path but
+/// still turns a lost MCP response into an actionable tool error rather than a
+/// permanently running Agent turn. Individual servers can raise this bound.
+const MCP_DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+const MCP_MIN_REQUEST_TIMEOUT_SECS: u64 = 1;
+const MCP_MAX_REQUEST_TIMEOUT_SECS: u64 = 600;
 const MCP_MAX_RESOURCE_URI_LEN: usize = 4096;
 const MCP_MAX_DATA_RESOURCE_URI_LEN: usize = (20 * 1024 * 1024 * 4 / 3) + 1024;
 const MCP_MAX_RESOURCE_NAME_LEN: usize = 512;
@@ -91,6 +107,18 @@ fn is_valid_uri_scheme(scheme: &str) -> bool {
         byte.is_ascii_alphabetic()
             || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
     })
+}
+
+fn request_timeout_for(config: &McpServerConfig) -> Result<Duration, McpError> {
+    match config.request_timeout_secs {
+        None => Ok(MCP_DEFAULT_REQUEST_TIMEOUT),
+        Some(seconds @ MCP_MIN_REQUEST_TIMEOUT_SECS..=MCP_MAX_REQUEST_TIMEOUT_SECS) => {
+            Ok(Duration::from_secs(seconds))
+        }
+        Some(seconds) => Err(McpError::InitFailed(format!(
+            "MCP request_timeout_secs must be between {MCP_MIN_REQUEST_TIMEOUT_SECS} and {MCP_MAX_REQUEST_TIMEOUT_SECS}, got {seconds}"
+        ))),
+    }
 }
 
 /// Validate an MCP resource locator before it can enter tool output/history.
@@ -200,6 +228,7 @@ impl McpManager {
         cleanup_registry: Arc<ConnectionCleanupRegistry>,
     ) -> Result<McpServer, McpError> {
         let empty_map = HashMap::new();
+        let request_timeout = request_timeout_for(config)?;
 
         // 1. Create transport
         let transport: Box<dyn McpTransport> = match config.transport {
@@ -249,7 +278,7 @@ impl McpManager {
             })?),
         );
 
-        let init_response = transport.request(&init_req).await?;
+        let init_response = Self::request_with_timeout(&*transport, request_timeout, &init_req).await?;
         let init_result: InitializeResult = serde_json::from_value(
             init_response
                 .result
@@ -271,7 +300,7 @@ impl McpManager {
 
         // 4. List tools
         let list_req = JsonRpcRequest::new(2, "tools/list", None);
-        let list_response = transport.request(&list_req).await?;
+        let list_response = Self::request_with_timeout(&*transport, request_timeout, &list_req).await?;
         let tools_result: ToolsListResult = serde_json::from_value(
             list_response
                 .result
@@ -284,7 +313,39 @@ impl McpManager {
             transport,
             tools: tools_result.tools,
             supports_resources,
+            request_timeout,
+            request_gate: tokio::sync::Mutex::new(()),
         })
+    }
+
+    async fn request_with_timeout(
+        transport: &dyn McpTransport,
+        request_timeout: Duration,
+        request: &JsonRpcRequest,
+    ) -> Result<super::protocol::JsonRpcResponse, McpError> {
+        match tokio::time::timeout(request_timeout, transport.request(request)).await {
+            Ok(result) => result,
+            Err(_) => {
+                // The transport request future has been cancelled. Give
+                // stateful transports a chance to remove response correlation
+                // state or retire a poisoned stdio pipe before the caller
+                // receives the deterministic timeout error.
+                if let Err(error) = transport.abort_request().await {
+                    tracing::warn!(target: "nomi_mcp", error = %error, "MCP request timed out and transport cleanup failed");
+                }
+                Err(McpError::RequestTimeout {
+                    timeout_ms: request_timeout.as_millis() as u64,
+                })
+            }
+        }
+    }
+
+    async fn request_server(
+        server: &McpServer,
+        request: &JsonRpcRequest,
+    ) -> Result<super::protocol::JsonRpcResponse, McpError> {
+        let _request = server.request_gate.lock().await;
+        Self::request_with_timeout(&*server.transport, server.request_timeout, request).await
     }
 
     /// Get all discovered tools with their server names
@@ -353,7 +414,7 @@ impl McpManager {
             request = request.with_execution_operation_id(context.operation_id());
         }
 
-        let response = server.transport.request(&request).await?;
+        let response = Self::request_server(server, &request).await?;
 
         let result_value = response
             .result
@@ -515,7 +576,7 @@ impl McpManager {
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = JsonRpcRequest::new(id, "resources/list", None);
-        let response = server.transport.request(&request).await?;
+        let response = Self::request_server(server, &request).await?;
 
         let result_value = response
             .result
@@ -536,7 +597,7 @@ impl McpManager {
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = JsonRpcRequest::new(id, "resources/read", Some(json!({ "uri": uri })));
-        let response = server.transport.request(&request).await?;
+        let response = Self::request_server(server, &request).await?;
 
         let result_value = response
             .result
@@ -591,6 +652,8 @@ impl McpManager {
                     transport,
                     tools: vec![],
                     supports_resources,
+                    request_timeout: MCP_DEFAULT_REQUEST_TIMEOUT,
+                    request_gate: tokio::sync::Mutex::new(()),
                 },
             );
         }
@@ -615,6 +678,36 @@ impl McpManager {
                     transport,
                     tools,
                     supports_resources,
+                    request_timeout: MCP_DEFAULT_REQUEST_TIMEOUT,
+                    request_gate: tokio::sync::Mutex::new(()),
+                },
+            );
+        }
+        Self {
+            servers,
+            stdio_cleanup_registries: Vec::new(),
+            next_id: AtomicU64::new(10),
+        }
+    }
+
+    /// Test-only constructor with a deliberately short deadline for deterministic
+    /// no-response transport coverage.
+    #[cfg(test)]
+    fn new_for_test_with_request_timeout(
+        entries: Vec<(&str, bool, Box<dyn super::transport::McpTransport>)>,
+        request_timeout: Duration,
+    ) -> Self {
+        let mut servers = HashMap::new();
+        for (name, supports_resources, transport) in entries {
+            servers.insert(
+                name.to_string(),
+                McpServer {
+                    name: name.to_string(),
+                    transport,
+                    tools: vec![],
+                    supports_resources,
+                    request_timeout,
+                    request_gate: tokio::sync::Mutex::new(()),
                 },
             );
         }
@@ -637,6 +730,81 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    struct NeverRespondsTransport {
+        aborted: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl McpTransport for NeverRespondsTransport {
+        async fn request(&self, _req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            std::future::pending().await
+        }
+
+        async fn abort_request(&self) -> Result<(), McpError> {
+            self.aborted.store(true, AtomicOrdering::Release);
+            Ok(())
+        }
+
+        async fn notify(&self, _req: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
+
+    struct AbortFenceTransport {
+        calls: Arc<AtomicUsize>,
+        aborted: Arc<AtomicBool>,
+        raced_before_abort: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl McpTransport for AbortFenceTransport {
+        async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            let attempt = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            if attempt == 0 {
+                return std::future::pending().await;
+            }
+            if !self.aborted.load(AtomicOrdering::Acquire) {
+                self.raced_before_abort
+                    .store(true, AtomicOrdering::Release);
+                return Err(McpError::Transport(
+                    "successor entered before timed-out request cleanup".into(),
+                ));
+            }
+            Ok(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: req.id,
+                result: Some(json!({
+                    "content": [{"type": "text", "text": "recovered"}],
+                    "isError": false
+                })),
+                error: None,
+            })
+        }
+
+        async fn abort_request(&self) -> Result<(), McpError> {
+            // Widen the cancellation/cleanup window so an un-gated successor
+            // deterministically enters too early.
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            self.aborted.store(true, AtomicOrdering::Release);
+            Ok(())
+        }
+
+        async fn notify(&self, _req: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
 
     // -----------------------------------------------------------------------
     // MockTransport: returns pre-configured JSON-RPC responses
@@ -732,6 +900,329 @@ mod tests {
 
     fn make_manager_with_servers(entries: Vec<(&str, bool, Box<dyn McpTransport>)>) -> McpManager {
         McpManager::new_for_test(entries)
+    }
+
+    async fn read_fixture_http_request(stream: &mut TcpStream) -> serde_json::Value {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "HTTP peer closed before sending request headers");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "HTTP peer closed before sending request body");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_no_response_transport_returns_a_bounded_tool_error_and_is_aborted() {
+        let aborted = Arc::new(AtomicBool::new(false));
+        let manager = McpManager::new_for_test_with_request_timeout(
+            vec![(
+                "silent",
+                false,
+                Box::new(NeverRespondsTransport {
+                    aborted: Arc::clone(&aborted),
+                }),
+            )],
+            Duration::from_millis(50),
+        );
+
+        let started = tokio::time::Instant::now();
+        let error = manager
+            .call_tool("silent", "never_returns", json!({}))
+            .await
+            .expect_err("an unanswered MCP tool must not leave the Agent turn running");
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(error, McpError::RequestTimeout { timeout_ms: 50 }));
+        assert!(aborted.load(AtomicOrdering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn request_gate_fences_successor_until_timeout_abort_finishes() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let aborted = Arc::new(AtomicBool::new(false));
+        let raced_before_abort = Arc::new(AtomicBool::new(false));
+        let manager = Arc::new(McpManager::new_for_test_with_request_timeout(
+            vec![(
+                "serialized",
+                false,
+                Box::new(AbortFenceTransport {
+                    calls: Arc::clone(&calls),
+                    aborted: Arc::clone(&aborted),
+                    raced_before_abort: Arc::clone(&raced_before_abort),
+                }),
+            )],
+            Duration::from_millis(40),
+        ));
+
+        let first_manager = Arc::clone(&manager);
+        let first = tokio::spawn(async move {
+            first_manager
+                .call_tool("serialized", "first", json!({}))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let second_manager = Arc::clone(&manager);
+        let second = tokio::spawn(async move {
+            second_manager
+                .call_tool("serialized", "second", json!({}))
+                .await
+        });
+
+        assert!(matches!(
+            first.await.unwrap(),
+            Err(McpError::RequestTimeout { timeout_ms: 40 })
+        ));
+        let recovered = second
+            .await
+            .unwrap()
+            .expect("the successor should run after exact timeout cleanup");
+        assert_eq!(recovered.text, "recovered");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        assert!(aborted.load(AtomicOrdering::Acquire));
+        assert!(
+            !raced_before_abort.load(AtomicOrdering::Acquire),
+            "a successor must not enter the transport before abort_request completes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn silent_stdio_call_times_out_then_respawns_without_consuming_a_late_line() {
+        use std::collections::HashMap;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let fixture_root = std::env::temp_dir().join(format!(
+            "nomi-mcp-silent-stdio-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&fixture_root).unwrap();
+        let script_path = fixture_root.join("server.ps1");
+        let marker_path = fixture_root.join("timed-out.marker");
+        std::fs::write(
+            &script_path,
+            r#"
+param([Parameter(Mandatory = $true)][string]$Marker)
+$ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $request = $line | ConvertFrom-Json
+    if ($null -eq $request.id) { continue }
+
+    switch ($request.method) {
+        'initialize' {
+            $result = [ordered]@{
+                protocolVersion = '2024-11-05'
+                capabilities = [ordered]@{}
+                serverInfo = [ordered]@{ name = 'silent-fixture'; version = '1.0' }
+            }
+            break
+        }
+        'tools/list' {
+            $result = [ordered]@{
+                tools = @(
+                    [ordered]@{
+                        name = 'probe'
+                        description = 'deadline probe'
+                        inputSchema = [ordered]@{
+                            type = 'object'
+                            properties = [ordered]@{}
+                        }
+                    }
+                )
+            }
+            break
+        }
+        'tools/call' {
+            if (-not (Test-Path -LiteralPath $Marker)) {
+                Set-Content -LiteralPath $Marker -Value 'timed-out' -NoNewline
+                Start-Sleep -Seconds 5
+                $text = 'late-first'
+            } else {
+                $text = 'second-ok'
+            }
+            $result = [ordered]@{
+                content = @([ordered]@{ type = 'text'; text = $text })
+                isError = $false
+            }
+            break
+        }
+        default {
+            $result = [ordered]@{}
+        }
+    }
+
+    $response = [ordered]@{
+        jsonrpc = '2.0'
+        id = [uint64]$request.id
+        result = $result
+    }
+    [Console]::Out.WriteLine(($response | ConvertTo-Json -Depth 20 -Compress))
+    [Console]::Out.Flush()
+}
+"#,
+        )
+        .unwrap();
+
+        let mut configs = HashMap::new();
+        configs.insert(
+            "silent-stdio".to_owned(),
+            McpServerConfig {
+                transport: TransportType::Stdio,
+                command: Some("powershell.exe".to_owned()),
+                args: Some(vec![
+                    "-NoProfile".to_owned(),
+                    "-NonInteractive".to_owned(),
+                    "-ExecutionPolicy".to_owned(),
+                    "Bypass".to_owned(),
+                    "-File".to_owned(),
+                    script_path.to_string_lossy().into_owned(),
+                    marker_path.to_string_lossy().into_owned(),
+                ]),
+                env: None,
+                url: None,
+                headers: None,
+                deferred: None,
+                request_timeout_secs: Some(1),
+            },
+        );
+
+        let manager = McpManager::connect_all(&configs).await.unwrap();
+        assert_eq!(manager.server_names(), vec!["silent-stdio".to_owned()]);
+
+        let started = tokio::time::Instant::now();
+        let first_error = manager
+            .call_tool("silent-stdio", "probe", json!({}))
+            .await
+            .expect_err("the first fixture call intentionally never responds");
+        assert!(matches!(
+            first_error,
+            McpError::RequestTimeout { timeout_ms: 1_000 }
+        ));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(
+            marker_path.is_file(),
+            "the timed-out child must have entered the tool before retirement"
+        );
+
+        let second = manager
+            .call_tool("silent-stdio", "probe", json!({}))
+            .await
+            .expect("a fresh child should be handshaken for the successor");
+        assert_eq!(second.text, "second-ok");
+        manager.shutdown().await.unwrap();
+
+        if marker_path.exists() {
+            std::fs::remove_file(&marker_path).unwrap();
+        }
+        std::fs::remove_file(&script_path).unwrap();
+        std::fs::remove_dir(&fixture_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn silent_streamable_http_body_times_out_and_next_request_uses_a_clean_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut first_stream, _) = listener.accept().await.unwrap();
+            let first_request = read_fixture_http_request(&mut first_stream).await;
+            assert_eq!(first_request["id"], 10);
+            first_stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                      Content-Length: 100000\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            first_stream.flush().await.unwrap();
+
+            // The first response never sends its declared body. Once the
+            // manager deadline cancels that request, reqwest must discard the
+            // incomplete connection and open a clean one for the successor.
+            let (mut second_stream, _) =
+                tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                    .await
+                    .expect("the successor should open a new HTTP connection")
+                    .unwrap();
+            let second_request = read_fixture_http_request(&mut second_stream).await;
+            let second_id = second_request["id"].as_u64().unwrap();
+            assert_eq!(second_id, 11);
+            let body = serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": second_id,
+                "result": {
+                    "content": [{"type": "text", "text": "second-ok"}],
+                    "isError": false
+                }
+            }))
+            .unwrap();
+            second_stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            second_stream.write_all(&body).await.unwrap();
+            second_stream.flush().await.unwrap();
+            drop(first_stream);
+        });
+
+        let transport = StreamableHttpTransport::connect(
+            &format!("http://{address}/mcp"),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let manager = McpManager::new_for_test_with_request_timeout(
+            vec![("silent-http", false, Box::new(transport))],
+            Duration::from_millis(60),
+        );
+
+        let first = manager
+            .call_tool("silent-http", "probe", json!({}))
+            .await
+            .expect_err("the first HTTP body intentionally never completes");
+        assert!(matches!(
+            first,
+            McpError::RequestTimeout { timeout_ms: 60 }
+        ));
+        let second = manager
+            .call_tool("silent-http", "probe", json!({}))
+            .await
+            .expect("the successor should not inherit the partial response body");
+        assert_eq!(second.text, "second-ok");
+        manager.shutdown().await.unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

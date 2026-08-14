@@ -49,7 +49,7 @@ where
 
 fn retry_log_classification(error: &ProviderError) -> (&'static str, Option<u16>) {
     match error {
-        ProviderError::Http(_) => ("http_connect", None),
+        ProviderError::Http(_) => ("http_transport", None),
         ProviderError::Connection(_) => ("connection", None),
         ProviderError::Api { status, .. } => ("transient_api", Some(*status)),
         _ => ("other", None),
@@ -58,7 +58,9 @@ fn retry_log_classification(error: &ProviderError) -> (&'static str, Option<u16>
 
 fn is_retryable_initial_request_error(error: &ProviderError) -> bool {
     match error {
-        ProviderError::Http(err) => err.is_connect(),
+        // No response stream exists yet, so a connect/request timeout cannot
+        // have exposed model output or tool progress and is replay-safe.
+        ProviderError::Http(err) => err.is_connect() || err.is_timeout() || err.is_request(),
         ProviderError::Connection(_) => true,
         ProviderError::Api { status, .. } => {
             matches!(status, 500 | 502 | 503 | 504) && !error.is_tool_schema_incompatible()
@@ -102,7 +104,7 @@ pub async fn backoff_sleep(attempt: u32, current_backoff: Duration) -> Duration 
     tracing::warn!(
         attempt,
         max = MAX_STREAM_RETRIES,
-        "retrying stream after mid-stream disconnect"
+        "retrying provider stream after an empty retryable failure"
     );
     tokio::time::sleep(current_backoff).await;
     (current_backoff * 2).min(MAX_BACKOFF)
@@ -120,7 +122,7 @@ pub fn evaluate_outcome(
         StreamOutcome::Ok => Ok(None),
         StreamOutcome::FailedPartial(e) => Ok(Some(e)),
         StreamOutcome::FailedEmpty(e) => {
-            if attempt == MAX_STREAM_RETRIES {
+            if !e.is_retryable() || attempt == MAX_STREAM_RETRIES {
                 Ok(Some(e))
             } else {
                 Err(e)
@@ -181,7 +183,7 @@ pub async fn finish_stream_with_retry<S, SFut, P, PFut>(
                 }
                 Err(_) => continue,
             },
-            Err(e) if attempt == MAX_STREAM_RETRIES => {
+            Err(e) if !e.is_retryable() || attempt == MAX_STREAM_RETRIES => {
                 final_err = Some(e);
                 break;
             }
@@ -336,6 +338,16 @@ mod tests {
             panic!("expected Ok(Some(err))")
         };
         assert!(matches!(e, ProviderError::Connection(_)));
+    }
+
+    #[test]
+    fn test_evaluate_outcome_failed_empty_non_retryable_stops_immediately() {
+        let err = ProviderError::Parse("malformed SSE frame".into());
+        let result = evaluate_outcome(StreamOutcome::FailedEmpty(err), 1);
+        let Ok(Some(e)) = result else {
+            panic!("expected Ok(Some(err))")
+        };
+        assert!(matches!(e, ProviderError::Parse(_)));
     }
 
     // --- backoff_sleep tests ---

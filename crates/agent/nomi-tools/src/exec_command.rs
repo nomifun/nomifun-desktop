@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::{
     Tool,
     process_store::{NumericSessionBinding, ProcessStore, missed_bytes},
-    windows_shell::{shell_transport, validate_shell_script},
+    windows_shell::{ShellOutputSanitizer, shell_transport, validate_shell_script},
 };
 
 const DEFAULT_YIELD_MS: u64 = 10_000;
@@ -522,15 +522,13 @@ impl Tool for ExecCommandTool {
          is POSIX sh. Separate Windows consoles and GUI launches are rejected; use the dedicated launch tool.\n\n\
          Script mode requires script, language (shell or python), and a hard timeout in milliseconds. \
          It is for deterministic, homogeneous local batches that need no intermediate model decision \
-         or approval. On Windows, shell commands always use an isolated PTY; on macOS/Linux script mode \
-         uses pipe transport. Script mode never returns a live session and does not download \
+         or approval. Script mode uses non-interactive pipe transport. Script mode never returns a live session and does not download \
          Python when the host has no Python 3 interpreter. Validate preconditions, fail non-zero on a \
          dependent-operation failure, bound output, and print a concise final summary. Do not use scripts \
          to bypass dedicated file, browser, UI, MCP, or approval-aware tools.\n\n\
          On macOS/Linux, use tty=true for REPLs, TUIs, and interactive installers.\n\n\
-         - On Windows, shell commands always use an isolated PTY with a merged terminal stream.\n\
-         - On macOS/Linux, tty=false uses separate stdout/stderr pipe streams.\n\
-         - On macOS/Linux, tty=true uses a merged PTY stream for interactive programs.\n\
+         - On every platform, tty=false uses separate stdout/stderr pipe streams and no visible console window.\n\
+         - tty=true uses a merged PTY stream for interactive programs.\n\
          - If the process exits within yield_time_ms, the result reports its exit_code and no \
          session_id.\n\
          - If it remains live, use write_stdin with the returned session_id.\n\n\
@@ -563,7 +561,7 @@ impl Tool for ExecCommandTool {
                 },
                 "tty": {
                     "type": "boolean",
-                    "description": "Use PTY transport on macOS/Linux. Defaults to false (pipe) there; Windows always uses an isolated PTY."
+                    "description": "Use merged PTY transport for an interactive program. Defaults to false, which preserves separate stdout/stderr streams."
                 },
                 "yield_time_ms": {
                     "type": "number",
@@ -999,7 +997,18 @@ pub(crate) fn render_output(
     chunks.sort_by_key(|chunk| chunk.seq);
     let mut rendered = String::new();
     let mut current_stream = None;
+    let mut stdout_sanitizer = ShellOutputSanitizer::default();
+    let mut stderr_sanitizer = ShellOutputSanitizer::default();
+    let mut pty_sanitizer = ShellOutputSanitizer::default();
     for chunk in chunks {
+        let cleaned = match chunk.stream {
+            OutputStream::Stdout => stdout_sanitizer.clean(&chunk.text),
+            OutputStream::Stderr => stderr_sanitizer.clean(&chunk.text),
+            OutputStream::Pty => pty_sanitizer.clean(&chunk.text),
+        };
+        if cleaned.is_empty() {
+            continue;
+        }
         if current_stream != Some(chunk.stream) {
             if !rendered.is_empty() && !rendered.ends_with('\n') {
                 rendered.push('\n');
@@ -1011,7 +1020,7 @@ pub(crate) fn render_output(
             });
             current_stream = Some(chunk.stream);
         }
-        rendered.push_str(&chunk.text);
+        rendered.push_str(&cleaned);
     }
     if rendered.is_empty() {
         rendered.push_str("OUTPUT:\n");
@@ -1449,7 +1458,7 @@ mod tests {
         assert!(properties["tty"]["description"]
             .as_str()
             .unwrap()
-            .contains("Windows always uses an isolated PTY"));
+            .contains("Defaults to false"));
     }
 
     #[tokio::test]
@@ -1721,16 +1730,8 @@ mod tests {
         }))
         .expect("shell script should prepare");
 
-        #[cfg(windows)]
-        {
-            assert_eq!(legacy.transport, Transport::Pty { cols: 120, rows: 30 });
-            assert_eq!(script.transport, Transport::Pty { cols: 120, rows: 30 });
-        }
-        #[cfg(not(windows))]
-        {
-            assert_eq!(legacy.transport, Transport::Pipe);
-            assert_eq!(script.transport, Transport::Pipe);
-        }
+        assert_eq!(legacy.transport, Transport::Pipe);
+        assert_eq!(script.transport, Transport::Pipe);
     }
 
     #[cfg(windows)]
@@ -1834,7 +1835,6 @@ mod tests {
         assert!(description.contains("Get-ChildItem"));
         assert!(description.contains("$env:NAME"));
         assert!(description.contains("cmd /C"));
-        assert!(description.contains("On Windows, shell commands always use an isolated PTY"));
         assert!(description.contains("tty=false uses separate stdout/stderr pipe streams"));
         assert!(description.contains("Separate Windows consoles and GUI launches are rejected"));
         assert!(description.contains("\"\\r\") as its own write_stdin call"));

@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex};
 
 use super::{
-    AgentError, MAX_PROVIDER_TURN_TOOL_CALLS, SYSTEM_RESOURCE_CONTEXT_HEADER,
-    USER_IMAGE_HISTORY_PLACEHOLDER,
+    AgentError, MAX_PROVIDER_TURN_TOOL_CALLS, REQUEST_SCOPED_TOOL_AUTHORITY_HEADER,
+    REQUEST_SCOPED_TOOL_AUTHORITY_RULE, SYSTEM_RESOURCE_CONTEXT_HEADER, USER_IMAGE_HISTORY_PLACEHOLDER,
 };
 use nomi_protocol::events::ToolCategory;
 use nomi_providers::{LlmProvider, ProviderError};
@@ -547,6 +547,9 @@ struct SuccessfulImageTool;
 #[derive(Default)]
 struct DeliveredMediaOutput;
 
+#[derive(Default)]
+struct FailedMediaOutput;
+
 impl OutputSink for DeliveredMediaOutput {
     fn emit_text_delta(&self, _: &str, _: &str) {}
     fn emit_thinking(&self, _: &str, _: &str) {}
@@ -563,6 +566,30 @@ impl OutputSink for DeliveredMediaOutput {
     ) -> ToolMediaDelivery {
         ToolMediaDelivery::Delivered {
             context: "Verified artifact receipt: nomifun-artifacts/image.png".to_owned(),
+        }
+    }
+    fn emit_stream_start(&self, _: &str) {}
+    fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
+    fn emit_error(&self, _: &str) {}
+    fn emit_info(&self, _: &str) {}
+}
+
+impl OutputSink for FailedMediaOutput {
+    fn emit_text_delta(&self, _: &str, _: &str) {}
+    fn emit_thinking(&self, _: &str, _: &str) {}
+    fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
+    fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+    fn emit_tool_result_with_images_and_artifact_identity(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: bool,
+        _: &str,
+        _: &[nomi_types::tool::ToolImage],
+    ) -> ToolMediaDelivery {
+        ToolMediaDelivery::Failed {
+            error: "durable image persistence failed".to_owned(),
         }
     }
     fn emit_stream_start(&self, _: &str) {}
@@ -1543,6 +1570,50 @@ async fn turn_tool_allowlist_is_exact_and_does_not_leak_to_the_next_turn() {
     assert_eq!(second_names, std::collections::HashSet::from(["browser"]));
 }
 
+#[tokio::test]
+async fn strict_route_prefixes_authority_over_hidden_knowledge_tool_promises() {
+    let provider = Arc::new(RecordingProvider::successful());
+    let mut engine = make_engine("strict-tool-authority");
+    engine.provider = provider.clone();
+    engine.system_prompt = "## Knowledge bases (extended knowledge source)\nCall the `knowledge_search` tool BEFORE answering, then call `knowledge_read`.".to_owned();
+    assert!(engine.tools.register(Box::new(SuccessfulImageTool)));
+    let image_only = std::collections::HashSet::from(["image_gen".to_owned()]);
+
+    engine
+        .execute_turn_with_content_for_source_and_tool_allowlist(
+            vec![ContentBlock::Text {
+                text: "generate an image".into(),
+            }],
+            "wire-strict-authority",
+            "message-strict-authority",
+            Some(&image_only),
+        )
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["image_gen"]
+    );
+    assert!(requests[0].system.starts_with(REQUEST_SCOPED_TOOL_AUTHORITY_HEADER));
+    assert!(requests[0].system.contains(REQUEST_SCOPED_TOOL_AUTHORITY_RULE));
+    assert!(
+        requests[0]
+            .system
+            .contains("Declared tools for this request: `image_gen`")
+    );
+    assert!(
+        requests[0].system.contains("knowledge_search"),
+        "the authority rule must override hidden promises without brittle prompt-string removal"
+    );
+}
+
 #[test]
 fn deterministic_host_turn_is_persisted_with_a_rewind_checkpoint() {
     let mut engine = make_engine("host-turn");
@@ -2397,6 +2468,49 @@ async fn delivered_image_bytes_are_replaced_by_receipt_context_without_a_redunda
     };
     assert!(content.contains("Verified artifact receipt"));
     assert!(images.is_empty(), "base64 image bytes must never persist in session history");
+}
+
+#[tokio::test]
+async fn strict_image_delivery_failure_stops_before_an_empty_tool_provider_pass() {
+    let mut engine = make_engine("failed-image-delivery");
+    let provider = Arc::new(StrictImageThenStopProvider {
+        requests: Mutex::new(Vec::new()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    engine.provider = provider.clone();
+    engine.output = Arc::new(FailedMediaOutput);
+    engine.tools.register(Box::new(SuccessfulImageTool));
+    let allowlist = std::collections::HashSet::from(["image_gen".to_owned()]);
+
+    engine
+        .execute_turn_with_content_for_source_and_tool_allowlist(
+            vec![ContentBlock::Text {
+                text: "generate a fox".to_owned(),
+            }],
+            "m-failed-image-delivery",
+            "root-failed-image-delivery",
+            Some(&allowlist),
+        )
+        .await
+        .expect("the engine phase must return control to the host receipt gate");
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "artifact failure must not trigger a prose pass with tools=[]"
+    );
+    assert_eq!(requests[0].tools.len(), 1);
+    drop(requests);
+
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &engine.messages[2].content[0]
+    else {
+        panic!("session history should retain the failed tool result");
+    };
+    assert!(*is_error);
+    assert!(content.contains("Artifact delivery failed"));
 }
 
 #[tokio::test]

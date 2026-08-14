@@ -12,13 +12,69 @@ const AGENT_WEB_OPEN_ERROR: &str =
      Browser tool (browser navigate) to read or interact with web pages";
 
 pub(crate) fn shell_transport(requested_tty: bool) -> Transport {
-    if cfg!(windows) || requested_tty {
+    if requested_tty {
         Transport::Pty {
             cols: SHELL_PTY_COLS,
             rows: SHELL_PTY_ROWS,
         }
     } else {
         Transport::Pipe
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+enum EscapeState {
+    #[default]
+    Text,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+/// Incrementally removes terminal control traffic from shell output while
+/// preserving ordinary text. PTY reads may split an ANSI/OSC sequence across
+/// arbitrary chunks, so cleaning each chunk independently is not sufficient.
+#[derive(Default)]
+pub(crate) struct ShellOutputSanitizer {
+    state: EscapeState,
+}
+
+impl ShellOutputSanitizer {
+    pub(crate) fn clean(&mut self, input: &str) -> String {
+        let mut output = Vec::with_capacity(input.len());
+        for &byte in input.as_bytes() {
+            match self.state {
+                EscapeState::Text => match byte {
+                    0x1b => self.state = EscapeState::Escape,
+                    b'\n' | b'\t' => output.push(byte),
+                    b'\r' => {}
+                    0x00..=0x08 | 0x0b..=0x1f | 0x7f => {}
+                    _ => output.push(byte),
+                },
+                EscapeState::Escape => {
+                    self.state = match byte {
+                        b'[' => EscapeState::Csi,
+                        b']' => EscapeState::Osc,
+                        _ => EscapeState::Text,
+                    };
+                }
+                EscapeState::Csi => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        self.state = EscapeState::Text;
+                    }
+                }
+                EscapeState::Osc => match byte {
+                    0x07 => self.state = EscapeState::Text,
+                    0x1b => self.state = EscapeState::OscEscape,
+                    _ => {}
+                },
+                EscapeState::OscEscape => {
+                    self.state = EscapeState::Text;
+                }
+            }
+        }
+        String::from_utf8_lossy(&output).into_owned()
     }
 }
 
@@ -210,6 +266,26 @@ mod windows_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noninteractive_shell_uses_pipe_and_tty_requests_pty() {
+        assert_eq!(shell_transport(false), Transport::Pipe);
+        assert_eq!(
+            shell_transport(true),
+            Transport::Pty {
+                cols: SHELL_PTY_COLS,
+                rows: SHELL_PTY_ROWS,
+            }
+        );
+    }
+
+    #[test]
+    fn output_sanitizer_strips_split_csi_osc_and_c0_sequences() {
+        let mut sanitizer = ShellOutputSanitizer::default();
+        assert_eq!(sanitizer.clean("\u{1b}[?9001"), "");
+        assert_eq!(sanitizer.clean("hplain\r\n\u{1b}]0;title"), "plain\n");
+        assert_eq!(sanitizer.clean("\u{7}error\u{8}"), "error");
+    }
 
     #[test]
     fn shell_web_opens_fail_closed_on_every_platform() {

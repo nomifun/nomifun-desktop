@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     Tool,
-    windows_shell::{shell_transport, validate_shell_script},
+    windows_shell::{ShellOutputSanitizer, shell_transport, validate_shell_script},
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -52,7 +52,8 @@ impl BashTool {
 
     async fn run_supervised(
         supervisor: Arc<ProcessSupervisor>,
-        cwd: PathBuf,
+        session_cwd: PathBuf,
+        requested_cwd: PathBuf,
         capability: CapabilityPolicy,
         owner: ProcessOwner,
         command: String,
@@ -73,7 +74,7 @@ impl BashTool {
                 },
                 script: command,
             },
-            cwd: cwd.clone(),
+            cwd: requested_cwd,
             env: BTreeMap::new(),
             transport: shell_transport(false),
             policy: ProcessPolicy {
@@ -83,7 +84,7 @@ impl BashTool {
             },
             capability,
         };
-        let request = match normalize_request(request, &cwd) {
+        let request = match normalize_request(request, &session_cwd) {
             Ok(request) => request,
             Err(error) => return process_error_result("Failed to prepare command", error),
         };
@@ -189,10 +190,11 @@ impl Tool for BashTool {
              - Read files: use Read (not cat, head, or tail)\n\
              - Edit files: use Edit (not sed or awk)\n\
              - Write files: use Write (not echo redirection or cat with heredoc)\n\n\
+             Commands already start in the session working directory shown in the system prompt. Do not prepend cd or Set-Location for normal project commands. This host uses Windows PowerShell 5.1, which does not support && or ||; use separate Bash calls, ';', or `if ($?) { ... }` when a later command depends on success.\n\n\
              # Instructions\n\
              - For shell-only work, use PowerShell syntax: Get-ChildItem, Get-Content, Set-Location, $env:NAME, and ';' for sequencing. Run cmd /C \"...\" explicitly only when cmd.exe syntax is required.\n\
              - Do not use start, Start-Process, or cmd /K. This tool rejects separate Windows consoles and GUI launches; use the Computer launch action instead.\n\
-             - Use absolute paths to avoid working directory confusion.\n\
+             - Prefer workspace-relative paths. To run in another allowed workspace directory, pass workdir as a native Windows path instead of concatenating a cd command.\n\
              - Validate browser behavior with the Browser tool. Do not emulate DOM, AudioContext, canvas, or other Web APIs in a long inline `node -e` command.\n\
              - For multiline code, use Write to create a temporary script in the workspace, execute that script, then remove it if appropriate. This avoids PowerShell interpolation, quoting, and command-length failures.\n\
              - When issuing multiple independent commands, make parallel tool calls instead of chaining them. Chain commands only when later commands depend on earlier ones.\n\
@@ -209,8 +211,9 @@ impl Tool for BashTool {
              - Read files: use Read (not cat, head, or tail)\n\
              - Edit files: use Edit (not sed or awk)\n\
              - Write files: use Write (not echo or cat with heredoc)\n\n\
+             Commands already start in the session working directory shown in the system prompt. Do not prepend cd for normal project commands.\n\n\
              # Instructions\n\
-             - Use absolute paths to avoid working directory confusion.\n\
+             - Prefer workspace-relative paths. To run in another allowed workspace directory, pass workdir instead of concatenating a cd command.\n\
              - Validate browser behavior with the Browser tool. Do not emulate DOM, AudioContext, canvas, or other Web APIs in a long inline `node -e` command.\n\
              - For multiline code, use Write to create a temporary script in the workspace, execute that script, then remove it if appropriate. This avoids shell interpolation, quoting, and command-length failures.\n\
              - When issuing multiple independent commands, make parallel tool calls instead of chaining them. Use `&&` only when commands depend on each other.\n\
@@ -233,9 +236,15 @@ impl Tool for BashTool {
                 "timeout": {
                     "type": "integer",
                     "description": "Timeout in milliseconds (default 120000, max 600000)"
+                },
+                "workdir": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Working directory for this command. Defaults to the session workspace; relative paths resolve inside that workspace. Pass native OS paths here instead of prepending cd or Set-Location."
                 }
             },
-            "required": ["command"]
+            "required": ["command"],
+            "additionalProperties": false
         })
     }
 
@@ -254,17 +263,28 @@ impl Tool for BashTool {
         if let Err(error) = validate_shell_script(command) {
             return ToolResult::error(error);
         }
+        let requested_cwd = match requested_workdir(&input, &self.cwd) {
+            Ok(cwd) => cwd,
+            Err(error) => return ToolResult::error(error),
+        };
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .min(MAX_TIMEOUT_MS);
-        tracing::debug!(cwd = %self.cwd.display(), command, timeout_ms, "BashTool executing");
+        tracing::debug!(
+            session_cwd = %self.cwd.display(),
+            requested_cwd = %requested_cwd.display(),
+            command,
+            timeout_ms,
+            "BashTool executing"
+        );
 
         let cancelled = CancellationToken::new();
         let mut cancellation_guard = CancelWorkerOnDrop::new(cancelled.clone());
         let worker = tokio::spawn(Self::run_supervised(
             Arc::clone(&self.supervisor),
             self.cwd.clone(),
+            requested_cwd,
             self.capability.clone(),
             ProcessOwner::new(self.invocation_id, Uuid::now_v7()),
             command.to_owned(),
@@ -488,7 +508,18 @@ fn render_output(output: &OutputSnapshot) -> String {
     chunks.sort_by_key(|chunk| chunk.seq);
     let mut rendered = String::new();
     let mut current_stream = None;
+    let mut stdout_sanitizer = ShellOutputSanitizer::default();
+    let mut stderr_sanitizer = ShellOutputSanitizer::default();
+    let mut pty_sanitizer = ShellOutputSanitizer::default();
     for chunk in chunks {
+        let cleaned = match chunk.stream {
+            OutputStream::Stdout => stdout_sanitizer.clean(&chunk.text),
+            OutputStream::Stderr => stderr_sanitizer.clean(&chunk.text),
+            OutputStream::Pty => pty_sanitizer.clean(&chunk.text),
+        };
+        if cleaned.is_empty() {
+            continue;
+        }
         if current_stream != Some(chunk.stream) {
             if !rendered.is_empty() && !rendered.ends_with('\n') {
                 rendered.push('\n');
@@ -500,7 +531,7 @@ fn render_output(output: &OutputSnapshot) -> String {
             });
             current_stream = Some(chunk.stream);
         }
-        rendered.push_str(&chunk.text);
+        rendered.push_str(&cleaned);
     }
     if rendered.is_empty() {
         rendered.push_str("OUTPUT:\n");
@@ -562,6 +593,17 @@ fn process_error_result(prefix: &str, error: ProcessError) -> ToolResult {
         content: format!("{prefix}: {error} ({})", error.code()),
         is_error: true,
         images: Vec::new(),
+    }
+}
+
+fn requested_workdir(input: &Value, session_cwd: &Path) -> Result<PathBuf, String> {
+    match input.get("workdir") {
+        None | Some(Value::Null) => Ok(session_cwd.to_path_buf()),
+        Some(Value::String(value)) if value.trim().is_empty() => {
+            Err("workdir must not be empty".to_owned())
+        }
+        Some(Value::String(value)) => Ok(PathBuf::from(value)),
+        Some(_) => Err("workdir must be a string".to_owned()),
     }
 }
 
@@ -628,14 +670,15 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_bash_runs_cmd_c_inside_the_pseudoconsole() {
+    async fn windows_bash_runs_cmd_c_with_separate_output_streams() {
         let result = tool(std::env::temp_dir())
             .execute(json!({"command": "cmd /c echo conpty_marker"}))
             .await;
 
         assert!(!result.is_error, "{}", result.content);
         assert!(result.content.contains("conpty_marker"), "{}", result.content);
-        assert!(result.content.contains("PTY:\n"), "{}", result.content);
+        assert!(result.content.contains("STDOUT:\n"), "{}", result.content);
+        assert!(!result.content.contains("PTY:\n"), "{}", result.content);
     }
 
     #[cfg(windows)]
@@ -699,10 +742,20 @@ mod tests {
             .await
             .expect("timeout cleanup must remain bounded")
             .expect("Bash task should join");
-        tokio::time::sleep(Duration::from_millis(1_700)).await;
-        let processes_gone = probes
-            .as_ref()
-            .is_some_and(|(helper, grandchild)| helper.is_gone() && grandchild.is_gone());
+        let processes_gone = if let Some((helper, grandchild)) = &probes {
+            tokio::time::timeout(Duration::from_secs(7), async {
+                loop {
+                    if helper.is_gone() && grandchild.is_gone() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .is_ok()
+        } else {
+            false
+        };
         if let Some((helper, grandchild)) = &probes {
             helper.force_kill();
             grandchild.force_kill();
@@ -782,6 +835,42 @@ mod tests {
             .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(result.content.contains("proof"));
+    }
+
+    #[tokio::test]
+    async fn workdir_override_handles_a_directory_with_spaces() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace with spaces");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("cwd_proof.txt"), "proof with spaces").unwrap();
+        let command = if cfg!(windows) {
+            "Get-Content cwd_proof.txt"
+        } else {
+            "cat cwd_proof.txt"
+        };
+        let result = tool(root.path().to_path_buf())
+            .execute(json!({
+                "command": command,
+                "workdir": workspace.to_str().unwrap()
+            }))
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("proof with spaces"), "{}", result.content);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_parse_errors_are_clean_and_keep_stderr() {
+        let result = tool(std::env::temp_dir())
+            .execute(json!({ "command": "Write-Output first && Write-Output second" }))
+            .await;
+
+        assert!(result.is_error, "{}", result.content);
+        assert!(result.content.contains("STDERR:\n"), "{}", result.content);
+        assert!(result.content.contains("&&"), "{}", result.content);
+        assert!(!result.content.contains('\u{1b}'), "{}", result.content);
+        assert!(!result.content.contains("PTY:\n"), "{}", result.content);
     }
 
     #[cfg(windows)]

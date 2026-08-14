@@ -634,6 +634,20 @@ fn classify_provider_api(lower: &str) -> Option<ClassifiedError> {
             None,
         ));
     }
+    // A clean HTTP EOF without the provider protocol's terminal marker is an
+    // upstream truncation, not evidence that the configured endpoint cannot
+    // be reached. Keep this ahead of generic timeout/network matching so the
+    // typed provider error cannot be misdirected to Base URL settings if its
+    // diagnostic happens to mention a transport detail.
+    if lower.contains("provider stream truncated") {
+        return Some(provider_error(
+            "The model provider returned a truncated response",
+            AgentErrorCode::UserLlmProviderGatewayError,
+            true,
+            AgentErrorResolutionKind::Retry,
+            None,
+        ));
+    }
     if contains_any(lower, &["504", "timeout", "deadline exceeded", "gateway timeout"]) {
         return Some(provider_error(
             "The model provider did not respond in time",
@@ -1022,12 +1036,20 @@ mod tests {
             "Nomi agent error: API error: OpenAI-compatible provider emitted non-usage data after finish_reason",
             "Nomi agent error: API error: OpenAI-compatible provider returned a tool call with a missing function name (call `call_123`)",
             "Nomi agent error: API error: provider stream protocol violation: tool progress 'Write' (call-123) was not advertised in this request",
+            "Nomi agent error: API error: Provider stream truncated: OpenAI-compatible stream ended before finish_reason",
         ] {
             let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
             assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
             assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
             assert_eq!(err.stream_error().retryable, Some(true));
             assert_eq!(err.stream_error().feedback_recommended, Some(false));
+            assert_eq!(
+                err.stream_error()
+                    .resolution
+                    .and_then(|resolution| resolution.target),
+                None,
+                "protocol/truncation errors must not send the user to Base URL settings"
+            );
         }
     }
 

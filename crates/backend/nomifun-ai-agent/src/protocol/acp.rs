@@ -66,6 +66,13 @@ use agent_client_protocol::schema::{
 /// the "process alive but not answering" case.
 const INIT_TIMEOUT_SECS_DEFAULT: u64 = 120;
 
+/// Maximum time the host waits for a user decision on an ACP permission
+/// request. The permission router uses the same bound to remove stale
+/// confirmations, while this protocol-side guard protects the SDK callback
+/// if the router task is unavailable or the relay channel is saturated.
+pub(crate) const ACP_PERMISSION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(120);
+
 /// Environment override for the initialize-handshake timeout (seconds).
 /// Operators on very slow networks can raise it without a rebuild.
 const INIT_TIMEOUT_ENV: &str = "NOMIFUN_ACP_INIT_TIMEOUT_SECS";
@@ -677,17 +684,30 @@ async fn handle_permission_request(
 
     let (response_tx, response_rx) = oneshot::channel();
 
-    if event_tx.send(PermissionRequest { request, response_tx }).await.is_err() {
-        warn!("Permission channel closed, cancelling request");
-        let _ = responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+    let send_result = tokio::time::timeout(
+        ACP_PERMISSION_TIMEOUT,
+        event_tx.send(PermissionRequest { request, response_tx }),
+    )
+    .await;
+    if !matches!(send_result, Ok(Ok(()))) {
+        warn!("Permission channel unavailable, cancelling request");
+        let _ = responder.respond(RequestPermissionResponse::new(
+            RequestPermissionOutcome::Cancelled,
+        ));
         return;
     }
 
-    let response = match response_rx.await {
-        Ok(PermissionDecision::Selected { option_id }) => RequestPermissionResponse::new(
-            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
-        ),
-        Ok(PermissionDecision::Cancelled) | Err(_) => {
+    let response = match tokio::time::timeout(ACP_PERMISSION_TIMEOUT, response_rx).await {
+        Ok(Ok(PermissionDecision::Selected { option_id })) => {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(option_id),
+            ))
+        }
+        Ok(Ok(PermissionDecision::Cancelled)) | Ok(Err(_)) => {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+        }
+        Err(_) => {
+            warn!("ACP permission response timed out; cancelling request");
             RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
         }
     };

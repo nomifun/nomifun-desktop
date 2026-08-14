@@ -465,7 +465,7 @@ async fn process_sse_stream_inner(
         // A closed HTTP body is not itself a successful Anthropic turn. Even a
         // complete `message_delta` can be followed by a malformed/truncated
         // tail; only `message_stop` commits the response.
-        let error = ProviderError::Connection(
+        let error = ProviderError::StreamTruncated(
             "Anthropic-compatible stream ended before message_stop".to_string(),
         );
         if emitted_content {
@@ -1661,7 +1661,10 @@ mod tests {
         let outcome = process_sse_stream(response, &tx).await;
         drop(tx);
 
-        assert!(matches!(outcome, StreamOutcome::FailedEmpty(_)));
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedEmpty(ProviderError::StreamTruncated(_))
+        ));
         while let Some(event) = rx.recv().await {
             assert!(!matches!(event, LlmEvent::ToolUse { .. }));
         }
@@ -1694,7 +1697,10 @@ mod tests {
             events.push(event);
         }
 
-        assert!(matches!(outcome, StreamOutcome::FailedEmpty(_)));
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedEmpty(ProviderError::StreamTruncated(_))
+        ));
         assert!(events.iter().all(|event| !matches!(
             event,
             LlmEvent::ToolUse { .. } | LlmEvent::Done { .. }

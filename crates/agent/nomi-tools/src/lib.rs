@@ -29,12 +29,15 @@ mod windows_shell_tests {
     use super::windows_shell::{shell_transport, validate_shell_script};
 
     #[test]
-    fn windows_shell_uses_pty_even_when_tty_is_not_requested() {
-        let transport = shell_transport(false);
-        #[cfg(windows)]
-        assert_eq!(transport, Transport::Pty { cols: 120, rows: 30 });
-        #[cfg(not(windows))]
-        assert_eq!(transport, Transport::Pipe);
+    fn noninteractive_shell_uses_pipe_and_tty_requests_pty() {
+        assert_eq!(shell_transport(false), Transport::Pipe);
+        assert_eq!(
+            shell_transport(true),
+            Transport::Pty {
+                cols: 120,
+                rows: 30,
+            }
+        );
     }
 
     #[test]
@@ -59,11 +62,20 @@ pub use output_truncation::{TruncationBudget, truncate_middle};
 
 use async_trait::async_trait;
 use serde_json::Value;
+use std::time::Duration;
 
 use nomi_config::hooks::HooksConfig;
 use nomi_protocol::events::ToolCategory;
 use nomi_types::skill_types::ContextModifier;
 use nomi_types::tool::{JsonSchema, ToolResult};
+
+/// Safety-net wall-clock budget for a tool invocation.
+///
+/// Tools with a more specific protocol/process deadline should override
+/// [`Tool::execution_timeout`].  The finite default is intentionally longer
+/// than the normal shell/MCP budgets, while ensuring a newly added custom
+/// tool cannot park an Agent turn forever.
+pub const DEFAULT_TOOL_EXECUTION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Truncate a string to at most `max_bytes`, snapping to a char boundary.
 pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
@@ -190,6 +202,16 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool
     async fn execute(&self, input: Value) -> ToolResult;
+
+    /// Maximum wall-clock time for one invocation, including host-side hooks.
+    ///
+    /// This is an engine safety net, not a replacement for a tool's own
+    /// cancellation/cleanup protocol.  Tools that expose a tighter,
+    /// user-controlled deadline may override it to keep the outer Agent
+    /// boundary aligned with that contract.
+    fn execution_timeout(&self, _input: &Value) -> Duration {
+        DEFAULT_TOOL_EXECUTION_TIMEOUT
+    }
 
     /// Execute with engine-owned invocation identity.
     ///

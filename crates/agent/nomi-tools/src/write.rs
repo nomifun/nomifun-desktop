@@ -242,6 +242,32 @@ mod tests {
         Arc::new(RwLock::new(FileStateCache::new(&config)))
     }
 
+    #[tokio::test]
+    async fn read_write_read_returns_the_new_content() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("cache rewrite.txt");
+        std::fs::write(&file_path, "before\n").unwrap();
+        let cache = make_cache();
+        let read = crate::read::ReadTool::new(Some(cache.clone()), None);
+        let write = WriteTool::new(Some(cache));
+        let input = json!({ "file_path": file_path.to_str().unwrap() });
+
+        let first = read.execute(input.clone()).await;
+        assert!(first.content.contains("before"), "{}", first.content);
+        let changed = write
+            .execute(json!({
+                "file_path": file_path.to_str().unwrap(),
+                "content": "after\n"
+            }))
+            .await;
+        assert!(!changed.is_error, "{}", changed.content);
+
+        let second = read.execute(input).await;
+        assert!(!second.is_error, "{}", second.content);
+        assert!(second.content.contains("after"), "{}", second.content);
+        assert!(!second.content.contains("unchanged since last read"), "{}", second.content);
+    }
+
     // -- Legacy tests (no cache) --
 
     #[tokio::test]

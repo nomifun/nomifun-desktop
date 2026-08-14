@@ -281,7 +281,7 @@ impl LlmProvider for BedrockProvider {
 
         let credentials = self.resolve_credentials()?;
         let stream_redactor = credentials_redactor(&credentials);
-        let client = crate::http_client();
+        let client = crate::http_client()?;
 
         // Each attempt re-signs: SigV4 signatures embed a timestamp and are only
         // valid within a short window, so a retried request needs a fresh
@@ -507,7 +507,7 @@ async fn process_aws_event_stream(
     }
 
     if !buffer.is_empty() {
-        let error = ProviderError::Connection(
+        let error = ProviderError::StreamTruncated(
             "Bedrock event stream ended in the middle of a frame".to_string(),
         );
         return if emitted_content {
@@ -523,7 +523,7 @@ async fn process_aws_event_stream(
         // Do not synthesize EndTurn here. That used to overwrite a real
         // MaxTokens Done from the shared parser, and it also committed tool
         // blocks from streams that closed without any terminal event.
-        let error = ProviderError::Connection(
+        let error = ProviderError::StreamTruncated(
             "Bedrock event stream ended before message_stop".to_string(),
         );
         if emitted_content {
@@ -922,7 +922,10 @@ mod tests {
         let outcome = process_aws_event_stream(response, &tx, &redactor).await;
         drop(tx);
 
-        assert!(matches!(outcome, anthropic_shared::StreamOutcome::FailedEmpty(_)));
+        assert!(matches!(
+            outcome,
+            anthropic_shared::StreamOutcome::FailedEmpty(ProviderError::StreamTruncated(_))
+        ));
         while let Some(event) = rx.recv().await {
             assert!(!matches!(event, LlmEvent::ToolUse { .. }));
         }
@@ -946,7 +949,10 @@ mod tests {
             events.push(event);
         }
 
-        assert!(matches!(outcome, anthropic_shared::StreamOutcome::FailedEmpty(_)));
+        assert!(matches!(
+            outcome,
+            anthropic_shared::StreamOutcome::FailedEmpty(ProviderError::StreamTruncated(_))
+        ));
         assert!(events.iter().all(|event| !matches!(
             event,
             LlmEvent::ToolUse { .. } | LlmEvent::Done { .. }

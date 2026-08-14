@@ -464,6 +464,12 @@ fn capture_source_snapshot(git_dir: &Path, source_root: &Path) -> Result<String,
         return Err("git commit-tree returned an empty revision".to_owned());
     }
     materialize_private_snapshot(git_dir, revision)?;
+    // The snapshot tree already contains the canonical Git blobs.  Do not let
+    // the machine-wide `core.autocrlf=true` setting rewrite those blobs when a
+    // delegated worktree is checked out on Windows.  Repository attributes such
+    // as `eol=crlf` still remain authoritative; this only prevents an ambient
+    // user/global setting from changing a repository with no explicit eol rule.
+    set_private_config(git_dir, "core.autocrlf", "false")?;
     Ok(revision.to_owned())
 }
 

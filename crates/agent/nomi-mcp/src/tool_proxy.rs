@@ -702,6 +702,7 @@ mod tests {
             url: None,
             headers: None,
             deferred,
+            request_timeout_secs: None,
         }
     }
 

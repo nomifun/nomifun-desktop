@@ -561,6 +561,13 @@ impl StdioTransport {
 impl McpTransport for StdioTransport {
     async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
         self.ensure_open()?;
+        // A manager deadline retires the complete child so a late response
+        // cannot contaminate the next request. The manager request gate ensures
+        // no successor can enter until that retirement has been scheduled;
+        // lazily establish a fresh, handshaken child here.
+        if self.conn.lock().await.is_none() {
+            self.respawn().await?;
+        }
         // First attempt on the current connection.
         let first = {
             let mut conn = self.conn.lock().await;
@@ -592,8 +599,25 @@ impl McpTransport for StdioTransport {
         }
     }
 
+    async fn abort_request(&self) -> Result<(), McpError> {
+        // A timed-out stdio request can still produce a late line.  Never leave
+        // that line in the pipe: retire the complete child process so the next
+        // request cannot consume a response belonging to an earlier request.
+        let stale = self.conn.lock().await.take();
+        if let Some(stale) = stale {
+            // `retire` immediately gives the cleanup registry ownership and
+            // schedules the process-tree shutdown. Do not await it here: this
+            // method runs on the deadline path and must let the Agent settle.
+            let _receipt = self.cleanup_registry.retire(stale)?;
+        }
+        Ok(())
+    }
+
     async fn notify(&self, req: &JsonRpcRequest) -> Result<(), McpError> {
         self.ensure_open()?;
+        if self.conn.lock().await.is_none() {
+            self.respawn().await?;
+        }
         let first = {
             let mut conn = self.conn.lock().await;
             let conn = conn.as_mut().ok_or_else(|| self.closed_error())?;

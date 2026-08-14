@@ -359,6 +359,16 @@ pub(super) async fn build(
         knowledge_write_policy.mode,
         nomifun_knowledge::WriteMode::Disabled
     );
+    // Prompt capability must be derived from the same effective surface that
+    // can register the native tools. Restricted workers retain a persistent
+    // allowlist, so advertising search/read when either name is absent creates
+    // a deterministic provider-authority violation later in the turn.
+    let knowledge_search_enabled = should_expose_knowledge_search(
+        is_instance_owner,
+        deps.knowledge_retrieval.is_some(),
+        !overrides.knowledge_mounts.is_empty(),
+        &overrides.allowed_tools,
+    );
 
     // Knowledge bases: append the mounted-bases section (per-base TOC +
     // write-back contract) to the system prompt, so nomi-engine sessions
@@ -367,6 +377,7 @@ pub(super) async fn build(
     overrides.system_prompt = append_knowledge_context(
         overrides.system_prompt.take(),
         &overrides,
+        knowledge_search_enabled,
         knowledge_write_enabled,
     );
 
@@ -757,7 +768,7 @@ pub(super) async fn build(
         None
     };
 
-    let knowledge_prelude: Option<String> = if overrides.knowledge_mounts.is_empty() {
+    let knowledge_prelude: Option<String> = if !knowledge_search_enabled {
         None
     } else {
         let names: Vec<&str> = overrides
@@ -836,7 +847,9 @@ pub(super) async fn build(
         } else {
             None
         },
-        is_instance_owner.then(|| deps.knowledge_retrieval.clone()).flatten(),
+        knowledge_search_enabled
+            .then(|| deps.knowledge_retrieval.clone())
+            .flatten(),
         knowledge_kb_ids,
         knowledge_prelude,
         knowledge_writeback_sink,
@@ -1038,9 +1051,25 @@ fn output_language_directive(lang: &str) -> &'static str {
 /// `PromptSection` format) so nomi-engine sessions (companion companion threads
 /// included) see exactly the same knowledge context the ACP path gets via
 /// its preset_context — single source of truth, no more structural copies.
+fn should_expose_knowledge_search(
+    is_instance_owner: bool,
+    has_retrieval_sink: bool,
+    has_mounts: bool,
+    allowed_tools: &[String],
+) -> bool {
+    if !is_instance_owner || !has_retrieval_sink || !has_mounts {
+        return false;
+    }
+
+    allowed_tools.is_empty()
+        || (allowed_tools.iter().any(|name| name == "knowledge_search")
+            && allowed_tools.iter().any(|name| name == "knowledge_read"))
+}
+
 fn append_knowledge_context(
     base: Option<String>,
     config: &NomiBuildExtra,
+    has_search_tool: bool,
     has_write_tool: bool,
 ) -> Option<String> {
     use nomifun_knowledge::context::{
@@ -1053,7 +1082,7 @@ fn append_knowledge_context(
             format: KnowledgeContextFormat::PromptSection,
             writeback: config.knowledge_writeback,
             writeback_eagerness: config.knowledge_writeback_eagerness.as_deref(),
-            has_search_tool: true,
+            has_search_tool,
             // The nomi engine registers the native knowledge_write tool whenever
             // the backend wired a write-back sink; the contract must then point
             // the model at that tool, not the (unreachable) generic Write path.
@@ -1322,6 +1351,7 @@ fn row_to_mcp_server_config(row: &McpServerRow) -> Result<McpServerConfig, Strin
                 url: None,
                 headers: None,
                 deferred: Some(false),
+                request_timeout_secs: None,
             })
         }
         "http" | "streamable_http" => {
@@ -1347,6 +1377,7 @@ fn row_to_mcp_server_config(row: &McpServerRow) -> Result<McpServerConfig, Strin
                 url: Some(url.to_owned()),
                 headers: Some(headers),
                 deferred: Some(false),
+                request_timeout_secs: None,
             })
         }
         "sse" => {
@@ -1372,6 +1403,7 @@ fn row_to_mcp_server_config(row: &McpServerRow) -> Result<McpServerConfig, Strin
                 url: Some(url.to_owned()),
                 headers: Some(headers),
                 deferred: Some(false),
+                request_timeout_secs: None,
             })
         }
         other => Err(format!("unsupported transport_type: {other}")),
@@ -1394,6 +1426,7 @@ fn session_server_to_mcp_server_config(
                 url: None,
                 headers: None,
                 deferred: Some(false),
+                request_timeout_secs: None,
             })
         }
         SessionMcpTransport::Http { url, headers } => {
@@ -1408,6 +1441,7 @@ fn session_server_to_mcp_server_config(
                 url: Some(url.clone()),
                 headers: Some(headers.clone()),
                 deferred: Some(false),
+                request_timeout_secs: None,
             })
         }
         SessionMcpTransport::Sse { url, headers } => {
@@ -1422,6 +1456,7 @@ fn session_server_to_mcp_server_config(
                 url: Some(url.clone()),
                 headers: Some(headers.clone()),
                 deferred: Some(false),
+                request_timeout_secs: None,
             })
         }
         SessionMcpTransport::StreamableHttp { url, headers } => {
@@ -1436,6 +1471,7 @@ fn session_server_to_mcp_server_config(
                 url: Some(url.clone()),
                 headers: Some(headers.clone()),
                 deferred: Some(false),
+                request_timeout_secs: None,
             })
         }
     }
@@ -1565,6 +1601,7 @@ fn gateway_mcp_to_config(
         url: None,
         headers: None,
         deferred: Some(true),
+        request_timeout_secs: None,
     };
 
     Some((
@@ -2062,6 +2099,7 @@ mod tests {
                 url: None,
                 headers: None,
                 deferred: Some(false),
+                request_timeout_secs: None,
             },
         )]);
 
@@ -2288,6 +2326,50 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_search_prompt_matches_the_effective_tool_surface() {
+        let unrestricted = Vec::<String>::new();
+        assert!(super::should_expose_knowledge_search(
+            true,
+            true,
+            true,
+            &unrestricted,
+        ));
+        assert!(!super::should_expose_knowledge_search(
+            false,
+            true,
+            true,
+            &unrestricted,
+        ));
+        assert!(!super::should_expose_knowledge_search(
+            true,
+            false,
+            true,
+            &unrestricted,
+        ));
+        assert!(!super::should_expose_knowledge_search(
+            true,
+            true,
+            false,
+            &unrestricted,
+        ));
+
+        let only_search = vec!["knowledge_search".to_owned()];
+        assert!(!super::should_expose_knowledge_search(
+            true,
+            true,
+            true,
+            &only_search,
+        ));
+        let complete_surface = vec!["knowledge_search".to_owned(), "knowledge_read".to_owned()];
+        assert!(super::should_expose_knowledge_search(
+            true,
+            true,
+            true,
+            &complete_surface,
+        ));
+    }
+
+    #[test]
     fn native_write_root_unrestricted_only_for_local_desktop() {
         // 本地桌面(无渠道)→ None(OS 用户全权,今日行为)。
         assert_eq!(resolve_native_write_root(None, "/ws"), None);
@@ -2305,11 +2387,11 @@ mod tests {
     fn append_knowledge_context_without_mounts_is_passthrough() {
         let config = NomiBuildExtra::default();
         assert_eq!(
-            append_knowledge_context(None, &config, true),
+            append_knowledge_context(None, &config, true, true),
             None
         );
         assert_eq!(
-            append_knowledge_context(Some("hello".into()), &config, true),
+            append_knowledge_context(Some("hello".into()), &config, true, true),
             Some("hello".into())
         );
     }
@@ -2335,7 +2417,7 @@ mod tests {
         };
 
         let readonly =
-            append_knowledge_context(Some("base".into()), &config, true).unwrap();
+            append_knowledge_context(Some("base".into()), &config, true, true).unwrap();
         assert!(readonly.starts_with("base\n\n"));
         assert!(readonly.contains("## Knowledge bases"));
         assert!(readonly.contains("领域知识"));
@@ -2350,7 +2432,7 @@ mod tests {
         // nomi surface has the native tool → the write-back contract points at
         // it, and no session id or inbox path can leak into the prompt any more.
         config.knowledge_writeback = true;
-        let tooled = append_knowledge_context(None, &config, true).unwrap();
+        let tooled = append_knowledge_context(None, &config, true, true).unwrap();
         assert!(tooled.contains("Write-back is ENABLED"));
         assert!(tooled.contains("knowledge_write"));
         assert!(!tooled.contains("STAGED"));
@@ -2360,13 +2442,13 @@ mod tests {
             "the contract must not carry a session id: {tooled}"
         );
         // Flag plumbs through: without the tool, the file-based prose returns.
-        let file_based = append_knowledge_context(None, &config, false).unwrap();
+        let file_based = append_knowledge_context(None, &config, true, false).unwrap();
         assert!(file_based.contains("knowledge base directory"));
         assert!(!file_based.contains("knowledge_write"));
         // Disposition (回写意识) threads from build-extra → contract.
         assert!(tooled.contains("Disposition — MANUAL"));
         config.knowledge_writeback_eagerness = Some("auto".into());
-        let eager = append_knowledge_context(None, &config, true).unwrap();
+        let eager = append_knowledge_context(None, &config, true, true).unwrap();
         assert!(eager.contains("Disposition — AUTO"));
     }
 
@@ -2393,10 +2475,7 @@ mod tests {
             Some("auto")
         );
 
-        let prompt = append_knowledge_context(
-            None, &overrides, true,
-        )
-        .unwrap();
+        let prompt = append_knowledge_context(None, &overrides, true, true).unwrap();
         assert!(prompt.contains("Knowledge bases"));
         assert!(prompt.contains("运维手册"));
         assert!(prompt.contains("knowledge_write"));

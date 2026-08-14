@@ -3,8 +3,24 @@ pub mod stdio;
 pub mod streamable_http;
 
 use async_trait::async_trait;
+use std::time::Duration;
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+
+/// Keep remote MCP transports bounded even if a caller accidentally bypasses
+/// the manager deadline. Connection setup is intentionally shorter than a
+/// complete coding-tool request; the manager owns the latter's configurable
+/// wall-clock deadline.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+pub(crate) fn bounded_http_client() -> Result<reqwest::Client, McpError> {
+    reqwest::Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .read_timeout(HTTP_READ_TIMEOUT)
+        .build()
+        .map_err(|error| McpError::Transport(format!("failed to build bounded MCP HTTP client: {error}")))
+}
 
 /// Find the next SSE event boundary (blank line) in `buf`, returning
 /// `(offset, delimiter_len)` for the earliest match.
@@ -37,6 +53,17 @@ pub trait McpTransport: Send + Sync {
     /// Send a JSON-RPC request and receive the response
     async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError>;
 
+    /// Abort the currently outstanding request after the manager's bounded
+    /// request deadline expires.  Implementations must make the transport safe
+    /// for a later request (for example, a stdio response must not be left in a
+    /// pipe where it could be mistaken for the next request's response).
+    ///
+    /// HTTP transports normally rely on cancellation of the request future;
+    /// the default keeps those implementations source-compatible.
+    async fn abort_request(&self) -> Result<(), McpError> {
+        Ok(())
+    }
+
     /// Send a notification (no response expected)
     async fn notify(&self, req: &JsonRpcRequest) -> Result<(), McpError>;
 
@@ -47,6 +74,9 @@ pub trait McpTransport: Send + Sync {
 /// Errors from MCP transport and protocol
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
+    #[error("MCP request timed out after {timeout_ms}ms")]
+    RequestTimeout { timeout_ms: u64 },
+
     #[error("Transport error: {0}")]
     Transport(String),
 

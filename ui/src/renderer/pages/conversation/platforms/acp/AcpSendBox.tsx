@@ -35,7 +35,10 @@ import {
   type ConversationCommandQueueItem,
 } from '@/renderer/pages/conversation/platforms/useConversationCommandQueue';
 import { classifyPublicMessageDelivery } from '@/renderer/pages/conversation/platforms/publicMessageDelivery';
-import { stopConversationAndConfirmRelease } from '@/renderer/pages/conversation/platforms/requestConversationStop';
+import {
+  stopConversationAndConfirmRelease,
+  waitForConversationTurnReleaseUntilSettled,
+} from '@/renderer/pages/conversation/platforms/requestConversationStop';
 import {
   shouldReleaseStopInteraction,
   useConversationStopAttemptGuard,
@@ -121,7 +124,6 @@ const AcpSendBox: React.FC<{
     reconcilePublicDeliveryReplay,
     resetState,
     confirmStopped,
-    restoreRunningAfterStopFailure,
     getTurnStartGeneration,
     getTurnCompletionGeneration,
     slashCommands,
@@ -587,13 +589,31 @@ Please check your local CLI tool authentication status`,
       return;
     }
 
-    console.warn('[AcpSendBox] stop request could not be confirmed', result);
-    restoreRunningAfterStopFailure();
-    setIsStopping(false);
-    Message.error({
-      content: t('conversation.stop.failed', { defaultValue: 'Failed to stop the current task. Please try again.' }),
+    // A timeout/unknown result is not idle authority. Keep the stop lock and
+    // queue pause until a later GET proves the runtime is idle or deleted.
+    console.warn('[AcpSendBox] stop request needs continued authoritative confirmation', result);
+    Message.warning({
+      content: t('conversation.stop.confirming', {
+        defaultValue: 'Stop requested. Waiting for the task to finish stopping...',
+      }),
       closable: true,
     });
+    const settled = await waitForConversationTurnReleaseUntilSettled(conversation_id, {
+      isCurrent: () => getStopAttemptStatus(stopAttempt) === 'current',
+    });
+    const settledAttemptStatus = getStopAttemptStatus(stopAttempt);
+    if (settledAttemptStatus !== 'current') {
+      if (shouldReleaseStopInteraction(settledAttemptStatus)) setIsStopping(false);
+      return;
+    }
+    if (settled === 'released' || settled === 'deleted') {
+      confirmStopped();
+      setIsStopping(false);
+      resetActiveExecution('external-reset');
+      return;
+    }
+
+    console.warn('[AcpSendBox] stop confirmation became stale', result);
   };
 
   // Clear conversation context (release model context); keeps message records.

@@ -1453,22 +1453,26 @@ const SendBox: React.FC<{
   const renderActionButtons = () => {
     if (isStopping) return stopButton;
     if (allowSendWhileLoading && (isLoading || loading)) {
-      // Keep a single action slot while processing: show stop when the draft is empty,
-      // and only switch back to send once the user has prepared a queued message.
-      if (compactActions || !hasDraftToSend || disabled || isUploading) {
+      // Stop is an independent safety action. A non-empty draft must never
+      // replace or hide it: users may need to cancel the current turn even
+      // while preparing a queued message.
+      if (!hasDraftToSend || disabled || isUploading) {
         return stopButton;
       }
-      // Opt-in: offer "steer now" alongside the (enqueue) send button when a
-      // consumer has wired it up and the affordance is available.
-      if (onSteer && steerAvailable) {
-        return (
-          <div className='flex items-center gap-2'>
-            {steerButton}
-            {sendButton}
-          </div>
-        );
-      }
-      return sendButton;
+      const queuedActions = compactActions ? (
+        sendButton
+      ) : (
+        <>
+          {onSteer && steerAvailable ? steerButton : null}
+          {sendButton}
+        </>
+      );
+      return (
+        <div className='flex items-center gap-2' data-testid='sendbox-busy-actions'>
+          {stopButton}
+          {queuedActions}
+        </div>
+      );
     }
 
     if (isLoading || loading) {

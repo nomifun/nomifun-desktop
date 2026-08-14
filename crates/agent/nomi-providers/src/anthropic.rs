@@ -147,7 +147,7 @@ impl LlmProvider for AnthropicProvider {
             self.base_url.trim_end_matches('/'),
             self.compat.api_path()
         );
-        let client = crate::http_client();
+        let client = crate::http_client()?;
         let sanitize_tool_schemas = self.should_sanitize_tool_schemas();
         let mut body = self.build_request_body(request, sanitize_tool_schemas);
 
