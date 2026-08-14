@@ -6,13 +6,14 @@ trust boundaries; endpoint details remain in the linked operator guides.
 
 Simplified Chinese: [product-ecosystem.zh.md](product-ecosystem.zh.md)
 
-## The three open-source products
+## The four open-source projects
 
 | Product | Primary responsibility | Documentation |
 |---|---|---|
 | [NomiFun Desktop](https://github.com/nomifun/nomifun-desktop) | Local source of truth and execution hub for data, models, Agents, tasks, tools, Skills, knowledge, companions, and Mini Apps | [Architecture overview](overview.md) · [WebUI remote access](../guides/webui-remote-access.md) · [Xiaozhi integration](../guides/xiaozhi-robot.md) |
 | [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | Android / iOS / H5 interaction surface that directly uses an authorized Desktop instance | [Mobile README](https://github.com/nomifun/nomifun-mobile#readme) |
 | [NomiFun Xiaozhi Yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | ESP32-S3 voice, display, motion, and device-tool endpoint for a Desktop companion | [Firmware README](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop integration](../guides/xiaozhi-robot.md) |
+| [NomiFun Net Infra](https://github.com/nomifun/nomifun-net-infra) | Optional self-hosted NomiRelay transport for reaching Desktop and other services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay integration](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
 
 ## Hub-and-surface model
 
@@ -59,6 +60,17 @@ trusted private VPN, keep the operating-system firewall enabled, and never
 publish the listener directly to the public Internet. See
 [WebUI Remote Access](../guides/webui-remote-access.md) for the complete threat
 model and operating steps.
+
+### Net Infra is an optional transport layer, not another backend
+
+When Mobile cannot reach Desktop over a trusted LAN, an operator can self-host
+NomiRelay and run `nfagent` where it can reach the Desktop WebUI listener. Mobile
+then connects to the relay business endpoint; it never receives relay-admin
+credentials or calls the console API. The relay carries HTTP/WebSocket bytes and
+enforces network policy, while Desktop remains the application-data and
+execution authority. Exact deployment and public-network validation belong to
+the [NomiRelay integration docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration)
+and the [Mobile relay guide](https://github.com/nomifun/nomifun-mobile/blob/main/docs/RELAY-INTEGRATION.md).
 
 ### Xiaozhi is a hardware surface for a companion
 

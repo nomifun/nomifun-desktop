@@ -58,9 +58,10 @@
 
 ## NomiFun open-source product family
 
-NomiFun is now three related open-source products. **Desktop is the local AI,
+NomiFun now has four related open-source projects. **Desktop is the local AI,
 data, model, Agent, task, and tool hub**; Mobile and the Xiaozhi robot connect to
-capabilities that you explicitly enable on Desktop. Desktop also hosts Agent
+capabilities that you explicitly enable, while Net Infra provides an optional,
+self-hosted cross-network relay. Desktop also hosts Agent
 Mini Apps, so an app created by an Agent can keep using the same local runtime
 and governed capabilities instead of becoming an isolated demo.
 
@@ -69,8 +70,9 @@ and governed capabilities instead of becoming an isolated demo.
 | **[NomiFun Desktop](https://github.com/nomifun/nomifun-desktop)** (this repository) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Mini Apps, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Desktop docs](https://www.nomifun.com/docs/) · [WebUI remote access](docs/guides/webui-remote-access.md) |
 | [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Mobile docs](https://github.com/nomifun/nomifun-mobile#readme) · Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
 | [NomiFun Xiaozhi Yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side multimodal interaction | [Xiaozhi docs](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop integration guide](docs/guides/xiaozhi-robot.md) |
+| [NomiFun Net Infra](https://github.com/nomifun/nomifun-net-infra) | Self-hosted NomiRelay infrastructure for exposing Desktop or other HTTP/WebSocket/TCP/UDP services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
 
-### Connect the three projects
+### Connect the four projects
 
 1. Run Desktop, configure the models/companions you need, and keep all data on
    that machine.
@@ -81,17 +83,21 @@ and governed capabilities instead of becoming an isolated demo.
    credentials and the durable data set do not need to be copied to the phone.
 3. For Xiaozhi, build and flash the Yuntai firmware, then follow the companion
    **Remote control → Robot connection** flow in Desktop to bind the device.
+4. When access must cross networks, self-host NomiRelay and `nfagent`, then
+   point Mobile at the relay business endpoint. Mobile never receives relay
+   admin credentials, and Desktop remains the application-data authority.
 
 Only enable remote interfaces on networks you trust. The Desktop guides above
 document authentication, LAN exposure, and deployment boundaries.
 
 ### One local hub, many interaction surfaces
 
-This is not three unrelated clients that happen to share a logo. Desktop owns
+This is not a collection of unrelated clients that happen to share a logo. Desktop owns
 the durable state and executes models, Agents, requirements, tools, knowledge,
 companion memory, and Skills. Mobile is a direct LAN control surface; Xiaozhi is
 a voice-and-motion hardware surface; Mini Apps are interactive software surfaces
-created and hosted by the same Desktop installation. The result is one governed
+created and hosted by the same Desktop installation; Net Infra is an optional
+transport layer rather than another application backend. The result is one governed
 capability graph with multiple ways to reach it, rather than separate clouds,
 accounts, credentials, and copies of user data.
 
