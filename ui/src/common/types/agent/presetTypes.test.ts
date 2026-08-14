@@ -10,6 +10,7 @@ import {
   parsePresetReference,
   parsePresetSnapshotReference,
   parsePresetTagKey,
+  presetSupportsTarget,
 } from './presetTypes';
 
 const expectTypeError = (action: () => unknown) => {
@@ -82,5 +83,13 @@ describe('preset tag natural keys', () => {
     ]) {
       expectTypeError(() => parsePresetTagKey(key));
     }
+  });
+});
+
+describe('preset target compatibility', () => {
+  test('treats an empty target list as universal like the backend resolver', () => {
+    expect(presetSupportsTarget({ targets: [] }, 'cron')).toBe(true);
+    expect(presetSupportsTarget({ targets: ['conversation', 'cron'] }, 'cron')).toBe(true);
+    expect(presetSupportsTarget({ targets: ['conversation', 'execution_step'] }, 'cron')).toBe(false);
   });
 });

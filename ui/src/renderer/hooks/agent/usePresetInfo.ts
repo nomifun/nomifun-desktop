@@ -11,7 +11,11 @@ import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
 import type { Preset, PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import CoworkLogo from '@/renderer/assets/icons/cowork.svg';
-import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
+import {
+  isEmoji,
+  resolvePresetAvatarImageSrc,
+  resolvePresetCatalogName,
+} from '@/renderer/utils/model/presetPresentation';
 
 export interface PresetInfo {
   preset_id: PresetReference;
@@ -37,10 +41,9 @@ export function resolvePresetSnapshot(conversation: TChatConversation): Resolved
 function normalizeAvatar(avatar: string | undefined): { logo: string; isEmoji: boolean } {
   const value = avatar?.trim() || '';
   if (!value) return { logo: '◆', isEmoji: true };
-  if (value === 'cowork.svg') return { logo: CoworkLogo, isEmoji: false };
-  const resolved = resolveExtensionAssetUrl(value) || value;
-  const isImage = /\.(svg|png|jpe?g|webp|gif)$/i.test(resolved) || /^(https?:|file:\/\/|data:|\/)/i.test(resolved);
-  return isImage ? { logo: resolved, isEmoji: false } : { logo: value, isEmoji: true };
+  const image = resolvePresetAvatarImageSrc(value, { 'cowork.svg': CoworkLogo });
+  if (image) return { logo: image, isEmoji: false };
+  return isEmoji(value) ? { logo: value, isEmoji: true } : { logo: '◆', isEmoji: true };
 }
 
 /** Historical conversations display their frozen launch identity before mutable catalog metadata. */
@@ -50,7 +53,7 @@ export function resolvePresetDisplayName(
   preset: Preset | null | undefined,
   locale: string,
 ): string {
-  return snapshot?.preset_name || preset?.name_i18n?.[locale] || preset?.name || presetId;
+  return snapshot?.preset_name || (preset ? resolvePresetCatalogName(preset, locale) : presetId);
 }
 
 export function usePresetInfo(conversation: TChatConversation | undefined): {

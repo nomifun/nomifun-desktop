@@ -36,6 +36,13 @@ import {
   tauriWebuiGetStatus,
   tauriWebuiStart,
   tauriWebuiStop,
+  tauriRelayPairingBootstrap,
+  tauriRelayPairingDisconnect,
+  tauriRelayPairingGetStatus,
+  tauriRelayPairingRestart,
+  tauriRelayPairingStop,
+  type TauriRelayPairingBootstrapRequest,
+  type TauriRelayPairingStatus,
   tauriWindowClose,
   tauriWindowIsMaximized,
   tauriWindowMaximize,
@@ -208,6 +215,7 @@ import {
   parseTerminalId,
   parseUserId,
   parseWebhookId,
+  type AgentId,
   type AttachmentId,
   type ChannelPluginId,
   type ConversationId,
@@ -2761,6 +2769,32 @@ export const webui = {
   },
 };
 
+export type IRelayPairingStatus = TauriRelayPairingStatus;
+export type IRelayPairingBootstrapRequest = TauriRelayPairingBootstrapRequest;
+
+export const relayPairing = {
+  bootstrap: shellProvider<IRelayPairingStatus, IRelayPairingBootstrapRequest>(
+    (request) => tauriRelayPairingBootstrap(request),
+    { state: 'disconnected' }
+  ),
+  getStatus: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingGetStatus(),
+    { state: 'disconnected' }
+  ),
+  stop: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingStop(),
+    { state: 'disconnected' }
+  ),
+  restart: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingRestart(),
+    { state: 'disconnected' }
+  ),
+  disconnect: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingDisconnect(),
+    { state: 'disconnected' }
+  ),
+};
+
 // ---------------------------------------------------------------------------
 // Cron — routed to /api/cron/*
 // ---------------------------------------------------------------------------
@@ -2782,6 +2816,18 @@ function fromApiCronJob(job: ICronJob): ICronJob {
         : {
             agent_config: {
               ...job.metadata.agent_config,
+              custom_agent_id:
+                job.metadata.agent_config.custom_agent_id == null
+                  ? undefined
+                  : parseAgentId(job.metadata.agent_config.custom_agent_id),
+              preset_id:
+                job.metadata.agent_config.preset_id == null
+                  ? undefined
+                  : parsePresetReference(job.metadata.agent_config.preset_id),
+              preset_snapshot:
+                job.metadata.agent_config.preset_snapshot == null
+                  ? undefined
+                  : fromApiResolvedPresetSnapshot(job.metadata.agent_config.preset_snapshot),
               provider_id:
                 job.metadata.agent_config.provider_id == null
                   ? undefined
@@ -2912,7 +2958,12 @@ export interface ICronAgentConfig {
   backend?: string;
   name: string;
   cli_path?: string;
+  /** Stable AgentRegistry identity required for every non-Nomi new conversation. */
+  custom_agent_id?: AgentId;
   preset_id?: PresetReference;
+  /** Frozen server-owned preset lineage returned by the API. */
+  preset_revision?: number;
+  preset_snapshot?: ResolvedPresetSnapshot;
   mode?: string;
   model?: string;
   /** Nomi logical reference to the provider business entity. */

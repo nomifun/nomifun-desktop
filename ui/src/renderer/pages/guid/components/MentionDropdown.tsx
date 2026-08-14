@@ -5,7 +5,6 @@
  */
 
 import type { MentionOption } from '../types';
-import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
 import { Dropdown, Menu } from '@arco-design/web-react';
 import { Down, Robot } from '@icon-park/react';
 import React from 'react';
@@ -35,23 +34,25 @@ const MentionDropdown: React.FC<MentionDropdownProps> = ({ menuRef, options, sel
         {options.length > 0 ? (
           options.map((option, index) => (
             <Menu.Item key={option.key} data-mention-index={index}>
-              <div className='flex items-center gap-8px'>
+              <div className='flex min-w-0 items-center gap-8px'>
                 {option.avatarImage ? (
                   <img
-                    src={resolveExtensionAssetUrl(option.avatarImage)}
+                    src={option.avatarImage}
                     alt=''
                     width={16}
                     height={16}
-                    style={{ objectFit: 'contain' }}
+                    style={{ objectFit: 'contain', flexShrink: 0 }}
                   />
-                ) : option.avatar ? (
-                  <span style={{ fontSize: 14, lineHeight: '16px' }}>{option.avatar}</span>
+                ) : option.avatarEmoji ? (
+                  <span aria-hidden='true' style={{ fontSize: 14, lineHeight: '16px', flexShrink: 0 }}>
+                    {option.avatarEmoji}
+                  </span>
                 ) : option.logo ? (
-                  <img src={option.logo} alt={option.label} width={16} height={16} style={{ objectFit: 'contain' }} />
+                  <img src={option.logo} alt='' width={16} height={16} style={{ objectFit: 'contain', flexShrink: 0 }} />
                 ) : (
-                  <Robot theme='outline' size={16} />
+                  <Robot theme='outline' size={16} aria-hidden='true' />
                 )}
-                <span>{option.label}</span>
+                <span className='min-w-0 truncate'>{option.label}</span>
               </div>
             </Menu.Item>
           ))

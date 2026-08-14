@@ -21,6 +21,7 @@ serde_json.workspace = true
 nomifun-app = { workspace = true, features = ["computer-use", "browser-use"] }
 nomifun-common.workspace = true
 nomifun-runtime.workspace = true
+nomi-process-runtime.workspace = true
 clap.workspace = true
 
 # `macos-private-api` is required for the transparent nomi companion window on macOS.
@@ -46,6 +47,11 @@ keepawake = "0.6"
 
 tokio.workspace = true
 serde.workspace = true
+chrono.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+url.workspace = true
+dunce.workspace = true
 # Required at compile time by `tauri::generate_context!` — the codegen emits
 # `serde_json::...` tokens into this crate (verified: removing it breaks the
 # `generated_tauri_context` expansion in main.rs).

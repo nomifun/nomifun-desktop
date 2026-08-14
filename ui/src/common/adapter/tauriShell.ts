@@ -354,6 +354,56 @@ export function tauriWebuiStop<T>(): Promise<T> {
   return invokeCommand<T>('webui_stop');
 }
 
+export interface TauriRelayPairingBootstrapRequest {
+  pairingEnvelope: string;
+}
+
+export type TauriRelayPairingState = 'disconnected' | 'connecting' | 'connected' | 'error';
+
+export interface TauriRelayPairingStatus {
+  state: TauriRelayPairingState;
+  pairUrl?: string;
+  relay?: string;
+  businessUrl?: string;
+  inviteId?: string;
+  tunnelId?: string;
+  tunnelSlug?: string;
+  agentStateDir?: string;
+  agentPid?: number;
+  qrExpiresAtMs?: number;
+  webuiPort?: number;
+  error?: string;
+}
+
+/** Bootstrap a desktop Relay agent from a one-time pairing envelope. */
+export function tauriRelayPairingBootstrap(
+  request: TauriRelayPairingBootstrapRequest
+): Promise<TauriRelayPairingStatus> {
+  return invokeCommand<TauriRelayPairingStatus>('relay_pairing_bootstrap', {
+    pairingEnvelope: request.pairingEnvelope,
+  });
+}
+
+/** Read the local Relay agent pairing state without returning credentials. */
+export function tauriRelayPairingGetStatus(): Promise<TauriRelayPairingStatus> {
+  return invokeCommand<TauriRelayPairingStatus>('relay_pairing_get_status');
+}
+
+/** Stop the local Relay agent, if one is running. */
+export function tauriRelayPairingStop(): Promise<TauriRelayPairingStatus> {
+  return invokeCommand<TauriRelayPairingStatus>('relay_pairing_stop');
+}
+
+/** Restart the local Relay agent using its persisted long-lived credential. */
+export function tauriRelayPairingRestart(): Promise<TauriRelayPairingStatus> {
+  return invokeCommand<TauriRelayPairingStatus>('relay_pairing_restart');
+}
+
+/** Stop the agent and remove all local Relay pairing state. */
+export function tauriRelayPairingDisconnect(): Promise<TauriRelayPairingStatus> {
+  return invokeCommand<TauriRelayPairingStatus>('relay_pairing_disconnect');
+}
+
 /**
  * Subscribe to backend-emitted WebUI/LAN status changes
  * (`apps/desktop/src/main.rs` forwards them on `webui://status-changed`).

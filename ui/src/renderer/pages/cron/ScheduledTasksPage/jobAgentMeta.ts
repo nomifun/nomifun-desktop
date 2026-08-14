@@ -25,19 +25,35 @@ function normalizeAgentBackend(agent: string | undefined): string | undefined {
 export function getJobAgentMeta(job: ICronJob, cliAgents: AgentMetadata[]): { name?: string; logo?: string | null } {
   const rawType = normalizeAgentBackend(job.metadata.agent_type);
   if (!rawType) return {};
+  const config = job.metadata.agent_config;
+  // A preset is the user-selected execution identity. Keep its frozen name
+  // visible even when the underlying runtime resolves to Claude/Codex/etc.
+  const presetName = config?.preset_id ? config.name.trim() : undefined;
+  const hasStableAgentId = Boolean(config?.custom_agent_id);
+  const detectedById = config?.custom_agent_id
+    ? cliAgents.find((agent) => agent.agent_id === config.custom_agent_id)
+    : undefined;
 
   if (rawType === 'acp') {
-    const backend = job.metadata.agent_config?.backend;
-    const detected = backend ? cliAgents.find((a) => (a.backend || a.agent_type) === backend) : undefined;
+    const backend = config?.backend;
+    // Once a stable identity exists, never substitute another Agent that happens
+    // to share its backend. Deleted Agents retain their frozen configured name.
+    const detected = hasStableAgentId
+      ? detectedById
+      : backend
+        ? cliAgents.find((agent) => (agent.backend || agent.agent_type) === backend)
+        : undefined;
     return {
-      name: detected?.name || job.metadata.agent_config?.name || backend || rawType,
-      logo: getAgentLogo(backend),
+      name: presetName || detected?.name || config?.name || backend || rawType,
+      logo: getAgentLogo(detected?.backend || backend),
     };
   }
 
-  const detected = cliAgents.find((a) => (a.backend || a.agent_type) === rawType);
+  const detected = hasStableAgentId
+    ? detectedById
+    : cliAgents.find((agent) => (agent.backend || agent.agent_type) === rawType);
   return {
-    name: detected?.name || rawType,
-    logo: getAgentLogo(rawType),
+    name: presetName || detected?.name || config?.name || rawType,
+    logo: getAgentLogo(detected?.backend || rawType),
   };
 }

@@ -13,6 +13,7 @@ const CRON_JOB_RUN_ID = '0190f5fe-7c00-7a00-8000-000000000011';
 const CONVERSATION_ID = '0190f5fe-7c00-7a00-8000-000000000012';
 const FIRST_RUN_NOW_KEY = '0190f5fe-7c00-7a00-8000-000000000013';
 const SECOND_RUN_NOW_KEY = '0190f5fe-7c00-7a00-8000-000000000014';
+const AGENT_ID = '0190f5fe-7c00-7a00-8000-000000000015';
 const realFetch = globalThis.fetch;
 
 const rawCronJob = (cron_job_id: unknown) => ({
@@ -141,6 +142,36 @@ describe('cron response wire ID contract', () => {
         conversation_title: 'Updated title',
         max_retries: 5,
       });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test('parses the stable custom Agent identity returned with scheduled tasks', async () => {
+    try {
+      respondWith([
+        {
+          ...rawCronJob(CRON_JOB_ID),
+          metadata: {
+            ...rawCronJob(CRON_JOB_ID).metadata,
+            agent_type: 'acp',
+            agent_config: { name: 'Custom reviewer', custom_agent_id: AGENT_ID },
+          },
+        },
+      ]);
+      expect((await cron.listJobs.invoke())[0]?.metadata.agent_config?.custom_agent_id).toBe(AGENT_ID);
+
+      respondWith([
+        {
+          ...rawCronJob(CRON_JOB_ID),
+          metadata: {
+            ...rawCronJob(CRON_JOB_ID).metadata,
+            agent_type: 'acp',
+            agent_config: { name: 'Broken reviewer', custom_agent_id: 'acp' },
+          },
+        },
+      ]);
+      await expectInvalidEntityId(() => cron.listJobs.invoke());
     } finally {
       globalThis.fetch = realFetch;
     }

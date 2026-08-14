@@ -33,6 +33,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 mod companion_pointer;
+mod relay_pairing;
 mod updater_install_context;
 
 /// Build the webview initialization script. Injects the loopback backend port
@@ -914,6 +915,72 @@ async fn webui_stop(server: tauri::State<'_, Arc<DesktopServer>>) -> Result<WebU
 /// 持有当前生效的系统防休眠 assertion;`None`=允许休眠。
 /// Drop `KeepAwake` 即释放 assertion,所以进程退出/关闭开关都能干净恢复正常电源行为。
 /// Managed state holding the active OS sleep-inhibitor assertion (None = sleep allowed).
+/// Read local Relay pairing state without returning any bearer credentials.
+#[tauri::command(rename_all = "camelCase")]
+async fn relay_pairing_get_status(
+    manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
+) -> Result<relay_pairing::RelayPairingStatus, String> {
+    manager
+        .inner()
+        .status(server.inner().clone())
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// Exchange a one-shot Relay pairing envelope and start nfagent.
+#[tauri::command(rename_all = "camelCase")]
+async fn relay_pairing_bootstrap(
+    manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
+    pairing_envelope: String,
+) -> Result<relay_pairing::RelayPairingStatus, String> {
+    manager
+        .inner()
+        .clone()
+        .bootstrap(server.inner().clone(), &pairing_envelope)
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// Restart nfagent using its persisted long-lived credential.
+#[tauri::command(rename_all = "camelCase")]
+async fn relay_pairing_restart(
+    manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
+) -> Result<relay_pairing::RelayPairingStatus, String> {
+    manager
+        .inner()
+        .clone()
+        .restart(server.inner().clone())
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// Stop nfagent while retaining restart-safe pairing state.
+#[tauri::command(rename_all = "camelCase")]
+async fn relay_pairing_stop(
+    manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+) -> Result<relay_pairing::RelayPairingStatus, String> {
+    manager
+        .inner()
+        .stop()
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// Disconnect and remove pairing state and the agent credential directory.
+#[tauri::command(rename_all = "camelCase")]
+async fn relay_pairing_disconnect(
+    manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+) -> Result<relay_pairing::RelayPairingStatus, String> {
+    manager
+        .inner()
+        .disconnect()
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
 struct AwakeState(Mutex<Option<keepawake::KeepAwake>>);
 
 /// 获取"保持唤醒"的 OS assertion:仅阻止系统空闲休眠(PreventUserIdleSystemSleep),
@@ -2042,6 +2109,7 @@ fn complete_main_thread_setup(
     app: tauri::AppHandle,
     server: Arc<DesktopServer>,
     coordinator: Arc<ExitCoordinator>,
+    pairing_data_dir: PathBuf,
 ) -> anyhow::Result<()> {
     if let Some(error) = server.current_failure() {
         return Err(anyhow::anyhow!("embedded backend failed before window setup: {error}"));
@@ -2067,6 +2135,22 @@ fn complete_main_thread_setup(
             "desktop backend state was already registered"
         ));
     }
+    let pairing_manager = Arc::new(
+        relay_pairing::RelayPairingManager::new(pairing_data_dir)
+            .context("failed to initialize Relay pairing state")?,
+    );
+    if !app.manage(pairing_manager.clone()) {
+        return Err(anyhow::anyhow!(
+            "Relay pairing state was already registered"
+        ));
+    }
+    // Restore the managed agent after the backend/webview state is published.
+    // The restore path is best-effort: a transient Relay outage leaves the
+    // persisted metadata visible and nfagent can be restarted from the UI.
+    let restore_server = server.clone();
+    tauri::async_runtime::spawn(async move {
+        pairing_manager.restore(restore_server).await;
+    });
     if coordinator.has_pending_shutdown() {
         if coordinator.is_restart_requested() {
             // Tauri deliberately ignores `prevent_exit` for the restart
@@ -2533,6 +2617,10 @@ fn main() -> std::process::ExitCode {
                 nomifun_app::browser_resource::BUNDLED_CHROME_DIR_ENV,
                 resource_dir.join("chrome-for-testing"),
             );
+            // Relay pairing uses the same authoritative Tauri resource root
+            // for the packaged nfagent. Development can still override this
+            // with NOMIFUN_NFAGENT_PATH.
+            std::env::set_var("NOMIFUN_RESOURCE_DIR", resource_dir);
         }
     }
 
@@ -2717,12 +2805,14 @@ fn main() -> std::process::ExitCode {
                                 let setup_app = setup_app_handle.clone();
                                 let setup_server = server.clone();
                                 let setup_coordinator = supervisor_coordinator.clone();
+                                let setup_pairing_data_dir = cli.data_dir.clone();
                                 if let Err(error) = setup_app_handle.run_on_main_thread(move || {
                                     let setup_coordinator_for_failure = setup_coordinator.clone();
                                     if let Err(error) = complete_main_thread_setup(
                                         setup_app.clone(),
                                         setup_server.clone(),
                                         setup_coordinator,
+                                        setup_pairing_data_dir,
                                     ) {
                                         tracing::error!(
                                             error = %error,
@@ -2880,6 +2970,11 @@ fn main() -> std::process::ExitCode {
             webui_get_status,
             webui_start,
             webui_stop,
+            relay_pairing_get_status,
+            relay_pairing_bootstrap,
+            relay_pairing_restart,
+            relay_pairing_stop,
+            relay_pairing_disconnect,
             set_keep_awake,
             set_tray_labels
         ])
