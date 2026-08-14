@@ -58,6 +58,7 @@ tempfile.workspace    = true
 mockall.workspace     = true
 rstest.workspace      = true
 serial_test.workspace = true
+tracing-subscriber.workspace = true
 
 # ── Integration test binaries ──────────────────────────────────────────────
 [[test]]
