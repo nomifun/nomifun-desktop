@@ -22,6 +22,7 @@ import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
+import { isEmoji, resolvePresetAvatarImageSrc } from '@/renderer/utils/model/presetPresentation';
 import { CUSTOM_AVATAR_IMAGE_MAP } from './constants';
 import AgentPillBar from './components/AgentPillBar';
 import ComposerEntryStrip, { type GuidActiveSkill } from './components/ComposerEntryStrip';
@@ -568,17 +569,13 @@ const GuidPage: React.FC = () => {
     );
     const avatarValue = selectedPreset?.avatar?.trim() || agentSelection.selectedAgentInfo?.avatar?.trim();
     if (!avatarValue) return { kind: 'icon' as const };
-    const mappedAvatar = CUSTOM_AVATAR_IMAGE_MAP[avatarValue];
-    const resolvedAvatar = resolveExtensionAssetUrl(avatarValue);
-    const avatarImage = mappedAvatar || resolvedAvatar;
-    const isImageAvatar = Boolean(
-      avatarImage &&
-      (/\.(svg|png|jpe?g|webp|gif)$/i.test(avatarImage) || /^(https?:|file:\/\/|data:|\/)/i.test(avatarImage)),
-    );
-    if (isImageAvatar && avatarImage) {
+    const avatarImage = resolvePresetAvatarImageSrc(avatarValue, CUSTOM_AVATAR_IMAGE_MAP);
+    if (avatarImage) {
       return { kind: 'image' as const, value: avatarImage };
     }
-    return { kind: 'emoji' as const, value: avatarValue };
+    return isEmoji(avatarValue)
+      ? { kind: 'emoji' as const, value: avatarValue }
+      : { kind: 'icon' as const };
   }, [
     agentSelection.presets,
     agentSelection.is_presetAgent,
